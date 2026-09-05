@@ -58,6 +58,20 @@ class IndexContext:
     # Override parameters
     chunk_lines: int | None = None
     force: bool = False
+    # nexus-4jj40 round 5 (T2 critique [24618]): DECOUPLED from ``force``.
+    # ``force`` alone bypasses ``check_staleness`` and re-chunks/re-sends an
+    # unchanged file; the server's own existence-partition (RDR-181) still
+    # skips the billed Voyage re-embed for a chash whose text is byte-
+    # identical, refreshing ONLY the chunk's stored metadata (e.g.
+    # ``section_type``) via a metadata-only UPDATE -- both the direct
+    # upsert path (``PgVectorRepository.batchUpdateMetadata``) and the
+    # combined-write path (``CombinedWriteService``) do this as of this
+    # round. ``force_re_embed=True`` is the explicit opt-in for the OLD
+    # behaviour (every chunk in the batch actually re-embeds), reserved for
+    # a genuine embedding-model/content-divergence recompute -- coupling it
+    # to ``force`` made a routine reclassification-only reindex pay full
+    # Voyage cost for zero benefit (T2 [24618] Important finding).
+    force_re_embed: bool = False
     timeout: float = 120.0
 
     # Optional tuning config; resolved lazily to avoid circular imports

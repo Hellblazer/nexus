@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import signal
 import socket
 import subprocess
@@ -39,19 +38,23 @@ import pytest
 from nexus.daemon.service_registry import pid_alive, process_command
 from tests._engine_substrate import (
     _LOW_PORT_RANGE,
+    _MAX_CONCURRENT_PG_BOOTS,
     _SIDECAR_FILENAME,
     _WORKER_SHARD_MAX_INDEX,
     _WORKER_SHARD_WIDTH,
     SweepResult,
     _free_port,
     _identify_leg,
+    _initdb_cluster,
     _kill_engine_leg,
     _kill_postmaster_leg,
     _owner_is_live,
     _pg_bin,
     _read_postmaster_pid,
+    _try_acquire_boot_slot,
     _worker_shard_range,
     sweep_stale_substrate_clusters,
+    throwaway_pg_cluster,
 )
 
 
@@ -441,46 +444,23 @@ class TestKillPostmasterLegUsesPgCtl:
         if not _pg_bin().exists():
             pytest.skip("no PG bundle discoverable for this throwaway cluster")
 
-        import tempfile
+        # nexus-rbc7k: the cluster comes from throwaway_pg_cluster, which
+        # boots INSIDE the cross-process boot semaphore. Booting one here
+        # by hand made this the only PG boot in the suite outside that
+        # bound, and under `-n auto` (every xdist worker already holding a
+        # segment for its own substrate postmaster) its initdb took the
+        # `shmget` ENOSPC against macOS's 32-segment kern.sysv.shmmni --
+        # green alone, red beside substrate-booting neighbours.
+        with throwaway_pg_cluster(prefix="nexus_lgdy1_throwaway_pg_") as pgdata:
+            pm_pid = _read_postmaster_pid(str(pgdata))
+            assert pm_pid is not None
+            assert pid_alive(pm_pid)
 
-        # A raw tempfile.mkdtemp() -- NOT pytest's tmp_path fixture, whose
-        # deep pytest-of-<user>/pytest-<N>/<test-name>/ nesting overruns
-        # the 103-byte Unix-domain-socket path limit on macOS (measured:
-        # pg_ctl start failed loud with exactly that FATAL). Matches how
-        # _boot() itself allocates pgdata, for the same reason.
-        pgdata = Path(tempfile.mkdtemp(prefix="nexus_lgdy1_throwaway_pg_"))
-        try:
-            subprocess.run(
-                [str(_pg_bin() / "initdb"), "-D", str(pgdata), "--no-locale",
-                 "-E", "UTF8", "--auth=trust"],
-                check=True, capture_output=True,
+            _kill_postmaster_leg(pm_pid, pgdata, grace_s=5.0)
+
+            assert not pid_alive(pm_pid), (
+                "pg_ctl stop -m immediate must actually stop a real postmaster"
             )
-            with open(pgdata / "postgresql.conf", "a") as f:
-                # Unix socket only -- no TCP port needed for this test.
-                f.write("listen_addresses = ''\n")
-            subprocess.run(
-                [str(_pg_bin() / "pg_ctl"), "-D", str(pgdata), "-l",
-                 str(pgdata / "pg.log"), "-o", f"-k {pgdata}", "start", "-w"],
-                check=True, capture_output=True,
-            )
-            try:
-                pm_pid = _read_postmaster_pid(str(pgdata))
-                assert pm_pid is not None
-                assert pid_alive(pm_pid)
-
-                _kill_postmaster_leg(pm_pid, pgdata, grace_s=5.0)
-
-                assert not pid_alive(pm_pid), (
-                    "pg_ctl stop -m immediate must actually stop a real postmaster"
-                )
-            finally:
-                subprocess.run(
-                    [str(_pg_bin() / "pg_ctl"), "-D", str(pgdata),
-                     "stop", "-m", "immediate"],
-                    capture_output=True,
-                )
-        finally:
-            shutil.rmtree(pgdata, ignore_errors=True)
 
     def test_falls_back_to_sigkill_when_pg_ctl_finds_nothing(
         self, tmp_path, owned_children,
@@ -498,6 +478,178 @@ class TestKillPostmasterLegUsesPgCtl:
 
         proc.wait(timeout=5)
         assert proc.poll() is not None
+
+
+class TestThrowawayClusterBootIsBounded:
+    """nexus-rbc7k. ``test_stops_a_real_postmaster_via_pg_ctl_immediate``
+    booted a real PG by hand -- the ONLY PG boot in the suite outside
+    ``_boot_semaphore_slot``. A PG boot costs two transient SysV
+    shared-memory segments (``initdb``'s bootstrap backend, then the
+    postmaster) against ``kern.sysv.shmmni``, which is 32 on macOS, while
+    under ``-n auto`` every xdist worker ALREADY holds one segment for its
+    own session-long substrate postmaster. Measured on the dev box: the
+    segment count pegs at exactly 32 and the unbounded boot's ``initdb``
+    fails with ``could not create shared memory segment: No space left on
+    device`` / ``shmget``.
+
+    Both tests here are deterministic -- real file locks and a fake
+    ``initdb``, no PG, no ports, no timing -- because the FAILURE itself
+    cannot be reproduced deterministically: it needs the machine's global
+    segment table at its ceiling. What IS deterministic is the structural
+    property that lets the failure happen, so that is what is pinned.
+    """
+
+    def test_boot_waits_for_a_semaphore_slot_and_leaves_no_debris(
+        self, tmp_path,
+    ) -> None:
+        """With every boot slot held, the throwaway boot WAITS (and then
+        fails loud) instead of booting a 5th concurrent PG.
+
+        Also pins that ``mkdtemp`` happens INSIDE the slot: a cluster dir
+        created before the wait would be sidecar-less debris for as long as
+        the wait lasts -- up to 300s, which is the window nexus-ui654's
+        round 2 closed for ``_boot`` and this path would have re-opened.
+        """
+        lock_dir = tmp_path / "boot_locks"
+        lock_dir.mkdir()
+        cluster_root = tmp_path / "clusters"
+        cluster_root.mkdir()
+
+        held = [
+            _try_acquire_boot_slot(lock_dir, _MAX_CONCURRENT_PG_BOOTS)
+            for _ in range(_MAX_CONCURRENT_PG_BOOTS)
+        ]
+        assert all(fh is not None for fh in held), "fixture could not fill the slots"
+        try:
+            assert _try_acquire_boot_slot(lock_dir, _MAX_CONCURRENT_PG_BOOTS) is None
+            with pytest.raises(RuntimeError, match="boot slot"):
+                with throwaway_pg_cluster(
+                    prefix="nexus_rbc7k_probe_pg_",
+                    lock_dir=lock_dir,
+                    boot_timeout_s=0.2,
+                    parent_dir=str(cluster_root),
+                ):
+                    pytest.fail("booted a PG while every boot slot was held")
+        finally:
+            for fh in held:
+                if fh is not None:
+                    fh.close()
+
+        assert list(cluster_root.iterdir()) == [], (
+            "a cluster dir was created before the boot slot was acquired"
+        )
+
+    def test_failed_initdb_leaves_no_empty_cluster_dir(self, tmp_path) -> None:
+        """A failed ``initdb`` strands NOTHING.
+
+        ``initdb`` removes the CONTENTS of a data directory it failed to
+        initialize but not the directory itself (it did not create it), so
+        every failed boot used to leave an empty, sidecar-less
+        ``nexus_t2_substrate_pg_*`` dir that ``_sweep_legacy_cluster``
+        correctly refuses to auto-reap -- 21 of them on the dev box when
+        nexus-rbc7k was filed. The fake initdb below reproduces that
+        exactly, contents-removal included.
+        """
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        fake = bin_dir / "initdb"
+        fake.write_text(
+            "#!/bin/sh\n"
+            'shift; d="$1"\n'
+            'touch "$d/base"\n'          # initdb gets partway...
+            'rm -f "$d/base"\n'          # ...then removes the contents
+            'echo "FATAL: could not create shared memory segment" >&2\n'
+            "exit 1\n"
+        )
+        fake.chmod(0o755)
+        cluster_root = tmp_path / "clusters"
+        cluster_root.mkdir()
+
+        with pytest.raises(RuntimeError, match="shared memory segment"):
+            _initdb_cluster(
+                bin_dir, prefix="nexus_rbc7k_probe_pg_", parent_dir=str(cluster_root),
+            )
+
+        assert list(cluster_root.iterdir()) == [], (
+            "a failed initdb stranded a cluster dir"
+        )
+
+    @staticmethod
+    def _fake_bin(tmp_path, *, message: str):
+        """A ``bin/`` whose ``initdb`` always fails with *message*, recording
+        one line per invocation so the retry count is directly countable."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        counter = tmp_path / "initdb_calls"
+        fake = bin_dir / "initdb"
+        fake.write_text(
+            "#!/bin/sh\n"
+            f'echo call >> "{counter}"\n'
+            f'echo "{message}" >&2\n'
+            "exit 1\n"
+        )
+        fake.chmod(0o755)
+        return bin_dir, counter
+
+    def test_shm_exhaustion_is_retried_and_then_fails_loud(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """A lost ``shmget`` race is retried; an exhausted budget still
+        raises, carrying PG's own FATAL.
+
+        The segments that lose the race belong to some OTHER in-flight boot,
+        so no bound on THIS caller can prevent the collision -- riding it out
+        is the only thing available. Nothing degrades and nothing is skipped
+        when the budget runs out, which is what keeps this a retry rather
+        than the silent fallback the project bans.
+        """
+        bin_dir, counter = self._fake_bin(
+            tmp_path,
+            message="FATAL: could not create shared memory segment: "
+                    "No space left on device",
+        )
+        monkeypatch.setattr("tests._engine_substrate._pg_bin", lambda: bin_dir)
+        lock_dir = tmp_path / "boot_locks"
+        cluster_root = tmp_path / "clusters"
+        cluster_root.mkdir()
+
+        with pytest.raises(RuntimeError, match="shared memory segment"):
+            with throwaway_pg_cluster(
+                prefix="nexus_rbc7k_probe_pg_",
+                lock_dir=lock_dir,
+                parent_dir=str(cluster_root),
+                attempts=3,
+                backoff_s=0.0,
+            ):
+                pytest.fail("booted despite a permanently failing initdb")
+
+        assert counter.read_text().count("call") == 3, "the boot was not retried"
+        assert list(cluster_root.iterdir()) == [], (
+            "a retried-then-abandoned boot stranded a cluster dir"
+        )
+
+    def test_a_non_shm_failure_is_not_retried(self, tmp_path, monkeypatch) -> None:
+        """The retry is keyed on PG's ``shmget`` wording, not on failure in
+        general -- a broken bundle or a bad pgdata must fail on the first
+        attempt rather than costing the budget's full backoff."""
+        bin_dir, counter = self._fake_bin(
+            tmp_path, message="initdb: error: invalid locale settings",
+        )
+        monkeypatch.setattr("tests._engine_substrate._pg_bin", lambda: bin_dir)
+        cluster_root = tmp_path / "clusters"
+        cluster_root.mkdir()
+
+        with pytest.raises(RuntimeError, match="invalid locale settings"):
+            with throwaway_pg_cluster(
+                prefix="nexus_rbc7k_probe_pg_",
+                lock_dir=tmp_path / "boot_locks",
+                parent_dir=str(cluster_root),
+                attempts=3,
+                backoff_s=0.0,
+            ):
+                pytest.fail("booted despite a permanently failing initdb")
+
+        assert counter.read_text().count("call") == 1, "a non-shm failure was retried"
 
 
 class TestOwnerCmdlineReuseGuard:

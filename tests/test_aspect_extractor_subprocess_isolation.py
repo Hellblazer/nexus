@@ -167,6 +167,46 @@ def test_run_claude_isolated_arms_pdeathsig_preexec(monkeypatch) -> None:
         assert captured.get("preexec_fn") is None
 
 
+def test_run_claude_isolated_redirects_stdin_from_file_not_pipe(monkeypatch) -> None:
+    """nexus-0bkjm: the same stdin-race shape nexus-vzy2v fixed in
+    ``claude_dispatch`` (``Popen(stdin=PIPE)`` + a prompt fed via a later
+    ``communicate(input=...)`` call, racing the Claude Code CLI's 3s
+    stdin-wait) existed here too. The prompt must now be written to disk
+    BEFORE ``Popen`` is called and the child's stdin redirected from that
+    file — never a live PIPE fed post-spawn, and never handed to
+    ``communicate()`` as ``input=`` (that only works when stdin IS a
+    PIPE, so its presence would mean the race shape is still there)."""
+    captured: dict = {}
+
+    class _Reaped:
+        args = ["python"]
+        returncode = 0
+
+        def communicate(self, *a, **k):
+            captured["communicate_args"] = a
+            captured["communicate_kwargs"] = k
+            return ("", "")
+
+    def _spy_popen(argv, **kw):
+        captured["popen_kwargs"] = kw
+        return _Reaped()
+
+    monkeypatch.setattr(ax.subprocess, "Popen", _spy_popen)
+    ax._run_claude_isolated("race-free-prompt", timeout=1, _argv=["python", "-c", "pass"])
+
+    stdin_arg = captured["popen_kwargs"].get("stdin")
+    assert stdin_arg is not subprocess.PIPE, (
+        "stdin must be a real file redirected before spawn, not a PIPE fed "
+        "after spawn (the vzy2v race shape)"
+    )
+    assert hasattr(stdin_arg, "read"), "stdin must be an open file object"
+    assert "input" not in captured["communicate_kwargs"], (
+        "communicate(input=...) only works with a PIPE stdin -- its presence "
+        "means the prompt is still being written to a live pipe post-spawn"
+    )
+    assert not captured["communicate_args"]
+
+
 def test_default_argv_carries_strict_mcp_config(monkeypatch) -> None:
     """RDR-196 .p0b audit fold F1 consequence 2 (nexus-nyry9.6): aspect
     extraction is a second, un-modernized ``claude -p`` call site that
@@ -230,3 +270,50 @@ def test_invoke_once_batch_uses_isolated_runner(monkeypatch) -> None:
     with contextlib.suppress(Exception):
         ax._invoke_once_batch("some batch prompt", timeout=321)
     assert seen["timeout"] == 321   # forwarded verbatim through the isolated runner
+
+
+# ── Stdin-race stderr recognition (nexus-0bkjm) ──────────────────────────────
+
+
+def test_stdin_race_error_stderr_is_transient_not_hard(monkeypatch) -> None:
+    """nexus-0bkjm: before this fix, a stdin-race stderr from the CLI --
+    'Error: Input must be provided either through stdin or as a prompt
+    argument when using --print' -- was NOT in _TRANSIENT_STDERR_PATTERNS,
+    so a race hit returned _HardFailure on the FIRST attempt: no retry, a
+    silently lost aspect extraction."""
+    cp = subprocess.CompletedProcess(
+        ["claude"], 1, "",
+        "Error: Input must be provided either through stdin or as a "
+        "prompt argument when using --print",
+    )
+    monkeypatch.setattr(ax, "_run_claude_isolated", lambda *a, **k: cp)
+    with pytest.raises(ax._TransientFailure):
+        ax._invoke_once("some prompt")
+
+
+def test_stdin_race_warning_stderr_is_transient(monkeypatch) -> None:
+    """Companion signal: 'Warning: no stdin data received in 3s,
+    proceeding without it' -- the CLI's soft variant of the same race
+    (it proceeds with no prompt rather than exiting outright); must also
+    retry rather than hard-fail."""
+    cp = subprocess.CompletedProcess(
+        ["claude"], 1, "",
+        "Warning: no stdin data received in 3s, proceeding without it",
+    )
+    monkeypatch.setattr(ax, "_run_claude_isolated", lambda *a, **k: cp)
+    with pytest.raises(ax._TransientFailure):
+        ax._invoke_once("some prompt")
+
+
+def test_stdin_race_error_stderr_is_transient_on_batch_path(monkeypatch) -> None:
+    """Same recognition, batch call site -- _invoke_once_batch shares
+    _TRANSIENT_STDERR_PATTERNS with _invoke_once, so one fix covers
+    both."""
+    cp = subprocess.CompletedProcess(
+        ["claude"], 1, "",
+        "Error: Input must be provided either through stdin or as a "
+        "prompt argument when using --print",
+    )
+    monkeypatch.setattr(ax, "_run_claude_isolated", lambda *a, **k: cp)
+    with pytest.raises(ax._TransientFailure):
+        ax._invoke_once_batch("some batch prompt", timeout=30)

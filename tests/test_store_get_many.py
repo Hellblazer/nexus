@@ -656,3 +656,197 @@ class TestStoreGetManyLimitPerSource:
 
         assert len(result["contents"]) == 4
         assert result["contents"] == ["body-a0", "body-a1", "body-b0", "body-b1"]
+
+
+class TestStoreGetManyHumanReadableRendersContent:
+    """nexus-z4j8d: the human-readable mode (``structured=False``) of a
+    HYDRATION tool must actually render hydrated content, not just a
+    ``Hydrated N/N docs`` count. Pre-fix, ``structured=True`` was
+    effectively mandatory to see any text."""
+
+    def test_renders_each_documents_content(self):
+        from nexus.mcp.core import store_get_many
+
+        ids = ["doc-1", "doc-2"]
+        found = {
+            "doc-1": {"content": "alpha content body"},
+            "doc-2": {"content": "beta content body"},
+        }
+        mock_t3, _ = _make_stub_t3({"*": found})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(ids=ids, collections="knowledge", structured=False)
+
+        assert isinstance(result, str)
+        assert "Hydrated 2/2 docs" in result
+        assert "doc-1" in result
+        assert "alpha content body" in result
+        assert "doc-2" in result
+        assert "beta content body" in result
+        # The doc-1 body must appear before the doc-2 body (order preserved).
+        assert result.index("alpha content body") < result.index("beta content body")
+
+    def test_renders_missing_ids_without_fabricating_content(self):
+        from nexus.mcp.core import store_get_many
+
+        ids = ["exists-1", "missing-1"]
+        found = {"exists-1": {"content": "real body"}}
+        mock_t3, _ = _make_stub_t3({"*": found})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(ids=ids, collections="knowledge", structured=False)
+
+        assert "Hydrated 1/2 docs" in result
+        assert "real body" in result
+        assert "Missing: missing-1" in result
+
+    def test_all_missing_has_no_content_blocks(self):
+        from nexus.mcp.core import store_get_many
+
+        ids = ["missing-1", "missing-2"]
+        mock_t3, _ = _make_stub_t3({"*": {}})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(ids=ids, collections="knowledge", structured=False)
+
+        assert "Hydrated 0/2 docs" in result
+        assert "Missing: missing-1, missing-2" in result
+
+    def test_truncation_marker_visible_in_human_mode(self):
+        from nexus.mcp.core import store_get_many
+
+        long_body = "x" * 100
+        found = {"doc-1": {"content": long_body}}
+        mock_t3, _ = _make_stub_t3({"*": found})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(
+                ids=["doc-1"], collections="knowledge",
+                structured=False, max_chars_per_doc=10,
+            )
+
+        assert "Hydrated 1/1 docs" in result
+        assert "x" * 10 in result
+        # nexus-lugwx: the cut must be visibly marked, never a bare
+        # truncation with no signal.
+        assert "…" in result
+        assert "x" * 100 not in result
+
+    def test_missing_ids_past_ten_get_a_count_marker(self):
+        """nexus-z4j8d review finding 4: ``missing[:10]`` silently drops
+        ids past the first 10 -- name the count of ids elided."""
+        from nexus.mcp.core import store_get_many
+
+        ids = [f"missing-{i}" for i in range(15)]
+        mock_t3, _ = _make_stub_t3({"*": {}})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(ids=ids, collections="knowledge", structured=False)
+
+        assert "Hydrated 0/15 docs" in result
+        assert "(+5 more)" in result
+
+    def test_oversized_human_mode_result_is_capped(self, monkeypatch):
+        """nexus-z4j8d review finding 1 (CRITICAL): the human-mode render
+        must go through ``_cap_text_result`` like every other text-
+        returning tool in this file (nexus-2xjge doctrine) -- pre-fix this
+        branch returned the assembled string unbounded, so a hydration of
+        real document bodies could produce a multi-MB response silently
+        truncated by the MCP host with no marker."""
+        from nexus.mcp import core as mcp_core
+        from nexus.mcp.core import store_get_many
+
+        monkeypatch.setattr(mcp_core, "_TEXT_RESULT_CAP_CHARS", 100)
+        ids = [f"doc-{i}" for i in range(20)]
+        found = {doc_id: {"content": f"padding content for {doc_id} " * 10} for doc_id in ids}
+        mock_t3, _ = _make_stub_t3({"*": found})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(ids=ids, collections="knowledge", structured=False)
+
+        assert "[store_get_many: result capped at 100 chars" in result
+        assert result.endswith("narrow the query, lower limit, or page with offset=...]")
+
+    def test_under_cap_human_mode_result_is_unaffected(self):
+        """The cap must not touch an ordinary, far-under-cap result."""
+        from nexus.mcp.core import store_get_many
+
+        found = {"doc-1": {"content": "small body"}}
+        mock_t3, _ = _make_stub_t3({"*": found})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(ids=["doc-1"], collections="knowledge", structured=False)
+
+        assert "small body" in result
+
+
+class TestStoreGetManySectionTypes:
+    """RDR-200 Phase 1c evidence hygiene (nexus-4jj40 Sam's decision 3):
+    ``structured=True`` also returns ``section_types``, aligned 1:1 with
+    ``contents``/the input id list, sourced from the SAME per-id fetch
+    that already resolves content -- no extra round trip. This is the
+    field ``nexus.plans.runner``'s evidence-hydration exclusion reads to
+    drop an import/package-only chunk (``section_type="imports"``)."""
+
+    def test_section_types_aligned_with_contents(self):
+        from nexus.mcp.core import store_get_many
+
+        ids = ["doc-1", "doc-2"]
+        found = {
+            "doc-1": {"content": "package foo;\nimport bar;", "section_type": "imports"},
+            "doc-2": {"content": "public void realMethod() {}", "section_type": "method"},
+        }
+        mock_t3, _ = _make_stub_t3({"*": found})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(ids=ids, collections="knowledge", structured=True)
+
+        assert result["contents"] == [
+            "package foo;\nimport bar;", "public void realMethod() {}",
+        ]
+        assert result["section_types"] == ["imports", "method"]
+
+    def test_section_types_empty_string_for_missing_id(self):
+        from nexus.mcp.core import store_get_many
+
+        ids = ["exists-1", "missing-1"]
+        found = {"exists-1": {"content": "real body", "section_type": "method"}}
+        mock_t3, _ = _make_stub_t3({"*": found})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(ids=ids, collections="knowledge", structured=True)
+
+        assert result["contents"] == ["real body", ""]
+        assert result["missing"] == ["missing-1"]
+        assert result["section_types"] == ["method", ""]
+
+    def test_section_types_empty_string_when_no_section_type_metadata(self):
+        """A chunk with no ``section_type`` stamped at all (the common
+        case for most code/prose) reports "" -- never None, never a
+        missing list index."""
+        from nexus.mcp.core import store_get_many
+
+        found = {"doc-1": {"content": "some body"}}
+        mock_t3, _ = _make_stub_t3({"*": found})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(ids=["doc-1"], collections="knowledge", structured=True)
+
+        assert result["section_types"] == [""]
+
+    def test_human_readable_mode_unaffected_by_section_types(self):
+        """``structured=False`` keeps rendering only content -- adding
+        ``section_types`` to the structured shape must not leak into or
+        change the human-readable string mode."""
+        from nexus.mcp.core import store_get_many
+
+        found = {"doc-1": {"content": "alpha body", "section_type": "imports"}}
+        mock_t3, _ = _make_stub_t3({"*": found})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(ids=["doc-1"], collections="knowledge", structured=False)
+
+        assert isinstance(result, str)
+        assert "alpha body" in result
+        assert "section_type" not in result
+        assert "result capped at" not in result

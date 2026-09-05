@@ -249,6 +249,13 @@ class TestOptInToolAccess:
 
         argv = captured[0]
         assert "--allowedTools" not in argv, "default dispatch must be tool-free"
+        # A child with no --tools restriction still has the CLI's built-in
+        # Read/Grep/Bash set; "tool-free" is only true with --tools "".
+        assert "--tools" in argv and argv[argv.index("--tools") + 1] == "", (
+            "tool-free dispatch must pass --tools \"\" so the child has NO "
+            "built-in tools (measured 2026-09-04: reviewers wandering the repo "
+            "to the budget cap)"
+        )
         assert "--mcp-config" not in argv, "default dispatch must not inject MCP servers"
         # RDR-196 Gap 4 (nexus-0d, 2026-08-19): without --strict-mcp-config
         # the tool-free child still LOADS the user's entire MCP server set

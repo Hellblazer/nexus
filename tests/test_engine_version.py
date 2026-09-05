@@ -488,7 +488,11 @@ class TestRequiredEngineVersion:
         # shared ONNX session (cores/permits capped the whole engine at 2
         # embedding threads; measured 377s -> 109s on a 30-file index). No
         # changeset. Deployed and gated before this bump.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 100)
+        # ->(0,1,104) 2026-09-05: v0.1.104 carries index_failures, capability_census
+        # and routing_events (telemetry-009..012), GET /v1/status embed activity,
+        # rerank retry hints, and the combined-write metadata refresh; v0.1.101 to
+        # v0.1.103 were burned on build-only defects with the same engine tree.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 104)
 
 
 class TestParseEngineVersion:

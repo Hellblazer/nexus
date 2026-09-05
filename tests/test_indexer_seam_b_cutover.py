@@ -139,14 +139,21 @@ def _flush_ctx(doc_id: str = "1.1", chash: str = "a" * 64) -> list:
 def test_run_index_batch_flush_forwards_force_re_embed(tmp_path, monkeypatch):
     """RDR-181 §Approach step 3 / nexus-wxjr6: the ChunkBatcher flush
     closure defined inside _run_index (the batched cross-file write path
-    for code/prose/pdf chunks, duoak 2C) must forward --force to
-    force_re_embed on the combined write's write_manifest_many call
+    for code/prose/pdf chunks, duoak 2C) must forward its own
+    force_re_embed to the combined write's write_manifest_many call
     (nexus-wxjr6 replaced the old direct upsert_chunks_with_embeddings
     call with the combined write — see _build_combined_write_payload /
-    _batch_flush). Without this, a forced reindex whose chunks land via
-    the shared batcher (rather than the per-file oversize-fallback path)
-    would silently keep the server-side embed-skip — the same gap the
-    per-file fallback fix closes, but for the dominant batched path.
+    _batch_flush). Without this, an explicit --force --re-embed run whose
+    chunks land via the shared batcher (rather than the per-file
+    oversize-fallback path) would silently keep the server-side embed-
+    skip — the same gap the per-file fallback fix closes, but for the
+    dominant batched path.
+
+    nexus-4jj40 round 5 decoupled force_re_embed from force: --force
+    alone no longer forces a re-embed (the closure's force_re_embed
+    param, not force, is what reaches write_manifest_many — see
+    _run_index's own force_re_embed docstring), so this test now passes
+    force_re_embed=True explicitly to exercise the forwarding.
     """
     from nexus.db.http_vector_client import HttpVectorClient
     from nexus.indexer import _run_index
@@ -195,7 +202,7 @@ def test_run_index_batch_flush_forwards_force_re_embed(tmp_path, monkeypatch):
     with _service_mode_patches(
         db, extra={"nexus.mcp_infra.get_catalog_writer": {"return_value": catalog_writer}},
     ), patch("nexus.chunk_batcher.ChunkBatcher", _CapturingBatcher):
-        _run_index(repo, reg, force=True)
+        _run_index(repo, reg, force=True, force_re_embed=True)
 
         assert "flush" in captured, (
             "ChunkBatcher must be constructed when db is an HttpVectorClient"

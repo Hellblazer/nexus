@@ -91,8 +91,16 @@ class HttpDocumentHighlightsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin
     # super()._post/_get (RefreshableHttpStoreMixin._send), never
     # self._client directly.
 
-    def _post(self, path: str, body: dict[str, Any], *, idempotent: bool = True) -> Any:
-        return super()._post(f"/v1/aspects/highlights{path}", body, idempotent=idempotent)
+    def _post(
+        self, path: str, body: dict[str, Any], *, idempotent: bool = True, mutates: bool = True
+    ) -> Any:
+        # nexus-a2qhz: mutates forwarded unchanged (every call site in this
+        # class is a write, default True; forwarding it anyway closes the
+        # latent TypeError trap a future read-via-POST addition would
+        # otherwise hit).
+        return super()._post(
+            f"/v1/aspects/highlights{path}", body, idempotent=idempotent, mutates=mutates
+        )
 
     def _get(self, path: str, params: dict[str, Any] | None = None, *, idempotent: bool = True) -> Any:
         q = {k: str(v) for k, v in (params or {}).items() if v is not None}

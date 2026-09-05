@@ -28,6 +28,7 @@ from __future__ import annotations
 import threading
 from typing import Any
 
+import httpx
 import structlog
 
 from nexus.db.t2.records import QueueRow
@@ -93,6 +94,11 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         rename_lock: Accepted for constructor parity with AspectExtractionQueue;
                      NOT used (no-op).
         timeout:     HTTP client timeout in seconds (default: 30.0).
+        client:      Optional pre-constructed ``httpx.Client`` (nexus-m20mf
+                     P3, additive) -- when supplied, this store shares that
+                     pool instead of opening its own, and ``close()`` on
+                     this store becomes a no-op for the client (the
+                     injecting caller owns closing it).
     """
 
     def __init__(
@@ -103,8 +109,9 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         rename_lock: "threading.RLock | None" = None,
         _token: str | None = None,
         timeout: float = 30.0,
+        client: httpx.Client | None = None,
     ) -> None:
-        super().__init__(base_url, tenant, _token=_token, timeout=timeout)
+        super().__init__(base_url, tenant, _token=_token, timeout=timeout, client=client)
         # rename_lock accepted for constructor parity but ignored over HTTP
         # (verbatim behavior preserved from the pre-mixin constructor).
         self.rename_lock: threading.RLock = (
@@ -121,12 +128,28 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     # super()._post/_get (RefreshableHttpStoreMixin._send), never
     # self._client directly.
 
-    def _post(self, path: str, body: dict[str, Any], *, idempotent: bool = True) -> Any:
-        return super()._post(f"/v1/aspects/queue{path}", body, idempotent=idempotent)
+    def _post(
+        self, path: str, body: dict[str, Any], *, idempotent: bool = True, mutates: bool = True
+    ) -> Any:
+        # nexus-a2qhz: mutates forwarded unchanged (every call site in this
+        # class is a write, default True; forwarding it anyway closes the
+        # latent TypeError trap a future read-via-POST addition would
+        # otherwise hit -- the class of regression caught in
+        # HttpTokenStore.list_tokens during review).
+        return super()._post(
+            f"/v1/aspects/queue{path}", body, idempotent=idempotent, mutates=mutates
+        )
 
-    def _get(self, path: str, params: dict[str, Any] | None = None, *, idempotent: bool = True) -> Any:
+    def _get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        idempotent: bool = True,
+        timeout: float | None = None,
+    ) -> Any:
         q = {k: str(v) for k, v in (params or {}).items() if v is not None}
-        return super()._get(f"/v1/aspects/queue{path}", q, idempotent=idempotent)
+        return super()._get(f"/v1/aspects/queue{path}", q, idempotent=idempotent, timeout=timeout)
 
     # ── Public API — mirrors AspectExtractionQueue ────────────────────────────
 
@@ -322,9 +345,17 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         r = self._post("/reclaim_stale", {"timeout_seconds": timeout_seconds})
         return int(r.get("reclaimed", 0))
 
-    def pending_count(self) -> int:
-        """Return the number of rows currently in 'pending' status."""
-        r = self._get("/pending_count")
+    def pending_count(self, *, timeout: float | None = None) -> int:
+        """Return the number of rows currently in 'pending' status.
+
+        ``timeout`` (nexus-m20mf P3 fold-in): optional per-request
+        override -- lets a caller sharing this store's client across a
+        longer-timeout run (e.g. an ``index_repository()`` shared pool)
+        still cap THIS specific call strictly, without needing its own
+        dedicated short-timeout client. ``None`` (default): no override,
+        unchanged from before this kwarg existed.
+        """
+        r = self._get("/pending_count", timeout=timeout)
         return int(r.get("count", 0))
 
     def is_drained(self) -> bool:

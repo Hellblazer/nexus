@@ -144,8 +144,9 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         *,
         _token: str | None = None,
         centroid_store: Any | None = None,
+        client: httpx.Client | None = None,
     ) -> None:
-        super().__init__(base_url, tenant, _token=_token)
+        super().__init__(base_url, tenant, _token=_token, client=client)
         # Centroid R/W routes through the pgvector centroid-port (nexus-t1hnc),
         # NOT chroma. Constructed lazily from the SAME resolved service config so
         # both stores share one base_url/token/tenant; injectable for tests.
@@ -184,6 +185,13 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 base_url=self._base_url if self._base_url_pinned else None,
                 tenant=self._tenant,
                 _token=self._token if self._token_pinned else None,
+                # nexus-m20mf P3 fold-in (code-review Important finding):
+                # share THIS store's client (injected or self-owned; None
+                # when this HttpTaxonomyStore itself owns its own client)
+                # rather than always opening an unshared 9th pool -- fixes
+                # the highest-traffic taxonomy commands (discover/rebuild/
+                # split) that this property exists to serve.
+                client=self._client,
             )
         return self._centroid_store
 
@@ -203,8 +211,19 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     # super()._post/_get (RefreshableHttpStoreMixin._send), never
     # self._client directly.
 
-    def _post(self, path: str, body: dict[str, Any], *, idempotent: bool = True) -> Any:
-        return super()._post(f"/v1/taxonomy{path}", body, idempotent=idempotent)
+    def _post(
+        self, path: str, body: dict[str, Any], *, idempotent: bool = True, mutates: bool = True
+    ) -> Any:
+        # nexus-a2qhz: mutates forwarded to the mixin unchanged (default
+        # True covers every write here; the four read-shaped POST call
+        # sites -- get_assignments_for_docs, get_assignment_details,
+        # get_topic_link_pairs, get_link_drift -- pass mutates=False).
+        # Missing this forward previously TypeError'd every call passing
+        # the kwarg, the same class of regression caught in
+        # HttpTokenStore.list_tokens during review.
+        return super()._post(
+            f"/v1/taxonomy{path}", body, idempotent=idempotent, mutates=mutates
+        )
 
     def _get(self, path: str, params: dict[str, Any] | None = None, *, idempotent: bool = True) -> Any:
         q = {k: str(v) for k, v in (params or {}).items() if v is not None}
@@ -468,7 +487,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         from. Pinned by tests/db/test_onjvy_write_only_surfaces.py: widen this
         projection and that test fails with instructions.
         """
-        result = self._post("/assignments/for_docs", {"doc_ids": doc_ids})
+        result = self._post("/assignments/for_docs", {"doc_ids": doc_ids}, mutates=False)
         return {r["doc_id"]: r["topic_id"] for r in result}
 
     def get_assignment_details(self, doc_ids: list[str]) -> list[dict[str, Any]]:
@@ -494,7 +513,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         if not doc_ids:
             return []
-        rows = self._post("/assignments/details", {"doc_ids": doc_ids})
+        rows = self._post("/assignments/details", {"doc_ids": doc_ids}, mutates=False)
         return list(rows or [])
 
     def purge_assignments_for_doc(self, project: str, title: str) -> int:
@@ -560,7 +579,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         service mode. The wire stays a row list; only the client-side shape
         changed.
         """
-        result = self._post("/links/pairs", {"topic_ids": topic_ids})
+        result = self._post("/links/pairs", {"topic_ids": topic_ids}, mutates=False)
         return {
             (r["from_topic_id"], r["to_topic_id"]): r["link_count"] for r in result
         }
@@ -585,7 +604,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             collection}]}``. ``drift_count`` is exact; ``rows`` is capped at
         *limit* so a large drift does not return a huge payload.
         """
-        return self._post("/links/drift", {"limit": limit}) or {}
+        return self._post("/links/drift", {"limit": limit}, mutates=False) or {}
 
     def upsert_topic_links(
         self,

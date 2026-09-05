@@ -67,6 +67,7 @@ nx index repo ./my-project
 | `rdr [PATH]` | Index RDR documents in `docs/rdr/` into `rdr__` collection (default: current dir) |
 | `pdf PATH` | Index a PDF document into T3 `docs__CORPUS` |
 | `md PATH` | Index a Markdown file into T3 `docs__CORPUS` |
+| `failures` | List durable per-file index-failure records (nexus-nukn3) |
 
 **Unchunkable sources (nexus-rqsh1, Hal directive 2026-08-15):** the indexer never registers a catalog document for a file it will not chunk. `repo` discovery silently skips zero-byte and binary-content files (counted in a `skipped_unchunkable` summary line — expected noise in an unbounded walk); the single-file forms (`md`, `pdf`, `rdr`) instead FAIL LOUD with a clean error naming the file (the operator named that exact file, so plain success with nothing registered would mislead), before any catalog write. In `rdr`'s batch walk an unchunkable file fails that file only, counted, never aborting the batch. `repo` staleness also now treats a doc whose catalog `index_state` is `indexing`/`failed` as stale regardless of content-hash match (nexus-cp46b) — a doc stranded by a failed upload drains on the next normal run, no `--force` needed.
 
@@ -76,7 +77,7 @@ nx index repo ./my-project
 
 | Flag | Description |
 |------|-------------|
-| `--force` | Force re-indexing, bypassing staleness check (re-chunks and re-embeds in-place) |
+| `--force` | Force re-indexing, bypassing staleness check (re-chunks and re-embeds in-place). For `pdf`/`md`/`rdr` this always re-embeds every chunk. For `repo` (nexus-4jj40 round 5), it re-chunks and re-sends every file but does NOT by itself force a Voyage re-embed; see the `repo`-only `--re-embed` flag below |
 | `--monitor` | Print per-file progress lines. For `pdf` and `md`, also shows a per-chunk tqdm progress bar during embedding. Auto-enabled when stdout is not a TTY (piped, backgrounded, CI) |
 
 **`repo`-only flags:**
@@ -84,6 +85,7 @@ nx index repo ./my-project
 | Flag | Description |
 |------|-------------|
 | `--frecency-only` | Update frecency scores only; skip re-embedding (faster, for re-ranking refresh). Mutually exclusive with `--force` |
+| `--re-embed` | Requires `--force`. Also forces a Voyage re-embed of every chunk, even one whose text is unchanged (the pre-nexus-4jj40 `--force` behaviour). Without it, `--force` alone re-chunks and re-sends every file; the server's own existence-partition still skips the billed embed call for a chunk whose text is byte-identical to what is already stored, refreshing only its metadata (e.g. a chunker classification change). Reserve `--re-embed` for a genuine embedding-model change |
 | `--force-stale` | Re-index only if collection pipeline version is outdated (smart force — skips current collections) |
 | `--since-head` | Index only the git delta since the last indexed commit (`owners.head_hash`): changed files re-index, deleted files' docs prune, full-tree passes (staleness pulls, housekeeping, misclassified/orphan prunes, rg cache rebuild) are skipped. Worktree-inclusive. Falls back to a full index when no usable base exists; ignored with `--force`/`--force-stale`. The per-commit hook's fast path |
 | `--corpus [docs\|knowledge]` | Corpus routing for auto-classified prose/PDF files (default: `docs`). `docs` routes to `docs__` collections; `knowledge` routes to `knowledge__` collections instead |
@@ -98,10 +100,15 @@ Every `nx index repo` run also writes a per-repo log file at `~/.config/nexus/lo
 **Observability output** (stderr, all emitted automatically during `repo` runs):
 
 - **Per-file line** — `  [N/total] path — K chunks  (T.Ts)` printed as each file completes (or when `--monitor` / no-TTY).
-- **`[eta]` line** — every 60 s: `[eta] N/total files · C chunks · Xs/file avg · ~M min remaining`. Fires regardless of TTY so CI / `nohup` / `tail -f` see pace even when tqdm suppresses its bar (introduced 4.8.0, nexus-vatx Gap 3).
+- **`[eta]` line** — every 5 s (was 60 s until nexus-s71lr; a single file taking anywhere under the old interval produced zero in-loop signal — the reported case was a 13-minute bulk embed with no output at all): `[eta] N/total files · C chunks · Xs/file avg · ~M min remaining`. Fires regardless of TTY so CI / `nohup` / `tail -f` see pace even when tqdm suppresses its bar (introduced 4.8.0, nexus-vatx Gap 3).
 - **`[post]` phase markers** — after the per-file loop, the pipeline keeps running for RDR discovery, pruning, pipeline-version stamping, and catalog registration. Each phase emits `[post] <phase>…` / `[post] <phase> done (Xs)`, bookended by `[post] Post-processing complete (Xs)` (introduced 4.8.0, nexus-vatx Gap 2). Catalog linking is three of those phases since 7.22.0 (nexus-jg3x5): `[post] Catalog linking: rdr…` / `… rdr done (8.1s)`, then `prose`, then `pdf` — each pair only for a generator that has a new document of its source type to link (no phantom `pdf` pair on a batch with no PDF), the duration being the one recorded in the `catalog_hook_stage_timing` log event; a generator that fails closes its phase with `… <kind> failed (Ns)`.
 - **Transient-error backoff summary** — on exit, if any Voyage / ChromaDB retry fired: `Transient-error backoff: Xs total (voyage ..., chroma ...)`. Silent on clean runs. Visible on exception paths (introduced 4.8.0, nexus-vatx Gap 4a).
 - **Rate-limit brake summary** — on exit, if the shared rate-limit brake paused any writer this run: `Rate-limit brake: N pauses, Ss`. Silent when the brake was never tripped. Emitted by `nx index repo`, `nx index pdf` (single-file and `--dir`), and `nx index md`. See "Voyage per-project rate limit" below (nexus-cy9u7).
+- **`nx index rdr`'s `[embed]` heartbeat** (nexus-s71lr) — unlike `repo`, this command had no in-loop signal at all. A background heartbeat, armed for the whole run and touched at every file completion, prints `  [embed] N/total RDR document(s) still running (Xs elapsed)` every 5 s while a file's embedding is taking longer than that — always on, not gated behind `--monitor`. Silent for a normal, fast run (no file clears the 5 s window).
+- **`nx index pdf --dir`'s `[embed]` heartbeat** (nexus-s71lr) — the batch loop echoes `[i/total] name…` and only completes the line after that PDF finishes indexing; a slow PDF was silence between those two echoes. Same mechanism as `index rdr`'s heartbeat above: `  [embed] i/total PDF(s), N chunks still running (Xs elapsed)` every 5 s, always on.
+- **`nx store import`'s `[embed]` heartbeat** (nexus-s71lr) — the import is one call with no per-record progress at all (worse than the per-file loops: not even a start/end line per record). Same mechanism, armed for the whole call: `  [embed] importing <file> still running (Xs elapsed)` every 5 s, always on.
+- **`nx store put`'s `[embed]` heartbeat** (nexus-s71lr pass 3) — a single document is still ONE embed call, and a large document's embed can run a minute+ with zero progress signal. Same mechanism, armed for the whole `db.put()` call: `  [embed] storing <title> still running (Xs elapsed)` every 5 s, always on.
+- **`GET /v1/status`** (nexus-s71lr, engine-side) — additive endpoint serving live embed-activity counters (`embedding_mode`, `local_embed_activity` for the local bge path, and — pass 3 — `embedder_activity`, a map keyed by model token covering the cloud-mode Voyage/CCE embedders too, so a cloud install is no longer always `null`). `nx doctor` (also `--check-engine-activity` standalone) polls it and renders one "Engine activity: …" line, falling back to the busiest tracked embedder when `local_embed_activity` is null.
 
 **Voyage per-project rate limit (nexus-cy9u7):** the engine embeds server-side on write, so a bulk `nx index` run's real "embed pressure" is its T3 vector-write and catalog manifest-write request rate. Voyage's RPM budget (4000 RPM for `voyage-context-3`) is per PROJECT, not per process or per worker — every concurrent worker thread AND every concurrent `nx index` session sharing that Voyage project draws from the SAME budget. Every write path now routes through a shared process-wide "rate brake" — `HttpVectorClient.upsert_chunks` (the one choke point every T3 write call site funnels through: the ChunkBatcher's combined-write flush, the per-file prose/code fallback, and PDF indexing, which never uses the batcher), the catalog manifest write, and the migration-ETL leg. The first worker to see ANY retryable transient failure — a 429, 502, 503, or 504, or a retryable transport error (connect refused, read timeout, ...), not only a narrow 429/503-with-`Retry-After` signal — pauses EVERY writer in this process until the same shared deadline, instead of each worker backing off independently and re-firing the limit the moment its own backoff elapses (the 2026-08-15 incident, conexus-ddh0/nexus-99r7y: the engine was retrying Voyage internally and the edge's own timeout surfaced to the client as a 502/504 with no `Retry-After` at all — a signal the narrower pre-fix scope would have missed entirely). The pause is floored at the server's `Retry-After` when one is supplied, otherwise an escalating default (2s, doubling per consecutive process-wide trip, capped at 60s); it resumes at the base delay once a write succeeds. `nexus-99r7y` (engine fail-fast with an explicit 429 + `Retry-After` instead of a bare edge timeout) sharpens this signal but is **not required** for the brake to engage — the escalating-default path covers every retryable failure shape either way.
 
@@ -300,6 +307,55 @@ nx search "" --corpus knowledge --where extraction_method=mineru --files
   to recover the value honestly); treat a missing key as *unknown*, never as
   a negative result. Tracked as nexus-0qc4b.
 
+### nx index failures
+
+```
+nx index failures [--run-id ID] [--days N] [--limit N]
+nx index failures --clear [--run-id ID] [--older-than-days N] [--dry-run]
+nx index failures --acknowledge (--file PATH | --error-class CLASS) [--reason TEXT]
+nx index failures --acks
+nx index failures --unacknowledge (--file PATH | --error-class CLASS)
+```
+
+Lists, clears, acknowledges, unacknowledges, or lists acknowledgments of durable per-file index-failure records (nexus-nukn3, Sam's design: "when a file fails, ENQUEUE the failure and move on"). A `repo` run that skips a file it cannot extract (`nexus.errors.UnextractableContentError`) now writes a durable row — file path, error class, reason, run id — to `nexus.index_failures` (engine-side PG table, event-log shape, mirrors `hook_failures`) instead of only a log line and an in-memory counter that die with the process. `nx index repo`'s systemic-skip floor (nexus-deyd5) reads this same durable count rather than the in-memory list — see the note on `--acknowledge` below for why that floor deliberately does NOT honor acknowledgments.
+
+`--clear`, `--acknowledge`, `--unacknowledge`, and `--acks` are pairwise mutually exclusive. `--dry-run` only means anything paired with `--clear`; used with any other mode (or alone) it is a usage error rather than a silent no-op.
+
+| Flag | Description |
+|------|-------------|
+| `--run-id ID` | Only show (or, with `--clear`, only clear) failures from this run (default: every run) |
+| `--days N` | Only show failures within the last N days (default: `0`, unbounded). Ignored with `--clear`/`--acknowledge`/`--unacknowledge`/`--acks` |
+| `--limit N` | Max rows to print (default: `100`). The printed count is always the exact total, independent of this cap. Ignored with `--clear`/`--acknowledge`/`--unacknowledge`/`--acks` |
+| `--clear` | Delete rows instead of listing them, scoped by `--run-id` and/or `--older-than-days` (at least one is required — an unscoped `--clear` is refused) |
+| `--older-than-days N` | With `--clear`: also delete rows older than N days (>= 1; omit for no age bound). Combine with `--run-id`, or use alone to age-sweep every run |
+| `--dry-run` | With `--clear`: preview the count that would be deleted, using the identical predicate, without deleting anything |
+| `--acknowledge` | Durably adjudicate a recurring failure instead of listing or clearing. Requires `--file` and/or `--error-class` |
+| `--unacknowledge` | Revoke a durable acknowledgment instead of creating one. Requires `--file` and/or `--error-class`, mirroring how it was created — a class-wide acknowledgment (created with `--error-class` alone) is revoked the same way |
+| `--acks` | List durable acknowledgments instead of failures (scope, error class, reason, created-at) |
+| `--file PATH` | With `--acknowledge`/`--unacknowledge`: the file (file-scoped — only that exact file + error-class pair is covered/revoked). Omit `--error-class` to auto-resolve: `--acknowledge` resolves from the file's most recently recorded failure; `--unacknowledge` resolves from the file's existing acknowledgment (refused as ambiguous if the file has acknowledgments under more than one error class — pass `--error-class` explicitly) |
+| `--error-class CLASS` | With `--acknowledge`/`--unacknowledge`: the error class. Alone (no `--file`), targets the error-class-scoped acknowledgment covering ANY file with this error class — a corpus-wide exemption for a known systemic issue |
+| `--reason TEXT` | With `--acknowledge`: optional free-text note, shown against the acknowledged row(s) in the list view |
+
+```bash
+nx index failures                              # every recorded failure
+nx index failures --run-id abc123               # one run only
+nx index failures --days 7                      # last week
+nx index failures --clear --run-id abc123        # retire one run
+nx index failures --clear --older-than-days 90   # age-sweep
+nx index failures --clear --older-than-days 90 --dry-run  # preview first
+nx index failures --acknowledge --file broken.pdf --reason "known encrypted PDF"
+nx index failures --acknowledge --error-class UnextractableContentError
+nx index failures --acks                         # list active acknowledgments
+nx index failures --unacknowledge --file broken.pdf
+nx index failures --unacknowledge --error-class UnextractableContentError
+```
+
+`--clear` is a ONE-TIME delete: the next index run that hits the same file mints a fresh row (and a fresh run id), so a permanently unextractable file re-indexed on a cadence undoes a bare `--clear` every time. `--acknowledge` is the durable fix — it writes a permanent `kind='acknowledgment'` marker into the same table that the read path (and the doctor gate) treats as "known", so a recurring failure for an acknowledged file no longer gates while a genuinely new file, or a new error class for that same file, still does. `--unacknowledge` revokes that marker (an exact-match delete mirroring the scope it was created with — never a fuzzy match); `--acks` lists every active one, since a write-only acknowledgment that can never be listed or revoked cannot be audited. Acknowledged rows are marked `[ACKNOWLEDGED]` in the list view. An unreachable service, or a call against an engine that predates the corresponding nexus-nukn3 route, raises a clean `ClickException` naming the condition rather than a raw traceback.
+
+`--acknowledge` is deliberately NOT read by `nx index repo`'s systemic-skip floor (nexus-deyd5): acknowledging a failure records that an operator has adjudicated it, not that the file actually indexed, so the floor keeps counting every failed file regardless of acknowledgment state.
+
+Pairs with `nx doctor --check-index-failures` for a pass/fail signal on the backlog; this verb answers *which* files. The doctor check's own footnote also names the count of active acknowledgments when any exist, pointing at `nx index failures --acks`.
+
 ---
 
 ## nx dt
@@ -345,6 +401,9 @@ nx dt index --uuid UUID-A --uuid UUID-B --uuid UUID-C
 
 # See what would be indexed without writing.
 nx dt index --selection --dry-run
+
+# Force re-indexing even if the record's content is unchanged.
+nx dt index --uuid 8EDC855D-213F-40AD-A9CF-9543CC76476B --force
 ```
 
 | Flag | Description |
@@ -359,6 +418,7 @@ nx dt index --selection --dry-run
 | `--corpus <name>` | Corpus name used to derive the default collection (default: `dt`). PDFs route to `knowledge__<corpus>-papers` (paper-shaped, aspect-eligible); markdown notes route to `docs__<corpus>` |
 | `--dry-run` | Print records that would be indexed; make no T3 writes |
 | `--extractor [auto\|docling\|mineru]` | PDF extraction backend for file-backed records (default `auto`). `mineru` is formula-aware but can OOM-fail on formula-dense pages; the recovery is `--extractor docling` (formula-stripped, always completes) |
+| `--force` | Force re-indexing every record, bypassing the staleness check (re-chunks and re-embeds in place) — same semantics as `nx index pdf --force`. Forwarded to `index_pdf`/`index_markdown`'s own `force` kwarg for both file-backed records and, with `--dt-content`, non-file-backed ones; catalog identity and tumbler are preserved (nexus-gup3b). Without it, an unchanged record prints `skipped: index fresh (use --force)` |
 | `--link-semantic` | After a record indexes, create `relates` edges to its DT similarity + explicit-link neighbours already indexed in nexus (RDR-139 Layer B). DT unavailable → zero edges. Opt-in |
 | `--writeback` | After a record indexes, stamp the nexus identity back onto the DT record (RDR-139 Layer F): `nx-indexed` / `nx-tumbler:<t>` tags + a tumbler backlink annotation. nexus-owned namespace only; never edits user content. Opt-in |
 | `--enrich` | After indexing, run a DT-CrossRef bibliographic gap-fill over each touched collection (RDR-139 Layer C): the `auto` primary backend, then DT's CrossRef resolver fills only still-empty `bib_*` fields (lowest precedence, never overwrites S2/OpenAlex). Opt-in |
@@ -1346,7 +1406,7 @@ Physically reclaim tombstoned catalog rows and their manifest-orphaned T3 chunks
 
 Default is a read-only dry-run: a per-dim stranded-chunk count preview plus an aged-tombstone document count (`--older-than-days`, default 30, must be >= 1), computed engine-side and printed. Nothing is deleted in this mode, and `--json` emits the same counts as machine-parseable JSON.
 
-**Age semantics are symmetric since catalog-026 (nexus-5da44, RDR-191 GATE-2; this paragraph described the earlier asymmetric behaviour for two weeks after the engine retired it — nexus-kcm6c):** both the `documents_purged` row delete AND the `chunks_<dim>_stranded` sweep honor `--older-than-days`. A tombstoned document inside the grace window keeps its catalog row, manifest rows, and chunks TOGETHER — the chunk sweep protects any chunk whose manifest row belongs to a live or still-in-window document, the exact complement of the row delete's predicate — and loses all three together once the window passes. "Manual restore stays possible" therefore genuinely holds for the whole window, even across mutating `purge-trash` runs. Consequence for reading the counts: a near-zero stranded count at the default 30 days next to a large one at `--older-than-days 1` means recent tombstones are being protected, by design — the 2026-08-27 shakedown read exactly that pair and concluded the counter was lying when the stale prose was (nexus-kcm6c).
+**Age semantics are symmetric since catalog-026 (nexus-5da44, RDR-191 GATE-2; this paragraph described the earlier asymmetric behaviour for two weeks after the engine retired it — nexus-kcm6c):** both the `documents_purged` row delete AND the `chunks_<dim>_stranded` sweep honor `--older-than-days`. A tombstoned document inside the grace window keeps its catalog row, manifest rows, and chunks TOGETHER — the chunk sweep protects any chunk whose manifest row belongs to a live or still-in-window document, the exact complement of the row delete's predicate — and loses all three together once the window passes. "Manual restore stays possible" therefore genuinely holds for the whole window, even across mutating `purge-trash` runs. Consequence for reading the counts: a near-zero stranded count at 30 days next to a large one at `--older-than-days 1` means recent tombstones are being protected, by design — the 2026-08-27 shakedown read exactly that pair and concluded the counter was lying when the stale prose was (nexus-kcm6c). **The default is one day since 7.32.0** (Sam, 2026-09-05): the 30-day window held 880 tombstoned documents and 1,503 stranded chunks for months against a standing request to delete them. `nx doctor --fix` runs the one-day purge (see [garbage sweep](#nx-doctor)).
 
 Mutation is gated behind BOTH `--no-dry-run` AND `--confirm` (same gate as `nx catalog reconcile-stale`): `--no-dry-run` alone still reports only, and `--json` cannot be combined with `--no-dry-run` (the mutation path prints a plain-text report, not JSON).
 
@@ -1489,8 +1549,9 @@ nx taxonomy show 5                              # docs assigned to topic 5
 nx taxonomy show 5 --assignments                # per-assignment quality: chunk/confidence/provenance
 nx taxonomy review                              # interactive: accept/rename/merge/delete/skip
 nx taxonomy review --auto                       # unattended: batched claude_dispatch verdicts
-nx taxonomy review --auto --dry-run             # preview verdicts, apply nothing
-nx taxonomy review --auto --yes                 # skip the destructive-action confirm prompt
+nx taxonomy review --auto --dry-run             # preview verdicts; persists them for a later apply
+nx taxonomy review --auto --apply-destructive   # skip the destructive-action confirm prompt
+nx taxonomy review --auto --accept-only         # apply accept/rename only; leave delete/merge pending
 nx taxonomy review --auto --batch-size 20       # topics per claude_dispatch call (default 40)
 nx taxonomy label                               # batch-relabel with Claude haiku
 nx taxonomy assign doc-id "topic label"         # manually assign a doc (see below)
@@ -1563,16 +1624,46 @@ nx taxonomy review --auto                       # default: up to 5000 pending to
 nx taxonomy review --auto -c docs__nexus         # scope to one collection
 nx taxonomy review --auto --limit 200            # cap topics considered
 nx taxonomy review --auto --batch-size 20        # topics per claude_dispatch call
-nx taxonomy review --auto --dry-run              # print verdicts, apply nothing
-nx taxonomy review --auto --yes                  # skip the destructive-action confirm prompt
+nx taxonomy review --auto --dry-run              # print verdicts, persist them for a later apply
+nx taxonomy review --auto --apply-destructive    # skip the destructive-action confirm prompt
+nx taxonomy review --auto --accept-only          # apply accept/rename only; delete/merge stay pending
 ```
 
 `accept` and `rename` apply immediately (unless `--dry-run`, which suppresses
 every mutation including those). `delete` and `merge` are held and printed as
 a grouped destructive plan — topic id, label, doc count, and the model's
 one-line reason for deletes; source label -> target label and doc counts for
-merges — then applied only after an interactive `y/N` confirm or `--yes`.
-Declining leaves those topics pending.
+merges — then applied only after an interactive `y/N` confirm or
+`--apply-destructive`. Declining leaves those topics pending. `--yes`/`-y` no
+longer skips this confirmation by itself (nexus-afnht) — it is kept for CLI
+compatibility, but a plain `--yes` run with destructive verdicts pending now
+prints a one-line notice and still prompts; pass `--apply-destructive` (with
+or without `--yes`) for unattended destructive apply. `--accept-only` is the
+alternative for the common case ("label and accept these N topics"): it
+applies accept/rename and withholds delete/merge entirely — no prompt, no
+printed plan, topics stay pending for explicit human review.
+
+**`--dry-run` is authoritative, not merely indicative (nexus-afnht).** Two
+independent batched `claude_dispatch` passes are two independent, unseeded
+stochastic draws — before this fix, a `--dry-run` preview predicted nothing
+about the destructive set a following `--auto` apply actually deleted or
+merged. `--dry-run` now persists every verdict it computes, per topic, keyed
+by collection plus a content hash covering exactly what the verdict prompt
+was built from — id, label, terms, the doc sample, and doc_count. A later
+`--auto` on the same collection reuses a cached verdict for any topic whose
+hash still matches — so reviewing a preview and then applying it produces
+EXACTLY the verdicts shown, never an independent re-sample. A topic with no
+cached verdict, or whose hash no longer matches — a discover/rebuild pass or
+a manual edit changed its label/terms, or incremental indexing changed which
+docs are assigned to it (doc sample/doc_count alone, with label and terms
+completely untouched) — is re-dispatched fresh, with a loud `NOTE:` line
+naming which topic ids were invalidated. Running `--dry-run` twice in a row
+with nothing changed dispatches only once — the second preview is served
+entirely from the cache and reports the identical verdict set. The cached
+entry expires after 7 days. A cached entry that exists but is malformed or
+wrong-shaped (a corrupted row, not simply absent) is never silently
+discarded: it is logged and echoed as a `NOTE: ... was discarded (...)`
+notice, then treated as empty so every topic in that collection re-samples.
 
 Fail-open throughout: a `claude_dispatch` exception, a malformed response, or
 an invalid verdict entry leaves that topic pending rather than raising.
@@ -2011,8 +2102,6 @@ nx hooks install [PATH]
 
 Hooks run `nx index repo` in the background after each qualifying git operation, appending output to `~/.config/nexus/index.log`. If a hook file already exists, the nexus stanza is appended (sentinel-bounded) without overwriting existing content.
 
-`post-commit` additionally runs [`nx review commit`](#nx-review) (bead nexus-jh86x) in the background. `post-merge` and `post-rewrite` do not: a merge brings in commits already reviewed where they were authored, and post-rewrite fires once per rewritten commit, so one interactive rebase of twenty commits would dispatch twenty reviews of already-reviewed work.
-
 **Hook status values:** `not installed` · `owned` (nexus-created) · `appended` (added to existing hook) · `unmanaged` (no nexus sentinel)
 
 ### nx hook routing-stats
@@ -2020,7 +2109,7 @@ Hooks run `nx index repo` in the background after each qualifying git operation,
 The `nx hook` group (hidden from `nx --help`) hosts Claude Code lifecycle plumbing: `session-start`, `session-end`, `session-end-flush`, and `session-end-detach` are invoked by the conexus plugin's SessionStart/SessionEnd hooks with a JSON payload on stdin and are not intended for manual use. `routing-stats` is the group's one operator-facing verb.
 
 ```
-nx hook routing-stats [--log-path PATH] [--json]
+nx hook routing-stats [--log-path PATH] [--json] [--escapes] [--from-store] [--since ISO_DATE]
 ```
 
 Aggregates the per-rule JSONL log written by the RDR-121 routing-hook
@@ -2033,6 +2122,8 @@ escape-rate per rule.
 | `--log-path PATH` | Read from this path instead of the default |
 | `--json` | Emit aggregated stats as JSON instead of a table |
 | `--escapes` | List escape events with their `# routing-allow:` reasons (the escape-audit surface); combines with `--json` |
+| `--from-store` | Read the durable `routing_events` engine table (nexus-gjv9b PART 2's replacement for the JSONL log) instead; `--log-path` is ignored |
+| `--since ISO_DATE` | With `--from-store`: only events at or after this date/datetime |
 
 JSON output shape (nexus-mzvwa.9): `{"rules": {<rule>: {...}}, "selftest_excluded": N,
 "unregistered_rules": [...]}` — `unregistered_rules` present only when a
@@ -2047,6 +2138,19 @@ Default log path resolves to `$NX_ROUTING_LOG_PATH`, falling back to
 `~/.config/nexus/routing_log.jsonl`. Used at the 30-day soak review
 (RDR-121 §Phase 4) to spot false positives (high escape rate), inert
 matchers (zero fires), or overly broad blocks (high block rate).
+
+**Writer swap (nexus-gjv9b PART 2, 2026-09):** the routing hooks record
+to the engine's `routing_events` table now (best-effort, ~250ms POST via
+`urllib`, no `nexus` import — see `conexus/hooks/scripts/routing/_lib.py`'s
+`log_routing_event`), not the JSONL log this command reads by default. Use
+`--from-store` to read the table instead — an unreachable service exits
+non-zero with `UNAVAILABLE: <reason>`, never a fabricated empty report. A
+routing event that could not reach the engine (service down, or an
+`NX_SERVICE_HOST`/`PORT`/`TOKEN`-less session — the common case for a
+plain interactive terminal) is counted in `nx doctor`'s drop meter
+(`nexus.dropped_writes`, `hook="routing_events"`), never appended to the
+JSONL log — that machinery stays in place only to protect installs still
+running pre-swap code, until this bead's deferred PART 3 removes it.
 
 ---
 
@@ -2395,9 +2499,12 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 | `--check-t1` | Diagnose T1 session lease presence + freshness. Checks `~/.config/nexus/t1_session_lease.<session_id>`. Exits 1 only when a session-id resolves AND a lease file exists AND it is expired/corrupt; a resolved session with no lease file at all is informational (a bare CLI legitimately has none — the MCP lifespan mints its own) |
 | `--check-mineru` | Verify MinerU is importable — surfaces a corrupt install at doctor-time instead of waiting for the first math-heavy PDF index to fail |
 | `--check-wal-retention` | Sample retained WAL bytes (local service only) via `pg_ls_waldir()`, escalating a `nexus_svc` session to `pg_monitor` with `SET ROLE` first — unconditionally, since `nexus_svc` is `NOINHERIT` in every deployment posture, so `pg_monitor`'s privileges are never ambient without it. Purely informational (RDR-191 Phase 4 trough-window context, not a pass/fail gate): **always exits 0**. Reports UNMEASURED (never a false clean) when the sample can't be taken |
+| `--git-hooks-scope PATH` | Restrict the git-hooks stanza-drift check (part of the default sweep, not a `--check-*` flag) to repos registered at or under `PATH`; repos elsewhere are excluded from the walk rather than reported. The registered-repo catalog is shared machine-wide, not scoped to `$HOME`, so an unscoped sweep run from an isolated automation sandbox also sees (and can be reddened by) every other repo ever indexed on the same machine. Default: unscoped, walks every registered repo (nexus-jds59) |
 | `--json` | Emit machine-parseable JSON. On the MAIN sweep (no mode flag) this emits `{"checks": [{name, ok, status: ok\|warn\|fail, detail, fatal, fix_suggestions}], "summary": {total, ok, warn, fail}, "local_mode"}` (nexus-0vycz — previously the flag was silently ignored there). Also honored by `--check-search`, `--check-quotas`, `--check-mcp-logs`. Combining `--json` with any other mode flag that cannot honor it is a usage error, never a silent ignore. |
 
-The `--fix` flag retroactively applies HNSW `search_ef` tuning to all existing local-mode collections. New collections get this automatically. In cloud mode (SPANN), prints a skip message — SPANN defaults are adequate.
+**Garbage sweep (7.32.0; Sam, 2026-09-05).** Two rows on every run. `Local garbage` reaps, in place, the litter nothing else touches: `t1_mint_<session>.lock` files older than a day whose session holds no lease (706 had accumulated since July), rotated logs (`*.log.N`) older than 14 days, and `operator-timeout-*` / `operator-budget-*` dispatch dumps older than 7. `Catalog garbage` counts orphaned links (an endpoint that resolves to no live document) and tombstoned documents plus stranded chunks past **one** day; a non-zero count is a ⚠ naming `nx doctor --fix`, and an unreachable engine is a ⚠ too, never a clean row. Each litter class this repo produces is a row in `nexus.garbage`; a new class is a new row there, not a new command.
+
+The `--fix` flag first reclaims the catalog garbage the sweep counted (deletes every orphaned link, then runs the one-day `purge-trash`; fails loud on an engine error), then retroactively applies HNSW `search_ef` tuning to all existing local-mode collections. New collections get this automatically. In cloud mode (SPANN), prints a skip message — SPANN defaults are adequate.
 
 ```
 nx doctor --check-schema          # Report where the T2 schema lives
@@ -2505,9 +2612,13 @@ The `--check-post-store-hooks` flag (introduced 4.18.0, `nexus-b0ka`) prints eve
 
 ```
 nx doctor --check-aspect-queue       # Surface RDR-089 aspect-extraction worker depth
+nx doctor --check-engine-activity    # Live engine embed activity from GET /v1/status (nexus-s71lr)
+nx doctor --check-index-failures     # Surface the durable index-failures backlog (nexus-nukn3)
 ```
 
 The `--check-aspect-queue` flag (introduced 4.18.0, `nexus-1pfq`) reports the `aspect_extraction_queue` row count plus per-status breakdown (`pending`, `processing`, `failed`, `completed`), the oldest non-completed `enqueued_at` as a lag indicator, and the top failed rows with their `last_error`. The same data surfaces in the `nx console` Aspect Queue card on `/health` for live monitoring. Pre-RDR-089 databases (no queue table) report cleanly as "table not present" rather than erroring. A transport failure (service unreachable) reports UNKNOWN and exits 0 — not reporting pass or fail; a reachable queue with one or more `failed` rows is a real backlog signal and exits 1 with a `✗ FAIL:` marker, matching the other promoted supplementary checks (nexus-fylxo).
+
+The `--check-index-failures` flag (introduced nexus-nukn3, also part of the default sweep) reports the `nexus.index_failures` all-time row count (see `nx index failures` above) as information, and gates the sweep on the LATEST run that recorded any UNACKNOWLEDGED failure — never the all-time total, and never a failure an operator has durably acknowledged. Deliberately written FAIL-FIRST: this is the exact bead nexus-fylxo names as the trap to avoid, a durable failure queue whose reader never raises reproduces the aspect-queue check's original silent-backlog defect for a second queue. Two rounds of scoping close two separate traps found in review: (1) an unscoped all-time gate turned the FIRST permanent extraction failure in a tenant's history into an unfixable FAIL forever — fixed by gating on the latest run instead, with a failure older than 30 days no longer gating at all (self-heals over time with no operator action); (2) staleness alone did not self-heal a corpus re-indexed on a cadence SHORTER than that window, since every run mints a fresh run id for the identical recurring failure — fixed by `nx index failures --acknowledge`, a durable adjudication the gate excludes regardless of how many times it recurs under a new run id. `nx index failures --clear` remains the immediate one-time remedy for a failure an operator has already handled and does not want to wait out the staleness window for. A transport failure reports UNKNOWN and exits 0; a fresh (within 30 days), unacknowledged latest-run failure exits 1 with a `✗ FAIL:` marker naming that run's count.
 
 ---
 
@@ -3672,65 +3783,11 @@ output — "SAME QUERIES, SAME BUCKETS, EVERY TIME" (playbook §4.5).
 
 ---
 
-## nx review
-
-Automated review of committed work (bead nexus-jh86x). Fired by the `post-commit` git hook, and usable by hand.
-
-```
-nx review commit [REV] [--repo PATH] [--quiet] [--drain]
-nx review show [REV] [--repo PATH]
-```
-
-| Subcommand | Description |
-|------------|-------------|
-| `commit [REV]` | Review REV (default `HEAD`) and record findings in T2. **Always exits 0** — a hook that can fail a commit is a footgun during a tag-push sequence. `--drain`: after REV, pop and review every sha the post-commit hook queued while a reviewer was running, until the queue is empty (the hook passes this; a hand-run review need not) |
-| `show [REV]` | Print the stored review record for REV |
-
-**Bursts are queued, not dropped** (2026-09-04). The post-commit hook serialises reviews with a `pgrep` guard. When a reviewer is already running, the hook appends `HEAD` to `<git-common-dir>/nx-review-queue` (one queue per repository, shared by every linked worktree) and logs `QUEUED (review already running)`; the running reviewer, dispatched with `--drain`, reviews the queued shas before it exits. Before this the hook logged `SKIPPED` and the commit was never reviewed: 6 of 9 commits in one push. A sha stranded in the queue (the reviewer exited between the hook's guard and its append) is picked up by the next commit's reviewer, and shows up as unreviewed in [`nx census reviews`](#nx-census) until then. A queued sha that cannot be reviewed is reported and dropped, never re-queued.
-
-The reviewer is a **tool-free** `claude -p` dispatch over `git show REV` alone. It cannot read the RDR corpus, the bead board, or prior reviews, and that independence is the point: a reviewer that has read the design record tends to agree with it.
-
-Findings carry one of three verdicts:
-
-| Verdict | Meaning |
-|---------|---------|
-| `FIX-NOW` | A defect that should be corrected before the work goes further |
-| `FILE` | A real issue worth tracking, but not urgent |
-| `DROP` | An observation considered and explicitly set aside |
-
-Nothing is auto-applied and nothing is auto-filed. Triage is a human act. Expect an instrument that mostly comments on test quality and occasionally catches a design error; if its FIX-NOW rate turns out to be dominated by noise, narrow or retire it rather than learning to ignore it.
-
-Records land in T2 project `nexus`, titled `review-<12-hex>`, with a default 90-day TTL. Count them with [`nx census reviews`](#nx-census).
-
-Each record carries a `Diff-Hash:` line, the sha256 of the first-parent patch with the sha/subject/author header stripped. A commit whose hash already has a record is skipped without a dispatch (`skipped (same diff already reviewed as review-<12-hex>)` on stderr) and gets no record of its own: an amend that rewords a message or a rebase that moves a change is the same review, and re-reviewing them was a quarter of the reviewer's spend when measured (nexus-yh25a). A rebase that changes the patch text, context lines included, hashes differently and is reviewed again.
-
-**Findings are surfaced, not merely stored.** SessionStart reports how many commits in the last 7 days carry `FIX-NOW` findings, because a verdict meaning "fix before this work goes further" that nobody sees is theatre. It counts commits rather than findings (two `FIX-NOW`s on one commit is one thing to look at), and the window is bounded on purpose: there is no "resolved" state on a review record, so an unbounded count would become the line people learn to scroll past.
-
-**Configuration** (`.nexus.yml#commit_review`, all optional):
-
-| Key | Default | Meaning |
-|-----|---------|---------|
-| `enabled` | `true` | Master switch |
-| `max_budget_usd` | `0.25` | Per-dispatch hard cap, passed to `claude -p --max-budget-usd`. A hard abort at cap, not a truncation |
-| `timeout_seconds` | `180` | Subprocess kill deadline |
-| `max_diff_bytes` | `200000` | Larger diffs are truncated, and the truncation is stated in both the prompt and the record |
-| `ttl_days` | `90` | Review records age out; a per-commit writer with a permanent TTL is an unbounded accumulator |
-| `model` | unset | Override the dispatch model |
-
-`NX_COMMIT_REVIEW=0` disables the reviewer for one shell or one command; `NX_COMMIT_REVIEW=1` re-enables it over a disabling config key. **The environment variable wins over the config key**, so silencing a noisy afternoon never requires editing a file.
-
-A release cut is a burst — a release commit, a back-merge, and any fix-forward landing in quick succession. The hook's `pgrep` guard serialises the burst rather than firing concurrent children; the cap is per dispatch, so an N-commit burst has an N × `max_budget_usd` ceiling.
-
 ## nx census
 
 ```
-nx census capability [--session SESSION_ID] [--since ISO_DATE] [--project-dir PATH] [--json]
-nx census reviews [--as-json]
+nx census capability [--session SESSION_ID] [--since ISO_DATE] [--project-dir PATH] [--json] [--from-store]
 ```
-
-`nx census reviews` counts per-commit review findings by verdict across the T2 records [`nx review commit`](#nx-review) writes, and reports **reviewed-and-clean separately from not-reviewed**: a census that could not tell those apart would read an unarmed hook as a clean codebase (the nexus-moht0 vacuous-gate doctrine). The first line reports the current repository's post-commit hook state (`armed`, `stale`, `not installed`, `unmanaged`, `unknown`; `hook_state` under `--as-json`), the same comparison `nx doctor` makes, so the census answers the hook-armed question rather than asking it. Records are selected by title prefix AND their first line `Commit review: `; human review notes sharing the prefix are not counted.
-
-When run inside a git repository the census also **names the gaps**: every commit reachable from `HEAD` since the newest reachable tag (or the last 100 commits when no tag is reachable) that has no review record. A commit is covered when a record carries its sha OR a record's `Diff-Hash` equals its own patch hash (an amend or rebase is reviewed under the sha it first had, and the reviewer deliberately writes nothing for the new sha; a truncated diff is never matched by hash). Patch-less commits (`merge -s ours`, `--allow-empty`) are counted, not listed, since the reviewer skips them by design. The line `Review queue: N waiting` appears when the post-commit hook's burst queue is non-empty (see [`nx review`](#nx-review)). Under `--as-json` these land in `coverage` (`since`, `commits`, `patchless`, `unreviewed[]`) and `queued`.
 
 Counts tool calls per capability across Claude Code session transcripts, split **orchestrator vs subagent** (nexus-h33x8.1). Buckets are `skill`, `agent`, `serena`, `nx_answer`, `search_query`, `other_nx_mcp`, `baseline` (Bash/Read/Edit/Write), `other`.
 
@@ -3745,6 +3802,8 @@ The split is the point, not a detail: the same instruction delivered at Subagent
 **Exits non-zero when the run measured *nothing*.** An empty, unreadable, unparseable, or tool-call-free scope reports `UNMEASURABLE` with a reason rather than a clean zero; a zero row inside a measurable run is a real zero. Sessions that legitimately carry no tool call are the majority of transcripts — they are counted, listed by reason, and reported as a share, but they do not fail the run. The exit code answers "did this measure anything at all", **not** "is this corpus healthy"; a caller needing a health threshold must read `unmeasurable_share`, not `$?`.
 
 **It reports counts and refuses a verdict.** Non-use of a capability may be a forgotten affordance or a correct rejection, and nothing in the transcript distinguishes them; `--json` carries a `verdict: null` field and per-tool counts so narrower slices stay derivable. The refusal governs what this command renders — it is not, and cannot be, an enforcement boundary against verdicts computed downstream from these numbers.
+
+**`--from-store`** (nexus-gjv9b PART 1) reads the durable `capability_census` engine table instead of re-parsing transcripts — the table every SessionEnd hook upserts to now, replacing the retired `capability_census.jsonl` writer. Reuses `--session`/`--since`/`--json`; `--project-dir` is ignored (there is no transcript walk on this path). A row's `blindspot`/`unmeasurable_reason` are surfaced verbatim from whatever the writing session recorded — this flag reads an already-measured artifact, so it carries no UNMEASURABLE-vs-zero distinction of its own; a session absent from the table is reported as absent, and a service-unreachable read exits non-zero with `UNAVAILABLE: <reason>`.
 
 ```
 nx census dispatches [--session SESSION_ID] [--project-dir PATH] [--json]

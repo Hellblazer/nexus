@@ -526,6 +526,303 @@ class TestTimestampPreservationPerTable:
         )
 
 
+class TestIndexFailuresRoundTrip:
+    """nexus-nukn3: durable per-file index-failure record. Real Java-service
+    round trip — proves the wire shape between HttpTelemetryStore and
+    TelemetryHandler/TelemetryRepository actually matches, which the
+    mocked unit tests (tests/test_deyd5_systemic_skip_run_level.py,
+    tests/test_false_clean_diagnostics_service_mode.py) cannot."""
+
+    def test_record_and_batch_read_back_by_run(self, tel_store):
+        run_id = f"itest-run-{time.time_ns()}"
+        tel_store.record_index_failure(
+            run_id=run_id, file_path="/repo/a.pdf",
+            error_class="UnextractableContentError", error="produced empty output",
+        )
+        inserted = tel_store.record_index_failures_batch(
+            [
+                ("/repo/b.pdf", "UnextractableContentError", "scanned image", ""),
+                ("/repo/c.pdf", "UnextractableContentError", "boom", ""),
+            ],
+            run_id=run_id,
+        )
+        assert inserted == 2
+
+        result = tel_store.list_index_failures(run_id=run_id, limit=100)
+        assert result["total"] == 3
+        paths = {row["file_path"] for row in result["rows"]}
+        assert paths == {"/repo/a.pdf", "/repo/b.pdf", "/repo/c.pdf"}
+        assert all(row["error_class"] == "UnextractableContentError" for row in result["rows"])
+
+    def test_aggregates_ignore_the_page_limit(self, tel_store):
+        run_id = f"itest-cap-{time.time_ns()}"
+        tel_store.record_index_failures_batch(
+            [(f"/repo/f{i}.pdf", "UnextractableContentError", "boom", "") for i in range(5)],
+            run_id=run_id,
+        )
+
+        capped = tel_store.list_index_failures(run_id=run_id, limit=1)
+
+        assert len(capped["rows"]) == 1
+        assert capped["total"] == 5, "total must count every matching row, not the page"
+
+    def test_blank_run_id_returns_every_run(self, tel_store):
+        run_a = f"itest-all-a-{time.time_ns()}"
+        run_b = f"itest-all-b-{time.time_ns()}"
+        tel_store.record_index_failure(
+            run_id=run_a, file_path="/repo/one.pdf",
+            error_class="UnextractableContentError", error="boom",
+        )
+        tel_store.record_index_failure(
+            run_id=run_b, file_path="/repo/two.pdf",
+            error_class="UnextractableContentError", error="boom",
+        )
+
+        scoped = tel_store.list_index_failures(run_id=run_a, limit=100)
+        assert scoped["total"] == 1
+
+        # Both rows are visible without a run_id filter, somewhere within the
+        # tenant's full (unbounded) history -- confirmed via a wide days=0 window.
+        unscoped = tel_store.list_index_failures(limit=1000)
+        assert unscoped["total"] >= 2
+
+    def test_trim_requires_scoping(self, tel_store):
+        with pytest.raises(ValueError):
+            tel_store.trim_index_failures()
+
+    def test_trim_by_run_id_deletes_only_that_run(self, tel_store):
+        run_a = f"itest-trim-a-{time.time_ns()}"
+        run_b = f"itest-trim-b-{time.time_ns()}"
+        tel_store.record_index_failures_batch(
+            [("/repo/a1.pdf", "UnextractableContentError", "boom", ""),
+             ("/repo/a2.pdf", "UnextractableContentError", "boom", "")],
+            run_id=run_a,
+        )
+        tel_store.record_index_failure(
+            run_id=run_b, file_path="/repo/b1.pdf",
+            error_class="UnextractableContentError", error="boom",
+        )
+
+        deleted = tel_store.trim_index_failures(run_id=run_a)
+
+        assert deleted == 2
+        assert tel_store.list_index_failures(run_id=run_a, limit=100)["total"] == 0
+        assert tel_store.list_index_failures(run_id=run_b, limit=100)["total"] == 1
+
+    def test_trim_dry_run_previews_without_deleting(self, tel_store):
+        run_id = f"itest-trim-dryrun-{time.time_ns()}"
+        tel_store.record_index_failure(
+            run_id=run_id, file_path="/repo/a.pdf",
+            error_class="UnextractableContentError", error="boom",
+        )
+
+        previewed = tel_store.trim_index_failures(run_id=run_id, dry_run=True)
+
+        assert previewed == 1
+        assert tel_store.list_index_failures(run_id=run_id, limit=100)["total"] == 1
+
+        deleted = tel_store.trim_index_failures(run_id=run_id)
+        assert deleted == 1
+
+    def test_acknowledge_requires_non_blank_error_class(self, tel_store):
+        with pytest.raises(ValueError):
+            tel_store.acknowledge_index_failure(error_class="")
+
+    def test_acknowledge_by_file_covers_recurring_failure_across_runs(self, tel_store):
+        """THE fold-in round 2 non-vacuity proof, against the REAL engine:
+        an acknowledged file's failure recurring under a FRESH run_id must
+        be excluded from unacknowledged_only, while a brand new file still
+        shows up."""
+        file_path = f"/repo/broken-{time.time_ns()}.pdf"
+        tel_store.record_index_failure(
+            run_id="run-1", file_path=file_path,
+            error_class="UnextractableContentError", error="encrypted",
+        )
+        tel_store.acknowledge_index_failure(
+            error_class="UnextractableContentError", file_path=file_path,
+            reason="known encrypted PDF",
+        )
+        # A re-run mints a NEW run_id for the identical failure.
+        tel_store.record_index_failure(
+            run_id="run-2", file_path=file_path,
+            error_class="UnextractableContentError", error="encrypted",
+        )
+
+        scoped_unacked = tel_store.list_index_failures(
+            run_id="run-2", unacknowledged_only=True, limit=100,
+        )
+        assert scoped_unacked["total"] == 0
+
+        # The plain list shows both recurrences, marked acknowledged.
+        plain = tel_store.list_index_failures(limit=1000)
+        matching = [r for r in plain["rows"] if r.get("file_path") == file_path]
+        assert len(matching) == 2
+        assert all(r.get("acknowledged") is True for r in matching)
+
+        # A NEW, unrelated file in the same run still shows up unacknowledged.
+        other_path = f"/repo/other-{time.time_ns()}.pdf"
+        tel_store.record_index_failure(
+            run_id="run-2", file_path=other_path,
+            error_class="UnextractableContentError", error="boom",
+        )
+        scoped_unacked_2 = tel_store.list_index_failures(
+            run_id="run-2", unacknowledged_only=True, limit=100,
+        )
+        assert scoped_unacked_2["total"] == 1
+        assert scoped_unacked_2["rows"][0]["file_path"] == other_path
+
+    def test_file_path_filter_narrows_to_exact_file(self, tel_store):
+        """Round-4 fold-in (code review [24624] item 3): the acknowledge
+        auto-resolve's server-side file_path filter, against the real
+        engine -- must match exactly, not as a substring/prefix."""
+        run_id = f"itest-filepath-{time.time_ns()}"
+        target = f"/repo/target-{time.time_ns()}.pdf"
+        other = f"/repo/other-{time.time_ns()}.pdf"
+        tel_store.record_index_failures_batch(
+            [
+                (target, "UnextractableContentError", "boom", ""),
+                (other, "UnextractableContentError", "boom", ""),
+            ],
+            run_id=run_id,
+        )
+
+        scoped = tel_store.list_index_failures(run_id=run_id, limit=100, file_path=target)
+
+        assert scoped["total"] == 1
+        assert scoped["rows"][0]["file_path"] == target
+
+    def test_list_acknowledgments_and_revoke_round_trip(self, tel_store):
+        """Round-4 fold-in (critique [24621] item 1): ack rows must be
+        listable and revocable through the real engine, not write-only.
+        The motivating case: revoke makes the recurring failure gate
+        again."""
+        file_path = f"/repo/ack-roundtrip-{time.time_ns()}.pdf"
+        error_class = "UnextractableContentError"
+        run_a = f"itest-ack-roundtrip-a-{time.time_ns()}"
+        run_b = f"itest-ack-roundtrip-b-{time.time_ns()}"
+
+        before = tel_store.list_index_failure_acknowledgments()
+        before_ids = {(r["file_path"], r["error_class"]) for r in before["rows"]}
+
+        tel_store.record_index_failure(
+            run_id=run_a, file_path=file_path,
+            error_class=error_class, error="encrypted",
+        )
+        tel_store.acknowledge_index_failure(
+            error_class=error_class, file_path=file_path, reason="known limitation",
+        )
+
+        after_ack = tel_store.list_index_failure_acknowledgments()
+        after_ids = {(r["file_path"], r["error_class"]) for r in after_ack["rows"]}
+        assert after_ids - before_ids == {(file_path, error_class)}
+        matching = next(
+            r for r in after_ack["rows"]
+            if r["file_path"] == file_path and r["error_class"] == error_class
+        )
+        assert matching["reason"] == "known limitation"
+        assert matching["created_at"]
+
+        # Recurring under a fresh run_id is excluded from the gate while
+        # the acknowledgment stands.
+        tel_store.record_index_failure(
+            run_id=run_b, file_path=file_path,
+            error_class=error_class, error="encrypted",
+        )
+        gated = tel_store.list_index_failures(
+            run_id=run_b, unacknowledged_only=True, limit=100,
+        )
+        assert gated["total"] == 0
+
+        deleted = tel_store.unacknowledge_index_failure(
+            error_class=error_class, file_path=file_path,
+        )
+        assert deleted == 1
+
+        after_revoke = tel_store.list_index_failure_acknowledgments()
+        after_revoke_ids = {(r["file_path"], r["error_class"]) for r in after_revoke["rows"]}
+        assert (file_path, error_class) not in after_revoke_ids
+
+        # THE motivating case: the recurring failure gates again.
+        gated_after_revoke = tel_store.list_index_failures(
+            run_id=run_b, unacknowledged_only=True, limit=100,
+        )
+        assert gated_after_revoke["total"] == 1
+        assert gated_after_revoke["rows"][0]["file_path"] == file_path
+
+    def test_list_acknowledgments_file_path_filter_narrows_to_exact_file(self, tel_store):
+        """Round-5 fold-in (code-review [24635] item 2): the
+        --unacknowledge --file auto-resolve's server-side filter, against
+        the real engine -- must match exactly, not as a substring/prefix."""
+        target = f"/repo/ack-target-{time.time_ns()}.pdf"
+        other = f"/repo/ack-other-{time.time_ns()}.pdf"
+        tel_store.acknowledge_index_failure(
+            error_class="UnextractableContentError", file_path=target,
+        )
+        tel_store.acknowledge_index_failure(
+            error_class="SomeOtherClass", file_path=other,
+        )
+
+        scoped = tel_store.list_index_failure_acknowledgments(file_path=target)
+
+        assert scoped["total"] == 1
+        assert scoped["rows"][0]["file_path"] == target
+        assert scoped["rows"][0]["error_class"] == "UnextractableContentError"
+
+    def test_unacknowledge_requires_non_blank_error_class(self, tel_store):
+        with pytest.raises(ValueError):
+            tel_store.unacknowledge_index_failure(error_class="")
+
+    def test_unacknowledge_unscoped_class_wide_is_disjoint_from_file_scoped(self, tel_store):
+        """A class-wide acknowledgment (blank file_path) and a file-scoped
+        one under the same error_class must revoke independently -- the
+        engine's exact-match delete condition (KIND + ERROR_CLASS +
+        FILE_PATH) must never let one revoke touch the other."""
+        error_class = f"itest-class-{time.time_ns()}"
+        file_path = f"/repo/scoped-{time.time_ns()}.pdf"
+
+        tel_store.acknowledge_index_failure(error_class=error_class, file_path="")
+        tel_store.acknowledge_index_failure(error_class=error_class, file_path=file_path)
+
+        deleted_file_scoped = tel_store.unacknowledge_index_failure(
+            error_class=error_class, file_path=file_path,
+        )
+        assert deleted_file_scoped == 1
+
+        remaining = tel_store.list_index_failure_acknowledgments()
+        remaining_ids = {(r["file_path"], r["error_class"]) for r in remaining["rows"]}
+        assert (file_path, error_class) not in remaining_ids
+        assert ("", error_class) in remaining_ids
+
+        deleted_class_wide = tel_store.unacknowledge_index_failure(
+            error_class=error_class, file_path="",
+        )
+        assert deleted_class_wide == 1
+
+    def test_trim_still_never_reaps_an_acknowledgment_after_revoke_exists(self, tel_store):
+        """A revoked acknowledgment row is gone via unacknowledge, never
+        via trim -- trim's KIND='failure' predicate must stay disjoint
+        from acknowledgment rows regardless of whether any were ever
+        revoked in this tenant's history."""
+        run_id = f"itest-trim-vs-ack-{time.time_ns()}"
+        file_path = f"/repo/trim-vs-ack-{time.time_ns()}.pdf"
+        error_class = "UnextractableContentError"
+
+        tel_store.record_index_failure(
+            run_id=run_id, file_path=file_path,
+            error_class=error_class, error="boom",
+        )
+        tel_store.acknowledge_index_failure(error_class=error_class, file_path=file_path)
+        tel_store.unacknowledge_index_failure(error_class=error_class, file_path=file_path)
+        tel_store.acknowledge_index_failure(error_class=error_class, file_path=file_path)
+
+        deleted = tel_store.trim_index_failures(run_id=run_id)
+        assert deleted == 1
+
+        acks = tel_store.list_index_failure_acknowledgments()
+        ack_ids = {(r["file_path"], r["error_class"]) for r in acks["rows"]}
+        assert (file_path, error_class) in ack_ids
+
+
 class TestNxAnswerStepsRoundTrip:
     """RDR-196 .p1d (nexus-nyry9.10): direct-store-read proof that
     ``HttpTelemetryStore.record_nx_answer_run(..., steps=[...])`` actually

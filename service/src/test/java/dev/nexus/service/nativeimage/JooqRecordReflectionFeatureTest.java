@@ -168,7 +168,11 @@ class JooqRecordReflectionFeatureTest {
     // nexus.taxonomy_ann_query_384/768/1024, three RETURNS TABLE functions
     // retiring TaxonomyCentroidRepository#annQuery's raw SQL (same shape as
     // plain_search_<dim>), one generated Record type each, +3.
-    private static final int EXPECTED_RECORD_TYPES = 84;
+    // 84 -> 87: three telemetry tables landed 2026-09-05, one generated Record
+    // type each: nexus.index_failures (telemetry-009, nexus-nukn3),
+    // nexus.capability_census (telemetry-010) and nexus.routing_events
+    // (telemetry-011, both nexus-gjv9b). telemetry-012 only added a column.
+    private static final int EXPECTED_RECORD_TYPES = 87;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

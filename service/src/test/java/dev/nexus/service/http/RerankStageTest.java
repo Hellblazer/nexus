@@ -5,6 +5,7 @@ package dev.nexus.service.http;
 import dev.nexus.service.vectors.Reranker;
 import dev.nexus.service.vectors.RerankUpstreamException;
 import dev.nexus.service.vectors.UpstreamAuthException;
+import dev.nexus.service.vectors.UpstreamRateLimitedException;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -166,6 +167,39 @@ class RerankStageTest {
         List<Map<String, Object>> out = results(env);
         assertThat(out).extracting(r -> r.get("id")).containsExactly("a", "b");
         assertThat(out.get(0)).doesNotContainKey("rerank_score");
+    }
+
+    @Test
+    void rateLimitedDegradeCarriesStructuredRetryAfterSeconds() {
+        // nexus-n75jg (1vpal critic finding 2): a rate-limit-caused degrade
+        // must carry a STRUCTURED retry_after so the client's rate brake can
+        // engage without parsing rerank_error's free text.
+        var fake = new FakeReranker();
+        fake.failure = new UpstreamRateLimitedException(
+                "Voyage AI is rate limiting (HTTP 429 x3 within the 2500ms budget); "
+                        + "failing fast before the edge timeout. Retry after ~7s.", 7L);
+        var rows = List.of(row("a", "ta", 0.1), row("b", "tb", 0.2));
+
+        Map<String, Object> env = new RerankStage(fake).apply("q", new ArrayList<>(rows), null);
+
+        assertThat(env.get("rerank_degraded")).isEqualTo(true);
+        assertThat(env.get("rerank_retry_after_seconds")).isEqualTo(7L);
+        assertThat((String) env.get("rerank_error")).contains("rate limiting");
+        List<Map<String, Object>> out = results(env);
+        assertThat(out).extracting(r -> r.get("id")).containsExactly("a", "b");
+    }
+
+    @Test
+    void nonRateLimitedDegradesOmitRetryAfterKeyEntirely() {
+        // The field must be OMITTED, never emitted as a JSON null, for every
+        // degrade cause that is not a rate limit.
+        var fake = new FakeReranker();
+        fake.failure = new RerankUpstreamException("Voyage AI rerank failed: HTTP 500");
+        var rows = List.of(row("a", "ta", 0.1));
+
+        Map<String, Object> env = new RerankStage(fake).apply("q", new ArrayList<>(rows), null);
+
+        assertThat(env).doesNotContainKey("rerank_retry_after_seconds");
     }
 
     @Test

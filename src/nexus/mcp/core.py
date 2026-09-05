@@ -39,12 +39,14 @@ from nexus.hook_registry import HookRegistry as _HookRegistry, install_default_h
 from nexus.mcp_infra import (
     catalog_auto_link as _catalog_auto_link,
     get_catalog as _get_catalog,
+    get_collection_counts as _get_collection_counts,
     get_collection_names as _get_collection_names,
     get_recent_search_traces as _get_recent_search_traces,
     get_t1 as _get_t1,
     get_t3 as _get_t3,
     inject_t1 as _inject_t1,
     inject_t3 as _inject_t3,
+    invalidate_collections_cache as _invalidate_collections_cache,
     record_search_trace as _record_search_trace,
     reset_singletons as _reset_singletons,
     t2_ctx as _t2_ctx,
@@ -1751,6 +1753,20 @@ def _record_tier_write(
 # ── Registered tools ─────────────────────────────────────────────────────────
 
 
+def _append_fanout_excluded_note(text: str, excluded: list[str]) -> str:
+    """Append a one-line footer naming collections the default fan-out
+    floor excluded (nexus-rbhci review finding: silent exclusion reads as
+    a genuine miss -- the same class of problem ``_no_results_message``'s
+    nexus-pebfx.8 failed-collections note already solves for backend
+    errors). Appended AFTER any ``_cap_text_result`` truncation, same as
+    that function's own capped-result marker, so it is never itself
+    truncated away. No-op when nothing was excluded.
+    """
+    if not excluded:
+        return text
+    return f"{text}\n[excluded below fan-out floor: {', '.join(excluded)}]"
+
+
 def _no_results_message(diagnostics: list, *, base: str = "No results.") -> str:
     """Surface a threshold-drop instead of a silent zero-hit (nexus-uro6c).
 
@@ -1912,38 +1928,14 @@ def _search_render(
             query = sanitize_query(query)
 
         t3 = _get_t3()
-        all_names = _get_collection_names()
-
-        if corpus == "all":
-            # True "all": every unique prefix that appears in the live
-            # collection list. Fixes the gap where the old constant
-            # ("knowledge,code,docs,rdr") missed projects whose only
-            # collection is e.g. rdr__* or a custom prefix.
-            seen_prefixes: list[str] = []
-            for n in all_names:
-                prefix = n.split("__", 1)[0]
-                if prefix and prefix not in seen_prefixes:
-                    seen_prefixes.append(prefix)
-            corpus = ",".join(seen_prefixes) if seen_prefixes else "knowledge,code,docs,rdr"
-
-        target: list[str] = []
-        for part in corpus.split(","):
-            part = part.strip()
-            if not part:
-                continue
-            if "__" in part:
-                # nexus-hmxi: route the qualified-with-__ form through
-                # ``t3_collection_name`` (with t3) so 2-segment legacy
-                # input is grandfathered to an existing legacy
-                # collection or auto-promoted to the conformant target,
-                # matching ``store_list`` / ``store_put`` resolution.
-                # Pre-fix this branch always used the user input as-is,
-                # so a 2-segment ``--corpus knowledge__art`` could hit
-                # a legacy collection that ``store_list --collection
-                # knowledge__art`` was missing.
-                target.append(t3_collection_name(part, t3=t3))
-            else:
-                target.extend(resolve_corpus(part, all_names))
+        # nexus-z4j8d review finding 2: route through the shared
+        # _resolve_corpus_target helper instead of carrying this file's
+        # own inline copy of the same "all"-expansion + t3_collection_name
+        # (nexus-hmxi) + resolve_corpus logic -- one implementation
+        # instead of two that can drift (query()'s plain-corpus branch was
+        # exactly that drift: nexus-z4j8d fix 1).
+        fanout_excluded: list[str] = []
+        target = _resolve_corpus_target(corpus, t3, excluded_out=fanout_excluded)
 
         if not target:
             return f"No collections match corpus {corpus!r}"
@@ -2017,7 +2009,7 @@ def _search_render(
         if not results:
             if structured:
                 return _structured_no_results(diag)
-            return _no_results_message(diag)
+            return _append_fanout_excluded_note(_no_results_message(diag), fanout_excluded)
 
         # nexus-0bmhd: render-layer file-diversity cap. `results` was just
         # cached above (fresh path) or read back unmodified (cache-HIT
@@ -2042,7 +2034,7 @@ def _search_render(
             _off_msg = f"No results at offset {offset} (total {total})."
             if structured:
                 return _structured_no_results(diag, base=_off_msg)
-            return _off_msg
+            return _append_fanout_excluded_note(_off_msg, fanout_excluded)
 
         # Record search trace for RDR-061 E2 retrieval feedback correlation.
         # Non-fatal — session may be unavailable in test contexts.
@@ -2112,7 +2104,9 @@ def _search_render(
         else:
             lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total} (end)")
 
-        return _cap_text_result("\n\n".join(lines), "search")
+        return _append_fanout_excluded_note(
+            _cap_text_result("\n\n".join(lines), "search"), fanout_excluded,
+        )
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("search", e)
 
@@ -2329,12 +2323,111 @@ def _reset_page_cache_for_tests() -> None:
         _page_cache.clear()
 
 
-def _resolve_corpus_target(corpus: str, t3: Any) -> list[str]:
+#: Minimum row count for a collection to count as "healthy" within its own
+#: bare-prefix fan-out group ("code", "knowledge,code,docs", "all"). This
+#: is NOT a flat per-collection cutoff: it only ever excludes a collection
+#: that is both below the floor AND sharing its prefix with at least one
+#: collection at or above it -- see ``_resolve_corpus_target``'s docstring
+#: for why. Deliberately small: this targets collections too thin to be
+#: worth the fan-out cost beside a real sibling, not merely small ones --
+#: a real but modest corpus (dozens of chunks) clears it easily, and a
+#: two-file repo (which produces well over 3 chunks in practice) stays
+#: searchable. Naming a collection explicitly (an exact ``__``-qualified
+#: corpus, or the short 2-segment form) always searches it regardless of
+#: this floor; see the "__" branch below, which never consults it.
+#:
+#: CHUNKS, deliberately, not documents (review finding, nexus-rbhci): this
+#: counts what ``list_collections()`` reports -- tombstone-filtered vector
+#: rows -- not catalog document counts, even though the bead that requested
+#: this floor spoke of "document-count" and cited document-level evidence
+#: (code__1-4's "1 doc"). A genuine document-count source exists
+#: (``HttpCatalogClient.collection_doc_counts()``, one batched call) and
+#: was considered and rejected: it requires ``get_catalog()`` to be
+#: non-None (local/no-catalog installs would see EVERY count as unknown,
+#: turning this floor off entirely rather than degrading), and its
+#: ``physical_collection`` keys cover only catalog-registered documents --
+#: a T3 collection with no catalog entry at all (a real, named category in
+#: this codebase, see ``classify_t3_orphan_collections``) would never get a
+#: count and would always fail open, which is exactly backwards: an
+#: orphaned collection is disproportionately likely to be the kind of thin,
+#: noisy collection this floor exists to catch. Chunk counts, by contrast,
+#: come from the exact ``list_collections()`` call already made below for
+#: every live collection unconditionally, with no dependency on catalog
+#: state -- uniform coverage over a metric that is a less precise proxy,
+#: preferred here over precise coverage of only part of the corpus.
+_FANOUT_MIN_COLLECTION_CHUNK_COUNT = 3
+
+
+def _fanout_exclusions_for_group(fanned_out: list[str], counts: dict[str, int]) -> set[str]:
+    """Pure function: which members of one bare-prefix fan-out group are
+    excluded by the sibling-relative floor (nexus-rbhci).
+
+    Shared by :func:`_resolve_corpus_target` (per live search/query call)
+    and the ``nx doctor`` fan-out-floor census (informational, across every
+    live prefix at once) so the two can never drift apart -- a census that
+    computed this rule independently could report collections as excluded
+    that a live search would actually still reach, or vice versa.
+
+    A collection is excluded only when it is BOTH below
+    :data:`_FANOUT_MIN_COLLECTION_CHUNK_COUNT` AND at least one *other*
+    collection sharing the group is at or above it -- a thin collection
+    riding beside a populous sibling is pure fan-out noise (it never
+    contributes a hit, only search cost), but a thin collection with no
+    healthy sibling is simply what that corpus currently holds, and
+    dropping it would silently empty the search (concretely: a fresh
+    install's first note lands alone in ``knowledge__knowledge`` at 1
+    chunk -- a flat floor would make the very first search on the default
+    corpus return nothing). A group of size < 2 is therefore never
+    touched, and a group where every member is below the floor is left
+    alone too -- there is no healthy sibling to make any of them noise BY
+    COMPARISON.
+
+    *counts* is looked up via plain ``.get()``: a missing key (unknown
+    count) is treated identically to a present-but-negative one -- see
+    :func:`nexus.mcp_infra.get_collection_counts`'s docstring, which
+    normalizes ``HttpVectorClient``'s ``-1`` failed-per-collection-count
+    sentinel out of the dict entirely so callers here never see it. Either
+    way, an unknown count fails OPEN (kept) and never itself counts as the
+    "healthy sibling" that would justify excluding someone else.
+    """
+    if len(fanned_out) < 2:
+        return set()
+    healthy_sibling_exists = any(
+        (c := counts.get(name)) is not None and c >= _FANOUT_MIN_COLLECTION_CHUNK_COUNT
+        for name in fanned_out
+    )
+    if not healthy_sibling_exists:
+        return set()
+    return {
+        name for name in fanned_out
+        if (c := counts.get(name)) is not None and c < _FANOUT_MIN_COLLECTION_CHUNK_COUNT
+    }
+
+
+def _resolve_corpus_target(
+    corpus: str, t3: Any, *, excluded_out: list[str] | None = None,
+) -> list[str]:
     """Resolve a comma-separated corpus/collection spec to collection names.
 
     Mirrors the ``search`` tool's routing: ``all`` expands to every live
     prefix; a ``__``-qualified part is a collection name; a bare part is a
     corpus prefix resolved against the live collection list.
+
+    Within one bare-prefix part's fan-out, a collection is dropped per
+    :func:`_fanout_exclusions_for_group` (nexus-rbhci) -- see that
+    function's docstring for the full rule. An explicitly named collection
+    (the ``"__" in part`` branch) is never subject to this floor at all.
+
+    *excluded_out*, when given a list, has every excluded collection name
+    APPENDED to it (review finding: exclusion was previously invisible to
+    the caller). ``search()``/``query()`` pass this so their rendered
+    result can name what was skipped, the same way ``_no_results_message``
+    already names backend-failed collections (nexus-pebfx.8).
+
+    Counts come from :func:`nexus.mcp_infra.get_collection_counts`, which
+    shares its cache with :func:`nexus.mcp_infra.get_collection_names` --
+    the same ``list_collections()`` call this function already makes
+    below, so the floor check costs no additional round trip.
     """
     all_names = _get_collection_names()
     if corpus == "all":
@@ -2352,7 +2445,22 @@ def _resolve_corpus_target(corpus: str, t3: Any) -> list[str]:
         if "__" in part:
             target.append(t3_collection_name(part, t3=t3))
         else:
-            target.extend(resolve_corpus(part, all_names))
+            fanned_out = resolve_corpus(part, all_names)
+            counts = _get_collection_counts()
+            excluded = _fanout_exclusions_for_group(fanned_out, counts)
+            for name in fanned_out:
+                if name in excluded:
+                    _log.debug(
+                        "corpus_fanout_excluded_below_floor",
+                        collection=name,
+                        count=counts.get(name),
+                        floor=_FANOUT_MIN_COLLECTION_CHUNK_COUNT,
+                        corpus_part=part,
+                    )
+                    if excluded_out is not None:
+                        excluded_out.append(name)
+                    continue
+                target.append(name)
     return list(dict.fromkeys(target))
 
 
@@ -3422,25 +3530,17 @@ def query(
         # dance, whose catalog_collections variable is gone too); every
         # query reaching here is the plain corpus-based path.
         routing_note = ""
-        all_names = _get_collection_names()
-
-        if corpus == "all":
-            seen_prefixes: list[str] = []
-            for n in all_names:
-                prefix = n.split("__", 1)[0]
-                if prefix and prefix not in seen_prefixes:
-                    seen_prefixes.append(prefix)
-            corpus = ",".join(seen_prefixes) if seen_prefixes else "knowledge,code,docs,rdr"
-
-        target: list[str] = []
-        for part in corpus.split(","):
-            part = part.strip()
-            if not part:
-                continue
-            if "__" in part:
-                target.append(part)
-            else:
-                target.extend(resolve_corpus(part, all_names))
+        # nexus-z4j8d: resolve *corpus* through the same helper the
+        # combined-query tools (search_metadata_scoped, search_graph_hop,
+        # search_topic_scoped, search_aspect_scoped, and this function's
+        # own catalog-param branch above) already share, instead of a
+        # hand-rolled copy. The prior copy skipped the ``__``-qualified
+        # branch's ``t3_collection_name`` promotion (nexus-hmxi), so a
+        # 2-segment legacy/prefix corpus (e.g. ``knowledge__art``) that
+        # ``search()`` resolves to a live collection reached the engine
+        # verbatim here and 400'd as "not four-segment conformant".
+        fanout_excluded_q: list[str] = []
+        target = _resolve_corpus_target(corpus, t3, excluded_out=fanout_excluded_q)
 
         if not target:
             return f"No collections match corpus {corpus!r}"
@@ -3491,7 +3591,7 @@ def query(
                     f"follow_links may have missed collections. Narrow `subtree` or "
                     f"split into multiple queries.]\n{no_results_msg}"
                 )
-            return no_results_msg
+            return _append_fanout_excluded_note(no_results_msg, fanout_excluded_q)
 
         if structured:
             page = results[:limit]
@@ -3677,7 +3777,9 @@ def query(
         if total > limit:
             lines.append(f"\n--- showing 1-{len(sorted_docs)} of {total} documents. Results are capped at limit={limit}.")
 
-        return _cap_text_result("\n".join(lines), "query")
+        return _append_fanout_excluded_note(
+            _cap_text_result("\n".join(lines), "query"), fanout_excluded_q,
+        )
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("query", e)
 
@@ -3700,7 +3802,14 @@ def store_put(
     """Store content in the T3 permanent knowledge store.
 
     Args:
-        content: Text content to store
+        content: Text content to store. This tool is single-chunk by
+            construction (no multi-chunk write path exists), so content is
+            capped at ``QUOTAS.MAX_DOCUMENT_BYTES`` (16,384 UTF-8 bytes,
+            roughly 3,000-4,000 words) — an over-quota call raises
+            ``PutOversizedError`` before any write. If a note runs over
+            that, split it into titled parts and call store_put once per
+            part with the same tags (e.g. title "my-note (1/2)",
+            "my-note (2/2)") rather than one oversized call.
         collection: Collection name or prefix (default: knowledge)
         title: Document title (recommended for deduplication). A non-empty
             title makes catalog identity stable: re-putting the same
@@ -3782,11 +3891,16 @@ def store_put(
         # fire_batch below needs real metadatas regardless of catalog_doc_id.
         from nexus.catalog.store_hook import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
             catalog_store_hook_tracked,
+            raise_if_oversized,
             rollback_minted_catalog_entry,
             single_chunk_manifest_metadata,
             store_put_manifest_direct,
         )
         chunk_chroma_id, manifest_metadatas = single_chunk_manifest_metadata(content)
+        # nexus-xzyr3 fold-in: refuse an over-quota document BEFORE minting
+        # a catalog row for it — put() already refuses it too, but only
+        # after paying for a wasted mint + rollback round trip.
+        raise_if_oversized(content, doc_id=chunk_chroma_id, collection=col_name)
         catalog_doc_id = ""
         catalog_row_minted = False
         try:
@@ -3887,6 +4001,11 @@ def store_put(
         # A committed write makes any cached page burst stale — drop it so a
         # same-identity search re-fetches (batch-f1655f55 critique).
         _page_cache_invalidate()
+        # nexus-rbhci review finding: a collection whose count just crossed
+        # _FANOUT_MIN_COLLECTION_CHUNK_COUNT (or a brand-new collection)
+        # must be visible to the default fan-out immediately, not up to
+        # _COLLECTIONS_CACHE_TTL seconds later.
+        _invalidate_collections_cache()
         # Auto-link from T1 scratch link-context.
         # nexus-a414: replace prior bare-except with named-exception capture
         # so unexpected errors surface at WARNING instead of silently passing.
@@ -4245,8 +4364,17 @@ def store_get_many(
         max_chars_per_doc: Per-document truncation cap (default 4 KB). A cut
             body ends in an ellipsis plus ``display_truncation_marker(cap)``
             so a reader never mistakes the cut for a defect (nexus-lugwx).
-        structured: Return ``{contents, missing}`` dict when True;
-            human-readable string when False.
+        structured: Return ``{contents, missing, section_types}`` dict when
+            True. ``section_types`` is aligned 1:1 with ``contents``/the
+            input id list -- each entry is the hydrated chunk's
+            ``section_type`` metadata (e.g. ``"imports"`` for an
+            import/package-only chunk, RDR-200 Phase 1c nexus-4jj40) or
+            ``""`` for a missing id or a chunk with no ``section_type``
+            stamped. When False (default), returns a human-readable
+            string: a ``Hydrated N/M docs`` header, each found document's
+            content under an ``[id]`` line (respecting
+            ``max_chars_per_doc`` and its truncation marker), and a
+            trailing ``Missing: ...`` line naming any unresolved ids.
         limit_per_source: Cap input IDs before hydration (RDR-097 P1.0).
             - ``None`` (default): no truncation; preserves prior behavior.
             - ``int``: truncate ``ids`` to first N entries. With
@@ -4429,10 +4557,21 @@ def store_get_many(
                         still_remaining.append(idx)
                 remaining_idxs = still_remaining
 
+        # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, Sam's decision
+        # 3): ``section_types`` rides along on the SAME per-id/broadcast
+        # fetch that already resolves ``contents`` -- ``entry`` already
+        # carries the chunk's full T3 metadata (``_batched_get_by_ids``
+        # merges it in), so this is zero extra round trips. Aligned 1:1
+        # with ``contents``/``missing``; "" for a missing id or a chunk
+        # whose metadata carries no ``section_type`` at all. Populated
+        # unconditionally (not gated on `structured`) so callers cannot
+        # observe stale data by mixing modes.
+        section_types: list[str] = []
         for doc_id, entry in zip(id_list, entries):
             if entry is None:
                 missing.append(doc_id)
                 contents.append("")
+                section_types.append("")
                 continue
 
             body = str(entry.get("content") or "")
@@ -4446,13 +4585,44 @@ def store_get_many(
                     + display_truncation_marker(max_chars_per_doc)
                 )
             contents.append(body)
+            section_types.append(str(entry.get("section_type") or ""))
 
         if structured:
-            return {"contents": contents, "missing": missing}
+            return {
+                "contents": contents, "missing": missing,
+                "section_types": section_types,
+            }
+
+        # nexus-z4j8d: the human-readable mode of a HYDRATION tool must
+        # render the hydrated content, not just a count -- pre-fix this
+        # branch returned only "Hydrated N/N docs", making
+        # structured=True effectively mandatory to see any text. `entries`
+        # (still in scope, index-aligned with id_list/contents) is the
+        # reliable found/missing signal -- checking it directly instead of
+        # reconstructing a set from `missing` avoids misattribution if
+        # id_list carries a duplicate id.
         lines = [f"Hydrated {len(contents) - len(missing)}/{len(id_list)} docs"]
+        blocks = [
+            f"[{doc_id}]\n{body}"
+            for doc_id, entry, body in zip(id_list, entries, contents)
+            if entry is not None
+        ]
+        if blocks:
+            lines.append("")
+            lines.append("\n\n".join(blocks))
         if missing:
-            lines.append(f"Missing: {', '.join(missing[:10])}")
-        return "\n".join(lines)
+            missing_line = f"Missing: {', '.join(missing[:10])}"
+            if len(missing) > 10:
+                # nexus-2xjge doctrine: never a silent drop -- name the
+                # count of ids elided past the first 10.
+                missing_line += f" (+{len(missing) - 10} more)"
+            lines.append(missing_line)
+        # nexus-z4j8d review finding 1 (CRITICAL): this branch can now
+        # return real document bodies (max_chars_per_doc has no upper
+        # bound, limit_per_source defaults to no cap) -- cap it like every
+        # other text-returning tool in this file instead of relying on the
+        # MCP host's silent truncation.
+        return _cap_text_result("\n".join(lines), "store_get_many")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         if structured:
             # Structured callers (plan-runner hydration) get a dict, not a string —
@@ -5407,6 +5577,8 @@ def store_delete(doc_id: str, collection: str = "knowledge") -> str:
         deleted = t3.delete_by_id(col_name, doc_id)
         if deleted:
             _page_cache_invalidate()
+            # nexus-rbhci review finding: see the store_put call site.
+            _invalidate_collections_cache()
             if cleanup_error:
                 return (
                     f"Deleted: {doc_id} from {col_name} (WARNING: catalog "
@@ -7090,8 +7262,12 @@ def _nx_answer_record_outcome(plan_id: int, *, success: bool) -> None:
     if not plan_id:
         return
     try:
-        with _t2_ctx() as db:
-            db.plans.increment_run_outcome(plan_id, success=success)
+        # nexus-m20mf P2: routed through the shared T2 singleton — a
+        # single db.* method call, so it is safe whole in the closure.
+        _t2_index_write(
+            lambda db: db.plans.increment_run_outcome(plan_id, success=success),
+            op="run_outcome",
+        )
     except Exception:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
         import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
         _slog.get_logger().warning(
@@ -8308,9 +8484,38 @@ async def nx_answer(
         _pinned_verb = (dimensions or {}).get("verb")
         _category_verb = _pinned_verb or _infer_verb(question)
         try:
-            with _t2_ctx() as db:
-                cache = get_t1_plan_cache(populate_from=db.plans)
-                matches = _plan_match(
+            # nexus-m20mf P2 (critique [24578] fix): get_t1_plan_cache's
+            # OWN T1 reach (populate, an occasional T2 list + T1 write +
+            # ONNX embed) stays OUTSIDE any T2-eviction-protected closure
+            # — a T1-only failure there must never evict a healthy T2
+            # singleton. This resolve is its own tiny closure (a bare
+            # attribute access, cannot itself raise a connectivity error).
+            _plans_store_for_cache = _t2_index_write(
+                lambda db: db.plans, op="plan_match_cache_populate",
+            )
+            cache = get_t1_plan_cache(populate_from=_plans_store_for_cache)
+            # _plan_match's OWN real T2 traffic (HttpPlanLibrary.get_plan
+            # per candidate, increment_match_metrics on every match) must
+            # run INSIDE the closure — the critique's finding was that a
+            # bare `lambda db: db.plans` closure released the singleton's
+            # refcount and _service_t2_write_locked's connectivity-error
+            # classifier BEFORE this real HTTP work even started, so
+            # neither a genuine failure here nor a concurrent sibling's
+            # eviction were ever correctly attributed to this call.
+            # NOT a residual: PlanSessionCache (the `cache` argument) is
+            # ALSO HTTP-backed (a T1 ChromaDB collection), but its
+            # `query()`/`remove()` (session_cache.py) each wrap their own
+            # call in a broad `except Exception: ...` that swallows
+            # EVERY failure (including a genuine connectivity error) and
+            # returns a safe default (`[]` / `False`) — nothing from
+            # those calls can ever propagate into this closure, so they
+            # cannot trigger eviction here regardless of T1's health.
+            # (code review [24602] correction: an earlier version of
+            # this comment claimed the opposite -- see T2
+            # nexus/dev-nexus-m20mf-p1-p2-critique-fold-round2 for the
+            # correction record.)
+            matches = _t2_index_write(
+                lambda db: _plan_match(
                     question,
                     library=db.plans,
                     cache=cache,
@@ -8327,7 +8532,9 @@ async def nx_answer(
                     # only typed bindings can make a plan unrunnable.
                     available_bindings=_caller_available,
                     category_verb=_category_verb,
-                )
+                ),
+                op="plan_match",
+            )
         except Exception as exc:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             return _result(f"Error during plan match: {exc}")
 
@@ -8402,8 +8609,26 @@ async def nx_answer(
         # (one cheap estimate_plan_cost call, returns it unchanged), so
         # there is no meaningful cost to always computing + logging this.
         try:
-            with _t2_ctx() as _cost_db:
-                _price_table = get_cached_price_table(_cost_db.telemetry)
+            # nexus-m20mf P2 (critique [24578] fix): the real T2 traffic
+            # (build_operator_price_table's query_nx_answer_runs GET, fired
+            # whenever the process-local TTL cache is stale) now runs
+            # INSIDE the closure -- the prior `lambda db: db.telemetry`
+            # shape released the singleton's refcount before that GET ever
+            # started, so neither a genuine failure here nor a concurrent
+            # sibling's eviction were attributed to this call. Residual,
+            # documented rather than silently accepted: get_cached_price_
+            # table -> build_operator_price_table has its OWN internal
+            # `except Exception: return OperatorPriceTable({})` (an
+            # intentional degrade-to-empty-table contract, not a bug), so
+            # a connectivity error is swallowed there before
+            # _service_t2_write_locked's classifier can ever see it --
+            # this closure is now structurally correct but eviction still
+            # will not trigger from a failure at this specific site. No
+            # narrower fix available without changing that function's
+            # documented never-raises contract, which other callers rely on.
+            _price_table = _t2_index_write(
+                lambda db: get_cached_price_table(db.telemetry), op="price_table",
+            )
             _chosen, _decision_log = choose_within_band(
                 matches, _price_table, band=PLAN_CHOICE_CONFIDENCE_BAND,
             )
@@ -8443,8 +8668,12 @@ async def nx_answer(
     # ``_nx_answer_record_outcome`` after their try/except completes.
     if best.plan_id:
         try:
-            with _t2_ctx() as db:
-                db.plans.increment_run_started(best.plan_id)
+            # nexus-m20mf P2: routed through the shared T2 singleton — a
+            # single db.* method call, so it is safe whole in the closure.
+            _t2_index_write(
+                lambda db: db.plans.increment_run_started(best.plan_id),
+                op="run_start",
+            )
         except Exception:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
             _log.warning(
                 "nx_answer_plan_use_increment_failed",
@@ -9462,13 +9691,29 @@ async def nx_answer(
 
     # ── Step 6: record run ───────────────────────────────────────────────
     try:
-        with _t2_ctx() as db:
-            _nx_answer_record_run(
+        # nexus-m20mf P2 (critique [24578] fix): the whole
+        # _nx_answer_record_run call -- including its real
+        # db.telemetry.record_nx_answer_run POST -- now runs INSIDE the
+        # closure, not just a `lambda db: db.telemetry` attribute
+        # resolution. Residual, documented rather than silently accepted:
+        # _nx_answer_record_run has its OWN internal
+        # `except Exception: _warn_telemetry_drop(...)` around the POST
+        # (deliberate: "best-effort telemetry, must not crash caller",
+        # and this same helper is called from several OTHER sites this
+        # bead does not touch), so a connectivity error there is still
+        # swallowed before _service_t2_write_locked's classifier can see
+        # it -- eviction will not trigger from a failure at this specific
+        # site. Removing that internal swallow would need auditing every
+        # other call site of _nx_answer_record_run, out of scope here.
+        _t2_index_write(
+            lambda db: _nx_answer_record_run(
                 db.telemetry, question=question, plan_id=best.plan_id,
                 matched_confidence=best.confidence, step_count=len(result.steps),
                 final_text=final_text[:2000], step_records=_result_step_records,
                 duration_ms=elapsed_ms, trace=trace,
-            )
+            ),
+            op="record_run",
+        )
     except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
         pass
 

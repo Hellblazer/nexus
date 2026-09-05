@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from contextlib import nullcontext
@@ -12,11 +13,15 @@ import click
 import numpy as np
 import structlog
 
+from nexus.commands._helpers import T2_SHARED_CLIENT_CTX_KEY as _T2_SHARED_CLIENT_CTX_KEY
 from nexus.commands._helpers import default_db_path as _default_db_path
+from nexus.commands._helpers import (
+    t2_shared_client_from_context as _command_shared_t2_client,
+)
 from nexus.db.http_vector_client import VectorServiceError
 
 
-def _T2Database(path):
+def _T2Database(path, *, client=None):
     """Lazy T2Database constructor (avoids module-level import poisoning by test mocks).
 
     RDR-128 P3 (nexus-sbxbe.3): this factory backs ~17 ``nx taxonomy``
@@ -29,9 +34,23 @@ def _T2Database(path):
     T2-generated ``topic_id`` inside one lock, which likewise cannot route.
     The reads do not contend on the WAL writer lock; the writes are
     infrequent operator commands, not the automated hot path.
+
+    nexus-m20mf P3 fold-in (critic finding 3): *client* is a plain,
+    explicit parameter -- this factory does NOT reach into Click's
+    ambient context itself (that was the prior shape, and it produced the
+    finding-2 bug: the identical helper silently behaved differently
+    depending purely on which Click group happened to be active). Every
+    call site below fetches its own command's shared client via
+    ``_command_shared_t2_client()`` (a thin wrapper over
+    ``nexus.commands._helpers.t2_shared_client_from_context``, itself
+    intended to be called ONLY from a command function's own body) and
+    passes it in explicitly, so this factory's behavior is a pure function
+    of its arguments -- callable identically from a test with no Click
+    context at all (``client=None``, the default, is byte-identical to
+    pre-P3 construction).
     """
     from nexus.db.t2 import T2Database  # noqa: PLC0415 - deferred to avoid circular import at module load
-    return T2Database(path)  # boundary-allow: taxonomy CLI factory — read-only subcommands need raw-cursor SELECTs (no WAL writer contention) and discover/rebuild/split interleave chroma-centroid writes keyed on T2-generated topic_ids; neither can cross the daemon RPC (RDR-128 P3 documented-irreducible)
+    return T2Database(path, client=client)  # boundary-allow: taxonomy CLI factory — read-only subcommands need raw-cursor SELECTs (no WAL writer contention) and discover/rebuild/split interleave chroma-centroid writes keyed on T2-generated topic_ids; neither can cross the daemon RPC (RDR-128 P3 documented-irreducible)
 
 if TYPE_CHECKING:
     from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
@@ -327,8 +346,28 @@ def discover_for_collection(
 
 
 @click.group()
-def taxonomy() -> None:
+@click.pass_context
+def taxonomy(ctx: click.Context) -> None:
     """Topic taxonomy — browsable knowledge hierarchy."""
+    # nexus-m20mf P3: one shared httpx.Client for this ENTIRE `nx taxonomy
+    # <subcmd>` process invocation, stashed in ctx.obj (a dict -- ensured,
+    # never replaced, so this coexists with `main`'s own ctx.obj["verbose"]
+    # in src/nexus/cli.py when this group runs under the full `nx` CLI, and
+    # still works standalone when a test invokes `taxonomy` directly via
+    # CliRunner with no parent context at all). Every `_T2Database(...)`
+    # call this invocation makes (up to ~17 subcommands, some calling it
+    # twice) shares this one pool instead of building its own 8 domain-store
+    # clients per call. `ctx.call_on_close` runs at context teardown on
+    # BOTH the success and exception paths (Click's Context is used as a
+    # context manager in BaseCommand.main()), so this is the "closed in a
+    # finally by the owner" contract -- the owner is this group callback,
+    # which built the client, never a subcommand that merely borrows it.
+    from nexus.db.t2._refreshable_client import build_shared_t2_client  # noqa: PLC0415 — deferred to avoid circular import at module load
+
+    ctx.ensure_object(dict)
+    shared_client = build_shared_t2_client()
+    ctx.obj[_T2_SHARED_CLIENT_CTX_KEY] = shared_client
+    ctx.call_on_close(shared_client.close)
 
 
 @taxonomy.command("status")
@@ -347,7 +386,7 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
       nx taxonomy status -n 10                        # top 10 by docs
       nx taxonomy status --needs-review               # pending review only
     """
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         # Derive the per-collection aggregate from the public API. The raw
         # branch this replaces read the same numbers with a GROUP BY over
         # `topics` through CatalogTaxonomy's cursor (nexus-i711w sub-stage C).
@@ -531,7 +570,7 @@ def list_cmd(collection: str, depth: int) -> None:
     from nexus.taxonomy import get_topic_tree  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     depth = min(depth, 4)
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         tree = get_topic_tree(db, collection, max_depth=depth)
     if not tree:
         click.echo("No topics found. Run `nx taxonomy discover --collection <name>` first.")
@@ -587,7 +626,7 @@ def show_cmd(topic_id: int, limit: int, assignments: bool) -> None:
 
     from nexus.taxonomy import get_topic_docs  # noqa: PLC0415 - deferred to avoid circular import at module load
 
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         docs = get_topic_docs(db, topic_id, limit=limit)
     if not docs:
         click.echo(f"No documents in topic {topic_id}.")
@@ -609,7 +648,7 @@ def _show_assignment_quality(topic_id: int, limit: int) -> None:
     are filtered defensively to this topic in case a doc_id was
     reassigned between the two calls.
     """
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         doc_ids = db.taxonomy.get_topic_doc_ids(topic_id, limit=limit)
         if not doc_ids:
             click.echo(f"No documents in topic {topic_id}.")
@@ -687,7 +726,7 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
 
     total_topics = 0
     total_labeled = 0
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         for i, col_name in enumerate(targets, 1):
             if len(targets) > 1:
                 click.echo(f"[{i}/{len(targets)}] {col_name}")
@@ -753,7 +792,7 @@ def rebuild_cmd(collection: str, project: str, k: int | None) -> None:
     if k is not None:
         click.echo("Note: -k is deprecated. Cluster count is now automatic (HDBSCAN).")
 
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         t3 = make_t3()
         count = discover_for_collection(
             collection, db.taxonomy, t3, force=True,
@@ -842,15 +881,41 @@ def _show_merge_targets(
 )
 @click.option(
     "--yes", "-y", is_flag=True,
-    help="Skip the destructive-action confirmation prompt (--auto only)",
+    help=(
+        "No longer sufficient alone to skip the destructive-action "
+        "confirmation (nexus-afnht) — pass --apply-destructive as well. "
+        "Kept for CLI compatibility"
+    ),
 )
 @click.option(
     "--dry-run", is_flag=True,
-    help="Print verdicts without applying any mutations (--auto only)",
+    help=(
+        "Print verdicts without applying any mutations (--auto only). "
+        "Persists the verdicts (per topic, keyed by a content hash of its "
+        "id/label/terms) so a subsequent --auto on the same collection "
+        "applies THESE verdicts rather than re-sampling claude_dispatch, "
+        "as long as the topic is unchanged (nexus-afnht)"
+    ),
 )
 @click.option(
     "--batch-size", default=40, type=int, show_default=True,
     help="Topics per claude_dispatch call (--auto only)",
+)
+@click.option(
+    "--apply-destructive", is_flag=True,
+    help=(
+        "Skip the destructive-action (delete/merge) confirmation prompt "
+        "and apply unattended (--auto, non-dry-run only). Required in "
+        "addition to accept/rename automation — --yes alone no longer "
+        "does this (nexus-afnht)"
+    ),
+)
+@click.option(
+    "--accept-only", is_flag=True,
+    help=(
+        "Apply accept/rename verdicts only; leave delete/merge verdicts "
+        "pending for explicit human review (--auto, non-dry-run only)"
+    ),
 )
 def review_cmd(
     collection: str,
@@ -859,16 +924,21 @@ def review_cmd(
     yes: bool,
     dry_run: bool,
     batch_size: int,
+    apply_destructive: bool,
+    accept_only: bool,
 ) -> None:
     """Interactive topic review — accept, rename, merge, delete, or skip."""
     resolved_limit = limit if limit is not None else (5000 if auto else 15)
 
     if auto:
-        with _T2Database(_default_db_path()) as db:
-            _review_auto(db, collection, resolved_limit, yes, dry_run, batch_size)
+        with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
+            _review_auto(
+                db, collection, resolved_limit, yes, dry_run, batch_size,
+                apply_destructive, accept_only,
+            )
         return
 
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         topics = db.taxonomy.get_unreviewed_topics(collection=collection, limit=resolved_limit)
         if not topics:
             click.echo("No unreviewed topics. All done!")
@@ -952,7 +1022,7 @@ def assign_cmd(doc_id: str, topic_label: str, collection: str) -> None:
             "chash, not a free-form identifier; pass the chash reported by "
             "`nx search` / `nx query`, not a title or tumbler."
         )
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
         if topic_id is None:
             click.echo(f"Topic '{topic_label}' not found.")
@@ -1008,7 +1078,7 @@ def rename_cmd(
     lets you fix a typo without forcing the topic through review.
     """
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
         if topic_id is None:
             click.echo(f"Topic '{topic_label}' not found.")
@@ -1033,7 +1103,7 @@ def rename_cmd(
 def merge_cmd(source_label: str, target_label: str, collection: str) -> None:
     """Merge source topic into target topic."""
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         source_id = db.taxonomy.resolve_label(source_label, collection=collection)
         if source_id is None:
             click.echo(f"Source topic '{source_label}' not found.")
@@ -1064,7 +1134,7 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
     """
     from nexus.db import make_t3  # noqa: PLC0415 - deferred to avoid circular import at module load
 
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
         if topic_id is None:
             click.echo(f"Topic '{topic_label}' not found.")
@@ -1264,7 +1334,7 @@ def links_cmd(collection: str, refresh: bool) -> None:
     from compute_topic_links (link_types contains 'cites', 'implements',
     etc.).  Use --refresh to recompute catalog-derived links first.
     """
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         if refresh:
             catalog = _try_load_catalog()
             if catalog is None:
@@ -1606,6 +1676,126 @@ def _print_review_destructive_plan(
             )
 
 
+_REVIEW_CACHE_PROJECT = "nexus_taxonomy_review_cache"
+
+
+def _review_cache_title(collection: str) -> str:
+    """T2 memory title for the ``--dry-run`` verdict cache of *collection*."""
+    return f"dry-run-verdicts:{collection or '(all)'}"
+
+
+def _topic_content_hash(
+    topic_id: int, label: str, terms: list[str], doc_ids: list[str], doc_count: int,
+) -> str:
+    """Deterministic short hash of exactly what the verdict prompt shows (nexus-afnht).
+
+    Covers id + label + terms + the doc sample + doc_count — every input
+    ``_generate_review_verdicts_batch`` builds its prompt line from (terms
+    and doc_ids sorted, so reordering either does not change the hash).
+    Label/terms alone under-covers: incremental indexing can change which
+    docs are assigned to a topic (and therefore the doc sample and
+    doc_count the model actually saw) without touching the topic's label or
+    terms at all, which would otherwise replay a stale cached verdict
+    within the TTL window against a taxonomy the model never actually
+    reviewed. Used to detect whether a topic changed between a ``--dry-run``
+    preview and a later ``--auto`` apply, so a cached verdict is only
+    reused when the taxonomy it was computed against is unchanged.
+    """
+    payload = json.dumps(
+        {
+            "id": topic_id,
+            "label": label,
+            "terms": sorted(terms),
+            "doc_ids": sorted(doc_ids),
+            "doc_count": doc_count,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _load_review_cache(db: Any, collection: str) -> dict[int, dict[str, Any]]:
+    """Load persisted ``--dry-run`` verdicts for *collection*, keyed by topic id.
+
+    Each value is ``{"hash": <topic content hash>, "verdict": <verdict dict>}``.
+
+    An ABSENT entry (no ``--dry-run`` has ever run for this collection, or
+    it has expired past its 7-day TTL) is the ordinary case and stays
+    silent — ``{}`` with nothing logged or printed. A PRESENT entry that is
+    malformed or wrong-shaped (empty content, invalid JSON, or a parsed
+    body with no ``topics`` dict) is a real anomaly — a corrupted T2 row, a
+    schema change, hand-edited content — and must not degrade silently
+    (nexus-afnht stacked-review finding 2): it is logged via
+    ``structlog.warning`` and echoed to the operator as a discard notice,
+    then treated as empty so every topic simply re-samples. A per-topic
+    sub-entry that is individually malformed inside an otherwise
+    well-formed cache is dropped without a notice — that topic alone
+    re-samples, which is the existing graceful per-topic degradation this
+    function already provided.
+    """
+    entry = db.memory.get(project=_REVIEW_CACHE_PROJECT, title=_review_cache_title(collection))
+    if not entry:
+        return {}
+
+    def _discard(reason: str) -> dict[int, dict[str, Any]]:
+        _log.warning(
+            "taxonomy_review_cache_discarded", collection=collection, reason=reason,
+        )
+        click.echo(
+            f"NOTE: the cached --dry-run preview for collection "
+            f"{collection or '(all)'} was discarded ({reason}); "
+            "re-sampling every topic.",
+            err=True,
+        )
+        return {}
+
+    content = entry.get("content") if isinstance(entry, dict) else None
+    if not content:
+        return _discard("cached entry has no content")
+    try:
+        raw = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return _discard("cached content is not valid JSON")
+    topics = raw.get("topics") if isinstance(raw, dict) else None
+    if not isinstance(topics, dict):
+        return _discard("cached content has an unexpected shape (no 'topics' object)")
+    out: dict[int, dict[str, Any]] = {}
+    for key, value in topics.items():
+        try:
+            topic_id = int(key)
+        except (TypeError, ValueError):
+            continue
+        if (
+            isinstance(value, dict)
+            and isinstance(value.get("hash"), str)
+            and isinstance(value.get("verdict"), dict)
+        ):
+            out[topic_id] = value
+    return out
+
+
+def _save_review_cache(collection: str, cache: dict[int, dict[str, Any]]) -> None:
+    """Persist ``--dry-run`` verdicts for *collection*, keyed by topic id.
+
+    Routed through ``t2_index_write`` — the module's established write path
+    (see every ``db.taxonomy`` mutation in ``_review_auto``/``review_cmd``).
+    TTL is 7 days: a preview should not silently authorize an apply run
+    against a long-stale taxonomy snapshot (nexus-afnht) — an operator who
+    wants a longer window just re-runs ``--dry-run``.
+    """
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+    content = json.dumps({"topics": {str(k): v for k, v in cache.items()}})
+    t2_index_write(
+        lambda db: db.memory.put(
+            project=_REVIEW_CACHE_PROJECT,
+            title=_review_cache_title(collection),
+            content=content,
+            ttl=7,
+        )
+    )
+
+
 def _review_auto(
     db: Any,
     collection: str,
@@ -1613,14 +1803,40 @@ def _review_auto(
     yes: bool,
     dry_run: bool,
     batch_size: int,
+    apply_destructive: bool = False,
+    accept_only: bool = False,
 ) -> None:
     """Batched, unattended review: swaps the human judge for ``claude_dispatch``.
 
     accept/rename apply immediately (unless ``dry_run``); delete/merge are
-    held as a destructive plan requiring ``click.confirm`` or ``--yes``
-    (``dry_run`` suppresses ALL mutations, including accept/rename).
-    Dispatch is sequential per batch — no parallelism (V1 non-goal,
-    nexus-6i01g).
+    held as a destructive plan requiring ``click.confirm`` or
+    ``--apply-destructive`` (``dry_run`` suppresses ALL mutations, including
+    accept/rename). ``--yes`` no longer skips the destructive confirmation by
+    itself (nexus-afnht) — see ``--apply-destructive``. Dispatch is
+    sequential per batch — no parallelism (V1 non-goal, nexus-6i01g).
+
+    **Verdict cache (nexus-afnht).** ``--dry-run`` persists every verdict it
+    computes, per topic, keyed by (collection, topic id) plus a content hash
+    of that topic's (id, label, terms). A later ``--auto`` on the same
+    collection reuses a cached verdict for any topic whose hash still
+    matches — so an operator who reviewed a ``--dry-run`` preview and then
+    applies gets EXACTLY the verdicts they saw, not an independent re-sample.
+    (The bug this closes: two batched ``claude_dispatch`` passes are two
+    independent, unseeded stochastic draws, so a preview predicted nothing
+    about the apply that followed it.) A topic with no cached entry, or
+    whose hash no longer matches (label/terms changed since the preview —
+    a discover/rebuild/manual edit happened in between), is re-dispatched
+    fresh, with a loud one-line notice naming which topics were invalidated.
+    ``--dry-run`` itself reads the cache first too (so two back-to-back
+    previews of an unchanged taxonomy are stable and dispatch-free), and
+    always rewrites the cache with the full verdict set it ends up with.
+
+    ``--accept-only`` restricts APPLY to accept/rename verdicts: pending
+    delete/merge verdicts are left untouched (topics stay pending) without
+    ever printing the destructive plan or prompting. It has no effect on
+    ``--dry-run`` (which always previews everything) or on the cache (every
+    verdict actually computed is still cached, whether or not this run acts
+    on it).
 
     Merge validation runs in a second pass once the whole batch's verdicts
     are known (guard order documented inline below), including a CRITICAL
@@ -1643,6 +1859,48 @@ def _review_auto(
 
     click.echo(f"Auto-reviewing {len(topics)} topic(s) in batches of {batch_size}...")
 
+    cache = _load_review_cache(db, collection)
+
+    parsed_terms: dict[int, list[str]] = {}
+    doc_ids_by_topic: dict[int, list[str]] = {}
+    current_hash: dict[int, str] = {}
+    verdict_by_topic: dict[int, dict[str, Any] | None] = {}
+    to_dispatch: list[dict[str, Any]] = []
+    invalidated_ids: list[int] = []
+
+    for t in topics:
+        try:
+            terms = json.loads(t["terms"]) if t.get("terms") else []
+        except (json.JSONDecodeError, TypeError):
+            terms = []
+        parsed_terms[t["id"]] = terms
+        # Fetched up front for EVERY topic (not only dispatched ones) so the
+        # hash below covers exactly what the prompt would show, even for a
+        # topic served from cache — a cache-hit decision must see the same
+        # doc sample the model would have (nexus-afnht stacked-review
+        # finding: label/terms alone missed doc-set drift from incremental
+        # indexing).
+        doc_ids = db.taxonomy.get_topic_doc_ids(t["id"], limit=3)
+        doc_ids_by_topic[t["id"]] = doc_ids
+        current_hash[t["id"]] = _topic_content_hash(
+            t["id"], t["label"], terms, doc_ids, t["doc_count"],
+        )
+        cached = cache.get(t["id"])
+        if cached is not None and cached["hash"] == current_hash[t["id"]]:
+            verdict_by_topic[t["id"]] = cached["verdict"]
+        else:
+            if cached is not None:
+                invalidated_ids.append(t["id"])
+            to_dispatch.append(t)
+
+    if invalidated_ids:
+        click.echo(
+            f"NOTE: {len(invalidated_ids)} cached --dry-run verdict(s) "
+            "invalidated (topic changed since the last preview) and will "
+            f"be re-sampled: topic id(s) {', '.join(str(i) for i in invalidated_ids)}.",
+            err=True,
+        )
+
     accepted = 0
     renamed = 0
     skipped = 0
@@ -1653,50 +1911,23 @@ def _review_auto(
     # the demoted per-failure INFO events land in the file while the
     # terminal gets one rollup line at the end.
     dispatch_failures: list[str] = []
-    n_batches = (len(topics) + batch_size - 1) // batch_size
+    n_batches = (len(to_dispatch) + batch_size - 1) // batch_size if to_dispatch else 0
 
     with open_run_log("taxonomy-review") as run_log_path:
-        for start in range(0, len(topics), batch_size):
-            batch = topics[start : start + batch_size]
+        for start in range(0, len(to_dispatch), batch_size):
+            batch = to_dispatch[start : start + batch_size]
             items: list[tuple[int, str, list[str], list[str], str]] = []
             for t in batch:
-                try:
-                    terms = json.loads(t["terms"]) if t.get("terms") else []
-                except (json.JSONDecodeError, TypeError):
-                    terms = []
-                doc_ids = db.taxonomy.get_topic_doc_ids(t["id"], limit=3)
-                items.append((t["id"], t["label"], terms, doc_ids, t["collection"]))
+                items.append(
+                    (t["id"], t["label"], parsed_terms[t["id"]], doc_ids_by_topic[t["id"]], t["collection"])
+                )
 
             verdicts = asyncio.run(
                 _generate_review_verdicts_batch(items, failures=dispatch_failures)
             )
 
             for topic, verdict in zip(batch, verdicts):
-                if verdict is None:
-                    skipped += 1
-                    continue
-                action = verdict["action"]
-                if action == "accept":
-                    if not dry_run:
-                        _tid = topic["id"]
-                        t2_index_write(lambda db, _t=_tid: db.taxonomy.mark_topic_reviewed(_t, "accepted"))
-                    accepted += 1
-                elif action == "rename":
-                    if not dry_run:
-                        _tid = topic["id"]
-                        _lbl = verdict["label"]
-                        t2_index_write(lambda db, _t=_tid, _l=_lbl: db.taxonomy.rename_topic(_t, _l))
-                    renamed += 1
-                elif action == "delete":
-                    candidate_deletes.append({**topic, "_reason": verdict.get("reason", "")})
-                elif action == "merge":
-                    candidate_merges.append(
-                        {
-                            **topic,
-                            "_target_id": verdict.get("target_id"),
-                            "_reason": verdict.get("reason", ""),
-                        }
-                    )
+                verdict_by_topic[topic["id"]] = verdict
 
         # nexus-l1qpj: ONE rollup line instead of a WARNING per failed
         # batch; the per-failure records are in the run log (demoted to
@@ -1709,6 +1940,35 @@ def _review_auto(
                 f"details: {run_log_path}. First: "
                 f"{dispatch_failures[0][:200]}",
                 err=True,
+            )
+
+    new_cache: dict[int, dict[str, Any]] = {}
+    for topic in topics:
+        tid = topic["id"]
+        verdict = verdict_by_topic.get(tid)
+        if verdict is None:
+            skipped += 1
+            continue
+        new_cache[tid] = {"hash": current_hash[tid], "verdict": verdict}
+        action = verdict["action"]
+        if action == "accept":
+            if not dry_run:
+                t2_index_write(lambda db, _t=tid: db.taxonomy.mark_topic_reviewed(_t, "accepted"))
+            accepted += 1
+        elif action == "rename":
+            if not dry_run:
+                _lbl = verdict["label"]
+                t2_index_write(lambda db, _t=tid, _l=_lbl: db.taxonomy.rename_topic(_t, _l))
+            renamed += 1
+        elif action == "delete":
+            candidate_deletes.append({**topic, "_reason": verdict.get("reason", "")})
+        elif action == "merge":
+            candidate_merges.append(
+                {
+                    **topic,
+                    "_target_id": verdict.get("target_id"),
+                    "_reason": verdict.get("reason", ""),
+                }
             )
 
     # Second pass: validate merges only once the full delete- and
@@ -1759,6 +2019,10 @@ def _review_auto(
         )
 
     if dry_run:
+        # nexus-afnht: the preview is the authoritative verdict set — persist
+        # it so a subsequent --auto apply on this collection reuses exactly
+        # what was shown here, instead of re-sampling claude_dispatch.
+        _save_review_cache(collection, new_cache)
         if candidate_deletes or pending_merges:
             _print_review_destructive_plan(candidate_deletes, pending_merges)
         click.echo(
@@ -1772,11 +2036,40 @@ def _review_auto(
     merged = 0
     failed = 0
     if candidate_deletes or pending_merges:
+        if accept_only:
+            # nexus-afnht acceptance item 4: restrict apply to accept/rename;
+            # destructive verdicts are never shown or prompted for, and stay
+            # pending for explicit human review.
+            n_withheld = len(candidate_deletes) + len(pending_merges)
+            skipped += n_withheld
+            click.echo(
+                f"{n_withheld} destructive verdict(s) withheld (--accept-only); "
+                "topics remain pending for explicit human review."
+            )
+            click.echo(
+                f"\nAuto-review complete: {accepted} accepted, {renamed} renamed, "
+                f"{deleted} deleted, {merged} merged, {skipped} skipped, {failed} failed."
+            )
+            return
+
         _print_review_destructive_plan(candidate_deletes, pending_merges)
-        try:
-            proceed = yes or click.confirm("Apply the above destructive actions?")
-        except (click.Abort, EOFError):
-            proceed = False
+        if apply_destructive:
+            proceed = True
+        else:
+            # nexus-afnht acceptance item 3: --yes alone no longer skips this
+            # confirmation for destructive verdicts — --apply-destructive is
+            # the explicit, separate opt-in for unattended destructive apply.
+            if yes:
+                click.echo(
+                    "NOTE: --yes no longer skips the destructive-action "
+                    "confirmation by itself; pass --apply-destructive as "
+                    "well to apply deletes/merges unattended (nexus-afnht).",
+                    err=True,
+                )
+            try:
+                proceed = click.confirm("Apply the above destructive actions?")
+            except (click.Abort, EOFError):
+                proceed = False
 
         if proceed:
             for d in candidate_deletes:
@@ -2053,7 +2346,7 @@ def label_cmd(collection: str, relabel_all: bool) -> None:
         click.echo("claude CLI not found. Install Claude Code to use LLM labeling.")
         return
 
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         # GitHub #243: the pre-check must see split sub-topics (children
         # with parent_id set); ``get_topics()`` only returns roots, so
         # a post-split pending child would be silently skipped here.
@@ -2138,7 +2431,7 @@ def project_cmd(
     from nexus.corpus import default_projection_threshold  # noqa: PLC0415 - deferred to avoid circular import at module load
     from nexus.db import make_t3  # noqa: PLC0415 - deferred to avoid circular import at module load
 
-    db = _T2Database(_default_db_path())
+    db = _T2Database(_default_db_path(), client=_command_shared_t2_client())
     t3 = make_t3()
     # nexus-9pqoj: project_against handles both handle shapes, so pass the
     # chroma client (raw T3Database) or the service handle (HttpVectorClient
@@ -2416,7 +2709,7 @@ def hubs_cmd(
     See docs/exploration/taxonomy-projection-tuning.md for guidance on interpreting
     the output and acting on flagged topics.
     """
-    db = _T2Database(_default_db_path())
+    db = _T2Database(_default_db_path(), client=_command_shared_t2_client())
     try:
         rows = db.taxonomy.detect_hubs(
             min_collections=min_collections,
@@ -2505,7 +2798,7 @@ def audit_cmd(collection: str, threshold: float | None, top_n: int) -> None:
 
     See docs/exploration/taxonomy-projection-tuning.md for interpretation guidance.
     """
-    db = _T2Database(_default_db_path())
+    db = _T2Database(_default_db_path(), client=_command_shared_t2_client())
     try:
         report = db.taxonomy.audit_collection(
             collection, threshold=threshold, top_n=top_n,

@@ -57,8 +57,26 @@ def _t2_writer(db_path_str: str, project: str, n: int):
     Retries T2Database init on 'database is locked' — all processes race to
     run executescript() on a fresh file; WAL mode prevents data-loss but the
     schema DDL can transiently fail.
+
+    nexus-a2qhz: this is a real ``spawn``ed child process (module-scope
+    ``_MP = multiprocessing.get_context("spawn")``), not a thread — it does
+    not inherit the parent test process's in-process
+    ``service_endpoint._test_only_opt_in_reason`` override
+    (tests/conftest.py's autouse ``_exempt_pytest_from_production_write_guard``),
+    which is deliberately never an env var precisely so it cannot leak into
+    a subprocess. T2Database's ``put`` is an HTTP write through
+    ``guard_production_write``, so this child must carry the real opt-in
+    in its own environment, exactly as
+    ``tests/hooks/test_pre_close_verification_hook.py``'s subprocess
+    round-trip does for its own write subprocess.
     """
+    import os as _os
     import time as _time
+    _os.environ["NX_ALLOW_PROD_WRITE"] = (
+        "nexus-a2qhz test_mcp_concurrency.py spawned T2 writer — targets "
+        "only the ephemeral engine test substrate the parent process "
+        "resolved via t2_service_env/_pin_t2_substrate, never production"
+    )
     for attempt in range(5):
         try:
             db = T2Database(Path(db_path_str))

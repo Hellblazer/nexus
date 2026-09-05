@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-nukn3 — durable per-file index-failure record for the repo-index
+    path (Sam's design, 2026-08-21: "when a file fails, ENQUEUE the failure
+    and move on").
+
+    nexus.index_failures mirrors nexus.hook_failures's event-log shape
+    (telemetry-001-baseline.xml changeset telemetry-001-9), not
+    nexus.aspect_extraction_queue's work-queue shape (aspects-001-baseline.xml
+    changeset aspects-001-5): a skipped file is a TERMINAL, informational
+    record, not work a retry worker will later claim (nexus-nukn3 explicitly
+    excludes a retry worker from scope) — reusing the queue's
+    enqueue/claim/mark_done/mark_retry vocabulary for a row nothing ever
+    claims would abuse its semantics rather than reuse its pattern. What IS
+    reused, per the bead's own instruction, is the PATTERN: a durable PG
+    table + thin HTTP client + doctor-check reader, exactly as
+    hook_failures already established for its own failure class.
+
+    Columns:
+      run_id      — correlates every row from one `nx index repo` invocation
+                    (nexus.indexer._run_index mints a fresh id per run).
+                    Not a foreign key to anything; purely a grouping label.
+      file_path   — the skipped file's path, verbatim from the on_skip
+                    callback (nexus.indexer._on_skip).
+      error_class — the exception class name (e.g. UnextractableContentError)
+                    for triage without parsing `error`.
+      error       — the human-readable skip reason.
+
+    No ETL import route: unlike the 6 tables /v1/telemetry/import already
+    covers, this table is NOT a migration target (nothing migrates historical
+    index-failure state between environments) — deliberately out of the
+    bead's scope fence, not an oversight.
+
+    RLS: same tenant_isolation policy shape as every other telemetry table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: index_failures table ─────────────────────────────── -->
+    <changeSet id="telemetry-009-1" author="nexus-nukn3">
+        <comment>Create nexus.index_failures (event log; durable per-file index-failure record)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.index_failures (
+    id           BIGSERIAL    NOT NULL,
+    tenant_id    TEXT         NOT NULL,
+    run_id       TEXT         NOT NULL DEFAULT '',
+    file_path    TEXT         NOT NULL,
+    error_class  TEXT         NOT NULL DEFAULT '',
+    error        TEXT         NOT NULL DEFAULT '',
+    occurred_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    CONSTRAINT index_failures_pk PRIMARY KEY (id)
+);
+
+-- BTree indexes: nx doctor / `nx index failures` list+count queries
+CREATE INDEX idx_index_failures_ts  ON nexus.index_failures (tenant_id, occurred_at DESC);
+CREATE INDEX idx_index_failures_run ON nexus.index_failures (tenant_id, run_id, occurred_at DESC);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.index_failures CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: index_failures RLS ───────────────────────────────── -->
+    <changeSet id="telemetry-009-2" author="nexus-nukn3">
+        <comment>RLS on index_failures</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.index_failures ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.index_failures FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.index_failures
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.index_failures;
+            ALTER TABLE nexus.index_failures NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.index_failures DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

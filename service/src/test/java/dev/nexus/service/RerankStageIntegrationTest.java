@@ -330,6 +330,13 @@ class RerankStageIntegrationTest {
         assertThat(env.get("rerank_degraded")).isEqualTo(true);
         assertThat((String) env.get("rerank_error")).contains("rate limiting");
         assertThat((String) env.get("rerank_error")).contains("retry after");
+        // nexus-n75jg: the structured field must ALSO be present, not just
+        // the free-text reason, so the client rate brake can engage.
+        assertThat(env).containsKey("rerank_retry_after_seconds");
+        // JSON round-trip through the real HTTP layer: a small value
+        // deserializes as Integer, not Long (Jackson's generic-Object
+        // mapping), so assert via Number rather than the engine's own type.
+        assertThat(((Number) env.get("rerank_retry_after_seconds")).longValue()).isPositive();
         List<Map<String, Object>> rows = results(env);
         assertThat(rows).extracting(r -> r.get("id")).containsExactly(C1, C2, C3);
         assertThat(rows.get(0)).doesNotContainKey("rerank_score");

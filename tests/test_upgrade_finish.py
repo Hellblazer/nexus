@@ -1067,6 +1067,43 @@ class TestConvergeEngine:
         assert "NEEDS HUMAN" in actions[0]
         assert "sha256 mismatch" in actions[0]
 
+    def test_second_attempt_in_same_process_does_not_retry_after_failure(
+        self, tmp_path,
+    ):
+        """nexus-1kqj8: the finish pass attempts a failed convergence TWICE
+        per `nx upgrade` invocation -- `check_version_transition` (the root
+        CLI group) calls converge_engine() once, and
+        `_converge_preconditions`'s `converge_preconditions()` calls it
+        again later in the SAME process. On a box that cannot converge
+        (verification failing on every attempt) that is two ~190 MB
+        downloads for one command. A failed install_binary() attempt must
+        be memoized for the rest of this process: a second converge_engine()
+        call for the same (config_dir, tag) must report the same NEEDS
+        HUMAN verdict WITHOUT calling install_binary again."""
+        from nexus.daemon.binary_install import BinaryVerificationError
+
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._mismatch(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
+                ), \
+                patch(
+                    "nexus.daemon.binary_install.install_binary",
+                    side_effect=BinaryVerificationError("sha256 mismatch"),
+                ) as install, \
+                patch("nexus.upgrade_finish.subprocess.run") as sp:
+            actions1 = converge_engine(tmp_path)
+            actions2 = converge_engine(tmp_path)
+
+        sp.assert_not_called()
+        install.assert_called_once()
+        assert len(actions1) == 1
+        assert "NEEDS HUMAN" in actions1[0]
+        assert "sha256 mismatch" in actions1[0]
+        assert len(actions2) == 1
+        assert "NEEDS HUMAN" in actions2[0]
+        assert "sha256 mismatch" in actions2[0]
+
     def test_install_bare_oserror_reports_needs_human_never_raises(self, tmp_path):
         """code-review HIGH: install_binary can raise more than
         BinaryVerificationError -- _atomic_copy (binary_install.py) re-raises
@@ -2889,6 +2926,46 @@ class TestNoAcquisitionOnPreviewOrConvergedBox:
         install.assert_called_once()
         assert install.call_args.args[0] == _PINNED_TAG
         assert actions == ["<restart stubbed>"]
+
+    def test_second_call_after_a_real_successful_install_does_not_reattempt(
+        self, tmp_path,
+    ):
+        """nexus-1kqj8, success arm: the fix must not touch this path at
+        all. Once the first attempt actually converges the box (a REAL
+        sidecar + binary on disk, exactly what production's install_binary
+        writes), a second converge_engine() call in the same process sees
+        the box as already converged from the on-disk state and never
+        reaches the install step -- unaffected by the new failed-attempt
+        memoization, which only ever guards the acquisition branch."""
+        self._creds(tmp_path)
+        self._receipt(tmp_path, _older_version_str())
+
+        def _fake_install(tag, cfg_dir, *, installed_by):
+            self._receipt(cfg_dir, _REQUIRED_STR)
+            return (cfg_dir / "service" / "nexus-service", {"version": _REQUIRED_STR})
+
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                patch(
+                    "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
+                ), \
+                patch(
+                    "nexus.daemon.binary_install.install_binary",
+                    side_effect=_fake_install,
+                ) as install, \
+                patch(
+                    "nexus.upgrade_finish._restart_and_verify",
+                    return_value=["<restart stubbed>"],
+                ), \
+                patch(
+                    "nexus.upgrade_finish._running_engine",
+                    return_value=_RunningEngine(up=False, version=None),
+                ):
+            actions1 = converge_engine(tmp_path)
+            actions2 = converge_engine(tmp_path)
+
+        install.assert_called_once()
+        assert actions1 == ["<restart stubbed>"]
+        assert actions2 == []
 
     def test_wet_run_reacquires_when_the_receipt_is_not_backed_by_the_bytes(
         self, tmp_path,

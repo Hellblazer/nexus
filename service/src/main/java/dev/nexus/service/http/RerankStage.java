@@ -28,6 +28,12 @@ import java.util.Map;
  *            "rerank_degraded": false, "rerank_model": "rerank-2.5"}
  * degraded: {"results": [rows in distance order],
  *            "rerank_degraded": true, "rerank_error": "&lt;reason&gt;"}
+ * rate-limited degrade additionally carries a structured
+ * {@code "rerank_retry_after_seconds": &lt;long&gt;} (nexus-n75jg, critic
+ * finding 2 on the nexus-1vpal review) so a well-behaved client can pace
+ * itself without parsing the free-text {@code rerank_error} reason. Absent
+ * (never {@code null} on the wire — the key itself is omitted) for every
+ * other degrade cause.
  * </pre>
  *
  * <p><strong>The degrade is LOUD and structured, never silent</strong> (the
@@ -102,7 +108,7 @@ final class RerankStage {
             log.warn("event=rerank_degraded reason=upstream_rate_limited retry_after_s={} error=\"{}\"",
                      e.retryAfterSeconds(), e.getMessage());
             return degrade(rows, topK, "Voyage AI is rate limiting the reranker (retry after ~"
-                    + e.retryAfterSeconds() + "s): " + e.getMessage());
+                    + e.retryAfterSeconds() + "s): " + e.getMessage(), e.retryAfterSeconds());
         } catch (RerankUpstreamException | UpstreamAuthException e) {
             log.warn("event=rerank_degraded reason=upstream_failure error=\"{}\"", e.getMessage());
             return degrade(rows, topK, e.getMessage());
@@ -136,16 +142,35 @@ final class RerankStage {
     }
 
     private Map<String, Object> degrade(List<Map<String, Object>> rows, Integer topK, String reason) {
-        return envelope(truncate(rows, topK), true, null, reason);
+        return degrade(rows, topK, reason, null);
+    }
+
+    /**
+     * @param retryAfterSeconds structured rate-limit signal (nexus-n75jg);
+     *                          {@code null} for every degrade cause OTHER
+     *                          than {@link UpstreamRateLimitedException} —
+     *                          the field is omitted from the wire envelope
+     *                          entirely rather than emitted as a JSON null.
+     */
+    private Map<String, Object> degrade(List<Map<String, Object>> rows, Integer topK, String reason,
+                                        Long retryAfterSeconds) {
+        return envelope(truncate(rows, topK), true, null, reason, retryAfterSeconds);
     }
 
     private static Map<String, Object> envelope(List<Map<String, Object>> results,
                                                 boolean degraded, String model, String error) {
+        return envelope(results, degraded, model, error, null);
+    }
+
+    private static Map<String, Object> envelope(List<Map<String, Object>> results,
+                                                boolean degraded, String model, String error,
+                                                Long retryAfterSeconds) {
         Map<String, Object> env = new LinkedHashMap<>();
         env.put("results", results);
         env.put("rerank_degraded", degraded);
         if (model != null) env.put("rerank_model", model);
         if (error != null) env.put("rerank_error", error);
+        if (retryAfterSeconds != null) env.put("rerank_retry_after_seconds", retryAfterSeconds);
         return env;
     }
 

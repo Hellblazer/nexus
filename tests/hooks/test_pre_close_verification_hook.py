@@ -30,6 +30,7 @@ import shutil as _shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 import pytest
@@ -62,6 +63,29 @@ _SAFE_PATH = f"{_PYTHON3_ISOLATED_DIR}:/usr/bin:/bin"
 # mirrors the `_PYTHON3_ISOLATED_DIR` pattern just above.
 _ROUTING_LOG_ISOLATED_DIR = Path(tempfile.mkdtemp(prefix="nx-hook-test-routing-log-"))
 _ISOLATED_ROUTING_LOG_PATH = _ROUTING_LOG_ISOLATED_DIR / "routing_log.jsonl"
+
+# nexus-gjv9b PART 2 writer swap: `log_routing_event` no longer writes
+# `routing_log.jsonl` at all in this subprocess (no NX_SERVICE_HOST/PORT/
+# TOKEN reaches it here) -- it degrades straight to a METERED DROP, which
+# falls back to the REAL `~/.config/nexus/dropped_writes.jsonl` whenever
+# NX_DROPPED_WRITES_LOG_PATH is unset. Same isolation discipline as the
+# routing-log default above: every `_run_hook` call gets its own isolated
+# drop-meter path, or this file reintroduces the exact real-home-dir leak
+# class the routing-log isolation was built to close.
+_DROPPED_WRITES_ISOLATED_DIR = Path(tempfile.mkdtemp(prefix="nx-hook-test-dropped-writes-"))
+_ISOLATED_DROPPED_WRITES_LOG_PATH = _DROPPED_WRITES_ISOLATED_DIR / "dropped_writes.jsonl"
+
+# nexus-gjv9b PART 2 CRITICAL review fix: `_lib._engine_endpoint` now also
+# discovers a live ServiceRegistry lease file and `config.yml` credentials
+# under `NEXUS_CONFIG_DIR` (t2_prefix_scan.py-style discovery), not just
+# env vars -- so a call that reaches `log_routing_event` (the inline-
+# override escape-audit path) can ACTUALLY POST to whatever real engine
+# this box has configured unless NEXUS_CONFIG_DIR is isolated too. Every
+# `_run_hook` call gets its own isolated (and therefore lease/config.yml
+# -less) config dir by default; TestF5RemedyRoundTripReal explicitly
+# overrides it via env_overrides for its own real-engine T1 lookup (that
+# override wins -- env_overrides is applied last).
+_ROUTING_ENGINE_ISOLATED_CONFIG_DIR = Path(tempfile.mkdtemp(prefix="nx-hook-test-engine-config-"))
 
 
 def _make_payload(
@@ -194,8 +218,27 @@ def _run_hook(
         **os.environ,
         "PATH": path,
         "NX_ROUTING_LOG_PATH": str(_ISOLATED_ROUTING_LOG_PATH),
+        "NX_DROPPED_WRITES_LOG_PATH": str(_ISOLATED_DROPPED_WRITES_LOG_PATH),
+        "NEXUS_CONFIG_DIR": str(_ROUTING_ENGINE_ISOLATED_CONFIG_DIR),
         **(env_overrides or {}),
     }
+    # Never let a real NX_SERVICE_HOST/PORT/URL/TOKEN leak in from the outer
+    # shell and cause the routing hook to actually attempt a network call
+    # in a test that didn't ask for one (nexus-gjv9b PART 2's endpoint
+    # resolution reads these verbatim). NX_SERVICE_URL joined the strip
+    # list here (nexus-a2qhz round-2 fold-in): stripping HOST/PORT/TOKEN
+    # while leaving a test's own NX_SERVICE_URL (t2_service_env sets it,
+    # not HOST/PORT) ambiently inherited produced a HALF-resolved
+    # credential -- service_url present, no token -- which fails loudly
+    # with a confusing "service_url is set but no service_token is
+    # resolvable" rather than either fully resolving or failing the clean
+    # "not configured" way. Callers that want the real test substrate
+    # (TestF5RemedyRoundTripReal) now forward NX_SERVICE_URL/TOKEN
+    # explicitly via env_overrides, same as every other credential this
+    # helper strips.
+    for _service_var in ("NX_SERVICE_HOST", "NX_SERVICE_PORT", "NX_SERVICE_URL", "NX_SERVICE_TOKEN"):
+        if _service_var not in (env_overrides or {}):
+            env.pop(_service_var, None)
     # Never let a real NX_REVIEW_GATE_OVERRIDE leak in from the outer shell
     # into a test that didn't ask for it.
     if "NX_REVIEW_GATE_OVERRIDE" not in (env_overrides or {}):
@@ -297,6 +340,35 @@ class TestRunHookIsolatesRoutingLog:
         _run_hook(_make_payload(), env_overrides={"NX_ROUTING_LOG_PATH": "/tmp/explicit-override.jsonl"})
 
         assert captured["env"]["NX_ROUTING_LOG_PATH"] == "/tmp/explicit-override.jsonl"
+
+    def test_default_env_always_carries_isolated_dropped_writes_log_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-gjv9b PART 2: log_routing_event's service-down fallback is
+        now a metered drop (NX_DROPPED_WRITES_LOG_PATH), not the JSONL log
+        -- this default must be just as isolated as NX_ROUTING_LOG_PATH's,
+        or this file reintroduces the real-home-dir leak class the
+        routing-log isolation above was built to close."""
+        captured: dict[str, dict[str, str]] = {}
+
+        def _fake_run(*args, **kwargs):
+            captured["env"] = kwargs.get("env") or {}
+
+            class _Result:
+                returncode = 0
+                stdout = '{"hookSpecificOutput": {"permissionDecision": "allow"}}'
+                stderr = ""
+
+            return _Result()
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        _run_hook(_make_payload())
+
+        assert "NX_DROPPED_WRITES_LOG_PATH" in captured["env"]
+        drop_path = captured["env"]["NX_DROPPED_WRITES_LOG_PATH"]
+        real_path = str(Path.home() / ".config" / "nexus" / "dropped_writes.jsonl")
+        assert drop_path != real_path
+        assert drop_path == str(_ISOLATED_DROPPED_WRITES_LOG_PATH)
 
 
 class TestFastNoops:
@@ -993,39 +1065,48 @@ class TestF2EnvPrefixOverride:
     def test_inline_override_emits_an_escape_routing_event(
         self, mock_config_env, fake_nx, tmp_path
     ) -> None:
+        """nexus-gjv9b PART 2 writer swap: this subprocess has no
+        NX_SERVICE_HOST/PORT/TOKEN, so `log_routing_event` degrades
+        straight to a metered drop rather than the JSONL log
+        (:func:`_record_dropped_routing_event`) -- the routing_log.jsonl
+        assertion this test used to make no longer applies; a dropped
+        write for hook="routing_events" is the observable proxy that an
+        escape event was attempted."""
         env = mock_config_env({"on_close": True})
         fake_bin = fake_nx("No scratch entries.")
-        log_path = tmp_path / "routing_log.jsonl"
+        drop_path = tmp_path / "dropped_writes.jsonl"
         result = _run_hook(
             _make_payload(command="NX_REVIEW_GATE_OVERRIDE=1 bd close nexus-abc12"),
             path_prefix=str(fake_bin),
-            env_overrides={**env, "NX_ROUTING_LOG_PATH": str(log_path)},
+            env_overrides={**env, "NX_DROPPED_WRITES_LOG_PATH": str(drop_path)},
         )
         parsed = json.loads(result.stdout)
         assert _get_decision(parsed) == "allow", parsed
-        assert log_path.exists(), "no routing event was logged for the override"
-        events = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
-        assert any(e.get("outcome") == "escape" for e in events), events
+        assert drop_path.exists(), "no routing event drop was recorded for the override"
+        drops = [json.loads(l) for l in drop_path.read_text().splitlines() if l.strip()]
+        assert any(d.get("hook") == "routing_events" for d in drops), drops
 
     def test_ambient_env_override_also_emits_an_escape_routing_event(
         self, mock_config_env, fake_nx, tmp_path
     ) -> None:
+        """See test_inline_override_emits_an_escape_routing_event's
+        docstring for why this checks the drop meter, not routing_log.jsonl."""
         env = mock_config_env({"on_close": True})
         fake_bin = fake_nx("No scratch entries.")
-        log_path = tmp_path / "routing_log.jsonl"
+        drop_path = tmp_path / "dropped_writes.jsonl"
         result = _run_hook(
             _make_payload(command="bd close nexus-abc12"),
             path_prefix=str(fake_bin),
             env_overrides={
                 **env,
-                "NX_ROUTING_LOG_PATH": str(log_path),
+                "NX_DROPPED_WRITES_LOG_PATH": str(drop_path),
                 "NX_REVIEW_GATE_OVERRIDE": "1",
             },
         )
         parsed = json.loads(result.stdout)
         assert _get_decision(parsed) == "allow", parsed
-        events = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
-        assert any(e.get("outcome") == "escape" for e in events), events
+        drops = [json.loads(l) for l in drop_path.read_text().splitlines() if l.strip()]
+        assert any(d.get("hook") == "routing_events" for d in drops), drops
 
 
 class TestF3ReasonBlindIdHarvesting:
@@ -1193,19 +1274,85 @@ class TestF5RemedyRoundTripReal:
     # left to round-trip.
     @pytest.mark.parametrize("remedy_kind", ["t1_scratch"])
     def test_printed_remedy_satisfies_the_hooks_own_lookup(
-        self, remedy_kind, mock_config_env, t2_service_env
+        self, remedy_kind, mock_config_env, t2_service_env, tmp_path: Path
     ) -> None:
         real_nx_dir = self._real_nx_dir()
         if real_nx_dir is None:
             pytest.skip("dev checkout `nx` console script not found next to sys.executable")
         real_nx = str(real_nx_dir / "nx")
 
-        bead_id = "nexus-r5a01"  # single remedy form post-fgekf; dead t2 branch removed
-        session_id = f"cr4lp-close-f5-{remedy_kind}"
+        # nexus-gjv9b fix-pass (coordinator-flagged): TWO independent
+        # sources of flake, both fixed here.
+        #
+        # (1) Fixed session/bead ids: this test writes a real T1 scratch
+        # marker via the real `nx` CLI with no teardown, so a second run
+        # against the same live substrate found its own prior marker and
+        # failed its own "no marker -> deny" precondition. A fresh uuid
+        # suffix per invocation makes every run start against a marker
+        # that provably cannot exist yet. ``[a-z0-9]+`` only (no hyphen)
+        # keeps bead_id inside the single `\bnexus-[a-z0-9]+\b` token the
+        # hook's own bead-id regex expects
+        # (pre_close_verification_hook.sh:357) -- a hyphenated suffix
+        # would sit OUTSIDE that token and be silently ignored.
+        #
+        # (2) Real mint_token bleed-through: this test's subprocesses
+        # inherited the REAL ``~/.config/nexus`` (no NEXUS_CONFIG_DIR
+        # override existed before this fix), so on a box with a mint_token
+        # credential actually configured (RDR-005 step (d)) the shared-
+        # CLI-dedicated-scope fallback tries to mint a fresh T1 session
+        # using that REAL credential against THIS TEST's ephemeral
+        # engine (t2_service_env) and gets a 401 -- "T1 unreachable ...
+        # closing anyway" -- which ALSO satisfies 'allow' where the
+        # precondition expects 'deny', independent of (1). Isolating
+        # NEXUS_CONFIG_DIR to an empty per-test directory means
+        # get_credential("mint_token") resolves to nothing, so the T1
+        # lookup falls back to the NX_SERVICE_TOKEN this test's
+        # t2_service_env fixture already provides -- the same isolation
+        # discipline test_session_end_capability_census.py and
+        # test_routing_hooks.py already apply for their own env leaks.
+        run_suffix = uuid.uuid4().hex[:8]
+        bead_id = f"nexus-r5a01{run_suffix}"  # single remedy form post-fgekf; dead t2 branch removed
+        session_id = f"cr4lp-close-f5-{remedy_kind}-{run_suffix}"
+        isolated_cfg_dir = str(tmp_path / "isolated-nexus-config")
 
         write_env = os.environ.copy()
         write_env["NX_SESSION_ID"] = session_id
         write_env["NX_T1_ALLOW_SHARED_FALLBACK"] = "1"
+        # nexus-a2qhz round-2 review: the suite-wide production-write-guard
+        # exemption is an IN-PROCESS override now (service_endpoint.
+        # _test_only_opt_in_reason), never an env var, precisely so it
+        # cannot leak into a subprocess's inherited os.environ the way
+        # NX_ALLOW_PROD_WRITE used to. This subprocess IS a real
+        # dev-checkout `nx` (this checkout's editable install, confirmed by
+        # _real_nx_dir()) performing a real T1 write, so it must carry the
+        # opt-in explicitly -- exactly like NX_SESSION_ID/
+        # NX_T1_ALLOW_SHARED_FALLBACK above -- rather than inherit it.
+        write_env["NX_ALLOW_PROD_WRITE"] = (
+            "nexus-cr4lp F5 remedy round-trip test: writes to the "
+            "hermetic t2_service_env test engine only, never production"
+        )
+        # nexus-gjv9b review fold-in teardown fix: isolate NEXUS_CONFIG_DIR
+        # on the write subprocess too, same rationale as the module-level
+        # _ROUTING_ENGINE_ISOLATED_CONFIG_DIR default in _run_hook --
+        # without it a real mint_token credential configured on this box
+        # (RDR-005 step (d)) makes the T1 write's own session resolution
+        # attempt a real mint against THIS test's ephemeral engine and get
+        # a 401, masking the very precondition this test exists to prove.
+        write_env["NEXUS_CONFIG_DIR"] = isolated_cfg_dir
+
+        # nexus-a2qhz round-2 fold-in: _run_hook now strips NX_SERVICE_URL
+        # (alongside HOST/PORT/TOKEN) unconditionally unless a caller
+        # forwards it explicitly -- the hook probes below need the REAL
+        # test substrate's credentials (t2_service_env set these on THIS
+        # process's os.environ), so pull them forward by hand rather than
+        # relying on ambient inheritance.
+        _service_url = os.environ.get("NX_SERVICE_URL", "")
+        _service_token = os.environ.get("NX_SERVICE_TOKEN", "")
+        assert _service_url and _service_token, (
+            "t2_service_env did not set NX_SERVICE_URL/NX_SERVICE_TOKEN on "
+            "this process -- the hook probes below would silently resolve "
+            "nothing"
+        )
 
         # nexus-e3mak: EXTRACT the command from what the hook actually
         # PRINTS, rather than keeping a hand-copied duplicate of it here.
@@ -1218,12 +1365,30 @@ class TestF5RemedyRoundTripReal:
         probe = _run_hook(
             _make_payload(command=f"bd close {bead_id}", session_id=session_id),
             path_prefix=str(real_nx_dir),
-            env_overrides={**env0, "NX_T1_ALLOW_SHARED_FALLBACK": "1"},
+            env_overrides={
+                **env0,
+                "NX_T1_ALLOW_SHARED_FALLBACK": "1",
+                "NX_SERVICE_URL": _service_url,
+                "NX_SERVICE_TOKEN": _service_token,
+                # nexus-a2qhz round-2: this "nx scratch list" probe is ALSO
+                # a real dev-checkout `nx` invocation, and its own T1
+                # session resolution may mint a session token (a guarded
+                # WRITE) as a bootstrap step even though the visible
+                # operation is a read. Without this, the mint is refused,
+                # `nx scratch list` exits nonzero, and the hook's own
+                # fail-open T1-unreachable path silently turns the expected
+                # "deny" into "allow" -- this env var is what keeps this
+                # precondition probe hitting the real T1 codepath instead
+                # of failing open.
+                "NX_ALLOW_PROD_WRITE": write_env["NX_ALLOW_PROD_WRITE"],
+                "NEXUS_CONFIG_DIR": isolated_cfg_dir,
+                "NX_CLOSE_GATE_DEADLINE_SECONDS": "15",
+            },
         )
         reason = _get_reason(json.loads(probe.stdout))
         assert _get_decision(json.loads(probe.stdout)) == "deny", (
             "precondition: with no marker written the hook must deny, or this "
-            "test never exercises the remedy it is here to verify"
+            f"test never exercises the remedy it is here to verify -- got: {probe.stdout}"
         )
 
         want = "nx scratch put"  # the only remedy form post-fgekf
@@ -1250,7 +1415,15 @@ class TestF5RemedyRoundTripReal:
         result = _run_hook(
             _make_payload(command=f"bd close {bead_id}", session_id=session_id),
             path_prefix=str(real_nx_dir),
-            env_overrides={**env, "NX_T1_ALLOW_SHARED_FALLBACK": "1"},
+            env_overrides={
+                **env,
+                "NX_T1_ALLOW_SHARED_FALLBACK": "1",
+                "NX_SERVICE_URL": _service_url,
+                "NX_SERVICE_TOKEN": _service_token,
+                "NX_ALLOW_PROD_WRITE": write_env["NX_ALLOW_PROD_WRITE"],
+                "NEXUS_CONFIG_DIR": isolated_cfg_dir,
+                "NX_CLOSE_GATE_DEADLINE_SECONDS": "15",
+            },
         )
         parsed = json.loads(result.stdout)
         assert _get_decision(parsed) == "allow", parsed

@@ -158,6 +158,137 @@ def test_store_put_invalid_ttl_shows_error(runner, mock_store, tmp_path):
     assert "5z" in result.output
 
 
+# ── nx store put oversized content (nexus-xzyr3 fold-in) ────────────────────
+#
+# code-review-nexus-xzyr3-26edb6662 [24586] Significant finding: before
+# this fold-in, PutOversizedError had no ClickException translation on
+# this CLI path — an oversized file surfaced a raw Python traceback
+# instead of a clean, actionable message. critique-nexus-xzyr3-26edb6662
+# [24589]: the catalog row was also minted BEFORE the byte check fired,
+# paying for a wasted mint + rollback on every refusal.
+
+
+def test_store_put_oversized_content_shows_clean_error(runner, mock_store, tmp_path):
+    from nexus.db.limits import QUOTAS
+
+    src = tmp_path / "big.md"
+    src.write_text("x" * (QUOTAS.MAX_DOCUMENT_BYTES + 1))
+    result = runner.invoke(main, ["store", "put", str(src), "--title", "big.md"])
+
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output, (
+        f"must be a clean click.ClickException, not a raw traceback: {result.output}"
+    )
+    assert str(QUOTAS.MAX_DOCUMENT_BYTES) in result.output
+    assert "put()" in result.output
+    # db.put() must never even be reached — the pre-check refuses first.
+    mock_store.put.assert_not_called()
+
+
+def test_store_put_oversized_content_never_mints_catalog_row(runner, mock_store, tmp_path, monkeypatch):
+    """The refusal must fire BEFORE catalog_store_hook_tracked -- no
+    wasted mint + rollback round trip for an oversized attempt."""
+    from nexus.db.limits import QUOTAS
+
+    mint_calls: list = []
+    import nexus.catalog.store_hook as store_hook_module
+
+    def _spy(*args, **kwargs):
+        mint_calls.append((args, kwargs))
+        return ("", False)
+
+    monkeypatch.setattr(store_hook_module, "catalog_store_hook_tracked", _spy)
+    # commands/store.py imported the symbol under a private alias at
+    # module load time, so the module-level patch above alone would miss
+    # it -- patch the alias too.
+    monkeypatch.setattr("nexus.commands.store._catalog_store_hook_tracked", _spy)
+
+    src = tmp_path / "big.md"
+    src.write_text("x" * (QUOTAS.MAX_DOCUMENT_BYTES + 1))
+    result = runner.invoke(main, ["store", "put", str(src), "--title", "big.md"])
+
+    assert result.exit_code != 0
+    assert mint_calls == [], (
+        f"catalog_store_hook_tracked must not be called for an oversized "
+        f"put; got {mint_calls}"
+    )
+
+
+# ── nx store put in-loop heartbeat, always on (nexus-s71lr pass 3) ──────────
+#
+# Deliverable 3 names `nx store put` literally: a single document is still
+# ONE embed call, and a large document's embed can run a minute+ with zero
+# progress signal at all. Same `_PhaseHeartbeat` mechanism as
+# `nx index rdr` / `nx index pdf --dir` / `nx store import`.
+
+
+def test_store_put_heartbeat_ticks_during_a_slow_embed(runner, mock_store, tmp_path, monkeypatch):
+    import time
+    import nexus.commands.index as index_mod
+
+    class _FastPhaseHeartbeat(index_mod._PhaseHeartbeat):
+        def __init__(self, *, is_tty, echo, interval=None, prefix="post"):
+            super().__init__(is_tty=is_tty, echo=echo, interval=0.02, prefix=prefix)
+
+    monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
+    # No catalog_doc_id -> the manifest-write path (which needs a live engine,
+    # unavailable in this unit-test environment) is skipped entirely; the
+    # heartbeat wraps db.put() regardless of whether catalog registration ran.
+    monkeypatch.setattr("nexus.commands.store._catalog_store_hook_tracked", lambda **kw: ("", False))
+
+    src = tmp_path / "big.md"
+    src.write_text("a large document")
+
+    def _slow_put(**kwargs):
+        time.sleep(0.09)  # several 0.02s intervals elapse with nothing done
+        return "doc-id-slow"
+
+    mock_store.put.side_effect = _slow_put
+    result = runner.invoke(main, ["store", "put", str(src)])
+
+    assert result.exit_code == 0, result.output
+    assert "[embed]" in result.output
+    assert "still running" in result.output
+    assert "elapsed)" in result.output
+
+
+def test_store_put_heartbeat_silent_on_a_fast_put(runner, mock_store, tmp_path, monkeypatch):
+    monkeypatch.setattr("nexus.commands.store._catalog_store_hook_tracked", lambda **kw: ("", False))
+
+    src = tmp_path / "small.md"
+    src.write_text("small content")
+
+    mock_store.put.return_value = "doc-id-fast"
+    result = runner.invoke(main, ["store", "put", str(src)])
+
+    assert result.exit_code == 0, result.output
+    assert "[embed]" not in result.output
+    assert "still running" not in result.output
+
+
+def test_store_put_heartbeat_disarmed_on_exception(runner, mock_store, tmp_path, monkeypatch):
+    import threading
+    import time
+    import nexus.commands.index as index_mod
+
+    class _FastPhaseHeartbeat(index_mod._PhaseHeartbeat):
+        def __init__(self, *, is_tty, echo, interval=None, prefix="post"):
+            super().__init__(is_tty=is_tty, echo=echo, interval=0.02, prefix=prefix)
+
+    monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
+    monkeypatch.setattr("nexus.commands.store._catalog_store_hook_tracked", lambda **kw: ("", False))
+
+    src = tmp_path / "boom.md"
+    src.write_text("content that triggers a put failure")
+
+    mock_store.put.side_effect = RuntimeError("boom")
+    result = runner.invoke(main, ["store", "put", str(src)])
+
+    assert result.exit_code != 0
+    time.sleep(0.05)
+    assert not any(t.name == "nx-phase-heartbeat" for t in threading.enumerate())
+
+
 # ── nx store list ────────────────────────────────────────────────────────────
 
 def test_store_list_empty_collection(runner, mock_store):
@@ -525,3 +656,78 @@ def test_store_get_custom_collection(runner, mock_store):
     mock_store.get_by_id.assert_called_once_with(
         "code__myrepo__voyage-code-3__v1", "abc123",
     )
+
+
+# ── nexus-s71lr: `nx store import` in-loop heartbeat, always on ────────────
+#
+# import_collection is one opaque call with no per-record progress callback
+# at all -- worse than the per-file loops (not even a start/end line per
+# record). Reuses the same `_PhaseHeartbeat` mechanism as `nx index rdr` /
+# `nx index pdf --dir`: ticks every 5s for as long as the call is in flight.
+
+
+def test_store_import_heartbeat_ticks_during_a_slow_import(runner, tmp_path, monkeypatch):
+    import time
+    import nexus.commands.index as index_mod
+
+    class _FastPhaseHeartbeat(index_mod._PhaseHeartbeat):
+        def __init__(self, *, is_tty, echo, interval=None, prefix="post"):
+            super().__init__(is_tty=is_tty, echo=echo, interval=0.02, prefix=prefix)
+
+    monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
+
+    dummy = tmp_path / "dummy.nxexp"
+    dummy.write_bytes(b"not a real file -- import_collection is fully mocked below")
+
+    def _slow_import_collection(**kwargs):
+        time.sleep(0.09)  # several 0.02s intervals elapse with nothing done
+        return {"imported_count": 5, "collection_name": "knowledge__x__voyage-context-3__v1",
+                "elapsed_seconds": 0.09}
+
+    with patch("nexus.commands.store._t3", return_value=MagicMock()), \
+         patch("nexus.exporter.import_collection", side_effect=_slow_import_collection):
+        result = runner.invoke(main, ["store", "import", str(dummy)])
+
+    assert result.exit_code == 0, result.output
+    assert "[embed]" in result.output
+    assert "still running" in result.output
+    assert "elapsed)" in result.output
+
+
+def test_store_import_heartbeat_silent_on_a_fast_import(runner, tmp_path):
+    dummy = tmp_path / "dummy.nxexp"
+    dummy.write_bytes(b"not a real file -- import_collection is fully mocked below")
+
+    fake_result = {"imported_count": 5, "collection_name": "knowledge__x__voyage-context-3__v1",
+                   "elapsed_seconds": 0.01}
+    with patch("nexus.commands.store._t3", return_value=MagicMock()), \
+         patch("nexus.exporter.import_collection", return_value=fake_result):
+        result = runner.invoke(main, ["store", "import", str(dummy)])
+
+    assert result.exit_code == 0, result.output
+    assert "[embed]" not in result.output
+    assert "still running" not in result.output
+
+
+def test_store_import_heartbeat_disarmed_on_exception(runner, tmp_path, monkeypatch):
+    import threading
+    import time
+    import nexus.commands.index as index_mod
+
+    class _FastPhaseHeartbeat(index_mod._PhaseHeartbeat):
+        def __init__(self, *, is_tty, echo, interval=None, prefix="post"):
+            super().__init__(is_tty=is_tty, echo=echo, interval=0.02, prefix=prefix)
+
+    monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
+
+    dummy = tmp_path / "dummy.nxexp"
+    dummy.write_bytes(b"not a real file -- import_collection is fully mocked below")
+
+    with patch("nexus.commands.store._t3", return_value=MagicMock()), \
+         patch("nexus.exporter.import_collection",
+               side_effect=RuntimeError("boom")):
+        result = runner.invoke(main, ["store", "import", str(dummy)])
+
+    assert result.exit_code != 0
+    time.sleep(0.05)
+    assert not any(t.name == "nx-phase-heartbeat" for t in threading.enumerate())

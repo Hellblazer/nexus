@@ -64,6 +64,13 @@ public final class AdmissionControlledEmbedder implements Embedder {
         return delegate.modelToken();
     }
 
+    /** Bead nexus-s71lr, pass 3 — delegates verbatim; this wrapper tracks no
+     * activity of its own. */
+    @Override
+    public EmbedActivitySnapshot activitySnapshot() {
+        return delegate.activitySnapshot();
+    }
+
     @Override
     public List<float[]> embed(List<String> texts) {
         acquire("embed");

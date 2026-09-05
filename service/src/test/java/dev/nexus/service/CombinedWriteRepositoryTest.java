@@ -650,6 +650,52 @@ class CombinedWriteRepositoryTest {
             .isEqualTo(5);
     }
 
+    // ── metadata-only refresh (nexus-4jj40 round 5) ──────────────────────────
+    //    A chash resent with IDENTICAL text but DIFFERENT metadata must have
+    //    its stored metadata replaced, with ZERO embed calls -- the exact
+    //    engine-side gap T2 code-review-nexus-4jj40-77c13a918 [24618] found:
+    //    the combined-write path used to OMIT this chash from `resolved`
+    //    entirely (kl2z6 original design), so nothing wrote the new
+    //    metadata at all, not even a client resend with --force.
+
+    @Test @Order(13)
+    void combinedWrite_metadataOnlyChange_updatesMetadataWithZeroEmbedCalls() throws Exception {
+        String col = "code__cw13__minilm-l6-v2-384__v1";
+        String chash = ch("cw13-stable-text");
+        String stableText = "cw13 stable text, unchanged across both calls";
+        registerDoc(TENANT_A, "cw.13a", col);
+        registerDoc(TENANT_A, "cw.13b", col);
+
+        // Call 1: brand new chash, old metadata.
+        int before1 = embedder.calls.get();
+        var r1 = svc.writeManyCombined(TENANT_A, col,
+            List.of(chunk(chash, stableText, Map.of("section_type", ""))),
+            List.of(doc("cw.13a", List.of(row(0, chash)))), null, false, false);
+        assertThat(r1.response().get("embed_embedded")).as("call 1: brand new").isEqualTo(1);
+        assertThat(embedder.calls.get() - before1).as("call 1: embedder ground truth").isEqualTo(1);
+        assertThat(chunk384MetadataJson(TENANT_A, col, chash))
+            .as("call 1: initial metadata stored").contains("\"section_type\": \"\"");
+
+        // Call 2: SAME chash, SAME text, DIFFERENT metadata, force_re_embed
+        // still false. The existence-partition must skip the embed (RDR-181
+        // unchanged) but the metadata-only UPDATE must still land.
+        int before2 = embedder.calls.get();
+        var r2 = svc.writeManyCombined(TENANT_A, col,
+            List.of(chunk(chash, stableText, Map.of("section_type", "imports"))),
+            List.of(doc("cw.13b", List.of(row(0, chash)))), null, false, false);
+        assertThat(r2.response().get("embed_skipped"))
+            .as("call 2: identical text must still skip the embed").isEqualTo(1);
+        assertThat(r2.response().get("embed_embedded")).as("call 2: identical text").isEqualTo(0);
+        assertThat(embedder.calls.get() - before2)
+            .as("ground truth: zero embed calls for a metadata-only resend").isEqualTo(0);
+        assertThat(chunk384MetadataJson(TENANT_A, col, chash))
+            .as("the new metadata must have landed despite the embed skip -- this is the "
+                + "exact gap nexus-4jj40 round 5 closes")
+            .contains("\"section_type\": \"imports\"");
+        assertThat(chunk384Text(TENANT_A, col, chash))
+            .as("text itself must be untouched (same value either way)").isEqualTo(stableText);
+    }
+
     /** Deterministic, dim-384 embedder that counts every text it is asked to embed. */
     static final class CountingFakeEmbedder implements Embedder {
         final AtomicInteger calls = new AtomicInteger();

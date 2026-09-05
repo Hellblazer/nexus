@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import contextlib
+import threading
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -301,6 +302,72 @@ def test_index_repo_no_skipped_unextractable_files_no_note(runner, repo_dir, moc
     assert "could not be extracted and were skipped" not in result.output
 
 
+def test_index_repo_upsert_timeout_exits_nonzero_with_clean_message(runner, repo_dir, mock_reg):
+    """nexus-8hdg9 phase 1 critique (Significant-2): defense in depth. The
+    common case is that indexer.py's _contain_transient_upsert already
+    defers a per-file VectorUpsertTimeoutError to staleness (see
+    tests/test_index_transient_containment.py and
+    tests/test_indexer.py::test_run_index_code_upsert_timeout_deferred_not_
+    aborted) so index_repository never raises it -- but if one DOES escape
+    containment (a phase this run does not wrap), the operator must see the
+    exception's own message (which names GET /v1/status), not a raw
+    traceback, matching the nexus-2fyb ClickException convention `nx index
+    pdf` already applies via its own local wrapper."""
+    from nexus.retry import VectorUpsertTimeoutError
+
+    def _raise(*args, **kwargs):
+        raise VectorUpsertTimeoutError(
+            "Upsert timed out (connect or read -- this transport cannot "
+            "tell which); the request may already have been sent and the "
+            "engine may still be embedding this batch server-side. Check "
+            "GET /v1/status for in-flight embed/admission activity before "
+            "retrying manually. (timed out)"
+        )
+
+    result, mock_idx = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg, index_side_effect=_raise,
+    )
+    assert result.exit_code != 0, result.output
+    assert "GET /v1/status" in result.output
+    assert "Upsert timed out" in result.output
+
+
+def test_index_repo_durable_write_failure_surfaces_a_loud_warning(runner, repo_dir, mock_reg):
+    """nexus-nukn3 fold-in (critic Significant finding): a durable-WRITE
+    failure (nothing recorded in nexus.index_failures for this run's
+    skips) must be surfaced loudly in the run summary, not just a
+    structlog line nobody watching stdout/stderr sees -- exit stays 0
+    since the exit-code decision already used the in-memory fallback."""
+    result, mock_idx = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={
+            "files_changed": 3159,
+            "skipped_unextractable_files": 1,
+            "index_failures_write_failed": True,
+        },
+    )
+    assert result.exit_code == 0, result.output
+    assert "could not be durably recorded" in result.stderr
+    assert "1 failure(s)" in result.stderr
+
+
+def test_index_repo_read_back_failure_alone_stays_quiet(runner, repo_dir, mock_reg):
+    """The write itself succeeded (index_failures_write_failed absent/False)
+    -- only the read-back confirmation query failed, which does not lose
+    any durable data (the in-memory count already matches what was
+    written), so no loud warning is warranted."""
+    result, mock_idx = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={
+            "files_changed": 3159,
+            "skipped_unextractable_files": 1,
+            "index_failures_write_failed": False,
+        },
+    )
+    assert result.exit_code == 0, result.output
+    assert "not durably recorded" not in result.stderr
+
+
 def test_index_repo_idempotent_when_already_registered(runner, repo_dir, mock_reg):
     result, mock_idx = _invoke_repo(runner, [str(repo_dir)], mock_reg)
     assert result.exit_code == 0
@@ -527,6 +594,41 @@ def test_index_repo_force_frecency_mutual_exclusion(runner, repo_dir, mock_reg):
         )
     assert result.exit_code != 0
     assert "mutually exclusive" in result.output.lower()
+
+
+# ── --re-embed flag (nexus-4jj40 round 5, T2 [24618]) ────────────────────────
+
+def test_index_repo_re_embed_requires_force(runner, repo_dir, mock_reg):
+    """--re-embed alone (no --force) is a UsageError -- a file the
+    staleness check skips never reaches the server, so there is nothing
+    to re-embed."""
+    with patch("nexus.commands.index._registry", return_value=mock_reg):
+        result = runner.invoke(
+            main, ["index", "repo", str(repo_dir), "--re-embed"]
+        )
+    assert result.exit_code != 0
+    assert "--re-embed requires --force" in result.output
+
+
+def test_index_repo_force_without_re_embed_defaults_false(runner, repo_dir, mock_reg):
+    """--force alone must NOT set force_re_embed=True on the server call
+    (nexus-4jj40 round 5's decoupling -- the whole point of this bead)."""
+    result, mock_idx = _invoke_repo(runner, [str(repo_dir), "--force"], mock_reg)
+    assert result.exit_code == 0, result.output
+    _, kw = mock_idx.call_args
+    assert kw.get("force") is True
+    assert kw.get("force_re_embed") is False
+
+
+def test_index_repo_force_and_re_embed_together(runner, repo_dir, mock_reg):
+    """--force --re-embed reaches index_repository as force_re_embed=True."""
+    result, mock_idx = _invoke_repo(
+        runner, [str(repo_dir), "--force", "--re-embed"], mock_reg
+    )
+    assert result.exit_code == 0, result.output
+    _, kw = mock_idx.call_args
+    assert kw.get("force") is True
+    assert kw.get("force_re_embed") is True
 
 
 def test_index_pdf_force_flag(runner, fake_pdf):
@@ -1145,6 +1247,38 @@ def test_eta_ticker_stops_when_file_loop_completes_not_on_phase(
     assert result.exit_code == 0, result.output
 
 
+# ── in-loop ETA ticker cadence (nexus-s71lr) ────────────────────────────────
+
+
+def test_repo_eta_ticker_interval_tightened_to_five_seconds(
+    runner, repo_dir, mock_reg, monkeypatch,
+):
+    """`nx index repo` must construct its ``_ETATicker`` with a 5s interval
+    (was 60s) — a single file taking anywhere under 60s produced zero
+    in-loop signal at the old cadence (the bead's own example: "a 33-chunk
+    file is 15 seconds of silence"). A second, independent heartbeat for
+    this same window was tried and reverted (it collided with
+    ``test_eta_ticker_and_phase_heartbeat_never_double_fire``'s protected
+    invariant below) — tightening the existing ticker's cadence is the
+    fix that reuses the already-reviewed single-ticker design instead."""
+    import nexus.commands.index as index_mod
+
+    captured: dict = {}
+    real_eta_ticker = index_mod._ETATicker
+
+    class _CapturingETATicker(real_eta_ticker):
+        def __init__(self, interval=60.0, emit=None):
+            captured["interval"] = interval
+            super().__init__(interval=interval, emit=emit)
+
+    monkeypatch.setattr(index_mod, "_ETATicker", _CapturingETATicker)
+
+    result, _ = _invoke_repo(runner, [str(repo_dir)], mock_reg)
+
+    assert result.exit_code == 0, result.output
+    assert captured.get("interval") == 5.0
+
+
 # ── heartbeat double-fire fix (T2 22168 engine-w0-503 follow-up) ───────────
 
 
@@ -1177,8 +1311,8 @@ def test_eta_ticker_and_phase_heartbeat_never_double_fire(runner, repo_dir, mock
             super().__init__(interval=0.02, emit=emit)
 
     class _FastPhaseHeartbeat(index_mod._PhaseHeartbeat):
-        def __init__(self, *, is_tty, echo, interval=None):
-            super().__init__(is_tty=is_tty, echo=echo, interval=0.02)
+        def __init__(self, *, is_tty, echo, interval=None, prefix="post"):
+            super().__init__(is_tty=is_tty, echo=echo, interval=0.02, prefix=prefix)
 
     monkeypatch.setattr(index_mod, "_ETATicker", _FastETATicker)
     monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
@@ -1289,6 +1423,80 @@ def test_phase_heartbeat_rearm_stops_previous_phase_ticks():
         assert max(a_indices) < min(b_indices), "a Phase A tick fired after Phase B was armed"
 
 
+def test_phase_heartbeat_custom_prefix() -> None:
+    """nexus-s71lr: a caller-supplied ``prefix`` replaces the hardcoded
+    ``[post]`` tag — the mechanism that lets a second heartbeat instance
+    (e.g. `nx index rdr`'s in-loop embed heartbeat) be visually
+    distinguishable from the existing pre/post-phase one."""
+    from nexus.commands.index import _PhaseHeartbeat
+    calls: list[str] = []
+    hb = _PhaseHeartbeat(
+        is_tty=False, echo=lambda msg, nl: calls.append(msg), interval=0.02, prefix="embed",
+    )
+    hb.arm("3/10 files")
+    time.sleep(0.05)
+    hb.disarm()
+    ticks = [c for c in calls if "still running" in c]
+    assert ticks, "expected at least one tick"
+    for msg in ticks:
+        assert msg.startswith("  [embed] ")
+        assert "[post]" not in msg
+
+
+def test_phase_heartbeat_touch_resets_elapsed_without_new_thread(monkeypatch) -> None:
+    """nexus-s71lr: ``touch()`` restarts the elapsed clock (so the next
+    tick reports time since the touch, not since the original ``arm()``)
+    and updates the label, WITHOUT spawning a new background thread.
+
+    code-review-expert (nexus-s71lr pass 2): the prior version of this test
+    never asserted the REPORTED elapsed number, so a ``touch()`` that
+    silently skipped resetting ``_start_mono`` would still pass (both
+    "since arm" and "since touch" round to the same tiny sub-second value
+    under real ``time.sleep``). Fixed by faking ``time.monotonic`` so the
+    two candidate elapsed values (53s "since arm" vs. 3s "since touch")
+    are unambiguous in the tick text itself.
+    """
+    import nexus.commands.index as index_mod
+
+    fake_now = [0.0]
+    monkeypatch.setattr(index_mod.time, "monotonic", lambda: fake_now[0])
+
+    calls: list[str] = []
+    hb = index_mod._PhaseHeartbeat(
+        is_tty=False, echo=lambda msg, nl: calls.append(msg), interval=0.02,
+    )
+    hb.arm("0/2 files")  # _start_mono captured at fake_now[0] == 0.0
+    thread_after_arm = hb._thread  # noqa: SLF001 -- white-box: proving no thread churn
+    fake_now[0] = 50.0
+    hb.touch("1/2 files")  # _start_mono reset to fake_now[0] == 50.0
+    assert hb._thread is thread_after_arm, "touch() must not spawn a new thread"  # noqa: SLF001
+    fake_now[0] = 53.0  # 3s since touch(), 53s since the original arm()
+    time.sleep(0.05)  # real wall-clock wait so the 0.02s-interval thread ticks at least once
+    hb.disarm()
+    ticks = [c for c in calls if "still running" in c]
+    assert ticks, "expected at least one tick"
+    for msg in ticks:
+        assert "1/2 files" in msg
+        assert "0/2 files" not in msg
+        # The discriminating assertion: 3s (since touch), never 53s (since
+        # the original arm) -- a touch() that failed to reset _start_mono
+        # would report 53s here.
+        assert "(3s elapsed)" in msg
+        assert "(53s elapsed)" not in msg
+
+
+def test_phase_heartbeat_touch_before_arm_is_a_noop() -> None:
+    """touch() on a never-armed heartbeat must not raise or spawn anything
+    -- an in-loop caller may legitimately call it before the loop's first
+    file completes if wiring is ever reordered."""
+    from nexus.commands.index import _PhaseHeartbeat
+    calls: list[str] = []
+    hb = _PhaseHeartbeat(is_tty=False, echo=lambda msg, nl: calls.append(msg), interval=5.0)
+    hb.touch("should be a no-op")  # must not raise
+    assert calls == []
+    assert hb._thread is None  # noqa: SLF001 -- white-box: proving no thread was spawned
+
+
 def test_on_phase_heartbeat_fires_for_silent_long_phase(runner, repo_dir, mock_reg, monkeypatch):
     """Integration: on_phase wiring arms/disarms the heartbeat and prints
     it on the ``[post]`` channel with the exact liveness constraints."""
@@ -1296,8 +1504,8 @@ def test_on_phase_heartbeat_fires_for_silent_long_phase(runner, repo_dir, mock_r
     import nexus.commands.index as index_mod
 
     class _FastPhaseHeartbeat(index_mod._PhaseHeartbeat):
-        def __init__(self, *, is_tty, echo, interval=None):
-            super().__init__(is_tty=is_tty, echo=echo, interval=0.02)
+        def __init__(self, *, is_tty, echo, interval=None, prefix="post"):
+            super().__init__(is_tty=is_tty, echo=echo, interval=0.02, prefix=prefix)
 
     monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
 
@@ -2059,3 +2267,79 @@ def test_pdf_dir_batch_identity_drop_surfaces_as_failure_entry(runner, home):
     assert "1 failure(s)" in result.output, result.output
     assert "identity" in result.output.lower()
     assert "1 of 2 file(s) failed" in result.output, result.output
+
+
+# ── nexus-s71lr: --dir in-loop heartbeat, always on (not --monitor-gated) ───
+
+
+def test_pdf_dir_heartbeat_ticks_during_a_slow_file_by_default(runner, home, monkeypatch):
+    """`nx index pdf --dir` echoes `[i/total] name…` with nl=False and only
+    completes the line AFTER index_pdf returns -- a slow PDF is silence
+    between those two echoes, the exact class the bead reports. Must
+    produce a "[embed] ... still running" line even WITHOUT --monitor."""
+    import nexus.commands.index as index_mod
+
+    class _FastPhaseHeartbeat(index_mod._PhaseHeartbeat):
+        def __init__(self, *, is_tty, echo, interval=None, prefix="post"):
+            super().__init__(is_tty=is_tty, echo=echo, interval=0.02, prefix=prefix)
+
+    monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
+
+    d = home / "pdfs"
+    d.mkdir()
+    (d / "a.pdf").write_bytes(b"fake pdf a")
+
+    def _slow_index_pdf(path, **kwargs):
+        time.sleep(0.09)  # several 0.02s intervals elapse with nothing done
+        return 3
+
+    with patch("nexus.doc_indexer.index_pdf", side_effect=_slow_index_pdf):
+        result = runner.invoke(
+            main, ["index", "pdf", "--dir", str(d), "--extractor", "docling"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "[embed]" in result.output
+    assert "still running" in result.output
+    assert "elapsed)" in result.output
+
+
+def test_pdf_dir_heartbeat_silent_on_a_fast_run(runner, home):
+    """The default (real, non-fast) heartbeat interval must NOT fire for a
+    normal, fast batch -- no flooding for the common case."""
+    d = home / "pdfs"
+    d.mkdir()
+    (d / "a.pdf").write_bytes(b"fake pdf a")
+
+    with patch("nexus.doc_indexer.index_pdf", return_value=3):
+        result = runner.invoke(
+            main, ["index", "pdf", "--dir", str(d), "--extractor", "docling"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "[embed]" not in result.output
+    assert "still running" not in result.output
+
+
+def test_pdf_dir_heartbeat_disarmed_after_batch_completes(runner, home, monkeypatch):
+    """No leaked background thread once the --dir batch finishes."""
+    import nexus.commands.index as index_mod
+
+    class _FastPhaseHeartbeat(index_mod._PhaseHeartbeat):
+        def __init__(self, *, is_tty, echo, interval=None, prefix="post"):
+            super().__init__(is_tty=is_tty, echo=echo, interval=0.02, prefix=prefix)
+
+    monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
+
+    d = home / "pdfs"
+    d.mkdir()
+    (d / "a.pdf").write_bytes(b"fake pdf a")
+
+    with patch("nexus.doc_indexer.index_pdf", return_value=3):
+        result = runner.invoke(
+            main, ["index", "pdf", "--dir", str(d), "--extractor", "docling"],
+        )
+
+    assert result.exit_code == 0, result.output
+    time.sleep(0.05)
+    assert not any(t.name == "nx-phase-heartbeat" for t in threading.enumerate())

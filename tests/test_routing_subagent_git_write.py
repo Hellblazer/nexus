@@ -98,6 +98,22 @@ def _bash(cmd: str, *, agent: bool = True, cwd: str | None = None) -> dict:
 @pytest.fixture(autouse=True)
 def _isolate_log(tmp_path, monkeypatch):
     monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(tmp_path / "log.jsonl"))
+    # nexus-gjv9b review fold-in round 6, found via a full-suite red: this
+    # file's _run() invokes the real hook script as a subprocess with an
+    # UNMODIFIED os.environ, so without isolating NEXUS_CONFIG_DIR the
+    # writer-swapped log_routing_event's endpoint discovery
+    # (conexus/hooks/scripts/routing/_lib.py's _engine_endpoint, ported
+    # from t2_prefix_scan.py) resolves against whatever is REALLY
+    # configured on the box running the suite -- a live lease, a real
+    # service_url/service_token -- and both attempts a real network call
+    # AND, on failure, would append to the REAL ~/.config/nexus/
+    # dropped_writes.jsonl instead of this test's own isolated path.
+    # Same isolation discipline test_routing_hooks.py's
+    # _isolate_endpoint_discovery already applies for this exact class
+    # of leak.
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "isolated-nexus-config"))
+    monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "dropped_writes.jsonl"))
 
 
 @pytest.fixture()
@@ -216,11 +232,23 @@ class TestAllow:
         assert out["permissionDecision"] == "deny"
 
     def test_escape_token_allows_and_logs(self, shared_repo, tmp_path):
+        """nexus-gjv9b PART 2's writer swap (16fd7f074, before this
+        bead's own fold-in rounds) replaced the direct
+        ``routing_log.jsonl`` append with a best-effort engine POST that
+        degrades to the drop meter on failure -- this subprocess has no
+        engine to reach (NEXUS_CONFIG_DIR is isolated to an empty dir by
+        the fixture above), so the escape fire lands in the
+        NX_DROPPED_WRITES_LOG_PATH log instead of ``log.jsonl``, which
+        this function has not written to since that commit. The escape
+        audit trail (nexus-mzvwa.9's over-use-visibility concern) still
+        survives the engine-down window: _record_dropped_routing_event
+        carries the original event's ``rule``/``outcome``/
+        ``escape_reason`` fields alongside the generic drop metadata."""
         out = _decision(
             _run(_bash("git commit -m msg # routing-allow: orchestrator sanctioned", cwd=str(shared_repo)))
         )
         assert out["permissionDecision"] == "allow"
-        log = (tmp_path / "log.jsonl").read_text()
+        log = (tmp_path / "dropped_writes.jsonl").read_text()
         assert '"outcome": "escape"' in log or '"escape"' in log
 
     def test_junk_stdin_fails_open(self):

@@ -36,7 +36,11 @@ from tests.conftest import (  # type: ignore[attr-defined]
 
 
 def _split(changed, before, after):
-    return _split_appends_from_state(changed, before, after)
+    """Wrap bare rel-paths as ``(verb, rel)`` pairs -- the verb is
+    immaterial to ``_split_appends_from_state``'s classification (only
+    ``rel`` is looked up in *before*/*after*), so every test below can keep
+    naming just the path it cares about."""
+    return _split_appends_from_state([("MODIFIED", rel) for rel in changed], before, after)
 
 
 # ── ambient daemon output is tolerated, in every direction ──────────────────
@@ -60,7 +64,7 @@ def test_daemon_output_is_not_a_state_mutation(rel, before, after, shape) -> Non
     a = {rel: after}
     state, appends = _split([rel], b, a)
     assert state == [], f"{shape} under logs/ was treated as state: {state}"
-    assert appends == [rel]
+    assert appends == [("MODIFIED", rel)]
 
 
 # ── the negative controls: what must STILL fail ────────────────────────────
@@ -78,7 +82,7 @@ def test_daemon_output_is_not_a_state_mutation(rel, before, after, shape) -> Non
 )
 def test_real_state_mutation_still_fails(rel, before, after, why) -> None:
     state, appends = _split([rel], {rel: before}, {rel: after})
-    assert state == [rel], f"widening swallowed a real mutation ({why})"
+    assert state == [("MODIFIED", rel)], f"widening swallowed a real mutation ({why})"
     assert appends == []
 
 
@@ -88,13 +92,13 @@ def test_a_named_append_log_that_shrank_still_fails() -> None:
     rel = "routing_log.jsonl"
     assert rel in _APPEND_ONLY_REAL_CONFIG_LOGS
     state, appends = _split([rel], {rel: (1, 900)}, {rel: (2, 10)})
-    assert state == [rel] and appends == []
+    assert state == [("MODIFIED", rel)] and appends == []
 
 
 def test_a_named_append_log_that_grew_is_still_benign() -> None:
     rel = "index.log"
     state, appends = _split([rel], {rel: (1, 10)}, {rel: (2, 99)})
-    assert state == [] and appends == [rel]
+    assert state == [] and appends == [("MODIFIED", rel)]
 
 
 # ── the widening must stay scoped ──────────────────────────────────────────
@@ -115,5 +119,5 @@ def test_a_mixed_batch_is_split_not_collapsed() -> None:
     before = {"logs/aspect_worker_daemon.log": (1, 10), "last_seen_version": (1, 6)}
     after = {"logs/aspect_worker_daemon.log": (2, 90), "last_seen_version": (2, 6)}
     state, appends = _split(changed, before, after)
-    assert state == ["last_seen_version"]
-    assert appends == ["logs/aspect_worker_daemon.log"]
+    assert state == [("MODIFIED", "last_seen_version")]
+    assert appends == [("MODIFIED", "logs/aspect_worker_daemon.log")]

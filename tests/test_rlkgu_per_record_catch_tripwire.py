@@ -412,11 +412,13 @@ _COMMAND_LEVEL_REASONS: dict[str, str] = {
         "records the file as failed."
     ),
     "PutOversizedError": (
-        "Raised only from T3Database.put (the MCP store_put / `nx store "
-        "put` path, db/t3.py), which per the class's own docstring has "
-        "'no chunker upstream' unlike the doc_indexer pipeline -- not "
-        "reachable from nx dt index / nx index pdf --dir's doc_indexer-"
-        "based per-record ingest call stack."
+        "Raised from T3Database.put and HttpVectorClient.put (nexus-xzyr3: "
+        "the MCP store_put / `nx store put` path, db/t3.py and "
+        "db/http_vector_client.py), both of which have 'no chunker "
+        "upstream' unlike the doc_indexer pipeline -- not reachable from "
+        "nx dt index / nx index pdf --dir's doc_indexer-based per-record "
+        "ingest call stack, which writes via upsert_chunks/upsert_chunks_"
+        "with_embeddings instead (drop-and-warn, never raises)."
     ),
     "SplitConservationViolatedError": (
         "Raised only from HttpTaxonomyStore.split_topic's defense-in-"

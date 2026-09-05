@@ -63,6 +63,7 @@ from nexus.db.http_vector_client import _GATEWAY_RETRY_CODES, _GATEWAY_RETRY_SLE
 from nexus.db.service_endpoint import (
     DEFAULT_LEASE_WAIT_BUDGET_S,
     discover_lease_with_wait,
+    guard_production_write,
     has_ever_resolved_lease,
     resolve_service_endpoint,
 )
@@ -145,6 +146,69 @@ def _get_shared_ssl_context() -> ssl.SSLContext:
             if _shared_ssl_context is None:
                 _shared_ssl_context = httpx.create_ssl_context()
     return _shared_ssl_context
+
+
+# ── Shared client injection (nexus-m20mf P3) ────────────────────────────────
+#
+# Explicit, PINNED pool limits for a shared client (design doc T2
+# nexus/design-nexus-m20mf-single-t2-transport [24553], "risks" section):
+# ``httpx.PoolTimeout`` is deliberately excluded from the retryable set
+# above (re-resolving the endpoint cannot fix local pool exhaustion, and an
+# immediate retry would pile onto the exhausted pool), so a shared client
+# MUST be given generous-but-bounded limits rather than inherit httpx's
+# defaults silently -- an unbounded pool defers the failure mode to a
+# surprising place, and a too-small one turns routine concurrency into a
+# loud (but avoidable) PoolTimeout.
+#
+# Sizing: T2Database composes 8 domain stores; a caller sharing ONE client
+# across a facade wants at least 8 concurrent slots so no two stores ever
+# contend for the same connection under ordinary sequential use. Doubled
+# to 16 for headroom against a second facade instance in the same process
+# (e.g. the aspect-worker background thread constructing its own T2Database
+# concurrently with a foreground CLI command) or a batch caller running
+# with ``serialize=False`` (the taxonomy batch hook, per the design doc's
+# risk note). ``max_keepalive_connections`` is kept at half of
+# ``max_connections`` (httpx's own default ratio) so idle connections don't
+# starve the pool of room for new ones. ``keepalive_expiry`` matches the
+# per-request timeout scale already used elsewhere in this module.
+_SHARED_CLIENT_MAX_CONNECTIONS = 16
+_SHARED_CLIENT_MAX_KEEPALIVE_CONNECTIONS = 8
+_SHARED_CLIENT_KEEPALIVE_EXPIRY_S = 30.0
+
+_SHARED_CLIENT_LIMITS = httpx.Limits(
+    max_connections=_SHARED_CLIENT_MAX_CONNECTIONS,
+    max_keepalive_connections=_SHARED_CLIENT_MAX_KEEPALIVE_CONNECTIONS,
+    keepalive_expiry=_SHARED_CLIENT_KEEPALIVE_EXPIRY_S,
+)
+
+
+def build_shared_t2_client(
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_S,
+    limits: httpx.Limits | None = None,
+) -> httpx.Client:
+    """Build ONE ``httpx.Client`` a caller can inject into every T2 domain
+    store it constructs (via ``client=`` on ``RefreshableHttpStoreMixin``
+    or ``T2Database``), replacing 8 independent pools with 1.
+
+    NOT constructed with ``base_url=`` or ``headers=`` -- same reasoning as
+    ``RefreshableHttpStoreMixin.__init__`` (a supervisor restart can hand
+    back a different port, and auth/tenant headers are per-request, never
+    baked into the client). Uses the same process-wide shared SSL context
+    as every other T2 client.
+
+    The CALLER owns this client and is responsible for closing it exactly
+    once, after every store it was injected into is done with it --
+    ``RefreshableHttpStoreMixin.close()`` is a no-op on an injected client
+    (see ``_owns_client``), by design: closing it from inside one store's
+    ``close()`` would break every sibling store still holding a reference
+    to the same pool.
+    """
+    return httpx.Client(
+        timeout=timeout,
+        verify=_get_shared_ssl_context(),
+        limits=limits if limits is not None else _SHARED_CLIENT_LIMITS,
+    )
 
 
 def _is_retryable_endpoint_error(exc: Exception) -> bool:
@@ -386,6 +450,7 @@ class RefreshableHttpStoreMixin:
         *,
         _token: str | None = None,
         timeout: float = _DEFAULT_TIMEOUT_S,
+        client: httpx.Client | None = None,
     ) -> None:
         # Track which halves were EXPLICITLY pinned by the caller (e.g. a
         # test constructing this store against a fake server) BEFORE the
@@ -457,11 +522,58 @@ class RefreshableHttpStoreMixin:
         # handshake ever happens) and behaviorally identical to the default
         # verify=True for an https:// base_url (same trust store, same
         # verification).
-        self._client = httpx.Client(timeout=timeout, verify=_get_shared_ssl_context())
+        #
+        # client= (nexus-m20mf P3, additive): a caller that already holds a
+        # transport built via build_shared_t2_client() (or any other
+        # pre-constructed httpx.Client) can inject it here so this store
+        # shares that pool instead of opening its own. Nothing changes for
+        # the 100% of existing callers that pass nothing -- construction is
+        # byte-identical to before this kwarg existed. NOT a naive shared
+        # httpx.BaseTransport: httpx.Client.close() closes its OWN
+        # transport, so sharing a bare transport across independently-
+        # closed Client instances would break every sibling the moment the
+        # first one closes. Sharing the whole Client (and tracking
+        # ownership below) is what makes close() safe to call from any one
+        # store without affecting the others.
+        if client is not None:
+            # nexus-m20mf P3 fold-in (code-review Suggestion): client= and
+            # timeout= are otherwise independent kwargs, and an injected
+            # client's OWN baked-in timeout always wins -- a caller passing
+            # both would get their timeout= silently ignored with no signal
+            # at all. Fail loud instead: a caller that genuinely needs a
+            # non-default timeout on a shared client must build that client
+            # itself (build_shared_t2_client(timeout=...)) rather than pass
+            # a timeout= this constructor cannot honor.
+            if timeout != _DEFAULT_TIMEOUT_S:
+                raise ValueError(
+                    f"{type(self).__name__}: client= and a non-default "
+                    f"timeout= ({timeout}) were both supplied -- the "
+                    f"injected client's own timeout always wins, so this "
+                    f"combination cannot mean what it looks like it means. "
+                    f"Either omit timeout= (the client's own timeout "
+                    f"applies), or build the shared client with the "
+                    f"desired timeout instead: "
+                    f"build_shared_t2_client(timeout={timeout})."
+                )
+            self._client = client
+            self._owns_client = False
+        else:
+            self._client = httpx.Client(timeout=timeout, verify=_get_shared_ssl_context())
+            self._owns_client = True
 
     def close(self) -> None:
-        """Close the keep-alive connection pool (idempotent)."""
-        self._client.close()
+        """Close the keep-alive connection pool (idempotent).
+
+        A no-op when this store did not construct its own ``httpx.Client``
+        (``client=`` was injected at construction, nexus-m20mf P3) -- the
+        OWNER of an injected client is whoever built and passed it in, and
+        that caller is responsible for closing it exactly once, after
+        every store sharing it is done. Closing it here would tear down
+        the pool out from under every sibling store still holding the same
+        reference.
+        """
+        if self._owns_client:
+            self._client.close()
 
     # ── Credential / endpoint refresh ───────────────────────────────────────
 
@@ -603,8 +715,19 @@ class RefreshableHttpStoreMixin:
         idempotent: bool = True,
         timeout: float | None = None,
         retry_read_timeout: bool = True,
+        mutates: bool = True,
     ) -> Any:
         """POST JSON *payload* to *path*; self-heals once on a retryable error.
+
+        ``mutates`` (nexus-a2qhz) defaults to ``True`` — the safe direction,
+        since most ``_post`` call sites across the adopter stores really are
+        writes. A handful of callers send a READ (a search/query/lookup
+        whose parameters do not fit a GET query string, e.g.
+        ``HttpMemoryStore.search``, ``HttpCatalogClient.traverse``,
+        ``HttpPlanLibrary.search_plans``) over POST; those pass
+        ``mutates=False`` to exempt themselves from
+        :func:`~nexus.db.service_endpoint.guard_production_write` (see
+        :meth:`_send`). Never flip this for a call that writes.
 
         ``idempotent=False`` (nexus-tjvgf) disables BOTH retry axes for
         operations where a lost-response retry double-applies server-side
@@ -644,14 +767,41 @@ class RefreshableHttpStoreMixin:
         starts a second, uncancelled embed on top of one that may still
         be running server-side.
         """
-        kwargs: dict[str, Any] = {"json": payload, "idempotent": idempotent, "retry_read_timeout": retry_read_timeout}
+        kwargs: dict[str, Any] = {
+            "json": payload,
+            "idempotent": idempotent,
+            "retry_read_timeout": retry_read_timeout,
+            "mutates": mutates,
+        }
         if timeout is not None:
             kwargs["timeout"] = timeout
         return self._send("POST", path, **kwargs)
 
-    def _get(self, path: str, params: dict[str, Any] | None = None, *, idempotent: bool = True) -> Any:
-        """GET *path*; self-heals once on a retryable error."""
-        return self._send("GET", path, params=params, idempotent=idempotent)
+    def _get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        idempotent: bool = True,
+        timeout: float | None = None,
+    ) -> Any:
+        """GET *path*; self-heals once on a retryable error.
+
+        ``timeout`` (nexus-m20mf P3 fold-in, round-2 critique finding 2):
+        the SAME optional per-request override :meth:`_post` has carried
+        since nexus-y9t08 -- ``None`` (default) means "no override, ride
+        the client-wide default exactly as before this kwarg existed".
+        Added specifically so a caller needing a strict per-call cap (e.g.
+        ``HttpAspectQueue``'s diagnostic queue-depth probe, which must
+        never block longer than a couple of seconds even against a
+        shared, longer-timeout client) can get one WITHOUT giving up a
+        shared client -- see :meth:`_post`'s docstring for the full
+        rationale, identical here.
+        """
+        kwargs: dict[str, Any] = {"params": params, "idempotent": idempotent}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        return self._send("GET", path, **kwargs)
 
     def _delete(self, path: str, params: dict[str, Any] | None = None, *, idempotent: bool = True) -> Any:
         """DELETE *path*; self-heals once on a retryable error.
@@ -673,6 +823,7 @@ class RefreshableHttpStoreMixin:
         *,
         idempotent: bool = True,
         retry_read_timeout: bool = True,
+        mutates: bool = True,
         **kwargs: Any,
     ) -> Any:
         """One round-trip, with ONE re-resolve-and-retry on a retryable error.
@@ -749,7 +900,19 @@ class RefreshableHttpStoreMixin:
         - Endpoint axis (outer): a retryable auth/connection error
           invalidates + re-resolves, then retries EXACTLY ONCE. A second
           failure (of ANY kind) propagates untouched — no retry loops.
+
+        nexus-a2qhz: every non-``GET`` verb WITH ``mutates=True`` (the
+        default — ``DELETE`` always, ``POST`` unless the caller passed
+        ``mutates=False`` for a read-shaped POST) routes through
+        :func:`~nexus.db.service_endpoint.guard_production_write` BEFORE
+        this method's first network attempt — a dev-checkout process with
+        no explicit ``NX_SERVICE_*`` override and no opt-in is refused
+        here, before ``_request_once`` ever dials ``self._base_url``.
+        Reads (``GET``, or a POST call site that declared ``mutates=False``)
+        are never guarded.
         """
+        if method != "GET" and mutates:
+            guard_production_write(self._base_url)
         if not idempotent:
             try:
                 return self._request_once(method, path, **kwargs)

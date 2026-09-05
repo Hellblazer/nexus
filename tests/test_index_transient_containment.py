@@ -13,6 +13,7 @@ import pytest
 
 from nexus.db.http_vector_client import VectorServiceError
 from nexus.indexer import _contain_transient_upsert
+from nexus.retry import VectorUpsertTimeoutError
 
 _FILE = Path("/repo/doc.md")
 
@@ -59,3 +60,17 @@ def test_non_vector_error_propagates() -> None:
 
     with pytest.raises(ValueError):
         _contain_transient_upsert(boom, _FILE)
+
+
+def test_upsert_timeout_deferred_returns_zero() -> None:
+    """nexus-8hdg9 phase 1 critique (ship-blocker fix): VectorUpsertTimeoutError
+    (retry.py) is a SIBLING RuntimeError, not a VectorServiceError subclass, so
+    it needs its own except clause here or it bypasses this containment
+    entirely and aborts the whole nx index repo run on the first refused
+    upsert timeout -- exactly the failure class this module exists to prevent
+    for the 5xx codes above. Deferred identically: 0 chunks written this run,
+    staleness retries next run."""
+    def boom() -> int:
+        raise VectorUpsertTimeoutError("timed out; check GET /v1/status")
+
+    assert _contain_transient_upsert(boom, _FILE) == 0

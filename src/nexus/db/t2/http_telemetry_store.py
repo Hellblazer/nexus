@@ -47,6 +47,21 @@ Route mapping (matches TelemetryHandler Java):
                                            target_title, the aggregate query route cannot
                                            carry it; capped page + exact total, same
                                            envelope discipline as list_hook_failures)
+    POST /v1/telemetry/index_failures/record        — record_index_failure (nexus-nukn3)
+    POST /v1/telemetry/index_failures/record_batch  — record_index_failures_batch
+    GET  /v1/telemetry/index_failures/list          — list_index_failures
+    POST /v1/telemetry/index_failures/trim          — trim_index_failures
+    POST /v1/telemetry/index_failures/acknowledge   — acknowledge_index_failure
+    GET  /v1/telemetry/index_failures/acks          — list_index_failure_acknowledgments
+    POST /v1/telemetry/index_failures/unacknowledge — unacknowledge_index_failure
+    POST /v1/telemetry/capability_census/record — record_capability_census (nexus-gjv9b
+                                           PART 1: upsert on (tenant_id, session_id))
+    GET  /v1/telemetry/capability_census/query  — query_capability_census
+    POST /v1/telemetry/routing_events/record    — record_routing_event (nexus-gjv9b
+                                           PART 2: NOT called by the routing hooks
+                                           themselves, which POST via urllib directly —
+                                           see that method's own docstring)
+    GET  /v1/telemetry/routing_events/list      — list_routing_events
 """
 
 from __future__ import annotations
@@ -844,6 +859,247 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         )
         return int(resp.get("deleted", 0))
 
+    # ── index_failures (nexus-nukn3) ──────────────────────────────────────────
+    #
+    # Durable per-file failure record for the repo-index path (Sam's design:
+    # "when a file fails, ENQUEUE the failure and move on"). Event-log shape,
+    # like hook_failures — not aspect_extraction_queue's work-queue shape:
+    # nothing ever claims or retries a row here (no retry worker in scope,
+    # nexus-nukn3's explicit scope fence).
+
+    def record_index_failure(
+        self,
+        *,
+        run_id: str,
+        file_path: str,
+        error_class: str = "",
+        error: str = "",
+        occurred_at: str | None = None,
+    ) -> None:
+        """Record one durable index failure. Calls
+        ``POST /v1/telemetry/index_failures/record``.
+        """
+        payload: dict[str, Any] = {
+            "run_id":      run_id,
+            "file_path":   file_path,
+            "error_class": error_class,
+            "error":       error,
+        }
+        if occurred_at is not None:
+            payload["occurred_at"] = occurred_at
+        self._post("/v1/telemetry/index_failures/record", payload)
+
+    def record_index_failures_batch(
+        self,
+        rows: list[tuple[str, str, str, str]],
+        *,
+        run_id: str,
+    ) -> int:
+        """Record N index failures from one run in ONE transaction.
+
+        *rows* is ``(file_path, error_class, error, occurred_at)`` tuples —
+        ``occurred_at`` may be ``""`` to let the server stamp ``now()``.
+        Mirrors :meth:`log_search_batch`'s row-tuple shape. Returns the
+        service's ``inserted`` ack (0, with a warning, on a stripped/absent
+        response — see :meth:`_batch_ack` — never a fabricated full count).
+        """
+        if not rows:
+            return 0
+        payload: dict[str, Any] = {
+            "rows": [[run_id, file_path, error_class, error, occurred_at or None]
+                     for file_path, error_class, error, occurred_at in rows]
+        }
+        resp = self._post("/v1/telemetry/index_failures/record_batch", payload)
+        return self._batch_ack(resp, len(rows))
+
+    def list_index_failures(
+        self,
+        *,
+        run_id: str = "",
+        days: int = 0,
+        limit: int = 100,
+        unacknowledged_only: bool = False,
+        file_path: str = "",
+    ) -> dict[str, Any]:
+        """Read index failures, newest first, optionally scoped to one
+        ``run_id`` (blank = every run).
+
+        Calls ``GET /v1/telemetry/index_failures/list``.
+
+        Returns ``{"rows": [...], "total": int, "oldest_occurred_at": str}``.
+        ``total`` is computed server-side over the WHOLE filtered set, not
+        the returned page — same non-vacuity shape as
+        :meth:`list_hook_failures`: a caller reading a count (``nx doctor
+        --check-index-failures``) must never under-report because the
+        backlog exceeded ``limit``.
+
+        Each row carries an ``acknowledged`` boolean (nexus-nukn3 fold-in,
+        critic Critical finding: the doctor gate needs a durable
+        adjudication that survives a fresh ``run_id`` every re-run --
+        ``nx index failures --acknowledge``). ``unacknowledged_only=True``
+        additionally excludes any covered row from both ``rows`` and
+        ``total`` -- the DOCTOR GATE's input only. Deliberately NOT the
+        deyd5 systemic-skip floor's input (code-review finding, T2
+        code-review-nexus-nukn3-4d5520bf4 [24624]): ``nexus.indexer.
+        _run_index`` calls this method for that floor WITHOUT
+        ``unacknowledged_only`` — correctly, since acknowledging a failure
+        records an operator's adjudication, not that the file actually
+        indexed; the skip-ratio math must count it regardless.
+
+        ``file_path`` (third fold-in, code-review finding [24624]) narrows
+        to an exact file server-side -- the fix for ``nx index failures
+        --acknowledge --file``'s error_class auto-resolve, which used to
+        page 1000 rows tenant-wide and filter client-side.
+        """
+        params: dict[str, Any] = {"days": days, "limit": limit}
+        if run_id:
+            params["run_id"] = run_id
+        if unacknowledged_only:
+            params["unacknowledged_only"] = True
+        if file_path:
+            params["file_path"] = file_path
+        resp = self._get("/v1/telemetry/index_failures/list", params)
+        if not isinstance(resp, dict):  # defensive: a stripped proxy response
+            return {"rows": [], "total": 0, "oldest_occurred_at": ""}
+        return {
+            "rows": list(resp.get("rows") or []),
+            "total": int(resp.get("total") or 0),
+            "oldest_occurred_at": str(resp.get("oldest_occurred_at") or ""),
+        }
+
+    def list_index_failure_acknowledgments(self, *, file_path: str = "") -> dict[str, Any]:
+        """List durable acknowledgments for the tenant, newest first
+        (nexus-nukn3 third fold-in, critic Critical finding T2
+        critique-nexus-nukn3-4d5520bf4 [24621]: the ack mechanism was
+        write-only -- created via :meth:`acknowledge_index_failure` but
+        never listable or revocable).
+
+        Calls ``GET /v1/telemetry/index_failures/acks``.
+
+        Args:
+            file_path: optional server-side EXACT filter (round-5 fold-in,
+                code-review [24635] item 2), narrowing to just that file's
+                acknowledgment(s) instead of paging every acknowledgment
+                tenant-wide and filtering client-side -- the same class of
+                fix as :meth:`list_index_failures`'s ``file_path`` param.
+                Omitted (default ``""``): every acknowledgment, unfiltered.
+
+        Returns ``{"rows": [{"id", "file_path", "error_class", "reason",
+        "created_at"}, ...], "total": int}``. ``file_path`` is ``""`` for
+        an error-class-scoped (corpus-wide) acknowledgment.
+        """
+        params: dict[str, Any] = {}
+        if file_path:
+            params["file_path"] = file_path
+        resp = self._get("/v1/telemetry/index_failures/acks", params)
+        if not isinstance(resp, dict):  # defensive: a stripped proxy response
+            return {"rows": [], "total": 0}
+        return {
+            "rows": list(resp.get("rows") or []),
+            "total": int(resp.get("total") or 0),
+        }
+
+    def unacknowledge_index_failure(
+        self, *, error_class: str, file_path: str = "",
+    ) -> int:
+        """Revoke a durable acknowledgment (nexus-nukn3 third fold-in,
+        critic Critical finding [24621]: an ack that could be created but
+        never undone).
+
+        Calls ``POST /v1/telemetry/index_failures/unacknowledge``. Deletes
+        ONLY the row matching the EXACT scope it was created under --
+        ``error_class`` REQUIRED non-blank (mirrors
+        :meth:`acknowledge_index_failure`'s own guard: revoking "every
+        acknowledgment for a file regardless of class" is never the
+        intended scope); ``file_path`` blank targets the error-class-scoped
+        acknowledgment, mirroring how it was created.
+
+        Returns the number of rows deleted (0 if no matching acknowledgment
+        exists).
+        """
+        if not error_class:
+            raise ValueError(
+                "unacknowledge_index_failure requires a non-blank error_class"
+            )
+        payload: dict[str, Any] = {"error_class": error_class}
+        if file_path:
+            payload["file_path"] = file_path
+        resp = self._post("/v1/telemetry/index_failures/unacknowledge", payload)
+        return int(resp.get("deleted", 0))
+
+    def acknowledge_index_failure(
+        self,
+        *,
+        error_class: str,
+        file_path: str = "",
+        reason: str = "",
+    ) -> None:
+        """Durably acknowledge a recurring index failure (nexus-nukn3
+        fold-in, critic Critical finding: a fresh ``run_id`` every run
+        means ``--clear`` alone is undone by the very next index run for a
+        PERMANENTLY unextractable file re-indexed on a cadence). Writes a
+        ``kind='acknowledgment'`` row into the same ``nexus.index_failures``
+        table -- an operator's adjudication that survives re-runs, unlike a
+        one-time ``--clear``.
+
+        Calls ``POST /v1/telemetry/index_failures/acknowledge``.
+
+        Args:
+            error_class: REQUIRED, non-blank. An acknowledgment with no
+                error_class would cover every failure for its file (or,
+                blank ``file_path`` too, every failure in the tenant),
+                which is never the intended scope.
+            file_path: file-scoped when non-blank (only that exact
+                ``(file_path, error_class)`` pair is covered going
+                forward); ``""`` (default) for an error-class-scoped
+                acknowledgment covering ANY file with ``error_class``.
+            reason: optional free-text note (shown in ``nx index
+                failures``'s error column for the acknowledgment).
+        """
+        if not error_class:
+            raise ValueError(
+                "acknowledge_index_failure requires a non-blank error_class"
+            )
+        payload: dict[str, Any] = {"error_class": error_class}
+        if file_path:
+            payload["file_path"] = file_path
+        if reason:
+            payload["reason"] = reason
+        self._post("/v1/telemetry/index_failures/acknowledge", payload)
+
+    def trim_index_failures(
+        self, *, run_id: str = "", days: int = 0, dry_run: bool = False,
+    ) -> int:
+        """Delete (or, with ``dry_run=True``, COUNT without deleting)
+        index_failures rows by ``run_id`` and/or age (nexus-nukn3 fold-in,
+        the critic's Critical finding on the original cut: an all-time,
+        fail-first doctor check with no remedy is unfixable forever once a
+        permanent extraction failure exists. This is the remedy -- ``nx
+        index failures --clear``.
+
+        Calls ``POST /v1/telemetry/index_failures/trim``. At least one of
+        ``run_id``/``days`` is required -- refusing here (before the wire
+        call) mirrors the engine's own 400 boundary, so a caller gets the
+        same clear refusal message regardless of which side would have
+        caught it first. Never deletes a ``kind='acknowledgment'`` row --
+        only failures age out; an acknowledgment is a durable policy
+        marker.
+        """
+        if not run_id and days < 1:
+            raise ValueError(
+                "trim_index_failures requires run_id and/or days >= 1 "
+                "(refusing an unscoped delete of the entire tenant history)"
+            )
+        payload: dict[str, Any] = {}
+        if run_id:
+            payload["run_id"] = run_id
+        if days > 0:
+            payload["days"] = days
+        if dry_run:
+            payload["dry_run"] = True
+        resp = self._post("/v1/telemetry/index_failures/trim", payload)
+        return int(resp.get("deleted", 0))
+
     def rename_collection(self, *, old: str, new: str) -> dict[str, int]:
         """Re-point collection columns from ``old`` to ``new`` in all telemetry tables.
 
@@ -1108,9 +1364,202 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         present: list[list[Any]] = []
         for start in range(0, len(keys), page):
             batch = keys[start : start + page]
-            resp = self._post("/v1/telemetry/ids/probe", {"table": table, "keys": batch})
+            resp = self._post(
+                "/v1/telemetry/ids/probe", {"table": table, "keys": batch}, mutates=False
+            )
             present.extend(resp.get("present") or [])
         return present
+
+    # ── capability_census (nexus-gjv9b PART 1) ──────────────────────────────
+
+    def record_capability_census(
+        self,
+        *,
+        session_id: str,
+        ts: str,
+        blindspot: bool,
+        unmeasurable_reason: str | None = None,
+        capabilities: dict[str, int] | None = None,
+        dispatches: int | None = None,
+        total_calls: int | None = None,
+        timeout: float = 2.0,
+    ) -> None:
+        """Upsert one session's capability census. Calls
+        ``POST /v1/telemetry/capability_census/record``.
+
+        Single-attempt with a hard *timeout* (default 2.0s, matching
+        ``_print_service_tier_summary``'s own precedent): this method is
+        called from the SessionEnd grandchild path
+        (``_session_end_census.write_session_capability_census``), which
+        has no retry budget to spend, so ``idempotent=False`` issues the
+        request EXACTLY ONCE per credential — no gateway 502/503/504
+        backoff loop — with the sole carve-out :meth:`_send` documents (a
+        definitive 401 re-mints and retries once; a genuinely dead
+        credential cannot silently wedge this path forever). ANY failure
+        is the caller's (``_post_capability_census``'s) cue to degrade to
+        a metered drop, never to retry itself on top of this.
+
+        Routed through :meth:`_post` (nexus-a2qhz / nexus-onq1a review
+        fix pass — a prior version bypassed the mixin's ``_client``
+        entirely via a raw ``httpx`` call, which ALSO bypassed the
+        production-write guard silently): this fires on every SessionEnd,
+        so a dev checkout running as the operator's live ``nx`` must
+        refuse it the same way every other T2 write does. ``mutates=True``
+        (the default) means :meth:`_send` calls
+        :func:`~nexus.db.service_endpoint.guard_production_write` BEFORE
+        the first network attempt; an unopted-in dev checkout gets
+        :class:`~nexus.db.service_endpoint.ProductionWriteGuardError`,
+        which the caller counts as a metered drop, never silently loses.
+        """
+        payload: dict[str, Any] = {
+            "session_id": session_id,
+            "ts":         ts,
+            "blindspot":  blindspot,
+        }
+        if blindspot:
+            payload["unmeasurable_reason"] = unmeasurable_reason or ""
+        else:
+            payload["capabilities"] = capabilities or {}
+            payload["dispatches"] = dispatches
+            payload["total_calls"] = total_calls
+        self._post(
+            "/v1/telemetry/capability_census/record",
+            payload,
+            idempotent=False,
+            timeout=timeout,
+        )
+
+    def query_capability_census(
+        self,
+        *,
+        session_id: str | None = None,
+        since: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Read capability_census rows, newest first — the read half of
+        ``nx census capability`` (nexus-gjv9b PART 1, S11 doctrine). Calls
+        ``GET /v1/telemetry/capability_census/query``.
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if session_id:
+            params["session_id"] = session_id
+        elif since:
+            params["since"] = normalize_since_filter(since)
+        resp = self._get("/v1/telemetry/capability_census/query", params=params)
+        if not isinstance(resp, dict):  # defensive: a stripped proxy response
+            return []
+        return list(resp.get("rows") or [])
+
+    def trim_capability_census(self, days: int = 30, *, dry_run: bool = False) -> int:
+        """Delete (or, with ``dry_run=True``, COUNT without deleting)
+        ``capability_census`` rows older than *days* days (nexus-gjv9b
+        review fold-in, critique Significant 4).
+
+        Calls ``POST /v1/telemetry/capability_census/trim``. Same dry-run-
+        reuses-the-delete's-own-predicate contract as
+        :meth:`trim_hook_failures` — the preview and the real delete share
+        one server-side ``ts < cutoff`` predicate, so the count returned
+        with ``dry_run=True`` is exactly what a subsequent ``dry_run=False``
+        call removes (barring rows that cross the cutoff in the interim).
+        ``dry_run`` defaults to ``False``.
+        """
+        if days < 1:
+            raise ValueError(f"days must be >= 1; got {days}")
+        resp = self._post(
+            "/v1/telemetry/capability_census/trim", {"days": days, "dry_run": dry_run}
+        )
+        return int(resp.get("deleted", 0))
+
+    # ── routing_events (nexus-gjv9b PART 2) ─────────────────────────────────
+
+    def record_routing_event(
+        self,
+        *,
+        rule: str,
+        outcome: str,
+        ts: str = "",
+        session_id: str = "",
+        tool_name: str = "",
+        command_fragment: str = "",
+        escape_reason: str = "",
+        timeout: float = 0.25,
+    ) -> None:
+        """Append one routing-hook event. Calls
+        ``POST /v1/telemetry/routing_events/record``.
+
+        NOTE: this method exists for in-process callers that already hold
+        an :class:`HttpTelemetryStore` (e.g. ``nx hook routing-stats``
+        replaying events, or a future non-hook writer). The routing hooks
+        THEMSELVES (``conexus/hooks/scripts/routing/_lib.py``) are
+        standalone scripts with no ``nexus`` import (RDR-121 § Contract)
+        and POST to the same route directly via ``urllib`` — they cannot
+        call this method, so the endpoint-discovery/guard fix here does
+        not reach them (see that module's own ``_engine_endpoint``).
+
+        Single-attempt with a hard *timeout* (default 0.25s — the
+        routing-hook latency budget): ``idempotent=False`` issues the
+        request EXACTLY ONCE per credential (the sole carve-out is
+        :meth:`_send`'s documented 401 re-mint-and-retry). ANY failure is
+        the caller's cue to drop, never to retry itself on top of this —
+        same discipline as :meth:`record_capability_census`.
+
+        Routed through :meth:`_post` (nexus-a2qhz / nexus-onq1a review
+        fix pass — a prior version bypassed the mixin's ``_client`` and
+        its production-write guard via a raw ``httpx`` call); ``mutates=
+        True`` (the default) means an unopted-in dev checkout is refused
+        via :func:`~nexus.db.service_endpoint.guard_production_write`
+        before any network attempt, same as every other T2 write.
+        """
+        payload: dict[str, Any] = {
+            "rule":             rule,
+            "outcome":          outcome,
+            "ts":               ts,
+            "session_id":       session_id,
+            "tool_name":        tool_name,
+            "command_fragment": command_fragment,
+            "escape_reason":    escape_reason,
+        }
+        self._post(
+            "/v1/telemetry/routing_events/record",
+            payload,
+            idempotent=False,
+            timeout=timeout,
+        )
+
+    def list_routing_events(
+        self,
+        *,
+        since: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Read routing_events rows, newest first — the read half of
+        :mod:`nexus.routing_stats` (nexus-gjv9b PART 2, S11 doctrine). Calls
+        ``GET /v1/telemetry/routing_events/list``.
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if since:
+            params["since"] = normalize_since_filter(since)
+        resp = self._get("/v1/telemetry/routing_events/list", params=params)
+        if not isinstance(resp, dict):  # defensive: a stripped proxy response
+            return []
+        return list(resp.get("rows") or [])
+
+    def trim_routing_events(self, days: int = 30, *, dry_run: bool = False) -> int:
+        """Delete (or, with ``dry_run=True``, COUNT without deleting)
+        ``routing_events`` rows older than *days* days (nexus-gjv9b review
+        fold-in, critique Significant 4).
+
+        Calls ``POST /v1/telemetry/routing_events/trim``. Same dry-run-
+        reuses-the-delete's-own-predicate contract as
+        :meth:`trim_hook_failures`/:meth:`trim_capability_census`.
+        ``dry_run`` defaults to ``False``.
+        """
+        if days < 1:
+            raise ValueError(f"days must be >= 1; got {days}")
+        resp = self._post(
+            "/v1/telemetry/routing_events/trim", {"days": days, "dry_run": dry_run}
+        )
+        return int(resp.get("deleted", 0))
 
 
 def tier_writes_read_failure_message(exc: Exception) -> str:

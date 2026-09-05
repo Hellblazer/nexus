@@ -60,6 +60,43 @@ def single_chunk_manifest_metadata(content: str) -> tuple[str, list[dict]]:
     return doc_id, [metadata]
 
 
+def raise_if_oversized(content: str, *, doc_id: str, collection: str) -> None:
+    """Refuse an over-quota single-chunk store BEFORE any catalog work.
+
+    nexus-xzyr3 fold-in (code-review-nexus-xzyr3-26edb6662 [24586] /
+    critique-nexus-xzyr3-26edb6662 [24589]): both ``T3Database.put`` and
+    ``HttpVectorClient.put`` already refuse an over-quota document with
+    ``PutOversizedError`` (``fail_on_oversized=True``) — but ONLY once
+    called, which is AFTER ``catalog_store_hook_tracked`` has already
+    minted a catalog row for every one of this function's three callers
+    (``mcp/core.py::store_put``, ``commands/store.py::put_cmd``,
+    ``catalog/recovery_bundle.py::_default_import_doc`` — all three call
+    :func:`single_chunk_manifest_metadata` then immediately
+    ``catalog_store_hook_tracked`` before ``put()``). Every oversized
+    attempt was paying for a wasted mint + rollback round trip. Calling
+    this FIRST — right after :func:`single_chunk_manifest_metadata`,
+    before ``catalog_store_hook_tracked`` — fails fast with no catalog
+    side effect at all. ``put()``'s own check stays as the
+    defense-in-depth backstop for any caller that skips this pre-check
+    (direct test calls, future callers).
+
+    Raises:
+        PutOversizedError: same shape and message ``put()`` raises —
+            single source of truth for both the check and the wording.
+    """
+    from nexus.db.limits import QUOTAS  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.errors import PutOversizedError  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    doc_bytes = len(content.encode())
+    if doc_bytes > QUOTAS.MAX_DOCUMENT_BYTES:
+        raise PutOversizedError(
+            doc_id=doc_id,
+            doc_bytes=doc_bytes,
+            max_bytes=QUOTAS.MAX_DOCUMENT_BYTES,
+            collection=collection,
+        )
+
+
 def resolve_knowledge_doc_for_chash(reader, chash: str, *, log_event: str):
     """Resolve *chash* to the single store_put-origin catalog document it
     identifies, or ``None`` if there is no match or the match is ambiguous.

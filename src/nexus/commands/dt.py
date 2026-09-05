@@ -124,6 +124,7 @@ def _index_record(
     corpus: str,
     dry_run: bool,
     extractor: str = "auto",
+    force: bool = False,
 ) -> tuple[bool, int]:
     """Dispatch a single supported ``(uuid, path)`` to the right indexer.
 
@@ -131,6 +132,12 @@ def _index_record(
     extensions before calling this function — that lets tests and the
     summary line see the skip count without having to introspect the
     dispatcher's internals.
+
+    ``force`` (nexus-gup3b) is forwarded verbatim to ``index_pdf`` /
+    ``index_markdown``'s own ``force`` kwarg — both already bypass their
+    staleness gate and re-chunk/re-embed in place under the SAME catalog
+    identity (RDR-181), so there is no separate staleness check to
+    duplicate here.
 
     After the indexer registers the catalog entry (with the resolved
     ``file://`` source_uri it sees), this function stamps the DT
@@ -170,9 +177,9 @@ def _index_record(
         # nexus-pxxyn: thread the operator's --extractor choice through so the
         # documented MinerU-failure recovery ("rerun with --extractor docling")
         # is actionable on the DT path. Markdown has no extractor backend.
-        raw = index_pdf(file_path, corpus=corpus, collection_name=collection, extractor=extractor)
+        raw = index_pdf(file_path, corpus=corpus, collection_name=collection, extractor=extractor, force=force)
     else:  # .md — extension filtering happens in index_cmd
-        raw = index_markdown(file_path, corpus=corpus, collection_name=collection)
+        raw = index_markdown(file_path, corpus=corpus, collection_name=collection, force=force)
     chunks = raw if isinstance(raw, int) else 0
 
     stamped = _stamp_dt_uri_on_entry(file_path, uuid)
@@ -423,9 +430,14 @@ def _index_dt_content_record(
     collection: str,
     corpus: str,
     extraction_source: str = "dt_content",
+    force: bool = False,
 ) -> bool:
     """RDR-139 Layer D: index a non-file-backed DT record from DT-extracted
     text (rather than an on-disk file).
+
+    ``force`` (nexus-gup3b) is forwarded to ``index_markdown``'s own
+    ``force`` kwarg, same contract as ``_index_record``'s file-backed
+    branch — no separate staleness logic here.
 
     Sources the AI-optimised body via :func:`devonthink.dt_extract_content`,
     writes it through the existing Markdown chunking pipeline with every chunk
@@ -545,6 +557,7 @@ def _index_dt_content_record(
             corpus=corpus,
             collection_name=collection,
             extraction_source=extraction_source,
+            force=force,
         )
         if not count:
             # We had non-empty text above, so a 0-chunk return is the
@@ -724,6 +737,18 @@ def dt() -> None:
         "``auto`` picks mineru when formulas are detected, else docling."
     ),
 )
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help=(
+        "Force re-indexing every record, bypassing the staleness check "
+        "(re-chunks and re-embeds in place) — same semantics as ``nx index "
+        "pdf --force``. Applies to both file-backed records and, with "
+        "--dt-content, non-file-backed ones. Catalog identity and tumbler "
+        "are preserved (nexus-gup3b)."
+    ),
+)
 def index_cmd(
     use_selection: bool,
     tag: str | None,
@@ -740,6 +765,7 @@ def index_cmd(
     dt_content: bool,
     highlights: bool,
     extractor: str,
+    force: bool,
 ) -> None:
     """Index DEVONthink records into Nexus.
 
@@ -869,7 +895,7 @@ def index_cmd(
                 dt_collection = _resolve_dt_collection(collection, corpus, ext)
                 try:
                     content_indexed = _index_dt_content_record(
-                        uuid, collection=dt_collection, corpus=corpus,
+                        uuid, collection=dt_collection, corpus=corpus, force=force,
                     )
                 except PER_RECORD_SURVIVABLE_EXCEPTIONS as exc:
                     # nexus-hb10j (substantive-critic, 2xu6t adjudication,
@@ -979,6 +1005,7 @@ def index_cmd(
                 corpus=corpus,
                 dry_run=False,
                 extractor=extractor,
+                force=force,
             )
         except PER_RECORD_SURVIVABLE_EXCEPTIONS as exc:
             # nexus-5xn3k.6 substantive-critic CRITICAL (nexus-qo84l,

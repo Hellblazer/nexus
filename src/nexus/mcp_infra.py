@@ -6,11 +6,16 @@ Separated from tool definitions (mcp_server.py) to isolate concerns.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import threading
 import time
+from typing import TYPE_CHECKING
 
 from nexus.config import default_db_path
+
+if TYPE_CHECKING:
+    import httpx
 
 
 def _parse_version(ver: str) -> tuple[int, ...]:
@@ -96,7 +101,7 @@ _t1_lock = threading.Lock()
 _t3_instance = None
 _t3_lock = threading.Lock()
 
-_collections_cache: tuple[list[str], float] = ([], 0.0)
+_collections_cache: tuple[list[str], dict[str, int], float] = ([], {}, 0.0)
 _COLLECTIONS_CACHE_TTL = 60.0
 
 # nexus-53x7s: SERVICE-mode t2_index_write cache. Reuses one T2Database (and
@@ -411,19 +416,216 @@ def get_t3():
     return _t3_instance
 
 
-def get_collection_names() -> list[str]:
-    """Return cached T3 collection names, refreshing every _COLLECTIONS_CACHE_TTL seconds."""
+def _refresh_collections_cache_if_stale() -> None:
+    """Refresh ``_collections_cache`` when older than ``_COLLECTIONS_CACHE_TTL``.
+
+    One ``list_collections()`` round trip populates both the name list and
+    the per-collection count map, so :func:`get_collection_names` and
+    :func:`get_collection_counts` share this single fetch instead of each
+    hitting T3 independently (nexus-rbhci).
+
+    A row's ``count`` is stored ONLY when it is a genuine non-negative
+    reading. ``HttpVectorClient._list_collections_via_count`` (the
+    pre-catalog-005 deployment-skew fallback path) deliberately reports
+    ``-1``, not an absent field, when a per-collection count fetch fails --
+    "a failing per-collection count is reported as -1 rather than dropping
+    the collection" (that module's own docstring), so the collection stays
+    NAMED even though its size could not be read. Review finding
+    (code-review-nexus-rbhci-516701aa3, CRITICAL): storing that ``-1``
+    verbatim let a transient count-fetch failure silently exclude a real,
+    populated collection from the default fan-out for up to
+    ``_COLLECTIONS_CACHE_TTL`` seconds, inverting this module's own "fails
+    open on unknown" contract -- ``-1 is not None`` and ``-1 < floor`` are
+    both true, so the consuming guard treated a FAILURE as a genuinely
+    tiny collection. Skipping the entry here instead of normalizing it in
+    every consumer fixes the bug at its one source: a collection with a
+    failed count is simply absent from this dict, indistinguishable from
+    any other "never seen this collection's size" case, which every
+    consumer already treats as unknown / fail-open.
+    """
     global _collections_cache
-    names, ts = _collections_cache
+    _names, _counts, ts = _collections_cache
     now = time.monotonic()
     if now - ts > _COLLECTIONS_CACHE_TTL:
-        new_names = [c["name"] for c in get_t3().list_collections()]
-        _collections_cache = (new_names, now)
-        return new_names
-    return names
+        rows = get_t3().list_collections()
+        new_names = [row["name"] for row in rows]
+        new_counts: dict[str, int] = {}
+        for row in rows:
+            raw = row.get("count")
+            if raw is None:
+                continue
+            count = int(raw)
+            if count < 0:
+                continue  # failed-count sentinel (see docstring) -- unknown, not a real size
+            new_counts[row["name"]] = count
+        _collections_cache = (new_names, new_counts, now)
 
 
-def t2_ctx():
+def get_collection_names() -> list[str]:
+    """Return cached T3 collection names, refreshing every _COLLECTIONS_CACHE_TTL seconds."""
+    _refresh_collections_cache_if_stale()
+    return _collections_cache[0]
+
+
+def get_collection_counts() -> dict[str, int]:
+    """Return cached per-collection row counts, keyed by collection name.
+
+    Shares the ``_COLLECTIONS_CACHE_TTL``-windowed cache with
+    :func:`get_collection_names`: whichever of the two is called first in a
+    given window pays for the ``list_collections()`` round trip, and the
+    other reads its half of the same cached tuple for free. This is what
+    ``list_collections()`` itself reports as ``count`` -- the vector
+    store's live row count for the collection (chunks, tombstone-filtered;
+    see ``HttpVectorClient.list_collections``'s docstring), with any
+    negative (failed-count) reading normalized OUT of the dict by
+    :func:`_refresh_collections_cache_if_stale` -- used as a cheap
+    per-collection health signal for the default corpus fan-out floor in
+    ``nexus.mcp.core._resolve_corpus_target``: a collection is excluded
+    from a bare-prefix fan-out only when it is thin AND a sibling under
+    the same prefix is not, never as a flat per-collection cutoff (a lone
+    thin collection -- e.g. a fresh install's first note -- is always
+    kept; see that function's docstring for the full rule). A collection
+    named explicitly is unaffected by any of this.
+
+    Invalidated (alongside the page-turn cache) on every committed
+    ``store_put``/``store_delete`` via :func:`invalidate_collections_cache`
+    -- a collection crossing the floor from below to at-or-above (or vice
+    versa, on delete) is visible to the very next call, not up to
+    ``_COLLECTIONS_CACHE_TTL`` seconds later.
+    """
+    _refresh_collections_cache_if_stale()
+    return _collections_cache[1]
+
+
+def invalidate_collections_cache() -> None:
+    """Force the next :func:`get_collection_names`/:func:`get_collection_counts`
+    call to refetch from T3 rather than serving up to
+    ``_COLLECTIONS_CACHE_TTL`` seconds of stale collection existence/counts.
+
+    Called after a committed ``store_put``/``store_delete`` (review finding,
+    code-review-nexus-rbhci-516701aa3: ``_collections_cache`` was
+    TTL-only, unlike the page-turn cache it sits beside, so a collection
+    crossing :data:`nexus.mcp.core._FANOUT_MIN_COLLECTION_CHUNK_COUNT`
+    from below to at-or-above could stay excluded from the default fan-out
+    for up to 60s after the write that should have un-excluded it).
+    Mirrors the existing ``_page_cache_invalidate()`` call at the same
+    write sites in ``nexus.mcp.core``.
+    """
+    global _collections_cache
+    _collections_cache = ([], {}, 0.0)
+
+
+#: nexus-m20mf P3 fold-in (critic finding 1/1b, hardened per round-2
+#: critique finding 1): the CURRENT `nx index repo` run's shared
+#: httpx.Client, or None outside one. Process-global by DESIGN, not a
+#: mistake -- unlike the CLI-layer Click-context lookup the critic ruled
+#: out for the DATA layer (taxonomy_cmd._T2Database, index.py's
+#: run_collection_postprocessing/_collections_without_topics, which now take
+#: an explicit `client` parameter instead), this value is set and torn down
+#: by ONE owner (index_repository, via use_shared_t2_client_for_index_run
+#: below) for the exact duration of its own run, visible to every thread the
+#: run itself spawns (ChunkBatcher flush workers) -- global visibility across
+#: threads is the REQUIRED property here, not a hazard, since the whole point
+#: is that concurrent workers of the SAME run share the SAME pool. It exists
+#: because the per-document hook-failure chain (hook_registry.py's
+#: fire_single/fire_batch/fire_document -> _record_*_hook_failure ->
+#: _persist_hook_failure -> t2_ctx()) and 5 independent direct
+#: record_catalog_hook_failure call sites (catalog/store_hook.py,
+#: doc_indexer.py, pipeline_stages.py, indexer.py x2) sit behind a FIXED
+#: hook-function call signature shared by every registered hook -- threading
+#: an explicit client parameter through that interface would mean changing
+#: every hook's signature codebase-wide for one caller's benefit. t2_ctx()
+#: is ALREADY this codebase's documented, sanctioned escape hatch for paths
+#: that cannot route through the ordinary daemon/singleton machinery; this
+#: extends its OWN resolution rule (explicit client argument wins; otherwise
+#: the current run's shared client; otherwise build fresh, exactly as
+#: before) rather than inventing a second mechanism.
+#:
+#: REENTRANCY (round-2 critique, Significant finding 1): a bare save/restore
+#: global is a silent-corruption shape under overlap -- two index_repository()
+#: calls racing in one process (thread A sets clientA, thread B enters before
+#: A exits and sets clientB, whichever `finally` runs LAST restores whatever
+#: IT captured as "previous", silently substituting the wrong client into
+#: the run still in flight, no exception, no log). Nothing calls
+#: index_repository() concurrently today (exactly one production call site,
+#: commands/index.py's index_repo_cmd, one `nx index repo` process per
+#: invocation) -- this hazard is currently DORMANT, not live -- but this
+#: codebase's own hot rule is "no silent fallbacks for data-correctness
+#: problems; fail loud", and a plain global with unconditional save/restore
+#: is a silent-corruption shape by construction. Fixed via a small
+#: depth-counted scope guarded by a lock: a REENTRANT call passing the
+#: IDENTICAL client (or both None) stacks cleanly (depth+1, single reset to
+#: None only when the outermost scope exits -- no leak between sequential
+#: runs); a call passing a DIFFERENT client while one is already active
+#: raises loud immediately rather than silently clobbering. This does not
+#: attempt true per-caller ISOLATION of overlapping runs (that would need a
+#: contextvar propagated explicitly into every ChunkBatcher worker thread,
+#: since plain contextvars do not cross thread boundaries on their own, and
+#: today's cross-thread VISIBILITY requirement -- workers of the SAME run
+#: sharing the SAME pool -- is what a global buys for free); it makes the
+#: genuinely hazardous case (two DIFFERENT clients live at once) impossible
+#: to enter silently.
+_current_index_run_client: "httpx.Client | None" = None
+_current_index_run_depth: int = 0
+_current_index_run_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def use_shared_t2_client_for_index_run(client: "httpx.Client | None"):
+    """Scope the process-wide "current index run" client to one
+    ``index_repository()`` call (reentrant-safe, see the module comment
+    above for the full rationale).
+
+    - First entry (depth 0 -> 1): activates *client* process-wide.
+    - Reentrant entry with the IDENTICAL client (``is``, including both
+      ``None``) while already active: stacks (depth N -> N+1); the value
+      resets to ``None`` only when the OUTERMOST scope exits (depth back
+      to 0) -- no leak between sequential runs, and a legitimately nested
+      call (or a second thread of the SAME run) sees the same client the
+      whole time.
+    - Reentrant entry with a DIFFERENT, non-identical client while one is
+      already active: raises ``RuntimeError`` immediately -- this is the
+      two-overlapping-runs hazard; refusing loud beats silently
+      cross-wiring which run's hook failures land against which pool.
+
+    ``client=None`` is a harmless no-op scope either way -- every
+    ``t2_ctx()`` call inside still falls back to building its own client,
+    byte-identical to pre-P3 behavior.
+    """
+    global _current_index_run_client, _current_index_run_depth
+    with _current_index_run_lock:
+        if _current_index_run_depth == 0:
+            _current_index_run_client = client
+            _current_index_run_depth = 1
+        elif _current_index_run_client is client:
+            _current_index_run_depth += 1
+        else:
+            raise RuntimeError(
+                "use_shared_t2_client_for_index_run re-entered with a "
+                "DIFFERENT shared client while another index_repository() "
+                "run is still active in this process -- overlapping "
+                "index_repository() calls with distinct clients are not "
+                "supported by this process-global scope (it would silently "
+                "cross-wire the per-file hook-failure chain between the two "
+                "runs). If this is a genuinely new concurrent caller, it "
+                "needs a design that isolates run state per caller, not "
+                "this scope."
+            )
+    try:
+        yield
+    finally:
+        with _current_index_run_lock:
+            _current_index_run_depth -= 1
+            if _current_index_run_depth == 0:
+                _current_index_run_client = None
+
+
+def current_index_run_t2_client() -> "httpx.Client | None":
+    """The active index run's shared client, or ``None`` outside one."""
+    return _current_index_run_client
+
+
+def t2_ctx(client: "httpx.Client | None" = None):
     """Return a T2Database context manager — fresh per call.
 
     Reserved for the paths that genuinely cannot route through the daemon
@@ -440,14 +642,31 @@ def t2_ctx():
     - memory.delete (line ~1943): scratch_delete tool
     - memory.merge_memories (line ~2069): memory_consolidate tool
     - memory.flag_stale_memories (line ~2080): memory_consolidate tool
-    - plans.increment_run_outcome (line ~3617): _nx_answer_record_outcome
-    - plans.increment_run_started (line ~4012): nx_answer
     - (nexus-pyzk7, resolved) _nx_answer_record_run + _record_tier_write now
       route through db.telemetry.record_* (backend-blind: SQLite raw OR the
       service's /v1/telemetry/*/record endpoint), not a raw db.telemetry.conn.
+
+    nexus-m20mf P2 (resolved): nx_answer's five happy-path sites --
+    plan_match, price_table, run_start, record_run, run_outcome, including
+    plans.increment_run_outcome (_nx_answer_record_outcome) and
+    plans.increment_run_started (nx_answer), formerly listed here as not
+    yet converted -- now route through t2_index_write. See that function's
+    call sites in mcp/core.py and T2 nexus/design-nexus-m20mf-single-t2-
+    transport for the closure-purity rule those conversions follow.
+
+    nexus-m20mf P3 fold-in: *client*, when supplied, is used as-is (an
+    explicit argument always wins). When omitted, falls back to
+    :func:`current_index_run_t2_client` -- the active ``nx index repo``
+    run's shared client, or ``None`` outside one, which is what lets the
+    per-document hook-failure chain and the direct
+    ``record_catalog_hook_failure`` call sites share the run's pool without
+    any change to their own signatures. Both branches are additive: a
+    caller passing nothing outside an active index run gets byte-identical
+    behavior to before this parameter existed.
     """
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import (db.t2)
-    return T2Database(default_db_path())  # boundary-allow: aspect_worker persist (document_aspects.upsert AspectRecord arg cannot round-trip the daemon RPC); not the every-poll hot path (RDR-128 P3)
+    resolved = client if client is not None else current_index_run_t2_client()
+    return T2Database(default_db_path(), client=resolved)  # boundary-allow: aspect_worker persist (document_aspects.upsert AspectRecord arg cannot round-trip the daemon RPC); not the every-poll hot path (RDR-128 P3)
 
 
 
@@ -1001,6 +1220,47 @@ def _record_manifest_write_failure(doc_id: str) -> None:
         _MANIFEST_WRITE_FAILURES.append(doc_id)
 
 
+# nexus-gup3b: a multi-batch document's every flush AFTER the first lacks
+# position 0 (ChunkBatcher's flush grain is ~16 chunks) and is routed to the
+# per-doc append path below by design — normal for any document spanning
+# more than one flush, not a defect. Before this collector, every such flush
+# fired an unconditional WARNING ("manifest_write_many_partial_doc_skipped"):
+# a live re-index of one large document logged it 23 times, once per flush,
+# drowning genuine warnings in noise. This tracks, per doc_id, how many
+# continuation-slice flushes have been SEEN this process/run so the emitter
+# in ``_manifest_write_loop`` can log INFO once per document (the first
+# flush) and DEBUG for every later flush of the SAME document — the count
+# stays visible via ``get_manifest_partial_doc_skip_counts()`` and the DEBUG
+# event's per-doc counts, it just stops being a WARNING per batch.
+_manifest_partial_doc_skips_lock = threading.Lock()
+_MANIFEST_PARTIAL_DOC_SKIP_COUNTS: dict[str, int] = {}
+
+
+def get_manifest_partial_doc_skip_counts() -> dict[str, int]:
+    """doc_id -> number of continuation-slice flush batches seen this
+    process/run. Snapshot copy."""
+    with _manifest_partial_doc_skips_lock:
+        return dict(_MANIFEST_PARTIAL_DOC_SKIP_COUNTS)
+
+
+def reset_manifest_partial_doc_skips() -> None:
+    """Clear the collector. CLI callers invoke this at the start of an
+    indexing run (mirrors ``reset_manifest_write_failures``) so a document
+    re-indexed in a LATER run gets its own fresh first-flush INFO line
+    instead of inheriting a prior run's dedup state for the life of the
+    long-lived MCP server process."""
+    with _manifest_partial_doc_skips_lock:
+        _MANIFEST_PARTIAL_DOC_SKIP_COUNTS.clear()
+
+
+def _record_manifest_partial_doc_skip(doc_id: str) -> int:
+    """Increment and return the running per-doc continuation-flush count."""
+    with _manifest_partial_doc_skips_lock:
+        n = _MANIFEST_PARTIAL_DOC_SKIP_COUNTS.get(doc_id, 0) + 1
+        _MANIFEST_PARTIAL_DOC_SKIP_COUNTS[doc_id] = n
+        return n
+
+
 # GH #1397 / nexus-94fxl: batches the manifest hook DROPPED because no chunk in
 # the batch carried a document identity (no catalog_doc_id from the caller, no
 # legacy meta doc_id). Distinct from _MANIFEST_WRITE_FAILURES (a write that was
@@ -1463,7 +1723,7 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
     # in doc_indexer.py/pipeline_stages.py route through the same helper.
     from nexus.indexer_utils import orphaned_chashes  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
 
-    orphaned = orphaned_chashes(reader, doc_id, dropped)
+    orphaned = orphaned_chashes(reader, doc_id, dropped, collection=collection)
     shared = len(dropped) - len(orphaned)
     if not orphaned:
         return
@@ -1612,7 +1872,7 @@ def _sweep_superseded_vectors_many(
     from nexus.indexer_utils import orphaned_chashes  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
 
     _batch_label = f"write_many_batch[{len(dropped_by_doc)}_docs]"
-    orphaned = orphaned_chashes(reader, _batch_label, candidates)
+    orphaned = orphaned_chashes(reader, _batch_label, candidates, collection=collection)
     shared = len(candidates) - len(orphaned)
     if not orphaned:
         return
@@ -1802,11 +2062,36 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
             full_docs.append((doc_id, chunks))
         if continuation:
             import structlog  # noqa: PLC0415 — deferred (lazy logger)
-            structlog.get_logger().warning(
-                "manifest_write_many_partial_doc_skipped",
-                count=len(continuation),
-                note="continuation slices routed to per-doc append path",
-            )
+            _log = structlog.get_logger()
+            # nexus-gup3b: log INFO once per doc_id per run (its first
+            # continuation-slice flush); every later flush of the SAME
+            # doc_id this run only bumps the collector and logs at DEBUG
+            # under a distinct event name — see the collector's docstring
+            # above for why (23 WARNINGs for one live multi-batch document).
+            _first_seen: list[str] = []
+            _repeat_counts: dict[str, int] = {}
+            for _doc_id in continuation:
+                _n = _record_manifest_partial_doc_skip(_doc_id)
+                if _n == 1:
+                    _first_seen.append(_doc_id)
+                else:
+                    _repeat_counts[_doc_id] = _n
+            if _first_seen:
+                _log.info(
+                    "manifest_write_many_partial_doc_skipped",
+                    count=len(_first_seen),
+                    doc_ids=_first_seen,
+                    note="continuation slices routed to per-doc append path "
+                         "— normal for a multi-batch document; further "
+                         "flushes for the same document log at debug",
+                )
+            if _repeat_counts:
+                _log.debug(
+                    "manifest_write_many_partial_doc_skipped_repeat",
+                    counts=_repeat_counts,
+                    note="repeat continuation flush(es) for a document "
+                         "already reported this run",
+                )
             # nexus-5xn3k.4: a doc the producer claimed COMPLETE landing in
             # the continuation bucket is a contract violation — its batch
             # lacks position 0, so it cannot be the whole file. Never stamp
@@ -2250,7 +2535,7 @@ def reset_singletons():
     _t1_instance = None
     _t1_isolated = False
     _t3_instance = None
-    _collections_cache = ([], 0.0)
+    _collections_cache = ([], {}, 0.0)
     with _service_t2_lock:
         if _service_t2_db is not None:
             _service_t2_db.close()

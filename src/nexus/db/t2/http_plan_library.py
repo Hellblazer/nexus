@@ -450,7 +450,7 @@ class HttpPlanLibrary(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             payload["any_lexeme"] = True
         if project:
             payload["project"] = project
-        resp = self._post("/v1/plans/search", payload)
+        resp = self._post("/v1/plans/search", payload, mutates=False)
         if isinstance(resp, list):
             return [_normalize(r) for r in resp]
         return []

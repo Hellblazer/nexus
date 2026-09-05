@@ -14,6 +14,13 @@ consults it (cc-validation scenario 16, measured), so the same allowlist is
 also registered on PreToolUse, where permissionDecision=allow lands before
 the classifier. One allowlist, two events.
 
+Worktree guard (nexus-ftpk3): before the allowlist is consulted, a Serena
+WRITE tool called from a linked git worktree is DENIED. Serena resolves
+paths against the root it found at startup, which for a worktree-dispatched
+subagent is the shared primary checkout; three incidents wrote there while
+the tool reported success. Detection and the write-tool set live in
+worktree_guard.py, shared with mcp-inject.sh.
+
 Stdlib only: hooks run under system python with no conexus installed.
 """
 from __future__ import annotations
@@ -21,6 +28,9 @@ from __future__ import annotations
 import json
 import pathlib
 import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from worktree_guard import cwd_from_payload, deny_reason, is_linked_worktree, is_serena_write_tool  # noqa: E402
 
 CONTEXT7_TOOLS = frozenset({
     "mcp__plugin_sn_context7__resolve-library-id",
@@ -48,9 +58,29 @@ def decide(payload: str, snapshot: pathlib.Path) -> str:
         data = json.loads(payload)
     except (ValueError, TypeError):
         return ""
-    if not isinstance(data, dict) or data.get("tool_name", "") not in allowed_tools(snapshot):
+    if not isinstance(data, dict):
         return ""
-    if data.get("hook_event_name", "PermissionRequest") == "PreToolUse":
+    tool_name = data.get("tool_name", "")
+    event = data.get("hook_event_name", "PermissionRequest")
+    if is_serena_write_tool(tool_name):
+        cwd = cwd_from_payload(payload)
+        if is_linked_worktree(cwd):
+            reason = deny_reason(tool_name, cwd)
+            if event == "PreToolUse":
+                out = {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                }
+            else:
+                out = {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {"behavior": "deny", "message": reason},
+                }
+            return json.dumps({"hookSpecificOutput": out})
+    if tool_name not in allowed_tools(snapshot):
+        return ""
+    if event == "PreToolUse":
         out = {
             "hookEventName": "PreToolUse",
             "permissionDecision": "allow",

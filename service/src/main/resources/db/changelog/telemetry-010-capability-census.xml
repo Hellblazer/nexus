@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-gjv9b PART 1 — capability_census: PG home for the per-session
+    capability census, replacing ``~/.config/nexus/capability_census.jsonl``
+    (Sam directive 2026-08-20, h33x8.3 rotation review: leverage PG instead
+    of flat-file gymnastics).
+
+    One row per (tenant_id, session_id) — an UPSERT table, not an event
+    log: the JSONL writer already collapsed SessionEnd's many re-fires per
+    session down to "append only when the newest measurement differs from
+    the last recorded one" (nexus-h33x8 follow-on, 2026-08-22 — 91% of
+    JSONL rows were duplicate re-fires). A table with a natural
+    (tenant_id, session_id) key does that collapsing FOR FREE via
+    ``ON CONFLICT ... DO UPDATE`` — the latest measurement for a session is
+    simply the current row, no dedup-by-tail-read needed client-side.
+
+    Column shape mirrors ``build_capability_census_record``
+    (src/nexus/_session_end_census.py) field-for-field:
+      session_id / timestamp        -> session_id / ts
+      blindspot                     -> blindspot (bool, NOT NULL)
+      unmeasurable_reason           -> unmeasurable_reason (nullable; only
+                                        set on a blindspot row)
+      capabilities{cap: count}      -> one INTEGER column per capability in
+                                        ``nexus.census.CAPABILITIES`` (a
+                                        fixed, closed 8-value tuple — skill,
+                                        agent, serena, nx_answer,
+                                        search_query, other_nx_mcp,
+                                        baseline, other), all nullable
+                                        (NULL on a blindspot row, where
+                                        nothing was measured; the bead's own
+                                        wording is literal — "per-capability
+                                        counts... as columns" — not a JSONB
+                                        blob, because the vocabulary is
+                                        small and closed, unlike a
+                                        genuinely open per-tool breakdown)
+      dispatches / total_calls      -> dispatches / total_calls (nullable,
+                                        same NULL-on-blindspot reasoning)
+
+    No ETL dedup index needed: this is a first-class live-write table with
+    a natural upsert key, not an event log being backfilled from a JSONL
+    tail.
+
+    Reader: GET /v1/telemetry/capability_census/query (TelemetryHandler),
+    consumed by ``nx census capability`` (its store-backed reader flag;
+    nexus-gjv9b PART 1 S11 doctrine: no writer ships without its reader).
+
+    Grants: consolidated in grants-nexus-svc.xml (runAlways) — no per-store
+    grant here.
+
+    Placement: changelog TAIL, immediately after
+    telemetry-009-index-failures.xml (the current tail, nexus-nukn3) and
+    before the grants-nexus-svc.xml runAlways block, matching the
+    established late-append convention (D0.1). Renumbered from
+    telemetry-009 to telemetry-010 on rebase over develop (nexus-nukn3
+    claimed telemetry-009-index-failures.xml first).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset telemetry-010-1: capability_census table ──────────────── -->
+    <changeSet id="telemetry-010-1" author="nexus-gjv9b">
+        <comment>Create capability_census table (per-session upsert; RDR-080-adjacent SessionEnd telemetry)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.capability_census (
+    tenant_id            TEXT         NOT NULL,
+    session_id           TEXT         NOT NULL,
+    ts                   TIMESTAMPTZ  NOT NULL,
+    blindspot            BOOLEAN      NOT NULL,
+    unmeasurable_reason  TEXT,
+    cap_skill            INTEGER,
+    cap_agent            INTEGER,
+    cap_serena           INTEGER,
+    cap_nx_answer        INTEGER,
+    cap_search_query     INTEGER,
+    cap_other_nx_mcp     INTEGER,
+    cap_baseline         INTEGER,
+    cap_other            INTEGER,
+    dispatches           INTEGER,
+    total_calls          INTEGER,
+    CONSTRAINT capability_census_pk PRIMARY KEY (tenant_id, session_id)
+);
+
+-- BTree index on ts: "since" filtering for the store-backed nx census capability reader.
+CREATE INDEX idx_capability_census_ts ON nexus.capability_census (tenant_id, ts DESC);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.capability_census CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset telemetry-010-2: capability_census RLS ────────────────── -->
+    <changeSet id="telemetry-010-2" author="nexus-gjv9b">
+        <comment>RLS: ENABLE + FORCE + tenant_isolation policy on capability_census</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.capability_census ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.capability_census FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.capability_census
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.capability_census;
+            ALTER TABLE nexus.capability_census NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.capability_census DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

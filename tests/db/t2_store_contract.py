@@ -253,6 +253,36 @@ T2_STORE_CONTRACT: dict[str, dict[str, list[str]]] = {
 # Landing only the first four would have left the blind spot half-open while the
 # comments here asserted it closed. Verified independently before adding.
 #
+# ADDED nexus-nukn3 (2026-09-05), same criteria — index_failures has no
+# SQLite twin at all (the table is brand new, post-dating RDR-158 P4's
+# SQLite deletion):
+#   telemetry.record_index_failure         indexer.py — _run_index's end-of-
+#                                            run per-file failure write
+#   telemetry.record_index_failures_batch  indexer.py — the batch form of
+#                                            the same write
+#   telemetry.list_index_failures          index_cmd.py's `nx index failures`
+#                                            verb; doctor.py's
+#                                            --check-index-failures
+#   telemetry.trim_index_failures          index_cmd.py's `nx index failures
+#                                            --clear` remedy verb (fold-in,
+#                                            critic finding: an all-time
+#                                            fail-first check needs a clear
+#                                            path)
+#   telemetry.acknowledge_index_failure    index_cmd.py's `nx index failures
+#                                            --acknowledge` verb (second
+#                                            fold-in, critic Critical finding:
+#                                            a fresh run_id every re-run means
+#                                            --clear alone is undone by the
+#                                            next index run for a permanently
+#                                            unextractable file)
+#   telemetry.list_index_failure_acknowledgments  index_cmd.py's `nx index
+#                                            failures --acks` verb (third
+#                                            fold-in, critic Critical finding:
+#                                            the ack mechanism was write-only)
+#   telemetry.unacknowledge_index_failure  index_cmd.py's `nx index failures
+#                                            --unacknowledge` verb (same
+#                                            fold-in)
+#
 # DELIBERATELY EXCLUDED: the ~20 uncovered `import_*` ETL methods across
 # memory/plans/telemetry/chash_index/document_aspects/document_highlights/
 # aspect_queue/taxonomy. They meet the mechanical criteria but are slated for
@@ -327,6 +357,41 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         # the read surface's first and only home, not a port of a SQLite
         # reader, so it needs the supplemental entry.
         'query_nx_answer_runs': ['since', 'limit'],
+        # nexus-nukn3: index_failures is a brand-new table (no SQLite
+        # predecessor at all — RDR-158 P4 had already deleted every SQLite
+        # store before this table existed), so all three methods are
+        # service-mode-only by construction, same shape as the
+        # hook_failures/nx_answer_runs entries above.
+        'record_index_failure': ['run_id', 'file_path', 'error_class', 'error', 'occurred_at'],
+        'record_index_failures_batch': ['rows', 'run_id'],
+        'list_index_failures': ['run_id', 'days', 'limit'],
+        'trim_index_failures': ['run_id', 'days', 'dry_run'],
+        'acknowledge_index_failure': ['error_class', 'file_path', 'reason'],
+        'list_index_failure_acknowledgments': [],
+        'unacknowledge_index_failure': ['error_class', 'file_path'],
+        # nexus-gjv9b PART 1: capability_census replaces
+        # ~/.config/nexus/capability_census.jsonl (Sam directive
+        # 2026-08-20) — service-only by construction, no SQLite twin ever
+        # existed for a table that did not exist until this bead.
+        'record_capability_census': [
+            'session_id', 'ts', 'blindspot', 'unmeasurable_reason',
+            'capabilities', 'dispatches', 'total_calls', 'timeout',
+        ],
+        'query_capability_census': ['session_id', 'since', 'limit'],
+        # nexus-gjv9b review fold-in, critique Significant 4: retention,
+        # same age-only trim_hook_failures shape (days positional,
+        # dry_run keyword-only) rather than trim_index_failures's
+        # all-keyword-only shape — capability_census has no run_id axis.
+        'trim_capability_census': ['days'],
+        # nexus-gjv9b PART 2: routing_events replaces
+        # ~/.config/nexus/routing_log.jsonl (same Sam directive) —
+        # service-only by construction, same no-twin shape.
+        'record_routing_event': [
+            'rule', 'outcome', 'ts', 'session_id', 'tool_name',
+            'command_fragment', 'escape_reason', 'timeout',
+        ],
+        'list_routing_events': ['since', 'limit'],
+        'trim_routing_events': ['days'],
     },
 }
 

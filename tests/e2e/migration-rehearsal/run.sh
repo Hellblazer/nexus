@@ -53,6 +53,18 @@ unset FORCE_COLOR CLICOLOR_FORCE
 # invoked FROM, not the repo root the next line cd's into.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# nexus-f2g8u: silent-exit guard. Armed as early as possible — before any
+# other trap this script installs — so no exit path anywhere below can
+# terminate the harness with zero diagnostic on either stream (observed
+# once at Step 11c of the 7.27.0 release, exit 1 after a SUCCESSFUL wheel
+# build with nothing printed on stdout or stderr). See the lib file's own
+# header for the mechanism; every later EXIT-trap reassignment in this file
+# chains `diag_exit_guard` first rather than clobbering it.
+# shellcheck source=../lib/exit_diagnostics.sh disable=SC1091
+source "$SCRIPT_DIR/../lib/exit_diagnostics.sh"
+diag_arm_err_trap
+trap 'diag_exit_guard' EXIT
+
 cd "$(git rev-parse --show-toplevel)"
 HERE="tests/e2e/migration-rehearsal"
 IMAGE="nexus-migration-rehearsal"
@@ -120,7 +132,7 @@ RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 # suite when it drifts. Following the old wording blocked the 7.6.0 release
 # battery (2026-08-10). A prose comment that contradicts a mechanical test
 # loses to the test.
-COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.100}"
+COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.104}"
 # nexus-cfgo9: the PACKAGE-UPGRADE leg's starting point — a REAL, already
 # published PyPI release + the engine tag ITS OWN PINNED_SERVICE_TAG
 # resolves to (see CHANGELOG.md's "[6.9.0]" entry: "Ships with (and
@@ -333,7 +345,7 @@ _guided_restore() {
 # stamp it; _guided_restore puts exactly these back on exit.
 RELEASE_PROPS_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/release.properties.snapshot.XXXXXX")"
 cp "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT"
-trap '_guided_restore' EXIT
+trap 'diag_exit_guard; _guided_restore' EXIT
 
 [ "$COLD" = 1 ] && [ "$GUIDED" = 1 ] && { echo "--cold and --guided are different flows; pick one" >&2; exit 2; }
 
@@ -471,7 +483,7 @@ source "$SCRIPT_DIR/../../../scripts/lib/build-lease.sh"
 # evaluation instead of the documented exit 2. LOCKDIR cannot be referenced
 # by a trap before this line, where it is first assigned — reassign the
 # trap to the lock-aware form only now that it is safe to do so.
-trap '_guided_restore; build_lease_release service 2>/dev/null || true; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+trap 'diag_exit_guard; _guided_restore; build_lease_release service 2>/dev/null || true; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
 echo "[rdr-184] lock acquired: $LOCKDIR (pid $$)" >&2
 # Test seam (RDR-184 P0.2, nexus-ccs9v.2): tests/e2e/lib/harness_lock_test.sh
 # sets this to prove a concurrent invocation gets PAST the lock without ever
@@ -616,8 +628,11 @@ fi
 # touches unused entries, so this is safe even with other builds up.
 preflight_docker_prune() {
   local reclaimable_gb
-  reclaimable_gb="$(docker system df --format '{{.Type}} {{.Reclaimable}}' 2>/dev/null \
-    | awk '/^Build Cache/ {v=$3+0; if ($3 ~ /TB/) v=v*1024; else if ($3 !~ /GB/) v=0; print int(v)}')"
+  # A probe, never a gate: a transient daemon error here must not kill the
+  # rehearsal under pipefail (observed 2026-09-05 while another Testcontainers
+  # run shared the daemon), so the pipeline is guarded and defaults to 0.
+  reclaimable_gb="$( { docker system df --format '{{.Type}} {{.Reclaimable}}' 2>/dev/null \
+    | awk '/^Build Cache/ {v=$3+0; if ($3 ~ /TB/) v=v*1024; else if ($3 !~ /GB/) v=0; print int(v)}'; } || true)"
   reclaimable_gb="${reclaimable_gb:-0}"
   if [ "${reclaimable_gb:-0}" -gt 40 ] 2>/dev/null; then
     echo "[preflight] Docker build cache reclaimable ~${reclaimable_gb}GB (>40GB) — pruning (reserved-space 40GB keeps hot layers incl. the bge model + the split deps layer)…"
@@ -634,7 +649,7 @@ echo "[stage] Staging a minimal build context + building image (COLD=$COLD HOLE_
 # repo .dockerignore excludes dist/, and the inputs live in three different
 # trees — staging sidesteps both without touching the shared .dockerignore.
 STAGE="$(mktemp -d)"
-trap '_guided_restore; rm -rf "$STAGE"; build_lease_release service 2>/dev/null || true; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+trap 'diag_exit_guard; _guided_restore; rm -rf "$STAGE"; build_lease_release service 2>/dev/null || true; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
 cp "$(ls -t dist/conexus-*.whl | head -1)"            "$STAGE/"   # keep real PEP 427 name
 # Lock-derived dependency manifest for the split install layer (Dockerfile /
 # .cold / .fullstack): the wheel's bytes churn every build (embedded mtimes),
@@ -830,7 +845,7 @@ DCFG="$HOME/.docker/config.json"
 if [ -f "$DCFG" ] && grep -q '"credsStore"' "$DCFG"; then
   cp "$DCFG" "$STAGE/.docker-config.bak"
   python3 -c "import json,os;p=os.path.expanduser('~/.docker/config.json');d=json.load(open(p));d.pop('credsStore',None);json.dump(d,open(p,'w'),indent=2)"
-  trap '_guided_restore; cp "$STAGE/.docker-config.bak" "$DCFG"; rm -rf "$STAGE"; build_lease_release service 2>/dev/null || true; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+  trap 'diag_exit_guard; _guided_restore; cp "$STAGE/.docker-config.bak" "$DCFG"; rm -rf "$STAGE"; build_lease_release service 2>/dev/null || true; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
   echo "      (temporarily stripped credsStore from ~/.docker/config.json — restored on exit)"
 fi
 

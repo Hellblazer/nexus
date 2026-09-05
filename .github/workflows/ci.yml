@@ -566,7 +566,8 @@ jobs:
           # DOCLING NO LONGER USES THIS. Its layout/TableFormer/CodeFormula
           # models come from our OWN hosted mirror (release asset
           # ci-assets-docling-v1) via NEXUS_DOCLING_ARTIFACTS_PATH — see the
-          # "Fetch docling models" step below. Anonymous HuggingFace fetches
+          # "Prime docling artifacts" step below (.github/actions/prime-docling).
+          # Anonymous HuggingFace fetches
           # were the recurring "docling flake" (nexus-cxsbs): runners keep no
           # layer cache, so a cache MISS re-fetched ~1.1GB from HF and failed on
           # CAS data-processing errors / resets / 429s. Same reason the bge-768
@@ -650,7 +651,7 @@ jobs:
       - name: Install project + dev deps
         run: uv sync --group dev
 
-      - name: Fetch docling models from our own mirror
+      - name: Prime docling artifacts (cache or self-hosted asset)
         # WE HOST THESE. Nothing here may reach HuggingFace.
         #
         # History (nexus-cxsbs / nexus-c7gnx): docling loads layout +
@@ -663,24 +664,16 @@ jobs:
         # 2026-07-31 on PR #1433, pytest 3.12, "CAS data processing error"). A
         # retry budget larger than the job budget is decoration.
         #
-        # Now: one deterministic download of OUR release asset, and
-        # NEXUS_DOCLING_ARTIFACTS_PATH points docling at the extracted dir so it
-        # never resolves through the hub at all. Same pattern as the self-hosted
-        # bge-768 ONNX (ci-assets-bge-768-v1).
-        #
-        # Regenerate with:
-        #   docling-tools models download -o <dir> layout tableformer code_formula
-        #   tar -czf docling-artifacts-v1.tar.gz -C <dir> .
-        # then cut a -v2 tag if a docling bump changes the model set.
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.cache/nexus/docling-artifacts"
-          curl --fail --silent --show-error --location --retry 3 --retry-delay 5 \
-            -o /tmp/docling-artifacts.tar.gz \
-            "https://github.com/${{ github.repository }}/releases/download/ci-assets-docling-v1/docling-artifacts-v1.tar.gz"
-          tar -xzf /tmp/docling-artifacts.tar.gz -C "$HOME/.cache/nexus/docling-artifacts"
-          rm -f /tmp/docling-artifacts.tar.gz
-          echo "NEXUS_DOCLING_ARTIFACTS_PATH=$HOME/.cache/nexus/docling-artifacts" >> "$GITHUB_ENV"
+        # nexus-tl7bu: the one deterministic download of OUR release asset had
+        # no actions/cache in front of it, so every shard re-fetched the ~1GB
+        # tarball on EVERY run (measured 2026-09-03: 20 minutes on a single
+        # shard, cancelling it under the job timeout). Same composite-action
+        # shape as the self-hosted bge-768 ONNX (prime-bge-onnx,
+        # ci-assets-bge-768-v1): cache the extracted directory keyed on the
+        # asset tag, fetch only on a cache miss. NEXUS_DOCLING_ARTIFACTS_PATH
+        # points docling at the extracted dir so it never resolves through the
+        # hub at all.
+        uses: ./.github/actions/prime-docling
 
       - name: Verify docling extracts from the mirrored models
         # NON-VACUITY: proves docling actually performed the extraction

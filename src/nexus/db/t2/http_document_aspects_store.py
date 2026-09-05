@@ -148,8 +148,17 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     # still goes through the inherited, self-healing super()._post/_get
     # (RefreshableHttpStoreMixin._send), never self._client directly.
 
-    def _post(self, path: str, body: dict[str, Any], *, idempotent: bool = True) -> Any:
-        return super()._post(f"/v1/aspects{path}", body, idempotent=idempotent)
+    def _post(
+        self, path: str, body: dict[str, Any], *, idempotent: bool = True, mutates: bool = True
+    ) -> Any:
+        # nexus-a2qhz: mutates forwarded to the mixin unchanged (default
+        # True covers every write here; the three operator_* reads sent
+        # over POST pass mutates=False). Missing this forward previously
+        # TypeError'd every call passing the kwarg, the same class of
+        # regression caught in HttpTokenStore.list_tokens during review.
+        return super()._post(
+            f"/v1/aspects{path}", body, idempotent=idempotent, mutates=mutates
+        )
 
     def _get(self, path: str, params: dict[str, Any] | None = None, *, idempotent: bool = True) -> Any:
         q = {k: str(v) for k, v in (params or {}).items() if v is not None}
@@ -398,7 +407,7 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "field": field,
             "predicate": predicate,
             "source_uris": source_uris,
-        })
+        }, mutates=False)
         result: list[str] = r.get("matched_uris", [])
         _log.debug(
             "http_aspects.operator_filter",
@@ -432,7 +441,7 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "op": "groupby",
             "field": field,
             "source_uris": source_uris,
-        })
+        }, mutates=False)
         groups: list[dict] = r.get("uri_groups", [])
         result: dict[str, str | None] = {}
         for entry in groups:
@@ -471,7 +480,7 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "op": "confidence_aggregate",
             "reducer_kind": reducer_kind,
             "source_uris": source_uris,
-        })
+        }, mutates=False)
         value = r.get("value")
         if value is None:
             return None

@@ -2,6 +2,8 @@
 
 **Use Serena for symbol tasks; Grep for text.** Project auto-activated via `--project-from-cwd`.
 
+**Root is fixed at server start.** Serena resolves every path against the project root it found when the MCP server started, not against your cwd. If your cwd is a linked git worktree (dispatched with `isolation: "worktree"`), Serena's write tools are denied by the sn hook and a worktree section above this one tells you what to use instead; read tools still answer, against the primary checkout.
+
 ### Setup — load tools before first use
 
 Tool names vary by backend. The JetBrains backend prefixes `jet_brains_`; the LSP backend is unprefixed. Load both variants via ToolSearch; only the available ones resolve:

@@ -54,11 +54,27 @@ _FRECENCY_WEIGHT: float = 0.3
 # distance, one code__ one knowledge__ (the exact tie a shared-model
 # deployment produces), scored 0.0 vs 1.0 purely from the collection name.
 # Classification is therefore by the RESOLVED EMBEDDING MODEL
-# (:func:`nexus.corpus.embedding_model_for_collection` — the same resolver
-# the index/query write and read paths already treat as authoritative),
-# and calibration is a hard no-op (factor 1.0 for every result) whenever
-# the call's result set resolves to ONE distinct model — see
+# (:func:`nexus.corpus.embedding_model_for_collection_calibrated`), and
+# calibration is a hard no-op (factor 1.0 for every result) whenever the
+# call's result set resolves to ONE distinct model — see
 # :func:`_resolve_calibration_factors`, which is where that gate lives.
+#
+# nexus-mc1l1 (2026-09-05): the resolver above is CALIBRATION-SPECIFIC,
+# not :func:`nexus.corpus.embedding_model_for_collection` (the resolver
+# the index/query write and read paths treat as authoritative for their
+# own purposes). For a LEGACY (pre-RDR-103, 2-segment) collection name
+# that shared resolver's fallback always guesses cloud/Voyage from the
+# collection-name PREFIX, regardless of the install's actual embedder —
+# so a local-mode install with grandfathered legacy collections
+# reproduced the full original bug (one code__ one knowledge__ result at
+# an identical raw distance, scored 1.0 vs 0.0 purely from the name).
+# The calibration-specific resolver instead asks what the install
+# ACTUALLY embeds a legacy name's content type with right now, so every
+# legacy name in a local-mode (non-Voyage) install collapses onto the
+# single local model that install has — a true no-op, not a name-derived
+# guess — while cloud-mode (and local-mode-opted-into-Voyage) legacy
+# names keep the real per-content-type split. See that function's
+# docstring for the full design.
 _CALIBRATION_THRESHOLDS_BY_MODEL: dict[str, float] = {
     "voyage-code-3": 0.45,
     "voyage-context-3": 0.65,
@@ -100,14 +116,14 @@ def _resolve_calibration_factors(results: list[SearchResult]) -> dict[str, float
     no-op, not a prefix-derived reshuffle. Only when two or more distinct
     models are actually present does a real per-model factor apply.
     """
-    from nexus.corpus import embedding_model_for_collection  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
+    from nexus.corpus import embedding_model_for_collection_calibrated  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
 
     model_by_collection: dict[str, str] = {}
 
     def _model_for(collection: str) -> str:
         model = model_by_collection.get(collection)
         if model is None:
-            model = embedding_model_for_collection(collection)
+            model = embedding_model_for_collection_calibrated(collection)
             model_by_collection[collection] = model
         return model
 

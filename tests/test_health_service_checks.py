@@ -925,6 +925,7 @@ class TestCheckMigrationState:
 _ALL_TENANT_TABLES = [
     "nexus.aspect_extraction_queue",
     "nexus.aspect_promotion_log",
+    "nexus.capability_census",  # nexus-gjv9b PART 1 (mirrors health._RLS_TENANT_TABLES)
     "nexus.catalog_collections",
     "nexus.catalog_document_chunks",
     "nexus.catalog_documents",
@@ -943,6 +944,7 @@ _ALL_TENANT_TABLES = [
     "nexus.frecency",
     "nexus.gc_audit",  # nexus-jqvzk: destructive-T3-op audit record (catalog-018)
     "nexus.hook_failures",
+    "nexus.index_failures",  # nexus-nukn3: telemetry-009-index-failures.xml (mirrors health._RLS_TENANT_TABLES)
     "nexus.ladder_completions",
     "nexus.memory",
     # ("nexus.migration_jobs" removed — nexus-tk070.p5b, reworked
@@ -959,6 +961,7 @@ _ALL_TENANT_TABLES = [
     "nexus.plans",
     "nexus.relevance_log",
     "nexus.retention_markers",
+    "nexus.routing_events",  # nexus-gjv9b PART 2 (mirrors health._RLS_TENANT_TABLES)
     "nexus.search_telemetry",
     "nexus.taxonomy_centroids",  # RDR-191 Phase 4 (nexus-o8dil.51/.47)
     "nexus.taxonomy_meta",

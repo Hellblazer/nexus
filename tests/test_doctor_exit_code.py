@@ -18,7 +18,10 @@ from nexus.health import HealthResult
 
 
 def _stub_sweep(monkeypatch, results: list[HealthResult]) -> None:
-    monkeypatch.setattr(health_mod, "run_health_checks", lambda: (results, False))
+    monkeypatch.setattr(
+        health_mod, "run_health_checks",
+        lambda *_a, **_kw: (results, False),
+    )
     # The supplementary checks are real probes of the box; the exit code
     # under test is the main sweep's. Keep them out of the picture.
     monkeypatch.setattr(doctor_mod, "_run_supplementary_checks", lambda: None)

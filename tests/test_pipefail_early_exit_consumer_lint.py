@@ -856,18 +856,18 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # probe-set phase, shifting every site below by +12. Numbers
         # regenerated from the detector itself (_early_exit_consumer_hits),
         # not arithmetic.
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:87",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:171",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:174",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:184",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:190",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:195",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:201",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:210",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:221",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:229",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:233",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:295",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:133",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:217",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:220",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:230",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:236",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:241",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:247",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:256",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:267",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:275",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:279",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:343",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:142",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:193",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:238",
@@ -931,16 +931,16 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # truncate a producer still doing work. This list is line-pinned, so
         # ANY edit to run.sh restale-izes it; that fragility is the lint's
         # own known shape, not a defect introduced here.
-        "tests/e2e/migration-rehearsal/run.sh:168",
-        "tests/e2e/migration-rehearsal/run.sh:186",
-        "tests/e2e/migration-rehearsal/run.sh:187",
-        "tests/e2e/migration-rehearsal/run.sh:200",
-        "tests/e2e/migration-rehearsal/run.sh:211",
-        "tests/e2e/migration-rehearsal/run.sh:638",
-        "tests/e2e/migration-rehearsal/run.sh:676",
-        "tests/e2e/migration-rehearsal/run.sh:731",
-        "tests/e2e/migration-rehearsal/run.sh:748",
-        "tests/e2e/migration-rehearsal/run.sh:796",
+        "tests/e2e/migration-rehearsal/run.sh:180",
+        "tests/e2e/migration-rehearsal/run.sh:198",
+        "tests/e2e/migration-rehearsal/run.sh:199",
+        "tests/e2e/migration-rehearsal/run.sh:212",
+        "tests/e2e/migration-rehearsal/run.sh:223",
+        "tests/e2e/migration-rehearsal/run.sh:653",
+        "tests/e2e/migration-rehearsal/run.sh:691",
+        "tests/e2e/migration-rehearsal/run.sh:746",
+        "tests/e2e/migration-rehearsal/run.sh:763",
+        "tests/e2e/migration-rehearsal/run.sh:811",
         # --- tests/e2e/mac-signed-binary-gate.sh (7 entries): needs an
         # actually-signed macOS binary + `spctl`/`codesign` on real macOS
         # to safely verify a rewrite of the signature-inspection logic.
@@ -962,14 +962,14 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # lines and shifted every site below the first extraction point
         # (:107 in the pre-edit file). Numbers regenerated from the
         # detector itself (_early_exit_consumer_hits), not arithmetic.
-        "service/native-smoke.sh:82",
-        "service/native-smoke.sh:135",
-        "service/native-smoke.sh:196",
-        "service/native-smoke.sh:248",
-        "service/native-smoke.sh:340",
-        "service/native-smoke.sh:378",
-        "service/native-smoke.sh:384",
-        "service/native-smoke.sh:387",
+        "service/native-smoke.sh:89",
+        "service/native-smoke.sh:142",
+        "service/native-smoke.sh:203",
+        "service/native-smoke.sh:255",
+        "service/native-smoke.sh:347",
+        "service/native-smoke.sh:385",
+        "service/native-smoke.sh:391",
+        "service/native-smoke.sh:394",
         # --- service/linux-native-verify.sh:43 (1 entry): a GENUINE
         # FALSE POSITIVE, not a "needs live infra" deferral -- the
         # matched pipe (`native-image --version | head -1`) sits inside a
@@ -1183,8 +1183,8 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         #   this guarded site itself gates nothing.
         #   Retargeted AGAIN (nexus-l8xnz): +12 for the Phase F header
         #   addition described above -- :264 -> :276, :128 -> :140.
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:293",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:140",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:341",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:186",
         # tests/e2e/release-sandbox.sh (3 entries): the already-commented
         # `|| true: head is an early-exit consumer...` idiom this file's
         # own docstring cites as the sanctioned shape -- readback for
@@ -1204,9 +1204,9 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         #   can be appended only for --check-schema, +11 lines before this
         #   region): :1130 -> :1141, :1134 -> :1145, :1182 -> :1193. Same 3
         #   sites, same rationale -- only an earlier, unrelated loop grew.
-        "tests/e2e/release-sandbox.sh:1173",
-        "tests/e2e/release-sandbox.sh:1177",
-        "tests/e2e/release-sandbox.sh:1225",
+        "tests/e2e/release-sandbox.sh:1230",
+        "tests/e2e/release-sandbox.sh:1234",
+        "tests/e2e/release-sandbox.sh:1282",
     }
 )
 _PIPEFAIL_OR_TRUE_SITES_CEILING = 9

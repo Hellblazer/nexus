@@ -233,6 +233,210 @@ class TestCheckT2DroppedWrites:
         assert "historical" in r.detail.lower()
         assert "retired" in r.detail.lower()
 
+    def test_live_producer_drops_are_soft_warn(self, tmp_path, monkeypatch):
+        """nexus-gjv9b PARTs 1/2: capability_census and routing_events both
+        adopted record_drop() for their own service-down degradation —
+        the meter is no longer historical-only, and a drop from either
+        must restore the soft-WARN posture RDR-129 B4 always intended for
+        a future live producer (record_drop's own docstring names this
+        exact case)."""
+        from nexus import dropped_writes
+
+        monkeypatch.setenv(
+            "NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl")
+        )
+        dropped_writes.record_drop(
+            hook="routing_events", collection="", rows=1, error="connection refused",
+        )
+        results = _check_t2_dropped_writes()
+        r = results[0]
+        assert r.ok is False
+        assert "routing_events" in r.detail
+        assert "historical" not in r.detail.lower()
+
+    def test_aged_out_live_producer_drop_is_no_longer_soft_warn(self, tmp_path, monkeypatch):
+        """nexus-gjv9b review fold-in (critique CRITICAL 2): a decay
+        window is required, or one drop from months ago soft-WARNs nx
+        doctor FOREVER — exactly the permanent-false-alarm class
+        nexus-piwya.9 already retired the founding chash-hook alarm to
+        avoid. A drop older than the 24h recency window must fall back
+        to the historical/ok=True framing, while the LIFETIME total
+        stays visible in the detail."""
+        import json as _json
+
+        log_path = tmp_path / "drops.jsonl"
+        monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(log_path))
+        old_record = {
+            "ts": "2020-01-01T00:00:00Z",
+            "hook": "routing_events",
+            "collection": "",
+            "rows": 1,
+            "error": "connection refused",
+        }
+        log_path.write_text(_json.dumps(old_record) + "\n")
+
+        results = _check_t2_dropped_writes()
+        r = results[0]
+        assert r.ok is True, r.detail
+        assert "1" in r.detail  # lifetime total stays visible
+        assert "routing_events" in r.detail
+
+    def test_recent_and_aged_drops_both_counted_lifetime_only_recent_alarms(
+        self, tmp_path, monkeypatch,
+    ):
+        """A mix of an old (aged-out) and a fresh drop: the fresh one
+        alone must drive the soft-WARN, and the lifetime total must
+        still include both."""
+        from nexus import dropped_writes
+
+        log_path = tmp_path / "drops.jsonl"
+        monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(log_path))
+        log_path.write_text(
+            '{"ts": "2020-01-01T00:00:00Z", "hook": "routing_events", '
+            '"collection": "", "rows": 1, "error": "old"}\n'
+        )
+        dropped_writes.record_drop(
+            hook="capability_census", collection="", rows=1, error="fresh failure",
+        )
+
+        results = _check_t2_dropped_writes()
+        r = results[0]
+        assert r.ok is False
+        assert "capability_census" in r.detail
+        assert "2" in r.detail  # lifetime total = 2 (old + fresh)
+
+    def test_window_of_only_guard_refused_drops_is_ok_not_soft_warn(
+        self, tmp_path, monkeypatch,
+    ):
+        """nexus-gjv9b review fold-in round 3, code-review item 1: a
+        window made ENTIRELY of guard_refused drops is an un-opted-in dev
+        checkout's production-write guard correctly protecting itself
+        (nexus-a2qhz) on every SessionEnd -- not evidence the engine is
+        failing. Must report ok=True and must NOT use the "engine is
+        failing" wording the real-failure branch uses."""
+        from nexus import dropped_writes
+
+        monkeypatch.setenv(
+            "NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl")
+        )
+        for _ in range(3):
+            dropped_writes.record_drop(
+                hook="capability_census", collection="", rows=1,
+                error="STOP: refusing a WRITE to 'https://x'.",
+            )
+
+        results = _check_t2_dropped_writes()
+        r = results[0]
+        assert r.ok is True, r.detail
+        assert "guard" in r.detail.lower()
+        assert "engine is failing" not in r.detail.lower()
+
+    def test_one_non_guard_drop_mixed_in_still_soft_warns(
+        self, tmp_path, monkeypatch,
+    ):
+        """A SINGLE non-guard-refused drop in the window must keep the
+        real-failure WARN path live -- the guard-refused exemption is
+        deliberately all-or-nothing, never "mostly benign"."""
+        from nexus import dropped_writes
+
+        monkeypatch.setenv(
+            "NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl")
+        )
+        dropped_writes.record_drop(
+            hook="capability_census", collection="", rows=1,
+            error="STOP: refusing a WRITE to 'https://x'.",
+        )
+        dropped_writes.record_drop(
+            hook="routing_events", collection="", rows=1,
+            error="HTTP 401: unauthorized",
+        )
+
+        results = _check_t2_dropped_writes()
+        r = results[0]
+        assert r.ok is False, (
+            "a single non-guard-refused drop mixed into the window must "
+            f"keep the real-failure WARN path live -- got: {r}"
+        )
+
+    def test_window_of_only_route_absent_drops_reports_engine_behind_the_client(
+        self, tmp_path, monkeypatch,
+    ):
+        """nexus-gjv9b review fold-in round 4: a plugin cut can ship a
+        writer ahead of the paired engine tag -- every call 404s until
+        the engine catches up. This is version skew, never "the engine
+        is failing"; must report ok=True with the info framing, not the
+        real-failure WARN wording."""
+        from nexus import dropped_writes
+
+        monkeypatch.setenv(
+            "NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl")
+        )
+        for _ in range(3):
+            dropped_writes.record_drop(
+                hook="routing_events", collection="", rows=1,
+                error="routing_events POST failed: route_absent", cause="route_absent",
+            )
+
+        results = _check_t2_dropped_writes()
+        r = results[0]
+        assert r.ok is True, r.detail
+        assert "engine behind the client" in r.detail
+        assert "routing_events" in r.detail
+        assert "engine is failing" not in r.detail.lower()
+
+    def test_window_of_mixed_guard_refused_and_route_absent_is_ok(
+        self, tmp_path, monkeypatch,
+    ):
+        """A dev checkout's guard refusal (capability_census) and a
+        properly-opted-in install hitting a not-yet-served route
+        (routing_events) can land in the SAME meter window -- still
+        version skew / expected behavior throughout, never a WARN."""
+        from nexus import dropped_writes
+
+        monkeypatch.setenv(
+            "NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl")
+        )
+        dropped_writes.record_drop(
+            hook="capability_census", collection="", rows=1,
+            error="STOP: refusing a WRITE to 'https://x'.",
+        )
+        dropped_writes.record_drop(
+            hook="routing_events", collection="", rows=1,
+            error="routing_events POST failed: route_absent", cause="route_absent",
+        )
+
+        results = _check_t2_dropped_writes()
+        r = results[0]
+        assert r.ok is True, r.detail
+
+    def test_one_real_failure_mixed_with_route_absent_still_soft_warns(
+        self, tmp_path, monkeypatch,
+    ):
+        """A SINGLE non-benign cause (e.g. a real 401) mixed into an
+        otherwise route_absent window must keep the real-failure WARN
+        path live -- same all-or-nothing discipline as the
+        guard_refused-only exemption."""
+        from nexus import dropped_writes
+
+        monkeypatch.setenv(
+            "NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl")
+        )
+        dropped_writes.record_drop(
+            hook="routing_events", collection="", rows=1,
+            error="routing_events POST failed: route_absent", cause="route_absent",
+        )
+        dropped_writes.record_drop(
+            hook="routing_events", collection="", rows=1,
+            error="HTTP 401: unauthorized",
+        )
+
+        results = _check_t2_dropped_writes()
+        r = results[0]
+        assert r.ok is False, (
+            "a single non-benign drop mixed into a route_absent window "
+            f"must keep the real-failure WARN path live -- got: {r}"
+        )
+
 
 # ── T2 daemon singleton / multiplicity (RDR-129 A3, nexus-exa2p) ────────────
 

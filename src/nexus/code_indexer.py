@@ -6,8 +6,9 @@ Extracted from indexer.py (RDR-032).  Public API::
 
     index_code_file(ctx: IndexContext, file_path: Path) -> int
 
-The module owns _extract_context (AST context extraction) and the associated
-language tables (_COMMENT_CHARS, DEFINITION_TYPES).
+The module owns _extract_context (AST context extraction), _is_import_only_chunk
+(RDR-200 Phase 1c import/package header classification), and the associated
+language tables (_COMMENT_CHARS, DEFINITION_TYPES, _IMPORT_NODE_TYPES).
 """
 from __future__ import annotations
 
@@ -307,6 +308,140 @@ def _extract_context(
     return (class_name, method_name)
 
 
+# Tree-sitter node types that represent a package/module declaration or an
+# import statement -- the structural, non-evidentiary header of a source
+# file (RDR-200 Phase 1c evidence hygiene, nexus-4jj40 Sam's decision 3).
+# Near-identical header boilerplate (Java package+imports, Python import
+# blocks, TS/JS import blocks, Go import blocks, ...) embeds close together
+# across unrelated, self-indexed repos and crowds out real evidentiary
+# matches in cross-corpus semantic search. Only languages where the grammar
+# names these node types explicitly are listed (verified empirically against
+# tree-sitter-language-pack, not guessed) -- an unlisted language's chunks
+# are never classified as import-only, matching ``_extract_context``'s
+# fail-conservative "when unclassifiable, leave it alone" design. This is a
+# per-CHUNK content rule, never a path or category rule -- the two
+# approaches RDR-200 Phase 1c already tried and reverted (see
+# ``nexus.plans.runner``'s non_evidentiary docstring history).
+_IMPORT_NODE_TYPES: dict[str, frozenset[str]] = {
+    "java": frozenset({"package_declaration", "import_declaration"}),
+    "python": frozenset({
+        "import_statement", "import_from_statement", "future_import_statement",
+    }),
+    "javascript": frozenset({"import_statement"}),
+    "typescript": frozenset({"import_statement"}),
+    "tsx": frozenset({"import_statement"}),
+    "go": frozenset({"package_clause", "import_declaration"}),
+    "c_sharp": frozenset({"using_directive"}),
+    "kotlin": frozenset({"package_header", "import_list"}),
+    "rust": frozenset({"use_declaration"}),
+    "cpp": frozenset({"preproc_include"}),
+    "c": frozenset({"preproc_include"}),
+    "scala": frozenset({"package_clause", "import_declaration"}),
+}
+
+# Tree-sitter node types for a line or block COMMENT, per language --
+# verified empirically against tree-sitter-language-pack (round 4 fix,
+# nexus-4jj40 / T2 critique [24606] Critical 1). A comment neither counts
+# as evidence nor disqualifies a chunk from being import-only: a BSD/SPDX
+# license header preceding ``package``+imports, or a Javadoc summary
+# trailing the tail imports, is itself non-evidentiary boilerplate, and
+# the pre-fix classifier's "every overlapping node must be a header type"
+# rule wrongly treated either as disqualifying "other content" -- verified
+# against delos/choam's real CHOAM.java, where 2 of its 3 header-region
+# chunks failed to classify for exactly this reason. A language's comment
+# node type(s) are listed here ONLY when distinct from its entry in
+# ``_IMPORT_NODE_TYPES`` (never overlapping); a language with no entry
+# here simply has no comment nodes filtered, matching the pre-fix
+# behaviour for that language.
+_COMMENT_NODE_TYPES: dict[str, frozenset[str]] = {
+    "java": frozenset({"line_comment", "block_comment"}),
+    "python": frozenset({"comment"}),
+    "javascript": frozenset({"comment"}),
+    "typescript": frozenset({"comment"}),
+    "tsx": frozenset({"comment"}),
+    "go": frozenset({"comment"}),
+    "c_sharp": frozenset({"comment"}),
+    "kotlin": frozenset({"line_comment", "multiline_comment"}),
+    "rust": frozenset({"line_comment", "block_comment"}),
+    "cpp": frozenset({"comment"}),
+    "c": frozenset({"comment"}),
+    "scala": frozenset({"comment", "block_comment"}),
+}
+
+
+def _is_import_only_chunk(
+    source: bytes,
+    language: str,
+    chunk_start_0idx: int,
+    chunk_end_0idx: int,
+) -> bool:
+    """True when every top-level node overlapping the chunk's line range is
+    a package/module declaration or import statement, IGNORING comments.
+
+    Only top-level (direct root children) nodes are examined: import and
+    package statements are never nested inside a method or class body, so
+    a chunk fully enclosed by one (``_extract_context`` already returns a
+    non-empty ``class_ctx``/``method_ctx`` for it) can never satisfy this
+    by construction -- callers should skip the call entirely in that case.
+
+    Comment nodes (``_COMMENT_NODE_TYPES``) are filtered out of the
+    overlap set before classification: a comment neither counts as
+    evidence nor disqualifies a chunk (round 4 fix, T2 [24606] Critical
+    1) -- a license header or a trailing Javadoc summary sitting beside
+    real header statements must not flip an otherwise-import-only chunk
+    to "mixed". A chunk of comments ALONE (no header statement at all)
+    still classifies ``False``: this function's job is to find import-only
+    chunks specifically, not to generally suppress comment-only chunks,
+    and stamping a bare comment block as ``section_type="imports"`` would
+    misdescribe it.
+
+    A module/file DOCSTRING is deliberately NOT comment-equivalent here.
+    Python's module docstring is a top-level ``expression_statement``
+    (wrapping a ``string``), never a ``comment`` node -- it is real,
+    author-written content that usually carries evidentiary value (module
+    purpose, usage notes), so a chunk mixing a docstring with imports
+    stays "mixed" and is never stamped ``imports``. This is a considered
+    per-language design decision, not an oversight: only line/block
+    COMMENT node types are neutral; nothing else is.
+
+    Returns ``False`` (never import-only) for: a language absent from
+    ``_IMPORT_NODE_TYPES``, a parser/parse failure, an empty overlap (no
+    top-level node touches the chunk range at all), a chunk of comments
+    with no header statement, or a chunk that mixes header statements
+    with ANY other non-comment top-level content (a docstring, a
+    constant, a class) -- classification is per chunk content, never per
+    path or owner.
+    """
+    header_types = _IMPORT_NODE_TYPES.get(language)
+    if not header_types:
+        return False
+    comment_types = _COMMENT_NODE_TYPES.get(language, frozenset())
+
+    try:
+        from tree_sitter_language_pack import get_parser  # lazy import  # noqa: PLC0415 (deferred import; rare/branch-local path or circular-dep / startup-cost avoidance)
+        # tree-sitter-language-pack uses "csharp" not "c_sharp" (mirrors
+        # nexus.chunker._make_code_splitter's own translation).
+        parser_name = "csharp" if language == "c_sharp" else language
+        parser = get_parser(parser_name)
+        tree = parser.parse(source)
+    except Exception as exc:  # noqa: BLE001 (best-effort; error surfaced via log, must not crash caller)
+        _log.debug("import_only_check_parse_failed", language=language, error=str(exc))
+        return False
+
+    overlapping = [
+        node for node in tree.root_node.children
+        if not (node.end_point[0] < chunk_start_0idx or node.start_point[0] > chunk_end_0idx)
+    ]
+    if not overlapping:
+        return False
+    substantive = [node for node in overlapping if node.type not in comment_types]
+    if not substantive:
+        # Comments only, no header statement at all -- not an import-only
+        # chunk; there is nothing to classify as "imports".
+        return False
+    return all(node.type in header_types for node in substantive)
+
+
 def index_code_file(ctx: IndexContext, file_path: Path) -> int:
     """Index a single code file into the code__ collection.
 
@@ -314,16 +449,43 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
     content, computes SHA-256, performs staleness check, AST-chunks, builds
     embed-only prefix per chunk, embeds via Voyage AI, and upserts to ChromaDB.
 
-    Returns the post-filter chunk count (chunks upserted), or 0 if
-    skipped (current) or failed.
+    Returns the post-filter chunk count (chunks upserted), or 0 ONLY when
+    the file is legitimately fresh (staleness check hit — content and
+    embedding model unchanged). nexus-hg2dw (critique round 2, T2
+    critique-nexus-hg2dw-36602c67f [24598] finding 4): every OTHER
+    zero-content outcome (the file cannot be decoded as UTF-8 text, or
+    decodes fine but produces no usable chunks) now raises
+    :class:`~nexus.errors.UnextractableContentError` instead of silently
+    returning 0, mirroring ``prose_indexer.index_prose_file``'s identical
+    treatment — a plain 0 return was indistinguishable from a legitimate
+    skip, which left a document Pass 1 had already registered fenced
+    nowhere. The raise reuses ``run_file_loop``'s existing nexus-deyd5
+    per-record-survivable handling.
     """
     from nexus.chunker import chunk_file  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.errors import UnextractableContentError  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
+
+    # nexus-hg2dw: resolved up front, before the read even happens, so a
+    # decode failure below can still fence-fail this document. Catalog
+    # Document.doc_id (RDR-101 Phase 3 PR δ): empty string when no
+    # catalog handle exists.
+    catalog_doc_id = (
+        ctx.doc_id_resolver(file_path) if ctx.doc_id_resolver is not None else ""
+    )
+
+    def _fence_fail_and_raise(reason: str) -> None:
+        # nexus-hg2dw: see prose_indexer.index_prose_file's identical
+        # helper for the full rationale.
+        if catalog_doc_id:
+            from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+            _fence_fail(catalog_doc_id, reason)
+        raise UnextractableContentError(f"{file_path}: {reason}")
 
     try:
         content = file_path.read_text(encoding="utf-8")
     except (UnicodeDecodeError, OSError) as exc:
         _log.debug("skipped non-text file", path=str(file_path), error=type(exc).__name__)
-        return 0
+        _fence_fail_and_raise(f"cannot decode as UTF-8 text ({type(exc).__name__})")
 
     source_bytes = content.encode("utf-8")
     content_hash = _hl.sha256(source_bytes).hexdigest()
@@ -332,19 +494,34 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
     comment_char = _COMMENT_CHARS.get(language, "#")
     rel_path = file_path.relative_to(ctx.repo_path)
 
-    # Staleness check — skip if content + model unchanged.
-    # nexus-dcym: prefer doc_id-keyed lookup when the catalog hook
-    # supplied a resolver. (The source_path fallback was deleted as dead
-    # code by nexus-afudo, 2026-08-05 — RDR-102 Phase 5b.)
-    catalog_doc_id_for_staleness = (
-        ctx.doc_id_resolver(file_path) if ctx.doc_id_resolver is not None else ""
-    )
+    # Staleness check — skip if content + model unchanged. Untouched by
+    # nexus-hg2dw: a file that reaches this point and reads fresh was
+    # never added to the registration-time needs_fence set, so there is
+    # nothing to reconcile for it — a plain, unfenced `return 0` remains
+    # correct here.
     if not ctx.force and check_staleness(
         ctx.col, file_path, content_hash, ctx.embedding_model,
-        doc_id=catalog_doc_id_for_staleness,
+        doc_id=catalog_doc_id,
         cache=ctx.staleness_cache,
     ):
         return 0
+
+    # nexus-hg2dw critique round 2 (T2 critique-nexus-hg2dw-36602c67f
+    # [24598] finding 1 CRITICAL; code-review-nexus-hg2dw-36602c67f
+    # [24601] finding 1): fence-begin THIS FILE right here, immediately
+    # after staleness determines real work is needed and BEFORE any
+    # chunking/embedding — see prose_indexer.index_prose_file's identical
+    # call site for the full rationale (bounding a hard kill's blast
+    # radius to whatever is actively in flight, not the whole run).
+    if catalog_doc_id:
+        try:
+            from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 — deferred import; test patch target
+            _fence_begin(catalog_doc_id, content_hash, ctx.corpus)
+        except Exception as exc:  # noqa: BLE001 — advisory: a fence-begin defect must never abort indexing
+            _log.warning(
+                "index_run_fence_begin_per_file_failed",
+                doc_id=catalog_doc_id, error=str(exc),
+            )
 
     # nexus-7niu: per-stage timer instrumentation. Silent when
     # ``ctx.stage_timers is None`` — no overhead, no output.
@@ -357,7 +534,7 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
         chunks = chunk_file(file_path, content, chunk_lines=ctx.chunk_lines)
     if not chunks:
         _log.debug("skipped file with no chunks", path=str(file_path))
-        return 0
+        _fence_fail_and_raise("no chunks produced from source content")
 
     ids: list[str] = []
     documents: list[str] = []
@@ -376,15 +553,6 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
             _line_offsets.append(_i + 1)
 
     from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415  — circular-dep avoidance (nexus.metadata_schema)
-
-    # Catalog Document.doc_id (RDR-101 Phase 3 PR δ): resolved once per
-    # file. Empty string when no catalog handle exists. RDR-108 Phase 3
-    # removed doc_id from chunk metadata; the catalog tumbler now flows
-    # through the post-store batch hook instead so the manifest can
-    # bind chunks to the document at write time.
-    catalog_doc_id = (
-        ctx.doc_id_resolver(file_path) if ctx.doc_id_resolver is not None else ""
-    )
 
     for i, chunk in enumerate(chunks):
         title = f"{rel_path}:{chunk['line_start']}-{chunk['line_end']}"
@@ -416,6 +584,17 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
         section_chain = [s for s in (class_ctx, method_ctx) if s]
         section_title = " > ".join(section_chain)
         section_type = "method" if method_ctx else ("class" if class_ctx else "")
+        # RDR-200 Phase 1c evidence hygiene (nexus-4jj40 Sam's decision 3):
+        # a chunk not already inside a method/class body may still be
+        # nothing but the file's package/import header -- structural, not
+        # evidentiary. Only checked when section_type is still empty: a
+        # chunk fully enclosed by a method or class can never be
+        # import-only (see ``_is_import_only_chunk``'s docstring), so this
+        # skips the extra parse for the common method/class case.
+        if not section_type and _is_import_only_chunk(
+            source_bytes, language, chunk["line_start"] - 1, chunk["line_end"] - 1
+        ):
+            section_type = "imports"
         # RDR-101 Phase 5c (nexus-o6aa.13) dropped corpus, store_type,
         # git_meta from the chunk schema. Title kept (find_ids_by_title
         # is load-bearing for nx store / MCP store_get). RDR-108 Phase 3
@@ -451,7 +630,7 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
         if d and d.strip()
     ]
     if not valid:
-        return 0
+        _fence_fail_and_raise("all chunks empty after whitespace filtering")
     ids, documents, metadatas, embed_texts = map(list, zip(*valid))
 
     # Embed using prefixed texts for improved retrieval quality; raw documents are stored.
@@ -504,11 +683,9 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
 
     # nexus-vw594 F1: producer #5 (nx index repo, code, legacy per-file
     # fallback — reached when the ChunkBatcher rejects the file or is
-    # absent). Fence begin BEFORE the upload, mirroring doc_indexer.py's
-    # single-flush producers; this path was previously entirely unfenced.
-    if catalog_doc_id:
-        from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 — deferred import; test patch target
-        _fence_begin(catalog_doc_id, content_hash, ctx.corpus)
+    # absent). nexus-hg2dw critique round 2: the fence-begin for this
+    # file already fired above, right after the staleness check — no
+    # second call needed here.
 
     with _stage("upload"):
         _log.debug("upserting", file=str(file_path), chunks=total_chunks)
@@ -519,7 +696,7 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
                 documents=documents,
                 embeddings=embeddings,
                 metadatas=metadatas,
-                force_re_embed=ctx.force,
+                force_re_embed=ctx.force_re_embed,
             )
         except Exception as upload_exc:
             # nexus-bhlfy: mirrors commands/store.py's cotmr fix — stamp

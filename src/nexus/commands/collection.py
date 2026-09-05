@@ -750,6 +750,20 @@ def reindex_cmd(name: str, force: bool) -> None:
     # repo. ``run_collection_postprocessing`` is now the shared entry
     # point.
     if indexed > 0:
+        # nexus-m20mf P3 fold-in (critic finding 2): this command is a
+        # DIFFERENT Click group from `index` (which builds its own shared
+        # client per `nx index repo` invocation) -- `run_collection_
+        # postprocessing` takes an explicit client= specifically so it
+        # never silently falls back to "whichever Click group happens to
+        # be active" (there was no such group active here before this
+        # fix, so this command's single call always built 8 unshared
+        # httpx.Client()s). Built locally (not at the `collection` group
+        # level) since this is the ONLY `collection` subcommand that
+        # touches T2 -- building one for every other subcommand would be
+        # pure overhead. Closed in the finally below, by the owner that
+        # built it (never by run_collection_postprocessing itself).
+        from nexus.db.t2._refreshable_client import build_shared_t2_client  # noqa: PLC0415 — deferred to avoid circular import at module load
+        _t2_client = build_shared_t2_client()
         try:
             from nexus.commands.index import run_collection_postprocessing  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
             # Resolve repo_path from the registry when available so the
@@ -795,13 +809,15 @@ def reindex_cmd(name: str, force: bool) -> None:
                             break
             except Exception:  # noqa: BLE001 — best-effort repo-path resolution; non-fatal
                 pass  # repo-path resolution is best-effort
-            run_collection_postprocessing([name], repo_path=repo_path)
+            run_collection_postprocessing([name], repo_path=repo_path, client=_t2_client)
         except Exception as exc:  # noqa: BLE001 — post-processing failure surfaced via click.echo, non-fatal
             click.echo(
                 f"Note: post-processing (taxonomy / links / context) "
                 f"failed: {exc}. Run `nx index repo <path>` to retry.",
                 err=True,
             )
+        finally:
+            _t2_client.close()
 
 
 @collection.command("verify")

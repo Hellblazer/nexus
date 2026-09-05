@@ -77,8 +77,17 @@ class HttpCentroidStore(RefreshableHttpStoreMixin):
         *,
         _token: str | None = None,
         _transport: httpx.BaseTransport | None = None,
+        client: httpx.Client | None = None,
     ) -> None:
-        super().__init__(base_url, tenant, _token=_token)
+        # nexus-m20mf P3 fold-in (code-review Important finding): client=
+        # is mutually exclusive with the _transport test seam below (which
+        # unconditionally rebuilds self._client) -- pass client= only when
+        # _transport is not also supplied. Threaded to the mixin so
+        # discover/rebuild/split (the taxonomy subcommands that actually
+        # touch centroid ops, named in taxonomy_cmd.py's own _T2Database
+        # boundary-allow comment) share HttpTaxonomyStore's pool instead of
+        # opening an unshared 9th client.
+        super().__init__(base_url, tenant, _token=_token, client=None if _transport is not None else client)
         if _transport is not None:
             # Test seam (MockTransport): the mixin's __init__ already built
             # a plain (transport-less) httpx.Client; swap it for one wired
@@ -135,8 +144,17 @@ class HttpCentroidStore(RefreshableHttpStoreMixin):
     # still goes through the inherited, self-healing super()._post/_get
     # (RefreshableHttpStoreMixin._send), never self._client directly.
 
-    def _post(self, path: str, body: dict[str, Any], *, idempotent: bool = True) -> Any:
-        return super()._post(f"/v1/taxonomy/centroids{path}", body, idempotent=idempotent)
+    def _post(
+        self, path: str, body: dict[str, Any], *, idempotent: bool = True, mutates: bool = True
+    ) -> Any:
+        # nexus-a2qhz: mutates forwarded to the mixin unchanged (default True
+        # covers every write here; ann_query -- the one read sent over POST --
+        # passes mutates=False). Missing this forward previously TypeError'd
+        # every call passing the kwarg, the same class of regression caught
+        # in HttpTokenStore.list_tokens during review.
+        return super()._post(
+            f"/v1/taxonomy/centroids{path}", body, idempotent=idempotent, mutates=mutates
+        )
 
     def _get(self, path: str, params: dict[str, Any] | None = None, *, idempotent: bool = True) -> Any:
         q = {k: str(v) for k, v in (params or {}).items() if v is not None}
@@ -244,7 +262,7 @@ class HttpCentroidStore(RefreshableHttpStoreMixin):
                 "collection": collection,
                 "cross_collection": cross_collection,
                 "n_results": n_results,
-            })
+            }, mutates=False)
         except httpx.HTTPStatusError as e:
             # Swallow to [] ONLY for the dimension-mismatch 400 — the oracle's
             # best-effort "don't assign" when the query vector's space does not

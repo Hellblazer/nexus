@@ -489,7 +489,68 @@ class TestReviewAutoCLI:
         # bucket in the summary line, not silently dropped from the tally.
         assert "0 accepted, 0 renamed, 0 deleted, 0 merged, 1 skipped, 0 failed." in result.output
 
-    def test_delete_applied_with_yes(self, tmp_path: Path) -> None:
+    def test_delete_applied_with_yes_and_apply_destructive(self, tmp_path: Path) -> None:
+        """nexus-afnht: --yes alone is no longer sufficient — unattended
+
+        destructive apply requires --apply-destructive too.
+        """
+        db_path = tmp_path / "memory.db"
+        tid = _seed_topic(db_path, "junk", doc_count=1)
+        dispatch = AsyncMock(
+            side_effect=_dispatch_by_topic_id(
+                {tid: {"action": "delete", "reason": "pollution"}}
+            )
+        )
+
+        runner = CliRunner()
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", _t2_router(db_path)),
+            patch("nexus.operators.dispatch.claude_dispatch", dispatch),
+        ):
+            result = runner.invoke(
+                taxonomy,
+                ["review", "--auto", "--collection", "proj", "--yes", "--apply-destructive"],
+            )
+
+        assert result.exit_code == 0, result.output
+        with T2Database(db_path) as db:
+            count = len(db.taxonomy.get_all_topics())
+        assert count == 0
+
+    def test_apply_destructive_alone_applies_unattended(self, tmp_path: Path) -> None:
+        """--apply-destructive is sufficient on its own, without --yes."""
+        db_path = tmp_path / "memory.db"
+        tid = _seed_topic(db_path, "junk", doc_count=1)
+        dispatch = AsyncMock(
+            side_effect=_dispatch_by_topic_id(
+                {tid: {"action": "delete", "reason": "pollution"}}
+            )
+        )
+
+        runner = CliRunner()
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", _t2_router(db_path)),
+            patch("nexus.operators.dispatch.claude_dispatch", dispatch),
+        ):
+            result = runner.invoke(
+                taxonomy,
+                ["review", "--auto", "--collection", "proj", "--apply-destructive"],
+            )
+
+        assert result.exit_code == 0, result.output
+        with T2Database(db_path) as db:
+            count = len(db.taxonomy.get_all_topics())
+        assert count == 0
+
+    def test_yes_alone_no_longer_skips_destructive_confirmation(self, tmp_path: Path) -> None:
+        """nexus-afnht acceptance item 3: the actual bug this closes — a
+
+        real invocation with only --yes (the pre-fix "safe" unattended
+        idiom) must NOT auto-apply a delete/merge. With no stdin supplied,
+        the confirm prompt hits EOF, declines, and the topic stays pending.
+        """
         db_path = tmp_path / "memory.db"
         tid = _seed_topic(db_path, "junk", doc_count=1)
         dispatch = AsyncMock(
@@ -510,8 +571,52 @@ class TestReviewAutoCLI:
 
         assert result.exit_code == 0, result.output
         with T2Database(db_path) as db:
-            count = len(db.taxonomy.get_all_topics())
-        assert count == 0
+            topic = db.taxonomy.get_topic_by_id(tid)
+        assert topic is not None
+        assert topic["review_status"] == "pending"
+        assert "no longer" in result.output.lower()
+        assert "Declined; topics remain pending." in result.output
+
+    def test_accept_only_withholds_destructive_verdicts(self, tmp_path: Path) -> None:
+        """nexus-afnht acceptance item 4: --accept-only never shows or
+
+        prompts for the destructive plan; the topic stays pending.
+        """
+        db_path = tmp_path / "memory.db"
+        t_accept = _seed_topic(db_path, "accept-me", doc_count=1)
+        t_delete = _seed_topic(db_path, "junk", doc_count=1)
+        dispatch = AsyncMock(
+            side_effect=_dispatch_by_topic_id(
+                {
+                    t_accept: {"action": "accept"},
+                    t_delete: {"action": "delete", "reason": "pollution"},
+                }
+            )
+        )
+
+        runner = CliRunner()
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", _t2_router(db_path)),
+            patch("nexus.operators.dispatch.claude_dispatch", dispatch),
+        ):
+            result = runner.invoke(
+                taxonomy,
+                ["review", "--auto", "--collection", "proj", "--accept-only"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "Destructive actions pending" not in result.output
+        with T2Database(db_path) as db:
+            assert db.taxonomy.get_topic_by_id(t_accept)["review_status"] == "accepted"
+            delete_topic = db.taxonomy.get_topic_by_id(t_delete)
+        assert delete_topic is not None
+        assert delete_topic["review_status"] == "pending"
+        assert "1 destructive verdict(s) withheld (--accept-only)" in result.output
+        assert (
+            "1 accepted, 0 renamed, 0 deleted, 0 merged, 1 skipped, 0 failed."
+            in result.output
+        )
 
     def test_merge_applied_with_confirm(self, tmp_path: Path) -> None:
         db_path = tmp_path / "memory.db"
@@ -794,6 +899,301 @@ class TestReviewAutoCLI:
             assert db.taxonomy.get_topic_by_id(t_merge)["review_status"] == "pending"
             assert db.taxonomy.get_topic_by_id(t_target)["review_status"] == "accepted"
 
+    # ── nexus-afnht: --dry-run persists verdicts; --auto applies THOSE ──────
+
+    def test_dry_run_persists_verdict_and_apply_reuses_it_without_redispatch(
+        self, tmp_path: Path,
+    ) -> None:
+        """The bug this closes: a --dry-run preview must predict the exact
+
+        delete set a following --auto applies. Proven here by making the
+        fake dispatch return a DIFFERENT (non-deterministic) delete set on
+        every call — if apply re-dispatched, it would delete a topic the
+        preview never showed. It must not re-dispatch at all: the second
+        invocation's dispatch call count stays zero.
+        """
+        db_path = tmp_path / "memory.db"
+        t_delete = _seed_topic(db_path, "junk", doc_count=1)
+        t_accept = _seed_topic(db_path, "accept-me", doc_count=1)
+        calls = {"n": 0}
+
+        async def _flaky_dispatch(prompt: str, schema: dict, **kw):  # noqa: ARG001
+            calls["n"] += 1
+            ids_in_prompt = {int(m) for m in re.findall(r"id=(\d+)", prompt)}
+            # First call (the dry-run): the "real" verdicts. Any further
+            # call would return something else entirely — proving apply
+            # never asked again.
+            out = []
+            if t_delete in ids_in_prompt:
+                out.append({"id": t_delete, "action": "delete", "reason": "pollution"})
+            if t_accept in ids_in_prompt:
+                out.append({"id": t_accept, "action": "accept"})
+            return {"verdicts": out}
+
+        runner = CliRunner()
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", _t2_router(db_path)),
+            patch("nexus.operators.dispatch.claude_dispatch", _flaky_dispatch),
+        ):
+            dry_result = runner.invoke(
+                taxonomy, ["review", "--auto", "--collection", "proj", "--dry-run"],
+            )
+            assert dry_result.exit_code == 0, dry_result.output
+            assert calls["n"] == 1
+
+            apply_result = runner.invoke(
+                taxonomy,
+                ["review", "--auto", "--collection", "proj", "--apply-destructive"],
+            )
+
+        assert apply_result.exit_code == 0, apply_result.output
+        # No further dispatch call was made for the apply pass — the cached
+        # verdicts were reused verbatim.
+        assert calls["n"] == 1
+        with T2Database(db_path) as db:
+            assert db.taxonomy.get_topic_by_id(t_delete) is None
+            assert db.taxonomy.get_topic_by_id(t_accept)["review_status"] == "accepted"
+
+    def test_dry_run_repeated_is_stable_and_dispatch_free(self, tmp_path: Path) -> None:
+        """Two back-to-back --dry-run previews of an unchanged taxonomy must
+
+        report the identical verdict set, and the second one must not
+        re-dispatch at all (nexus-afnht: --dry-run itself reads its own
+        cache first).
+        """
+        db_path = tmp_path / "memory.db"
+        tid = _seed_topic(db_path, "junk", doc_count=1)
+        dispatch = AsyncMock(
+            side_effect=_dispatch_by_topic_id(
+                {tid: {"action": "delete", "reason": "pollution"}}
+            )
+        )
+
+        runner = CliRunner()
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", _t2_router(db_path)),
+            patch("nexus.operators.dispatch.claude_dispatch", dispatch),
+        ):
+            first = runner.invoke(
+                taxonomy, ["review", "--auto", "--collection", "proj", "--dry-run"],
+            )
+            second = runner.invoke(
+                taxonomy, ["review", "--auto", "--collection", "proj", "--dry-run"],
+            )
+
+        assert first.exit_code == 0, first.output
+        assert second.exit_code == 0, second.output
+        assert dispatch.call_count == 1
+        assert "0 would be accepted, 0 would be renamed, 1 would be deleted" in first.output
+        assert "0 would be accepted, 0 would be renamed, 1 would be deleted" in second.output
+
+    def test_apply_after_dry_run_with_changed_topic_invalidates_and_resamples(
+        self, tmp_path: Path,
+    ) -> None:
+        """A topic that changed between --dry-run and --auto (its label was
+
+        renamed here, simulating a discover/rebuild/manual edit in
+        between) must be re-dispatched, with a loud invalidation notice —
+        not silently applied from a stale cached verdict.
+        """
+        db_path = tmp_path / "memory.db"
+        tid = _seed_topic(db_path, "junk", doc_count=1)
+
+        runner = CliRunner()
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", _t2_router(db_path)),
+            patch(
+                "nexus.operators.dispatch.claude_dispatch",
+                AsyncMock(
+                    side_effect=_dispatch_by_topic_id(
+                        {tid: {"action": "delete", "reason": "pollution"}}
+                    )
+                ),
+            ),
+        ):
+            dry_result = runner.invoke(
+                taxonomy, ["review", "--auto", "--collection", "proj", "--dry-run"],
+            )
+        assert dry_result.exit_code == 0, dry_result.output
+
+        # Simulate the taxonomy changing in between: the topic gets a new
+        # label (and thus a new content hash) before apply runs.
+        # update_topic_label (unlike rename_topic) leaves review_status
+        # untouched, so the topic stays pending / unreviewed — exactly what
+        # a discover/rebuild relabel or a manual `nx taxonomy rename` does.
+        with T2Database(db_path) as db:
+            db.taxonomy.update_topic_label(tid, "renamed-junk")
+
+        fresh_dispatch = AsyncMock(
+            side_effect=_dispatch_by_topic_id({tid: {"action": "accept"}})
+        )
+        runner2 = CliRunner()
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", _t2_router(db_path)),
+            patch("nexus.operators.dispatch.claude_dispatch", fresh_dispatch),
+        ):
+            apply_result = runner2.invoke(
+                taxonomy, ["review", "--auto", "--collection", "proj"],
+            )
+
+        assert apply_result.exit_code == 0, apply_result.output
+        assert fresh_dispatch.call_count == 1
+        assert "invalidated" in apply_result.output.lower()
+        assert str(tid) in apply_result.output
+        with T2Database(db_path) as db:
+            topic = db.taxonomy.get_topic_by_id(tid)
+        # The fresh verdict (accept) applied, not the stale cached delete.
+        assert topic is not None
+        assert topic["review_status"] == "accepted"
+
+    def test_new_doc_assignment_invalidates_cache_without_label_or_terms_change(
+        self, tmp_path: Path,
+    ) -> None:
+        """nexus-afnht stacked-review finding 1: a topic's doc SAMPLE can
+
+        drift via incremental indexing (a new doc gets assigned) with its
+        label, terms, and even its stamped ``doc_count`` all untouched
+        (``import_assignment`` is a raw fidelity insert with no doc_count
+        side effect — the topic's stamped count stays exactly as seeded).
+        The cached verdict must still invalidate: hashing only id/label/
+        terms would have missed this and replayed a stale delete verdict
+        against a taxonomy the model never actually reviewed.
+        """
+        db_path = tmp_path / "memory.db"
+        tid = _seed_topic(db_path, "junk", doc_count=1, n_docs=1)
+
+        runner = CliRunner()
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", _t2_router(db_path)),
+            patch(
+                "nexus.operators.dispatch.claude_dispatch",
+                AsyncMock(
+                    side_effect=_dispatch_by_topic_id(
+                        {tid: {"action": "delete", "reason": "pollution"}}
+                    )
+                ),
+            ),
+        ):
+            dry_result = runner.invoke(
+                taxonomy, ["review", "--auto", "--collection", "proj", "--dry-run"],
+            )
+        assert dry_result.exit_code == 0, dry_result.output
+
+        # Incremental indexing assigns a NEW doc to this topic. Label,
+        # terms, and doc_count (a separately-stamped fidelity field) are
+        # completely untouched — only the live assignment set drifts.
+        _seed_chunks_for_tenant(
+            _current_tenant, "proj", [canonical_chunk_id("junk-doc-extra.py")],
+        )
+        with T2Database(db_path) as db:
+            db.taxonomy.import_assignment(
+                doc_id=canonical_chunk_id("junk-doc-extra.py"),
+                topic_id=tid,
+                assigned_by="test-drift",
+                similarity=None,
+                assigned_at=None,
+                source_collection="proj",
+            )
+            topic_before = db.taxonomy.get_topic_by_id(tid)
+        # Label and terms are untouched by the new assignment; the real store
+        # does bump doc_count on import, so the drift signal under test is
+        # the doc SAMPLE in the hash, not the count.
+        assert topic_before["label"] == "junk"
+        assert topic_before["terms"] == '["term-a", "term-b"]'
+
+        fresh_dispatch = AsyncMock(
+            side_effect=_dispatch_by_topic_id({tid: {"action": "accept"}})
+        )
+        runner2 = CliRunner()
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", _t2_router(db_path)),
+            patch("nexus.operators.dispatch.claude_dispatch", fresh_dispatch),
+        ):
+            apply_result = runner2.invoke(
+                taxonomy, ["review", "--auto", "--collection", "proj"],
+            )
+
+        assert apply_result.exit_code == 0, apply_result.output
+        assert fresh_dispatch.call_count == 1
+        assert "invalidated" in apply_result.output.lower()
+        with T2Database(db_path) as db:
+            topic = db.taxonomy.get_topic_by_id(tid)
+        # The fresh verdict (accept) applied, not the stale cached delete.
+        assert topic["review_status"] == "accepted"
+
+    def test_malformed_cache_entry_is_discarded_with_loud_notice(
+        self, tmp_path: Path,
+    ) -> None:
+        """nexus-afnht stacked-review finding 2: a malformed/wrong-shape
+
+        cached entry must not degrade silently — it is logged and echoed
+        as a discard notice, then treated as empty (every topic re-samples
+        fresh) rather than either crashing or silently vanishing.
+        """
+        from nexus.commands import taxonomy_cmd as _taxonomy_cmd
+
+        db_path = tmp_path / "memory.db"
+        tid = _seed_topic(db_path, "junk", doc_count=1)
+
+        with T2Database(db_path) as db:
+            db.memory.put(
+                project=_taxonomy_cmd._REVIEW_CACHE_PROJECT,
+                title=_taxonomy_cmd._review_cache_title("proj"),
+                content="not valid json at all",
+                ttl=7,
+            )
+
+        dispatch = AsyncMock(
+            side_effect=_dispatch_by_topic_id({tid: {"action": "accept"}})
+        )
+        runner = CliRunner()
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", _t2_router(db_path)),
+            patch("nexus.operators.dispatch.claude_dispatch", dispatch),
+        ):
+            result = runner.invoke(
+                taxonomy, ["review", "--auto", "--collection", "proj"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert dispatch.call_count == 1, "a discarded cache must still re-sample"
+        assert "discarded" in result.output.lower()
+        with T2Database(db_path) as db:
+            topic = db.taxonomy.get_topic_by_id(tid)
+        assert topic["review_status"] == "accepted"
+
+    def test_absent_cache_prints_no_discard_notice(self, tmp_path: Path) -> None:
+        """The ordinary first-run case (no prior --dry-run) must stay
+
+        silent — no discard notice, no invalidation notice — since there
+        is nothing anomalous about a cache that was never populated.
+        """
+        db_path = tmp_path / "memory.db"
+        tid = _seed_topic(db_path, "junk", doc_count=1)
+        dispatch = AsyncMock(
+            side_effect=_dispatch_by_topic_id({tid: {"action": "accept"}})
+        )
+        runner = CliRunner()
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", _t2_router(db_path)),
+            patch("nexus.operators.dispatch.claude_dispatch", dispatch),
+        ):
+            result = runner.invoke(
+                taxonomy, ["review", "--auto", "--collection", "proj"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "discarded" not in result.output.lower()
+        assert "invalidated" not in result.output.lower()
+
     def test_dispatch_raises_all_stay_pending_exit_zero(self, tmp_path: Path) -> None:
         db_path = tmp_path / "memory.db"
         t1 = _seed_topic(db_path, "topic-1", doc_count=1)
@@ -895,7 +1295,8 @@ class TestReviewAutoCLI:
             patch("nexus.operators.dispatch.claude_dispatch", dispatch),
         ):
             result = runner.invoke(
-                taxonomy, ["review", "--auto", "--collection", "proj", "--yes"],
+                taxonomy,
+                ["review", "--auto", "--collection", "proj", "--apply-destructive"],
             )
 
         assert result.exit_code == 0, result.output

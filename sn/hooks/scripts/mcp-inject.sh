@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # sn SubagentStart hook — inject Serena + Context7 MCP tool guidance
-# into every subagent. Timeout: 5s (hooks.json); two cats plus one python3.
+# into every subagent. Timeout: 5s (hooks.json); cats plus two python3 calls.
 #
 # DELIVERY CONTRACT (Claude Code SubagentStart): emit content via the JSON
 # envelope of the form
@@ -42,14 +42,6 @@ print(json.dumps({
 }
 trap _sn_emit_json_envelope EXIT
 
-# Both sections are injected for every subagent (nexus-jbt5x). The former
-# task-text heuristic skipped Serena for any prompt containing "investigate",
-# "audit", "package", "dependency" or "migrate", which is most debugger and
-# developer briefs; the two sections together are about 3 KB, cheaper than
-# one subagent re-deriving a tool name. stdin is drained so the harness
-# never sees a broken pipe.
-cat >/dev/null
-
 # Section bodies live in sibling .md files rather than heredocs.
 # Bash here-docs hang in some non-interactive shell contexts (Claude Code
 # harness, test subprocess fixtures) where the parent's stdin is wired to
@@ -58,5 +50,30 @@ cat >/dev/null
 # dependency, and the markdown stays editable as markdown.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Both sections are injected for every subagent (nexus-jbt5x). The former
+# task-text heuristic skipped Serena for any prompt containing "investigate",
+# "audit", "package", "dependency" or "migrate", which is most debugger and
+# developer briefs; the two sections together are about 3 KB, cheaper than
+# one subagent re-deriving a tool name.
+#
+# The only branch is on the caller's cwd (nexus-ftpk3): a subagent dispatched
+# with isolation:"worktree" runs in a LINKED git worktree, and Serena's shared
+# server would write its edits into the primary checkout (worktree_guard.py
+# has the history). Such an agent gets the worktree section FIRST, so the
+# routing table's "prefer Serena for edits" is already overridden when it is
+# read. Detection is delegated to worktree_guard.py so this hook and the
+# PreToolUse guard cannot disagree on what a worktree is. stdin is read
+# exactly once; an unparseable payload means "not a worktree".
+STDIN=$(cat)
+IN_WORKTREE=$(printf '%s' "$STDIN" | python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from worktree_guard import cwd_from_payload, is_linked_worktree
+print("1" if is_linked_worktree(cwd_from_payload(sys.stdin.read())) else "0")
+' "$SCRIPT_DIR" 2>/dev/null)
+
+if [[ "$IN_WORKTREE" == "1" ]]; then
+    cat "$SCRIPT_DIR/worktree-section.md"
+fi
 cat "$SCRIPT_DIR/serena-section.md"
 cat "$SCRIPT_DIR/context7-section.md"

@@ -6,12 +6,7 @@ this reports counts and refuses verdicts.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import click
-
-if TYPE_CHECKING:
-    from nexus.commit_review import ReviewCoverage
 
 
 @click.group("census")
@@ -45,18 +40,39 @@ def census_group() -> None:
     default=False,
     help="Emit JSON (carries per-tool counts) instead of the human table.",
 )
+@click.option(
+    "--from-store",
+    is_flag=True,
+    default=False,
+    help="Read the durable capability_census engine table (written at every "
+    "SessionEnd, nexus-gjv9b PART 1) instead of re-parsing transcripts. "
+    "Reuses --session/--since/--json; --project-dir is ignored.",
+)
 def capability_cmd(
     session: str | None,
     since: str | None,
     project_dir: str | None,
     as_json: bool,
+    from_store: bool,
 ) -> None:
     """Count tool calls per capability, split orchestrator vs subagent.
 
     Exits non-zero when the run measured *nothing* — an empty, corrupt,
     or tool-call-free scope reports UNMEASURABLE rather than a clean
     zero. A zero row in a measurable run is a real zero.
+
+    ``--from-store`` reads a fundamentally different artifact: the
+    already-measured ``capability_census`` engine table (nexus-gjv9b
+    PART 1's replacement for ``capability_census.jsonl``), never a fresh
+    transcript walk — so it carries no UNMEASURABLE/BLINDSPOT distinction
+    of its own; a session absent from the table is reported as absent,
+    and a ``blindspot`` row (the transcript WAS unmeasurable at the time
+    it was recorded) is surfaced verbatim.
     """
+    if from_store:
+        _capability_from_store(session=session, since=since, as_json=as_json)
+        return
+
     import pathlib as _pathlib  # noqa: PLC0415 — stdlib deferred to subcommand scope
 
     from nexus.census import (  # noqa: PLC0415 — deferred; census only needed here
@@ -71,6 +87,69 @@ def capability_cmd(
     click.echo(to_json(result) if as_json else render_text(result), nl=False)
     if result.exit_code:
         raise SystemExit(result.exit_code)
+
+
+def _capability_from_store(*, session: str | None, since: str | None, as_json: bool) -> None:
+    """The store-backed reader half of ``nx census capability
+    --from-store`` (nexus-gjv9b PART 1, S11 doctrine: no writer ships
+    without its reader). Normal HttpTelemetryStore construction (full
+    resolve/retry mixin) — this is an interactive CLI command, not the
+    SessionEnd hot path, so there is no reason to bypass it the way
+    ``_print_service_tier_summary``'s single-attempt read does.
+
+    EXIT-CODE PARITY (nexus-gjv9b review fold-in, code-review IMPORTANT
+    3 / critique Significant 5): the transcript-walk reader's own
+    ``CorpusCensus.exit_code`` is non-zero when a run measured *nothing*
+    (``measurable_sessions == 0``) — a whole-run analog of the same
+    UNMEASURABLE-vs-zero contract every other census/dispatch command in
+    this module documents. Zero rows from the store is the identical
+    "measured nothing" case for this filter (a typo'd ``--session``, or a
+    genuinely empty table), so it exits 1 here too — this command
+    previously always exited 0, silently indistinguishable from "checked
+    and confirmed empty" for a caller relying on ``$?``. The JSON payload
+    carries an explicit ``exit_code`` field for the same reason the
+    transcript-walk reader's own ``to_json`` does: a caller parsing JSON
+    should not have to separately capture ``$?`` to learn this.
+    """
+    import json as _json  # noqa: PLC0415 — stdlib deferred to subcommand scope
+
+    try:
+        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred; only needed here
+
+        store = HttpTelemetryStore()
+        try:
+            rows = store.query_capability_census(session_id=session, since=since, limit=100)
+        finally:
+            store.close()
+    except Exception as exc:  # noqa: BLE001 — boundary catch; degrade to an honest, non-zero-exit message
+        click.echo(f"UNAVAILABLE: capability_census read failed: {exc}", nl=True)
+        raise SystemExit(1) from exc
+
+    exit_code = 0 if rows else 1
+
+    if as_json:
+        click.echo(_json.dumps({"rows": rows, "exit_code": exit_code}, sort_keys=True))
+        if exit_code:
+            raise SystemExit(exit_code)
+        return
+
+    if not rows:
+        click.echo("No capability_census rows found for the given filter.")
+        raise SystemExit(exit_code)
+
+    lines = []
+    for row in rows:
+        header = f"session={row.get('session_id')} ts={row.get('ts')}"
+        if row.get("blindspot"):
+            lines.append(f"{header} BLINDSPOT reason={row.get('unmeasurable_reason')}")
+            continue
+        caps = row.get("capabilities") or {}
+        cap_str = " ".join(f"{k}={v}" for k, v in caps.items())
+        lines.append(
+            f"{header} total_calls={row.get('total_calls')} "
+            f"dispatches={row.get('dispatches')} {cap_str}"
+        )
+    click.echo("\n".join(lines))
 
 
 @census_group.command("dispatches")
@@ -125,103 +204,3 @@ def dispatches_cmd(
     click.echo(dispatches_to_json(result) if as_json else render_dispatches_text(result), nl=False)
     if result.exit_code:
         raise SystemExit(result.exit_code)
-
-
-@census_group.command("reviews")
-@click.option("--as-json", is_flag=True, help="Emit JSON instead of text.")
-def reviews_cmd(as_json: bool) -> None:
-    """Count per-commit review findings by verdict (bead nexus-jh86x).
-
-    Reads the review records the post-commit hook writes to T2 and
-    reports the FIX-NOW / FILE / DROP distribution across them, plus how
-    many commits were reviewed and found clean.
-
-    Reviewed-and-clean is reported separately from not-reviewed: a census
-    that cannot tell those apart would read an unarmed hook as a clean
-    codebase (the nexus-moht0 vacuous-gate doctrine).
-    """
-    import json as _json  # noqa: PLC0415 — stdlib deferred to subcommand scope
-
-    from nexus.commands._helpers import t2_handle  # noqa: PLC0415 — deferred; T2 only needed here
-    from nexus.commands.review_cmd import reviews_census  # noqa: PLC0415 — deferred; avoids import cycle at module load
-    from nexus.commit_review import VERDICTS  # noqa: PLC0415 — deferred with its siblings
-
-    from pathlib import Path  # noqa: PLC0415 — stdlib deferred to subcommand scope
-
-    from nexus.commands.hooks import hook_stanza_state  # noqa: PLC0415 — deferred; avoids click group import at module load
-    from nexus.commands.review_cmd import (  # noqa: PLC0415 — deferred with reviews_census
-        _iter_review_records,
-        reviews_coverage,
-    )
-
-    repo = Path.cwd()
-    with t2_handle() as db:
-        review_records = _iter_review_records(db)
-        totals = reviews_census(db, records=review_records)
-    coverage, queued = reviews_coverage(review_records, repo)
-
-    records = totals.pop("_records", 0)
-    clean = totals.pop("_clean", 0)
-
-    state = hook_stanza_state(repo)
-
-    if as_json:
-        click.echo(_json.dumps(
-            {
-                "records": records,
-                "clean": clean,
-                "verdicts": totals,
-                "hook_state": state,
-                "coverage": None if coverage is None else {
-                    "since": coverage.since,
-                    "commits": coverage.commits,
-                    "patchless": coverage.patchless,
-                    "unreviewed": [{"sha": g.sha, "subject": g.subject} for g in coverage.gaps],
-                },
-                "queued": queued,
-            },
-            indent=2,
-        ))
-        return
-
-    remedy = {
-        "stale": " (nx hooks update refreshes it)",
-        "not installed": " (nx hooks install arms it)",
-        "unmanaged": " (a foreign hook; nx hooks install appends the stanza)",
-        "unknown": " (not a git repository, or git did not answer)",
-    }.get(state, "")
-    click.echo(f"Post-commit reviewer in this repo: {state}{remedy}")
-
-    if not records:
-        click.echo(
-            "No commit reviews recorded (records expire after the configured "
-            "ttl). Either the hook was not armed when commits happened, or "
-            "nothing has committed since."
-        )
-        _echo_coverage(coverage, queued)
-        return
-
-    click.echo(f"Commit reviews: {records} record(s), {clean} clean")
-    for verdict in VERDICTS:
-        click.echo(f"  {verdict:<8} {totals.get(verdict, 0)}")
-    _echo_coverage(coverage, queued)
-
-
-def _echo_coverage(coverage: ReviewCoverage | None, queued: int) -> None:
-    """The gap half of the census. A commit with no record is named, never
-    summed into "clean": the hook's burst guard queued (before 2026-09-04,
-    dropped) commits that landed while a reviewer ran, and the record count
-    alone cannot show which commits those were."""
-    if coverage is None:
-        return
-    n = len(coverage.gaps)
-    patchless = f", {coverage.patchless} without a patch" if coverage.patchless else ""
-    click.echo(
-        f"Unreviewed since {coverage.since}: {n} of {coverage.commits} commit(s){patchless}"
-    )
-    for gap in coverage.gaps:
-        click.echo(f"  {gap.sha[:12]}  {gap.subject}")
-    if n:
-        click.echo("  (review one: nx review commit <sha>; a burst drains at the next commit)")
-    if queued:
-        click.echo(f"Review queue: {queued} waiting (drained by the running reviewer, or the next commit)")

@@ -111,7 +111,10 @@ _DEFAULT_IGNORE: list[str] = [
 ]
 
 
-def orphaned_chashes(reader: object, doc_id: str, candidates: Iterable[str]) -> list[str]:
+def orphaned_chashes(
+    reader: object, doc_id: str, candidates: Iterable[str],
+    *, collection: str | None = None,
+) -> list[str]:
     """Of *candidates* (chashes no longer in *doc_id*'s manifest), return the
     subset with NO OTHER live document referencing them — safe to delete
     from T3.
@@ -124,6 +127,27 @@ def orphaned_chashes(reader: object, doc_id: str, candidates: Iterable[str]) -> 
     contains it (CLAUDE.md § catalog/T3 split). "Not in THIS document's
     manifest" is therefore NOT "unreferenced" — deleting on that basis
     would silently remove chunks another live document still depends on.
+
+    COLLECTION SCOPE (nexus-flkdc): ``docs_for_chashes`` is a catalog-WIDE
+    reverse lookup — it has no notion of physical_collection — so it can
+    return a referencing document that lives in a DIFFERENT physical
+    collection than *collection* (chash is a hash of the raw chunk text,
+    collection-independent; the same paper registered a second time under
+    a different title/collection reproduces the identical chash). A
+    delete for this sweep only ever touches *collection*'s T3 rows, so a
+    reference from another collection can never be what keeps this row
+    alive — treating it as "still referenced" pins the row permanently.
+    When *collection* is given, every referencing doc_id other than
+    *doc_id* is additionally resolved (via ``reader.resolve_many``) and
+    only counted as protecting a candidate when its own
+    ``physical_collection`` equals *collection*. Fails OPEN on any
+    resolution failure (unconfigured/broken ``resolve_many``, or a
+    referencing doc_id ``resolve_many`` cannot find): unprovable scope
+    keeps the ORIGINAL (unscoped) verdict for that reference rather than
+    narrowing it away, same fail-open direction as the rest of this
+    function. ``collection=None`` (the default) preserves the exact
+    prior, unscoped behavior — existing callers that never learned about
+    physical collections keep working unchanged.
 
     FAIL-OPEN, deliberately, on every failure mode: no reader, or a reader
     whose ``docs_for_chashes`` raises. Over-retention is recoverable (the
@@ -141,10 +165,15 @@ def orphaned_chashes(reader: object, doc_id: str, candidates: Iterable[str]) -> 
             itself in the reverse lookup is not evidence of sharing.
         candidates: chashes to test (typically ``stale_ids`` /
             ``dropped`` — chashes this run no longer references).
+        collection: the physical_collection this sweep's delete() will
+            target. When given, narrows the union guard to references
+            from documents actually IN this collection (see above).
 
     Returns:
         The subset of *candidates* referenced by no live document other
-        than *doc_id*. Empty on empty input or any read failure.
+        than *doc_id* IN *collection* (or by no other document at all,
+        when *collection* is omitted). Empty on empty input or any read
+        failure.
     """
     cands = sorted({c for c in candidates if c})
     if not cands:
@@ -170,6 +199,33 @@ def orphaned_chashes(reader: object, doc_id: str, candidates: Iterable[str]) -> 
             doc_id=doc_id, candidates=len(cands),
         )
         return []
+    if collection:
+        other_docs = {
+            d for ds in refs.values() for d in (ds or []) if d and d != doc_id
+        }
+        if other_docs:
+            try:
+                entries = reader.resolve_many(list(other_docs)) or {}
+            except Exception:  # noqa: BLE001 — cannot prove scope: keep the unscoped verdict
+                structlog.get_logger().warning(
+                    "superseded_sweep_scope_lookup_failed",
+                    doc_id=doc_id, collection=collection,
+                    candidates=len(cands),
+                )
+            else:
+                # A doc_id ``resolve_many`` could not resolve is left
+                # unscoped (kept protective) — fail open, same direction
+                # as everywhere else in this function: only a POSITIVELY
+                # confirmed different-collection reference is discounted.
+                refs = {
+                    h: [
+                        d for d in (ds or [])
+                        if d == doc_id
+                        or d not in entries
+                        or getattr(entries[d], "physical_collection", "") == collection
+                    ]
+                    for h, ds in refs.items()
+                }
     return [h for h in cands if not any(d != doc_id for d in (refs.get(h) or []))]
 
 

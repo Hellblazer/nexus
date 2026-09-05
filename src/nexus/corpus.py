@@ -591,6 +591,71 @@ def embedding_model_for_collection(collection_name: str) -> str:
 index_model_for_collection = embedding_model_for_collection
 
 
+def _legacy_content_type_for_collection(collection_name: str) -> str:
+    """Map a legacy (non-conformant) collection name to its RDR-103
+    content type, via the SAME prefix convention
+    :func:`voyage_model_for_collection` uses: ``docs__``/``knowledge__``/
+    ``rdr__`` map to their own type; everything else (including
+    ``code__``) defaults to ``"code"``.
+    """
+    if collection_name.startswith("docs__"):
+        return "docs"
+    if collection_name.startswith("knowledge__"):
+        return "knowledge"
+    if collection_name.startswith("rdr__"):
+        return "rdr"
+    return "code"
+
+
+def embedding_model_for_collection_calibrated(collection_name: str) -> str:
+    """Resolve the embedding model for *collection_name* for CROSS-MODEL
+    CALIBRATION purposes (nexus-mc1l1) -- distinct from
+    :func:`embedding_model_for_collection`, which callers needing the
+    collection's REAL, historically-written model (query dispatch,
+    ``nx collection list`` labeling) must keep using unchanged.
+
+    Conformant 4-segment names carry their model token directly in the
+    name, so the parse is delegated exactly as
+    :func:`embedding_model_for_collection` does -- unaffected by this
+    function's existence.
+
+    LEGACY 2-segment names are the nexus-mc1l1 defect:
+    :func:`embedding_model_for_collection`'s fallback
+    (:func:`voyage_model_for_collection`) infers the model purely from
+    the collection-name PREFIX and always guesses cloud/Voyage,
+    regardless of what the install actually embeds with. In a
+    local-mode install every collection shares ONE embedder regardless
+    of content_type, so that guess reproduces the full nexus-tox2m bug
+    for any pre-RDR-103 (2026-05-03) install with grandfathered legacy
+    collections: two results at an identical raw distance, one
+    ``code__`` one ``knowledge__``, scored 1.0 vs 0.0 purely from the
+    collection name.
+
+    For a legacy name this instead asks what the install ACTUALLY
+    embeds that content type with RIGHT NOW --
+    :func:`resolve_read_embedding_model`, the same credential-free
+    read-path resolver ``t3_collection_name`` uses to probe candidate
+    names, so this reuses the one already-correct install-mode-aware
+    resolver rather than re-deriving the truth table. In local mode
+    (not opted into Voyage) that resolver ignores content_type entirely
+    and returns the single active local token for every call, so every
+    legacy name collapses onto the SAME resolved model and calibration
+    is a genuine no-op -- satisfying "no model can be determined for a
+    legacy name -> treat all legacy names as one model" without a
+    special-cased sentinel, because the single local embedder IS that
+    one model. In cloud mode (or local mode explicitly opted into
+    Voyage, nexus-35ok4), it returns the same per-content-type
+    voyage-code-3/voyage-context-3 split
+    :func:`voyage_model_for_collection` already produced, so that
+    (correct) split is unaffected.
+    """
+    parsed = embedding_model_for_collection_name(collection_name)
+    if parsed is not None:
+        return parsed
+    content_type = _legacy_content_type_for_collection(collection_name)
+    return resolve_read_embedding_model(content_type)
+
+
 def t3_collection_name(
     user_arg: str, *, t3: object | None = None, for_write: bool = False,
 ) -> str:

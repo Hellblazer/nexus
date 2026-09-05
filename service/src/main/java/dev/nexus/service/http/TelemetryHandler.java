@@ -47,11 +47,40 @@ import java.util.Map;
  *   GET  /v1/telemetry/hook_failures/list      list hook failures + exact totals (nexus-onjvy)
  *   POST /v1/telemetry/hook_failures/trim      trim old hook-failure entries; same dry_run=true
  *                                              preview contract as search/trim
+ *   POST /v1/telemetry/index_failures/record   record one durable index failure (nexus-nukn3)
+ *   POST /v1/telemetry/index_failures/record_batch  batch-record (one txn); nx index repo's
+ *                                              end-of-run write of every file skipped this run
+ *   GET  /v1/telemetry/index_failures/list     list index failures + exact totals, optionally
+ *                                              scoped to one run_id (nexus-nukn3)
+ *   POST /v1/telemetry/index_failures/trim     delete rows by run_id and/or age; the
+ *                                              nx index failures --clear remedy (nexus-nukn3
+ *                                              fold-in, critic finding: an all-time fail-first
+ *                                              check with no clear path is unfixable forever)
+ *   POST /v1/telemetry/index_failures/acknowledge  durable adjudication (nx index failures
+ *                                              --acknowledge) that survives a fresh run_id
+ *                                              on the next index run (nexus-nukn3 second
+ *                                              fold-in, critic Critical finding)
+ *   GET  /v1/telemetry/index_failures/acks     list durable acknowledgments (nx index
+ *                                              failures --acks; third fold-in, critic
+ *                                              Critical finding [24621]: the ack
+ *                                              mechanism was write-only)
+ *   POST /v1/telemetry/index_failures/unacknowledge  revoke an acknowledgment (nx index
+ *                                              failures --unacknowledge; same fold-in)
  *   POST /v1/telemetry/frecency/upsert         upsert frecency record
  *   GET  /v1/telemetry/frecency/get            get frecency by chunk_id
  *   POST /v1/telemetry/import                  fidelity ETL for all 6 tables
  *   POST /v1/telemetry/import_batch             bulk fidelity ETL for one table
  *   POST /v1/telemetry/ids/probe                membership probe (verify-fill inner loop)
+ *   POST /v1/telemetry/capability_census/record upsert one session's capability census
+ *                                                (nexus-gjv9b PART 1)
+ *   GET  /v1/telemetry/capability_census/query  read capability_census rows, newest first
+ *   POST /v1/telemetry/capability_census/trim   trim old capability_census rows; same dry_run=true
+ *                                                preview contract as hook_failures/trim
+ *   POST /v1/telemetry/routing_events/record    append one routing-hook event (nexus-gjv9b PART 2)
+ *   POST /v1/telemetry/routing_events/batch     append a batch of routing-hook events
+ *   GET  /v1/telemetry/routing_events/list      read routing_events rows, newest first
+ *   POST /v1/telemetry/routing_events/trim      trim old routing_events rows; same dry_run=true
+ *                                                preview contract as hook_failures/trim
  * </pre>
  *
  * <p>All endpoints require {@code Authorization: Bearer <token>} (via {@link AuthFilter})
@@ -71,6 +100,15 @@ public final class TelemetryHandler implements HttpHandler {
 
     /** RDR-178 wave-2 (nexus-s3dd4.3): max candidate keys per /ids/probe request. */
     private static final int MAX_PROBE_KEYS = 300;
+
+    /**
+     * nexus-gjv9b PART 2 review fix (code-review IMPORTANT 2): max events
+     * per {@code POST /v1/telemetry/routing_events/batch} request, same
+     * {@link #MAX_PROBE_KEYS} batch-discipline pattern — a batch larger
+     * than this is rejected with HTTP 400 rather than silently accepted
+     * unbounded.
+     */
+    private static final int MAX_ROUTING_EVENTS_BATCH = 300;
 
     /**
      * RDR-196 .p1c-b review fix (nexus-lme1s): max {@code limit} for
@@ -124,11 +162,25 @@ public final class TelemetryHandler implements HttpHandler {
                 case "/hook_failures/record"   -> handleHookFailureRecord(exchange, tenant, method);
                 case "/hook_failures/list"     -> handleHookFailureList(exchange, tenant, method);
                 case "/hook_failures/trim"     -> handleHookFailureTrim(exchange, tenant, method);
+                case "/index_failures/record"       -> handleIndexFailureRecord(exchange, tenant, method);
+                case "/index_failures/record_batch"  -> handleIndexFailureRecordBatch(exchange, tenant, method);
+                case "/index_failures/list"         -> handleIndexFailureList(exchange, tenant, method);
+                case "/index_failures/trim"          -> handleIndexFailureTrim(exchange, tenant, method);
+                case "/index_failures/acknowledge"    -> handleIndexFailureAcknowledge(exchange, tenant, method);
+                case "/index_failures/acks"           -> handleIndexFailureAcksList(exchange, tenant, method);
+                case "/index_failures/unacknowledge"  -> handleIndexFailureUnacknowledge(exchange, tenant, method);
                 case "/frecency/upsert"        -> handleFrecencyUpsert(exchange, tenant, method);
                 case "/frecency/get"           -> handleFrecencyGet(exchange, tenant, method);
                 case "/import"                 -> handleImport(exchange, tenant, method);
                 case "/import_batch"           -> handleImportBatch(exchange, tenant, method);
                 case "/ids/probe"               -> handleIdsProbe(exchange, tenant, method);
+                case "/capability_census/record" -> handleCapabilityCensusRecord(exchange, tenant, method);
+                case "/capability_census/query"  -> handleCapabilityCensusQuery(exchange, tenant, method);
+                case "/capability_census/trim"   -> handleCapabilityCensusTrim(exchange, tenant, method);
+                case "/routing_events/record"    -> handleRoutingEventRecord(exchange, tenant, method);
+                case "/routing_events/batch"     -> handleRoutingEventsBatch(exchange, tenant, method);
+                case "/routing_events/list"      -> handleRoutingEventsList(exchange, tenant, method);
+                case "/routing_events/trim"      -> handleRoutingEventsTrim(exchange, tenant, method);
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
         } catch (IllegalArgumentException e) {
@@ -510,6 +562,298 @@ public final class TelemetryHandler implements HttpHandler {
         int days = optInt(body, "days", 30);
         boolean dryRun = Boolean.TRUE.equals(body.get("dry_run"));
         int deleted = repo.trimHookFailures(tenant, days, dryRun);
+        HttpUtil.send(ex, 200, json(Map.of("deleted", deleted, "dry_run", dryRun)));
+    }
+
+    // ── index_failures (nexus-nukn3) ─────────────────────────────────────────────
+
+    private void handleIndexFailureRecord(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        String runId      = optStr(body, "run_id");
+        String filePath   = requireString(body, "file_path");
+        String errorClass = optStr(body, "error_class");
+        String error      = optStr(body, "error");
+        String occurredAt = optStr(body, "occurred_at");
+        repo.recordIndexFailure(tenant, runId, filePath, errorClass, error, occurredAt);
+        HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    /**
+     * POST /v1/telemetry/index_failures/record_batch — one transaction for every
+     * file skipped this run (mirrors {@link #handleSearchBatch}'s row-tuple shape).
+     * Row layout: {@code [run_id, file_path, error_class, error, occurred_at]}.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleIndexFailureRecordBatch(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        var rows = (List<List<Object>>) body.getOrDefault("rows", List.of());
+        List<Object[]> tuples = rows.stream()
+            .map(r -> r.toArray(Object[]::new))
+            .toList();
+        int count = repo.recordIndexFailuresBatch(tenant, tuples);
+        HttpUtil.send(ex, 200, json(Map.of("inserted", count)));
+    }
+
+    /**
+     * List index failures, newest first (nexus-nukn3). {@code ?run_id=} scopes to
+     * one run (blank/absent = all runs), {@code ?days=N} bounds the window (0 =
+     * unbounded), {@code ?limit=N} caps the returned page. {@code total} is
+     * computed over the WHOLE predicate — see {@link TelemetryRepository#getIndexFailures}.
+     * {@code ?unacknowledged_only=true} (fold-in, critic Critical finding)
+     * excludes any row covered by a durable acknowledgment from both
+     * {@code rows} and {@code total} — the DOCTOR GATE's input only (never
+     * the deyd5 systemic-skip floor's — see {@link TelemetryRepository#getIndexFailures}'s
+     * own javadoc). {@code ?file_path=} (third fold-in, code-review finding
+     * [24624]) narrows to an exact file — the server-side alternative to
+     * paging the whole tenant backlog client-side for a single-file lookup.
+     */
+    private void handleIndexFailureList(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        var params = queryParams(ex);
+        String runId = params.getOrDefault("run_id", "");
+        int days  = parseIntParam(params, "days", 0);
+        int limit = parseIntParam(params, "limit", 100);
+        boolean unacknowledgedOnly = "true".equalsIgnoreCase(params.get("unacknowledged_only"));
+        String filePath = params.getOrDefault("file_path", "");
+        HttpUtil.send(ex, 200, json(
+            repo.getIndexFailures(tenant, runId, days, limit, unacknowledgedOnly, filePath)));
+    }
+
+    /**
+     * POST /v1/telemetry/index_failures/acknowledge — the durable-adjudication
+     * remedy (nexus-nukn3 fold-in, critic Critical finding: a fresh {@code run_id}
+     * every run means {@code --clear} alone is undone by the next index run).
+     * Body: {@code file_path} (optional; blank = error-class-scoped, covers ANY
+     * file with {@code error_class}), {@code error_class} (REQUIRED, non-blank),
+     * {@code reason} (optional, free text).
+     */
+    private void handleIndexFailureAcknowledge(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        String filePath   = optStr(body, "file_path");
+        String errorClass = optStr(body, "error_class");
+        String reason     = optStr(body, "reason");
+        repo.recordIndexFailureAcknowledgment(tenant, filePath, errorClass, reason);
+        HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    /**
+     * GET /v1/telemetry/index_failures/acks — list durable acknowledgments
+     * (third fold-in, critic Critical finding [24621]: a write-only ack
+     * mechanism). {@code nx index failures --acks}. Optional {@code
+     * ?file_path=} query param (round-5 fold-in, code-review [24635] item
+     * 2) narrows to that exact file server-side — the {@code
+     * --unacknowledge --file} auto-resolve's lookup, mirroring the
+     * server-side {@code file_path} filter already on {@code
+     * /index_failures/list}.
+     */
+    private void handleIndexFailureAcksList(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        var params = queryParams(ex);
+        String filePath = params.getOrDefault("file_path", "");
+        HttpUtil.send(ex, 200, json(repo.listIndexFailureAcknowledgments(tenant, filePath)));
+    }
+
+    /**
+     * POST /v1/telemetry/index_failures/unacknowledge — revoke a durable
+     * acknowledgment (third fold-in, critic Critical finding [24621]).
+     * Body: {@code file_path} (optional; blank = revoke the error-class-scoped
+     * acknowledgment) and {@code error_class} (REQUIRED, non-blank —
+     * mirrors the creation-side requirement, see
+     * {@link TelemetryRepository#revokeIndexFailureAcknowledgment}).
+     * {@code nx index failures --unacknowledge}.
+     */
+    private void handleIndexFailureUnacknowledge(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        String filePath   = optStr(body, "file_path");
+        String errorClass = optStr(body, "error_class");
+        int deleted = repo.revokeIndexFailureAcknowledgment(tenant, filePath, errorClass);
+        HttpUtil.send(ex, 200, json(Map.of("deleted", deleted)));
+    }
+
+    /**
+     * POST /v1/telemetry/index_failures/trim — the {@code nx index failures --clear}
+     * remedy (nexus-nukn3 fold-in, critic Critical finding). Body: {@code run_id}
+     * and/or {@code days}; AT LEAST ONE is required — refusing here (400) is what
+     * keeps an unscoped body from silently clearing a tenant's entire history,
+     * since {@link TelemetryRepository#trimIndexFailures} itself has no opinion
+     * (see that method's own javadoc). {@code dry_run=true} (fold-in suggestion,
+     * code review [24595]) previews the count that WOULD be deleted, using the
+     * identical predicate, without deleting anything.
+     */
+    private void handleIndexFailureTrim(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        String runId = optStr(body, "run_id");
+        int days = optInt(body, "days", 0);
+        boolean dryRun = Boolean.TRUE.equals(body.get("dry_run"));
+        if (runId.isBlank() && days <= 0) {
+            throw new IllegalArgumentException(
+                "index_failures/trim requires run_id and/or days >= 1 -- refusing an "
+                + "unscoped clear of the entire tenant history");
+        }
+        int deleted = repo.trimIndexFailures(tenant, runId, days, dryRun);
+        HttpUtil.send(ex, 200, json(Map.of("deleted", deleted, "dry_run", dryRun)));
+    }
+
+    // ── capability_census (nexus-gjv9b PART 1) ──────────────────────────────────
+
+    /**
+     * POST /v1/telemetry/capability_census/record — upsert on
+     * {@code (tenant_id, session_id)}. {@code capabilities} is an object
+     * keyed by the 8-value vocabulary ({@code skill}, {@code agent},
+     * {@code serena}, {@code nx_answer}, {@code search_query},
+     * {@code other_nx_mcp}, {@code baseline}, {@code other}); omitted
+     * entirely (or {@code null}) on a {@code blindspot=true} record, which
+     * this handler never rejects — a census that could not measure the
+     * transcript still records THAT fact.
+     */
+    private void handleCapabilityCensusRecord(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        String sessionId = requireString(body, "session_id");
+        String ts        = optStr(body, "ts");
+        boolean blindspot = Boolean.TRUE.equals(body.get("blindspot"));
+        String unmeasurableReason = optStrNull(body, "unmeasurable_reason");
+        Map<String, Integer> capabilities = new java.util.LinkedHashMap<>();
+        Object rawCaps = body.get("capabilities");
+        if (rawCaps instanceof Map<?, ?> m) {
+            for (var e : m.entrySet()) {
+                if (e.getKey() instanceof String k && e.getValue() instanceof Number n) {
+                    capabilities.put(k, n.intValue());
+                }
+            }
+        }
+        Integer dispatches = optInt(body, "dispatches");
+        Integer totalCalls = optInt(body, "total_calls");
+        repo.recordCapabilityCensus(tenant, sessionId, ts, blindspot, unmeasurableReason,
+            capabilities, dispatches, totalCalls);
+        HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    /**
+     * GET /v1/telemetry/capability_census/query — the read half of
+     * {@code nx census capability --from-store}. {@code ?session_id=}
+     * returns at most one row; else {@code ?since=} bounds by {@code ts};
+     * else every row for the tenant, capped by {@code ?limit=} (default
+     * 100).
+     */
+    private void handleCapabilityCensusQuery(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        var params = queryParams(ex);
+        String sessionId = params.getOrDefault("session_id", "");
+        String since      = params.getOrDefault("since", "");
+        int limit = parseIntParam(params, "limit", 100);
+        HttpUtil.send(ex, 200, json(Map.of("rows", repo.queryCapabilityCensus(tenant, sessionId, since, limit))));
+    }
+
+    /**
+     * POST /v1/telemetry/capability_census/trim — same {@code dry_run}
+     * contract as {@link #handleHookFailureTrim} (nexus-gjv9b review
+     * fold-in, critique Significant 4). Body: {@code days} (default 30),
+     * {@code dry_run}.
+     */
+    private void handleCapabilityCensusTrim(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        int days = optInt(body, "days", 30);
+        boolean dryRun = Boolean.TRUE.equals(body.get("dry_run"));
+        int deleted = repo.trimCapabilityCensus(tenant, days, dryRun);
+        HttpUtil.send(ex, 200, json(Map.of("deleted", deleted, "dry_run", dryRun)));
+    }
+
+    // ── routing_events (nexus-gjv9b PART 2) ─────────────────────────────────────
+
+    /**
+     * POST /v1/telemetry/routing_events/record — append one routing-hook
+     * event. Called by the standalone (no-nexus-import) routing hooks via
+     * urllib with a short (~250ms) timeout; a failure here is the caller's
+     * cue to fall back to a metered local drop, never to retry.
+     */
+    private void handleRoutingEventRecord(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        String ts               = optStr(body, "ts");
+        String sessionId        = optStr(body, "session_id");
+        String rule             = requireString(body, "rule");
+        String outcome          = requireString(body, "outcome");
+        String toolName         = optStr(body, "tool_name");
+        String commandFragment  = optStr(body, "command_fragment");
+        String escapeReason     = optStr(body, "escape_reason");
+        repo.recordRoutingEvent(tenant, ts, sessionId, rule, outcome, toolName, commandFragment, escapeReason);
+        HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    /**
+     * POST /v1/telemetry/routing_events/batch — {@code {events: [...]}},
+     * each entry shaped like the single-event body above. Returns
+     * {@code {inserted: N}}. A batch larger than
+     * {@value #MAX_ROUTING_EVENTS_BATCH} is rejected with HTTP 400
+     * rather than silently accepted unbounded (nexus-gjv9b PART 2 review
+     * fix, same {@link #MAX_PROBE_KEYS} discipline); a non-array
+     * {@code events} field, or any element that is not a JSON object,
+     * is likewise a 400 — never silently skipped.
+     */
+    private void handleRoutingEventsBatch(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        Object rawEvents = body.get("events");
+        if (!(rawEvents instanceof List<?> list)) {
+            throw new IllegalArgumentException("field 'events' must be a JSON array");
+        }
+        if (list.size() > MAX_ROUTING_EVENTS_BATCH) {
+            throw new IllegalArgumentException(
+                "field 'events' exceeds max batch size of " + MAX_ROUTING_EVENTS_BATCH
+                + " (got " + list.size() + ")");
+        }
+        var events = new ArrayList<TelemetryRepository.RoutingEventInput>(list.size());
+        for (Object o : list) {
+            if (!(o instanceof Map<?, ?> m)) {
+                throw new IllegalArgumentException("each element of 'events' must be a JSON object");
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> e = (Map<String, Object>) m;
+            events.add(new TelemetryRepository.RoutingEventInput(
+                optStr(e, "ts"), optStr(e, "session_id"),
+                requireString(e, "rule"), requireString(e, "outcome"),
+                optStr(e, "tool_name"), optStr(e, "command_fragment"),
+                optStr(e, "escape_reason")));
+        }
+        int inserted = repo.recordRoutingEventsBatch(tenant, events);
+        HttpUtil.send(ex, 200, json(Map.of("inserted", inserted)));
+    }
+
+    /**
+     * GET /v1/telemetry/routing_events/list — the read half of
+     * {@code nexus.routing_stats.aggregate}/{@code escape_events}
+     * (nexus-gjv9b PART 2). {@code ?since=} bounds by {@code ts};
+     * {@code ?limit=} caps the page (default 1000 — routing-hook events
+     * fire far more often than hook_failures/tier_writes, and a soak
+     * review reads the whole recent window at once).
+     */
+    private void handleRoutingEventsList(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        var params = queryParams(ex);
+        String since = params.getOrDefault("since", "");
+        int limit = parseIntParam(params, "limit", 1000);
+        HttpUtil.send(ex, 200, json(Map.of("rows", repo.listRoutingEvents(tenant, since, limit))));
+    }
+
+    /**
+     * POST /v1/telemetry/routing_events/trim — same {@code dry_run}
+     * contract as {@link #handleHookFailureTrim} (nexus-gjv9b review
+     * fold-in, critique Significant 4). Body: {@code days} (default 30),
+     * {@code dry_run}.
+     */
+    private void handleRoutingEventsTrim(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        int days = optInt(body, "days", 30);
+        boolean dryRun = Boolean.TRUE.equals(body.get("dry_run"));
+        int deleted = repo.trimRoutingEvents(tenant, days, dryRun);
         HttpUtil.send(ex, 200, json(Map.of("deleted", deleted, "dry_run", dryRun)));
     }
 

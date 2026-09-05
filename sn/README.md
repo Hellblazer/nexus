@@ -41,6 +41,36 @@ Every subagent receives a `system-reminder` block containing:
 
 Parameter signatures are delegated to Serena's own `initial_instructions` tool, which is backend-aware.
 
+### Worktree Guidance and Guard
+
+Serena resolves every path against the project root it found at startup (`--project-from-cwd` is read once). Claude Code subagents share the parent's MCP connection, so a subagent dispatched with `isolation: "worktree"` sends its edits to that server, and the server writes them into the primary checkout. Three incidents; the tool reported success each time.
+
+The plugin handles this in two places, both keyed on the `cwd` field of the hook payload and one detector (`hooks/scripts/worktree_guard.py`: the cwd's nearest `.git` is a file whose `gitdir:` points under `.git/worktrees/`):
+
+- **SubagentStart**: a worktree agent gets `worktree-section.md` ahead of the routing table: use the built-in `LSP` tool for navigation and `Edit`/`Write` with absolute paths for edits; Serena read tools stay available.
+- **PreToolUse / PermissionRequest**: every Serena write tool (`replace_in_files`, `replace_symbol_body`, `insert_*`, `rename_symbol`, `jet_brains_rename`/`move`/`safe_delete`/`inline_symbol`, `*_lines`, `replace_content`, memory writes) is denied with a reason naming the worktree. Read tools are approved as before.
+
+For the read side to work in worktrees, install the native LSP plugins for your languages (`claude plugin install pyright-lsp@claude-plugins-official`, likewise `jdtls-lsp`, `kotlin-lsp`, `typescript-lsp`) and their binaries.
+
+### Symbol editing inside worktrees (opt-in agent)
+
+The guard above takes Serena's write tools away from worktree subagents. To have them back, a subagent needs a Serena of its own, rooted at the worktree. `examples/worktree-developer.md` is that agent: its frontmatter declares a private Serena MCP server (tool prefix `mcp__serena-wt__`), pinned to the same revision as `.mcp.json`.
+
+Two measured facts shape it (nexus cc-validation scenario 30, 2026-09-05):
+
+- Claude Code spawns an agent's inline MCP server in the **parent's** directory, not the worktree. A server started with `--project-from-cwd` therefore roots itself at the primary checkout and writes there. The example starts Serena with **no project** and the agent's first action is `activate_project` on its own `pwd`; under the `claude-code` context, `activate_project` stays available exactly when no project was given at startup.
+- Plugin-shipped agents cannot declare `mcpServers` (Claude Code blocks it), so this file cannot ship as part of the plugin. It is a template to copy.
+
+Install:
+
+```bash
+cp ~/.claude/plugins/cache/nexus-plugins/sn/<version>/examples/worktree-developer.md ~/.claude/agents/
+```
+
+(or copy it from this repo). Then add `mcp__serena-wt__*` to `permissions.allow` in `~/.claude/settings.json`; the sn auto-approve covers only the plugin's own server. Dispatch with `subagent_type: "worktree-developer"` and `isolation: "worktree"`. The sn guard still applies to the shared `mcp__plugin_sn_serena__*` tools in that agent, which is what you want.
+
+Cost: one Serena process plus its language servers per dispatched agent, so a 10 to 60 second startup depending on the language, and a cold `uvx` cache on first use.
+
 ### Context7 Guidance
 
 - **Workflow**: `resolve-library-id` then `query-docs`
@@ -81,7 +111,11 @@ sn/
 │       ├── context7-section.md    # injected Context7 guidance
 │       ├── auto-approve-sn-mcp.sh # PreToolUse / PermissionRequest wrapper
 │       ├── auto_approve_sn_mcp.py # the allowlist decision (stdlib only)
+│       ├── worktree_guard.py      # linked-worktree detection + Serena write-tool set
+│       ├── worktree-section.md    # injected ahead of the routing table in worktrees
 │       └── serena-tools.txt       # generated Serena tool snapshot
+├── examples/
+│   └── worktree-developer.md      # opt-in agent template: private Serena per worktree
 └── README.md
 ```
 

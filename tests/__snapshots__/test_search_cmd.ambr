@@ -2,35 +2,35 @@
 # name: test_search_ranking_snapshot[caching strategy with TTL expiry]
   '''
   0.7000  knowledge__snapshot  /docs/arch_decision_002.md
-  0.4687  knowledge__snapshot  /docs/api_design.md
-  0.4255  code__snapshot  /repo/cache_layer.py
-  0.3957  knowledge__snapshot  /docs/security_policy.md
-  0.3876  knowledge__snapshot  /docs/arch_decision_001.md
-  0.3591  knowledge__snapshot  /docs/deployment_guide.md
-  0.2496  code__snapshot  /repo/auth_logout.py
-  0.1741  code__snapshot  /repo/http_handler.py
-  0.1164  code__snapshot  /repo/logging_setup.py
-  0.1025  code__snapshot  /repo/db_connection.py
-  0.0887  code__snapshot  /repo/config_loader.py
-  0.0691  code__snapshot  /repo/auth_login.py
-  0.0662  code__snapshot  /repo/auth_register.py
-  0.0441  code__snapshot  /repo/db_migration.py
+  0.5151  code__snapshot  /repo/cache_layer.py
+  0.3022  code__snapshot  /repo/auth_logout.py
+  0.2956  knowledge__snapshot  /docs/api_design.md
+  0.2108  code__snapshot  /repo/http_handler.py
+  0.1680  knowledge__snapshot  /docs/security_policy.md
+  0.1538  knowledge__snapshot  /docs/arch_decision_001.md
+  0.1409  code__snapshot  /repo/logging_setup.py
+  0.1240  code__snapshot  /repo/db_connection.py
+  0.1073  code__snapshot  /repo/config_loader.py
+  0.1040  knowledge__snapshot  /docs/deployment_guide.md
+  0.0837  code__snapshot  /repo/auth_login.py
+  0.0802  code__snapshot  /repo/auth_register.py
+  0.0534  code__snapshot  /repo/db_migration.py
   d=1.0623  code__snapshot  /repo/search_index.py
   '''
 # ---
 # name: test_search_ranking_snapshot[database connection pool management]
   '''
   0.7000  code__snapshot  /repo/db_connection.py
-  0.5794  knowledge__snapshot  /docs/security_policy.md
-  0.5755  knowledge__snapshot  /docs/arch_decision_001.md
-  0.5146  knowledge__snapshot  /docs/deployment_guide.md
-  0.4761  knowledge__snapshot  /docs/api_design.md
-  0.4589  knowledge__snapshot  /docs/arch_decision_002.md
+  0.3420  knowledge__snapshot  /docs/security_policy.md
+  0.3365  knowledge__snapshot  /docs/arch_decision_001.md
   0.2748  code__snapshot  /repo/auth_login.py
+  0.2485  knowledge__snapshot  /docs/deployment_guide.md
   0.2425  code__snapshot  /repo/auth_register.py
   0.2211  code__snapshot  /repo/db_migration.py
   0.1964  code__snapshot  /repo/config_loader.py
+  0.1928  knowledge__snapshot  /docs/api_design.md
   0.1879  code__snapshot  /repo/auth_logout.py
+  0.1681  knowledge__snapshot  /docs/arch_decision_002.md
   0.1618  code__snapshot  /repo/cache_layer.py
   0.1394  code__snapshot  /repo/http_handler.py
   0.0407  code__snapshot  /repo/logging_setup.py
@@ -40,37 +40,37 @@
 # name: test_search_ranking_snapshot[deployment docker configuration]
   '''
   0.7000  knowledge__snapshot  /docs/deployment_guide.md
-  0.3968  knowledge__snapshot  /docs/arch_decision_001.md
-  0.3928  knowledge__snapshot  /docs/api_design.md
-  0.3779  knowledge__snapshot  /docs/arch_decision_002.md
-  0.3773  knowledge__snapshot  /docs/security_policy.md
-  0.3120  code__snapshot  /repo/config_loader.py
-  0.2053  code__snapshot  /repo/db_migration.py
-  0.1745  code__snapshot  /repo/db_connection.py
-  0.1104  code__snapshot  /repo/cache_layer.py
-  0.0999  code__snapshot  /repo/auth_login.py
-  0.0869  code__snapshot  /repo/search_index.py
-  0.0865  code__snapshot  /repo/auth_register.py
-  0.0594  code__snapshot  /repo/http_handler.py
-  0.0583  code__snapshot  /repo/logging_setup.py
+  0.4322  code__snapshot  /repo/config_loader.py
+  0.2844  code__snapshot  /repo/db_migration.py
+  0.2417  code__snapshot  /repo/db_connection.py
+  0.1530  code__snapshot  /repo/cache_layer.py
+  0.1384  code__snapshot  /repo/auth_login.py
+  0.1204  code__snapshot  /repo/search_index.py
+  0.1198  code__snapshot  /repo/auth_register.py
+  0.0933  knowledge__snapshot  /docs/arch_decision_001.md
+  0.0852  knowledge__snapshot  /docs/api_design.md
+  0.0823  code__snapshot  /repo/http_handler.py
+  0.0808  code__snapshot  /repo/logging_setup.py
+  0.0555  knowledge__snapshot  /docs/arch_decision_002.md
+  0.0543  knowledge__snapshot  /docs/security_policy.md
   d=1.0720  code__snapshot  /repo/auth_logout.py
   '''
 # ---
 # name: test_search_ranking_snapshot[search and indexing with embeddings]
   '''
   0.7000  code__snapshot  /repo/search_index.py
-  0.4001  knowledge__snapshot  /docs/arch_decision_002.md
-  0.3920  knowledge__snapshot  /docs/arch_decision_001.md
-  0.3540  knowledge__snapshot  /docs/deployment_guide.md
-  0.3367  knowledge__snapshot  /docs/security_policy.md
-  0.3066  knowledge__snapshot  /docs/api_design.md
+  0.1459  knowledge__snapshot  /docs/arch_decision_002.md
+  0.1342  knowledge__snapshot  /docs/arch_decision_001.md
   0.1329  code__snapshot  /repo/cache_layer.py
   0.1140  code__snapshot  /repo/db_migration.py
   0.0794  code__snapshot  /repo/auth_register.py
+  0.0794  knowledge__snapshot  /docs/deployment_guide.md
+  0.0543  knowledge__snapshot  /docs/security_policy.md
   0.0271  code__snapshot  /repo/db_connection.py
   0.0238  code__snapshot  /repo/config_loader.py
   0.0189  code__snapshot  /repo/http_handler.py
   0.0186  code__snapshot  /repo/auth_login.py
+  0.0108  knowledge__snapshot  /docs/api_design.md
   0.0074  code__snapshot  /repo/logging_setup.py
   d=1.0653  code__snapshot  /repo/auth_logout.py
   '''
@@ -78,37 +78,37 @@
 # name: test_search_ranking_snapshot[security password hashing bcrypt]
   '''
   0.7000  knowledge__snapshot  /docs/security_policy.md
-  0.3998  knowledge__snapshot  /docs/arch_decision_002.md
-  0.3977  code__snapshot  /repo/auth_login.py
-  0.3877  knowledge__snapshot  /docs/api_design.md
-  0.3653  knowledge__snapshot  /docs/arch_decision_001.md
-  0.3272  knowledge__snapshot  /docs/deployment_guide.md
-  0.3265  code__snapshot  /repo/auth_register.py
-  0.1488  code__snapshot  /repo/auth_logout.py
-  0.1178  code__snapshot  /repo/db_connection.py
-  0.1157  code__snapshot  /repo/cache_layer.py
-  0.0629  code__snapshot  /repo/config_loader.py
-  0.0421  code__snapshot  /repo/db_migration.py
-  0.0246  code__snapshot  /repo/search_index.py
-  0.0128  code__snapshot  /repo/http_handler.py
+  0.5163  code__snapshot  /repo/auth_login.py
+  0.4239  code__snapshot  /repo/auth_register.py
+  0.1931  code__snapshot  /repo/auth_logout.py
+  0.1530  code__snapshot  /repo/db_connection.py
+  0.1502  code__snapshot  /repo/cache_layer.py
+  0.1371  knowledge__snapshot  /docs/arch_decision_002.md
+  0.1144  knowledge__snapshot  /docs/api_design.md
+  0.0816  code__snapshot  /repo/config_loader.py
+  0.0724  knowledge__snapshot  /docs/arch_decision_001.md
+  0.0547  code__snapshot  /repo/db_migration.py
+  0.0320  code__snapshot  /repo/search_index.py
+  0.0166  code__snapshot  /repo/http_handler.py
+  0.0009  knowledge__snapshot  /docs/deployment_guide.md
   d=1.0498  code__snapshot  /repo/logging_setup.py
   '''
 # ---
 # name: test_search_ranking_snapshot[user authentication login password]
   '''
   0.7000  code__snapshot  /repo/auth_login.py
-  0.6955  knowledge__snapshot  /docs/security_policy.md
-  0.6251  knowledge__snapshot  /docs/api_design.md
   0.4875  code__snapshot  /repo/auth_register.py
-  0.4236  knowledge__snapshot  /docs/arch_decision_002.md
-  0.4194  knowledge__snapshot  /docs/arch_decision_001.md
-  0.4132  knowledge__snapshot  /docs/deployment_guide.md
+  0.4857  knowledge__snapshot  /docs/security_policy.md
+  0.3840  knowledge__snapshot  /docs/api_design.md
   0.3293  code__snapshot  /repo/auth_logout.py
   0.1489  code__snapshot  /repo/logging_setup.py
   0.1366  code__snapshot  /repo/cache_layer.py
   0.1323  code__snapshot  /repo/db_connection.py
   0.1244  code__snapshot  /repo/http_handler.py
+  0.0931  knowledge__snapshot  /docs/arch_decision_002.md
   0.0910  code__snapshot  /repo/config_loader.py
+  0.0869  knowledge__snapshot  /docs/arch_decision_001.md
+  0.0780  knowledge__snapshot  /docs/deployment_guide.md
   0.0151  code__snapshot  /repo/search_index.py
   d=1.0870  code__snapshot  /repo/db_migration.py
   '''

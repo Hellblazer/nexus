@@ -1771,3 +1771,90 @@ class TestDefaultPollInterval:
         from nexus.aspect_worker import AspectExtractionWorker
 
         assert AspectExtractionWorker(poll_interval=0.05)._poll_interval == 0.05
+
+
+class TestBestEffortQueueDepthSharedClient:
+    """nexus-m20mf P3 fold-in (round-2 critique finding 2):
+    ``_best_effort_queue_depth`` shares the ACTIVE index run's client
+    (when there is one) instead of always building its own dedicated
+    9th pool, now that ``_get``/``pending_count`` carry a per-request
+    ``timeout=`` override letting it keep its strict 2s cap either way."""
+
+    def test_outside_an_index_run_builds_its_own_dedicated_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No active ``index_repository()`` run -- byte-identical to
+        pre-fix behavior: its own client, unshared."""
+        import httpx
+
+        from nexus.aspect_worker import _best_effort_queue_depth
+        from nexus.mcp_infra import current_index_run_t2_client
+
+        assert current_index_run_t2_client() is None  # clean before this test
+
+        tally: list[int] = []
+        orig_init = httpx.Client.__init__
+
+        def _counting_init(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003 — matches httpx's own signature
+            tally.append(1)
+            orig_init(self, *args, **kwargs)
+
+        monkeypatch.setattr(httpx.Client, "__init__", _counting_init)
+
+        _best_effort_queue_depth()  # return value not asserted -- may be None on a slow/absent daemon; the CONSTRUCTION shape is what's under test
+
+        assert len(tally) == 1, (
+            f"expected the diagnostic to build exactly 1 dedicated "
+            f"httpx.Client() outside an active index run; got {len(tally)}"
+        )
+
+    def test_inside_an_index_run_shares_the_run_client_and_keeps_its_cap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Inside ``use_shared_t2_client_for_index_run``, the diagnostic's
+        ``HttpAspectQueue`` must share that client (zero additional
+        httpx.Client() constructions) AND still cap ITS OWN call via
+        ``pending_count(timeout=2.0)`` -- proving the earlier "sharing
+        would defeat the 2s cap" framing no longer holds."""
+        import httpx
+
+        from nexus.aspect_worker import _best_effort_queue_depth
+        from nexus.db.t2._refreshable_client import build_shared_t2_client
+        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
+        from nexus.mcp_infra import use_shared_t2_client_for_index_run
+
+        shared = build_shared_t2_client()
+        captured_timeouts: list[float | None] = []
+        orig_pending_count = HttpAspectQueue.pending_count
+
+        def _capturing_pending_count(self, *, timeout=None):  # noqa: ANN001, ANN202
+            captured_timeouts.append(timeout)
+            return orig_pending_count(self, timeout=timeout)
+
+        monkeypatch.setattr(HttpAspectQueue, "pending_count", _capturing_pending_count)
+
+        tally: list[int] = []
+        orig_init = httpx.Client.__init__
+
+        def _counting_init(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+            tally.append(1)
+            orig_init(self, *args, **kwargs)
+
+        monkeypatch.setattr(httpx.Client, "__init__", _counting_init)
+
+        try:
+            with use_shared_t2_client_for_index_run(shared):
+                _best_effort_queue_depth()
+        finally:
+            shared.close()
+
+        assert tally == [], (
+            f"expected ZERO additional httpx.Client() constructions -- the "
+            f"diagnostic must reuse the active index run's client; got "
+            f"{len(tally)}"
+        )
+        assert captured_timeouts == [2.0], (
+            f"expected the strict 2s per-call cap to still apply even when "
+            f"sharing the run's (longer-timeout) client; got "
+            f"{captured_timeouts}"
+        )

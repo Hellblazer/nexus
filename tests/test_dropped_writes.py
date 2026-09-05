@@ -76,3 +76,346 @@ def test_malformed_lines_are_skipped(tmp_path, monkeypatch):
     assert summary.total == 1
     assert summary.rows == 4
     assert summary.last_collection == "code__x"
+
+
+# ── recency decay window (nexus-gjv9b review fold-in, critique CRITICAL 2) ──
+
+def test_fresh_drop_counts_as_recent(tmp_path, monkeypatch):
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl"))
+    dropped_writes.record_drop(
+        hook="routing_events", collection="", rows=1, error="connection refused",
+    )
+    summary = dropped_writes.count_drops()
+    assert summary.total == 1
+    assert summary.recent_total == 1
+    assert summary.recent_last_hook == "routing_events"
+
+
+def test_old_drop_does_not_count_as_recent_but_stays_in_lifetime_total(
+    tmp_path, monkeypatch,
+):
+    log = tmp_path / "drops.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(log))
+    log.write_text(
+        '{"ts": "2020-01-01T00:00:00Z", "hook": "routing_events", '
+        '"collection": "", "rows": 1, "error": "old"}\n'
+    )
+    summary = dropped_writes.count_drops()
+    assert summary.total == 1, "lifetime total must still count the old drop"
+    assert summary.recent_total == 0, "an aged-out drop must not count as recent"
+    assert summary.recent_last_hook == ""
+
+
+def test_recent_hours_param_is_honoured(tmp_path, monkeypatch):
+    """A drop from 2 hours ago is 'recent' under a 1-hour window's
+    complement (i.e. NOT recent under a 1h window, but IS recent under a
+    3h window) -- proves the parameter actually gates the boundary,
+    not just the (default 24h) common case."""
+    import time as _time
+
+    log = tmp_path / "drops.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(log))
+    two_hours_ago = _time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ", _time.gmtime(_time.time() - 2 * 3600)
+    )
+    log.write_text(
+        f'{{"ts": "{two_hours_ago}", "hook": "capability_census", '
+        f'"collection": "", "rows": 1, "error": "x"}}\n'
+    )
+
+    assert dropped_writes.count_drops(recent_hours=1.0).recent_total == 0
+    assert dropped_writes.count_drops(recent_hours=3.0).recent_total == 1
+
+
+def test_mixed_old_and_fresh_recent_reflects_only_the_fresh_one(tmp_path, monkeypatch):
+    log = tmp_path / "drops.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(log))
+    log.write_text(
+        '{"ts": "2020-01-01T00:00:00Z", "hook": "chash_dual_write_batch_hook", '
+        '"collection": "", "rows": 1, "error": "old"}\n'
+    )
+    dropped_writes.record_drop(
+        hook="routing_events", collection="", rows=2, error="fresh",
+    )
+    summary = dropped_writes.count_drops()
+    assert summary.total == 2
+    assert summary.rows == 3
+    assert summary.recent_total == 1
+    assert summary.recent_last_hook == "routing_events"
+
+
+def test_malformed_ts_never_counts_as_recent_and_never_raises(tmp_path, monkeypatch):
+    log = tmp_path / "drops.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(log))
+    log.write_text(
+        '{"ts": "not-a-timestamp", "hook": "routing_events", '
+        '"collection": "", "rows": 1, "error": "x"}\n'
+    )
+    summary = dropped_writes.count_drops()  # must not raise
+    assert summary.total == 1
+    assert summary.recent_total == 0
+
+
+# ---------------------------------------------------------------------------
+# Cause classification (nexus-gjv9b review fold-in round 3, critique
+# CRITICAL 2 / code-review item 1): record_drop's error field already
+# carries the distinguishing text for most producers -- classify_drop_cause
+# turns it into a short, stable vocabulary so count_drops can report the
+# DOMINANT failure mode in its recency window.
+# ---------------------------------------------------------------------------
+
+
+def test_classify_drop_cause_guard_refused():
+    msg = (
+        "STOP: refusing a WRITE to 'https://api.example.test'. This "
+        "process's nexus package resolves from a dev checkout"
+    )
+    assert dropped_writes.classify_drop_cause(msg) == "guard_refused"
+
+
+def test_classify_drop_cause_401():
+    assert dropped_writes.classify_drop_cause(
+        "HttpTelemetryStore.record_capability_census failed: HTTP 401: unauthorized"
+    ) == "401"
+
+
+def test_classify_drop_cause_403():
+    assert dropped_writes.classify_drop_cause(
+        "HttpTelemetryStore.record_routing_event failed: HTTP 403: forbidden"
+    ) == "403"
+
+
+def test_classify_drop_cause_route_absent_404():
+    """nexus-gjv9b review fold-in round 4: a plugin cut can ship the
+    client half of a route ahead of the paired engine tag -- the SERVING
+    engine predates the route entirely, on every call, until the engine
+    catches up. Version skew, not a failure."""
+    assert dropped_writes.classify_drop_cause(
+        "HttpTelemetryStore.record_routing_event failed: HTTP 404: Not Found"
+    ) == "route_absent"
+
+
+def test_classify_drop_cause_route_absent_405():
+    assert dropped_writes.classify_drop_cause(
+        "HttpTelemetryStore.record_capability_census failed: HTTP 405: Method Not Allowed"
+    ) == "route_absent"
+
+
+def test_classify_drop_cause_5xx():
+    assert dropped_writes.classify_drop_cause(
+        "HttpTelemetryStore.record_capability_census failed: HTTP 503: unavailable"
+    ) == "5xx"
+
+
+def test_classify_drop_cause_timeout():
+    assert dropped_writes.classify_drop_cause("ReadTimeout: timed out") == "timeout"
+
+
+def test_classify_drop_cause_connect():
+    assert dropped_writes.classify_drop_cause(
+        "ConnectError: [Errno 61] Connection refused"
+    ) == "connect"
+
+
+def test_classify_drop_cause_unresolvable():
+    assert dropped_writes.classify_drop_cause(
+        "service_url is set but no service_token is resolvable"
+    ) == "unresolvable"
+
+
+def test_classify_drop_cause_unrecognized_is_other():
+    assert dropped_writes.classify_drop_cause("something completely unexpected") == "other"
+
+
+def test_classify_drop_cause_empty_is_unclassified():
+    assert dropped_writes.classify_drop_cause("") == ""
+    assert dropped_writes.classify_drop_cause("   ") == ""
+
+
+def test_record_drop_auto_classifies_cause_from_error(tmp_path, monkeypatch):
+    log = tmp_path / "drops.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(log))
+    dropped_writes.record_drop(
+        hook="capability_census", collection="", rows=1,
+        error="STOP: refusing a WRITE to 'https://x'.",
+    )
+    line = log.read_text().splitlines()[0]
+    import json as _json
+    rec = _json.loads(line)
+    assert rec["cause"] == "guard_refused"
+
+
+def test_record_drop_explicit_cause_wins_over_auto_classification(tmp_path, monkeypatch):
+    """The routing hook's stdlib urllib layer already knows its failure
+    mode precisely from the transport itself -- more reliably than any
+    text match on an error string could -- so an explicit cause is never
+    overridden by classify_drop_cause."""
+    log = tmp_path / "drops.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(log))
+    dropped_writes.record_drop(
+        hook="routing_events", collection="", rows=1,
+        error="routing_events POST failed: 401", cause="401",
+    )
+    import json as _json
+    rec = _json.loads(log.read_text().splitlines()[0])
+    assert rec["cause"] == "401"
+
+
+# ---------------------------------------------------------------------------
+# Dominant cause + guard-refused-only window (nexus-gjv9b review fold-in
+# round 3, critique CRITICAL 2 / code-review item 1)
+# ---------------------------------------------------------------------------
+
+
+def test_count_drops_reports_dominant_cause_in_window(tmp_path, monkeypatch):
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl"))
+    for _ in range(3):
+        dropped_writes.record_drop(
+            hook="routing_events", collection="", rows=1, error="x", cause="401",
+        )
+    dropped_writes.record_drop(
+        hook="routing_events", collection="", rows=1, error="x", cause="timeout",
+    )
+    summary = dropped_writes.count_drops()
+    assert summary.recent_total == 4
+    assert summary.recent_dominant_cause == "401"
+    assert summary.recent_dominant_cause_count == 3
+
+
+def test_count_drops_dominant_cause_tiebreak_is_most_recent(tmp_path, monkeypatch):
+    log = tmp_path / "drops.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(log))
+    import json as _json
+    import time as _time
+    now = _time.time()
+    lines = [
+        _json.dumps({
+            "ts": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(now - 100)),
+            "hook": "routing_events", "collection": "", "rows": 1,
+            "error": "x", "cause": "connect",
+        }),
+        _json.dumps({
+            "ts": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(now - 10)),
+            "hook": "routing_events", "collection": "", "rows": 1,
+            "error": "x", "cause": "timeout",
+        }),
+    ]
+    log.write_text("\n".join(lines) + "\n")
+    summary = dropped_writes.count_drops()
+    assert summary.recent_dominant_cause == "timeout", (
+        "a 1-1 tie between two causes must break on whichever was seen "
+        "MOST RECENTLY, mirroring recent_last_hook's own framing"
+    )
+
+
+def test_count_drops_recent_all_guard_refused_true_when_every_in_window_drop_is(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl"))
+    for _ in range(3):
+        dropped_writes.record_drop(
+            hook="capability_census", collection="", rows=1,
+            error="STOP: refusing a WRITE", cause="guard_refused",
+        )
+    summary = dropped_writes.count_drops()
+    assert summary.recent_all_guard_refused is True
+
+
+def test_count_drops_recent_all_guard_refused_false_with_one_other_cause_mixed_in(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl"))
+    for _ in range(3):
+        dropped_writes.record_drop(
+            hook="capability_census", collection="", rows=1,
+            error="STOP: refusing a WRITE", cause="guard_refused",
+        )
+    dropped_writes.record_drop(
+        hook="capability_census", collection="", rows=1, error="x", cause="401",
+    )
+    summary = dropped_writes.count_drops()
+    assert summary.recent_all_guard_refused is False, (
+        "a single non-guard-refused drop in the window must keep the WARN "
+        "path live -- this flag is all-or-nothing, not 'mostly'"
+    )
+
+
+def test_count_drops_recent_all_guard_refused_false_when_cause_unclassified(
+    tmp_path, monkeypatch,
+):
+    """An unclassified (empty) cause must NOT be treated as confirmed
+    guard_refused -- only an AFFIRMATIVE classification may excuse the
+    window."""
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl"))
+    dropped_writes.record_drop(
+        hook="capability_census", collection="", rows=1, error="",
+    )
+    summary = dropped_writes.count_drops()
+    assert summary.recent_all_guard_refused is False
+
+
+def test_count_drops_recent_all_guard_refused_false_with_no_drops():
+    summary = dropped_writes.DropSummary()
+    assert summary.recent_all_guard_refused is False
+
+
+# ---------------------------------------------------------------------------
+# recent_all_benign (nexus-gjv9b review fold-in round 4): a strict
+# superset of recent_all_guard_refused -- also excuses a window of only
+# route_absent drops, or a MIX of guard_refused and route_absent (a
+# plugin cut ahead of the engine and an un-opted-in dev checkout can
+# both land in the same meter window).
+# ---------------------------------------------------------------------------
+
+
+def test_recent_all_benign_true_for_route_absent_only_window(tmp_path, monkeypatch):
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl"))
+    for _ in range(3):
+        dropped_writes.record_drop(
+            hook="routing_events", collection="", rows=1,
+            error="routing_events POST failed: route_absent", cause="route_absent",
+        )
+    summary = dropped_writes.count_drops()
+    assert summary.recent_all_benign is True
+    assert summary.recent_all_guard_refused is False, (
+        "route_absent alone must not also satisfy the narrower "
+        "guard_refused-only flag"
+    )
+
+
+def test_recent_all_benign_true_for_mixed_guard_refused_and_route_absent(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl"))
+    dropped_writes.record_drop(
+        hook="capability_census", collection="", rows=1,
+        error="STOP: refusing a WRITE",
+    )
+    dropped_writes.record_drop(
+        hook="routing_events", collection="", rows=1,
+        error="route_absent", cause="route_absent",
+    )
+    summary = dropped_writes.count_drops()
+    assert summary.recent_all_benign is True
+
+
+def test_recent_all_benign_false_with_one_other_cause_mixed_in(tmp_path, monkeypatch):
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl"))
+    dropped_writes.record_drop(
+        hook="routing_events", collection="", rows=1,
+        error="route_absent", cause="route_absent",
+    )
+    dropped_writes.record_drop(
+        hook="routing_events", collection="", rows=1,
+        error="HTTP 401: unauthorized",
+    )
+    summary = dropped_writes.count_drops()
+    assert summary.recent_all_benign is False, (
+        "a single non-benign cause in the window must keep the real "
+        "WARN path live -- all-or-nothing, not 'mostly benign'"
+    )
+
+
+def test_recent_all_benign_false_with_no_drops():
+    summary = dropped_writes.DropSummary()
+    assert summary.recent_all_benign is False

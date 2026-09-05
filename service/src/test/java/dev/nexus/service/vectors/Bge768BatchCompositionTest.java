@@ -312,4 +312,109 @@ class Bge768BatchCompositionTest {
                     .isGreaterThan(COSINE_TOLERANCE);
         }
     }
+
+    /**
+     * Bead nexus-s71lr — the engine-side half of "bulk indexing is silent for minutes":
+     * {@code embedSubBatched} must emit a structured INFO progress line when it internally
+     * splits an oversize batch, not stay silent above DEBUG. Reuses the exact oversize-batch
+     * shape {@link #oversizeBatch_internalSubBatching_multipleInvocations_outputsMatchSingles()}
+     * already proves forces more than one {@code session.run()} call — a fresh embedder
+     * instance here (rather than the shared {@code @BeforeAll} one) so {@link
+     * EmbedProgressGate}'s "first call ever" exemption is guaranteed to fire and this test
+     * never depends on what earlier tests in this class already consumed from the shared
+     * instance's rate-limit window.
+     */
+    @Test
+    void oversizeBatch_emitsStructuredProgressLogAboveDebug() throws Exception {
+        String modelPath = System.getProperty("nexus.bge.modelPath", Bge768Embedder.DEFAULT_MODEL_PATH);
+        String tokPath   = System.getProperty("nexus.bge.tokenizerPath", Bge768Embedder.DEFAULT_TOKENIZER_PATH);
+        Bge768Embedder fresh = new Bge768Embedder(modelPath, tokPath);
+
+        var root = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
+                org.slf4j.Logger.ROOT_LOGGER_NAME);
+        var logs = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            List<String> big = new ArrayList<>();
+            for (int i = 0; i < 20; i++) {
+                big.add(longText("progress logging engine visibility bulk indexing silent minutes " + i, 480));
+            }
+            fresh.embed(big);
+
+            var progressLines = logs.list.stream()
+                    .filter(e -> e.getLevel() == ch.qos.logback.classic.Level.INFO)
+                    .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                    .filter(m -> m.startsWith("event=bge768_embed_progress"))
+                    .toList();
+
+            assertThat(progressLines)
+                    .as("an oversize (multi-sub-batch) embed() call must emit at least one "
+                        + "INFO progress line -- the exact silence this bead closes")
+                    .isNotEmpty();
+            assertThat(progressLines.get(0))
+                    .contains("sub_batch=")
+                    .contains("sub_batch_size=")
+                    .contains("chunks_done=")
+                    .contains("chunks_total=20")
+                    .contains("elapsed_s=")
+                    .contains("chunks_per_sec=");
+            assertThat(progressLines.get(0))
+                    .as("no admission gate wired on this fresh instance -- the fields must "
+                        + "be OMITTED, never fabricated as 0")
+                    .doesNotContain("queue_depth=")
+                    .doesNotContain("thread_width=");
+
+            EmbedActivitySnapshot noGateSnapshot = fresh.activitySnapshot();
+            assertThat(noGateSnapshot.queueDepth()).isEqualTo(-1);
+            assertThat(noGateSnapshot.threadWidth()).isEqualTo(-1);
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+            fresh.close();
+        }
+    }
+
+    /**
+     * Bead nexus-s71lr, code-review-expert pass 2 finding c — end-to-end wiring proof:
+     * once {@link Bge768Embedder#setAdmissionGate} is called, both the progress log
+     * line and {@link Bge768Embedder#activitySnapshot()} must report the REAL
+     * queue-depth/thread-width read from that {@link LocalOnnxAdmission} instance,
+     * never a fabricated or recomputed value.
+     */
+    @Test
+    void withAdmissionGateWired_logLineAndSnapshotReportRealQueueDepthAndThreadWidth() throws Exception {
+        String modelPath = System.getProperty("nexus.bge.modelPath", Bge768Embedder.DEFAULT_MODEL_PATH);
+        String tokPath   = System.getProperty("nexus.bge.tokenizerPath", Bge768Embedder.DEFAULT_TOKENIZER_PATH);
+        Bge768Embedder fresh = new Bge768Embedder(modelPath, tokPath);
+        LocalOnnxAdmission gate = new LocalOnnxAdmission(4, 1000);
+        fresh.setAdmissionGate(gate);
+
+        var root = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
+                org.slf4j.Logger.ROOT_LOGGER_NAME);
+        var logs = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            fresh.embed(List.of("a single small text -- the fast, unsplit path"));
+
+            var progressLines = logs.list.stream()
+                    .filter(e -> e.getLevel() == ch.qos.logback.classic.Level.INFO)
+                    .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                    .filter(m -> m.startsWith("event=bge768_embed_progress"))
+                    .toList();
+            assertThat(progressLines).isNotEmpty();
+            assertThat(progressLines.get(0))
+                    .contains("queue_depth=0")   // nothing else contends for this fresh gate
+                    .contains("thread_width=4"); // the configured permit ceiling, READ not derived
+
+            EmbedActivitySnapshot snapshot = fresh.activitySnapshot();
+            assertThat(snapshot.queueDepth()).isEqualTo(0);
+            assertThat(snapshot.threadWidth()).isEqualTo(4);
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+            fresh.close();
+        }
+    }
 }

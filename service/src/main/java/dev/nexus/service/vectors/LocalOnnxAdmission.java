@@ -103,7 +103,24 @@ public final class LocalOnnxAdmission {
 
     private final int      permits;
     private final long     queryTimeoutMs;
-    private final Semaphore inFlight;
+    private final ObservableSemaphore inFlight;
+
+    /**
+     * Bead nexus-s71lr, deliverable 1/2: {@link Semaphore#getQueueLength()} is
+     * {@code protected} (a JDK API design meant for subclasses), so exposing it to
+     * this class's own {@link #queueLength()} needs a trivial subclass rather than
+     * reflection. This is the ONLY reason this type exists — it adds no other
+     * behaviour over plain {@link Semaphore}.
+     */
+    private static final class ObservableSemaphore extends Semaphore {
+        ObservableSemaphore(int permits, boolean fair) {
+            super(permits, fair);
+        }
+
+        int queueLength() {
+            return getQueueLength();
+        }
+    }
 
     /**
      * Production factory: permits and query timeout resolved from real
@@ -141,7 +158,7 @@ public final class LocalOnnxAdmission {
         this.queryTimeoutMs = queryTimeoutMs;
         // Fair: a burst of concurrent local-embed requests cannot starve an
         // earlier arrival — same fairness choice as TenantScope.ADMISSION.
-        this.inFlight = new Semaphore(permits, true);
+        this.inFlight = new ObservableSemaphore(permits, true);
         // Boot-time visibility lives in fromEnv() (the one production call
         // site), which also logs the search-statement-timeout this
         // constructor's queryTimeoutMs was derived from — logging again
@@ -149,7 +166,9 @@ public final class LocalOnnxAdmission {
         // noise to the many direct-construction tests in this package.
     }
 
-    /** The configured concurrent-local-ONNX-call ceiling. */
+    /** The configured concurrent-local-ONNX-call ceiling — the "thread width"
+     * bead nexus-s71lr's engine progress line and {@code GET /v1/status} report
+     * (READ here, never recomputed by either caller). */
     int permits() {
         return permits;
     }
@@ -157,6 +176,27 @@ public final class LocalOnnxAdmission {
     /** The configured interactive (query/rerank) admission timeout, in ms. */
     long queryTimeoutMs() {
         return queryTimeoutMs;
+    }
+
+    /**
+     * Bead nexus-s71lr, deliverable 1/2: how many callers are CURRENTLY BLOCKED
+     * waiting for a permit — the "queue depth" the engine progress log line and
+     * {@code GET /v1/status} report. An estimate (per {@link
+     * Semaphore#getQueueLength()}'s own contract: "the value is only an
+     * estimate"), never a computed/derived proxy — this reads the semaphore's
+     * own wait-queue directly.
+     */
+    int queueLength() {
+        return inFlight.queueLength();
+    }
+
+    /**
+     * Bead nexus-s71lr, deliverable 1/2: how many permits are CURRENTLY HELD
+     * (in-flight local ONNX calls right now), distinct from {@link
+     * #queueLength()} (callers waiting, not yet admitted).
+     */
+    int inFlightCount() {
+        return permits - inFlight.availablePermits();
     }
 
     /**

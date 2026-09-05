@@ -3,6 +3,9 @@ package dev.nexus.service;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.*;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.postgresql.util.PSQLException;
 
 import java.sql.Connection;
@@ -10,8 +13,12 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.HexFormat;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -732,16 +739,38 @@ class ForeignKeyConstraintTest {
             insertCatalogDocument(su, TENANT_A, "rls-check-tumbler");
         }
 
-        // Query via svc role with Tenant-B GUC — must see 0 rows
+        // Query via svc role with Tenant-B GUC — must see 0 rows.
+        // isLocal=true (SET LOCAL) only survives to the guarded SELECT if this
+        // connection is in an explicit transaction — the pool hands out
+        // autoCommit=true connections, so an implicit-commit boundary between
+        // setTenant() and the SELECT would silently discard the GUC and this
+        // test would exercise RLS default-deny instead of the claimed
+        // cross-tenant mismatch (nexus-gcbp4).
         try (Connection svc = svcDs.getConnection()) {
+            svc.setAutoCommit(false);
+            DSLContext ctx = DSL.using(svc, SQLDialect.POSTGRES);
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_B, true);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.catalog_documents " +
-                "WHERE tumbler='rls-check-tumbler'");
-            rs.next();
-            assertThat(rs.getInt(1))
+            int count = ctx.selectCount().from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TUMBLER.eq("rls-check-tumbler"))
+                .fetchOne(0, int.class);
+            assertThat(count)
                 .as("Tenant-B must not see Tenant-A catalog_documents after FK addition")
                 .isZero();
+
+            // Positive control (nexus-492qf): flip the GUC, in the SAME transaction,
+            // to the row's rightful owner and confirm it becomes visible — proves the
+            // negative assertion above is driven by tenant mismatch, not by the GUC
+            // having silently gone missing (which would ALSO read back 0 rows under
+            // FORCE RLS default-deny).
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, true);
+            int ownerCount = ctx.selectCount().from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TUMBLER.eq("rls-check-tumbler"))
+                .fetchOne(0, int.class);
+            assertThat(ownerCount)
+                .as("Tenant-A (the rightful owner) must see its own catalog_documents row")
+                .isPositive();
+
+            svc.rollback();
         }
     }
 
@@ -763,13 +792,30 @@ class ForeignKeyConstraintTest {
         }
 
         try (Connection svc = svcDs.getConnection()) {
+            svc.setAutoCommit(false);
+            DSLContext ctx = DSL.using(svc, SQLDialect.POSTGRES);
+            byte[] chash = HexFormat.of().parseHex(hexChash("rls-ta-tumbler"));
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_B, true);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.topic_assignments WHERE doc_id=decode('" + hexChash("rls-ta-tumbler") + "', 'hex')");
-            rs.next();
-            assertThat(rs.getInt(1))
+            int count = ctx.selectCount().from(TOPIC_ASSIGNMENTS)
+                .where(TOPIC_ASSIGNMENTS.DOC_ID.eq(chash))
+                .fetchOne(0, int.class);
+            assertThat(count)
                 .as("Tenant-B must not see Tenant-A topic_assignments after FK addition")
                 .isZero();
+
+            // Positive control (nexus-492qf): flip the GUC, in the SAME transaction,
+            // to the row's rightful owner and confirm it becomes visible — proves the
+            // negative assertion above is driven by tenant mismatch, not by the GUC
+            // having silently gone missing.
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, true);
+            int ownerCount = ctx.selectCount().from(TOPIC_ASSIGNMENTS)
+                .where(TOPIC_ASSIGNMENTS.DOC_ID.eq(chash))
+                .fetchOne(0, int.class);
+            assertThat(ownerCount)
+                .as("Tenant-A (the rightful owner) must see its own topic_assignments row")
+                .isPositive();
+
+            svc.rollback();
         }
     }
 
@@ -786,13 +832,29 @@ class ForeignKeyConstraintTest {
         }
 
         try (Connection svc = svcDs.getConnection()) {
+            svc.setAutoCommit(false);
+            DSLContext ctx = DSL.using(svc, SQLDialect.POSTGRES);
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_B, true);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.document_aspects WHERE doc_id='rls-asp-tumbler'");
-            rs.next();
-            assertThat(rs.getInt(1))
+            int count = ctx.selectCount().from(DOCUMENT_ASPECTS)
+                .where(DOCUMENT_ASPECTS.DOC_ID.eq("rls-asp-tumbler"))
+                .fetchOne(0, int.class);
+            assertThat(count)
                 .as("Tenant-B must not see Tenant-A document_aspects after FK addition")
                 .isZero();
+
+            // Positive control (nexus-492qf): flip the GUC, in the SAME transaction,
+            // to the row's rightful owner and confirm it becomes visible — proves the
+            // negative assertion above is driven by tenant mismatch, not by the GUC
+            // having silently gone missing.
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, true);
+            int ownerCount = ctx.selectCount().from(DOCUMENT_ASPECTS)
+                .where(DOCUMENT_ASPECTS.DOC_ID.eq("rls-asp-tumbler"))
+                .fetchOne(0, int.class);
+            assertThat(ownerCount)
+                .as("Tenant-A (the rightful owner) must see its own document_aspects row")
+                .isPositive();
+
+            svc.rollback();
         }
     }
 

@@ -986,6 +986,16 @@ def clear_t1_session_lease(session_id: str, config_dir: Path) -> None:
         path.unlink()
     except OSError:
         pass
+    # The mint lock file for this session (``_t1_session_mint_lock_path``)
+    # is created on first mint-or-borrow and was never removed: 706
+    # zero-byte files had accumulated by 2026-09-05. It cannot be unlinked
+    # under the flock (a waiter on the old inode and a newcomer on the new
+    # one would both hold "the" lock), so it goes here, at session end,
+    # when no recoverer has a live session to mint for.
+    try:
+        _t1_session_mint_lock_path(session_id, config_dir).unlink()
+    except OSError:
+        pass
 
 
 class T1RoutingAction(enum.StrEnum):

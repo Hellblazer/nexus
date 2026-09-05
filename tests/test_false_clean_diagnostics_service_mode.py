@@ -32,6 +32,7 @@ that the frozen-file read path stays dead.
 """
 from __future__ import annotations
 
+import datetime as _dt
 from pathlib import Path
 from unittest.mock import patch
 
@@ -217,26 +218,40 @@ class TestTrimTelemetryRoutes:
              patch("sqlite3.connect") as sqlite_connect:
             http_store.return_value.trim_search_telemetry.return_value = 7
             http_store.return_value.trim_hook_failures.return_value = 3
+            # nexus-gjv9b review fold-in, critique Significant 4: the sweep
+            # grew from two live tables to four.
+            http_store.return_value.trim_capability_census.return_value = 5
+            http_store.return_value.trim_routing_events.return_value = 9
             doctor_mod._run_trim_telemetry(days=30)
 
         http_store.return_value.trim_search_telemetry.assert_called_once_with(
             days=30, dry_run=False)
         http_store.return_value.trim_hook_failures.assert_called_once_with(
             days=30, dry_run=False)
+        http_store.return_value.trim_capability_census.assert_called_once_with(
+            days=30, dry_run=False)
+        # routing_events falls back to its own shorter 7d default when the
+        # caller leaves `days` at the shared default (nexus-gjv9b review
+        # fold-in round 3, critique Significant 3).
+        http_store.return_value.trim_routing_events.assert_called_once_with(
+            days=7, dry_run=False)
         sqlite_connect.assert_not_called(), "must not open the frozen SQLite"
 
     def test_dry_run_previews_both_tables_without_deleting(
         self, service_mode: None,
     ) -> None:
-        """``dry_run=True`` must reach BOTH stores — a partial preview
-        (search_telemetry previewed, hook_failures for-real deleted, or vice
-        versa) would be a worse footgun than the missing feature."""
+        """``dry_run=True`` must reach ALL FOUR stores (nexus-gjv9b review
+        fold-in, critique Significant 4, grew this from two) — a partial
+        preview (one table previewed, another for-real deleted) would be a
+        worse footgun than the missing feature."""
         from nexus.commands import doctor as doctor_mod
 
         with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as http_store, \
              _engine_version_probe("0.1.81"):
             http_store.return_value.trim_search_telemetry.return_value = 2
             http_store.return_value.trim_hook_failures.return_value = 1
+            http_store.return_value.trim_capability_census.return_value = 4
+            http_store.return_value.trim_routing_events.return_value = 6
             runner = CliRunner()
             with runner.isolation() as (out, _err, _):
                 doctor_mod._run_trim_telemetry(days=30, dry_run=True)
@@ -246,8 +261,14 @@ class TestTrimTelemetryRoutes:
             days=30, dry_run=True)
         http_store.return_value.trim_hook_failures.assert_called_once_with(
             days=30, dry_run=True)
+        http_store.return_value.trim_capability_census.assert_called_once_with(
+            days=30, dry_run=True)
+        http_store.return_value.trim_routing_events.assert_called_once_with(
+            days=7, dry_run=True)
         assert "Would trim 2 search_telemetry" in printed, printed
         assert "Would trim 1 hook_failures" in printed, printed
+        assert "Would trim 4 capability_census" in printed, printed
+        assert "Would trim 6 routing_events" in printed, printed
         assert "Trimmed" not in printed, (
             "dry-run output must never read like a completed deletion"
         )
@@ -541,3 +562,367 @@ class TestEndpointUnresolvableDegradesCleanly:
         assert "search_telemetry" not in printed, (
             f"must not report the partial success as a completed trim: {printed}"
         )
+
+
+# ── nx doctor --check-index-failures (nexus-nukn3) ──────────────────────────
+
+
+class TestIndexFailuresCheckRoutes:
+    """Non-vacuity: this check must fire loudly on a seeded failure row --
+    the exact nexus-fylxo trap named on this bead (a durable failure queue
+    whose reader never raises reproduces the aspect-queue check's original
+    defect for a second queue). Written FAIL-FIRST rather than retrofitted.
+
+    Fold-in round 1 (T2 critique-nexus-nukn3-410720f6a [24569], Critical
+    finding): the check now scopes its gate to the LATEST run and exempts
+    a stale one, rather than gating on the all-time total.
+
+    Fold-in round 2 (T2 critique-nexus-nukn3-37262c4a1 [24596], Critical
+    finding): the gate is now scoped to the latest UNACKNOWLEDGED run --
+    a durable ``nx index failures --acknowledge`` adjudication is excluded
+    from the gate so a recurring failure for an acknowledged file does not
+    gate forever just because every re-index mints a fresh run_id. These
+    tests assert the resulting THREE-query shape: an unscoped all-time
+    call, an unscoped unacknowledged-only call (finds the latest
+    unacknowledged run's id), and a run_id + unacknowledged_only scoped
+    call for the exact gating count."""
+
+    @staticmethod
+    def _scoped_mock(
+        all_time: dict,
+        unacked_all_time: dict | None = None,
+        by_run_id_unacked: dict | None = None,
+    ):
+        """A list_index_failures side_effect routed by (run_id,
+        unacknowledged_only): the plain unscoped call returns *all_time*;
+        the unscoped unacknowledged_only call returns *unacked_all_time*
+        (defaults to *all_time* when every failure is unacknowledged, the
+        common test shape); a run_id + unacknowledged_only scoped call
+        returns *by_run_id_unacked*."""
+        def _side_effect(*, run_id: str = "", days: int = 0, limit: int = 100,
+                          unacknowledged_only: bool = False):
+            if run_id:
+                assert unacknowledged_only, (
+                    "the run-scoped gate call must always pass "
+                    "unacknowledged_only=True"
+                )
+                assert by_run_id_unacked is not None, (
+                    f"unexpected scoped call with run_id={run_id}"
+                )
+                return by_run_id_unacked
+            if unacknowledged_only:
+                return unacked_all_time if unacked_all_time is not None else all_time
+            return all_time
+        return _side_effect
+
+    def test_zero_failures_does_not_signal_failure(
+        self, service_mode: None,
+    ) -> None:
+        import click
+
+        from nexus.commands import doctor as doctor_mod
+
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+            store.return_value.list_index_failures.side_effect = self._scoped_mock(
+                {"rows": [], "total": 0, "oldest_occurred_at": ""},
+            )
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                exit_code = None
+                try:
+                    doctor_mod._run_check_index_failures()
+                except click.exceptions.Exit as exc:
+                    exit_code = exc.exit_code
+                printed = out.getvalue().decode() + err.getvalue().decode()
+
+        assert exit_code is None
+        assert "0 recorded failure" in printed
+        assert "FAIL" not in printed
+
+    def test_fresh_latest_run_failure_signals_failure_loudly(
+        self, service_mode: None,
+    ) -> None:
+        """THE motivating case: a genuine, RECENT backlog must raise Exit(1)
+        with a ✗/FAIL: marker, never read as healthy (nexus-fylxo class)."""
+        import click
+
+        from nexus.commands import doctor as doctor_mod
+
+        now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        row = {
+            "run_id": "run-1", "file_path": "/repo/broken.pdf",
+            "error_class": "UnextractableContentError",
+            "error": "produced empty output",
+            "occurred_at": now_iso,
+        }
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+            store.return_value.list_index_failures.side_effect = self._scoped_mock(
+                all_time={"rows": [row], "total": 1, "oldest_occurred_at": now_iso},
+                by_run_id_unacked={"rows": [row], "total": 1, "oldest_occurred_at": now_iso},
+            )
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                exit_code = None
+                try:
+                    doctor_mod._run_check_index_failures()
+                except click.exceptions.Exit as exc:
+                    exit_code = exc.exit_code
+                printed = out.getvalue().decode() + err.getvalue().decode()
+
+        assert exit_code == 1
+        assert "✗" in printed or "FAIL:" in printed, printed
+        assert "/repo/broken.pdf" in printed
+        assert "UnextractableContentError" in printed
+
+    def test_stale_older_run_failure_alone_does_not_signal_failure(
+        self, service_mode: None,
+    ) -> None:
+        """THE Critical fix's non-vacuity proof: a backlog whose only
+        failure is older than the staleness window must NOT gate the
+        sweep -- only a fresh one does. Before this fold-in, this exact
+        scenario (one permanent failure, however old) failed the default
+        sweep forever."""
+        import click
+
+        from nexus.commands import doctor as doctor_mod
+
+        old_iso = (
+            _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=60)
+        ).isoformat()
+        row = {
+            "run_id": "run-old", "file_path": "/repo/ancient.pdf",
+            "error_class": "UnextractableContentError",
+            "error": "encrypted PDF", "occurred_at": old_iso,
+        }
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+            store.return_value.list_index_failures.side_effect = self._scoped_mock(
+                {"rows": [row], "total": 1, "oldest_occurred_at": old_iso},
+            )
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                exit_code = None
+                try:
+                    doctor_mod._run_check_index_failures()
+                except click.exceptions.Exit as exc:
+                    exit_code = exc.exit_code
+                printed = out.getvalue().decode() + err.getvalue().decode()
+
+        assert exit_code is None, printed
+        assert "FAIL" not in printed
+        assert "1 recorded failure" in printed, printed
+        assert "no longer gates" in printed
+
+    def test_all_failures_acknowledged_does_not_signal_failure(
+        self, service_mode: None,
+    ) -> None:
+        """Fold-in round 2's motivating case: a FRESH, recurring failure
+        that is fully covered by a durable acknowledgment must not gate,
+        even though the all-time total is nonzero and the failure recurred
+        just now (the exact shape a stale-only fix cannot self-heal)."""
+        import click
+
+        from nexus.commands import doctor as doctor_mod
+
+        now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        row = {
+            "run_id": "run-9", "file_path": "/repo/known-encrypted.pdf",
+            "error_class": "UnextractableContentError",
+            "error": "encrypted", "occurred_at": now_iso,
+        }
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+            store.return_value.list_index_failures.side_effect = self._scoped_mock(
+                all_time={"rows": [row], "total": 2, "oldest_occurred_at": now_iso},
+                unacked_all_time={"rows": [], "total": 0, "oldest_occurred_at": ""},
+            )
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                exit_code = None
+                try:
+                    doctor_mod._run_check_index_failures()
+                except click.exceptions.Exit as exc:
+                    exit_code = exc.exit_code
+                printed = out.getvalue().decode() + err.getvalue().decode()
+
+        assert exit_code is None, printed
+        assert "FAIL" not in printed
+        assert "2 recorded failure" in printed, printed
+        assert "acknowledged" in printed
+
+    def test_unreachable_service_reports_UNKNOWN_not_zero(
+        self, service_mode: None,
+    ) -> None:
+        from nexus.commands import doctor as doctor_mod
+
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+            store.side_effect = httpx.ConnectError("refused")
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                doctor_mod._run_check_index_failures()
+                printed = out.getvalue().decode() + err.getvalue().decode()
+
+        assert "UNKNOWN" in printed, printed
+        assert "0 recorded failure" not in printed
+
+    def test_active_acknowledgments_are_named_in_the_footnote(
+        self, service_mode: None,
+    ) -> None:
+        """Round-4 fold-in (critique [24621] item 1): the doctor footnote
+        must name the ACTIVE acknowledgment count and point at the list
+        surface, alongside the pre-existing "N are acknowledged" line."""
+        import click
+
+        from nexus.commands import doctor as doctor_mod
+
+        now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        row = {
+            "run_id": "run-9", "file_path": "/repo/known-encrypted.pdf",
+            "error_class": "UnextractableContentError",
+            "error": "encrypted", "occurred_at": now_iso,
+        }
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+            store.return_value.list_index_failures.side_effect = self._scoped_mock(
+                all_time={"rows": [row], "total": 2, "oldest_occurred_at": now_iso},
+                unacked_all_time={"rows": [], "total": 0, "oldest_occurred_at": ""},
+            )
+            store.return_value.list_index_failure_acknowledgments.return_value = {
+                "rows": [{
+                    "file_path": "/repo/known-encrypted.pdf",
+                    "error_class": "UnextractableContentError",
+                    "reason": "known limitation", "created_at": now_iso,
+                }],
+                "total": 1,
+            }
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                exit_code = None
+                try:
+                    doctor_mod._run_check_index_failures()
+                except click.exceptions.Exit as exc:
+                    exit_code = exc.exit_code
+                printed = out.getvalue().decode() + err.getvalue().decode()
+
+        assert exit_code is None, printed
+        assert "1 active acknowledgment(s)" in printed, printed
+        assert "nx index failures --acks" in printed, printed
+
+    def test_ack_lookup_failure_does_not_break_the_footnote(
+        self, service_mode: None,
+    ) -> None:
+        """The footnote's own lookup is advisory: a transport error there
+        must never turn the (already-clean) all-time summary into a hard
+        failure, mirroring the outer store-construction posture."""
+        import click
+
+        from nexus.commands import doctor as doctor_mod
+
+        now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        row = {
+            "run_id": "run-9", "file_path": "/repo/known-encrypted.pdf",
+            "error_class": "UnextractableContentError",
+            "error": "encrypted", "occurred_at": now_iso,
+        }
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+            store.return_value.list_index_failures.side_effect = self._scoped_mock(
+                all_time={"rows": [row], "total": 2, "oldest_occurred_at": now_iso},
+                unacked_all_time={"rows": [], "total": 0, "oldest_occurred_at": ""},
+            )
+            store.return_value.list_index_failure_acknowledgments.side_effect = (
+                httpx.ConnectError("refused")
+            )
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                exit_code = None
+                try:
+                    doctor_mod._run_check_index_failures()
+                except click.exceptions.Exit as exc:
+                    exit_code = exc.exit_code
+                printed = out.getvalue().decode() + err.getvalue().decode()
+
+        assert exit_code is None, printed
+        assert "FAIL" not in printed
+        assert "acknowledged" in printed
+
+    def test_pre_emptive_acknowledgment_is_named_with_zero_failures(
+        self, service_mode: None,
+    ) -> None:
+        """Round-5 fold-in (code-review [24635] item 3): an acknowledgment
+        created AHEAD of any failure ever being recorded for that file/class
+        (an operator pre-emptively exempting a known-bad corpus) must still
+        be named -- the old placement inside the post-return branch never
+        reached this, since total_all_time == 0 returns before the ack
+        lookup ran at all."""
+        import click
+
+        from nexus.commands import doctor as doctor_mod
+
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+            store.return_value.list_index_failures.side_effect = self._scoped_mock(
+                {"rows": [], "total": 0, "oldest_occurred_at": ""},
+            )
+            store.return_value.list_index_failure_acknowledgments.return_value = {
+                "rows": [{
+                    "file_path": "", "error_class": "ScannedPdfNoOcrError",
+                    "reason": "known systemic issue",
+                    "created_at": "2026-09-05T00:00:00Z",
+                }],
+                "total": 1,
+            }
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                exit_code = None
+                try:
+                    doctor_mod._run_check_index_failures()
+                except click.exceptions.Exit as exc:
+                    exit_code = exc.exit_code
+                printed = out.getvalue().decode() + err.getvalue().decode()
+
+        assert exit_code is None, printed
+        assert "0 recorded failure" in printed, printed
+        assert "1 active acknowledgment(s)" in printed, printed
+        assert "nx index failures --acks" in printed, printed
+
+    def test_surviving_acknowledgment_is_named_when_no_current_failure_is_covered(
+        self, service_mode: None,
+    ) -> None:
+        """Round-5 fold-in (code-review [24635] item 3): an acknowledgment
+        whose own failure has aged out or been cleared, while an UNRELATED
+        fresh failure exists, must still be named -- total_all_time equals
+        total_unacknowledged here (nothing CURRENT is covered), so the old
+        placement inside `if total_all_time > total_unacknowledged` never
+        reached the ack lookup in this shape either."""
+        import click
+
+        from nexus.commands import doctor as doctor_mod
+
+        now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        unrelated_row = {
+            "run_id": "run-1", "file_path": "/repo/unrelated.pdf",
+            "error_class": "UnextractableContentError",
+            "error": "boom", "occurred_at": now_iso,
+        }
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+            store.return_value.list_index_failures.side_effect = self._scoped_mock(
+                all_time={"rows": [unrelated_row], "total": 1, "oldest_occurred_at": now_iso},
+                by_run_id_unacked={"rows": [unrelated_row], "total": 1, "oldest_occurred_at": now_iso},
+            )
+            store.return_value.list_index_failure_acknowledgments.return_value = {
+                "rows": [{
+                    "file_path": "/repo/long-since-fixed.pdf",
+                    "error_class": "UnextractableContentError",
+                    "reason": "fixed upstream", "created_at": now_iso,
+                }],
+                "total": 1,
+            }
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                exit_code = None
+                try:
+                    doctor_mod._run_check_index_failures()
+                except click.exceptions.Exit as exc:
+                    exit_code = exc.exit_code
+                printed = out.getvalue().decode() + err.getvalue().decode()
+
+        # The unrelated failure still gates (it is genuinely unacknowledged).
+        assert exit_code == 1, printed
+        assert "1 active acknowledgment(s)" in printed, printed
+        assert "nx index failures --acks" in printed, printed

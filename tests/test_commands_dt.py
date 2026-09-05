@@ -86,6 +86,7 @@ def fake_dispatcher(monkeypatch) -> list[dict]:
         corpus: str,
         dry_run: bool,
         extractor: str = "auto",
+        force: bool = False,
     ) -> tuple[bool, int]:
         calls.append({
             "uuid": uuid,
@@ -94,6 +95,7 @@ def fake_dispatcher(monkeypatch) -> list[dict]:
             "corpus": corpus,
             "dry_run": dry_run,
             "extractor": extractor,
+            "force": force,
         })
         # Default success (stamped, chunks=1) — tests that want to exercise
         # the stamp-failed / unchanged summary paths replace the dispatcher
@@ -405,6 +407,95 @@ class TestPassthroughFlags:
         assert result.exit_code == 0, result.output
         assert fake_dispatcher[0]["extractor"] == "auto"
 
+    def test_force_passthrough(
+        self, runner, fake_selectors, fake_dispatcher,
+    ):
+        # nexus-gup3b: --force reaches the per-record dispatcher exactly
+        # like --extractor does, so the underlying index_pdf/index_markdown
+        # staleness bypass is reachable from the DT path.
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [("U", "/a.pdf")]
+        result = runner.invoke(main, [
+            "dt", "index", "--selection", "--force",
+        ])
+        assert result.exit_code == 0, result.output
+        assert fake_dispatcher[0]["force"] is True
+
+    def test_force_defaults_to_false(
+        self, runner, fake_selectors, fake_dispatcher,
+    ):
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [("U", "/a.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--selection"])
+        assert result.exit_code == 0, result.output
+        assert fake_dispatcher[0]["force"] is False
+
+
+# ── nexus-gup3b: --force bypasses the staleness gate end-to-end ─────────────
+#
+# Exercises the REAL ``_index_record`` body (not the ``fake_dispatcher``
+# stand-in) with ``nexus.doc_indexer.index_markdown`` faked at the
+# boundary, so the full ``index_cmd -> _index_record -> index_markdown``
+# wire is proven: without --force, an unchanged record reports 0 chunks
+# and the CLI prints the "index fresh (use --force)" hint; with --force,
+# the same faked indexer returns chunks and the record counts as indexed.
+
+
+class TestForceStalenessBypass:
+    def test_without_force_unchanged_record_prints_fresh_hint(
+        self, runner, fake_selectors, monkeypatch,
+    ):
+        from nexus.cli import main
+        from nexus.commands import dt as dt_module
+
+        fake_selectors["selection"].return_value = [("U1", "/a.md")]
+        monkeypatch.setattr(
+            dt_module, "_stamp_dt_uri_on_entry", lambda *a, **kw: True,
+        )
+
+        def fake_index_markdown(*args, **kwargs):
+            # Staleness gate: force=False -> unchanged -> 0 chunks.
+            return 0 if not kwargs.get("force") else 5
+
+        monkeypatch.setattr(
+            "nexus.doc_indexer.index_markdown", fake_index_markdown,
+        )
+
+        result = runner.invoke(main, ["dt", "index", "--selection"])
+
+        assert result.exit_code == 0, result.output
+        assert "skipped: index fresh (use --force)" in result.output
+        assert "Indexed 0 record(s)" in result.output
+
+    def test_with_force_unchanged_record_reindexes_and_no_fresh_hint(
+        self, runner, fake_selectors, monkeypatch,
+    ):
+        from nexus.cli import main
+        from nexus.commands import dt as dt_module
+
+        fake_selectors["selection"].return_value = [("U1", "/a.md")]
+        monkeypatch.setattr(
+            dt_module, "_stamp_dt_uri_on_entry", lambda *a, **kw: True,
+        )
+
+        def fake_index_markdown(*args, **kwargs):
+            # Same "unchanged" document, but --force bypasses the gate.
+            return 0 if not kwargs.get("force") else 5
+
+        monkeypatch.setattr(
+            "nexus.doc_indexer.index_markdown", fake_index_markdown,
+        )
+
+        result = runner.invoke(main, [
+            "dt", "index", "--selection", "--force",
+        ])
+
+        assert result.exit_code == 0, result.output
+        assert "skipped: index fresh" not in result.output
+        assert "Indexed 1 record(s)" in result.output
+
 
 # ── nexus-cvaw: paper PDFs route to knowledge__ by default ──────────────────
 
@@ -557,7 +648,7 @@ class TestStampFailedSummary:
         ]
 
         # Dispatcher returns False for the two that should fail to stamp.
-        def maybe_fail(uuid, path, *, collection, corpus, dry_run, extractor="auto"):
+        def maybe_fail(uuid, path, *, collection, corpus, dry_run, extractor="auto", force=False):
             return uuid == "U-OK", 1
 
         monkeypatch.setattr("nexus.commands.dt._index_record", maybe_fail)
@@ -619,7 +710,7 @@ class TestDtContentExceptionHandling:
             ("U-OK", "x-devonthink-item://ok"),
         ]
 
-        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content"):
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content", force=False):
             if uuid == "U-BAD":
                 raise ChunkLandingUnverifiedError(collection=collection, count=3)
             return True
@@ -662,7 +753,7 @@ class TestDtContentExceptionHandling:
             ("U-OK", "x-devonthink-item://ok"),
         ]
 
-        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content"):
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content", force=False):
             if uuid == "U-BAD":
                 raise IndexRunVerifyRefused(
                     doc_id="1.99.1", referenced=5, present=3, missing=2,
@@ -719,7 +810,7 @@ class TestDtContentExceptionHandling:
             ("U-BAD", "x-devonthink-item://bad"),
         ]
 
-        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content"):
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content", force=False):
             raise IndexRunVerifyRefused(
                 doc_id="1.99.1", referenced=5, present=3, missing=2,
                 chunk_count=5,
@@ -751,7 +842,7 @@ class TestDtContentExceptionHandling:
 
         monkeypatch.setattr(
             "nexus.commands.dt._index_dt_content_record",
-            lambda uuid, *, collection, corpus, extraction_source="dt_content": True,
+            lambda uuid, *, collection, corpus, extraction_source="dt_content", force=False: True,
         )
 
         result = runner.invoke(main, ["dt", "index", "--selection", "--dt-content"])
@@ -760,6 +851,33 @@ class TestDtContentExceptionHandling:
         assert "2 from DT content" in result.output, result.output
         assert "failed" not in result.output, result.output
         assert result.exit_code == 0, result.output
+
+    def test_dt_content_force_passthrough(
+        self, runner, fake_selectors, monkeypatch,
+    ):
+        # nexus-gup3b: --force reaches _index_dt_content_record too, so
+        # non-file-backed (--dt-content) records can also be forced.
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [
+            ("U-A", "x-devonthink-item://a"),
+        ]
+        seen: list[dict] = []
+
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content", force=False):
+            seen.append({"uuid": uuid, "force": force})
+            return True
+
+        monkeypatch.setattr(
+            "nexus.commands.dt._index_dt_content_record", fake_index,
+        )
+
+        result = runner.invoke(main, [
+            "dt", "index", "--selection", "--dt-content", "--force",
+        ])
+
+        assert result.exit_code == 0, result.output
+        assert seen == [{"uuid": "U-A", "force": True}]
 
     def test_skip_path_unchanged_when_dt_content_returns_false(
         self, runner, fake_selectors, monkeypatch,
@@ -776,7 +894,7 @@ class TestDtContentExceptionHandling:
 
         monkeypatch.setattr(
             "nexus.commands.dt._index_dt_content_record",
-            lambda uuid, *, collection, corpus, extraction_source="dt_content": False,
+            lambda uuid, *, collection, corpus, extraction_source="dt_content", force=False: False,
         )
 
         result = runner.invoke(main, ["dt", "index", "--selection", "--dt-content"])
@@ -928,7 +1046,7 @@ class TestAllTupleMembersSurviveTheRealPerRecordPath:
             ("U-OK", "x-devonthink-item://ok"),
         ]
 
-        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content"):
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content", force=False):
             if uuid == "U-BAD":
                 raise member_cls(**kwargs)
             return True
@@ -1022,7 +1140,7 @@ class TestGenericFallbackHandlesUnknownTupleMember:
             ("U-OK", "x-devonthink-item://ok"),
         ]
 
-        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content"):
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content", force=False):
             if uuid == "U-BAD":
                 raise _SyntheticThirdMember(detail="unknown-shape")
             return True
@@ -1724,6 +1842,92 @@ class TestStampDtUriOnEntry:
         assert md_kwargs[0].get("collection_name") == "knowledge__notes"
         assert md_kwargs[0].get("corpus") == "default"
 
+    def test_index_record_forwards_force_to_index_pdf(
+        self, monkeypatch, tmp_path,
+    ):
+        # nexus-gup3b: --force must reach index_pdf's own force kwarg
+        # (RDR-181) so a --force re-index bypasses PDF staleness too.
+        from nexus.commands import dt as dt_module
+
+        pdf_kwargs: list[dict] = []
+
+        def fake_index_pdf(*args, **kwargs):
+            pdf_kwargs.append(kwargs)
+            return 3
+
+        monkeypatch.setattr(
+            dt_module, "_stamp_dt_uri_on_entry", lambda *a, **kw: True,
+        )
+        monkeypatch.setattr("nexus.doc_indexer.index_pdf", fake_index_pdf)
+
+        dt_module._index_record(
+            uuid="UUID-FORCE-PDF",
+            path=str(tmp_path / "a.pdf"),
+            collection="knowledge__test",
+            corpus="default",
+            dry_run=False,
+            force=True,
+        )
+        assert pdf_kwargs[0].get("force") is True
+
+    def test_index_record_forwards_force_to_index_markdown(
+        self, monkeypatch, tmp_path,
+    ):
+        # nexus-gup3b: same contract on the .md branch.
+        from nexus.commands import dt as dt_module
+
+        md_kwargs: list[dict] = []
+
+        def fake_index_markdown(*args, **kwargs):
+            md_kwargs.append(kwargs)
+            return 2
+
+        monkeypatch.setattr(
+            dt_module, "_stamp_dt_uri_on_entry", lambda *a, **kw: True,
+        )
+        monkeypatch.setattr("nexus.doc_indexer.index_markdown", fake_index_markdown)
+
+        dt_module._index_record(
+            uuid="UUID-FORCE-MD",
+            path=str(tmp_path / "note.md"),
+            collection="knowledge__test",
+            corpus="default",
+            dry_run=False,
+            force=True,
+        )
+        assert md_kwargs[0].get("force") is True
+
+    def test_index_record_force_defaults_to_false_for_both_branches(
+        self, monkeypatch, tmp_path,
+    ):
+        from nexus.commands import dt as dt_module
+
+        pdf_kwargs: list[dict] = []
+        md_kwargs: list[dict] = []
+
+        monkeypatch.setattr(
+            dt_module, "_stamp_dt_uri_on_entry", lambda *a, **kw: True,
+        )
+        monkeypatch.setattr(
+            "nexus.doc_indexer.index_pdf",
+            lambda *a, **kw: pdf_kwargs.append(kw) or 1,
+        )
+        monkeypatch.setattr(
+            "nexus.doc_indexer.index_markdown",
+            lambda *a, **kw: md_kwargs.append(kw) or 1,
+        )
+
+        dt_module._index_record(
+            uuid="U-PDF", path=str(tmp_path / "a.pdf"),
+            collection=None, corpus="default", dry_run=False,
+        )
+        dt_module._index_record(
+            uuid="U-MD", path=str(tmp_path / "a.md"),
+            collection=None, corpus="default", dry_run=False,
+        )
+        assert pdf_kwargs[0].get("force") is False
+        assert md_kwargs[0].get("force") is False
+
     def test_index_record_dry_run_skips_stamp(
         self, monkeypatch, tmp_path,
     ):
@@ -1870,7 +2074,7 @@ class TestLinkSemantic:
         wb_calls: list[str] = []
         monkeypatch.setattr(
             "nexus.commands.dt._index_record",
-            lambda uuid, path, *, collection, corpus, dry_run, extractor="auto": (uuid == "U-OK", 1),
+            lambda uuid, path, *, collection, corpus, dry_run, extractor="auto", force=False: (uuid == "U-OK", 1),
         )
         monkeypatch.setattr(
             "nexus.commands.dt._link_semantic_record",

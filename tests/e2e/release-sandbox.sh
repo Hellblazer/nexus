@@ -99,6 +99,51 @@ _index_floor_check() {
     fi
 }
 
+# nexus-s71lr: an `nx index repo`/`nx index rdr` step's whole stdout+stderr is
+# redirected into a log file and only tailed AFTER the command returns (see
+# steps 2/11 and 4/11 below) -- a stall was invisible in THIS transcript even
+# after the client-side heartbeat fix (index.py's _PhaseHeartbeat / tightened
+# ETA ticker), because those lines land in the log file, never on this
+# script's own stdout, until the command finishes. Backgrounds `tail -f` on
+# the log file for the DURATION of the foreground command so the same
+# heartbeat/eta lines the CLI now prints by default become visible live in
+# THIS transcript too, not only in the post-hoc `tail -5`. The log file is
+# touched first so `tail -f` has something to open immediately even if the
+# indexed command is slow to produce its first byte.
+#
+# UNTESTED end-to-end at authoring time (no Docker / live shakedown run
+# available in the authoring sandbox) -- rehearse this step live before
+# relying on it for a real release shakedown.
+# The live tail's PID is also tracked globally so an interrupted run (Ctrl-C
+# on a stall, a CI timeout) kills it from the EXIT/INT/TERM traps instead
+# of orphaning a `tail -f` that holds the log open forever (s71lr review).
+_LIVE_TAIL_PID=""
+
+# Sets _LIVE_TAIL_PID; never call this through `$(...)` (the backgrounded
+# tail inherits the substitution's stdout pipe, so the substitution never
+# sees EOF and the caller hangs; pass-2 critique, reproduced standalone).
+_start_live_log_tail() {
+    local log_file="$1"
+    : > "$log_file"
+    tail -n +1 -f "$log_file" &
+    _LIVE_TAIL_PID=$!
+}
+
+_stop_live_log_tail() {
+    local tail_pid="$1"
+    kill "$tail_pid" 2>/dev/null || true
+    wait "$tail_pid" 2>/dev/null || true
+    [[ "$_LIVE_TAIL_PID" == "$tail_pid" ]] && _LIVE_TAIL_PID=""
+}
+
+_kill_live_tail() {
+    [[ -n "$_LIVE_TAIL_PID" ]] || return 0
+    kill "$_LIVE_TAIL_PID" 2>/dev/null || true
+    _LIVE_TAIL_PID=""
+}
+trap '_kill_live_tail; exit 130' INT
+trap '_kill_live_tail; exit 143' TERM
+
 # nexus-98zsp: indexing wall-clock floor. engine-service-v0.1.99 shipped an
 # 8x embed slowdown through every gate because none of them timed an index
 # run; this is the only place a real corpus is indexed pre-release.
@@ -477,7 +522,7 @@ _svc_teardown() {
 # service stop --with-pg` is a no-op-safe call even when nothing came up.
 _provision_local_service() {
     echo "  ── self-provisioning local service (nexus-596jm) ──"
-    trap '_svc_teardown; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+    trap '_kill_live_tail; _svc_teardown; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
     if ! nx init -y --no-autostart 2>&1 | sed 's/^/    /'; then
         _die "nx init did not reach serving inside the sandbox (self-provisioning failed — see remedy above)"
     fi
@@ -602,7 +647,7 @@ source "$SCRIPT_DIR/lib/lock.sh"
 LOCKDIR="/tmp/nexus-e2e-locks/release-sandbox.lock"
 mkdir -p "$(dirname "$LOCKDIR")"
 lock_acquire "$LOCKDIR" || exit 1
-trap 'lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+trap '_kill_live_tail; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
 echo "[rdr-184] lock acquired: $LOCKDIR (pid $$)" >&2
 # Test seam (RDR-184 P0.2, nexus-ccs9v.2): tests/e2e/lib/harness_lock_test.sh
 # sets this to prove a concurrent invocation gets PAST the lock without ever
@@ -930,11 +975,17 @@ case "$MODE" in
         mkdir -p "$SANDBOX/logs"
         INDEX_REPO_LOG="$SANDBOX/logs/shakedown-index-repo.log"
         INDEX_REPO_T0=$SECONDS
+        # nexus-s71lr: live-tail this step's own log so a stall (the eta
+        # ticker / heartbeat lines nx index now prints by default) is visible
+        # in THIS transcript, not only in the post-hoc tail -5 below.
+        _start_live_log_tail "$INDEX_REPO_LOG"; _REPO_TAIL_PID="$_LIVE_TAIL_PID"
         if ! nx index repo "$FIXTURE_DIR" >"$INDEX_REPO_LOG" 2>&1; then
+            _stop_live_log_tail "$_REPO_TAIL_PID"
             tail -5 "$INDEX_REPO_LOG" | sed 's/^/  /'
             echo "  [FAIL] nx index repo exited non-zero" >&2
             SHAKEDOWN_FAILED+=("2/11 nx index repo")
         else
+            _stop_live_log_tail "$_REPO_TAIL_PID"
             tail -5 "$INDEX_REPO_LOG" | sed 's/^/  /'
             _throughput_step "2/11 index-repo" "sandbox-repo-fixture" "$INDEX_REPO_LOG" $((SECONDS - INDEX_REPO_T0))
             # Chunk floor is 3x the doc floor (same 1:3 ratio as the PDF
@@ -1048,11 +1099,17 @@ case "$MODE" in
         read -r ODOCS_BEFORE OCHUNKS_BEFORE < <(_catalog_counts)
         INDEX_RDR_LOG="$SANDBOX/logs/shakedown-index-rdr.log"
         INDEX_RDR_T0=$SECONDS
+        # nexus-s71lr: this is the EXACT command the bead's own reproduction
+        # used (212 RDR files, 13 minutes, no output) -- live-tail so its
+        # heartbeat lines are visible in THIS transcript while it runs.
+        _start_live_log_tail "$INDEX_RDR_LOG"; _RDR_TAIL_PID="$_LIVE_TAIL_PID"
         if ! nx index rdr "$REPO_ROOT" >"$INDEX_RDR_LOG" 2>&1; then
+            _stop_live_log_tail "$_RDR_TAIL_PID"
             tail -5 "$INDEX_RDR_LOG" | sed 's/^/  /'
             echo "  [FAIL] nx index rdr exited non-zero" >&2
             SHAKEDOWN_FAILED+=("4/11 nx index rdr")
         else
+            _stop_live_log_tail "$_RDR_TAIL_PID"
             tail -5 "$INDEX_RDR_LOG" | sed 's/^/  /'
             _throughput_step "4/11 index-rdr" "sandbox-rdr-corpus" "$INDEX_RDR_LOG" $((SECONDS - INDEX_RDR_T0))
             # 1:3 doc:chunk ratio floor, matching the other steps; live
@@ -1241,7 +1298,16 @@ case "$MODE" in
         # convention (6xkdu) every other fail-capable step in this arm
         # already uses, so a doctor red produces an explicit verdict line
         # rather than crashing the script.
-        if ! nx doctor 2>&1 | sed 's/^/  /'; then
+        #
+        # nexus-jds59: --git-hooks-scope "$SANDBOX" restricts the
+        # stanza-drift walk (part of the bare sweep above) to repos
+        # registered under this sandbox. The registered-repo catalog is
+        # shared machine-wide, not scoped to $HOME, so an unscoped walk
+        # also sees every other repo ever indexed on this machine —
+        # including the live dev checkout this sandbox reinstalls from,
+        # whose post-commit hook may be deliberately held on an older
+        # stanza. That ambient state has nothing to do with this gate.
+        if ! nx doctor --git-hooks-scope "$SANDBOX" 2>&1 | sed 's/^/  /'; then
             echo "  [FAIL] nx doctor exited non-zero" >&2
             SHAKEDOWN_FAILED+=("10/11 nx doctor")
         fi
@@ -1271,7 +1337,7 @@ case "$MODE" in
         echo "  corpus-integrity instruments (chash conformance, stale index-run"
         echo "  fences, manifest pre-backfill rows) — warn=true by design, so"
         echo "  they never flip bare doctor's exit code; asserting on --json directly:"
-        DOCTOR_JSON_OUT=$(nx doctor --json 2>/dev/null || true)
+        DOCTOR_JSON_OUT=$(nx doctor --json --git-hooks-scope "$SANDBOX" 2>/dev/null || true)
         if [[ -z "$DOCTOR_JSON_OUT" ]]; then
             echo "  [FAIL] nx doctor --json produced no output" >&2
             SHAKEDOWN_FAILED+=("10/11 nx doctor --json (no output)")
@@ -1438,7 +1504,7 @@ case "$MODE" in
         # this mode's own teardown trap — this assignment REPLACES the
         # top-level trap set earlier, so the lock release must be re-added
         # here or a crash in this window would leak the lock.
-        trap '_svc_teardown; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+        trap '_kill_live_tail; _svc_teardown; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
 
         # ── serving proof: /health == ok (NOT merely "a lease exists"). ──
         echo

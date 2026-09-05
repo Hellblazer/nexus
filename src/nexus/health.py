@@ -1620,7 +1620,23 @@ def _check_mcp_entry_points() -> list[HealthResult]:
     return results
 
 
-def _check_git_hooks() -> list[HealthResult]:
+def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]:
+    """Walk registered repos' git hooks for stanza drift.
+
+    ``repo_scope`` (nexus-jds59): the catalog + legacy registry this walk
+    reads from are a SHARED, machine-wide store — not scoped to the
+    caller's ``$HOME``/``NEXUS_CONFIG_DIR``. An automation harness that
+    provisions its own throwaway repo (the release-sandbox shakedown's
+    fixture checkout) still sees every OTHER repo ever registered on the
+    same machine, including the live dev checkout the harness reinstalls
+    from — so a deliberate hold on that repo's hook stanza (e.g. pinned
+    behind an unreleased ``nx`` feature) reds a gate that has nothing to
+    do with it. Passing a root here restricts the walk to repos at or
+    under that root; repos outside it are silently excluded from the
+    result (not even rendered as ``ok``), and the default (``None``)
+    preserves the original walk-every-registered-repo behavior a
+    developer running bare ``nx doctor`` relies on.
+    """
     # nexus-8g79.10 (V2): import from the lower-layer module instead of
     # reaching up into commands/. Use module-attribute access so test
     # monkeypatches on ``nexus._git_hooks_meta.effective_hooks_dir``
@@ -1645,10 +1661,8 @@ def _check_git_hooks() -> list[HealthResult]:
     def _canonical_stanza_body(hook_name: str) -> str | None:
         """Canonical body for *hook_name*.
 
-        Per-hook since nexus-jh86x: ``post-commit`` carries the review
-        stanza inside the same sentinel block, so comparing every hook
-        against one template would report a correctly-installed
-        post-commit as drifted on every ``nx doctor`` run.
+        Resolved per hook by name (``_stanza_for``) so a hook-specific
+        stanza, should one return, compares against its own template.
         """
         try:
             from nexus.commands.hooks import _stanza_for  # noqa: PLC0415 — deferred to avoid circular import
@@ -1717,11 +1731,46 @@ def _check_git_hooks() -> list[HealthResult]:
         catalog_repo_roots = set()
         deactivate_capability = "unknown"
 
+    # nexus-jds59: apply the scope filter (if any) BEFORE the "no repos"
+    # branch below, so a scoped walk with nothing in scope reports an
+    # honest "out of scope" reason rather than the unscoped "none
+    # registered at all" message.
+    _scope_root: Path | None = None
+    _excluded_out_of_scope = 0
+    if repo_scope is not None:
+        _scope_root = Path(repo_scope).resolve()
+        _scoped_repos: list[str] = []
+        for repo_str in repos:
+            try:
+                _resolved = Path(repo_str).resolve()
+            except OSError:
+                # Unreadable path component -- treat as out of scope
+                # rather than crashing the filter; the per-repo probe
+                # below already degrades vanished/unreadable roots
+                # honestly for the unscoped walk.
+                _excluded_out_of_scope += 1
+                continue
+            if _resolved == _scope_root or _scope_root in _resolved.parents:
+                _scoped_repos.append(repo_str)
+            else:
+                _excluded_out_of_scope += 1
+        repos = _scoped_repos
+
     if not repos:
-        results.append(HealthResult(
-            label="git hooks", ok=True,
-            detail="no repos registered — run: nx index repo <path>",
-        ))
+        if _scope_root is not None and _excluded_out_of_scope:
+            results.append(HealthResult(
+                label="git hooks", ok=True,
+                detail=(
+                    f"no repos registered under scope {_scope_root} "
+                    f"({_excluded_out_of_scope} registered repo(s) outside "
+                    "scope, skipped)"
+                ),
+            ))
+        else:
+            results.append(HealthResult(
+                label="git hooks", ok=True,
+                detail="no repos registered — run: nx index repo <path>",
+            ))
     else:
         for repo_str in repos:
             repo_path = Path(repo_str)
@@ -1737,9 +1786,9 @@ def _check_git_hooks() -> list[HealthResult]:
                     # body means the user is running an old stanza
                     # (e.g. pre-pgrep-guard, vulnerable to the multi-
                     # indexer pile-up race).
-                    # One comparison, shared with ``nx census reviews``
-                    # (commands/hooks.py hook_stanza_state, nexus-trwxr):
-                    # a second copy of this selector drifted on arrival.
+                    # One comparison (commands/hooks.py hook_stanza_state,
+                    # nexus-trwxr): a second copy of this selector drifted
+                    # on arrival.
                     drifted: list[str] = []
                     for name in installed:
                         if canonical_by_hook.get(name) is None:
@@ -2041,6 +2090,73 @@ def _check_orphan_t1_lease() -> list[HealthResult]:
         parts.append("no live T1 sessions")
 
     return [HealthResult(label="T1 sessions", ok=True, detail="; ".join(parts))]
+
+
+def _check_garbage() -> list[HealthResult]:
+    """The garbage sweep (:mod:`nexus.garbage`, Sam 2026-09-05).
+
+    Local litter (stale mint locks, rotated logs past 14 days, operator
+    dispatch dumps past 7) is reaped here on every run, the same way the
+    T1 lease and handoff-marker reapers above behave. Catalog litter
+    (orphaned links, tombstones past the one-day window) is COUNTED here
+    and reclaimed only by ``nx doctor --fix``, since each reclaim is an
+    engine write. A non-zero catalog count is a warning that names the
+    command; an unreachable engine is a warning too, never a clean row
+    (nexus-moht0: a sweep that could not look is not a pass).
+    """
+    from nexus import config as _config  # noqa: PLC0415 — deferred to avoid circular import; module import so the by-value ratchet stays at its census
+    from nexus.garbage import catalog_garbage, sweep_local_garbage  # noqa: PLC0415 — deferred to avoid circular import
+
+    results: list[HealthResult] = []
+    report = sweep_local_garbage(_config.nexus_config_dir())
+    if report.failed_count:
+        results.append(HealthResult(
+            label="Local garbage",
+            ok=False, warn=True,
+            detail=(
+                f"reaped {report.removed_count}, could not remove "
+                f"{report.failed_count}: "
+                + ", ".join(f"{k}={len(v)}" for k, v in report.failed.items())
+            ),
+        ))
+    elif report.removed_count:
+        results.append(HealthResult(
+            label="Local garbage", ok=True,
+            detail="reaped " + ", ".join(f"{len(v)} {k}" for k, v in report.removed.items()),
+        ))
+    else:
+        results.append(HealthResult(label="Local garbage", ok=True, detail="none"))
+
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+        reader = make_catalog_reader()
+    except Exception as exc:  # noqa: BLE001 - report, never crash doctor
+        results.append(HealthResult(
+            label="Catalog garbage", ok=False, warn=True,
+            detail=f"could not open the catalog: {exc}",
+        ))
+        return results
+    # Counting is all reads (the purge is a dry run), so the READ handle
+    # serves it; the write-only proxy refuses ``orphaned_links``.
+    garbage = catalog_garbage(reader)
+    if garbage.error:
+        results.append(HealthResult(
+            label="Catalog garbage", ok=False, warn=True,
+            detail=f"could not count: {garbage.error}",
+        ))
+    elif garbage.total:
+        results.append(HealthResult(
+            label="Catalog garbage", ok=False, warn=True,
+            detail=(
+                f"{garbage.orphaned_links} orphaned link(s), "
+                f"{garbage.trash_documents} tombstoned document(s) and "
+                f"{garbage.stranded_chunks} stranded chunk(s) past 1 day"
+            ),
+            fix_suggestions=["nx doctor --fix"],
+        ))
+    else:
+        results.append(HealthResult(label="Catalog garbage", ok=True, detail="none"))
+    return results
 
 
 def _check_orphan_t1_handoff() -> list[HealthResult]:
@@ -2547,18 +2663,41 @@ def _check_t2_schema_applied() -> list[HealthResult]:
     return results
 
 
+#: Hook names for LIVE producers of nexus.dropped_writes.record_drop as of
+#: nexus-gjv9b PARTs 1/2 — a drop from one of these is CURRENT evidence a
+#: best-effort write to the engine is failing, not RDR-187 chash-hook
+#: history. Keep in lockstep with the ``hook=`` value each producer passes
+#: (``_session_end_census._post_capability_census``,
+#: ``routing/_lib.py``'s ``_record_dropped_routing_event``).
+_LIVE_DROP_PRODUCER_HOOKS = frozenset({"capability_census", "routing_events"})
+
+
 def _check_t2_dropped_writes() -> list[HealthResult]:
     """Surface the dropped-best-effort-write meter (RDR-129 B4, nexus-uq8a4).
 
-    RDR-187 (nexus-piwya.4): the meter's only-ever producer — the chash
-    dual-write hook — is retired, so the count can no longer grow. A
-    nonzero count is therefore HISTORICAL evidence (drops that happened
-    before the writer was retired), reported ok=True with the number
-    visible: a frozen soft-WARN whose last_ts can never advance would
-    nag forever about a writer that no longer exists, and a permanently
-    green "no drops" would silently hide the history. If a future
-    best-effort writer adopts record_drop(), restore the soft-WARN
-    posture for its records.
+    RDR-187 (nexus-piwya.4) retired the meter's FOUNDING producer — the
+    chash dual-write hook — but nexus-gjv9b PARTs 1/2 gave it two LIVE
+    ones (see :data:`_LIVE_DROP_PRODUCER_HOOKS`): the capability_census
+    and routing_events writer swaps both degrade here on service-down.
+    Framing keys on :attr:`DropSummary.recent_last_hook` — a WINDOWED
+    field (:func:`nexus.dropped_writes.count_drops`'s ``recent_hours``,
+    24h default), NOT the lifetime ``last_hook`` (review fold-in,
+    critique CRITICAL 2): a live producer is expected to have OCCASIONAL
+    drops during a real outage, and once the window passes with no new
+    ones, this check must stop soft-WARNing — a decision keyed on the
+    lifetime field would soft-WARN forever over one drop from months ago,
+    exactly the "permanent false alarm" class nexus-piwya.9 already
+    retired the founding chash-hook alarm to avoid re-introducing here.
+
+    - ``recent_last_hook`` in :data:`_LIVE_DROP_PRODUCER_HOOKS`: soft-WARN
+      (``ok=False``) — a live producer dropping WITHIN THE WINDOW IS
+      current evidence of a best-effort write actually failing (service
+      down, or an old engine missing the route), the exact posture
+      RDR-129 B4 restores for a future adopter.
+    - Anything else (empty, or the retired chash hook's historical
+      value, or a live producer's drop that has AGED OUT of the window):
+      HISTORICAL framing, ``ok=True`` — the lifetime ``total`` stays
+      visible in the detail either way, audit visibility never shrinks.
     """
     from nexus.dropped_writes import count_drops  # noqa: PLC0415 — deferred to avoid circular import
 
@@ -2574,10 +2713,79 @@ def _check_t2_dropped_writes() -> list[HealthResult]:
             label="T2 best-effort writes", ok=True, detail="no drops recorded",
         )]
 
+    if summary.recent_last_hook in _LIVE_DROP_PRODUCER_HOOKS:
+        # nexus-gjv9b review fold-in round 3, code-review item 1: a window
+        # made ENTIRELY of guard_refused drops is an un-opted-in dev
+        # checkout's production-write guard correctly protecting itself
+        # (nexus-a2qhz) on every SessionEnd — not evidence the engine or a
+        # live producer is failing. This must never render as the same
+        # "the engine is failing" WARN a real service-down/auth/timeout
+        # episode gets; a SINGLE non-guard-refused drop in the window still
+        # takes the WARN path below (recent_all_guard_refused is
+        # deliberately all-or-nothing, not "mostly").
+        if summary.recent_all_guard_refused:
+            detail = (
+                f"{summary.recent_total} drop(s) in the last 24h, all refused by "
+                "the production-write guard (this process is an un-opted-in dev "
+                "checkout — nexus-a2qhz; expected, not evidence of a failing "
+                f"engine) ({summary.total} lifetime, {summary.rows} rows)"
+            )
+            if summary.last_ts:
+                detail += f", last {summary.last_ts}"
+            return [HealthResult(label="T2 best-effort writes", ok=True, detail=detail)]
+
+        # nexus-gjv9b review fold-in round 4: a window whose OTHER causes
+        # are all route_absent (a plugin cut shipping this hook ahead of
+        # the paired engine tag -- every decision 404s until the engine
+        # catches up), alone or mixed with guard_refused, is version skew,
+        # not a failing service. recent_all_benign is a strict superset of
+        # recent_all_guard_refused (checked above) -- reaching here means
+        # the window is NOT all guard_refused, so an info framing here
+        # implies at least one route_absent drop is present. A SINGLE
+        # cause outside {guard_refused, route_absent} still falls through
+        # to the real WARN below -- same all-or-nothing discipline.
+        if summary.recent_all_benign:
+            detail = (
+                f"{summary.recent_total} drop(s) in the last 24h, most recently "
+                f"from {summary.recent_last_hook!r} — engine behind the client; "
+                f"{summary.recent_last_hook!r} not yet served "
+                f"({summary.total} lifetime, {summary.rows} rows)"
+            )
+            if summary.last_ts:
+                detail += f", last {summary.last_ts}"
+            return [HealthResult(label="T2 best-effort writes", ok=True, detail=detail)]
+
+        detail = (
+            f"{summary.recent_total} drop(s) in the last 24h "
+            f"({summary.total} lifetime, {summary.rows} rows), most recently "
+            f"from {summary.recent_last_hook!r} — a best-effort write to the "
+            f"engine is failing (service down, or an old engine missing the route)"
+        )
+        # nexus-gjv9b review fold-in round 3, critique CRITICAL 2: name the
+        # DOMINANT cause and its share of the window, not just a bare count
+        # -- "3 drops in the last 24h" reads identically whether that is
+        # three unrelated connection blips (self-resolving, likely nothing
+        # to do) or three consecutive 401s on the same broken credential
+        # (structural, will keep recurring after this window ages out too).
+        # An auth cause (401/403) never gets a softer word than "cause";
+        # this is deliberately the same sentence shape as any other cause.
+        if summary.recent_dominant_cause:
+            detail += (
+                f" — dominant cause: {summary.recent_dominant_cause!r} "
+                f"({summary.recent_dominant_cause_count}/{summary.recent_total} in window)"
+            )
+        if summary.last_ts:
+            detail += f", last {summary.last_ts}"
+        return [HealthResult(label="T2 best-effort writes", ok=False, detail=detail)]
+
     detail = (
-        f"{summary.total} historical drop(s) under lock contention "
-        f"({summary.rows} rows) from the retired chash dual-write hook "
-        f"(writer retired by RDR-187; count frozen)"
+        f"{summary.total} historical drop(s) "
+        f"({summary.rows} rows)"
+        + (
+            f" from the retired chash dual-write hook (writer retired by RDR-187; count frozen)"
+            if summary.last_hook not in _LIVE_DROP_PRODUCER_HOOKS
+            else f" from {summary.last_hook!r} (outside the 24h recency window — not currently failing)"
+        )
     )
     if summary.last_ts:
         detail += f", last {summary.last_ts}"
@@ -2879,6 +3087,11 @@ def _check_mint_token() -> list[HealthResult]:
 _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.aspect_extraction_queue",
     "nexus.aspect_promotion_log",
+    # nexus.capability_census: nexus-gjv9b PART 1 (telemetry-010-capability-
+    # census.xml), replacing capability_census.jsonl. Per-session UPSERT
+    # (tenant_id, session_id) with the usual ENABLE + FORCE + tenant_isolation
+    # RLS shape.
+    "nexus.capability_census",
     "nexus.catalog_collections",
     "nexus.catalog_document_chunks",
     "nexus.catalog_documents",
@@ -2912,6 +3125,10 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.frecency",
     "nexus.gc_audit",
     "nexus.hook_failures",
+    # nexus.index_failures: nexus-nukn3, durable per-file index-failure
+    # record (telemetry-009-index-failures.xml). Event-log shape, same RLS
+    # posture as hook_failures (ENABLE + FORCE + tenant_isolation).
+    "nexus.index_failures",
     "nexus.ladder_completions",
     "nexus.memory",
     # "nexus.migration_jobs" REMOVED (nexus-tk070.p5b, reworked
@@ -2934,6 +3151,10 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.plans",
     "nexus.relevance_log",
     "nexus.retention_markers",
+    # nexus.routing_events: nexus-gjv9b PART 2 (telemetry-011-routing-
+    # events.xml), replacing routing_log.jsonl. Append-only event log, same
+    # RLS shape as relevance_log/search_telemetry.
+    "nexus.routing_events",
     "nexus.search_telemetry",
     # nexus.taxonomy_centroids: RDR-191 Phase 4 unify (nexus-o8dil.51/.47 "one
     # era" ruling). Same rationale as nexus.chunks above: added alongside
@@ -6022,8 +6243,13 @@ def _highest_child_seqs(cat: Any) -> dict[str, int]:
     return best
 
 
-def run_health_checks() -> tuple[list[HealthResult], bool]:
+def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[HealthResult], bool]:
     """Run all health checks.
+
+    ``git_hooks_scope``: forwarded to :func:`_check_git_hooks` (nexus-jds59)
+    to restrict the git-hooks stanza-drift walk to repos at or under the
+    given root. ``None`` (default) preserves the original behavior of
+    walking every repo registered on the machine.
 
     Returns (results, is_local_mode).
     """
@@ -6083,10 +6309,11 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
 
     results.extend(_check_tools())
     results.extend(_check_mcp_entry_points())
-    results.extend(_check_git_hooks())
+    results.extend(_check_git_hooks(repo_scope=git_hooks_scope))
     results.extend(_check_index_log())
     results.extend(_check_orphan_t1_lease())
     results.extend(_check_orphan_t1_handoff())
+    results.extend(_check_garbage())
     results.extend(_check_orphan_checkpoints())
     results.extend(_check_orphan_pipelines())
     results.extend(_check_mineru_server())

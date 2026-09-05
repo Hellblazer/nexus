@@ -166,6 +166,176 @@ class TestCatalogHookDocuments:
         assert len(entries) == 2
 
 
+class TestFixturePathAutoStamp:
+    """nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review round 3):
+    ``nx index repo`` auto-stamps ``non_evidentiary`` in ``Document.meta``
+    for files under ``tests/fixtures/`` (fixture DATA), never for a
+    sibling test MODULE that exercises real code -- see
+    ``nexus.catalog.types.is_fixture_path``'s docstring.
+    """
+
+    def test_fixture_path_is_stamped(self, tmp_path, monkeypatch):
+        from nexus.indexer import _catalog_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        fixture = tmp_path / "tests" / "fixtures" / "sample.json"
+        fixture.parent.mkdir(parents=True)
+        fixture.write_text("{}")
+
+        _catalog_hook(
+            repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
+            head_hash="abc123",
+            indexed_files=[(fixture, "code", "code__nexus")],
+        )
+        owner = cat.owner_for_repo("571b8edd")
+        entry = cat.by_file_path(owner, "tests/fixtures/sample.json")
+        assert entry is not None
+        assert entry.meta.get("non_evidentiary") is True
+
+    def test_sibling_test_module_is_not_stamped(self, tmp_path, monkeypatch):
+        """A test MODULE living beside tests/fixtures/ (same tests/
+        directory, but NOT under the fixtures/ subdirectory) is never
+        auto-stamped -- the bead's own cited leaks (tests/test_*.py
+        files) are marked manually via `nx catalog update --meta`, not
+        by this automatic rule."""
+        from nexus.indexer import _catalog_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        test_module = tmp_path / "tests" / "test_operator_dispatch.py"
+        test_module.parent.mkdir(parents=True)
+        test_module.write_text("def test_x(): pass")
+
+        _catalog_hook(
+            repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
+            head_hash="abc123",
+            indexed_files=[(test_module, "code", "code__nexus")],
+        )
+        owner = cat.owner_for_repo("571b8edd")
+        entry = cat.by_file_path(owner, "tests/test_operator_dispatch.py")
+        assert entry is not None
+        assert not entry.meta.get("non_evidentiary")
+
+
+class TestNeedsFenceOutParam:
+    """nexus-hg2dw: ``needs_fence`` names exactly the documents this run's
+    registration determined need real indexing work — new registrations,
+    and existing documents whose FILE CONTENT genuinely changed — and
+    excludes everything else, including a bare head_hash bump that
+    touches every tracked document's row without any file's content
+    changing at all."""
+
+    def test_new_file_populates_needs_fence(self, tmp_path, monkeypatch):
+        from nexus.indexer import _catalog_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        src = tmp_path / "main.py"
+        src.write_text("print('hello')")
+
+        needs_fence: dict = {}
+        _catalog_hook(
+            repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
+            head_hash="abc",
+            indexed_files=[(src, "code", "code__nexus")],
+            needs_fence=needs_fence,
+        )
+
+        owner = cat.owner_for_repo("571b8edd")
+        entry = cat.by_file_path(owner, "main.py")
+        assert str(entry.tumbler) in needs_fence
+        content_hash, collection = needs_fence[str(entry.tumbler)]
+        assert content_hash  # a real sha256, non-empty
+        assert collection == "code__nexus"
+
+    def test_head_hash_only_bump_does_not_populate_needs_fence(
+        self, tmp_path, monkeypatch,
+    ):
+        """The control case this whole design turns on: a bare git commit
+        (HEAD moves) re-sends every tracked document's head_hash without
+        touching a single file's content. Fencing these would force
+        every unchanged document to 'indexing' on every commit."""
+        from nexus.indexer import _catalog_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        src = tmp_path / "main.py"
+        src.write_text("print('hello')")
+
+        _catalog_hook(
+            repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
+            head_hash="commit-1",
+            indexed_files=[(src, "code", "code__nexus")],
+            needs_fence={},
+        )
+
+        needs_fence: dict = {}
+        _catalog_hook(
+            repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
+            head_hash="commit-2",  # HEAD moved; file content is IDENTICAL
+            indexed_files=[(src, "code", "code__nexus")],
+            needs_fence=needs_fence,
+        )
+
+        assert needs_fence == {}
+
+    def test_content_change_on_existing_doc_populates_needs_fence(
+        self, tmp_path, monkeypatch,
+    ):
+        from nexus.indexer import _catalog_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        src = tmp_path / "main.py"
+        src.write_text("v1")
+
+        _catalog_hook(
+            repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
+            head_hash="commit-1",
+            indexed_files=[(src, "code", "code__nexus")],
+            needs_fence={},
+        )
+        owner = cat.owner_for_repo("571b8edd")
+        tumbler = str(cat.by_file_path(owner, "main.py").tumbler)
+
+        src.write_text("v2 — content actually changed")
+        needs_fence: dict = {}
+        _catalog_hook(
+            repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
+            head_hash="commit-2",
+            indexed_files=[(src, "code", "code__nexus")],
+            needs_fence=needs_fence,
+        )
+
+        assert tumbler in needs_fence
+
+    def test_needs_fence_none_default_is_a_no_op(self, tmp_path, monkeypatch):
+        """The out-param is optional — omitting it must not change any
+        other behavior (backward compatible with every existing caller
+        that doesn't pass it)."""
+        from nexus.indexer import _catalog_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        src = tmp_path / "main.py"
+        src.write_text("print('hello')")
+
+        # Should not raise despite needs_fence being omitted entirely.
+        file_to_doc_id = _catalog_hook(
+            repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
+            head_hash="abc",
+            indexed_files=[(src, "code", "code__nexus")],
+        )
+        assert file_to_doc_id
+
+
 class _SpyProxy:
     """Counting proxy around a real reader/writer (integration over mocks).
 
@@ -894,6 +1064,78 @@ class TestRunHousekeeping:
         # Links should be transferred to the new entry
         links = cat.links_from(new_t)
         assert any(str(l.to_tumbler) == str(other_t) for l in links)
+
+    def test_rename_carries_non_evidentiary_stamp_to_new_entry(self, tmp_path, monkeypatch):
+        """nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review round
+        4): a manually-stamped document survives a rename. Without this,
+        the old entry's non_evidentiary meta key is discarded when
+        _run_housekeeping deletes it -- the new entry (registered at the
+        new path by an earlier pass in the SAME index run) never
+        inherits it, so the very next `nx index repo` after a `git mv`
+        silently un-stamps the document."""
+        from nexus.indexer import _run_housekeeping
+
+        catalog_dir, cat = self._make_cat(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        owner = cat.register_owner("nexus", "repo", repo_hash="fff777")
+        owner_t = cat.owner_for_repo("fff777")
+        # Old entry, manually stamped non_evidentiary by an operator --
+        # NOT under tests/fixtures/, so nothing auto-derives this stamp
+        # from its path.
+        old_t = cat.register(
+            owner_t, "old_name.py", content_type="code",
+            file_path="src/old_name.py",
+            meta={"content_hash": "deadbeef5678", "non_evidentiary": True},
+        )
+        # New entry already registered at the new path (an earlier pass
+        # in the same run), with its OWN freshly-computed content_hash
+        # but no stamp of its own -- the new path isn't a fixture path
+        # either.
+        new_t = cat.register(
+            owner_t, "new_name.py", content_type="code",
+            file_path="src/new_name.py",
+            meta={"content_hash": "deadbeef5678"},
+        )
+
+        _run_housekeeping(cat, owner_t, indexed_set={"src/new_name.py"})
+
+        assert cat.resolve(old_t) is None  # old entry still deleted
+        new_entry = cat.resolve(new_t)
+        assert new_entry is not None
+        assert new_entry.meta.get("non_evidentiary") is True
+        # The new entry's OWN content_hash is authoritative and untouched.
+        assert new_entry.meta.get("content_hash") == "deadbeef5678"
+
+    def test_rename_does_not_stamp_new_entry_when_old_entry_unstamped(
+        self, tmp_path, monkeypatch,
+    ):
+        """The transfer is conditional -- an ordinary (unstamped) rename
+        must not acquire a stamp from nowhere."""
+        from nexus.indexer import _run_housekeeping
+
+        catalog_dir, cat = self._make_cat(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        owner = cat.register_owner("nexus", "repo", repo_hash="fff888")
+        owner_t = cat.owner_for_repo("fff888")
+        old_t = cat.register(
+            owner_t, "old_name.py", content_type="code",
+            file_path="src/old_name.py",
+            meta={"content_hash": "cafef00d"},
+        )
+        new_t = cat.register(
+            owner_t, "new_name.py", content_type="code",
+            file_path="src/new_name.py",
+            meta={"content_hash": "cafef00d"},
+        )
+
+        _run_housekeeping(cat, owner_t, indexed_set={"src/new_name.py"})
+
+        assert cat.resolve(old_t) is None
+        new_entry = cat.resolve(new_t)
+        assert new_entry is not None
+        assert not new_entry.meta.get("non_evidentiary")
 
     def test_rename_not_triggered_without_content_hash(self, tmp_path, monkeypatch):
         """Orphan without content_hash follows normal miss_count path, not rename."""

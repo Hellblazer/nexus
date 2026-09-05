@@ -216,6 +216,35 @@ public final class VoyageEmbedder implements Embedder {
     private final VoyageRetryLoop retryLoop;
 
     /**
+     * Bead nexus-s71lr, code-review-expert pass 2 finding a: the engine progress
+     * line originally fired only from {@link Bge768Embedder} — cloud-mode users
+     * (this class) got nothing between per-document upserts, the identical
+     * silence class the bead exists to close. Mirrors {@link
+     * Bge768Embedder#PROGRESS_LOG_INTERVAL_NANOS} / {@code progressGate} exactly:
+     * rate-limited to about once per 5s, per instance (each of {@code
+     * EmbedderRouter}'s doc/query routers constructs its OWN {@code
+     * VoyageEmbedder}, so this is not process-wide the way {@code
+     * LocalOnnxAdmission} is — an acceptable bound: at most one line per 5s PER
+     * embedder instance, never per-chunk).
+     */
+    private static final long PROGRESS_LOG_INTERVAL_NANOS = java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+    private final EmbedProgressGate progressGate = new EmbedProgressGate(PROGRESS_LOG_INTERVAL_NANOS);
+
+    /**
+     * Bead nexus-s71lr, pass 3: {@code GET /v1/status}'s {@code
+     * local_embed_activity} was null for every cloud install (the majority
+     * posture) — this class now feeds the SAME {@link EmbedActivityTracker}
+     * mechanism {@link Bge768Embedder} does, surfaced via {@link
+     * #activitySnapshot()} and aggregated across embedders by {@link
+     * EmbedderRouter#embedActivitySnapshots()}. {@code queue_depth}/{@code
+     * thread_width} stay -1 always here — there is no {@code
+     * LocalOnnxAdmission}-equivalent concept for the cloud path (concurrency
+     * is bounded by Voyage's own rate limits, not a local semaphore).
+     */
+    private static final long ACTIVE_WINDOW_NANOS = 2 * PROGRESS_LOG_INTERVAL_NANOS;
+    private final EmbedActivityTracker activityTracker = new EmbedActivityTracker(ACTIVE_WINDOW_NANOS);
+
+    /**
      * Non-vacuity test instrument (RDR-195, mirrors {@link Bge768Embedder#onnxInvocationCount}):
      * counts every REAL Voyage POST this instance has sent (including internal 429/5xx
      * retries within a single {@link #callApi} call), since construction or the last
@@ -287,6 +316,14 @@ public final class VoyageEmbedder implements Embedder {
     @Override
     public String modelToken() {
         return model;
+    }
+
+    /**
+     * Bead nexus-s71lr, pass 3 — see {@link #activityTracker}'s javadoc.
+     */
+    @Override
+    public EmbedActivitySnapshot activitySnapshot() {
+        return activityTracker.snapshot(System.nanoTime(), -1, -1);
     }
 
     @Override
@@ -379,9 +416,35 @@ public final class VoyageEmbedder implements Embedder {
         // RATE_LIMIT_BUDGET_MS's javadoc for why per-sub-batch would re-arm.
         long deadlineNanos = retryLoop.newDeadlineNanos();
         List<SubBatchResponse> out = new ArrayList<>();
+        // Bead nexus-s71lr (code-review-expert pass 2 finding a): this call's own
+        // clock, for the progress line below — mirrors Bge768Embedder.embedSubBatched
+        // exactly.
+        long callStartNanos = System.nanoTime();
+        int chunksDone = 0;
+        int batchIndex = 0;
         for (List<String> batch : planned) {
             AtomicInteger subRequestBudget = new AtomicInteger(0);
             collectWithHalving(batch, subRequestBudget, out, 0, deadlineNanos);
+            chunksDone += batch.size();
+
+            long nowNanos = System.nanoTime();
+            double elapsedSecForTracker = (nowNanos - callStartNanos) / 1_000_000_000.0;
+            double chunksPerSecForTracker = elapsedSecForTracker > 0.0 ? chunksDone / elapsedSecForTracker : 0.0;
+            // Bead nexus-s71lr, pass 3: update the wire-visible activity counters on
+            // EVERY planned batch, unconditionally — GET /v1/status must reflect true
+            // current state regardless of how often the log line below fires.
+            activityTracker.record(batch.size(), chunksPerSecForTracker, nowNanos);
+
+            if (progressGate.shouldLog(nowNanos)) {
+                double elapsedSec = (nowNanos - callStartNanos) / 1_000_000_000.0;
+                double chunksPerSec = elapsedSec > 0.0 ? chunksDone / elapsedSec : 0.0;
+                log.info("event=embed_progress embedder=voyage model={} sub_batch={} "
+                        + "sub_batch_size={} chunks_done={} chunks_total={} elapsed_s={} "
+                        + "chunks_per_sec={}",
+                        model, batchIndex, batch.size(), chunksDone, texts.size(),
+                        String.format("%.1f", elapsedSec), String.format("%.1f", chunksPerSec));
+            }
+            batchIndex++;
         }
         return out;
     }

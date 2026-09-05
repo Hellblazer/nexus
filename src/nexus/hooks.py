@@ -243,74 +243,7 @@ def session_start(claude_session_id: str | None = None, source: str | None = Non
     return (
         f"Nexus ready (session: {session_id})."
         f"{_stale_mcp_host_warning()}"
-        f"{_pending_fix_now_notice()}"
         f"{_guidance_imperative_block()}"
-    )
-
-
-#: How far back the SessionStart notice looks for FIX-NOW findings.
-#:
-#: Bounded on purpose. There is no "resolved" state on a review record, so
-#: an unbounded count would nag forever and become the thing people learn
-#: to scroll past -- which is the failure mode the notice exists to
-#: prevent. Seven days keeps it about work still in hand; older findings
-#: stay readable via ``nx census reviews``.
-_FIX_NOW_NOTICE_WINDOW_DAYS = 7
-
-
-def _pending_fix_now_notice() -> str:
-    """One-line SessionStart nudge naming recent FIX-NOW review findings.
-
-    Sam's ruling, 2026-09-02. The per-commit reviewer (bead nexus-jh86x)
-    writes typed findings to T2, and a FIX-NOW verdict means "fix before
-    this work goes further" -- but nothing pushed it at anyone, so the
-    substantive critique called the whole instrument theatre: the records
-    sat in T2 and a log file until somebody thought to look.
-
-    Reports COMMITS, not findings, because two FIX-NOWs on one commit is
-    one thing to go and look at.
-
-    Never raises -- a probe failure here must not break session start
-    (mirrors every other best-effort leg in this module).
-    """
-    try:
-        from datetime import datetime, timedelta, timezone  # noqa: PLC0415 — deferred, only needed on this path
-
-        from nexus.commands._helpers import t2_handle  # noqa: PLC0415 — deferred; T2 dep off the hot path
-        from nexus.commit_review import (  # noqa: PLC0415 — deferred with its sibling
-            iter_review_records,
-            parse_record_verdicts,
-        )
-
-        cutoff = datetime.now(timezone.utc) - timedelta(days=_FIX_NOW_NOTICE_WINDOW_DAYS)
-        with t2_handle() as db:
-            rows = iter_review_records(db.memory)
-
-        commits = 0
-        for row in rows:
-            stamp = str(row.get("timestamp", "") or "")
-            if stamp:
-                try:
-                    when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-                    if when.tzinfo is None:
-                        when = when.replace(tzinfo=timezone.utc)
-                    if when < cutoff:
-                        continue
-                except ValueError:
-                    # An unparseable stamp is counted rather than dropped:
-                    # silently skipping is how a real finding disappears.
-                    pass
-            if parse_record_verdicts(row.get("content", "") or "").get("FIX-NOW"):
-                commits += 1
-    except Exception:  # noqa: BLE001 — session start must never break on this probe
-        return ""
-
-    if not commits:
-        return ""
-    plural = "commit" if commits == 1 else "commits"
-    return (
-        f" REVIEW: {commits} {plural} in the last {_FIX_NOW_NOTICE_WINDOW_DAYS} days "
-        f"carry FIX-NOW findings — nx census reviews."
     )
 
 

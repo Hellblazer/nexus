@@ -6,6 +6,83 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.32.0] - 2026-09-05
+
+### Removed
+
+- The per-commit reviewer (`nx review commit` / `nx review show`, the
+  post-commit review stanza, `nx census reviews`, the SessionStart FIX-NOW
+  notice, `.nexus.yml#commit_review`). Deleted 2026-09-05 (Sam): its
+  `claude -p` child was never tool-free, so it explored the repository
+  instead of judging the diff and hit its $0.25 cap 22 times in one day
+  with no verdict; nobody read the records it did write. Existing hooks
+  keep working; `nx hooks update` rewrites the stanza without the block.
+
+### Added
+
+- sn worktree guard (nexus-ftpk3). Serena's MCP server resolves paths
+  against the project root fixed at startup, so a subagent dispatched with
+  `isolation: "worktree"` wrote into the shared primary checkout while the
+  tool reported success (three incidents). The sn PreToolUse and
+  PermissionRequest hooks now deny every Serena write tool when the hook's
+  cwd is a linked git worktree, and the SubagentStart hook injects a
+  worktree section routing such agents to the built-in `LSP` tool and
+  Edit with absolute paths. Detection is one shared module,
+  `sn/hooks/scripts/worktree_guard.py`.
+- The garbage sweep (`nexus.garbage`): `nx doctor` reaps stale
+  `t1_mint_*.lock` files, rotated logs past 14 days and operator dispatch
+  dumps past 7 on every run, counts orphaned catalog links and tombstones
+  past one day, and `nx doctor --fix` reclaims them.
+
+### Changed
+
+- Operator dispatch passes `--tools ""`: a tool-free child has no built-in
+  Read/Grep/Bash either.
+- `nx catalog purge-trash` defaults to a one-day window, not thirty.
+- The per-session T1 mint lock file is removed with the lease at session end.
+
+### Added (2026-09-05 burn-down, paired with engine-service-v0.1.104)
+
+- Durable per-file index failures (nexus-nukn3): `nx index repo` records each
+  skipped file in the engine (`nexus.index_failures`), `nx index failures`
+  lists them, `--clear` retires them by run or age (with `--dry-run`),
+  `--acknowledge` / `--acks` / `--unacknowledge` mark a known permanent
+  failure so `nx doctor --check-index-failures` gates on the latest run's
+  unacknowledged failures only.
+- Capability census and routing events move from JSONL files to engine
+  tables (nexus-gjv9b): `nx census capability --from-store`,
+  `nx hook routing-stats --from-store`, retention via
+  `nx doctor --trim-telemetry`, the routing hook discovers the engine from
+  the lease file and meters drops by cause.
+- Production-write guard (nexus-a2qhz): a process whose nexus package
+  resolves from a dev checkout refuses HTTP writes unless
+  `NX_ALLOW_PROD_WRITE` names a reason. Reads are unaffected; the installed
+  tool never trips it.
+- `nx dt index --force` (nexus-gup3b); the skip message had named a flag
+  that did not exist.
+- `nx index repo --re-embed` (nexus-4jj40): `--force` alone re-chunks and
+  refreshes chunk metadata without re-embedding unchanged chunks.
+- Per-document `non_evidentiary` catalog stamp and an index-time
+  `section_type=imports` stamp on package/import header chunks, both
+  honoured by nx_answer evidence assembly (nexus-4jj40).
+- `GET /v1/status` embed activity and live progress lines on every indexing
+  path (nexus-s71lr); `nx doctor --check-engine-activity`.
+
+### Fixed (2026-09-05)
+
+- Bulk upserts no longer re-POST an identical body on a bare read timeout;
+  the refusal is contained per file (nexus-8hdg9 phase 1).
+- The index-run fence begins per file before chunking and reconciles at exit,
+  so a run that dies before its first flush no longer leaves documents
+  stamped but unfenced (nexus-hg2dw).
+- `query()` resolves a collection prefix the same way `search()` does;
+  `store_get_many` renders content in human mode, capped (nexus-z4j8d).
+- MCP `store_put` refuses a chunk over the 16,384-byte quota before the
+  catalog mint (nexus-xzyr3); nine oversized notes had been admitted.
+- A bare-prefix fan-out drops a collection under 3 chunks only beside a
+  healthy sibling and names the exclusion in the result (nexus-rbhci).
+- Release-sandbox smoke runs in CI on plugin-surface PRs (nexus-98gpl).
+
 ## [7.31.0] - 2026-09-05
 
 Engine identity unchanged: `engine-service-v0.1.100`.

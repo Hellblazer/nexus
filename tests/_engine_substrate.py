@@ -432,6 +432,183 @@ def _boot_semaphore_slot(
         fh.close()
 
 
+def _initdb_cluster(
+    bin_dir: Path, *, prefix: str, parent_dir: str | None = None,
+) -> str:
+    """``mkdtemp`` + ``initdb`` a fresh cluster dir, cleaning up on failure.
+
+    Call INSIDE :func:`_boot_semaphore_slot` — ``initdb`` starts a bootstrap
+    standalone backend, which is one of the two SysV-shm allocations the
+    semaphore exists to bound.
+
+    Two behaviours the ``check=True, capture_output=True`` call this replaces
+    did not have (both nexus-rbc7k, both measured):
+
+    * **The directory is removed when initdb fails.** ``initdb`` removes the
+      CONTENTS of a data directory it failed to initialize but leaves the
+      directory itself, because it did not create it -- it says so:
+      ``initdb: removing contents of data directory "..."``. Every failed
+      boot therefore stranded an EMPTY ``nexus_t2_substrate_pg_*`` dir with
+      no sidecar, which :func:`_sweep_legacy_cluster` reports and by design
+      refuses to auto-reap. That is where the 21 empty cluster dirs on the
+      dev box came from; they are debris from failed boots, not from live
+      ones. ``_kill_pg`` only exists from ``pg_ctl start`` onward, so this
+      earlier window had no cleanup at all.
+    * **initdb's own stderr reaches the caller.** ``CalledProcessError``'s
+      message carries the argv and the return code and DISCARDS the captured
+      stderr, so a failed boot reported ``exit status 1`` and nothing else.
+      The failure underneath nexus-rbc7k was a one-line PG FATAL
+      (``could not create shared memory segment: No space left on device``,
+      ``shmget`` -- macOS ``kern.sysv.shmmni`` is 32) that no consumer of
+      this substrate could see.
+    """
+    pgdata = tempfile.mkdtemp(prefix=prefix, dir=parent_dir)
+    proc = subprocess.run(
+        [str(bin_dir / "initdb"), "-D", pgdata, "--no-locale", "-E", "UTF8",
+         "--auth=trust"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        shutil.rmtree(pgdata, ignore_errors=True)
+        raise RuntimeError(
+            f"initdb failed (rc={proc.returncode}) for a throwaway cluster "
+            f"under {prefix!r}:\n{proc.stderr}"
+        )
+    return pgdata
+
+
+#: PostgreSQL's own wording when ``shmget`` returns ENOSPC. The FULL text is
+#: ``could not create shared memory segment: No space left on device`` with
+#: a DETAIL line naming the failed ``shmget`` call and a HINT that says to
+#: raise SHMMNI -- and it is not about disk space, which the HINT also says.
+_SHM_EXHAUSTED_MARKER = "could not create shared memory segment"
+
+#: Bounded retry budget for a throwaway boot that loses the ``shmget`` race
+#: (nexus-rbc7k). NOT a fallback: nothing degrades, nothing is skipped, and
+#: an exhausted budget still raises with PG's own FATAL attached. It is a
+#: resource-acquisition retry against a transient MACHINE-WIDE ceiling, the
+#: same shape as ``nexus.retry._voyage_with_retry``. The window it rides out
+#: is another boot's in-flight segments (a boot is ~1-3s), so the budget is
+#: sized in single-digit seconds; a box whose STEADY state is at the ceiling
+#: (measured: two concurrent 16-worker sessions peg it at exactly 32) is not
+#: transient and correctly fails loud after the budget.
+_THROWAWAY_BOOT_ATTEMPTS = 5
+_THROWAWAY_BOOT_BACKOFF_S = 2.0
+
+
+@contextmanager
+def throwaway_pg_cluster(
+    *,
+    prefix: str = "nexus_throwaway_pg_",
+    lock_dir: Path = _BOOT_SEMAPHORE_DIR,
+    boot_timeout_s: float = _BOOT_SEMAPHORE_ACQUIRE_TIMEOUT_S,
+    parent_dir: str | None = None,
+    attempts: int = _THROWAWAY_BOOT_ATTEMPTS,
+    backoff_s: float = _THROWAWAY_BOOT_BACKOFF_S,
+) -> Iterator[Path]:
+    """A real, socket-only PG cluster for a test that needs a live postmaster
+    it may kill, torn down (``pg_ctl stop -m immediate`` + ``rmtree``) on the
+    way out.
+
+    Boots INSIDE the cross-process boot semaphore, and retries a boot that
+    loses the SysV-shared-memory race (nexus-rbc7k). A PG boot needs two
+    transient SysV segments -- ``initdb``'s bootstrap backend, then the
+    postmaster -- against a machine-wide ``kern.sysv.shmmni``, which is 32 on
+    macOS and cannot be raised without a reboot; under ``pytest -n auto``
+    every xdist worker already holds one segment for its own session-long
+    substrate postmaster, and other fixtures boot their own. Measured on the
+    dev box: the segment table pegs at exactly 32 under load and the boot
+    fails with ``could not create shared memory segment: No space left on
+    device`` / ``shmget``.
+
+    Both halves matter and neither is sufficient alone:
+
+    * the semaphore stops this boot from BEING the extra concurrent boot
+      (``test_stops_a_real_postmaster_via_pg_ctl_immediate`` booted by hand
+      and was the only PG boot in the suite outside that bound);
+    * the retry rides out the segments some OTHER in-flight boot holds,
+      which no bound on this caller can control.
+
+    ``listen_addresses = ''`` -- Unix socket only, inside the cluster dir.
+    There is no TCP port to collide on, so this needs no port allocation.
+    Cluster dirs come from ``tempfile.mkdtemp``, NOT pytest's ``tmp_path``,
+    whose ``pytest-of-<user>/pytest-<N>/<test-name>/`` nesting overruns the
+    103-byte Unix-domain-socket path limit on macOS.
+
+    ``_boot`` deliberately does NOT share the retry: its own answer to this
+    hazard is the semaphore plus a fail-loud setup error (nexus-ui654), and
+    changing the substrate's boot contract is not this bead's business.
+    """
+    pgdata: Path | None = None
+    bin_dir: Path | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with _boot_semaphore_slot(lock_dir=lock_dir, timeout_s=boot_timeout_s):
+                # Resolved INSIDE the slot, unlike _boot's own call: nothing
+                # before the slot means a caller that never gets one (the
+                # contended case) never touches the PG bundle at all, which
+                # is what lets the bound-ness of this path be tested without
+                # a PG bundle present.
+                bin_dir = _pg_bin()
+                pgdata = Path(
+                    _initdb_cluster(bin_dir, prefix=prefix, parent_dir=parent_dir)
+                )
+                try:
+                    with open(pgdata / "postgresql.conf", "a") as f:
+                        f.write("listen_addresses = ''\n")
+                    proc = subprocess.run(
+                        [str(bin_dir / "pg_ctl"), "-D", str(pgdata), "-l",
+                         str(pgdata / "pg.log"), "-o", f"-k {pgdata}",
+                         "start", "-w"],
+                        capture_output=True, text=True,
+                    )
+                    if proc.returncode != 0:
+                        try:
+                            log_tail = (pgdata / "pg.log").read_text()[-2000:]
+                        except OSError:
+                            log_tail = "<no pg.log>"
+                        raise RuntimeError(
+                            f"pg_ctl start failed (rc={proc.returncode}) for "
+                            f"the throwaway cluster at {pgdata}:\n"
+                            f"{proc.stderr}\n--- pg.log tail ---\n{log_tail}"
+                        )
+                except BaseException:
+                    # A postmaster can be half up when pg_ctl's wait gives
+                    # up; stop it before the rmtree, or it outlives its
+                    # pgdata holding the SysV segment this helper exists
+                    # to conserve (rbc7k review). A no-op when nothing
+                    # started.
+                    subprocess.run(
+                        [str(bin_dir / "pg_ctl"), "-D", str(pgdata), "stop", "-m", "immediate"],
+                        capture_output=True, text=True, check=False,
+                    )
+                    shutil.rmtree(pgdata, ignore_errors=True)
+                    pgdata = None
+                    raise
+            break
+        except RuntimeError as exc:
+            if _SHM_EXHAUSTED_MARKER not in str(exc) or attempt == attempts:
+                raise
+            _log.warning(
+                "nexus_t2_substrate.throwaway_boot_shm_exhausted",
+                attempt=attempt,
+                attempts=attempts,
+                backoff_s=backoff_s,
+                bead="nexus-rbc7k",
+                hint="machine-wide SysV segment table full (kern.sysv.shmmni)",
+            )
+            time.sleep(backoff_s)
+    assert pgdata is not None and bin_dir is not None  # loop either broke or raised
+    try:
+        yield pgdata
+    finally:
+        subprocess.run(
+            [str(bin_dir / "pg_ctl"), "-D", str(pgdata), "stop", "-m", "immediate"],
+            capture_output=True,
+        )
+        shutil.rmtree(pgdata, ignore_errors=True)
+
+
 def _boot() -> dict:
     """Boot hermetic PG + the shaded service JAR. Called once, under _lock."""
     try:
@@ -497,12 +674,10 @@ def _boot() -> dict:
     # any earlier candidate filter. Updated (not re-created) at each
     # later checkpoint below as more identity becomes known.
     with _boot_semaphore_slot():
-        pgdata = tempfile.mkdtemp(prefix="nexus_t2_substrate_pg_")
-        subprocess.run(
-            [str(bin_dir / "initdb"), "-D", pgdata, "--no-locale", "-E", "UTF8",
-             "--auth=trust"],
-            check=True, capture_output=True,
-        )
+        # Cleans the dir up if initdb fails, and carries initdb's stderr out
+        # (nexus-rbc7k) -- see _initdb_cluster's docstring for both, and for
+        # the 21 empty cluster dirs the previous shape stranded here.
+        pgdata = _initdb_cluster(bin_dir, prefix="nexus_t2_substrate_pg_")
         sidecar_started_at = _write_sidecar(
             pgdata, pg_port=pg_port, svc_port=None,
             postmaster_pid=None, engine_pid=None,
@@ -512,12 +687,32 @@ def _boot() -> dict:
             # The suite issues thousands of tiny transactions; keep fsync off
             # for the throwaway test cluster.
             f.write("fsync = off\nsynchronous_commit = off\nfull_page_writes = off\n")
-        subprocess.run(
+        _start = subprocess.run(
             [str(bin_dir / "pg_ctl"), "-D", pgdata, "-l",
              os.path.join(pgdata, "pg.log"),
              "-o", f"-p {pg_port} -k {pgdata}", "start", "-w"],
-            check=True, capture_output=True,
+            capture_output=True, text=True, check=False,
         )
+        if _start.returncode != 0:
+            # Carry pg_ctl's stderr and the log tail out (rbc7k critique):
+            # CalledProcessError drops stderr, which is where PG names the
+            # shmget ENOSPC that the throwaway helper retries and this
+            # shared boot deliberately does not. Stop a half-started
+            # postmaster first so it cannot outlive its pgdata holding a
+            # SysV segment.
+            subprocess.run(
+                [str(bin_dir / "pg_ctl"), "-D", pgdata, "stop", "-m", "immediate"],
+                capture_output=True, check=False,
+            )
+            try:
+                _log_tail = open(os.path.join(pgdata, "pg.log")).read()[-2000:]
+            except OSError:
+                _log_tail = "<no pg.log>"
+            shutil.rmtree(pgdata, ignore_errors=True)
+            raise RuntimeError(
+                f"nexus test substrate: pg_ctl start failed (rc={_start.returncode}) "
+                f"for {pgdata}:\n{_start.stderr}\n--- pg.log tail ---\n{_log_tail}"
+            )
     postmaster_pid = _read_postmaster_pid(pgdata)
     # Checkpoint 2 of 3 (nexus-ui654 follow-up, critic Q3): UPDATE the
     # sidecar (not re-create -- `started_at` stays pinned to the earliest

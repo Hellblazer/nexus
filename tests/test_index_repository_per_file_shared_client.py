@@ -1,0 +1,324 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""nexus-m20mf P3 fold-in (critic findings 1/1b/C2): the design's own
+named target population -- "the indexer's per-file facades" -- is the
+per-document hook-failure chain (``hook_registry.py``'s ``fire_document``
+-> ``_record_document_hook_failure`` -> ``_persist_hook_failure`` ->
+``mcp_infra.t2_ctx()``), not just the once-or-twice-per-run
+taxonomy-postprocessing step ``tests/test_index_cmd_shared_client_fanout.py``
+covers. This file drives a REAL ``index_repository()`` call over N real
+files and forces a hook failure on EVERY one, proving the per-file
+facade sharing the earlier fanout test could not reach (that test mocks
+``nexus.indexer.index_repository`` entirely, per the established
+CLI-test convention).
+
+Uses the in-memory ``T3Database`` fixture shape from
+``tests/test_indexer_e2e.py`` (no real embeddings, no network for T3) so
+this stays fast; T2 still routes through the real per-session engine
+substrate (autouse ``_pin_t2_substrate``), which is what the counts below
+actually measure.
+"""
+from __future__ import annotations
+
+import subprocess
+import threading
+from pathlib import Path
+from typing import Any
+from unittest.mock import patch
+
+import httpx
+import pytest
+
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
+from nexus.db.t3 import T3Database
+from nexus.registry import RepoRegistry
+from tests.conftest import fake_credentials, make_vector_test_client
+
+
+def _git_init(repo: Path) -> None:
+    for cmd in (
+        ["git", "init"],
+        ["git", "config", "user.email", "test@test"],
+        ["git", "config", "user.name", "test"],
+        ["git", "add", "."],
+        ["git", "commit", "-m", "initial"],
+    ):
+        subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
+
+
+@pytest.fixture
+def tiny_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "tiny-repo"
+    repo.mkdir()
+    for i in range(3):
+        (repo / f"module_{i}.py").write_text(
+            f"def function_{i}(x):\n    '''Docstring for function {i}.'''\n    return x + {i}\n"
+        )
+    _git_init(repo)
+    return repo
+
+
+@pytest.fixture
+def local_t3() -> T3Database:
+    return T3Database(
+        _client=make_vector_test_client(), _ef_override=DefaultEmbeddingFunction()
+    )
+
+
+@pytest.fixture
+def registry(tmp_path: Path, tiny_repo: Path) -> RepoRegistry:
+    reg = RepoRegistry(tmp_path / "repos.json")
+    reg.add(tiny_repo)
+    return reg
+
+
+def _instrument_httpx_clients(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    tally: list[int] = []
+    orig_init = httpx.Client.__init__
+
+    def _counting_init(self: httpx.Client, *args: Any, **kwargs: Any) -> None:
+        tally.append(1)
+        orig_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "__init__", _counting_init)
+    return tally
+
+
+def _instrument_t2database(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    from nexus.db.t2 import T2Database
+
+    tally: list[int] = []
+    orig_init = T2Database.__init__
+
+    def _counting_init(self: Any, *args: Any, **kwargs: Any) -> None:
+        orig_init(self, *args, **kwargs)
+        tally.append(id(self.telemetry._client))
+
+    monkeypatch.setattr(T2Database, "__init__", _counting_init)
+    return tally
+
+
+def test_index_repository_shares_one_t2_client_across_n_per_file_hook_failures(
+    tiny_repo: Path,
+    registry: RepoRegistry,
+    local_t3: T3Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A REAL ``index_repository()`` run over 3 files, with an ALWAYS-
+    FAILING document hook registered (forcing exactly one
+    ``_record_document_hook_failure`` -> ``t2_ctx()`` call per file):
+    BEFORE this wiring, N files -> N independent T2Database constructions
+    -> N x 8 unshared httpx.Client()s. AFTER, N files still construct N
+    T2Database facades (one per hook-failure record -- that part is
+    unaffected; ``t2_ctx()`` is fresh-per-call by design), but they all
+    share ONE T2 httpx.Client via ``index_repository``'s new ``client=``
+    parameter + ``use_shared_t2_client_for_index_run``.
+
+    CAN FAIL: reverting the ``with use_shared_t2_client_for_index_run
+    (client):`` wrap in ``index_repository`` (indexer.py), or ``t2_ctx()``'s
+    fallback to ``current_index_run_t2_client()``, makes the shared-client
+    identity assertion fail and the httpx.Client count regress toward
+    N x 8.
+    """
+    from nexus.db.t2._refreshable_client import build_shared_t2_client
+    from nexus.hook_registry import HookRegistry, install_default_hooks
+    from nexus.indexer import index_repository
+
+    failure_count = {"n": 0}
+
+    def _always_failing_hook(source_path: str, collection: str, content: str, *, doc_id: str = "") -> None:
+        failure_count["n"] += 1
+        raise RuntimeError("nexus-m20mf-p3-forced-hook-failure")
+
+    hooks = HookRegistry()
+    install_default_hooks(hooks)
+    hooks.register_document(_always_failing_hook)
+
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "local")
+
+    shared = build_shared_t2_client()
+    client_tally = _instrument_httpx_clients(monkeypatch)
+    t2_tally = _instrument_t2database(monkeypatch)
+
+    with (
+        patch("nexus.db.make_t3", return_value=local_t3),
+        patch("nexus.config.get_credential", side_effect=fake_credentials()),
+    ):
+        index_repository(tiny_repo, registry, hooks=hooks, client=shared)
+
+    assert failure_count["n"] == 3, (
+        f"expected the always-failing document hook to fire once per "
+        f"file (3 files in tiny_repo); fired {failure_count['n']} times "
+        f"-- the harness itself is broken if this isn't 3, not the "
+        f"property under test"
+    )
+    assert t2_tally and len(t2_tally) >= 3, (
+        f"expected at least 3 T2Database constructions (one per per-file "
+        f"hook-failure record via t2_ctx()); got {len(t2_tally)}"
+    )
+    assert set(t2_tally) == {id(shared)}, (
+        f"expected EVERY per-file hook-failure T2Database's telemetry "
+        f"store to share the identical injected client; found "
+        f"{len(set(t2_tally))} distinct client id(s) across "
+        f"{len(t2_tally)} T2Database constructions"
+    )
+    # Exactly 1, not 0: nexus.catalog.factory's process-lifetime shared
+    # HttpCatalogClient singleton (a DIFFERENT tier entirely, also built on
+    # RefreshableHttpStoreMixin but never one of T2Database's 8 domain
+    # stores) lazily constructs on its first use during this run
+    # (_migrate_legacy_collections) -- traced via a full stack capture
+    # during authoring, not assumed. It is a per-PROCESS singleton, so
+    # this count does not grow with N files or N hook failures either;
+    # the property under test (per-file T2 sharing) is fully proven by
+    # the identity assertion below, not by this incidental total.
+    assert len(client_tally) == 1, (
+        f"expected exactly 1 additional httpx.Client() construction -- "
+        f"the catalog tier's own process-lifetime singleton client, "
+        f"unrelated to T2Database and not affected by this fix -- and "
+        f"ZERO from the {failure_count['n']} per-file T2 hook-failure "
+        f"records (build_shared_t2_client() ran BEFORE instrumentation "
+        f"started, so it is correctly excluded from this count). Got "
+        f"{len(client_tally)}; more than 1 means some per-file T2Database "
+        f"still built its own client instead of reusing the shared one"
+    )
+
+    assert not shared.is_closed
+    shared.close()
+
+
+class TestIndexRunClientScopeReentrancy:
+    """nexus-m20mf P3 fold-in (round-2 critique, Significant finding 1):
+    ``mcp_infra.use_shared_t2_client_for_index_run`` guards its
+    process-global "current index run client" against the exact hazard a
+    bare save/restore global creates -- two overlapping activations
+    racing to set/restore the SAME variable, where whichever ``finally``
+    runs LAST silently substitutes the wrong client into a run still in
+    flight. Nothing calls ``index_repository()`` concurrently in
+    production today (exactly one call site, ``commands/index.py``'s
+    ``index_repo_cmd``, one process per ``nx index repo`` invocation) --
+    this hazard was previously DORMANT, not live -- but "no silent
+    fallbacks for correctness problems; fail loud" applies regardless of
+    whether a hazard is currently exercised.
+    """
+
+    def test_sequential_runs_each_see_only_their_own_client_nothing_leaks(self) -> None:
+        """Two SEQUENTIAL scopes (no overlap) must each see exactly their
+        own client while active, and the global must reset to ``None``
+        between them and after the second -- CAN FAIL if the scope ever
+        failed to reset (a leak would make the second scope silently see
+        the first client, or the post-exit read return non-None)."""
+        from nexus.mcp_infra import current_index_run_t2_client, use_shared_t2_client_for_index_run
+
+        assert current_index_run_t2_client() is None  # clean before this test
+
+        client_a = object()
+        client_b = object()
+
+        with use_shared_t2_client_for_index_run(client_a):
+            assert current_index_run_t2_client() is client_a
+        assert current_index_run_t2_client() is None, "leaked after run A"
+
+        with use_shared_t2_client_for_index_run(client_b):
+            assert current_index_run_t2_client() is client_b
+        assert current_index_run_t2_client() is None, "leaked after run B"
+
+    def test_reentrant_same_client_stacks_cleanly(self) -> None:
+        """A NESTED entry with the IDENTICAL client (the shape a legitimate
+        recursive/nested call into the same run would take) must stack
+        rather than reset the outer scope's state early -- the outer
+        scope must still see its client active after the inner exits, and
+        the global resets to None only once BOTH have exited."""
+        from nexus.mcp_infra import current_index_run_t2_client, use_shared_t2_client_for_index_run
+
+        client = object()
+        with use_shared_t2_client_for_index_run(client):
+            assert current_index_run_t2_client() is client
+            with use_shared_t2_client_for_index_run(client):
+                assert current_index_run_t2_client() is client
+            # Inner exited -- outer's activation must survive.
+            assert current_index_run_t2_client() is client
+        assert current_index_run_t2_client() is None
+
+    def test_reentrant_none_client_stacks_cleanly(self) -> None:
+        """Both scopes passing ``client=None`` (the common "no shared
+        client configured" case) must also stack without raising --
+        ``None is None`` is a valid "same collaborator" match, not a
+        conflict."""
+        from nexus.mcp_infra import current_index_run_t2_client, use_shared_t2_client_for_index_run
+
+        with use_shared_t2_client_for_index_run(None):
+            assert current_index_run_t2_client() is None
+            with use_shared_t2_client_for_index_run(None):
+                assert current_index_run_t2_client() is None
+        assert current_index_run_t2_client() is None
+
+    def test_conflicting_nested_entry_raises_loud_not_silent_clobber(self) -> None:
+        """A NESTED entry with a DIFFERENT, non-identical client while one
+        is already active must raise immediately -- CAN FAIL if the guard
+        were removed (silently overwriting the active client, then the
+        inner scope's exit would restore the OUTER's original value,
+        exactly the round-2 critique's named hazard shape)."""
+        from nexus.mcp_infra import current_index_run_t2_client, use_shared_t2_client_for_index_run
+
+        client_a = object()
+        client_b = object()
+
+        with use_shared_t2_client_for_index_run(client_a):
+            with pytest.raises(RuntimeError, match="DIFFERENT"):
+                with use_shared_t2_client_for_index_run(client_b):
+                    pass
+            # The outer scope's own activation must be UNAFFECTED by the
+            # inner's failed, rejected entry.
+            assert current_index_run_t2_client() is client_a
+        assert current_index_run_t2_client() is None
+
+    def test_overlapping_runs_via_real_threads_the_loser_is_refused_not_corrupted(
+        self,
+    ) -> None:
+        """The genuinely adversarial shape named by the critique: two REAL
+        threads, each trying to activate a DIFFERENT client, racing via
+        actual OS thread scheduling (not just nested calls in one thread).
+        Thread A enters and holds its scope open (via an Event) while
+        thread B's overlapping attempt must be REFUSED loud -- never
+        silently see a blended/wrong client, and thread A's own view of
+        its client must never change out from under it. After both
+        threads finish, nothing leaks."""
+        from nexus.mcp_infra import current_index_run_t2_client, use_shared_t2_client_for_index_run
+
+        client_a = object()
+        client_b = object()
+        entered_a = threading.Event()
+        release_a = threading.Event()
+        a_observed: list[object] = []
+        b_errors: list[BaseException] = []
+
+        def run_a() -> None:
+            with use_shared_t2_client_for_index_run(client_a):
+                entered_a.set()
+                release_a.wait(timeout=5.0)
+                # A's own view must be UNCHANGED by B's rejected attempt.
+                a_observed.append(current_index_run_t2_client())
+
+        def run_b() -> None:
+            assert entered_a.wait(timeout=5.0), "run_a never entered -- harness broken"
+            try:
+                with use_shared_t2_client_for_index_run(client_b):
+                    pass  # pragma: no cover -- must never be reached
+            except RuntimeError as exc:
+                b_errors.append(exc)
+            finally:
+                release_a.set()
+
+        ta = threading.Thread(target=run_a)
+        tb = threading.Thread(target=run_b)
+        ta.start()
+        tb.start()
+        ta.join(timeout=10.0)
+        tb.join(timeout=10.0)
+        assert not ta.is_alive() and not tb.is_alive(), "a thread hung"
+
+        assert len(b_errors) == 1 and isinstance(b_errors[0], RuntimeError)
+        assert a_observed == [client_a], (
+            "thread A's client must never be silently substituted by "
+            "thread B's rejected overlapping attempt"
+        )
+        assert current_index_run_t2_client() is None, "leaked after both threads finished"

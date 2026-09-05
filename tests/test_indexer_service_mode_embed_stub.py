@@ -67,7 +67,13 @@ def _make_col() -> MagicMock:
 
 
 def _make_ctx(
-    tmp_path: Path, db: _RecordingDb, corpus: str, model: str, *, force: bool = True,
+    tmp_path: Path,
+    db: _RecordingDb,
+    corpus: str,
+    model: str,
+    *,
+    force: bool = True,
+    force_re_embed: bool = False,
 ) -> IndexContext:
     return IndexContext(
         col=_make_col(),
@@ -80,6 +86,7 @@ def _make_ctx(
         git_meta={},
         now_iso="2026-06-11T00:00:00+00:00",
         force=force,  # bypass staleness — no col roundtrip
+        force_re_embed=force_re_embed,
     )
 
 
@@ -150,7 +157,14 @@ def test_code_indexer_service_mode_skips_client_embed(tmp_path, monkeypatch):
         "def alpha():\n    return 1\n\n\ndef beta():\n    return 2\n"
     )
     db = _RecordingDb()
-    ctx = _make_ctx(tmp_path, db, "code__t__minilm-l6-v2-384__v1", "minilm-l6-v2-384")
+    # nexus-4jj40 round 5: force_re_embed is decoupled from force (a plain
+    # --force reclassify pass no longer pays for a re-embed) — pass it
+    # explicitly to exercise the ctx.force_re_embed -> upsert forwarding
+    # code_indexer.py actually performs.
+    ctx = _make_ctx(
+        tmp_path, db, "code__t__minilm-l6-v2-384__v1", "minilm-l6-v2-384",
+        force_re_embed=True,
+    )
 
     count = index_code_file(ctx, f)
 
@@ -159,7 +173,9 @@ def test_code_indexer_service_mode_skips_client_embed(tmp_path, monkeypatch):
     up = db.upserts[0]
     assert len(up["embeddings"]) == len(up["ids"])
     assert all(e == [] for e in up["embeddings"])
-    # RDR-181 §Approach step 3: --force must reach force_re_embed=True.
+    # RDR-181 §Approach step 3 / nexus-4jj40 round 5: --force --re-embed
+    # (ctx.force_re_embed=True) must reach force_re_embed=True on the
+    # upsert call.
     assert up["force_re_embed"] is True
 
 

@@ -250,16 +250,111 @@ def test_index_code_file_skips_current_file(tmp_path, make_ctx):
     assert index_code_file(ctx, py_file) == 0
 
 
-def test_index_code_file_returns_zero_for_non_text_file(tmp_path, make_ctx):
+def test_index_code_file_raises_for_undecodable_content(tmp_path, make_ctx):
+    """nexus-hg2dw critique round 2 (T2 critique-nexus-hg2dw-36602c67f
+    [24598] finding 4): a code file that cannot be decoded as UTF-8 text
+    must raise UnextractableContentError, not silently return 0 —
+    mirrors prose_indexer's identical treatment. Supersedes the retired
+    test_index_code_file_returns_zero_for_non_text_file (same fixture,
+    new expected contract)."""
+    from nexus.errors import UnextractableContentError
     from nexus.code_indexer import index_code_file
 
     bin_file = tmp_path / "binary.py"
     bin_file.write_bytes(b"\xff\xfe binary content")
-    # nexus-8g79.28: real empty collection; check_staleness returns
-    # False, index_code_file returns 0 for the non-text bytes.
     ctx = make_ctx(col=_real_col())
 
-    assert index_code_file(ctx, bin_file) == 0
+    with pytest.raises(UnextractableContentError, match="decode"):
+        index_code_file(ctx, bin_file)
+
+
+def test_index_code_file_fresh_skip_stays_a_plain_zero_no_exception(tmp_path, make_ctx):
+    """Control / non-regression: a genuinely fresh (unchanged) code file
+    must still return a plain 0 — no exception, no fence call."""
+    import hashlib
+    from unittest.mock import patch
+
+    from nexus.code_indexer import index_code_file
+
+    py_file = tmp_path / "hello2.py"
+    py_file.write_text("print('hello again')\n")
+    h = hashlib.sha256(py_file.read_text().encode("utf-8")).hexdigest()
+    col = _real_col()
+    col.add(
+        ids=["id1"],
+        documents=["print('hello again')"],
+        metadatas=[{
+            "content_hash": h, "embedding_model": "voyage-code-3",
+            "source_path": str(py_file),
+        }],
+    )
+    ctx = make_ctx(col=col)
+
+    with patch("nexus.doc_indexer._fence_fail") as fence_fail, \
+         patch("nexus.doc_indexer._fence_begin") as fence_begin:
+        result = index_code_file(ctx, py_file)
+
+    assert result == 0
+    fence_fail.assert_not_called()
+    fence_begin.assert_not_called()
+
+
+def test_index_code_file_begins_fence_before_chunking(tmp_path, make_ctx):
+    """T2 critique-nexus-hg2dw-36602c67f [24598] finding 1 CRITICAL /
+    finding 4: code_indexer gets the identical per-file begin-before-
+    chunk treatment as prose_indexer."""
+    from unittest.mock import patch
+
+    from nexus.code_indexer import index_code_file
+
+    py_file = tmp_path / "new_code.py"
+    py_file.write_text("def f():\n    return 1\n")
+    call_order: list[str] = []
+
+    def _fake_begin(doc_id, content_hash, collection):
+        call_order.append("begin")
+        assert doc_id == "1.1.11"
+        assert collection == "code__test"
+        assert len(content_hash) == 64
+
+    ctx = make_ctx(
+        col=_real_col(), corpus="code__test",
+        doc_id_resolver=lambda p: "1.1.11",
+    )
+
+    with patch("nexus.doc_indexer._fence_begin", side_effect=_fake_begin) as fence_begin, \
+         patch("nexus.doc_indexer._fence_fail"), \
+         patch("nexus.chunker.chunk_file") as chunk_file_mock:
+        chunk_file_mock.side_effect = lambda *a, **k: call_order.append("chunk") or []
+        with pytest.raises(Exception, match="no chunks"):
+            index_code_file(ctx, py_file)
+
+    fence_begin.assert_called_once()
+    assert call_order == ["begin", "chunk"], (
+        f"expected fence-begin BEFORE chunking, got order {call_order}"
+    )
+
+
+def test_index_code_file_fence_begin_failure_does_not_abort(tmp_path, make_ctx):
+    """code-review-nexus-hg2dw-36602c67f [24601] finding 1: a defect in
+    the per-file begin call must be fail-open for code_indexer too."""
+    from unittest.mock import patch
+
+    from nexus.code_indexer import index_code_file
+
+    py_file = tmp_path / "resilient.py"
+    py_file.write_text("def resilient():\n    return True\n")
+
+    ctx = make_ctx(
+        col=_real_col(), corpus="code__test",
+        embed_fn=lambda texts: [[0.1] * 8 for _ in texts],
+        doc_id_resolver=lambda p: "1.1.12",
+    )
+
+    with patch("nexus.doc_indexer._fence_begin", side_effect=RuntimeError("boom")):
+        result = index_code_file(ctx, py_file)
+
+    assert result >= 1, "a fence-begin defect must never abort real indexing work"
 
 
 def test_index_code_file_happy_path_new_file(tmp_path, make_ctx):
@@ -294,6 +389,104 @@ def test_index_code_file_happy_path_new_file(tmp_path, make_ctx):
     call_kwargs = mock_db.upsert_chunks_with_embeddings.call_args[1]
     assert call_kwargs["collection_name"] == "code__test"
     assert len(call_kwargs["ids"]) == result
+
+
+def test_index_code_file_force_re_embed_decoupled_from_force(tmp_path, make_ctx):
+    """nexus-4jj40 round 5 (T2 critique [24618]): ctx.force=True must NOT
+    imply force_re_embed=True on the server call -- the two are
+    deliberately decoupled so a plain --force reclassification pass never
+    pays for a full Voyage re-embed. ctx.force_re_embed defaults False."""
+    from nexus.code_indexer import index_code_file
+
+    py_file = tmp_path / "example.py"
+    py_file.write_text("def greet(name):\n    return f'Hello {name}'\n")
+
+    mock_db = MagicMock()
+
+    def fake_embed_fn(texts):
+        return [[0.1] * 128 for _ in texts]
+
+    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn,
+                   git_meta={"git_project_name": "test"}, force=True)
+
+    assert ctx.force_re_embed is False, "force_re_embed must default False"
+    index_code_file(ctx, py_file)
+
+    call_kwargs = mock_db.upsert_chunks_with_embeddings.call_args[1]
+    assert call_kwargs["force_re_embed"] is False, (
+        "ctx.force=True must not leak into force_re_embed=True"
+    )
+
+
+def test_index_code_file_force_re_embed_explicit_opt_in(tmp_path, make_ctx):
+    """The explicit opt-in still reaches the server call when set."""
+    from nexus.code_indexer import index_code_file
+
+    py_file = tmp_path / "example.py"
+    py_file.write_text("def greet(name):\n    return f'Hello {name}'\n")
+
+    mock_db = MagicMock()
+
+    def fake_embed_fn(texts):
+        return [[0.1] * 128 for _ in texts]
+
+    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn,
+                   git_meta={"git_project_name": "test"}, force=True,
+                   force_re_embed=True)
+
+    index_code_file(ctx, py_file)
+
+    call_kwargs = mock_db.upsert_chunks_with_embeddings.call_args[1]
+    assert call_kwargs["force_re_embed"] is True
+
+
+def test_index_code_file_stamps_import_only_chunk_section_type(tmp_path, make_ctx):
+    """RDR-200 Phase 1c evidence hygiene (nexus-4jj40 Sam's decision 3):
+    a chunk consisting only of an import statement gets
+    ``section_type="imports"`` end to end through ``index_code_file`` --
+    not just at the ``_is_import_only_chunk`` classifier level."""
+    from nexus.code_indexer import index_code_file
+
+    py_file = tmp_path / "header_only.py"
+    py_file.write_text("import os\n")
+
+    mock_db = MagicMock()
+
+    def fake_embed_fn(texts):
+        return [[0.1] * 128 for _ in texts]
+
+    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn,
+                   git_meta={"git_project_name": "test"})
+
+    result = index_code_file(ctx, py_file)
+
+    assert result == 1
+    call_kwargs = mock_db.upsert_chunks_with_embeddings.call_args[1]
+    assert call_kwargs["metadatas"][0]["section_type"] == "imports"
+
+
+def test_index_code_file_mixed_chunk_not_stamped_imports(tmp_path, make_ctx):
+    """A chunk that mixes an import statement with real code (a function
+    definition the import precedes, so the function does not fully
+    enclose the chunk) must NOT be classified as import-only."""
+    from nexus.code_indexer import index_code_file
+
+    py_file = tmp_path / "mixed.py"
+    py_file.write_text("import os\n\n\ndef foo():\n    return os.getcwd()\n")
+
+    mock_db = MagicMock()
+
+    def fake_embed_fn(texts):
+        return [[0.1] * 128 for _ in texts]
+
+    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn,
+                   git_meta={"git_project_name": "test"})
+
+    result = index_code_file(ctx, py_file)
+
+    assert result == 1
+    call_kwargs = mock_db.upsert_chunks_with_embeddings.call_args[1]
+    assert call_kwargs["metadatas"][0]["section_type"] != "imports"
 
 
 # ── index_prose_file ─────────────────────────────────────────────────────────
@@ -355,6 +548,190 @@ def test_index_prose_file_non_markdown_uses_line_chunk(tmp_path, make_ctx):
     assert embed_texts == upsert_kwargs["documents"]
     meta = upsert_kwargs["metadatas"][0]
     assert "line_start" in meta and meta["line_start"] >= 1
+
+
+# ── nexus-hg2dw: zero-content outcomes distinguished from a fresh skip ──────
+
+
+def test_index_prose_file_raises_for_undecodable_content(tmp_path, make_ctx):
+    """A file that cannot even be read as UTF-8 text must raise
+    UnextractableContentError, not silently return 0 — pre-fix this was
+    indistinguishable from a legitimate staleness skip and left a
+    registered document with no fence action at all."""
+    from nexus.errors import UnextractableContentError
+    from nexus.prose_indexer import index_prose_file
+
+    bin_file = tmp_path / "binary.txt"
+    bin_file.write_bytes(b"\xff\xfe not valid utf-8 \x00\x01")
+    ctx = make_ctx(col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
+                   corpus="docs__test", embedding_model="voyage-context-3")
+
+    with pytest.raises(UnextractableContentError, match="decode"):
+        index_prose_file(ctx, bin_file)
+
+
+def test_index_prose_file_undecodable_content_fence_fails_when_doc_id_known(
+    tmp_path, make_ctx,
+):
+    """When a doc_id_resolver supplies a catalog doc_id, the decode
+    failure must fence-fail that document before raising (nexus-hg2dw
+    point 2's underlying goal: nothing left dangling at 'indexing')."""
+    from unittest.mock import patch
+
+    from nexus.errors import UnextractableContentError
+    from nexus.prose_indexer import index_prose_file
+
+    bin_file = tmp_path / "binary.txt"
+    bin_file.write_bytes(b"\xff\xfe not valid utf-8 \x00\x01")
+    ctx = make_ctx(
+        col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
+        corpus="docs__test", embedding_model="voyage-context-3",
+        doc_id_resolver=lambda p: "1.1.7",
+    )
+
+    with patch("nexus.doc_indexer._fence_fail") as fence_fail, \
+         pytest.raises(UnextractableContentError):
+        index_prose_file(ctx, bin_file)
+
+    fence_fail.assert_called_once()
+    assert fence_fail.call_args[0][0] == "1.1.7"
+
+
+def test_index_prose_file_raises_for_empty_markdown(tmp_path, make_ctx):
+    """A markdown file that decodes fine but chunks to nothing (e.g.
+    frontmatter-only) must raise, not silently return 0 — same reasoning
+    as the decode-failure case: this is NOT a staleness skip."""
+    from nexus.errors import UnextractableContentError
+    from nexus.prose_indexer import index_prose_file
+
+    md_file = tmp_path / "empty.md"
+    md_file.write_text("---\ntitle: nothing here\n---\n")
+    ctx = make_ctx(col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
+                   corpus="docs__test", embedding_model="voyage-context-3")
+
+    with pytest.raises(UnextractableContentError):
+        index_prose_file(ctx, md_file)
+
+
+def test_index_prose_file_raises_for_empty_non_markdown(tmp_path, make_ctx):
+    """A non-markdown prose file with only whitespace must raise, not
+    silently return 0."""
+    from nexus.errors import UnextractableContentError
+    from nexus.prose_indexer import index_prose_file
+
+    txt_file = tmp_path / "blank.txt"
+    txt_file.write_text("   \n\n   \n")
+    ctx = make_ctx(col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
+                   corpus="docs__test", embedding_model="voyage-context-3")
+
+    with pytest.raises(UnextractableContentError):
+        index_prose_file(ctx, txt_file)
+
+
+def test_index_prose_file_fresh_skip_stays_a_plain_zero_no_exception(
+    tmp_path, make_ctx,
+):
+    """Control / non-regression: a genuinely fresh (unchanged) file must
+    still return a plain 0 — no exception, no fence call — exactly as
+    before nexus-hg2dw. This is the OTHER half of the distinction the
+    bead asks for: fresh-skipped vs decode-failed must both be reachable
+    and must not collapse onto the same signal."""
+    import hashlib
+    from unittest.mock import patch
+
+    from nexus.prose_indexer import index_prose_file
+
+    md_file = tmp_path / "README.md"
+    md_file.write_text("# Hello\n\nSome content here.\n")
+    h = hashlib.sha256(md_file.read_text().encode()).hexdigest()
+    col = _real_col("docs__t_" + uuid.uuid4().hex[:12])
+    col.add(
+        ids=["id1"],
+        documents=["# Hello\n\nSome content here."],
+        metadatas=[{
+            "content_hash": h, "embedding_model": "voyage-context-3",
+            "source_path": str(md_file),
+        }],
+    )
+    ctx = make_ctx(col=col, corpus="docs__test",
+                   embedding_model="voyage-context-3")
+
+    with patch("nexus.doc_indexer._fence_fail") as fence_fail, \
+         patch("nexus.doc_indexer._fence_begin") as fence_begin:
+        result = index_prose_file(ctx, md_file)
+
+    assert result == 0
+    fence_fail.assert_not_called()
+    fence_begin.assert_not_called()
+
+
+# ── nexus-hg2dw critique round 2: per-file begin, not whole-run-upfront ─────
+
+
+def test_index_prose_file_begins_fence_before_chunking(tmp_path, make_ctx):
+    """T2 critique-nexus-hg2dw-36602c67f [24598] finding 1 CRITICAL: the
+    fence must begin per FILE, immediately after staleness determines
+    real work is needed and BEFORE chunking/embedding — not batched
+    across a whole run up front (which would enlarge an uncatchable
+    kill's blast radius). Assert the begin call fires with this file's
+    real doc_id/content_hash/collection, and — the ordering half — that
+    it happens before the chunker ever runs."""
+    from unittest.mock import patch
+
+    from nexus.prose_indexer import index_prose_file
+
+    md_file = tmp_path / "new.md"
+    md_file.write_text("# New\n\nNeeds real work.\n")
+    call_order: list[str] = []
+
+    def _fake_begin(doc_id, content_hash, collection):
+        call_order.append("begin")
+        assert doc_id == "1.1.9"
+        assert collection == "docs__test"
+        assert len(content_hash) == 64  # a real sha256 hex digest
+
+    ctx = make_ctx(
+        col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
+        corpus="docs__test", embedding_model="voyage-context-3",
+        embed_fn=lambda texts: [[0.1] * 8 for _ in texts],
+        doc_id_resolver=lambda p: "1.1.9",
+    )
+
+    with patch("nexus.doc_indexer._fence_begin", side_effect=_fake_begin) as fence_begin, \
+         patch("nexus.doc_indexer._fence_fail"), \
+         patch("nexus.md_chunker.SemanticMarkdownChunker.chunk") as chunk_mock:
+        chunk_mock.side_effect = lambda *a, **k: call_order.append("chunk") or []
+        with pytest.raises(Exception, match="no chunks"):
+            index_prose_file(ctx, md_file)
+
+    fence_begin.assert_called_once()
+    assert call_order == ["begin", "chunk"], (
+        f"expected fence-begin BEFORE chunking, got order {call_order}"
+    )
+
+
+def test_index_prose_file_fence_begin_failure_does_not_abort(tmp_path, make_ctx):
+    """code-review-nexus-hg2dw-36602c67f [24601] finding 1: a defect in
+    the per-file begin call must be fail-open (logged, never raised) —
+    consistent with every other fence helper's contract."""
+    from unittest.mock import patch
+
+    from nexus.prose_indexer import index_prose_file
+
+    md_file = tmp_path / "resilient.md"
+    md_file.write_text("# Resilient\n\nStill indexes despite a fence bug.\n")
+
+    ctx = make_ctx(
+        col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
+        corpus="docs__test", embedding_model="voyage-context-3",
+        embed_fn=lambda texts: [[0.1] * 8 for _ in texts],
+        doc_id_resolver=lambda p: "1.1.10",
+    )
+
+    with patch("nexus.doc_indexer._fence_begin", side_effect=RuntimeError("boom")):
+        result = index_prose_file(ctx, md_file)
+
+    assert result >= 1, "a fence-begin defect must never abort real indexing work"
 
 
 # ── RDR-102 Phase B: source_path absent from indexer-stamped chunk meta ──

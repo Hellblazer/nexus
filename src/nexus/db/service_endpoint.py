@@ -27,6 +27,8 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Callable
+from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -432,3 +434,290 @@ def resolve_service_endpoint(
         wait_budget_s=wait_budget_s, poll_interval_s=poll_interval_s, clock=clock, sleep=sleep
     )
     return f"http://{host}:{port}", token
+
+
+# ── Dev-checkout production-write guard (nexus-a2qhz) ────────────────────────
+#
+# Three incidents (2026-08-19, 2026-08-21 x2 — see the bead) reached Sam's
+# live production T2/T3/catalog substrate from a dev-checkout process running
+# OUTSIDE pytest's `_pin_t2_substrate` autouse fixture: a `uv run python -c`
+# one-liner, a deliberate arc-end MVV, and a scratchpad verification script
+# that imported `tests._catalog_fixture_ops` from outside `tests/`. The
+# critic's finding, confirmed on the bead: no guard anywhere in the HTTP
+# storage-client path stops this. The design (locked on the bead by three
+# recorded incidents, option (a)): gate WRITES with an explicit opt-in, fail
+# loud naming the opt-in, never a silent cwd-based redirect.
+#
+# Detection signal: NOT the process cwd (the third incident's script ran
+# from a scratchpad directory entirely outside the checkout — its danger
+# came from an IMPORT resolving nexus's package to the checkout's editable
+# install, not from where the script itself lived). Instead: does THIS
+# module's own file resolve inside a conexus git checkout (a plain clone or
+# a worktree — `.git` is a directory for the former, a file for the latter,
+# both satisfied by `.exists()`) with a `pyproject.toml` naming the
+# `conexus` project? An installed generation (`<tools>/gen-*/.../
+# site-packages/nexus/...`) or a plain `uv tool install` copy has no such
+# ancestor at any depth — nothing under `site-packages` ships a
+# `pyproject.toml`. This is exactly the "nexus package resolves from an
+# editable dev checkout" signal the bead asked for, and it transfers to any
+# script that imports nexus (or a tests helper that imports nexus), from
+# anywhere, regardless of that script's own location.
+#
+# KNOWN LIMIT (documented, not fixed here): a copied tree with neither a
+# `.git` nor a `pyproject.toml` ancestor at any depth — e.g. a Docker build
+# stage that `COPY`s `src/` without git metadata — is NOT detected as a dev
+# checkout and receives zero guard coverage regardless of env state. See
+# docs/architecture.md's "Dev-checkout production-write guard" section.
+#
+# Production identity, REVISED (nexus-a2qhz, second review round): the
+# first cut of this guard exempted a write whenever ANY of `NX_SERVICE_URL`
+# / `NX_SERVICE_HOST` / `NX_SERVICE_PORT` / `NX_SERVICE_TOKEN` was set,
+# reasoning that an explicit env var meant "the caller deliberately pinned
+# this endpoint." That heuristic is DEFEATED by conexus's own documented
+# cloud onboarding: docs/getting-started.md and docs/managed-onboarding.md
+# both instruct `export NX_SERVICE_URL=https://api.conexus-nexus.com` —
+# exactly the permanently-exported shell shape every one of the three
+# recorded incidents ran under. An exported env var cannot distinguish "a
+# fixture pinned an ephemeral endpoint for THIS process" from "this shell
+# always points at the operator's live production service." So the
+# exemption is GONE: env-var presence is no longer consulted at all. A
+# dev-checkout process is refused on every write regardless of how its
+# endpoint resolved — the ONLY bypass is the named opt-in below, which
+# requires a REASON (not a bare truthy flag), so pytest's own substrate
+# fixtures declare their exemption explicitly (see
+# tests/conftest.py's `_exempt_pytest_from_production_write_guard`) rather
+# than being silently inferred.
+
+#: The opt-in that lets a dev-checkout process perform a deliberate WRITE
+#: against the endpoint it resolved. Named in every refusal. Must carry a
+#: REASON — a bare boolean-shaped value (see
+#: :data:`_OPT_IN_BOOLEAN_LOOKALIKES`) is refused exactly like an unset
+#: var, so the intent stays greppable (nexus-a2qhz review: "1 alone
+#: invites reflexive bypass by an agent — two of the three recorded
+#: incidents were subagents").
+PROD_WRITE_OPT_IN_ENV = "NX_ALLOW_PROD_WRITE"
+
+#: Values that look like a leftover boolean flag rather than a reason —
+#: refused exactly like an unset opt-in. Case-insensitive.
+_OPT_IN_BOOLEAN_LOOKALIKES: frozenset[str] = frozenset(
+    {"0", "1", "true", "false", "yes", "no"}
+)
+
+#: Ancestors of this module's own file to inspect while looking for the
+#: conexus checkout root. Bounded so a pathological install layout cannot
+#: make the walk expensive — a plain checkout
+#: (``.../src/nexus/db/service_endpoint.py``) and a git worktree
+#: (``.../worktrees/<name>/src/nexus/db/service_endpoint.py``) both find
+#: their root within the first few ancestors; an installed generation
+#: never finds one at any depth (no ``pyproject.toml`` ships under
+#: ``site-packages``).
+_DEV_CHECKOUT_SEARCH_DEPTH = 12
+
+#: Sentinel distinguishing "never computed" from a genuine ``None`` result
+#: in the process-wide cache below (the checkout root cannot change for
+#: the life of the interpreter, so this is computed at most once per
+#: process on the real, uncached call shape).
+_DEV_CHECKOUT_ROOT_UNSET: Any = object()
+_dev_checkout_root_cache: Any = _DEV_CHECKOUT_ROOT_UNSET
+
+
+class ProductionWriteGuardError(RuntimeError):
+    """Raised by :func:`guard_production_write` when a dev-checkout process
+    attempts an HTTP WRITE without the explicit, reason-bearing
+    :data:`PROD_WRITE_OPT_IN_ENV` opt-in.
+
+    Design of record: bead nexus-a2qhz. Reads are unaffected; only writes
+    route through :func:`guard_production_write` — every
+    ``RefreshableHttpStoreMixin`` adopter (the T2 domain stores and the
+    catalog client, which share that one transport), T3's module-level
+    ``_post``, and the two bespoke (non-mixin) clients, ``HttpTokenStore``
+    and ``HttpScratchStore`` (T1).
+    """
+
+
+def _compute_dev_checkout_root(start: Path) -> Path | None:
+    """The conexus checkout root *start* resolves under, or ``None``."""
+    try:
+        here = start.resolve()
+    except OSError:
+        return None
+    for ancestor in list(here.parents)[:_DEV_CHECKOUT_SEARCH_DEPTH]:
+        pyproject = ancestor / "pyproject.toml"
+        git_marker = ancestor / ".git"
+        if not (pyproject.is_file() and git_marker.exists()):
+            continue
+        try:
+            import tomllib  # noqa: PLC0415 — deferred, stdlib; avoids module-load cost on the common (non-dev) path
+
+            data = tomllib.loads(pyproject.read_text())
+        except Exception:  # noqa: BLE001 — a malformed/foreign pyproject.toml at some unrelated ancestor is not a match, never a crash
+            continue
+        if data.get("project", {}).get("name") == "conexus":
+            return ancestor
+    return None
+
+
+def _dev_checkout_root(start: Path | None = None) -> Path | None:
+    """The conexus checkout root this process's ``nexus`` package resolves
+    from, or ``None`` when it resolves from an installed (non-editable)
+    copy.
+
+    *start* defaults to THIS module's own file — ``nexus/db/
+    service_endpoint.py`` — deliberately never ``sys.argv[0]`` or the
+    caller's cwd (see the module-level design comment above). Passing
+    *start* explicitly bypasses the process-wide cache entirely and is for
+    tests only; real callers always take the default and pay the
+    filesystem walk at most once per process.
+    """
+    global _dev_checkout_root_cache
+    if start is not None:
+        return _compute_dev_checkout_root(start)
+    if _dev_checkout_root_cache is _DEV_CHECKOUT_ROOT_UNSET:
+        _dev_checkout_root_cache = _compute_dev_checkout_root(Path(__file__))
+    return _dev_checkout_root_cache
+
+
+def is_dev_checkout_process() -> bool:
+    """True when this process's ``nexus`` package resolves from a conexus
+    dev checkout (editable install or git worktree) rather than an
+    installed generation / ``uv tool install`` copy."""
+    return _dev_checkout_root() is not None
+
+
+def reset_dev_checkout_cache_for_tests() -> None:
+    """Test-only: force the next :func:`_dev_checkout_root` (default-arg)
+    call to recompute rather than reuse the process-wide cache."""
+    global _dev_checkout_root_cache
+    _dev_checkout_root_cache = _DEV_CHECKOUT_ROOT_UNSET
+
+
+#: Test-only in-process override for the accepted opt-in reason — NEVER an
+#: env var, precisely so it cannot leak into a subprocess's inherited
+#: ``os.environ`` the way a real ``NX_ALLOW_PROD_WRITE`` would (nexus-a2qhz
+#: round-2 review: the blanket pytest exemption previously used
+#: ``monkeypatch.setenv``, which DOES mutate the real process
+#: ``os.environ`` for the test's duration — any subprocess a test spawns
+#: via ``env=os.environ.copy()`` silently inherited the reason regardless
+#: of whether that subprocess's OWN substrate was correctly pinned).
+#: ``None`` (the default) means "no override" — the real env var still
+#: resolves normally. Set only via :func:`set_test_only_opt_in_reason_for_tests`.
+_test_only_opt_in_reason: str | None = None
+
+
+def set_test_only_opt_in_reason_for_tests(reason: str | None) -> None:
+    """Test-only in-process override for :func:`guard_production_write`'s
+    opt-in check — see :data:`_test_only_opt_in_reason`'s docstring.
+
+    ``tests/conftest.py``'s blanket pytest exemption calls this via
+    ``monkeypatch.setattr(service_endpoint, "_test_only_opt_in_reason",
+    "<reason>")`` (still undone per test, same as any other monkeypatch)
+    instead of setting the real env var — the exemption then never
+    appears in ``os.environ`` and cannot leak into a subprocess a test
+    spawns. A test that spawns a subprocess needing the REAL guard
+    behavior (e.g. a genuine dev-checkout write against the test
+    substrate) must set the real ``NX_ALLOW_PROD_WRITE`` env var
+    explicitly for that subprocess's own environment — this override
+    covers only THIS process's in-process store constructions.
+    """
+    global _test_only_opt_in_reason
+    _test_only_opt_in_reason = reason
+
+
+def _opt_in_reason() -> str | None:
+    """The caller's stated reason for bypassing the guard, or ``None`` when
+    no valid opt-in is present.
+
+    Checks :data:`_test_only_opt_in_reason` FIRST (test-only, never an env
+    var) — when set, it wins outright, matching the "later call wins"
+    contract every other autouse-fixture override in this codebase
+    follows. Otherwise: a valid opt-in is a non-empty
+    :data:`PROD_WRITE_OPT_IN_ENV` value that is not a boolean lookalike
+    (:data:`_OPT_IN_BOOLEAN_LOOKALIKES`, checked case-insensitively) — a
+    bare ``"1"`` (the RETIRED spelling) or a leftover
+    ``"0"``/``"true"``/``"false"``/``"yes"``/``"no"`` all fail this check
+    exactly like an unset var. Anything else is treated as a reason and
+    returned verbatim (for logging/messages) — this function does not,
+    and cannot, judge whether the text is a GOOD reason, only that it is
+    not a rebadged boolean flag.
+    """
+    if _test_only_opt_in_reason is not None:
+        return _test_only_opt_in_reason
+    raw = (os.environ.get(PROD_WRITE_OPT_IN_ENV, "") or "").strip()
+    if not raw or raw.lower() in _OPT_IN_BOOLEAN_LOOKALIKES:
+        return None
+    return raw
+
+
+def guard_production_write(base_url: str) -> None:
+    """Refuse an HTTP WRITE to *base_url* from a dev-checkout process
+    unless :data:`PROD_WRITE_OPT_IN_ENV` carries an explicit reason.
+
+    Called from every HTTP storage client's write path: every
+    ``RefreshableHttpStoreMixin`` adopter's ``_send`` (T2 domain stores +
+    the catalog client) for non-GET verbs with ``mutates=True``, T3's
+    module-level ``_post`` for its write-shaped path suffixes, and the two
+    bespoke (non-mixin) clients' own write methods — ``HttpTokenStore``
+    and ``HttpScratchStore`` (T1).
+
+    Exactly two conditions exempt a write, checked in this order:
+
+    1. A REASON-bearing opt-in is present (:func:`_opt_in_reason`) — a
+       visible, greppable, reviewable statement that THIS write is
+       deliberate (e.g. an arc-end MVV that must exercise the real
+       substrate). Endpoint-resolution env vars (``NX_SERVICE_URL`` etc.)
+       are NEVER consulted here — a permanently-exported cloud
+       ``NX_SERVICE_URL`` (conexus's own documented onboarding) must not
+       silently exempt a write, since that is the exact shell shape every
+       recorded incident ran under.
+    2. This process is not a dev checkout (an installed generation, a
+       plain ``uv tool install``, or any process whose ``nexus`` package
+       did not resolve from an editable checkout) — Sam's real installed
+       ``nx`` must never trip this, regardless of env state.
+
+    Otherwise raises :class:`ProductionWriteGuardError` — a stop-and-verify
+    message, not a fix-it instruction: it names the target as the
+    operator's real store, states that the write must be deliberate and
+    reviewed, and requires a reason rather than inviting a reflexive
+    export.
+
+    Every ACCEPTED opt-in is logged at WARNING (nexus-a2qhz round-2
+    review: "auditable after the fact" was previously just a docstring
+    claim — nothing persisted past the process's own environment; INFO
+    would be filtered by default in most real deployments and by this
+    suite's own ``pytest_configure``, which defaults ``--log-level`` to
+    WARNING). Logged only when the guard actually ENGAGES (a dev-checkout
+    process) — an installed ``nx`` with a stray ``NX_ALLOW_PROD_WRITE``
+    lingering in its environment never reaches this branch at all, so
+    ordinary production traffic never pays for a log line the guard never
+    needed to consult.
+    """
+    checkout_root = _dev_checkout_root()
+    if checkout_root is None:
+        return
+    reason = _opt_in_reason()
+    if reason is not None:
+        # WARNING, not INFO: a dev-checkout process about to write past
+        # this guard is a genuinely unusual, audit-worthy event even when
+        # correctly exempted -- INFO is filtered by default in most
+        # real-world deployments and by this suite's own pytest_configure
+        # (WARNING is the default --log-level), which would make the
+        # "auditable after the fact" claim false again by construction.
+        _log.warning(
+            "guard_production_write.opt_in_accepted",
+            base_url=base_url,
+            checkout_root=str(checkout_root),
+            reason=reason,
+        )
+        return
+    raise ProductionWriteGuardError(
+        f"STOP: refusing a WRITE to {base_url!r}. This process's nexus "
+        f"package resolves from a dev checkout ({checkout_root}), so this "
+        "write is presumed to target the OPERATOR'S REAL, LIVE STORE — "
+        "the same substrate a real install reaches — regardless of how "
+        "the endpoint was resolved (an exported NX_SERVICE_URL included). "
+        "Do not bypass this reflexively. If, and only if, this write is "
+        "genuinely deliberate and has been reviewed, state WHY in the "
+        f"opt-in itself: {PROD_WRITE_OPT_IN_ENV}=\"<why this write is "
+        f"safe and intended>\" (a bare \"1\", or any other boolean-shaped "
+        "value, is refused exactly like an unset var — name the reason)."
+    )

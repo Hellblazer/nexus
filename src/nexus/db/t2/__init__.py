@@ -68,6 +68,8 @@ import structlog
 from nexus.db.t2.records import _sanitize_fts5
 
 if TYPE_CHECKING:
+    import httpx
+
     from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 
 _log = structlog.get_logger()
@@ -106,10 +108,26 @@ class T2Database:
         path: Path,
         *,
         run_migrations: bool | None = None,
+        client: httpx.Client | None = None,
     ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         # Store path for cross-domain operations (e.g. rename_collection_cascade).
         self._path: Path = path
+
+        # client= (nexus-m20mf P3, additive): a caller that constructs one
+        # shared httpx.Client (nexus.db.t2._refreshable_client.build_shared_t2_client)
+        # and passes it here gets all eight domain stores sharing ONE
+        # connection pool instead of eight independent ones -- the general
+        # fix for callers option B's t2_index_write singleton does not
+        # reach: taxonomy_cmd's ~20 per-command _T2Database(...) sites and
+        # the indexer's per-file facades. Nothing changes for the default
+        # client=None: every store below constructs its own client exactly
+        # as before this kwarg existed. This facade does NOT own an
+        # injected client -- close() below never touches it directly; each
+        # store's own close() already respects its _owns_client flag, so
+        # T2Database.close() needs no extra bookkeeping to stay correct
+        # either way.
+        self._client = client
 
         # ``run_migrations`` is RETAINED-AND-IGNORED for signature stability
         # (RDR-158 P4 Stage 4, nexus-i711w): the machinery it used to gate —
@@ -171,12 +189,12 @@ class T2Database:
         from nexus.db.t2.http_memory_store import HttpMemoryStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
         from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore as _HttpTaxonomyStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
 
-        self.memory: HttpMemoryStore = HttpMemoryStore()
+        self.memory: HttpMemoryStore = HttpMemoryStore(client=self._client)
 
         # RDR-152 nexus-gmiaf.11 seam, COLLAPSED (A3): HttpPlanLibrary is
         # the only plan library — the SQLite PlanLibrary is deleted.
         from nexus.db.t2.http_plan_library import HttpPlanLibrary  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-        self.plans: HttpPlanLibrary = HttpPlanLibrary()
+        self.plans: HttpPlanLibrary = HttpPlanLibrary(client=self._client)
         # RDR-152 nexus-gmiaf.14 seam, COLLAPSED in nexus-i711w Stage 2
         # sub-stage C (store) and Stage 3 (selector, nexus-7bomn):
         # HttpTaxonomyStore is the only taxonomy store, constructed eagerly
@@ -185,13 +203,13 @@ class T2Database:
         # the service endpoint is first resolved and broke an unrelated
         # catalog store-hook path in test_memory (see the sub-stage C
         # history in git for the full account).
-        self._taxonomy: Any = _HttpTaxonomyStore()
+        self._taxonomy: Any = _HttpTaxonomyStore(client=self._client)
 
         # RDR-152 nexus-gmiaf.12 seam, COLLAPSED in nexus-i711w Stage 2
         # sub-stage A: HttpTelemetryStore is the only telemetry store — the
         # SQLite Telemetry it used to select is deleted.
         from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-        self.telemetry: HttpTelemetryStore = HttpTelemetryStore()
+        self.telemetry: HttpTelemetryStore = HttpTelemetryStore(client=self._client)
         # RDR-086 Phase 1: global chash → (collection, doc_id) lookup
         # populated by the six indexing write sites via best-effort
         # dual-write after each T3 upsert.
@@ -199,7 +217,7 @@ class T2Database:
         # sub-stage A: HttpChashIndex is the only chash index — the SQLite
         # ChashIndex it used to select is deleted.
         from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-        self.chash_index: HttpChashIndex = HttpChashIndex()
+        self.chash_index: HttpChashIndex = HttpChashIndex(client=self._client)
         # RDR-089 Phase 1: per-document structured aspect table
         # populated by the document-grain hook chain at every CLI
         # ingest site (knowledge__* only in Phase 1).
@@ -207,7 +225,7 @@ class T2Database:
         # sub-stage A3): HttpDocumentAspectsStore is the only aspects store —
         # the SQLite DocumentAspects it used to select is deleted.
         from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-        self.document_aspects: HttpDocumentAspectsStore = HttpDocumentAspectsStore()
+        self.document_aspects: HttpDocumentAspectsStore = HttpDocumentAspectsStore(client=self._client)
         # RDR-089 follow-up (nexus-qeo8): durable queue feeding the
         # async aspect-extraction worker. The hook fires fast (just
         # an enqueue); the worker drains in a background thread.
@@ -218,7 +236,7 @@ class T2Database:
         # AspectExtractionQueue it used to select is deleted.
         from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
         self.aspect_queue: HttpAspectQueue = HttpAspectQueue(
-            rename_lock=self.RENAME_LOCK
+            rename_lock=self.RENAME_LOCK, client=self._client
         )
         # RDR-139 Layer E: per-document DEVONthink highlight/mention notes,
         # keyed by tumbler. Dedicated table (NOT document_aspects) so
@@ -228,7 +246,7 @@ class T2Database:
         # sub-stage A: HttpDocumentHighlightsStore is the only highlights
         # store — the SQLite DocumentHighlights it used to select is deleted.
         from nexus.db.t2.http_document_highlights_store import HttpDocumentHighlightsStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
-        self.document_highlights: HttpDocumentHighlightsStore = HttpDocumentHighlightsStore()
+        self.document_highlights: HttpDocumentHighlightsStore = HttpDocumentHighlightsStore(client=self._client)
 
     @property
     def taxonomy(self) -> "HttpTaxonomyStore":
@@ -276,6 +294,14 @@ class T2Database:
         Each store closes its own connection under its own lock. The
         close order is reverse of construction so the most recently
         opened connection is released first.
+
+        When this facade was constructed with an injected ``client=``
+        (nexus-m20mf P3), every store below is a no-op here for the
+        client itself -- each store's own ``_owns_client`` flag already
+        makes this correct without any extra bookkeeping in this method:
+        the injecting caller owns the shared client and is responsible for
+        closing it, once, after this facade (and any sibling using the
+        same client) is done with it.
         """
         # Reverse-construction order: document_highlights was built after
         # aspect_queue (RDR-139 Layer E), so it closes first.

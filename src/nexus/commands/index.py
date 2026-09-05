@@ -174,7 +174,8 @@ def _open_catalog_or_none() -> Any:
 
 
 @click.group()
-def index() -> None:
+@click.pass_context
+def index(ctx: click.Context) -> None:
     """Index repositories, PDFs, and Markdown into T3 collections."""
     # RDR-159 P1c (S2 quiesce): suspend ALL indexing while a guided upgrade
     # migration is in flight. Indexing into a half-migrated store would write
@@ -190,6 +191,422 @@ def index() -> None:
             f"{_banner} — nx index is suspended until the upgrade "
             "completes (or fails and is cleared)."
         )
+
+    # nexus-m20mf P3: one shared httpx.Client for this ENTIRE `nx index
+    # <subcmd>` process invocation (repo/pdf/md/rdr/failures), stashed in
+    # ctx.obj -- see taxonomy_cmd.taxonomy's identical mechanism for the
+    # full rationale (dict-key coexistence with main's ctx.obj["verbose"],
+    # ctx.call_on_close firing on both the success and exception paths).
+    # Built AFTER the migration-quiesce guard above so a suspended-index
+    # invocation never bothers constructing a client it will not use.
+    # nexus-m20mf P3 fold-in: T2_SHARED_CLIENT_CTX_KEY now lives in
+    # commands._helpers (the unified helper both taxonomy_cmd.py and
+    # index.py use — code-review Suggestion, no more near-duplicate copy).
+    from nexus.commands._helpers import T2_SHARED_CLIENT_CTX_KEY  # noqa: PLC0415 — deferred to avoid circular import at module load
+    from nexus.db.t2._refreshable_client import build_shared_t2_client  # noqa: PLC0415 — deferred to avoid circular import at module load
+
+    ctx.ensure_object(dict)
+    shared_client = build_shared_t2_client()
+    ctx.obj[T2_SHARED_CLIENT_CTX_KEY] = shared_client
+    ctx.call_on_close(shared_client.close)
+
+
+@index.command("failures")
+@click.option(
+    "--run-id",
+    default=None,
+    help="Only show (or, with --clear, only clear) failures from this run "
+    "(default: every run).",
+)
+@click.option(
+    "--days",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Only show failures within the last N days (0 = unbounded). "
+    "Ignored with --clear -- see --older-than-days.",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=100,
+    show_default=True,
+    help="Max rows to print. The printed count is always the exact total, "
+    "regardless of this cap. Ignored with --clear.",
+)
+@click.option(
+    "--clear",
+    "clear",
+    is_flag=True,
+    default=False,
+    help="Delete rows instead of listing them, scoped by --run-id and/or "
+    "--older-than-days (at least one is required). The remedy for "
+    "`nx doctor --check-index-failures`: an operator who has adjudicated "
+    "a failure (accepted it, or fixed and re-indexed the file) retires "
+    "its row(s) immediately rather than waiting out the 30-day staleness "
+    "window doctor's own check applies.",
+)
+@click.option(
+    "--older-than-days",
+    "older_than_days",
+    type=click.IntRange(min=1),
+    default=None,
+    help="With --clear: also delete rows older than N days (>= 1; omit "
+    "for no age bound -- combine with --run-id, or use alone to "
+    "age-sweep every run).",
+)
+@click.option(
+    "--dry-run",
+    "dry_run",
+    is_flag=True,
+    default=False,
+    help="With --clear: preview the count that would be deleted, using "
+    "the identical predicate, without deleting anything.",
+)
+@click.option(
+    "--acknowledge",
+    "acknowledge",
+    is_flag=True,
+    default=False,
+    help="Durably adjudicate a recurring failure instead of listing or "
+    "clearing rows -- the fix for nx doctor --check-index-failures gating "
+    "forever on a PERMANENTLY unextractable file that is re-indexed on a "
+    "cadence: unlike --clear, this survives the next index run minting a "
+    "fresh run_id for the same failure. Requires --file and/or "
+    "--error-class.",
+)
+@click.option(
+    "--unacknowledge",
+    "unacknowledge",
+    is_flag=True,
+    default=False,
+    help="Revoke a durable acknowledgment instead of creating one. "
+    "Requires --file and/or --error-class -- a class-wide acknowledgment "
+    "(created with --error-class alone) is revoked the same way, "
+    "--error-class alone with no --file.",
+)
+@click.option(
+    "--acks",
+    "acks",
+    is_flag=True,
+    default=False,
+    help="List durable acknowledgments instead of failures.",
+)
+@click.option(
+    "--file",
+    "file_path",
+    default=None,
+    help="With --acknowledge/--unacknowledge: the file (file-scoped -- "
+    "only that exact file+error-class pair is covered/revoked). Combine "
+    "with --error-class to skip the lookup, or omit it to auto-resolve "
+    "the file's most recently recorded error_class (--acknowledge) or "
+    "its existing acknowledgment's error_class (--unacknowledge).",
+)
+@click.option(
+    "--error-class",
+    "error_class",
+    default=None,
+    help="With --acknowledge/--unacknowledge: the error class. Alone (no "
+    "--file), targets the error-class-scoped acknowledgment covering ANY "
+    "file with this error_class -- the broader, corpus-wide exemption "
+    "for a known systemic issue (e.g. scanned PDFs with no OCR "
+    "configured).",
+)
+@click.option(
+    "--reason",
+    "reason",
+    default=None,
+    help="With --acknowledge: optional free-text note, shown in the list "
+    "view against the acknowledged row(s).",
+)
+def index_failures_cmd(
+    run_id: str | None, days: int, limit: int,
+    clear: bool, older_than_days: int | None, dry_run: bool,
+    acknowledge: bool, unacknowledge: bool, acks: bool,
+    file_path: str | None, error_class: str | None,
+    reason: str | None,
+) -> None:
+    """List, clear, acknowledge, unacknowledge, or list acknowledgments of
+    durable per-file index-failure records (nexus-nukn3).
+
+    A repo-index run that skips a file it could not extract writes a
+    durable row here (file path, error class, reason, run id) instead of
+    only a log line and an in-memory counter that die with the process —
+    ``nx index repo``'s systemic-skip floor (nexus-deyd5) reads this same
+    backlog. Pair with ``nx doctor --check-index-failures`` for a
+    pass/fail signal, or run this verb directly to see *which* files.
+
+    \b
+    Examples:
+      nx index failures                              # every recorded failure
+      nx index failures --run-id abc123               # one run only
+      nx index failures --days 7                      # last week
+      nx index failures --clear --run-id abc123        # retire one run
+      nx index failures --clear --older-than-days 90   # age-sweep
+      nx index failures --clear --older-than-days 90 --dry-run  # preview
+      nx index failures --acknowledge --file broken.pdf --reason "encrypted"
+      nx index failures --acknowledge --error-class UnextractableContentError
+      nx index failures --acks                         # list acknowledgments
+      nx index failures --unacknowledge --file broken.pdf
+      nx index failures --unacknowledge --error-class UnextractableContentError
+
+    \b
+    ``--clear`` is a ONE-TIME delete: the next index run that hits the same
+    file mints a fresh row (and a fresh run_id), so a permanently
+    unextractable file re-indexed on a cadence undoes a bare ``--clear``
+    every time. ``--acknowledge`` is the durable fix -- it writes a
+    permanent marker the read path (and the doctor gate) treats as
+    "known", so a recurring failure for an acknowledged file no longer
+    gates, while a genuinely NEW file or a NEW error class for that same
+    file still does. ``--unacknowledge`` revokes that marker; ``--acks``
+    lists every active one.
+    """
+    import httpx  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    modes = [clear, acknowledge, unacknowledge, acks]
+    if sum(modes) > 1:
+        raise click.UsageError(
+            "--clear, --acknowledge, --unacknowledge, and --acks are "
+            "mutually exclusive."
+        )
+    if dry_run and not clear:
+        # Round-5 fold-in (code-review [24635] item 1): --dry-run only
+        # means anything paired with --clear -- silently ignoring it on
+        # every other mode would let an operator believe a preview ran
+        # when nothing did.
+        raise click.UsageError("--dry-run only applies to --clear.")
+
+    try:
+        store = HttpTelemetryStore()
+    except RuntimeError as exc:
+        raise click.ClickException(
+            f"index_failures: service backend unreachable ({exc})."
+        ) from exc
+
+    if acks:
+        try:
+            result = store.list_index_failure_acknowledgments()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise click.ClickException(
+                    "index_failures/acks route not found on this engine -- "
+                    "the engine predates nexus-nukn3's --acks support. "
+                    "Upgrade the engine (nx upgrade / redeploy)."
+                ) from exc
+            raise click.ClickException(f"index_failures --acks failed: {exc}.") from exc
+        except (httpx.HTTPError, RuntimeError) as exc:
+            raise click.ClickException(
+                f"index_failures: service backend unreachable ({exc})."
+            ) from exc
+        ack_rows = result["rows"]
+        if not ack_rows:
+            click.echo("index_failures: no active acknowledgments.")
+            return
+        click.echo(f"index_failures: {result['total']} active acknowledgment(s):")
+        for row in ack_rows:
+            scope = row.get("file_path") or "(any file)"
+            click.echo(
+                f"  {row.get('created_at', '?')}  {scope}  "
+                f"[{row.get('error_class', '?')}] {row.get('reason', '')}"
+            )
+        return
+
+    if acknowledge or unacknowledge:
+        if not file_path and not error_class:
+            flag = "--acknowledge" if acknowledge else "--unacknowledge"
+            raise click.UsageError(f"{flag} requires --file and/or --error-class.")
+        resolved_class = error_class
+        if not resolved_class:
+            # Auto-resolve the error_class: --acknowledge looks it up from
+            # the most recent FAILURE for this file (server-side exact
+            # file_path filter, fold-in fix -- code-review finding [24624]:
+            # this used to page 1000 rows tenant-wide and filter
+            # client-side); --unacknowledge looks it up from the file's
+            # existing ACKNOWLEDGMENT instead (the failures table is not
+            # the right oracle for "what was this file acknowledged as").
+            if acknowledge:
+                try:
+                    candidates = store.list_index_failures(limit=1, file_path=file_path)
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code == 404:
+                        raise click.ClickException(
+                            "index_failures/list route not found on this "
+                            "engine -- the engine predates nexus-nukn3."
+                        ) from exc
+                    raise click.ClickException(f"index_failures: request failed ({exc}).") from exc
+                except (httpx.HTTPError, RuntimeError) as exc:
+                    raise click.ClickException(
+                        f"index_failures: service backend unreachable ({exc})."
+                    ) from exc
+                if not candidates["rows"]:
+                    raise click.ClickException(
+                        f"no recorded failure for {file_path!r} -- pass "
+                        "--error-class explicitly to acknowledge it anyway."
+                    )
+                resolved_class = str(candidates["rows"][0].get("error_class") or "")
+                if not resolved_class:
+                    raise click.ClickException(
+                        f"the recorded failure for {file_path!r} has no "
+                        "error_class -- pass --error-class explicitly."
+                    )
+            else:
+                # Round-5 fold-in (code-review [24635] item 2): a
+                # server-side exact file_path filter, mirroring the
+                # --acknowledge --file fix above, instead of paging every
+                # acknowledgment tenant-wide and filtering client-side.
+                try:
+                    acks_result = store.list_index_failure_acknowledgments(
+                        file_path=file_path,
+                    )
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code == 404:
+                        raise click.ClickException(
+                            "index_failures/acks route not found on this "
+                            "engine -- the engine predates nexus-nukn3's "
+                            "--acks support."
+                        ) from exc
+                    raise click.ClickException(f"index_failures --acks failed: {exc}.") from exc
+                except (httpx.HTTPError, RuntimeError) as exc:
+                    raise click.ClickException(
+                        f"index_failures: service backend unreachable ({exc})."
+                    ) from exc
+                matching = acks_result["rows"]
+                if not matching:
+                    raise click.ClickException(
+                        f"no acknowledgment found for {file_path!r} -- pass "
+                        "--error-class explicitly to target one anyway."
+                    )
+                if len(matching) > 1:
+                    classes = sorted({str(r.get("error_class") or "") for r in matching})
+                    raise click.UsageError(
+                        f"{file_path!r} has acknowledgments under multiple "
+                        f"error classes ({', '.join(classes)}) -- pass "
+                        "--error-class explicitly to disambiguate."
+                    )
+                resolved_class = str(matching[0].get("error_class") or "")
+
+        if acknowledge:
+            try:
+                store.acknowledge_index_failure(
+                    error_class=resolved_class, file_path=file_path or "",
+                    reason=reason or "",
+                )
+            except ValueError as exc:
+                raise click.UsageError(str(exc)) from exc
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    raise click.ClickException(
+                        "index_failures/acknowledge route not found on this "
+                        "engine -- the engine predates nexus-nukn3's "
+                        "--acknowledge support. Upgrade the engine "
+                        "(nx upgrade / redeploy)."
+                    ) from exc
+                raise click.ClickException(f"index_failures --acknowledge failed: {exc}.") from exc
+            except (httpx.HTTPError, RuntimeError) as exc:
+                raise click.ClickException(
+                    f"index_failures: service backend unreachable ({exc})."
+                ) from exc
+            scope = f"{file_path!r} + {resolved_class}" if file_path else f"any file with {resolved_class}"
+            click.echo(f"Acknowledged: {scope}.")
+        else:
+            try:
+                deleted = store.unacknowledge_index_failure(
+                    error_class=resolved_class, file_path=file_path or "",
+                )
+            except ValueError as exc:
+                raise click.UsageError(str(exc)) from exc
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    raise click.ClickException(
+                        "index_failures/unacknowledge route not found on "
+                        "this engine -- the engine predates nexus-nukn3's "
+                        "--unacknowledge support. Upgrade the engine "
+                        "(nx upgrade / redeploy)."
+                    ) from exc
+                raise click.ClickException(f"index_failures --unacknowledge failed: {exc}.") from exc
+            except (httpx.HTTPError, RuntimeError) as exc:
+                raise click.ClickException(
+                    f"index_failures: service backend unreachable ({exc})."
+                ) from exc
+            if not deleted:
+                scope = f"{file_path!r} + {resolved_class}" if file_path else f"any file with {resolved_class}"
+                click.echo(f"No acknowledgment found for: {scope}.")
+            else:
+                scope = f"{file_path!r} + {resolved_class}" if file_path else f"any file with {resolved_class}"
+                click.echo(f"Revoked acknowledgment: {scope}.")
+        return
+
+    if clear:
+        # CLI-side guard, ahead of the client/engine's own (redundant on
+        # purpose, defense in depth): fail fast with a UsageError before
+        # even attempting the wire call, and give the same message
+        # regardless of which layer would have refused first.
+        older_than_days_value = older_than_days or 0
+        if not run_id and older_than_days_value <= 0:
+            raise click.UsageError(
+                "--clear requires --run-id and/or --older-than-days "
+                "(refusing to clear the entire backlog unscoped)."
+            )
+        try:
+            deleted = store.trim_index_failures(
+                run_id=run_id or "", days=older_than_days_value, dry_run=dry_run,
+            )
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise click.ClickException(
+                    "index_failures/trim route not found on this engine -- "
+                    "the engine predates nexus-nukn3's --clear support. "
+                    "Upgrade the engine (nx upgrade / redeploy)."
+                ) from exc
+            raise click.ClickException(f"index_failures --clear failed: {exc}.") from exc
+        except (httpx.HTTPError, RuntimeError) as exc:
+            raise click.ClickException(
+                f"index_failures: service backend unreachable ({exc})."
+            ) from exc
+        verb = "Would clear" if dry_run else "Cleared"
+        click.echo(f"{verb} {deleted} index-failure row(s).")
+        return
+
+    try:
+        result = store.list_index_failures(run_id=run_id or "", days=days, limit=limit)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise click.ClickException(
+                "index_failures/list route not found on this engine -- the "
+                "engine predates nexus-nukn3. Upgrade the engine (nx upgrade "
+                "/ redeploy) to use this verb."
+            ) from exc
+        raise click.ClickException(f"index_failures: request failed ({exc}).") from exc
+    except (httpx.HTTPError, RuntimeError) as exc:
+        raise click.ClickException(
+            f"index_failures: service backend unreachable ({exc})."
+        ) from exc
+
+    rows = result["rows"]
+    total = result["total"]
+
+    scope = f" for run {run_id}" if run_id else ""
+    if not rows:
+        click.echo(f"index_failures: no recorded failures{scope}.")
+        return
+
+    click.echo(f"index_failures: {total} row(s){scope} (showing {len(rows)}):")
+    for row in rows:
+        # nexus-nukn3 fold-in (critic Critical finding): "ack shown in the
+        # list" -- a row covered by a durable acknowledgment is marked so
+        # an operator can tell a gate-exempt recurrence from a fresh one.
+        ack_marker = " [ACKNOWLEDGED]" if row.get("acknowledged") else ""
+        click.echo(
+            f"  {row.get('occurred_at', '?')}  {row.get('file_path', '?')}  "
+            f"[{row.get('error_class', '?')}] {row.get('error', '')}  "
+            f"(run {row.get('run_id', '?')}){ack_marker}"
+        )
+    if total > len(rows):
+        click.echo(f"\n({total - len(rows)} more not shown — raise --limit to see them.)")
 
 
 def _discover_taxonomy(collection_name, taxonomy, t3, *, force=False, quiet=False):
@@ -352,6 +769,13 @@ class _PhaseHeartbeat:
     ETA format is meaningless once the per-file loop ends, whereas this
     heartbeat covers every phase, including the ones the ticker never
     saw at all.
+
+    nexus-s71lr: *prefix* (default ``"post"``, preserving every existing
+    caller's exact tick text) lets a second, independently-labelled
+    instance cover a DIFFERENT silent stretch — the per-file embedding
+    loop itself, which used to have no heartbeat at all (see
+    :meth:`touch`) — without the two instances' tick lines being
+    indistinguishable in the transcript.
     """
 
     def __init__(
@@ -360,10 +784,12 @@ class _PhaseHeartbeat:
         is_tty: bool,
         echo: Callable[[str, bool], None],
         interval: float | None = None,
+        prefix: str = "post",
     ) -> None:
         self._interval = interval if interval is not None else (10.0 if is_tty else 30.0)
         self._is_tty = is_tty
         self._echo = echo
+        self._prefix = prefix
         self._done = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -383,6 +809,28 @@ class _PhaseHeartbeat:
             target=self._loop, name="nx-phase-heartbeat", daemon=True,
         )
         self._thread.start()
+
+    def touch(self, label: str | None = None) -> None:
+        """Reset the elapsed-time clock (and optionally the label) of an
+        ALREADY-armed heartbeat, without stopping/restarting its background
+        thread.
+
+        nexus-s71lr: the per-file loop calls this once per completed file so
+        the heartbeat's "Xs elapsed" always measures silence since the LAST
+        completed unit of work — i.e. how long the CURRENT (still-running)
+        file has been embedding — rather than cumulative time since the
+        whole loop started. Unlike :meth:`arm`, this never joins or spawns a
+        thread, so it is cheap enough to call once per file even across a
+        run of thousands of files. A call before the heartbeat has ever
+        been armed is a no-op (there is no live thread reading the clock
+        yet, so resetting it would have nothing to observe it).
+        """
+        if self._thread is None:
+            return
+        with self._lock:
+            if label is not None:
+                self._label = label
+            self._start_mono = time.monotonic()
 
     def disarm(self) -> None:
         self._done.set()
@@ -406,7 +854,7 @@ class _PhaseHeartbeat:
         if not label:
             return
         elapsed = time.monotonic() - start
-        msg = f"  [post] {label} still running ({elapsed:.0f}s elapsed)"
+        msg = f"  [{self._prefix}] {label} still running ({elapsed:.0f}s elapsed)"
         self._ticked = True
         if self._is_tty:
             self._echo(f"\r{msg}", False)
@@ -426,7 +874,25 @@ class _PhaseHeartbeat:
     "--force",
     is_flag=True,
     default=False,
-    help="Force re-indexing all files, bypassing staleness check (re-chunks and re-embeds in-place).",
+    help="Force re-indexing all files, bypassing staleness check (re-chunks "
+         "and re-sends every chunk in place). Does NOT force a Voyage "
+         "re-embed on its own (nexus-4jj40 round 5): the server's own "
+         "existence-partition still skips the embed call for a chunk whose "
+         "text is byte-identical to what is already stored, refreshing "
+         "only its metadata. Add --re-embed for the old force-re-embeds-"
+         "everything behaviour.",
+)
+@click.option(
+    "--re-embed",
+    "re_embed",
+    is_flag=True,
+    default=False,
+    help="With --force: also force a Voyage re-embed of every chunk, even "
+         "ones whose text is unchanged (the pre-nexus-4jj40 --force "
+         "behaviour). Has no effect without --force -- there is nothing to "
+         "re-embed for a file the staleness check already skips. Reserve "
+         "for a genuine embedding-model change; a plain reclassification-"
+         "only pass (e.g. a chunker metadata change) does not need it.",
 )
 @click.option("--monitor", is_flag=True, default=False,
               help="Print per-file progress lines. Auto-enabled when stdout is not a TTY.")
@@ -471,7 +937,7 @@ class _PhaseHeartbeat:
     ),
 )
 def index_repo_cmd(
-    path: Path, frecency_only: bool, force: bool, monitor: bool,
+    path: Path, frecency_only: bool, force: bool, re_embed: bool, monitor: bool,
     force_stale: bool, since_head: bool, on_locked: str, no_taxonomy: bool,
     debug_timing: bool, corpus_choice: str,
 ) -> None:
@@ -483,6 +949,7 @@ def index_repo_cmd(
     into rdr__.
     """
     from nexus.indexer import index_repository  # noqa: PLC0415 — deliberate function-local import (heavy indexer dep deferred; startup-cost)
+    from nexus.retry import VectorUpsertTimeoutError  # noqa: PLC0415 -- deliberate function-local import (per-run retry accumulator reset convention)
 
     if force and frecency_only:
         raise click.UsageError("--force and --frecency-only are mutually exclusive.")
@@ -490,6 +957,12 @@ def index_repo_cmd(
         raise click.UsageError("--force-stale and --force are mutually exclusive.")
     if force_stale and frecency_only:
         raise click.UsageError("--force-stale and --frecency-only are mutually exclusive.")
+    if re_embed and not force:
+        raise click.UsageError(
+            "--re-embed requires --force -- a file the staleness check "
+            "skips never reaches the server, so there is nothing to "
+            "re-embed."
+        )
 
     reg = _registry()
     path = path.resolve()
@@ -616,7 +1089,20 @@ def index_repo_cmd(
         total = 0
         total_chunks = 0
         skipped_files = 0
-        eta_ticker = _ETATicker(emit=lambda msg: click.echo(f"  {msg}", err=True))
+        # nexus-s71lr: 5s (was 60s) — the bead's own reproduction ("a
+        # 33-chunk file is 15 seconds of silence") falls entirely inside
+        # the old 60s window, so this ticker never got a chance to fire
+        # during exactly the silence the bead reports. This is the ONLY
+        # thing live during the per-file loop (see on_file's n==1 branch
+        # below, which disarms phase_heartbeat once real per-file progress
+        # exists) — a second, independent heartbeat here was tried and
+        # reverted: it collided with the T2-22168 double-fire invariant
+        # ``test_eta_ticker_and_phase_heartbeat_never_double_fire`` protects
+        # (no "still running" line may appear once genuine per-file eta
+        # ticks exist). Tightening this interval reuses that already-
+        # reviewed single-ticker design instead of reintroducing a second
+        # one.
+        eta_ticker = _ETATicker(interval=5.0, emit=lambda msg: click.echo(f"  {msg}", err=True))
         phase_heartbeat = _PhaseHeartbeat(
             is_tty=sys.stdout.isatty(),
             echo=lambda msg, nl: click.echo(msg, nl=nl, err=True),
@@ -841,14 +1327,35 @@ def index_repo_cmd(
                 err=True,
             )
 
+        # nexus-m20mf P3 fold-in (critic finding 2 -- share the SAME
+        # command's client with index_repository's per-file hook-failure
+        # chain, not just the taxonomy-postprocessing step below): fetched
+        # ONCE, at the CLI layer (this command's own body), and passed on
+        # explicitly to every T2-touching call this command makes.
+        from nexus.commands._helpers import t2_shared_client_from_context  # noqa: PLC0415 — deferred to avoid circular import at module load
+        _t2_client = t2_shared_client_from_context()
+
         stats: dict = {}
         try:
             stats = index_repository(path, reg, frecency_only=frecency_only, force=force,
+                                     force_re_embed=re_embed,
                                      force_stale=force_stale, since_head=since_head,
                                      on_locked=on_locked, on_start=on_start, on_file=on_file,
                                      on_phase=on_phase,
                                      on_flush=on_flush_progress if monitor else None,
-                                     on_stage_timers=on_stage_timers) or {}
+                                     on_stage_timers=on_stage_timers,
+                                     client=_t2_client) or {}
+        except VectorUpsertTimeoutError as e:
+            # nexus-8hdg9 phase 1 critique (Significant-2): defense in depth.
+            # indexer.py's _contain_transient_upsert now defers a per-file
+            # VectorUpsertTimeoutError to staleness instead of raising it, so
+            # this should be rare -- it can only reach here from a phase this
+            # run does not wrap in that containment. When it does, the
+            # nexus-2fyb convention (index_pdf's ClickException translation)
+            # applies here too: a clean message, not a raw traceback. The
+            # exception's own str(e) already names GET /v1/status; a re-run
+            # of `nx index repo` picks up any file this run did not reach.
+            raise click.ClickException(str(e)) from e
         finally:
             eta_ticker.stop()
             phase_heartbeat.disarm()
@@ -904,12 +1411,15 @@ def index_repo_cmd(
         # fails AFTER a prior success while file churn has stopped (nexus-du6d0) —
         # the latter needs a signal independent of index runs, not just this gate.
         if not frecency_only and not no_taxonomy and stats:
+            # _t2_client was already fetched above (same command
+            # invocation, same shared client backs BOTH index_repository's
+            # per-file hook-failure chain and this taxonomy step).
             info = reg.get(path) or {}
             collections = _collections_from_registry_info(info)
             files_changed = stats.get("files_changed", 0)
             # One topic-existence probe serves both the qgc4b self-heal gate
             # and the tevzq subset (review Medium-2: was two T2 opens).
-            no_topics = _collections_without_topics(collections)
+            no_topics = _collections_without_topics(collections, client=_t2_client)
             if files_changed > 0 or no_topics:
                 # nexus-tevzq: collection-grain refinement of the qgc4b gate.
                 # Only collections whose own kind wrote files this run (plus
@@ -918,10 +1428,11 @@ def index_repo_cmd(
                 # taxonomy. Projection/links/L1 still see the full list.
                 discover = _discover_subset(
                     collections, stats.get("files_changed_by_kind"),
-                    no_topics=no_topics,
+                    no_topics=no_topics, client=_t2_client,
                 )
                 run_collection_postprocessing(
                     collections, repo_path=path, discover_collections=discover,
+                    client=_t2_client,
                 )
             else:
                 click.echo("  Taxonomy: no files changed — skipping discovery")
@@ -993,6 +1504,21 @@ def index_repo_cmd(
                 f"extracted and were skipped (nexus-deyd5) — every other "
                 f"file indexed normally. See the WARNING/ERROR log line(s) "
                 f"above for the affected path(s) and reason(s).",
+                err=True,
+            )
+        # nexus-nukn3 fold-in (critic Significant finding): the durable
+        # write and its read-back are two separate advisory steps in
+        # indexer._run_index -- a write failure means no row exists in
+        # nexus.index_failures for this run's skips at all, which `nx index
+        # failures` / `nx doctor --check-index-failures` cannot see or
+        # report on. Surfaced loudly here since it is the one case where
+        # this run's own summary is the only place that knows.
+        if (stats or {}).get("index_failures_write_failed", False):
+            click.echo(
+                f"WARNING: {skipped_unextractable_files} failure(s) could "
+                f"not be durably recorded (nx index failures write failed) "
+                f"-- see the WARNING log line above. The exit-code decision "
+                f"above used the in-memory count instead.",
                 err=True,
             )
         if manifest_problems_detected:
@@ -1111,7 +1637,7 @@ def index_repo_cmd(
             )
 
 
-def _taxonomy_incomplete(collections: list[str]) -> bool:
+def _taxonomy_incomplete(collections: list[str], *, client=None) -> bool:
     """Return True if ANY collection has no discovered topics yet.
 
     nexus-qgc4b self-heal guard: gates whether a no-change ``nx index repo``
@@ -1122,16 +1648,37 @@ def _taxonomy_incomplete(collections: list[str]) -> bool:
     Read-only; runs only on the cheap no-change path (short-circuited after
     ``files_changed > 0``). Fails safe: on any error, returns True (run
     discovery) rather than risk stranding a collection.
+
+    nexus-m20mf P3 fold-in: *client* is a plain, explicit, optional
+    parameter (default ``None`` — pre-existing per-instance-client
+    behavior, unchanged) threaded straight to
+    :func:`_collections_without_topics`. This function does NOT itself
+    reach into Click's ambient context (critic finding 3) — a caller in
+    an active ``nx index`` invocation passes its own shared client in.
     """
-    return bool(_collections_without_topics(collections))
+    return bool(_collections_without_topics(collections, client=client))
 
 
-def _collections_without_topics(collections: list[str]) -> set[str]:
+def _collections_without_topics(collections: list[str], *, client=None) -> set[str]:
     """Return the subset of *collections* with zero discovered topics.
 
     The per-collection form of the qgc4b self-heal probe (nexus-tevzq).
     Fails safe: on any probe error, returns ALL of *collections* — err
     toward running discovery, never toward stranding a collection.
+
+    nexus-m20mf P3 fold-in (critic finding 3): *client* is a plain,
+    explicit, optional ``httpx.Client`` (default ``None`` — pre-existing
+    per-instance-client behavior, unchanged for every caller that passes
+    nothing). This function does NOT read Click's ambient context itself
+    — the prior shape did, via ``_current_index_command_shared_client()``
+    called from inside this data-layer helper, which is exactly the
+    pattern that produced finding 2 (the identical helper silently
+    behaving differently depending on which Click group happened to be
+    active — ``run_collection_postprocessing``'s two callers, ``nx index
+    repo`` and ``nx collection reindex``, are a different Click group
+    each). The CLI-layer command function is now responsible for fetching
+    its own shared client (``nexus.commands._helpers.t2_shared_client_from_context``)
+    and passing it in explicitly.
     """
     if not collections:
         return set()
@@ -1139,7 +1686,7 @@ def _collections_without_topics(collections: list[str]) -> set[str]:
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
 
     try:
-        with T2Database(default_db_path()) as db:  # boundary-allow: read-only topic-existence probe; no WAL writer contention (RDR-128 P3)
+        with T2Database(default_db_path(), client=client) as db:  # boundary-allow: read-only topic-existence probe; no WAL writer contention (RDR-128 P3)
             return {
                 col for col in collections
                 if not db.taxonomy.get_topics_for_collection(col)
@@ -1154,6 +1701,7 @@ def _discover_subset(
     files_changed_by_kind: dict | None,
     *,
     no_topics: set[str] | None = None,
+    client=None,
 ) -> list[str]:
     """Collections that should run taxonomy DISCOVERY this run (nexus-tevzq).
 
@@ -1184,7 +1732,7 @@ def _discover_subset(
         # Caller pre-computed the probe (gate path) — don't re-open T2.
         keep = changed | (no_topics & set(unchanged))
     else:
-        keep = changed | _collections_without_topics(unchanged)
+        keep = changed | _collections_without_topics(unchanged, client=client)
     return [col for col in collections if col in keep]
 
 
@@ -1378,6 +1926,7 @@ def run_collection_postprocessing(
     repo_path: Path | None = None,
     quiet: bool = False,
     discover_collections: list[str] | None = None,
+    client=None,
 ) -> None:
     """Run the post-index taxonomy + projection + topic-link chain
     against *collections* and refresh the L1 context cache.
@@ -1395,6 +1944,18 @@ def run_collection_postprocessing(
 
     *quiet* suppresses the human-facing ``click.echo`` lines so
     callers can drive the chain without operator output.
+
+    *client* (nexus-m20mf P3 fold-in, critic findings 2/3): a plain,
+    explicit, optional ``httpx.Client``. This function is called from TWO
+    different Click groups — ``nx index repo`` (``index``) and ``nx
+    collection reindex`` (``collection``) — so it must not resolve its own
+    collaborator via Click's ambient context (that was the prior shape,
+    and it produced finding 2's inconsistency bug: ``nx collection
+    reindex`` silently got NO shared client because ``index``'s ambient
+    lookup naturally finds nothing when a different group is active).
+    Each caller now fetches ITS OWN command's shared client and passes it
+    in explicitly. ``None`` (the default) is byte-identical to pre-P3
+    per-instance-client construction.
     """
     if not collections:
         return
@@ -1432,7 +1993,7 @@ def run_collection_postprocessing(
                     f"  Taxonomy: {_n_skipped} unchanged collection(s) skipped "
                     f"(no files written this run)"
                 )
-        with T2Database(default_db_path()) as db:  # boundary-allow: read-only: discover/project compute use a local chroma client; all pure-T2 writes routed via t2_index_write (RDR-151 Phase 3, nexus-uzay8)
+        with T2Database(default_db_path(), client=client) as db:  # boundary-allow: read-only: discover/project compute use a local chroma client; all pure-T2 writes routed via t2_index_write (RDR-151 Phase 3, nexus-uzay8)
             for _tax_i, col_name in enumerate(_discover_targets, start=1):
                 _say(f"  [{_tax_i}/{len(_discover_targets)}] Taxonomy: discovering {col_name}...")
                 try:
@@ -1940,48 +2501,68 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         # only once at the end (which would see only the LAST file's count).
         from nexus.mcp_infra import get_reconciled_collections_count  # noqa: PLC0415 — deliberate function-local import: rare branch, only reached when non-zero
         reconciled_total = 0
-        for i, pdf in enumerate(pdfs, 1):
-            click.echo(f"[{i}/{total}] {pdf.name}…", nl=False)
-            t0 = _time.monotonic()
-            reset_identity_drop_collectors()
-            try:
-                n = index_pdf(
-                    pdf, corpus=corpus, collection_name=collection,
-                    force=force, enrich=enrich, extractor=extractor,
-                    on_formula_oom=on_formula_oom, streaming=streaming,
-                    allow_degraded_extraction=allow_degraded_extraction,
-                )
-                elapsed = _time.monotonic() - t0
-                total_chunks += n
-                reconciled_total += get_reconciled_collections_count()
-                click.echo(f" — {n} chunks, {elapsed:.1f}s")
-                if emit_identity_drop_summary(indexed_count=1):
-                    failures.append((
-                        pdf,
-                        f"indexed ({n} chunk(s)) but catalog document "
-                        f"identity failed to register — orphaned (no "
-                        f"tumbler); re-run or 'nx catalog reconcile' to "
-                        f"repair",
-                    ))
-            except Exception as exc:  # noqa: BLE001 — per-PDF batch isolation: one file's failure must not abort the batch; recorded and logged via log.warning
-                elapsed = _time.monotonic() - t0
-                # nexus-2t63u round 2: a reconcile can succeed BEFORE a
-                # later failure in the same file's run (e.g. the fence
-                # refusal case) — count it here too, before the next
-                # iteration's reset zeroes the collector.
-                reconciled_total += get_reconciled_collections_count()
-                # nexus-5xn3k.6 code-review-expert IMPORTANT (2026-08-02):
-                # a completion-stamp refusal already lands here (Exception
-                # covers it) and is never folded into a success line — but
-                # give it the same dedicated wording as the single-file
-                # branches instead of the raw exception text.
-                msg = (
-                    _index_run_refused_message(exc, target_collection=collection or "", corpus=corpus)
-                    if isinstance(exc, IndexRunVerifyRefused) else str(exc)
-                )
-                failures.append((pdf, msg))
-                _log.warning("batch_index_failed", path=str(pdf), error=msg)
-                click.echo(f" — FAILED ({elapsed:.1f}s): {exc}")
+        # nexus-s71lr: `nx index pdf --dir` echoes `[i/total] name…` with
+        # nl=False and only completes the line AFTER index_pdf returns — a
+        # single slow PDF (the bead's own complaint class) is silence between
+        # those two echoes. Mirrors `nx index rdr`'s heartbeat exactly:
+        # touch()-ed per file so "Xs elapsed" measures the CURRENT file's
+        # silence, armed immediately before the loop (nothing risky between
+        # arm() and the try/finally that guards it — code-review-expert
+        # finding d) so a raise anywhere in the loop always reaches disarm().
+        file_heartbeat = _PhaseHeartbeat(
+            is_tty=sys.stdout.isatty(),
+            echo=lambda msg, nl: click.echo(msg, nl=nl, err=True),
+            interval=5.0,
+            prefix="embed",
+        )
+        file_heartbeat.arm(f"0/{total} PDF(s)")
+        try:
+            for i, pdf in enumerate(pdfs, 1):
+                click.echo(f"[{i}/{total}] {pdf.name}…", nl=False)
+                t0 = _time.monotonic()
+                reset_identity_drop_collectors()
+                try:
+                    n = index_pdf(
+                        pdf, corpus=corpus, collection_name=collection,
+                        force=force, enrich=enrich, extractor=extractor,
+                        on_formula_oom=on_formula_oom, streaming=streaming,
+                        allow_degraded_extraction=allow_degraded_extraction,
+                    )
+                    elapsed = _time.monotonic() - t0
+                    total_chunks += n
+                    reconciled_total += get_reconciled_collections_count()
+                    click.echo(f" — {n} chunks, {elapsed:.1f}s")
+                    if emit_identity_drop_summary(indexed_count=1):
+                        failures.append((
+                            pdf,
+                            f"indexed ({n} chunk(s)) but catalog document "
+                            f"identity failed to register — orphaned (no "
+                            f"tumbler); re-run or 'nx catalog reconcile' to "
+                            f"repair",
+                        ))
+                except Exception as exc:  # noqa: BLE001 — per-PDF batch isolation: one file's failure must not abort the batch; recorded and logged via log.warning
+                    elapsed = _time.monotonic() - t0
+                    # nexus-2t63u round 2: a reconcile can succeed BEFORE a
+                    # later failure in the same file's run (e.g. the fence
+                    # refusal case) — count it here too, before the next
+                    # iteration's reset zeroes the collector.
+                    reconciled_total += get_reconciled_collections_count()
+                    # nexus-5xn3k.6 code-review-expert IMPORTANT (2026-08-02):
+                    # a completion-stamp refusal already lands here (Exception
+                    # covers it) and is never folded into a success line — but
+                    # give it the same dedicated wording as the single-file
+                    # branches instead of the raw exception text.
+                    msg = (
+                        _index_run_refused_message(exc, target_collection=collection or "", corpus=corpus)
+                        if isinstance(exc, IndexRunVerifyRefused) else str(exc)
+                    )
+                    failures.append((pdf, msg))
+                    _log.warning("batch_index_failed", path=str(pdf), error=msg)
+                    click.echo(f" — FAILED ({elapsed:.1f}s): {exc}")
+                finally:
+                    file_heartbeat.touch(f"{i}/{total} PDF(s), {total_chunks:,} chunks")
+        finally:
+            file_heartbeat.disarm()
 
         batch_elapsed = _time.monotonic() - batch_start
         summary_line = (
@@ -2487,12 +3068,26 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
 
     bar = tqdm(total=len(rdr_files), disable=None, desc="RDR", unit="doc")
     n = 0
+    # nexus-s71lr: `nx index rdr` had NO signal at all between per-file
+    # completion lines \u2014 no ETA ticker, no phase heartbeat, nothing. This is
+    # the exact command the bead's own reproduction used ("212 RDR files ...
+    # 13 minutes ... no output"). Armed for the whole batch_index_markdowns
+    # call below; `touch()`-ed on every file completion so its "Xs elapsed"
+    # measures silence since the LAST completed file, never cumulative run
+    # time. Always on (not gated behind --monitor).
+    file_heartbeat = _PhaseHeartbeat(
+        is_tty=sys.stdout.isatty(),
+        echo=lambda msg, nl: click.echo(msg, nl=nl, err=True),
+        interval=5.0,
+        prefix="embed",
+    )
 
     def on_file(fpath: Path, chunks: int, elapsed: float) -> None:
         nonlocal n
         n += 1
         bar.update(1)
         bar.set_postfix(now=fpath.name)
+        file_heartbeat.touch(f"{n}/{len(rdr_files)} RDR document(s)")
         if monitor or not sys.stdout.isatty():
             lbl = f"{chunks} chunks" if chunks else "skipped"
             line = f"  [{n}/{len(rdr_files)}] {fpath.name} \u2014 {lbl}  ({elapsed:.1f}s)"
@@ -2525,9 +3120,18 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
             # floats or ints, got [[np.float32(...)..."
             return [[float(x) for x in v] for v in _local_ef(texts)], model
 
-    results = batch_index_markdowns(rdr_files, corpus=basename, collection_name=collection,
-                                    content_type="rdr", force=force, on_file=on_file,
-                                    base_path=repo_root, embed_fn=_embed_fn)
+    # nexus-s71lr code-review-expert fix: arm() moved here, immediately
+    # before the try/finally — everything above (embed_fn resolution:
+    # imports + LocalEmbeddingFunction() construction, either of which can
+    # raise) used to run AFTER arm(), so a raise there left the heartbeat
+    # armed with no disarm ever reached (a leaked background thread).
+    file_heartbeat.arm(f"0/{len(rdr_files)} RDR document(s)")
+    try:
+        results = batch_index_markdowns(rdr_files, corpus=basename, collection_name=collection,
+                                        content_type="rdr", force=force, on_file=on_file,
+                                        base_path=repo_root, embed_fn=_embed_fn)
+    finally:
+        file_heartbeat.disarm()
     bar.close()
     # nexus-5xn3k.6 AC4: batch_index_markdowns already distinguishes
     # indexed/skipped/failed per file (doc_indexer.py) — the gap was that

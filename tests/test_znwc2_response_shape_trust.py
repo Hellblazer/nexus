@@ -159,7 +159,7 @@ class TestDocsForChashesCountReconciled:
             monkeypatch.setattr(c, "_post", post, raising=False)
         else:
             monkeypatch.setattr(
-                c, "_post", lambda path, body=None: post, raising=False,
+                c, "_post", lambda path, body=None, **_kwargs: post, raising=False,
             )
         if callable(get_manifests):
             monkeypatch.setattr(c, "get_manifests", get_manifests, raising=False)
@@ -216,7 +216,7 @@ class TestDocsForChashesCountReconciled:
         posts: list[list[str]] = []
         manifests_calls: list[list[str]] = []
 
-        def _fake_post(path: str, body: dict | None = None) -> Any:
+        def _fake_post(path: str, body: dict | None = None, **_kwargs: Any) -> Any:
             assert path == "/manifest/docs_for_chashes"
             batch = body["chashes"]
             posts.append(batch)

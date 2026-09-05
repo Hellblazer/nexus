@@ -49,6 +49,12 @@ def test_http_401_raise_site_carries_the_marker() -> None:
     _clean_service_errors keys on it, so a wording drift at the raise site
     would silently lose the actionable guidance."""
     store = HttpScratchStore.__new__(HttpScratchStore)  # skip env-dependent __init__
+    # nexus-a2qhz round 3: _post's mutates=True branch (the default) now
+    # reads self._base_url to call guard_production_write before it ever
+    # reaches the HTTP call this test is exercising — __new__ skips
+    # __init__ entirely, so the attribute must be set by hand here, same
+    # as _client below.
+    store._base_url = "http://127.0.0.1:0"
     resp = MagicMock()
     resp.is_success = False
     resp.status_code = 401
@@ -63,6 +69,34 @@ def test_http_401_raise_site_carries_the_marker() -> None:
     with pytest.raises(RuntimeError) as exc_info:
         store._post_raw("/v1/t1/get", {})
     assert SESSION_UNAUTHORIZED_MARKER in str(exc_info.value)
+
+
+def test_post_mutates_guard_reads_base_url() -> None:
+    """nexus-a2qhz round 3: _post's mutates=True branch (the default —
+    put/flag/unflag/delete/clear/close_session) must call
+    guard_production_write with THIS store's own _base_url, not a stale
+    or missing value. Pins the read at src/nexus/db/http_scratch_store.py's
+    ``_post`` guard call site directly (the coupling
+    test_http_401_raise_site_carries_the_marker exercises only
+    incidentally, via __new__ needing the attribute set at all)."""
+    store = HttpScratchStore.__new__(HttpScratchStore)  # skip env-dependent __init__
+    store._base_url = "http://127.0.0.1:54321"
+    store._session_token = ""
+    resp = MagicMock()
+    resp.is_success = True
+    resp.status_code = 200
+    resp.json.return_value = {}
+    store._client = MagicMock()
+    store._client.post.return_value = resp
+
+    with patch(
+        "nexus.db.service_endpoint.guard_production_write"
+    ) as mock_guard, patch.object(
+        HttpScratchStore, "_current_authorization_header", return_value="Bearer x",
+    ):
+        store._post("/v1/t1/put", {})
+
+    mock_guard.assert_called_once_with("http://127.0.0.1:54321")
 
 
 def test_call_time_generic_service_error_is_clean() -> None:

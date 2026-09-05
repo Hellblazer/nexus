@@ -11,6 +11,7 @@ Validates the contract every routing hook must honor:
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -18,6 +19,9 @@ import pathlib
 import subprocess
 import sys
 import textwrap
+import time as _time
+import urllib.error
+import urllib.parse
 
 import pytest
 
@@ -257,28 +261,296 @@ def test_log_path_fallback_resolves_home_at_call_time_not_import_time(tmp_path, 
     assert resolved == new_home / ".config" / "nexus" / "routing_log.jsonl"
 
 
-def test_log_routing_event_appends_jsonl(tmp_path, monkeypatch):
+# ---------------------------------------------------------------------------
+# log_routing_event writer swap (nexus-gjv9b PART 2): best-effort HTTP POST
+# to the engine's routing_events table, metered-drop fallback -- never a
+# JSONL append any more (that machinery stays in place, unused from this
+# function, for PART 3's deferred deletion; see the rotation tests below).
+# ---------------------------------------------------------------------------
+
+
+def _drop_records(path: pathlib.Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
+
+
+def _isolate_endpoint_discovery(tmp_path, monkeypatch):
+    """nexus-gjv9b PART 2 CRITICAL review fix: ``_engine_endpoint`` now
+    also reads a ServiceRegistry lease file and ``config.yml`` under
+    ``NEXUS_CONFIG_DIR`` (t2_prefix_scan.py-style discovery), not just
+    env vars. Without isolating that directory, these tests would
+    resolve against whatever is REALLY configured on the box running
+    them (a live lease, a real service_url) instead of the scenario
+    each test constructs -- the identical class of leak the routing-log/
+    dropped-writes/pre-close-verification isolation fixes in this same
+    bead already closed for their own env surfaces."""
+    cfg_dir = tmp_path / "isolated-nexus-config"
+    cfg_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg_dir))
+    monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+    return cfg_dir
+
+
+def test_log_routing_event_no_engine_env_drops_to_meter(tmp_path, monkeypatch):
+    """The common case: NX_SERVICE_HOST/PORT/TOKEN unset, no lease file,
+    no config.yml -- no network attempt at all, straight to the metered
+    drop, and the JSONL log is never touched."""
+    _isolate_endpoint_discovery(tmp_path, monkeypatch)
     log_path = tmp_path / "routing_log.jsonl"
+    drop_path = tmp_path / "dropped_writes.jsonl"
     monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(log_path))
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
+    monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
+    monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
     lib = _load_lib()
+
     lib.log_routing_event(rule="rule_a", outcome="allow")
-    lib.log_routing_event(rule="rule_b", outcome="deny", tool_name="Bash")
-    lines = log_path.read_text().splitlines()
-    assert len(lines) == 2
-    first = json.loads(lines[0])
-    assert first["rule"] == "rule_a"
-    assert first["outcome"] == "allow"
-    assert "ts" in first
-    second = json.loads(lines[1])
-    assert second["rule"] == "rule_b"
-    assert second["outcome"] == "deny"
-    assert second["tool_name"] == "Bash"
+
+    assert not log_path.exists(), "log_routing_event must never fall back to the JSONL log"
+    drops = _drop_records(drop_path)
+    assert len(drops) == 1
+    assert drops[0]["hook"] == "routing_events"
+    assert drops[0]["rows"] == 1
+
+
+def test_log_routing_event_drop_record_preserves_rule_outcome_and_escape_reason(
+    tmp_path, monkeypatch,
+):
+    """nexus-gjv9b review fold-in round 6, found via a full-suite red on
+    tests/test_routing_subagent_git_write.py: the drop-meter record must
+    carry the ORIGINAL event's rule/outcome/escape_reason, not just a
+    generic error/cause -- an escape-token fire (nexus-mzvwa.9's
+    over-use-visibility concern) that hits an engine-down window must
+    stay auditable, exactly as it was when routing_log.jsonl carried it
+    directly (before the PART 2 writer swap)."""
+    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    drop_path = tmp_path / "dropped_writes.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
+    monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
+    monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+    lib = _load_lib()
+
+    lib.log_routing_event(
+        rule="phase_review_close_requires_gate",
+        outcome="escape",
+        escape_reason="orchestrator sanctioned",
+    )
+
+    drops = _drop_records(drop_path)
+    assert len(drops) == 1
+    assert drops[0]["rule"] == "phase_review_close_requires_gate"
+    assert drops[0]["outcome"] == "escape"
+    assert drops[0]["escape_reason"] == "orchestrator sanctioned"
+
+
+def test_log_routing_event_drop_record_omits_absent_optional_fields(tmp_path, monkeypatch):
+    """No tool_name/command_fragment/escape_reason given -> none of those
+    keys appear in the drop record (never empty-string padding)."""
+    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    drop_path = tmp_path / "dropped_writes.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
+    monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
+    monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+    lib = _load_lib()
+
+    lib.log_routing_event(rule="rule_bare", outcome="allow")
+
+    drops = _drop_records(drop_path)
+    assert len(drops) == 1
+    assert drops[0]["rule"] == "rule_bare"
+    assert drops[0]["outcome"] == "allow"
+    assert "escape_reason" not in drops[0]
+
+
+def test_log_routing_event_http_success_no_drop(tmp_path, monkeypatch):
+    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    log_path = tmp_path / "routing_log.jsonl"
+    drop_path = tmp_path / "dropped_writes.jsonl"
+    monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(log_path))
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
+    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+    monkeypatch.setenv("NX_SERVICE_PORT", "9999")
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")
+    lib = _load_lib()
+
+    sent: list[dict] = []
+
+    class _FakeResponse:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def _fake_urlopen(req, timeout=None):  # noqa: ARG001
+        sent.append({
+            "url": req.full_url,
+            "body": json.loads(req.data.decode("utf-8")),
+            "headers": dict(req.header_items()),
+        })
+        return _FakeResponse()
+
+    # _lib._post_routing_event_http imports urllib.request lazily, inside
+    # the function body -- it fetches the same process-wide sys.modules
+    # entry patched here.
+    import urllib.request as _ur
+    monkeypatch.setattr(_ur, "urlopen", _fake_urlopen)
+
+    lib.log_routing_event(rule="rule_b", outcome="deny", tool_name="Bash", session_id="sess-1")
+
+    assert len(sent) == 1
+    assert sent[0]["url"] == "http://127.0.0.1:9999/v1/telemetry/routing_events/record"
+    assert sent[0]["body"]["rule"] == "rule_b"
+    assert sent[0]["body"]["outcome"] == "deny"
+    assert sent[0]["body"]["session_id"] == "sess-1"
+    assert sent[0]["headers"]["Authorization"] == "Bearer test-token"
+    assert not log_path.exists()
+    assert _drop_records(drop_path) == []
+
+
+def test_log_routing_event_resolves_from_lease_file_with_no_env_set(tmp_path, monkeypatch):
+    """nexus-gjv9b PART 2 CRITICAL review fix: the routing hook must be
+    able to reach a normal local install's engine WITHOUT any
+    NX_SERVICE_* env exported -- nothing sets those into an interactive
+    Claude Code process (.mcp.json, storage_service_daemon._spawn_service,
+    and the install scripts all checked by the reviewer carry no such
+    export). A live ServiceRegistry lease file is what every OTHER T2/T3
+    client actually resolves through; this proves the routing hook does
+    too now, mirroring t2_prefix_scan.py's identical discovery."""
+    import time as _time
+
+    cfg_dir = _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
+    monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+    lease_path = cfg_dir / f"storage_service_addr.{os.getuid()}"
+    lease_path.write_text(json.dumps({
+        "status": "live",
+        "heartbeat_epoch": _time.time(),
+        "ttl": 60.0,
+        "endpoint": {"host": "127.0.0.1", "port": 4242, "token": "lease-bearer-token"},
+    }))
+    lib = _load_lib()
+
+    sent: list[dict] = []
+
+    class _FakeResponse:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def _fake_urlopen(req, timeout=None):  # noqa: ARG001
+        sent.append({"url": req.full_url, "headers": dict(req.header_items())})
+        return _FakeResponse()
+
+    import urllib.request as _ur
+    monkeypatch.setattr(_ur, "urlopen", _fake_urlopen)
+
+    lib.log_routing_event(rule="rule_lease", outcome="allow")
+
+    assert len(sent) == 1
+    assert sent[0]["url"] == "http://127.0.0.1:4242/v1/telemetry/routing_events/record"
+    assert sent[0]["headers"]["Authorization"] == "Bearer lease-bearer-token"
+
+
+def test_log_routing_event_expired_lease_is_ignored(tmp_path, monkeypatch):
+    """A heartbeat older than its own TTL must not be trusted -- same
+    stale-lease-is-absent contract as
+    nexus.db.service_endpoint.discover_lease's local-supervisor leg."""
+    import time as _time
+
+    cfg_dir = _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    drop_path = tmp_path / "dropped_writes.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
+    monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
+    monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+    lease_path = cfg_dir / f"storage_service_addr.{os.getuid()}"
+    lease_path.write_text(json.dumps({
+        "status": "live",
+        "heartbeat_epoch": _time.time() - 120.0,
+        "ttl": 60.0,
+        "endpoint": {"host": "127.0.0.1", "port": 4242, "token": "stale-bearer-token"},
+    }))
+    lib = _load_lib()
+
+    lib.log_routing_event(rule="rule_stale", outcome="allow")
+
+    drops = _drop_records(drop_path)
+    assert len(drops) == 1, "an expired lease must be treated as absent -- no attempt, straight to the drop meter"
+
+
+def test_log_routing_event_resolves_from_config_yml_service_url(tmp_path, monkeypatch):
+    """nexus-gjv9b PART 2 CRITICAL review fix: the managed-cloud onboarding
+    path (`nx config set service_url/service_token`) persists ONLY to
+    config.yml, never an env var -- a Desktop .mcpb install has no other
+    credential source at all. The routing hook must read it."""
+    cfg_dir = _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
+    monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+    (cfg_dir / "config.yml").write_text(
+        "credentials:\n"
+        "  service_url: https://api.example-managed.test\n"
+        "  service_token: managed-bearer-token\n"
+    )
+    lib = _load_lib()
+
+    sent: list[dict] = []
+
+    class _FakeResponse:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def _fake_urlopen(req, timeout=None):  # noqa: ARG001
+        sent.append({"url": req.full_url, "headers": dict(req.header_items())})
+        return _FakeResponse()
+
+    import urllib.request as _ur
+    monkeypatch.setattr(_ur, "urlopen", _fake_urlopen)
+
+    lib.log_routing_event(rule="rule_cfg", outcome="allow")
+
+    assert len(sent) == 1
+    assert sent[0]["url"] == "https://api.example-managed.test/v1/telemetry/routing_events/record"
+    assert sent[0]["headers"]["Authorization"] == "Bearer managed-bearer-token"
+
+
+def test_log_routing_event_http_failure_drops_to_meter(tmp_path, monkeypatch):
+    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    drop_path = tmp_path / "dropped_writes.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
+    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+    monkeypatch.setenv("NX_SERVICE_PORT", "9999")
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")
+    lib = _load_lib()
+
+    import urllib.request as _ur
+
+    def _boom(req, timeout=None):  # noqa: ARG001
+        raise TimeoutError("simulated: engine unreachable")
+
+    monkeypatch.setattr(_ur, "urlopen", _boom)
+
+    lib.log_routing_event(rule="rule_c", outcome="allow")  # must not raise
+
+    drops = _drop_records(drop_path)
+    assert len(drops) == 1
+    assert drops[0]["hook"] == "routing_events"
 
 
 def test_log_routing_event_swallows_errors(tmp_path, monkeypatch):
-    """Telemetry must never crash the hook. Unwritable path = silent no-op."""
-    unwritable = tmp_path / "does-not-exist" / "log.jsonl"
-    monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(unwritable))
+    """Telemetry must never crash the hook, even when the metered-drop
+    fallback's own log path is unwritable."""
+    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    unwritable = tmp_path / "does-not-exist" / "dropped.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(unwritable))
+    monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
+    monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
     lib = _load_lib()
     # If this raises, the test fails — log helper must be defensive.
     lib.log_routing_event(rule="x", outcome="allow")
@@ -354,50 +626,14 @@ def test_rotate_log_if_oversized_tolerates_concurrent_rotation_race(tmp_path, mo
     lib._rotate_log_if_oversized(log_path)  # must not raise
 
 
-def test_log_routing_event_rotates_before_append(tmp_path, monkeypatch):
-    """Integration: an oversize routing_log.jsonl rotates, and the new
-    event lands in the fresh (post-rotation) file."""
-    log_path = tmp_path / "routing_log.jsonl"
-    monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(log_path))
-    lib = _load_lib()
-    monkeypatch.setattr(lib, "_ROUTING_LOG_ROTATION_MAX_BYTES", 10)
-    log_path.write_text("x" * 100)
-
-    lib.log_routing_event(rule="rule_a", outcome="allow")
-
-    rotated = tmp_path / "routing_log.jsonl.1"
-    assert rotated.read_text() == "x" * 100
-    lines = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
-    assert len(lines) == 1
-    assert lines[0]["rule"] == "rule_a"
-
-
-def test_log_routing_event_rotation_failure_never_breaks_the_append(tmp_path, monkeypatch):
-    """A non-ENOENT rotation failure (e.g. a permission error on the
-    rename) must still let the append proceed."""
-    log_path = tmp_path / "routing_log.jsonl"
-    monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(log_path))
-    lib = _load_lib()
-    monkeypatch.setattr(lib, "_ROUTING_LOG_ROTATION_MAX_BYTES", 10)
-    # Trailing newline: real log content is always line-terminated (every
-    # log_routing_event write ends in "\n") -- this keeps the pre-existing
-    # oversize content and the new append parseable as separate JSONL
-    # lines even though rotation is simulated to fail.
-    log_path.write_text("x" * 100 + "\n")
-
-    def _boom(_src, _dst):
-        raise PermissionError("simulated rotation failure")
-
-    monkeypatch.setattr(lib.os, "replace", _boom)
-
-    lib.log_routing_event(rule="rule_b", outcome="allow")  # must not raise
-
-    assert log_path.exists()
-    # The pre-existing "x" * 100 filler line is deliberately not valid
-    # JSON (synthetic oversize content); only the newly appended LAST
-    # line is asserted on, since that is the actual write under test.
-    last_line = log_path.read_text().splitlines()[-1]
-    assert json.loads(last_line)["rule"] == "rule_b"
+# nexus-gjv9b PART 2 writer swap: the two integration tests formerly
+# here (rotation-before-append, rotation-failure-never-breaks-append)
+# exercised _rotate_log_if_oversized through log_routing_event -- a call
+# chain that no longer exists (see that function's own docstring:
+# rotation has no caller from this module any more, kept in place only
+# for PART 3's deferred deletion). _rotate_log_if_oversized itself is
+# still fully covered, directly, by the tests above and by the TOCTOU
+# suite below.
 
 
 # ---------------------------------------------------------------------------
@@ -597,3 +833,444 @@ def test_explicit_log_path_still_wins_over_config_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
 
     assert lib._log_path() == explicit
+
+
+# ---------------------------------------------------------------------------
+# Data-token lease branch (nexus-gjv9b review fold-in round 3, critique
+# CRITICAL 1): a fresh data-token lease must win over ANY static token
+# (config.yml service_token, NX_SERVICE_TOKEN, or the ServiceRegistry
+# lease's own token) once the base URL is known -- the RDR-005-armed-box
+# case, where the static config.yml service_token is a scope=mint-locked
+# credential that gets a real 401 if ever sent to a data path. Before
+# this test, `_read_data_token_lease`'s own return value was exercised
+# only indirectly through `_engine_endpoint()` unit tests -- nothing
+# proved `log_routing_event`'s FULL path (resolve -> POST) actually sends
+# the data token over the wire, which is the exact case the critique
+# named as unverified.
+# ---------------------------------------------------------------------------
+
+
+def _write_data_token_lease(cfg_dir, *, base_url, tenant, token, expires_in=3600.0):
+    host = urllib.parse.urlsplit(base_url).netloc or base_url
+    digest = hashlib.sha256(f"{host}\x00{tenant}".encode("utf-8")).hexdigest()
+    lease_path = cfg_dir / f"data_token_lease.{digest}"
+    lease_path.write_text(json.dumps({
+        "format_version": 1,
+        "token": token,
+        "tenant": tenant,
+        "base_url_digest": digest,
+        "expires_at": _time.time() + expires_in,
+        "ttl_seconds": expires_in,
+        "minted_by_pid": os.getpid(),
+    }))
+    return lease_path
+
+
+def test_log_routing_event_prefers_data_token_lease_over_config_yml_static_token(tmp_path, monkeypatch):
+    """The RDR-005-armed-box case the critique named: a static
+    config.yml service_token exists (the mint-locked credential) AND a
+    fresh data-token lease exists for the same host -- the wire request
+    must carry the DATA token, never the static one."""
+    cfg_dir = _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
+    monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+    (cfg_dir / "config.yml").write_text(
+        "credentials:\n"
+        "  service_url: https://api.example-managed.test\n"
+        "  service_token: mint-locked-static-token\n"
+    )
+    _write_data_token_lease(
+        cfg_dir,
+        base_url="https://api.example-managed.test",
+        tenant="default",
+        token="fresh-data-token",
+    )
+    lib = _load_lib()
+
+    sent: list[dict] = []
+
+    class _FakeResponse:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def _fake_urlopen(req, timeout=None):  # noqa: ARG001
+        sent.append({"url": req.full_url, "headers": dict(req.header_items())})
+        return _FakeResponse()
+
+    import urllib.request as _ur
+    monkeypatch.setattr(_ur, "urlopen", _fake_urlopen)
+
+    lib.log_routing_event(rule="rule_data_token", outcome="allow")
+
+    assert len(sent) == 1
+    assert sent[0]["headers"]["Authorization"] == "Bearer fresh-data-token", (
+        "a fresh data-token lease must win over the static config.yml "
+        "service_token -- sending the static (mint-locked) token here is "
+        "the exact 401-swallowed-into-a-generic-drop the critique named"
+    )
+
+
+def test_log_routing_event_expired_data_token_lease_falls_back_to_static_token(tmp_path, monkeypatch):
+    """The converse: an EXPIRED data-token lease must not be used at all
+    -- falls back to the static config.yml token, same as no lease
+    existing (never a mint attempt; this hook never mints)."""
+    cfg_dir = _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
+    monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+    (cfg_dir / "config.yml").write_text(
+        "credentials:\n"
+        "  service_url: https://api.example-managed.test\n"
+        "  service_token: static-fallback-token\n"
+    )
+    _write_data_token_lease(
+        cfg_dir,
+        base_url="https://api.example-managed.test",
+        tenant="default",
+        token="stale-data-token",
+        expires_in=-60.0,
+    )
+    lib = _load_lib()
+
+    sent: list[dict] = []
+
+    class _FakeResponse:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def _fake_urlopen(req, timeout=None):  # noqa: ARG001
+        sent.append({"headers": dict(req.header_items())})
+        return _FakeResponse()
+
+    import urllib.request as _ur
+    monkeypatch.setattr(_ur, "urlopen", _fake_urlopen)
+
+    lib.log_routing_event(rule="rule_expired_data_token", outcome="allow")
+
+    assert len(sent) == 1
+    assert sent[0]["headers"]["Authorization"] == "Bearer static-fallback-token"
+
+
+# ---------------------------------------------------------------------------
+# Non-2xx cause classification (nexus-gjv9b review fold-in round 3,
+# critique CRITICAL 1/2): a real auth or server failure must be metered
+# with a distinguishing cause, not a generic "POST failed" the doctor
+# check cannot tell apart from a transient connection blip.
+# ---------------------------------------------------------------------------
+
+
+def test_log_routing_event_401_response_meters_with_cause_401(tmp_path, monkeypatch):
+    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    drop_path = tmp_path / "dropped_writes.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
+    monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
+    monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
+    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+    monkeypatch.setenv("NX_SERVICE_PORT", "4242")
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "wrong-scope-token")
+    lib = _load_lib()
+
+    def _fake_urlopen(req, timeout=None):  # noqa: ARG001
+        raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, None)
+
+    import urllib.request as _ur
+    monkeypatch.setattr(_ur, "urlopen", _fake_urlopen)
+
+    lib.log_routing_event(rule="rule_401", outcome="allow")
+
+    drops = _drop_records(drop_path)
+    assert len(drops) == 1
+    assert drops[0]["cause"] == "401"
+
+
+def test_log_routing_event_404_response_meters_with_cause_route_absent(tmp_path, monkeypatch):
+    """nexus-gjv9b review fold-in round 4: a plugin cut can ship this
+    hook ahead of the paired engine tag -- the cloud engine has no
+    routing_events route yet, so every hook decision 404s until the
+    engine catches up. Must classify as route_absent (version skew),
+    never a generic failure."""
+    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    drop_path = tmp_path / "dropped_writes.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
+    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+    monkeypatch.setenv("NX_SERVICE_PORT", "4242")
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "some-token")
+    lib = _load_lib()
+
+    def _fake_urlopen(req, timeout=None):  # noqa: ARG001
+        raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+
+    import urllib.request as _ur
+    monkeypatch.setattr(_ur, "urlopen", _fake_urlopen)
+
+    lib.log_routing_event(rule="rule_404", outcome="allow")
+
+    drops = _drop_records(drop_path)
+    assert len(drops) == 1
+    assert drops[0]["cause"] == "route_absent"
+
+
+def test_log_routing_event_405_response_meters_with_cause_route_absent(tmp_path, monkeypatch):
+    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    drop_path = tmp_path / "dropped_writes.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
+    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+    monkeypatch.setenv("NX_SERVICE_PORT", "4242")
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "some-token")
+    lib = _load_lib()
+
+    def _fake_urlopen(req, timeout=None):  # noqa: ARG001
+        raise urllib.error.HTTPError(req.full_url, 405, "Method Not Allowed", {}, None)
+
+    import urllib.request as _ur
+    monkeypatch.setattr(_ur, "urlopen", _fake_urlopen)
+
+    lib.log_routing_event(rule="rule_405", outcome="allow")
+
+    drops = _drop_records(drop_path)
+    assert len(drops) == 1
+    assert drops[0]["cause"] == "route_absent"
+
+
+def test_log_routing_event_5xx_response_meters_with_cause_5xx(tmp_path, monkeypatch):
+    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    drop_path = tmp_path / "dropped_writes.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
+    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+    monkeypatch.setenv("NX_SERVICE_PORT", "4242")
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "some-token")
+    lib = _load_lib()
+
+    def _fake_urlopen(req, timeout=None):  # noqa: ARG001
+        raise urllib.error.HTTPError(req.full_url, 503, "Service Unavailable", {}, None)
+
+    import urllib.request as _ur
+    monkeypatch.setattr(_ur, "urlopen", _fake_urlopen)
+
+    lib.log_routing_event(rule="rule_5xx", outcome="allow")
+
+    drops = _drop_records(drop_path)
+    assert len(drops) == 1
+    assert drops[0]["cause"] == "5xx"
+
+
+def test_log_routing_event_connect_failure_meters_with_cause_connect(tmp_path, monkeypatch):
+    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    drop_path = tmp_path / "dropped_writes.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
+    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+    monkeypatch.setenv("NX_SERVICE_PORT", "4242")
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "some-token")
+    lib = _load_lib()
+
+    def _fake_urlopen(req, timeout=None):  # noqa: ARG001
+        raise urllib.error.URLError(ConnectionRefusedError("Connection refused"))
+
+    import urllib.request as _ur
+    monkeypatch.setattr(_ur, "urlopen", _fake_urlopen)
+
+    lib.log_routing_event(rule="rule_connect", outcome="allow")
+
+    drops = _drop_records(drop_path)
+    assert len(drops) == 1
+    assert drops[0]["cause"] == "connect"
+
+
+def test_log_routing_event_timeout_meters_with_cause_timeout(tmp_path, monkeypatch):
+    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    drop_path = tmp_path / "dropped_writes.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
+    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+    monkeypatch.setenv("NX_SERVICE_PORT", "4242")
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "some-token")
+    lib = _load_lib()
+
+    def _fake_urlopen(req, timeout=None):  # noqa: ARG001
+        raise TimeoutError("timed out")
+
+    import urllib.request as _ur
+    monkeypatch.setattr(_ur, "urlopen", _fake_urlopen)
+
+    lib.log_routing_event(rule="rule_timeout", outcome="allow")
+
+    drops = _drop_records(drop_path)
+    assert len(drops) == 1
+    assert drops[0]["cause"] == "timeout"
+
+
+def test_log_routing_event_unresolvable_endpoint_meters_with_cause_unresolvable(tmp_path, monkeypatch):
+    """No env, no lease, no config.yml -- the pre-existing 'common case'
+    test above already proves the drop; this pins the CAUSE label on it."""
+    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    drop_path = tmp_path / "dropped_writes.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
+    monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
+    monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+    lib = _load_lib()
+
+    lib.log_routing_event(rule="rule_unresolvable", outcome="allow")
+
+    drops = _drop_records(drop_path)
+    assert len(drops) == 1
+    assert drops[0]["cause"] == "unresolvable"
+
+
+# ---------------------------------------------------------------------------
+# Parity with t2_prefix_scan.py (nexus-gjv9b review fold-in round 3,
+# code-review item 2): _read_service_lease/_read_lease,
+# _read_data_token_lease, and _read_config_yml_credentials were all
+# "ported verbatim" from t2_prefix_scan.py, and one of the three
+# docstrings already CLAIMED this suite existed before it did. The two
+# files use different Path-import conventions (t2_prefix_scan.py:
+# `from pathlib import Path`; routing/_lib.py: `import pathlib`), so a
+# byte-diff of the source would false-positive on that alone -- this
+# runs BOTH implementations against the SAME on-disk lease/config
+# layout instead and asserts identical return values, function by
+# function, across every branch each one documents (fresh, expired,
+# malformed, missing, wrong digest).
+# ---------------------------------------------------------------------------
+
+T2_PREFIX_SCAN_PATH = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "t2_prefix_scan.py"
+
+
+def _load_t2_prefix_scan():
+    spec = importlib.util.spec_from_file_location("nx_t2_prefix_scan", T2_PREFIX_SCAN_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_parity_read_service_lease_fresh(tmp_path):
+    scan = _load_t2_prefix_scan()
+    lib = _load_lib()
+    lease_path = tmp_path / f"storage_service_addr.{os.getuid()}"
+    lease_path.write_text(json.dumps({
+        "status": "live",
+        "heartbeat_epoch": _time.time(),
+        "ttl": 60.0,
+        "endpoint": {"host": "127.0.0.1", "port": 4242, "token": "tok"},
+    }))
+    assert lib._read_service_lease(tmp_path) == scan._read_lease(tmp_path)
+
+
+def test_parity_read_service_lease_expired(tmp_path):
+    scan = _load_t2_prefix_scan()
+    lib = _load_lib()
+    lease_path = tmp_path / f"storage_service_addr.{os.getuid()}"
+    lease_path.write_text(json.dumps({
+        "status": "live",
+        "heartbeat_epoch": _time.time() - 120.0,
+        "ttl": 60.0,
+        "endpoint": {"host": "127.0.0.1", "port": 4242, "token": "tok"},
+    }))
+    assert lib._read_service_lease(tmp_path) is None
+    assert scan._read_lease(tmp_path) is None
+
+
+def test_parity_read_service_lease_malformed(tmp_path):
+    scan = _load_t2_prefix_scan()
+    lib = _load_lib()
+    lease_path = tmp_path / f"storage_service_addr.{os.getuid()}"
+    lease_path.write_text("not json")
+    assert lib._read_service_lease(tmp_path) is None
+    assert scan._read_lease(tmp_path) is None
+
+
+def test_parity_read_service_lease_missing(tmp_path):
+    scan = _load_t2_prefix_scan()
+    lib = _load_lib()
+    assert lib._read_service_lease(tmp_path) is None
+    assert scan._read_lease(tmp_path) is None
+
+
+def test_parity_read_data_token_lease_fresh_match(tmp_path):
+    scan = _load_t2_prefix_scan()
+    lib = _load_lib()
+    _write_data_token_lease(tmp_path, base_url="http://127.0.0.1:4242", tenant="default", token="tok")
+    base_url = "http://127.0.0.1:4242"
+    assert lib._read_data_token_lease(tmp_path, base_url) == "tok"
+    assert scan._read_data_token_lease(tmp_path, base_url) == "tok"
+
+
+def test_parity_read_data_token_lease_wrong_digest(tmp_path):
+    scan = _load_t2_prefix_scan()
+    lib = _load_lib()
+    _write_data_token_lease(tmp_path, base_url="http://127.0.0.1:4242", tenant="default", token="tok")
+    other_url = "http://127.0.0.1:9999"
+    assert lib._read_data_token_lease(tmp_path, other_url) is None
+    assert scan._read_data_token_lease(tmp_path, other_url) is None
+
+
+def test_parity_read_data_token_lease_expired(tmp_path):
+    scan = _load_t2_prefix_scan()
+    lib = _load_lib()
+    _write_data_token_lease(
+        tmp_path, base_url="http://127.0.0.1:4242", tenant="default", token="tok", expires_in=-1.0,
+    )
+    base_url = "http://127.0.0.1:4242"
+    assert lib._read_data_token_lease(tmp_path, base_url) is None
+    assert scan._read_data_token_lease(tmp_path, base_url) is None
+
+
+def test_parity_read_data_token_lease_missing(tmp_path):
+    scan = _load_t2_prefix_scan()
+    lib = _load_lib()
+    base_url = "http://127.0.0.1:4242"
+    assert lib._read_data_token_lease(tmp_path, base_url) is None
+    assert scan._read_data_token_lease(tmp_path, base_url) is None
+
+
+def test_parity_read_config_yml_credentials_present(tmp_path):
+    scan = _load_t2_prefix_scan()
+    lib = _load_lib()
+    (tmp_path / "config.yml").write_text(
+        "credentials:\n"
+        "  service_url: https://api.example.test\n"
+        "  service_token: tok-123\n"
+    )
+    assert lib._read_config_yml_credentials(tmp_path) == scan._read_config_yml_credentials(tmp_path)
+
+
+def test_parity_read_config_yml_credentials_absent(tmp_path):
+    scan = _load_t2_prefix_scan()
+    lib = _load_lib()
+    assert lib._read_config_yml_credentials(tmp_path) == {}
+    assert scan._read_config_yml_credentials(tmp_path) == {}
+
+
+def test_parity_read_config_yml_credentials_no_credentials_block(tmp_path):
+    scan = _load_t2_prefix_scan()
+    lib = _load_lib()
+    (tmp_path / "config.yml").write_text("install:\n  mode: managed\n")
+    assert lib._read_config_yml_credentials(tmp_path) == {}
+    assert scan._read_config_yml_credentials(tmp_path) == {}
+
+
+# ---------------------------------------------------------------------------
+# Cause-vocabulary parity with nexus.dropped_writes (nexus-gjv9b review
+# fold-in round 5, code-review non-blocking item 1): the drop-cause
+# vocabulary was two hand-maintained string-literal sets -- this hook's
+# own transport-layer classification, and dropped_writes.classify_drop_
+# cause's pattern table. The hook is stdlib-only (no `nexus` import) and
+# cannot share the literals via a common import, so this is the "honest
+# tool" the code review asked for: read both files' literal sets and
+# assert equality, the same discipline as the discovery-function parity
+# suite above.
+# ---------------------------------------------------------------------------
+
+
+def test_parity_cause_vocabulary_matches_dropped_writes():
+    from nexus import dropped_writes
+
+    lib = _load_lib()
+    assert lib._STATIC_CAUSE_NAMES == dropped_writes.NAMED_DROP_CAUSES, (
+        "the routing hook's mirror of the drop-cause vocabulary "
+        "(_lib._STATIC_CAUSE_NAMES) has drifted from the canonical "
+        "registry (nexus.dropped_writes.NAMED_DROP_CAUSES) -- update "
+        "whichever side is missing the other's causes"
+    )

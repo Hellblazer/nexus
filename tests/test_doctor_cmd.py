@@ -184,6 +184,8 @@ class TestSupplementaryChecks:
         "--- taxonomy ---",
         "--- aspect-queue ---",
         "--- t1 ---",
+        "--- engine-activity ---",
+        "--- fanout-floor ---",
     ])
     def test_each_promoted_check_runs(self, runner, mock_reg, marker):
         result = _invoke(runner, mock_reg)
@@ -209,6 +211,7 @@ class TestSupplementaryChecks:
         for absent in (
             "--check-resources", "--check-plan-library",
             "--check-taxonomy", "--check-aspect-queue", "--check-t1",
+            "--check-engine-activity",
         ):
             assert absent not in tail
 
@@ -246,6 +249,77 @@ class TestSupplementaryChecks:
         # The rest of the sweep still ran.
         assert "--- t1 ---" in result.output
         assert "Remaining opt-in-only checks" in result.output
+
+
+# ── --check-fanout-floor census content (nexus-rbhci) ───────────────────────
+#
+# The marker-presence test above (test_each_promoted_check_runs) only
+# proves the check RUNS; these prove what it actually reports, against a
+# controlled list_collections() fixture -- exactly the shape
+# HttpVectorClient.list_collections() returns.
+
+
+def test_fanout_floor_census_lists_excluded_collection(runner, mock_reg):
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [
+        {"name": "code__thin", "count": 1},
+        {"name": "code__healthy", "count": 20},
+    ]
+    result = _invoke(
+        runner, mock_reg,
+        extra_patches=[patch("nexus.db.make_t3", return_value=mock_t3)],
+    )
+    assert result.exit_code == 0
+    assert "1 collection(s) currently excluded" in result.output
+    assert "code__thin" in result.output
+    assert "code__healthy" not in result.output.split(
+        "collection(s) currently excluded", 1
+    )[1]
+
+
+def test_fanout_floor_census_clean_when_nothing_excluded(runner, mock_reg):
+    """A lone collection under its prefix is never excluded (nexus-rbhci
+    sibling-relative rule) -- the census must say so plainly, not just
+    omit a section."""
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [
+        {"name": "knowledge__notes", "count": 1},
+    ]
+    result = _invoke(
+        runner, mock_reg,
+        extra_patches=[patch("nexus.db.make_t3", return_value=mock_t3)],
+    )
+    assert result.exit_code == 0
+    assert "no collections currently excluded" in result.output
+
+
+def test_fanout_floor_census_ignores_negative_count_sentinel(runner, mock_reg):
+    """A -1 (HttpVectorClient's failed-per-collection-count sentinel) must
+    read as unknown here too, never as a genuinely thin collection --
+    same normalization as the live search()/query() path."""
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [
+        {"name": "code__mystery", "count": -1},
+        {"name": "code__healthy", "count": 20},
+    ]
+    result = _invoke(
+        runner, mock_reg,
+        extra_patches=[patch("nexus.db.make_t3", return_value=mock_t3)],
+    )
+    assert result.exit_code == 0
+    assert "no collections currently excluded" in result.output
+    assert "code__mystery" not in result.output
+
+
+def test_fanout_floor_census_unavailable_on_t3_failure(runner, mock_reg):
+    result = _invoke(
+        runner, mock_reg,
+        extra_patches=[
+            patch("nexus.db.make_t3", side_effect=RuntimeError("no service")),
+        ],
+    )
+    assert result.exit_code == 0
+    assert "fan-out floor census: UNAVAILABLE" in result.output
 
 
 # ── Missing credentials ─────────────────────────────────────────────────────
@@ -456,6 +530,27 @@ def test_doctor_hooks_exception_does_not_propagate(runner):
     ])
     assert result.exit_code == 0
     assert "git hooks" in result.output
+
+
+def test_doctor_git_hooks_scope_excludes_out_of_scope_repo(runner, tmp_path):
+    """nexus-jds59: ``--git-hooks-scope`` wires through to the CLI. A
+    registered repo outside the given root (the ambient dev-checkout
+    class of repo) is excluded from the walk instead of being reported,
+    while one inside the root is still shown."""
+    reg = MagicMock()
+    in_scope_root = tmp_path / "scope"
+    in_scope_root.mkdir()
+    repo_in_scope = str(in_scope_root / "sandbox-fixture")
+    repo_outside = str(tmp_path / "outside" / "dev-checkout")
+    reg.all.return_value = [repo_in_scope, repo_outside]
+    with tempfile.TemporaryDirectory() as td:
+        result = _invoke(runner, reg, extra_patches=[
+            patch("nexus._git_hooks_meta.effective_hooks_dir",
+                  return_value=Path(td)),
+        ], extra_args=["--git-hooks-scope", str(in_scope_root)])
+    assert result.exit_code == 0, result.output
+    assert repo_in_scope in result.output
+    assert repo_outside not in result.output
 
 
 # ── Index log ───────────────────────────────────────────────────────────────
@@ -1066,6 +1161,69 @@ class TestCheckWalRetention:
         assert "[ ]" in result.output
         assert "UNMEASURED" in result.output
         assert "grants-004-monitor-wal-visibility" in result.output
+
+
+# ── --check-engine-activity (nexus-s71lr) ────────────────────────────────────
+
+
+class TestCheckEngineActivity:
+    """"What is the engine doing right now" -- bead nexus-s71lr deliverable 3.
+    Always exit 0 (informational, same posture as --check-wal-retention); the
+    real GET /v1/status probe is proven at the http_engine_status unit-test
+    layer (tests/test_http_engine_status.py) -- these tests exercise the CLI
+    wiring only, via a monkeypatched fetch_engine_status."""
+
+    def test_flag_dispatches_to_the_check(self, runner: CliRunner, monkeypatch) -> None:
+        calls = {"n": 0}
+
+        def _fake_fetch(**kwargs):
+            calls["n"] += 1
+            return {"embedding_mode": "onnx-local", "local_embed_activity": None}
+
+        monkeypatch.setattr("nexus.db.http_engine_status.fetch_engine_status", _fake_fetch)
+        result = runner.invoke(main, ["doctor", "--check-engine-activity"])
+        assert result.exit_code == 0, result.output
+        assert calls["n"] == 1  # dispatch really reached _run_check_engine_activity
+
+    def test_reachable_engine_renders_the_activity_line(
+        self, runner: CliRunner, monkeypatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "nexus.db.http_engine_status.fetch_engine_status",
+            lambda **kwargs: {
+                "embedding_mode": "onnx-local",
+                "local_embed_activity": {
+                    "active": True, "chunks_done_total": 128, "sub_batches_total": 8,
+                    "last_chunks_per_sec": 7.7, "last_activity_age_ms": 230,
+                    "queue_depth": 0, "thread_width": 4,
+                },
+            },
+        )
+        result = runner.invoke(main, ["doctor", "--check-engine-activity"])
+        assert result.exit_code == 0, result.output
+        assert "Engine activity:" in result.output
+        assert "chunks_done=128" in result.output
+
+    def test_unreachable_engine_renders_unknown_and_exits_zero(
+        self, runner: CliRunner, monkeypatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "nexus.db.http_engine_status.fetch_engine_status", lambda **kwargs: None,
+        )
+        result = runner.invoke(main, ["doctor", "--check-engine-activity"])
+        assert result.exit_code == 0, result.output
+        assert "UNKNOWN" in result.output
+
+    def test_promoted_into_the_default_sweep(self, runner: CliRunner, monkeypatch) -> None:
+        calls = {"n": 0}
+
+        def _fake_fetch(**kwargs):
+            calls["n"] += 1
+            return None
+
+        monkeypatch.setattr("nexus.db.http_engine_status.fetch_engine_status", _fake_fetch)
+        runner.invoke(main, ["doctor"])
+        assert calls["n"] == 1, "the default sweep must run engine-activity too, not only --check-engine-activity"
 
 
 # ── --json on the main sweep (nexus-0vycz) ──────────────────────────────────

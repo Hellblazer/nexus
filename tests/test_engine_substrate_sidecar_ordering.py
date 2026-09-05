@@ -55,7 +55,7 @@ class TestSidecarWrittenBeforeTcpWait:
         real_mkdtemp = tempfile.mkdtemp
         created: list[Path] = []
 
-        def _fake_mkdtemp(*, prefix):
+        def _fake_mkdtemp(*, prefix, dir=None):  # noqa: A002 — mirrors tempfile.mkdtemp, which _initdb_cluster now calls with dir= (nexus-rbc7k)
             d = real_mkdtemp(prefix=prefix, dir=str(tmp_path))
             created.append(Path(d))
             return d
@@ -123,7 +123,7 @@ class TestSidecarWrittenBeforeTcpWait:
         real_mkdtemp = tempfile.mkdtemp
         created: list[Path] = []
 
-        def _fake_mkdtemp(*, prefix):
+        def _fake_mkdtemp(*, prefix, dir=None):  # noqa: A002 — mirrors tempfile.mkdtemp, which _initdb_cluster now calls with dir= (nexus-rbc7k)
             d = real_mkdtemp(prefix=prefix, dir=str(tmp_path))
             created.append(Path(d))
             return d
@@ -203,7 +203,7 @@ class TestClusterDirectoryNeverExistsWithoutASidecar:
     def _common_mocks(tmp_path, monkeypatch, created: list[Path]):
         real_mkdtemp = tempfile.mkdtemp
 
-        def _fake_mkdtemp(*, prefix):
+        def _fake_mkdtemp(*, prefix, dir=None):  # noqa: A002 — mirrors tempfile.mkdtemp, which _initdb_cluster now calls with dir= (nexus-rbc7k)
             d = real_mkdtemp(prefix=prefix, dir=str(tmp_path))
             created.append(Path(d))
             return d

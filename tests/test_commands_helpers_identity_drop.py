@@ -77,6 +77,25 @@ def test_reset_identity_drop_collectors_also_zeroes_the_sweep_collector():
     assert get_superseded_sweep_stats() == {"swept": 0, "skipped": []}
 
 
+def test_reset_identity_drop_collectors_also_zeroes_the_partial_doc_skip_collector():
+    """nexus-gup3b: same shape as the sweep collector above — added to
+    the SAME reset function so a fresh index run does not inherit a
+    prior run's per-doc continuation-flush dedup state (which would
+    wrongly keep a re-indexed document's flushes at debug-only forever,
+    for the life of the long-lived MCP server process)."""
+    from nexus.mcp_infra import (
+        _record_manifest_partial_doc_skip,
+        get_manifest_partial_doc_skip_counts,
+    )
+
+    _record_manifest_partial_doc_skip("1.2.3")
+    assert get_manifest_partial_doc_skip_counts() == {"1.2.3": 1}
+
+    reset_identity_drop_collectors()
+
+    assert get_manifest_partial_doc_skip_counts() == {}
+
+
 def test_emit_identity_drop_summary_silent_and_false_when_all_empty(capsys):
     result = emit_identity_drop_summary(indexed_count=1)
     assert result is False

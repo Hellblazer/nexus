@@ -860,19 +860,36 @@ def _run_trim_telemetry(days: int, dry_run: bool = False) -> None:
     """Delete (or, with ``dry_run=True``, PREVIEW) aged audit-log rows older
     than *days* (RDR-087 P2.4; nexus-7365x).
 
-    Trims both ``search_telemetry`` (RDR-087) and ``hook_failures`` (RDR-164 P0
-    audit-table TTL parity) — the two age-reaped, no-cascade audit tables.
+    Trims ``search_telemetry`` (RDR-087), ``hook_failures`` (RDR-164 P0
+    audit-table TTL parity), ``capability_census``, and ``routing_events``
+    (nexus-gjv9b review fold-in, critique Significant 4 -- the two new
+    engine-half tables need the same retention every other age-reaped,
+    no-cascade audit table already has) — four age-reaped, no-cascade
+    audit tables, one sweep.
 
     ``dry_run=True`` reports what WOULD be removed without deleting anything
     (the search_telemetry trim-preview gap this closes: until now there was
     no way to learn the row count before ``--trim-telemetry`` deleted it —
-    see T2 ``nexus/shakedown-2026-08-11-s11-telemetry``). Both tables are
-    previewed together under one ``--dry-run`` — trimming ``search_telemetry``
-    for real while only previewing ``hook_failures`` (or vice versa) would be
-    a worse footgun than the missing feature, so
-    :meth:`HttpTelemetryStore.trim_hook_failures` grew the identical
-    ``dry_run`` contract alongside :meth:`trim_search_telemetry` rather than
-    leaving it a partial, single-table preview.
+    see T2 ``nexus/shakedown-2026-08-11-s11-telemetry``). All four tables are
+    previewed together under one ``--dry-run`` — trimming one for real while
+    only previewing another would be a worse footgun than the missing
+    feature, so :meth:`HttpTelemetryStore.trim_hook_failures`,
+    :meth:`trim_capability_census`, and :meth:`trim_routing_events` all grew
+    the identical ``dry_run`` contract :meth:`trim_search_telemetry`
+    established, rather than leaving any of them a partial preview.
+
+    *days* is the ``--days`` CLI value verbatim. When it is left at the
+    flag's own default (:data:`_DEFAULT_TELEMETRY_RETENTION_DAYS`),
+    ``capability_census`` and ``routing_events`` each fall back to their
+    OWN named default instead (nexus-gjv9b review fold-in round 3,
+    critique Significant 3) —
+    :data:`_CAPABILITY_CENSUS_RETENTION_DAYS` (currently identical to the
+    shared default: session-scoped, same audit shape/volume as
+    search_telemetry/hook_failures) and
+    :data:`_ROUTING_EVENTS_RETENTION_DAYS` (shorter: a per-permission-
+    decision event log, far higher volume, shorter useful life). An
+    EXPLICIT ``--days N`` always applies literally to all four tables —
+    the split only changes what happens with no override at all.
     """
     # nexus-ingey: this used to construct Telemetry(db_path) unconditionally.
     # On a migrated box that is the FROZEN SQLite — the verb trimmed a file
@@ -934,8 +951,19 @@ def _run_trim_telemetry(days: int, dry_run: bool = False) -> None:
 
     try:
         store = HttpTelemetryStore()
+        # nexus-gjv9b review fold-in round 3, critique Significant 3: an
+        # UNCHANGED caller-supplied `days` (still at the CLI flag's own
+        # default) lets routing_events fall back to its own shorter
+        # default; an EXPLICIT --days override applies literally to every
+        # table, with no per-table magic to second-guess an operator who
+        # named a number.
+        using_default_days = days == _DEFAULT_TELEMETRY_RETENTION_DAYS
+        census_days = _CAPABILITY_CENSUS_RETENTION_DAYS if using_default_days else days
+        routing_events_days = _ROUTING_EVENTS_RETENTION_DAYS if using_default_days else days
         deleted_search = store.trim_search_telemetry(days=days, dry_run=dry_run)
         deleted_hooks = store.trim_hook_failures(days=days, dry_run=dry_run)
+        deleted_census = store.trim_capability_census(days=census_days, dry_run=dry_run)
+        deleted_routing = store.trim_routing_events(days=routing_events_days, dry_run=dry_run)
     except (httpx.HTTPError, RuntimeError) as exc:
         # Same class as _report_aspect_queue_service above (review
         # 2026-07-25): store CONSTRUCTION resolves the endpoint and raises
@@ -955,12 +983,14 @@ def _run_trim_telemetry(days: int, dry_run: bool = False) -> None:
         )
         raise click.exceptions.Exit(2)
     verb = "Would trim" if dry_run else "Trimmed"
-    for table, deleted in (
-        ("search_telemetry", deleted_search),
-        ("hook_failures", deleted_hooks),
+    for table, deleted, table_days in (
+        ("search_telemetry", deleted_search, days),
+        ("hook_failures", deleted_hooks, days),
+        ("capability_census", deleted_census, census_days),
+        ("routing_events", deleted_routing, routing_events_days),
     ):
         noun = "row" if deleted == 1 else "rows"
-        click.echo(f"{verb} {deleted} {table} {noun} older than {days} days.")
+        click.echo(f"{verb} {deleted} {table} {noun} older than {table_days} days.")
 
 
 # ── --check-aspect-queue (nexus-1pfq) ────────────────────────────────────────
@@ -1058,6 +1088,362 @@ def _run_check_aspect_queue() -> None:
     with the =sqlite opt-out (RDR-158 P3, nexus-7bomn).
     """
     _report_aspect_queue_service()
+
+
+# ── --check-index-failures (nexus-nukn3) ─────────────────────────────────────
+
+#: Shared default retention/staleness window (days), one named constant
+#: (fold-in, critic Significant finding T2 critique-nexus-nukn3-37262c4a1
+#: [24596]: this literal and --trim-telemetry's --days default were two
+#: independent `30`s that could silently drift apart). Both
+#: :data:`_INDEX_FAILURES_LATEST_RUN_STALENESS_DAYS` below and the
+#: ``--days`` click option on ``doctor_cmd`` derive from this ONE source.
+_DEFAULT_TELEMETRY_RETENTION_DAYS: int = 30
+
+#: capability_census's OWN default retention (nexus-gjv9b review fold-in
+#: round 3, critique Significant 3), named separately from
+#: :data:`_DEFAULT_TELEMETRY_RETENTION_DAYS` even though it currently
+#: carries the identical value: one row per SESSION (upsert, not
+#: append-only), the same audit-relevant shape and volume as
+#: search_telemetry/hook_failures, so it keeps their shared 30-day
+#: window rather than routing_events' shorter one below.
+_CAPABILITY_CENSUS_RETENTION_DAYS: int = _DEFAULT_TELEMETRY_RETENTION_DAYS
+
+#: routing_events' OWN default retention (nexus-gjv9b review fold-in
+#: round 3, critique Significant 3): a per-permission-decision EVENT LOG
+#: (one row per routing-hook fire, not per session) is far higher volume
+#: than the other three audit tables and has a much shorter useful life
+#: -- the 30-day soak-review window this hook framework was built for
+#: (RDR-121 Phase 3) reads recent history, not a month-old trickle.
+#: ``--trim-telemetry``'s single ``--days`` flag still applies this value
+#: literally when the caller passes it EXPLICITLY (an explicit override
+#: always wins, on every table, with no per-table magic); this shorter
+#: default only takes effect when the caller leaves ``--days`` at its own
+#: default (see :func:`_run_trim_telemetry`).
+_ROUTING_EVENTS_RETENTION_DAYS: int = 7
+
+#: A recorded failure older than this many days no longer gates the default
+#: sweep (nexus-nukn3 fold-in, critic Critical finding T2
+#: critique-nexus-nukn3-410720f6a [24569]). The ORIGINAL cut gated on the
+#: ALL-TIME cumulative total: the first permanent extraction failure in a
+#: tenant's history (an encrypted PDF, a corrupt fixture kept on purpose)
+#: turned the default `nx doctor` sweep into an unfixable FAIL forever --
+#: the mirror image of the nexus-fylxo trap this check exists to avoid (a
+#: check that can never return to green is operationally the same failure
+#: as one nobody reads). Scoping the gate to the LATEST UNACKNOWLEDGED run,
+#: and further exempting it once it is this stale, means the check
+#: self-heals over time even with no operator action.
+#:
+#: SECOND fold-in (critic Critical finding T2
+#: critique-nexus-nukn3-37262c4a1 [24596]): staleness alone does not
+#: self-heal a corpus re-indexed ON A CADENCE shorter than this window --
+#: every run mints a fresh ``run_id`` for the identical recurring failure,
+#: so the "latest run" is always freshly-timestamped and the gate never
+#: ages out. ``nx index failures --acknowledge`` is the real remedy for
+#: that case: a durable adjudication (a `kind='acknowledgment'` row in the
+#: SAME table) that the query layer treats as covering every future
+#: recurrence of that exact (file, error_class) -- see
+#: ``HttpTelemetryStore.list_index_failures``'s ``unacknowledged_only``
+#: param and ``TelemetryRepository.getIndexFailures``'s Java-side
+#: implementation. This constant now only matters for the residual case of
+#: an UNACKNOWLEDGED failure that simply stopped recurring (the file was
+#: fixed or removed, but the operator never ran `nx index failures
+#: --clear`) -- `--clear` is still the IMMEDIATE remedy for that case.
+_INDEX_FAILURES_LATEST_RUN_STALENESS_DAYS: int = _DEFAULT_TELEMETRY_RETENTION_DAYS
+
+
+def _index_failure_is_stale(occurred_at_iso: str, staleness_days: int) -> bool:
+    """True when *occurred_at_iso* is more than *staleness_days* days old.
+
+    Unparseable or blank input is treated as NOT stale (never exempts a
+    real failure from gating because of a parsing surprise -- the check's
+    fail-first posture takes priority over a graceful degrade here).
+    """
+    if not occurred_at_iso:
+        return False
+    from datetime import datetime, timedelta, timezone  # noqa: PLC0415 — deferred, this branch only
+
+    try:
+        ts = datetime.fromisoformat(occurred_at_iso.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=staleness_days)
+    return ts < cutoff
+
+
+def _report_index_failures_service() -> None:
+    """Report the durable index-failures backlog (nexus-nukn3).
+
+    A repo-index run that skips a file it could not extract now writes a
+    durable row here instead of only a log line and an in-memory counter
+    that die with the process — see ``nexus.indexer._run_index``. Without
+    a reader, that queue accumulates silently, exactly the trap named on
+    this bead: nexus-fylxo found ``--check-aspect-queue`` printing a
+    failed-row backlog without ever raising or emitting a ✗/FAIL: marker.
+
+    FAIL-FIRST, but scoped TWICE over (two fold-in rounds, both Critical
+    findings — see :data:`_INDEX_FAILURES_LATEST_RUN_STALENESS_DAYS`'s own
+    docstring for the full rationale of each):
+
+    1. The gate fires on the LATEST run that recorded any UNACKNOWLEDGED
+       failure — an operator's durable ``nx index failures --acknowledge``
+       adjudication is excluded from the gate (and from ``rows``/``total``
+       when queried with ``unacknowledged_only``) so a permanently
+       unextractable file re-indexed on a cadence does not gate forever
+       just because every run mints a fresh ``run_id`` for it.
+    2. That latest-unacknowledged run must itself be recent (within
+       :data:`_INDEX_FAILURES_LATEST_RUN_STALENESS_DAYS`) — a genuinely
+       stale, never-acknowledged failure self-heals out of the gate over
+       time even with no operator action.
+
+    The ALL-TIME count across every run (acknowledged or not) is always
+    shown as information, never as the gating number. A transport error is
+    reported as UNKNOWN (never a false "0 failures") and does not raise —
+    matching ``_report_aspect_queue_service``'s own posture for the
+    identical failure mode.
+    """
+    import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    try:
+        store = HttpTelemetryStore()
+        all_time = store.list_index_failures(limit=1)
+    except (httpx.HTTPError, RuntimeError) as exc:
+        # RuntimeError: store construction resolves the service endpoint and
+        # raises ServiceEndpointUnresolvableError (a RuntimeError, not an
+        # httpx error) when it cannot — same class as
+        # _report_aspect_queue_service's identical try/except.
+        click.echo(
+            f"index_failures: service backend unreachable ({exc}). "
+            "Backlog UNKNOWN — not reporting a count.",
+            err=True,
+        )
+        return
+
+    total_all_time = all_time["total"]
+    click.echo(f"index_failures: {total_all_time} recorded failure(s) all-time (service backend)")
+
+    # Informational footnote only (round-4 fold-in, critique [24621] item
+    # 1; round-5 fold-in, code-review [24635] item 3): name the ACTIVE
+    # acknowledgment count and that it can be listed. Deliberately
+    # UNCONDITIONAL -- run regardless of whether the tenant currently has
+    # any recorded failure at all, and regardless of whether any CURRENT
+    # failure happens to be covered by one. A pre-emptive acknowledgment
+    # (no failure has ever been recorded for that file/class -- an
+    # operator acknowledging ahead of a known-bad corpus) has
+    # total_all_time == 0 and would never reach the old placement inside
+    # the post-return branch below; a surviving acknowledgment (the
+    # failure it once covered has since aged out or been cleared, but the
+    # ack row itself is still live) has total_all_time == total_unacknowledged
+    # (nothing CURRENT counts as "some are acknowledged") and would also
+    # have been skipped. Both must still be named here. A failure in this
+    # lookup must never turn the ALL-TIME summary above into a hard
+    # failure — same non-fatal posture as the outer store-construction
+    # try/except.
+    try:
+        acks = store.list_index_failure_acknowledgments()
+    except (httpx.HTTPError, RuntimeError):
+        pass
+    else:
+        ack_total = acks["total"]
+        if ack_total:
+            click.echo(
+                f"{ack_total} active acknowledgment(s) — see: "
+                "nx index failures --acks"
+            )
+
+    if not total_all_time:
+        return
+
+    # The gate's own input: the latest run among UNACKNOWLEDGED failures
+    # only — an acknowledged file's recurring failure must never surface
+    # here (fold-in round 2, critic Critical finding).
+    newest_unacked = store.list_index_failures(limit=1, unacknowledged_only=True)
+    total_unacknowledged = newest_unacked["total"]
+    if total_all_time > total_unacknowledged:
+        click.echo(
+            f"({total_all_time - total_unacknowledged} of those are "
+            "acknowledged — see: nx index failures)"
+        )
+    rows = newest_unacked["rows"]
+    if not rows:
+        return
+
+    latest_row = rows[0]
+    latest_run_id = str(latest_row.get("run_id") or "")
+    latest_occurred_at = str(latest_row.get("occurred_at") or "")
+    if not latest_run_id or _index_failure_is_stale(
+        latest_occurred_at, _INDEX_FAILURES_LATEST_RUN_STALENESS_DAYS,
+    ):
+        click.echo(
+            f"\nThe most recent recorded (unacknowledged) failure is from "
+            f"{latest_occurred_at or 'an unknown time'} — older than "
+            f"{_INDEX_FAILURES_LATEST_RUN_STALENESS_DAYS} days, so it no "
+            "longer gates the sweep. See it (or the rest of the backlog) "
+            "with: nx index failures — or clear adjudicated rows with: "
+            "nx index failures --clear"
+        )
+        return
+
+    # Re-query scoped to exactly the latest run — `newest_unacked["total"]`
+    # above is the ALL-TIME unacknowledged count, not this run's; using it
+    # here would resurrect the original bug under a different variable
+    # name.
+    latest = store.list_index_failures(
+        run_id=latest_run_id, limit=20, unacknowledged_only=True,
+    )
+    latest_total = latest["total"]
+    if not latest_total:
+        # Defensive only — latest_row itself proves at least 1 unacknowledged
+        # row exists for latest_run_id; a mismatch here would mean the two
+        # queries disagree, not that the backlog is actually empty.
+        return
+
+    click.echo(f"\n{latest_total} unacknowledged failure(s) in the latest run ({latest_run_id}):")
+    for row in latest["rows"][:20]:
+        click.echo(
+            f"  {row.get('file_path', '?')} :: {row.get('error_class', '?')}"
+        )
+    if total_unacknowledged > latest_total:
+        click.echo(
+            f"\n({total_unacknowledged - latest_total} more unacknowledged "
+            "from older run(s) -- see: nx index failures)"
+        )
+    click.echo(f"\nSee them all with: nx index failures --run-id {latest_run_id}")
+    click.echo(
+        f"Clear this run's rows with: nx index failures --clear "
+        f"--run-id {latest_run_id}"
+    )
+    click.echo(
+        "Acknowledge a PERMANENTLY unextractable file (survives future "
+        "re-indexes minting a fresh run_id) with: nx index failures "
+        "--acknowledge --file <path> [--reason <text>]"
+    )
+    click.echo(
+        f"\n✗ FAIL: {latest_total} unacknowledged failed index-file(s) in "
+        "the latest run.",
+        err=True,
+    )
+    raise click.exceptions.Exit(1)
+
+
+def _run_check_index_failures() -> None:
+    """Report the durable index-failures backlog. See
+    :func:`_report_index_failures_service` for the fail-loud contract."""
+    _report_index_failures_service()
+
+
+# ── --check-engine-activity (nexus-s71lr) ────────────────────────────────────
+
+
+def _report_engine_activity() -> None:
+    """"What is the engine doing right now" — bead nexus-s71lr deliverable 3.
+
+    One unauthenticated GET (``fetch_engine_status``), always exit 0 —
+    informational only, same posture as ``--check-wal-retention``: there is
+    no pass/fail state here, only "here is the live counter reading, or
+    UNKNOWN if the endpoint could not be reached" (a pre-nexus-s71lr engine,
+    or the service down, both report cleanly as UNKNOWN rather than a
+    traceback or a false "everything is fine").
+    """
+    from nexus.db.http_engine_status import fetch_engine_status, format_engine_activity_line  # noqa: PLC0415 — deferred to keep CLI startup fast
+    status = fetch_engine_status()
+    click.echo(format_engine_activity_line(status))
+
+
+def _run_check_engine_activity() -> None:
+    """Report the engine's live embed-activity counters from GET /v1/status.
+
+    Bead nexus-s71lr: the client-side half of "is the engine still
+    embedding, or has it hung" — the SAME question the engine's own
+    rate-limited progress log line answers, without tailing logs.
+    """
+    _report_engine_activity()
+
+
+# ── --check-fanout-floor (nexus-rbhci) ───────────────────────────────────────
+
+
+def _report_fanout_floor_census() -> None:
+    """List collections currently excluded from the default MCP
+    search()/query() corpus fan-out by the sibling-relative floor
+    (``nexus.mcp.core._FANOUT_MIN_COLLECTION_CHUNK_COUNT``).
+
+    Review finding (code-review-nexus-rbhci-516701aa3): an excluded
+    collection stops contributing to ``search_telemetry``'s zero-hit-rate
+    figure the moment it drops out of the default fan-out, since
+    ``search_cross_corpus`` only measures the collections it is actually
+    asked to search. A genuinely broken/partial index — the bead's own
+    original hypothesis about ``code__1-4`` before it was ruled out as
+    legitimate small-corpus noise — would go quiet rather than visibly
+    zero-hit if this ever recurs. This check keeps that blind spot
+    visible: it names, on every ``nx doctor`` run, exactly which
+    collections are currently sitting below the floor beside a healthy
+    sibling, so "why did this collection's zero-hit rate stop moving" has
+    an answer without reading debug logs.
+
+    Read-only and cheap: ONE ``list_collections()`` call (this doctor
+    process's own cache, cold on every invocation — the same cost `nx
+    collection list` already pays), then the identical pure grouping rule
+    ``_resolve_corpus_target`` uses (``_fanout_exclusions_for_group``,
+    imported here so the two can never drift apart). No per-collection
+    round trip, no write, no effect on ``nx doctor``'s exit code —
+    informational only, same posture as ``--check-engine-activity``.
+    """
+    from nexus.mcp.core import _fanout_exclusions_for_group  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+
+    try:
+        from nexus.db import make_t3  # noqa: PLC0415 - deferred: heavy import, keep CLI startup fast
+
+        rows = make_t3().list_collections()
+    except Exception as exc:  # noqa: BLE001 — informational check; a T3 failure here is reported, not raised
+        click.echo(f"  fan-out floor census: UNAVAILABLE ({type(exc).__name__}: {exc})")
+        return
+
+    names = [row["name"] for row in rows]
+    counts: dict[str, int] = {}
+    for row in rows:
+        raw = row.get("count")
+        if raw is None:
+            continue
+        count = int(raw)
+        if count < 0:
+            continue  # failed-count sentinel; unknown, not a real size
+        counts[row["name"]] = count
+
+    groups: dict[str, list[str]] = {}
+    for name in names:
+        prefix = name.split("__", 1)[0]
+        if prefix:
+            groups.setdefault(prefix, []).append(name)
+
+    census: dict[str, list[str]] = {}
+    for prefix, members in groups.items():
+        excluded = _fanout_exclusions_for_group(members, counts)
+        if excluded:
+            census[prefix] = sorted(excluded)
+
+    if not census:
+        click.echo("  fan-out floor: no collections currently excluded")
+        return
+    total_excluded = sum(len(v) for v in census.values())
+    click.echo(
+        f"  fan-out floor: {total_excluded} collection(s) currently excluded "
+        f"from the default corpus fan-out (below floor beside a healthy "
+        f"sibling; zero-hit telemetry is NOT accumulating for these):"
+    )
+    for prefix, excluded_names in sorted(census.items()):
+        for name in excluded_names:
+            click.echo(f"    {prefix}: {name} ({counts.get(name)} chunks)")
+
+
+def _run_check_fanout_floor() -> None:
+    """Census of collections currently excluded from the default corpus
+    fan-out by the sibling-relative floor (nexus-rbhci)."""
+    _report_fanout_floor_census()
 
 
 # ── --check-tier-discipline (nexus-a52i) ─────────────────────────────────────
@@ -1466,6 +1852,32 @@ def _run_check_mineru() -> None:
 #                                          | this is informational" by its
 #                                          | own docstring -- no failure
 #                                          | state to surface.
+#   --check-engine-activity       | YES       | ONE unauthenticated GET
+#                                          | (GET /v1/status), same cost
+#                                          | class as --check-aspect-queue;
+#                                          | always exit 0 (informational,
+#                                          | like --check-wal-retention) --
+#                                          | "what is the engine doing right
+#                                          | now" (nexus-s71lr).
+#   --check-index-failures        | YES       | ONE HTTP GET, real backlog
+#                                          | signal nothing else watches
+#                                          | (nx index repo's durable
+#                                          | per-file failure record,
+#                                          | nexus-nukn3). FAIL-FIRST by
+#                                          | design (the nexus-fylxo trap
+#                                          | this bead names explicitly):
+#                                          | any nonzero backlog raises
+#                                          | Exit(1) with a ✗ FAIL: marker.
+#   (no --check-fanout-floor flag)| YES       | ONE list_collections() call
+#                                          | (no per-collection round trip);
+#                                          | always exit 0 (informational,
+#                                          | like --check-wal-retention) --
+#                                          | names collections currently
+#                                          | excluded from the default MCP
+#                                          | search()/query() corpus
+#                                          | fan-out (nexus-rbhci), whose
+#                                          | zero-hit telemetry has gone
+#                                          | quiet as a result.
 #
 # Non-gating by design: a supplementary check's failure is printed, never
 # folded into the default sweep's exit code. Two of the five (schema-
@@ -1483,7 +1895,8 @@ def _run_check_mineru() -> None:
 #: ``_run_check_taxonomy`` / ``_run_check_t1`` are defined further down
 #: this file, after ``doctor_cmd``).
 _SUPPLEMENTARY_CHECK_NAMES: tuple[str, ...] = (
-    "resources", "plan-library", "taxonomy", "aspect-queue", "t1",
+    "resources", "plan-library", "taxonomy", "aspect-queue", "t1", "engine-activity",
+    "index-failures", "fanout-floor",
 )
 
 #: The remaining opt-in-only flags -- named in the summary line at the end
@@ -1519,6 +1932,9 @@ def _run_supplementary_checks() -> None:
         "taxonomy": _run_check_taxonomy,
         "aspect-queue": _run_check_aspect_queue,
         "t1": _run_check_t1,
+        "engine-activity": _run_check_engine_activity,
+        "index-failures": _run_check_index_failures,
+        "fanout-floor": _run_check_fanout_floor,
     }
     click.echo(
         "\nSupplementary checks (cheap/read-only subset of the opt-in "
@@ -1561,7 +1977,8 @@ def _run_supplementary_checks() -> None:
     "--fix",
     is_flag=True,
     default=False,
-    help="Apply HNSW ef tuning to all local collections (local mode only).",
+    help="Reclaim catalog garbage (orphaned links, tombstones past 1 day); "
+         "then HNSW ef tuning on local collections (local mode only).",
 )
 @click.option(
     "--fix-paths",
@@ -1778,12 +2195,47 @@ def _run_supplementary_checks() -> None:
          "nexus-bb5c8.",
 )
 @click.option(
+    "--check-engine-activity",
+    "check_engine_activity",
+    is_flag=True,
+    default=False,
+    help="Report the engine's live embed-activity counters (GET /v1/status): "
+         "is it actively embedding right now, chunks/s, queue depth, thread "
+         "width. Also part of the default sweep. Always exit 0 — "
+         "informational, UNKNOWN (never a traceback) when the endpoint is "
+         "unreachable or predates the route. nexus-s71lr.",
+)
+@click.option(
+    "--check-index-failures",
+    "check_index_failures",
+    is_flag=True,
+    default=False,
+    help="Report the durable index-failures backlog (nx index repo's "
+         "per-file failure record, nexus-nukn3). Also part of the default "
+         "sweep. Exits 1 with a ✗ FAIL: marker on any nonzero backlog; "
+         "UNKNOWN (never a traceback) when the service is unreachable.",
+)
+@click.option(
     "--days",
     "days",
-    default=30,
+    default=_DEFAULT_TELEMETRY_RETENTION_DAYS,
     type=click.IntRange(min=1),
     show_default=True,
     help="Retention window for --trim-telemetry (days; minimum 1).",
+)
+@click.option(
+    "--git-hooks-scope",
+    "git_hooks_scope",
+    default=None,
+    type=click.Path(),
+    help="Restrict the git-hooks stanza-drift check (part of the default "
+         "sweep) to repos registered at or under this root; repos "
+         "elsewhere are excluded from the walk instead of being reported. "
+         "The registered-repo catalog is shared machine-wide, not scoped "
+         "to $HOME, so a bare sweep run from an isolated automation "
+         "sandbox otherwise also sees (and can be reddened by) every "
+         "other repo ever indexed on the same machine. Default: unscoped, "
+         "walks every registered repo. nexus-jds59.",
 )
 def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                fix_paths: bool, dry_run: bool, check_schema: bool,
@@ -1798,10 +2250,13 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_aspect_queue: bool,
                check_t1: bool,
                check_wal_retention: bool,
+               check_engine_activity: bool,
+               check_index_failures: bool,
                check_tier_discipline: bool,
                check_storage_boundary: bool,
                fail_on_violation: bool,
-               phase: str | None) -> None:
+               phase: str | None,
+               git_hooks_scope: str | None) -> None:
     """Verify that all required services and credentials are available."""
     if json_out:
         # nexus-0vycz: --json is honored by the main sweep (no mode flag)
@@ -1821,6 +2276,8 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             "--check-aspect-queue": check_aspect_queue,
             "--check-t1": check_t1,
             "--check-wal-retention": check_wal_retention,
+            "--check-engine-activity": check_engine_activity,
+            "--check-index-failures": check_index_failures,
             "--fix": fix,
             "--fix-paths": fix_paths,
             "--clean-checkpoints": clean_checkpoints,
@@ -1896,11 +2353,36 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         _run_check_wal_retention()
         return
 
+    if check_engine_activity:
+        _run_check_engine_activity()
+        return
+
+    if check_index_failures:
+        _run_check_index_failures()
+        return
+
     if check_tier_discipline:
         _run_check_tier_discipline()
         return
 
     if fix:
+        # The garbage sweep's reclaim half (nexus.garbage, Sam 2026-09-05):
+        # the main sweep counts catalog litter on every run; this is the
+        # one command that removes it. Fails loud on an engine error.
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.commands.catalog import _get_catalog_writer  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.garbage import TRASH_MAX_AGE_DAYS, reclaim_catalog_garbage  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        writer = _get_catalog_writer()
+        try:
+            # The writer refuses reads; the read handle serves orphaned_links.
+            reclaimed = reclaim_catalog_garbage(writer, reader=make_catalog_reader())
+        finally:
+            writer.close()
+        click.echo(
+            f"Catalog garbage reclaimed: {reclaimed.links_deleted} orphaned link(s), "
+            f"{reclaimed.trash_documents} tombstoned document(s), "
+            f"{reclaimed.stranded_chunks} stranded chunk(s) (older than {TRASH_MAX_AGE_DAYS} day)."
+        )
         from nexus.config import is_local_mode  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.db import make_t3  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.db.t3 import apply_hnsw_ef  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
@@ -2049,7 +2531,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
     # ── Health check path — delegates to nexus.health ─────────────────────────
     from nexus.health import run_health_checks, format_health_for_cli, format_health_for_json  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-    results, is_local = run_health_checks()
+    results, is_local = run_health_checks(git_hooks_scope=git_hooks_scope)
     output, failed = format_health_for_cli(results, local_mode=is_local)
     if json_out:
         # nexus-0vycz: machine-parseable JSON on stdout only -- no human

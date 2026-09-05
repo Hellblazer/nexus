@@ -1359,6 +1359,407 @@ public final class TelemetryRepository {
         });
     }
 
+    // ── index_failures ─────────────────────────────────────────────────────────
+    //
+    // nexus-nukn3: durable per-file index-failure record for the repo-index
+    // path (Sam's design — enqueue the failure and move on, rather than a log
+    // line + an in-memory counter that die with the process). Event-log shape
+    // (mirrors hook_failures), not aspect_extraction_queue's work-queue shape
+    // — nothing ever claims or retries a row here (no retry worker in scope).
+
+    /**
+     * Append one index failure (live write path — {@code nexus.indexer._run_index}'s
+     * end-of-run batch write, one row per skipped file).
+     */
+    public void recordIndexFailure(String tenant,
+                                   String runId,
+                                   String filePath,
+                                   String errorClass,
+                                   String error,
+                                   String occurredAtIso) {
+        tenantScope.withTenant(tenant, ctx -> {
+            OffsetDateTime occurredAt = occurredAtIso != null && !occurredAtIso.isBlank()
+                ? parseTs(occurredAtIso) : OffsetDateTime.now(ZoneOffset.UTC);
+            ctx.insertInto(INDEX_FAILURES)
+                .set(INDEX_FAILURES.TENANT_ID, tenant)
+                .set(INDEX_FAILURES.RUN_ID, str(runId))
+                .set(INDEX_FAILURES.FILE_PATH, filePath)
+                .set(INDEX_FAILURES.ERROR_CLASS, str(errorClass))
+                .set(INDEX_FAILURES.ERROR, str(error))
+                .set(INDEX_FAILURES.OCCURRED_AT, occurredAt)
+                .execute();
+            return null;
+        });
+    }
+
+    /**
+     * Append N index failures in ONE transaction (mirrors {@link #logSearchBatch}'s
+     * shape) — the client's end-of-run write for every file skipped this run.
+     *
+     * <p>Row tuple layout: {@code (run_id, file_path, error_class, error, occurred_at_iso)}.
+     * Returns the number of rows inserted.
+     */
+    public int recordIndexFailuresBatch(String tenant, List<Object[]> rows) {
+        if (rows.isEmpty()) return 0;
+        // Code-review minor (nexus-nukn3 fold-in): a short row (fewer than the
+        // 5 positional fields below) previously threw ArrayIndexOutOfBoundsException
+        // from inside the transaction — an unhandled exception the outer handler's
+        // catch-all turns into a 500 rather than a clean 400. Reject up front,
+        // mirroring the other handlers' IllegalArgumentException -> 400 convention.
+        for (var r : rows) {
+            if (r.length < 5) {
+                throw new IllegalArgumentException(
+                    "index_failures row must have 5 fields (run_id, file_path, "
+                    + "error_class, error, occurred_at); got " + r.length);
+            }
+        }
+        return tenantScope.withTenant(tenant, ctx -> {
+            int count = 0;
+            for (var r : rows) {
+                String runId       = (String) r[0];
+                String filePath    = (String) r[1];
+                String errorClass  = (String) r[2];
+                String error       = (String) r[3];
+                String occurredAtIso = (String) r[4];
+                OffsetDateTime occurredAt = occurredAtIso != null && !occurredAtIso.isBlank()
+                    ? parseTs(occurredAtIso) : OffsetDateTime.now(ZoneOffset.UTC);
+                count += ctx.insertInto(INDEX_FAILURES)
+                    .set(INDEX_FAILURES.TENANT_ID, tenant)
+                    .set(INDEX_FAILURES.RUN_ID, str(runId))
+                    .set(INDEX_FAILURES.FILE_PATH, filePath)
+                    .set(INDEX_FAILURES.ERROR_CLASS, str(errorClass))
+                    .set(INDEX_FAILURES.ERROR, str(error))
+                    .set(INDEX_FAILURES.OCCURRED_AT, occurredAt)
+                    .execute();
+            }
+            return count;
+        });
+    }
+
+    /**
+     * Correlated EXISTS: true when a {@code kind='acknowledgment'} row covers
+     * the CALLER's {@code (error_class, file_path)} — an exact file+class
+     * match (file-scoped ack), or a blank-{@code file_path} acknowledgment
+     * for that {@code error_class} (error-class-scoped, corpus-wide ack).
+     * References the OUTER (unaliased) {@code INDEX_FAILURES} table's columns,
+     * so this may only be used inside a query whose FROM is the unaliased
+     * table — every {@code getIndexFailures} caller satisfies that.
+     *
+     * <p>One shared definition of "covered" for both the per-row
+     * {@code acknowledged} flag and the {@code unacknowledgedOnly} filter —
+     * nexus-nukn3 fold-in (critic Critical finding, T2
+     * critique-nexus-nukn3-37262c4a1 [24596]): the durable-adjudication
+     * fix. An acknowledgment row's own {@code run_id} is always {@code ''}
+     * (see {@link #recordIndexFailureAcknowledgment}), so it never appears
+     * in a {@code kind='failure'}-filtered result itself.
+     */
+    private static org.jooq.Condition indexFailureIsAcknowledged() {
+        var ack = INDEX_FAILURES.as("ifa");
+        return exists(
+            selectOne()
+                .from(ack)
+                .where(ack.KIND.eq("acknowledgment"))
+                .and(ack.ERROR_CLASS.eq(INDEX_FAILURES.ERROR_CLASS))
+                .and(ack.FILE_PATH.eq("").or(ack.FILE_PATH.eq(INDEX_FAILURES.FILE_PATH)))
+        );
+    }
+
+    /**
+     * List index failures, newest first (read surface — {@code nx index failures},
+     * {@code nx doctor --check-index-failures}).
+     *
+     * <p>{@code runId} (blank = all runs) and {@code days} (0 = unbounded) narrow
+     * the predicate; {@code limit} caps the returned page. {@code total} is
+     * computed over the WHOLE predicate, independent of {@code limit} — same
+     * non-vacuity shape as {@link #getHookFailures}: a caller reading a count
+     * (doctor's backlog check) must never under-report because the backlog
+     * exceeded one page.
+     *
+     * <p>Only {@code kind='failure'} rows are ever returned here (an
+     * acknowledgment row is a durable marker, not a failure to list); each
+     * returned row carries an {@code acknowledged} boolean (see
+     * {@link #indexFailureIsAcknowledged}) — the fold-in's "ack shown in the
+     * list" requirement. {@code unacknowledgedOnly=true} additionally
+     * excludes covered rows from both {@code rows} and {@code total} — the
+     * DOCTOR GATE's input only, so a permanently acknowledged file never
+     * re-triggers it once adjudicated.
+     *
+     * <p><b>Deliberately NOT the deyd5 systemic-skip floor's input</b>
+     * (code-review finding, T2 code-review-nexus-nukn3-4d5520bf4 [24624]:
+     * an earlier version of this javadoc claimed otherwise). {@code
+     * nexus.indexer._run_index} calls {@code list_index_failures} for that
+     * floor WITHOUT {@code unacknowledged_only} (see its own call site) —
+     * correctly: acknowledging a failure records that an operator has
+     * adjudicated it, not that the file actually indexed. The
+     * systemic-skip floor measures "how much of THIS run's corpus failed
+     * to index", which an acknowledgment does not change; only the doctor
+     * GATE's fail/pass verdict should treat an acknowledged recurrence as
+     * "known", never the underlying skip-ratio math.
+     */
+    public Map<String, Object> getIndexFailures(String tenant,
+                                                String runId,
+                                                int days,
+                                                int limit,
+                                                boolean unacknowledgedOnly) {
+        return getIndexFailures(tenant, runId, days, limit, unacknowledgedOnly, "");
+    }
+
+    /**
+     * As above, plus an exact {@code filePath} filter (code-review finding,
+     * T2 code-review-nexus-nukn3-4d5520bf4 [24624]: {@code nx index
+     * failures --acknowledge --file}'s error_class auto-resolve was paging
+     * 1000 rows tenant-wide and filtering client-side; a server-side exact
+     * filter is the direct fix). Blank {@code filePath} means unfiltered
+     * (matches the 5-arg overload above exactly).
+     */
+    public Map<String, Object> getIndexFailures(String tenant,
+                                                String runId,
+                                                int days,
+                                                int limit,
+                                                boolean unacknowledgedOnly,
+                                                String filePath) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var cond = INDEX_FAILURES.KIND.eq("failure");
+            if (runId != null && !runId.isBlank()) {
+                cond = cond.and(INDEX_FAILURES.RUN_ID.eq(runId));
+            }
+            if (days > 0) {
+                OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusDays(days);
+                cond = cond.and(INDEX_FAILURES.OCCURRED_AT.ge(cutoff));
+            }
+            if (filePath != null && !filePath.isBlank()) {
+                cond = cond.and(INDEX_FAILURES.FILE_PATH.eq(filePath));
+            }
+            if (unacknowledgedOnly) {
+                cond = cond.and(indexFailureIsAcknowledged().not());
+            }
+
+            var agg = ctx.select(count(), min(INDEX_FAILURES.OCCURRED_AT))
+                .from(INDEX_FAILURES)
+                .where(cond)
+                .fetchOne();
+            int total = agg != null && agg.value1() != null ? agg.value1() : 0;
+            OffsetDateTime oldest = agg != null ? agg.value2() : null;
+
+            List<Map<String, Object>> resultRows = ctx.select(
+                INDEX_FAILURES.ID,
+                INDEX_FAILURES.RUN_ID,
+                INDEX_FAILURES.FILE_PATH,
+                INDEX_FAILURES.ERROR_CLASS,
+                INDEX_FAILURES.ERROR,
+                INDEX_FAILURES.OCCURRED_AT,
+                when(indexFailureIsAcknowledged(), inline(true)).otherwise(inline(false)))
+                .from(INDEX_FAILURES)
+                .where(cond)
+                .orderBy(INDEX_FAILURES.OCCURRED_AT.desc(), INDEX_FAILURES.ID.desc())
+                .limit(Math.max(limit, 0))
+                .fetch()
+                .map(r -> {
+                    Map<String, Object> m = new java.util.LinkedHashMap<>();
+                    m.put("id",          r.value1());
+                    m.put("run_id",      str(r.value2()));
+                    m.put("file_path",   str(r.value3()));
+                    m.put("error_class", str(r.value4()));
+                    m.put("error",       str(r.value5()));
+                    m.put("occurred_at", utcIso(r.value6()));
+                    m.put("acknowledged", Boolean.TRUE.equals(r.value7()));
+                    return m;
+                });
+
+            Map<String, Object> out = new java.util.LinkedHashMap<>();
+            out.put("rows", resultRows);
+            out.put("total", total);
+            out.put("oldest_occurred_at", oldest != null ? utcIso(oldest) : "");
+            return out;
+        });
+    }
+
+    /**
+     * Record a durable acknowledgment (nexus-nukn3 fold-in, critic Critical
+     * finding: the latest-run-within-window doctor gate never self-heals for
+     * a permanently unextractable file re-indexed on a cadence, since every
+     * run mints a fresh {@code run_id} for the same failure). Writes a
+     * {@code kind='acknowledgment'} row into the SAME table — {@code run_id}
+     * is always {@code ''} (an acknowledgment is not tied to any one run),
+     * {@code occurred_at} is stamped {@code now()}.
+     *
+     * @param filePath   file-scoped when non-blank (only that exact
+     *                   {@code (file_path, error_class)} pair is covered
+     *                   going forward); {@code ''} for an error-class-scoped
+     *                   acknowledgment covering ANY file with {@code errorClass}.
+     * @param errorClass REQUIRED, non-blank — an acknowledgment with no
+     *                   error_class would cover every failure for its file
+     *                   (or, blank file_path too, every failure in the
+     *                   tenant), which is never the intended scope.
+     */
+    public void recordIndexFailureAcknowledgment(String tenant,
+                                                 String filePath,
+                                                 String errorClass,
+                                                 String reason) {
+        if (errorClass == null || errorClass.isBlank()) {
+            throw new IllegalArgumentException(
+                "index_failures acknowledgment requires a non-blank error_class");
+        }
+        tenantScope.withTenant(tenant, ctx -> {
+            ctx.insertInto(INDEX_FAILURES)
+                .set(INDEX_FAILURES.TENANT_ID, tenant)
+                .set(INDEX_FAILURES.RUN_ID, "")
+                .set(INDEX_FAILURES.FILE_PATH, str(filePath))
+                .set(INDEX_FAILURES.ERROR_CLASS, errorClass)
+                .set(INDEX_FAILURES.ERROR, str(reason))
+                .set(INDEX_FAILURES.OCCURRED_AT, OffsetDateTime.now(ZoneOffset.UTC))
+                .set(INDEX_FAILURES.KIND, "acknowledgment")
+                .execute();
+            return null;
+        });
+    }
+
+    /**
+     * List durable acknowledgments (nexus-nukn3 third fold-in, critic
+     * Critical finding T2 critique-nexus-nukn3-4d5520bf4 [24621]: an ack
+     * row was write-only -- created via {@link #recordIndexFailureAcknowledgment}
+     * but never listable or revocable). Every {@code kind='acknowledgment'}
+     * row for the tenant, newest first. No {@code who} field: no per-request
+     * user identity is captured at this layer (RLS is tenant-scoped only),
+     * so this is stated rather than fabricated.
+     *
+     * @return {@code {"rows": [{id, file_path, error_class, reason,
+     *         created_at}, ...], "total": int}}. {@code file_path} is
+     *         {@code ""} for an error-class-scoped (corpus-wide)
+     *         acknowledgment.
+     */
+    public Map<String, Object> listIndexFailureAcknowledgments(String tenant) {
+        return listIndexFailureAcknowledgments(tenant, "");
+    }
+
+    /**
+     * {@link #listIndexFailureAcknowledgments(String)}, scoped to an EXACT
+     * {@code file_path} (round-5 fold-in, code-review [24635] item 2: the
+     * {@code --unacknowledge --file} auto-resolve previously paged every
+     * acknowledgment tenant-wide and filtered client-side -- the same
+     * class of gap the {@code --acknowledge --file} auto-resolve was
+     * already fixed for via {@link #getIndexFailures(String, String, int,
+     * int, boolean, String)}'s {@code filePath} filter). A blank
+     * {@code filePath} is equivalent to the no-arg overload (every
+     * acknowledgment, no filter) -- it does NOT mean "error-class-scoped
+     * only"; that scope has no dedicated accessor here since the CLI
+     * caller already knows when it wants the class-wide row (it passes
+     * {@code --error-class} directly and skips the lookup entirely).
+     */
+    public Map<String, Object> listIndexFailureAcknowledgments(String tenant, String filePath) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var cond = INDEX_FAILURES.KIND.eq("acknowledgment");
+            if (filePath != null && !filePath.isBlank()) {
+                cond = cond.and(INDEX_FAILURES.FILE_PATH.eq(filePath));
+            }
+            List<Map<String, Object>> rows = ctx.select(
+                INDEX_FAILURES.ID,
+                INDEX_FAILURES.FILE_PATH,
+                INDEX_FAILURES.ERROR_CLASS,
+                INDEX_FAILURES.ERROR,
+                INDEX_FAILURES.OCCURRED_AT)
+                .from(INDEX_FAILURES)
+                .where(cond)
+                .orderBy(INDEX_FAILURES.OCCURRED_AT.desc(), INDEX_FAILURES.ID.desc())
+                .fetch()
+                .map(r -> {
+                    Map<String, Object> m = new java.util.LinkedHashMap<>();
+                    m.put("id",          r.value1());
+                    m.put("file_path",   str(r.value2()));
+                    m.put("error_class", str(r.value3()));
+                    m.put("reason",      str(r.value4()));
+                    m.put("created_at",  utcIso(r.value5()));
+                    return m;
+                });
+            Map<String, Object> out = new java.util.LinkedHashMap<>();
+            out.put("rows", rows);
+            out.put("total", rows.size());
+            return out;
+        });
+    }
+
+    /**
+     * Revoke a durable acknowledgment (nexus-nukn3 third fold-in, critic
+     * Critical finding [24621]: an ack that could be created but never
+     * undone). Deletes ONLY the row(s) matching the EXACT scope it was
+     * created under -- {@code kind='acknowledgment'} AND {@code error_class}
+     * AND {@code file_path} (blank {@code filePath} targets the
+     * error-class-scoped acknowledgment, never every file-scoped one for
+     * that class too; mirrors how {@link #recordIndexFailureAcknowledgment}
+     * distinguishes the two scopes on write). Never touches a
+     * {@code kind='failure'} row -- a disjoint predicate from
+     * {@link #trimIndexFailures}, not a shared code path with it.
+     *
+     * @param errorClass REQUIRED, non-blank -- mirrors the same requirement
+     *                   on creation; revoking "every acknowledgment for a
+     *                   file regardless of class" is never the intended
+     *                   scope.
+     * @return the number of acknowledgment rows deleted (0 or 1 in
+     *         practice -- {@code (tenant_id, file_path, error_class)}
+     *         is not a DB-enforced unique key, but the CLI never creates
+     *         a duplicate).
+     */
+    public int revokeIndexFailureAcknowledgment(String tenant, String filePath, String errorClass) {
+        if (errorClass == null || errorClass.isBlank()) {
+            throw new IllegalArgumentException(
+                "index_failures unacknowledge requires a non-blank error_class");
+        }
+        return tenantScope.withTenant(tenant, ctx -> {
+            var cond = INDEX_FAILURES.KIND.eq("acknowledgment")
+                .and(INDEX_FAILURES.ERROR_CLASS.eq(errorClass))
+                .and(INDEX_FAILURES.FILE_PATH.eq(str(filePath)));
+            return ctx.deleteFrom(INDEX_FAILURES).where(cond).execute();
+        });
+    }
+
+    /**
+     * Delete index_failures rows matching *runId* and/or older than *days* days
+     * (nexus-nukn3 fold-in — the critic's Critical finding: an event-log store
+     * with a fail-first doctor check needs a remedy, mirroring
+     * {@link #expireRelevanceLog}'s age-based reap, generalized with an
+     * OPTIONAL run_id predicate so an operator can retire one adjudicated run
+     * without waiting out the age window). Returns the number of rows deleted.
+     *
+     * <p>Blank {@code runId} AND {@code days <= 0} together match every row for
+     * the tenant — deliberately NOT guarded here (a pure predicate-delete
+     * primitive matching {@link #trimHookFailures}'s shape); the "at least one
+     * predicate" refusal lives at the HTTP boundary
+     * ({@code TelemetryHandler#handleIndexFailureTrim}) and the Python client,
+     * so a malformed request 400s before reaching this method, while a
+     * deliberate full-tenant clear stays possible for an operator who really
+     * wants one (unlike the boundary, this method has no opinion).
+     */
+    public int trimIndexFailures(String tenant, String runId, int days) {
+        return trimIndexFailures(tenant, runId, days, false);
+    }
+
+    /**
+     * Delete (or, with {@code dryRun=true}, COUNT without deleting) as above
+     * (fold-in suggestion, code review [24595]). Same dry-run-reuses-the-
+     * delete's-own-predicate discipline as {@link #trimHookFailures(String, int, boolean)}.
+     *
+     * <p>Always scoped to {@code kind='failure'} rows — an acknowledgment is a
+     * durable policy marker, never swept by an age-based {@code --older-than-days}
+     * clear (only a row it would otherwise have failed to gate on).
+     */
+    public int trimIndexFailures(String tenant, String runId, int days, boolean dryRun) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var cond = INDEX_FAILURES.KIND.eq("failure");
+            if (runId != null && !runId.isBlank()) {
+                cond = cond.and(INDEX_FAILURES.RUN_ID.eq(runId));
+            }
+            if (days > 0) {
+                OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusDays(days);
+                cond = cond.and(INDEX_FAILURES.OCCURRED_AT.lt(cutoff));
+            }
+            if (dryRun) {
+                Integer cnt = ctx.selectCount().from(INDEX_FAILURES).where(cond).fetchOne(0, Integer.class);
+                return cnt != null ? cnt : 0;
+            }
+            return ctx.deleteFrom(INDEX_FAILURES).where(cond).execute();
+        });
+    }
+
     // ── frecency ───────────────────────────────────────────────────────────────
 
     /**
@@ -1803,6 +2204,297 @@ public final class TelemetryRepository {
             result.put("miss_count",     rec.value5());
             result.put("last_hit_at",    rec.value6() != null ? rec.value6().toString() : "");
             return Optional.<Map<String, Object>>of(result);
+        });
+    }
+
+    // ── capability_census (nexus-gjv9b PART 1) ──────────────────────────────────
+
+    /**
+     * Upsert one session's capability census (live write path).
+     *
+     * <p>The capability vocabulary this table stamps one column per —
+     * {@code skill}, {@code agent}, {@code serena}, {@code nx_answer},
+     * {@code search_query}, {@code other_nx_mcp}, {@code baseline},
+     * {@code other} — matches {@code nexus.census.CAPABILITIES}
+     * (src/nexus/_session_end_census.py) exactly. A {@code capabilities}
+     * key outside this set is silently ignored rather than rejected: the
+     * census client is the sole writer and this repository must not
+     * become a second place that has to be updated in lockstep with the
+     * client's own tuple every time a capability is added or renamed.
+     *
+     * <p>UPSERT on {@code (tenant_id, session_id)} — unlike every other
+     * table in this repository, this is not an event log: SessionEnd fires
+     * many times per session (measured: 306 rows across 28 sessions in the
+     * JSONL era, one session alone 134 of them — see
+     * {@code _session_end_census.py}'s follow-on note), and the LATEST
+     * measurement for a session is simply what this table should hold, no
+     * dedup-by-tail-read needed client-side any more.
+     *
+     * @param blindspot true for an unmeasurable-transcript record; when
+     *     true, {@code capabilities}/{@code dispatches}/{@code totalCalls}
+     *     are stored NULL (nothing was measured), never a fabricated zero.
+     * @param capabilities per-capability call counts, keyed by the
+     *     8-value vocabulary named above; ignored entirely when
+     *     {@code blindspot} is true.
+     */
+    public void recordCapabilityCensus(String tenant,
+                                       String sessionId,
+                                       String tsIso,
+                                       boolean blindspot,
+                                       String unmeasurableReason,
+                                       Map<String, Integer> capabilities,
+                                       Integer dispatches,
+                                       Integer totalCalls) {
+        OffsetDateTime ts = tsIso != null && !tsIso.isBlank()
+            ? parseTs(tsIso) : OffsetDateTime.now(ZoneOffset.UTC);
+        Map<String, Integer> caps = blindspot || capabilities == null ? Map.of() : capabilities;
+        tenantScope.withTenant(tenant, ctx -> {
+            var insert = ctx.insertInto(CAPABILITY_CENSUS)
+                .set(CAPABILITY_CENSUS.TENANT_ID, tenant)
+                .set(CAPABILITY_CENSUS.SESSION_ID, sessionId)
+                .set(CAPABILITY_CENSUS.TS, ts)
+                .set(CAPABILITY_CENSUS.BLINDSPOT, blindspot)
+                .set(CAPABILITY_CENSUS.UNMEASURABLE_REASON, blindspot ? str(unmeasurableReason) : null)
+                .set(CAPABILITY_CENSUS.CAP_SKILL, caps.get("skill"))
+                .set(CAPABILITY_CENSUS.CAP_AGENT, caps.get("agent"))
+                .set(CAPABILITY_CENSUS.CAP_SERENA, caps.get("serena"))
+                .set(CAPABILITY_CENSUS.CAP_NX_ANSWER, caps.get("nx_answer"))
+                .set(CAPABILITY_CENSUS.CAP_SEARCH_QUERY, caps.get("search_query"))
+                .set(CAPABILITY_CENSUS.CAP_OTHER_NX_MCP, caps.get("other_nx_mcp"))
+                .set(CAPABILITY_CENSUS.CAP_BASELINE, caps.get("baseline"))
+                .set(CAPABILITY_CENSUS.CAP_OTHER, caps.get("other"))
+                .set(CAPABILITY_CENSUS.DISPATCHES, blindspot ? null : dispatches)
+                .set(CAPABILITY_CENSUS.TOTAL_CALLS, blindspot ? null : totalCalls);
+            insert.onConflict(CAPABILITY_CENSUS.TENANT_ID, CAPABILITY_CENSUS.SESSION_ID)
+                .doUpdate()
+                .set(CAPABILITY_CENSUS.TS, field(name("excluded", "ts"), OffsetDateTime.class))
+                .set(CAPABILITY_CENSUS.BLINDSPOT, field(name("excluded", "blindspot"), Boolean.class))
+                .set(CAPABILITY_CENSUS.UNMEASURABLE_REASON, field(name("excluded", "unmeasurable_reason"), String.class))
+                .set(CAPABILITY_CENSUS.CAP_SKILL, field(name("excluded", "cap_skill"), Integer.class))
+                .set(CAPABILITY_CENSUS.CAP_AGENT, field(name("excluded", "cap_agent"), Integer.class))
+                .set(CAPABILITY_CENSUS.CAP_SERENA, field(name("excluded", "cap_serena"), Integer.class))
+                .set(CAPABILITY_CENSUS.CAP_NX_ANSWER, field(name("excluded", "cap_nx_answer"), Integer.class))
+                .set(CAPABILITY_CENSUS.CAP_SEARCH_QUERY, field(name("excluded", "cap_search_query"), Integer.class))
+                .set(CAPABILITY_CENSUS.CAP_OTHER_NX_MCP, field(name("excluded", "cap_other_nx_mcp"), Integer.class))
+                .set(CAPABILITY_CENSUS.CAP_BASELINE, field(name("excluded", "cap_baseline"), Integer.class))
+                .set(CAPABILITY_CENSUS.CAP_OTHER, field(name("excluded", "cap_other"), Integer.class))
+                .set(CAPABILITY_CENSUS.DISPATCHES, field(name("excluded", "dispatches"), Integer.class))
+                .set(CAPABILITY_CENSUS.TOTAL_CALLS, field(name("excluded", "total_calls"), Integer.class))
+                .execute();
+            return null;
+        });
+    }
+
+    /**
+     * Read capability_census rows, newest first (nx census capability
+     * --from-store). Filter precedence: {@code sessionId} (exact match, at
+     * most one row) &gt; {@code sinceIso} (ts &gt;= filter) &gt; no filter (all
+     * rows for the tenant, capped by {@code limit}).
+     */
+    public List<Map<String, Object>> queryCapabilityCensus(String tenant,
+                                                            String sessionId,
+                                                            String sinceIso,
+                                                            int limit) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var cond = noCondition();
+            if (sessionId != null && !sessionId.isEmpty()) {
+                cond = CAPABILITY_CENSUS.SESSION_ID.eq(sessionId);
+            } else if (sinceIso != null && !sinceIso.isEmpty()) {
+                cond = CAPABILITY_CENSUS.TS.ge(parseSinceFilter(sinceIso));
+            }
+            return ctx.select(
+                    CAPABILITY_CENSUS.SESSION_ID, CAPABILITY_CENSUS.TS,
+                    CAPABILITY_CENSUS.BLINDSPOT, CAPABILITY_CENSUS.UNMEASURABLE_REASON,
+                    CAPABILITY_CENSUS.CAP_SKILL, CAPABILITY_CENSUS.CAP_AGENT,
+                    CAPABILITY_CENSUS.CAP_SERENA, CAPABILITY_CENSUS.CAP_NX_ANSWER,
+                    CAPABILITY_CENSUS.CAP_SEARCH_QUERY, CAPABILITY_CENSUS.CAP_OTHER_NX_MCP,
+                    CAPABILITY_CENSUS.CAP_BASELINE, CAPABILITY_CENSUS.CAP_OTHER,
+                    CAPABILITY_CENSUS.DISPATCHES, CAPABILITY_CENSUS.TOTAL_CALLS)
+                .from(CAPABILITY_CENSUS)
+                .where(cond)
+                .orderBy(CAPABILITY_CENSUS.TS.desc())
+                .limit(limit)
+                .fetch()
+                .map(r -> {
+                    var caps = new java.util.LinkedHashMap<String, Object>();
+                    caps.put("skill",        r.value5());
+                    caps.put("agent",        r.value6());
+                    caps.put("serena",       r.value7());
+                    caps.put("nx_answer",    r.value8());
+                    caps.put("search_query", r.value9());
+                    caps.put("other_nx_mcp", r.value10());
+                    caps.put("baseline",     r.value11());
+                    caps.put("other",        r.value12());
+                    var row = new java.util.LinkedHashMap<String, Object>();
+                    row.put("session_id",          r.value1());
+                    row.put("ts",                  r.value2().toString());
+                    row.put("blindspot",           r.value3());
+                    row.put("unmeasurable_reason", r.value4());
+                    row.put("capabilities",        caps);
+                    row.put("dispatches",          r.value13());
+                    row.put("total_calls",         r.value14());
+                    return (Map<String, Object>) row;
+                });
+        });
+    }
+
+    /**
+     * Delete (or, with {@code dryRun=true}, COUNT without deleting)
+     * capability_census rows older than {@code days} days (nexus-gjv9b
+     * review fold-in, critique Significant 4: both new tables need
+     * retention, same as every other audit-log table). Filters on
+     * {@code ts}; same age-only, no-run-id shape and dry-run-reuses-the-
+     * delete's-own-predicate discipline as {@link #trimHookFailures(String,
+     * int, boolean)} — capability_census has no run concept, only a
+     * per-session upsert timestamp, so age is the only sensible axis.
+     */
+    public int trimCapabilityCensus(String tenant, int days, boolean dryRun) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusDays(days);
+            var predicate = CAPABILITY_CENSUS.TS.lt(cutoff);
+            if (dryRun) {
+                Integer count = ctx.selectCount()
+                    .from(CAPABILITY_CENSUS)
+                    .where(predicate)
+                    .fetchOne(0, Integer.class);
+                return count != null ? count : 0;
+            }
+            return ctx.deleteFrom(CAPABILITY_CENSUS)
+                .where(predicate)
+                .execute();
+        });
+    }
+
+    // ── routing_events (nexus-gjv9b PART 2) ─────────────────────────────────────
+
+    /**
+     * Append one routing-hook event (live write path — event log, never an
+     * upsert: a hook firing is a genuinely distinct event every time,
+     * unlike capability_census's one-row-per-session collapse above).
+     */
+    public void recordRoutingEvent(String tenant,
+                                   String tsIso,
+                                   String sessionId,
+                                   String rule,
+                                   String outcome,
+                                   String toolName,
+                                   String commandFragment,
+                                   String escapeReason) {
+        OffsetDateTime ts = tsIso != null && !tsIso.isBlank()
+            ? parseTs(tsIso) : OffsetDateTime.now(ZoneOffset.UTC);
+        tenantScope.withTenant(tenant, ctx -> {
+            ctx.insertInto(ROUTING_EVENTS)
+                .set(ROUTING_EVENTS.TENANT_ID, tenant)
+                .set(ROUTING_EVENTS.TS, ts)
+                .set(ROUTING_EVENTS.SESSION_ID, str(sessionId))
+                .set(ROUTING_EVENTS.RULE, rule)
+                .set(ROUTING_EVENTS.OUTCOME, outcome)
+                .set(ROUTING_EVENTS.TOOL_NAME, str(toolName))
+                .set(ROUTING_EVENTS.COMMAND_FRAGMENT, str(commandFragment))
+                .set(ROUTING_EVENTS.ESCAPE_REASON, str(escapeReason))
+                .execute();
+            return null;
+        });
+    }
+
+    /** One routing event within a batch — see {@link #recordRoutingEventsBatch}. */
+    public record RoutingEventInput(String tsIso,
+                                    String sessionId,
+                                    String rule,
+                                    String outcome,
+                                    String toolName,
+                                    String commandFragment,
+                                    String escapeReason) {}
+
+    /**
+     * Append a batch of routing-hook events in one round trip. Returns the
+     * number of rows inserted (always {@code events.size()} — no conflict
+     * target to skip on).
+     */
+    public int recordRoutingEventsBatch(String tenant, List<RoutingEventInput> events) {
+        if (events.isEmpty()) {
+            return 0;
+        }
+        return tenantScope.withTenant(tenant, ctx -> {
+            var batch = ctx.batch(
+                events.stream().map(e -> {
+                    OffsetDateTime ts = e.tsIso() != null && !e.tsIso().isBlank()
+                        ? parseTs(e.tsIso()) : OffsetDateTime.now(ZoneOffset.UTC);
+                    return ctx.insertInto(ROUTING_EVENTS)
+                        .set(ROUTING_EVENTS.TENANT_ID, tenant)
+                        .set(ROUTING_EVENTS.TS, ts)
+                        .set(ROUTING_EVENTS.SESSION_ID, str(e.sessionId()))
+                        .set(ROUTING_EVENTS.RULE, e.rule())
+                        .set(ROUTING_EVENTS.OUTCOME, e.outcome())
+                        .set(ROUTING_EVENTS.TOOL_NAME, str(e.toolName()))
+                        .set(ROUTING_EVENTS.COMMAND_FRAGMENT, str(e.commandFragment()))
+                        .set(ROUTING_EVENTS.ESCAPE_REASON, str(e.escapeReason()));
+                }).toList()
+            ).execute();
+            int inserted = 0;
+            for (int n : batch) {
+                inserted += Math.max(n, 0);
+            }
+            return inserted;
+        });
+    }
+
+    /**
+     * List routing events, newest first — the read half of
+     * {@code nexus.routing_stats.aggregate}/{@code escape_events} (nexus-
+     * gjv9b PART 2, S11 doctrine). {@code sinceIso} filters {@code ts &gt;=
+     * filter}; empty/blank means no time bound. {@code limit} caps the
+     * page (aggregation over a capped page is a caller concern — the
+     * historical JSONL reader had no cap at all, since the rotated file
+     * bounded its own size instead).
+     */
+    public List<Map<String, Object>> listRoutingEvents(String tenant, String sinceIso, int limit) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var cond = (sinceIso != null && !sinceIso.isEmpty())
+                ? ROUTING_EVENTS.TS.ge(parseSinceFilter(sinceIso))
+                : noCondition();
+            return ctx.select(
+                    ROUTING_EVENTS.TS, ROUTING_EVENTS.SESSION_ID, ROUTING_EVENTS.RULE,
+                    ROUTING_EVENTS.OUTCOME, ROUTING_EVENTS.TOOL_NAME,
+                    ROUTING_EVENTS.COMMAND_FRAGMENT, ROUTING_EVENTS.ESCAPE_REASON)
+                .from(ROUTING_EVENTS)
+                .where(cond)
+                .orderBy(ROUTING_EVENTS.TS.desc())
+                .limit(limit)
+                .fetch()
+                .map(r -> Map.<String, Object>of(
+                    "ts",               r.value1().toString(),
+                    "session_id",       r.value2(),
+                    "rule",             r.value3(),
+                    "outcome",          r.value4(),
+                    "tool_name",        r.value5(),
+                    "command_fragment", r.value6(),
+                    "escape_reason",    r.value7()));
+        });
+    }
+
+    /**
+     * Delete (or, with {@code dryRun=true}, COUNT without deleting)
+     * routing_events rows older than {@code days} days (nexus-gjv9b
+     * review fold-in, critique Significant 4). Filters on {@code ts};
+     * event-log shape, same age-only trim discipline as {@link
+     * #trimHookFailures(String, int, boolean)} — a routing-hook fire has
+     * no run concept to scope by, only age.
+     */
+    public int trimRoutingEvents(String tenant, int days, boolean dryRun) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusDays(days);
+            var predicate = ROUTING_EVENTS.TS.lt(cutoff);
+            if (dryRun) {
+                Integer count = ctx.selectCount()
+                    .from(ROUTING_EVENTS)
+                    .where(predicate)
+                    .fetchOne(0, Integer.class);
+                return count != null ? count : 0;
+            }
+            return ctx.deleteFrom(ROUTING_EVENTS)
+                .where(predicate)
+                .execute();
         });
     }
 }

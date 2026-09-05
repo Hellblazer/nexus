@@ -16,11 +16,15 @@ form captures ``y`` at import time and silently bypasses the patch.
 """
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
 
 from nexus import config as _config
 
+if TYPE_CHECKING:
+    import httpx
+
 __all__ = [
+    "T2_SHARED_CLIENT_CTX_KEY",
     "default_db_path",
     "emit_identity_drop_summary",
     "emit_retry_summary",
@@ -28,7 +32,41 @@ __all__ = [
     "raise_identity_drop_exception_for_file",
     "reset_identity_drop_collectors",
     "t2_handle",
+    "t2_shared_client_from_context",
 ]
+
+#: nexus-m20mf P3 fold-in: the ``ctx.obj`` dict key a Click group callback
+#: (``taxonomy_cmd.taxonomy``, ``index.index``, ``collection``'s reindex
+#: command) stashes its one-per-invocation shared T2 ``httpx.Client``
+#: under. A NEW key in that dict (``main``'s ``ctx.ensure_object(dict)`` /
+#: ``ctx.obj["verbose"]`` in ``src/nexus/cli.py``), never a replacement of
+#: it, so nothing that dict already carries is disturbed.
+T2_SHARED_CLIENT_CTX_KEY = "_t2_shared_client"
+
+
+def t2_shared_client_from_context() -> "httpx.Client | None":
+    """CLI-LAYER helper: the current Click invocation's shared T2 client,
+    or ``None`` outside a live Click context (a test calling a command
+    function directly, or any non-CLI caller).
+
+    Call this from a COMMAND FUNCTION's own body (the CLI layer) and pass
+    the result on as an explicit ``client=`` argument -- never from inside
+    a data-layer construction helper. ``T2Database``, ``_T2Database``,
+    ``run_collection_postprocessing``, and ``_collections_without_topics``
+    all take ``client`` as a plain, explicit parameter precisely so their
+    behavior is a pure function of their arguments, not of whichever Click
+    group happens to be active on the context stack (nexus-m20mf P3
+    fold-in, critic finding 3 -- the prior per-module ``click.get_current_
+    context()`` calls INSIDE those data-layer helpers produced exactly the
+    inconsistency bug finding 2 describes: the identical function silently
+    got a shared client under one Click group and none under another).
+    """
+    import click  # noqa: PLC0415 — deferred: keeps this module's own import-time cost light for CLI helpers that never touch Click state
+
+    ctx = click.get_current_context(silent=True)
+    if ctx is None or not isinstance(ctx.obj, dict):
+        return None
+    return ctx.obj.get(T2_SHARED_CLIENT_CTX_KEY)
 
 
 def default_db_path() -> Path:
@@ -138,6 +176,7 @@ def reset_identity_drop_collectors() -> None:
     from nexus.mcp_infra import (  # noqa: PLC0415 — deliberate function-local import: avoids a hard nexus.mcp_infra dependency at CLI startup
         reset_complete_refusals,
         reset_manifest_identity_drops,
+        reset_manifest_partial_doc_skips,
         reset_manifest_write_failures,
         reset_reconciled_collections_count,
         reset_superseded_sweep_stats,
@@ -153,6 +192,11 @@ def reset_identity_drop_collectors() -> None:
     # nexus-2t63u round 2: same shape again, for physical_collection
     # reconciliation visibility.
     reset_reconciled_collections_count()
+    # nexus-gup3b: same shape again — a fresh run must not inherit a prior
+    # run's per-doc continuation-flush dedup state, or a document re-indexed
+    # in THIS run right after a prior run touched it would wrongly stay in
+    # "already reported" (debug-only) mode and never get its own INFO line.
+    reset_manifest_partial_doc_skips()
 
 
 def emit_retry_summary() -> None:

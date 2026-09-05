@@ -787,6 +787,7 @@ class TestZeroEvidenceFallbackProvenance:
              patch("nexus.plans.runner.plan_run",
                    AsyncMock(return_value=plan_run_result)), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
             t2_ctx.return_value.__enter__.return_value = db_stub
@@ -833,6 +834,7 @@ class TestZeroEvidenceFallbackProvenance:
              patch("nexus.plans.runner.plan_run",
                    AsyncMock(return_value=plan_run_result)), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
              patch("nexus.mcp.core._nx_answer_record_run", side_effect=_spy):
@@ -889,6 +891,7 @@ class TestZeroEvidenceFallbackProvenance:
              patch("nexus.plans.runner.plan_run",
                    AsyncMock(return_value=plan_run_result)), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
             t2_ctx.return_value.__enter__.return_value = db_stub
@@ -935,6 +938,7 @@ class TestZeroEvidenceFallbackProvenance:
              patch("nexus.plans.runner.plan_run",
                    AsyncMock(return_value=plan_run_result)), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
             t2_ctx.return_value.__enter__.return_value = db_stub
@@ -964,44 +968,51 @@ class TestPlanRunTelemetry:
         _nx_answer_record_outcome(0, success=False)
 
     def test_record_outcome_bumps_success_for_library_plan(self):
-        """plan_id > 0 increments success_count on the real library row."""
+        """plan_id > 0 increments success_count on the real library row.
+
+        nexus-m20mf P2: ``_nx_answer_record_outcome`` now routes its
+        ``db.plans.increment_run_outcome`` call through
+        ``_t2_index_write`` (the shared T2 singleton), not ``_t2_ctx``.
+        """
         from nexus.mcp import core as _core
 
         library = MagicMock()
-        ctx = MagicMock()
-        ctx.__enter__ = MagicMock(return_value=MagicMock(plans=library))
-        ctx.__exit__ = MagicMock(return_value=False)
+        db_stub = MagicMock(plans=library)
 
-        with patch.object(_core, "_t2_ctx", return_value=ctx):
+        with patch.object(_core, "_t2_index_write", lambda fn, **_kw: fn(db_stub)):
             _core._nx_answer_record_outcome(42, success=True)
 
         library.increment_run_outcome.assert_called_once_with(42, success=True)
 
     def test_record_outcome_bumps_failure_for_library_plan(self):
-        """plan_id > 0 increments failure_count on the real library row."""
+        """plan_id > 0 increments failure_count on the real library row.
+
+        nexus-m20mf P2: same routing note as the success case above.
+        """
         from nexus.mcp import core as _core
 
         library = MagicMock()
-        ctx = MagicMock()
-        ctx.__enter__ = MagicMock(return_value=MagicMock(plans=library))
-        ctx.__exit__ = MagicMock(return_value=False)
+        db_stub = MagicMock(plans=library)
 
-        with patch.object(_core, "_t2_ctx", return_value=ctx):
+        with patch.object(_core, "_t2_index_write", lambda fn, **_kw: fn(db_stub)):
             _core._nx_answer_record_outcome(42, success=False)
 
         library.increment_run_outcome.assert_called_once_with(42, success=False)
 
     def test_record_outcome_swallows_library_errors(self):
-        """Telemetry must never break the user-facing flow."""
+        """Telemetry must never break the user-facing flow.
+
+        nexus-m20mf P2: routed through ``_t2_index_write`` — see the
+        success/failure tests above for why ``_t2_ctx`` no longer
+        reaches this call.
+        """
         from nexus.mcp import core as _core
 
         library = MagicMock()
         library.increment_run_outcome.side_effect = RuntimeError("db gone")
-        ctx = MagicMock()
-        ctx.__enter__ = MagicMock(return_value=MagicMock(plans=library))
-        ctx.__exit__ = MagicMock(return_value=False)
+        db_stub = MagicMock(plans=library)
 
-        with patch.object(_core, "_t2_ctx", return_value=ctx):
+        with patch.object(_core, "_t2_index_write", lambda fn, **_kw: fn(db_stub)):
             _core._nx_answer_record_outcome(42, success=True)  # no raise
 
     @pytest.mark.asyncio
@@ -1032,6 +1043,7 @@ class TestPlanRunTelemetry:
              patch("nexus.plans.runner.plan_run",
                    AsyncMock(return_value=plan_run_result)), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
             t2_ctx.return_value.__enter__.return_value = db_stub
@@ -1067,11 +1079,20 @@ class TestPlanRunTelemetry:
              patch("nexus.plans.runner.plan_run",
                    AsyncMock(return_value=plan_run_result)), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
             t2_ctx.return_value.__enter__.return_value = db_stub
             await nx_answer(question="something the library can't match")
 
+        # nexus-m20mf P2 round 2 (code review [24602]): patching
+        # _t2_index_write to the SAME db_stub means these two asserts are
+        # now proven by the plan_id==0 guard itself, not merely left
+        # unfalsifiable by an unpatched real singleton -- a future
+        # weakening of that guard (e.g. run_start moved outside the
+        # `if best.plan_id:` check) would make library.increment_run_
+        # started fire against THIS mock and fail the test, instead of
+        # silently landing on the real substrate and passing regardless.
         library.increment_run_started.assert_not_called()
         library.increment_run_outcome.assert_not_called()
 
@@ -1093,6 +1114,7 @@ class TestPlanRunTelemetry:
              patch("nexus.plans.runner.plan_run",
                    AsyncMock(side_effect=RuntimeError("exec blew up"))), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
             t2_ctx.return_value.__enter__.return_value = db_stub
@@ -1352,7 +1374,7 @@ class TestGrownPlanDimensionalColumns:
              patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
              patch("nexus.plans.runner.plan_run", AsyncMock(return_value=_plan_run_ok())), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
-             patch("nexus.mcp.core._t2_index_write", lambda fn: fn(db_stub)), \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
             t2_ctx.return_value.__enter__.return_value = db_stub
@@ -1428,7 +1450,7 @@ class TestGrownPlanDimensionalColumns:
              patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
              patch("nexus.plans.runner.plan_run", AsyncMock(return_value=_plan_run_ok())), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
-             patch("nexus.mcp.core._t2_index_write", lambda fn: fn(db_stub)), \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
             t2_ctx.return_value.__enter__.return_value = db_stub
@@ -1456,7 +1478,7 @@ class TestGrownPlanDimensionalColumns:
              patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
              patch("nexus.plans.runner.plan_run", AsyncMock(return_value=_plan_run_ok())), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
-             patch("nexus.mcp.core._t2_index_write", lambda fn: fn(db_stub)), \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
             t2_ctx.return_value.__enter__.return_value = db_stub
@@ -1485,7 +1507,7 @@ class TestGrownPlanDimensionalColumns:
              patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
              patch("nexus.plans.runner.plan_run", AsyncMock(return_value=_plan_run_ok())), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
-             patch("nexus.mcp.core._t2_index_write", lambda fn: fn(db_stub)), \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
             t2_ctx.return_value.__enter__.return_value = db_stub
@@ -4457,6 +4479,13 @@ class TestContinuationParameter:
             patch("nexus.mcp.core._t2_ctx"),
             patch("nexus.mcp.core.scratch", return_value="ok"),
             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None),
+            # nexus-m20mf P2 (code review [24580] audit): _make_multi_step_
+            # match() carries plan_id=1 (truthy), so run_start/run_outcome/
+            # record_run -- all now routed through _t2_index_write -- fire
+            # for real on every caller of this helper. Route them to the
+            # SAME db_stub so this helper's isolation is not silently
+            # bypassed for the sites nexus-m20mf converted.
+            patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)),
         ), db_stub
 
     @pytest.mark.asyncio
@@ -4488,6 +4517,7 @@ class TestContinuationParameter:
 
         patches, db_stub = self._patches(plan_run_result)
         with patches[0], patches[1], patches[2] as t2_ctx, patches[3], patches[4], \
+             patches[5], \
              patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", False):
             t2_ctx.return_value.__enter__.return_value = db_stub
             result = await nx_answer(
@@ -4549,7 +4579,7 @@ class TestContinuationParameter:
 
         patches, db_stub = self._patches(plan_run_result)
         with patches[0], patches[1] as plan_run_mock, patches[2] as t2_ctx, \
-             patches[3], patches[4], \
+             patches[3], patches[4], patches[5], \
              patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", False):
             t2_ctx.return_value.__enter__.return_value = db_stub
             with capture_logs() as cap:
@@ -4589,7 +4619,8 @@ class TestContinuationParameter:
             plan_run_result.budget_exhausted_at_step = None
 
             patches, db_stub = self._patches(plan_run_result)
-            with patches[0], patches[1], patches[2] as t2_ctx, patches[3], patches[4]:
+            with patches[0], patches[1], patches[2] as t2_ctx, patches[3], patches[4], \
+                 patches[5]:
                 t2_ctx.return_value.__enter__.return_value = db_stub
                 with capture_logs() as cap:
                     await nx_answer(question="q", continuation=continuation_value)
@@ -4644,6 +4675,7 @@ class TestContinuationGoLive:
         with patch("nexus.plans.matcher.plan_match",
                     return_value=[_make_multi_step_match()]), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
              patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", True), \
@@ -4699,6 +4731,7 @@ class TestContinuationGoLive:
         with patch("nexus.plans.matcher.plan_match",
                     return_value=[_make_multi_step_match()]), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
              patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", True), \
@@ -4764,6 +4797,7 @@ class TestContinuationGoLive:
 
         with patch("nexus.plans.matcher.plan_match", return_value=[match]), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
              patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", True), \
@@ -4875,6 +4909,7 @@ class TestContinuationGoLive:
 
         with patch("nexus.plans.matcher.plan_match", return_value=[match]), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
              patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", True), \
@@ -4976,6 +5011,7 @@ class TestContinuationGoLiveMidPrefixFailure:
 
         with patch("nexus.plans.matcher.plan_match", return_value=[match]), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
              patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", True), \
@@ -5046,6 +5082,7 @@ class TestContinuationGoLiveMidPrefixFailure:
 
         with patch("nexus.plans.matcher.plan_match", return_value=[match]), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
              patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", True), \
@@ -5110,6 +5147,7 @@ class TestContinuationGoLiveMidPrefixFailure:
 
         with patch("nexus.plans.matcher.plan_match", return_value=[match]), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
              patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", True), \

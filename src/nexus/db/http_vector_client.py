@@ -1223,6 +1223,25 @@ def _local_voyage_restart_remedy(code: int, err_message: str) -> str | None:
     )
 
 
+#: nexus-a2qhz: T3 sends every operation over POST — reads (search, get,
+#: get-all-metadata, ...) included, since a query body (embeddings,
+#: filters) does not fit a GET query string. So unlike T2/the catalog
+#: client, "is this call a POST" is NOT "is this call a write" for this
+#: module — the write guard below keys on the PATH's suffix instead. This
+#: is the exhaustive write-shaped endpoint set as of RDR-156/195: any
+#: `/v1/vectors/*` route that mutates (as opposed to merely querying)
+#: server-side state.
+_T3_WRITE_PATH_SUFFIXES: tuple[str, ...] = (
+    "/store-put",
+    "/store-delete",
+    "/update-metadata",
+    "/upsert-chunks",
+    "/gc/expire-quarantine",
+    "/gc/quarantine-orphans",
+    "/gc/restore-rereferenced",
+)
+
+
 def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120) -> Any:
     """POST JSON to the service endpoint, return parsed response body.
 
@@ -1233,8 +1252,21 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
     raised (bead nexus-rvfwj, 2026-06-10 — docs__1-16 + docs__1-1 evidence).
     Per dual-review S2 the raise is deliberately NOT global — a slow search
     should still fail fast.
+
+    nexus-a2qhz: a WRITE-shaped *path* (:data:`_T3_WRITE_PATH_SUFFIXES`)
+    routes through :func:`~nexus.db.service_endpoint.guard_production_write`
+    BEFORE this function's first network attempt — a dev-checkout process
+    with no explicit ``NX_SERVICE_*`` override and no opt-in is refused
+    here. Every other path (search/get/metadata reads, also sent over
+    POST) is unaffected.
     """
     import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+
+    if any(path.endswith(suffix) for suffix in _T3_WRITE_PATH_SUFFIXES):
+        from nexus.db.service_endpoint import guard_production_write  # noqa: PLC0415 — deferred: only on the write-shaped-path branch, no circular import (service_endpoint imports no nexus.* modules)
+
+        base_url, _ = _resolve_endpoint()
+        guard_production_write(base_url)
 
     try:
         return _request("POST", path, tenant=tenant, timeout=timeout, body=body)
@@ -1869,6 +1901,25 @@ class HttpVectorClient:
         # materialized boundary list, not a precomputed formula.
         cap = per_collection_chunk_cap(collection)
         metas = metadatas or [{}] * len(ids)
+
+        # nexus-xzyr3 fold-in (code-review-nexus-xzyr3-26edb6662 [24586]) tried
+        # to mirror T3Database._write_batch's drop-and-warn defense-in-depth
+        # (a document over QUOTAS.MAX_DOCUMENT_BYTES=16384 dropped, never
+        # raised) onto this method — REVERTED (nexus-xzyr3 fold-in round 2,
+        # dev-suite-reds-2026-09-05-wave-fold): it silently emptied every
+        # batch in the pre-existing RDR-195 byte-budget paging contract
+        # (nexus-nf3n7/nexus-kmtlp, TestUpsertChunksPaging), whose chunks
+        # (18,000-300,000 bytes in the paging tests, and legitimately large
+        # in production — Voyage's 32k-token ceiling is far above 16,384
+        # bytes) are BY DESIGN handled by paging (a single oversize chunk
+        # ships alone in its own page — see :func:`_upsert_page_bounds`) and,
+        # if genuinely too large for Voyage, by the typed-422 the engine
+        # already surfaces (RDR-195, ``cda82c8a5``) rather than a silent
+        # client-side drop. MAX_DOCUMENT_BYTES is a ChromaDB-era STORAGE
+        # quota, not a Voyage EMBED quota — the two must not be conflated
+        # here. ``put()``'s own ``fail_on_oversized=True`` check (this
+        # method's single-chunk, non-paginated sibling, where the 9-row
+        # evidence actually pointed) is untouched by this revert.
         n = len(ids)
         byte_budget = None if embeddings is not None else _upsert_byte_budget(collection)
         chunk_bytes = (
@@ -1936,6 +1987,21 @@ class HttpVectorClient:
 
                 result = _vector_with_retry(
                     _post, "/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600,
+                    # nexus-8hdg9 phase 1: a bare TimeoutError on an upsert is
+                    # refused rather than retried. _request_once uses ONE
+                    # socket timeout for connect AND read, so this fires for
+                    # either phase -- most often read (the request was
+                    # already sent and the engine may still be embedding
+                    # this exact batch server-side, where re-POSTing it
+                    # would stack a second embed pass), but a genuine
+                    # connect-phase stall is refused the same way; the
+                    # transport cannot tell them apart (see
+                    # VectorUpsertTimeoutError's docstring). Contained per
+                    # file by the indexer (_contain_transient_upsert), not a
+                    # whole-run abort. A connection-level error (dead/
+                    # refused peer -- ConnectionError/URLError) is a
+                    # different exception family and still retries normally.
+                    retry_on_timeout=False,
                 )
             else:
                 result = _post(
@@ -2067,8 +2133,11 @@ class HttpVectorClient:
         a parity gap — see EXCLUSIONS comment in the parity test.
 
         Single-chunk: one HTTP call per put() call. T3Database.put uses
-        ``fail_on_oversized=True``; the server is responsible for rejecting
-        oversized content on the HTTP path.
+        ``fail_on_oversized=True``; this method enforces the SAME check
+        client-side (nexus-xzyr3) before the HTTP call is ever made —
+        the server does NOT reject oversized content on this path (see
+        ``VectorHandler.handleStorePut`` / ``PgVectorRepository
+        .upsertChunksInternal``, neither of which validates byte length).
         """
         from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (corpus)
             embedding_model_for_collection_name,
@@ -2096,6 +2165,29 @@ class HttpVectorClient:
         content_hash = hashlib.sha256(content.encode()).hexdigest()
         doc_id = content_hash
         now_iso = datetime.now(UTC).isoformat()
+
+        # nexus-xzyr3: fail_on_oversized=True parity with T3Database.put()
+        # (t3.py's _write_batch), enforced HERE rather than assumed
+        # server-side. This docstring used to claim "the server is
+        # responsible for rejecting oversized content on the HTTP path" —
+        # that was never true: VectorHandler.handleStorePut and
+        # PgVectorRepository.upsertChunksInternal admit any byte count, so
+        # nine knowledge__knowledge notes up to 32,735 bytes were written
+        # this way between 2026-07-10 and 2026-09-04 (T2
+        # nexus/xzyr3-oversize-rows-2026-09-05). Refuse client-side, before
+        # the HTTP call, exactly like the put path's local-mode twin.
+        doc_bytes = len(content.encode())
+        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits), matches this module's other call sites
+
+        if doc_bytes > QUOTAS.MAX_DOCUMENT_BYTES:
+            from nexus.errors import PutOversizedError  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+            raise PutOversizedError(
+                doc_id=doc_id,
+                doc_bytes=doc_bytes,
+                max_bytes=QUOTAS.MAX_DOCUMENT_BYTES,
+                collection=collection,
+            )
 
         # Derive content_type from collection prefix — mirrors T3Database.put
         # at t3.py:860-870 exactly.
@@ -2252,12 +2344,22 @@ class HttpVectorClient:
         fused rerank stage. The response becomes an object envelope
         ``{"results": [...], "rerank_degraded": ..., ...}``; scored rows carry
         ``rerank_score``. The envelope's degrade state is written into
-        ``rerank_meta_out`` (``{"degraded", "error", "model"}``) — the caller
-        MUST surface a degrade to the user (Gap 2: WARN-only invisibility is
-        the retired defect). An engine predating the fused stage ignores the
-        unknown field and returns a bare array: reported as
+        ``rerank_meta_out`` (``{"degraded", "error", "model", "retry_after_seconds"}``)
+        — the caller MUST surface a degrade to the user (Gap 2: WARN-only
+        invisibility is the retired defect). An engine predating the fused
+        stage ignores the unknown field and returns a bare array: reported as
         ``degraded=True, stale_engine=True`` with the convergence remedy —
         one-engine doctrine, never a refusal.
+
+        ``retry_after_seconds`` (nexus-n75jg, 1vpal critic finding 2) is the
+        engine's structured ``rerank_retry_after_seconds``, present only when
+        the degrade cause was Voyage rate-limiting the reranker — ``None``
+        for every other degrade cause and for a success. When present, this
+        method feeds it straight into the process-wide
+        :class:`~nexus.rate_brake.RateLimitBrake` (source ``"rerank"``) so
+        every other writer in this process paces itself, exactly as a
+        429+Retry-After from a vector/manifest write would — this call
+        itself never retries; the server already served a 200.
         """
         body: dict[str, Any] = {
             "query": query,
@@ -2272,6 +2374,14 @@ class HttpVectorClient:
             body["rerank"] = True
             if rerank_top_k is not None:
                 body["rerank_top_k"] = rerank_top_k
+            # Pace rerank requests on the shared brake (n75jg critique):
+            # the reranker is the same upstream the brake trips on, and a
+            # per-collection fan-out (search_cross_corpus) would otherwise
+            # keep hitting a rate-limited reranker while the brake was
+            # tripped. wait() is a no-op unless a trip is in force, so an
+            # untripped process pays nothing here.
+            from nexus.rate_brake import get_brake  # noqa: PLC0415 — deferred import: leaf module, keeps this otherwise-urllib-only module's load-time graph unchanged
+            get_brake().wait()
 
         results = _post("/v1/vectors/search", body, tenant=self._tenant)
         # results is a list of {id, content, distance, collection, ...} — or,
@@ -2281,11 +2391,43 @@ class HttpVectorClient:
         if rerank:
             if isinstance(results, dict) and "results" in results:
                 if "rerank_degraded" in results:
+                    retry_after = results.get("rerank_retry_after_seconds")
                     meta = {
                         "degraded": bool(results.get("rerank_degraded")),
                         "error": results.get("rerank_error"),
                         "model": results.get("rerank_model"),
+                        "retry_after_seconds": retry_after,
                     }
+                    if retry_after is not None:
+                        # nexus-n75jg (1vpal critic finding 2): a rate-
+                        # limit-caused rerank degrade now carries a
+                        # STRUCTURED retry_after (the engine's RerankStage
+                        # emits it only for an UpstreamRateLimitedException
+                        # degrade — never for any other degrade cause).
+                        # Feed the shared rate brake so every OTHER writer
+                        # in this process paces itself, exactly as a
+                        # 429+Retry-After from a vector/manifest write
+                        # would (nexus.retry's brake.trip call sites).
+                        # This never retries the search itself — the
+                        # server already served a 200 with distance-order
+                        # rows; the brake trip is purely a signal for
+                        # OTHER callers sharing this process.
+                        # Clamped through the same parser every other
+                        # trip() call site uses: the engine forwards
+                        # Voyage's Retry-After unbounded above, and
+                        # trip() only floors, so an absurd or non-numeric
+                        # value must never stall every writer in the
+                        # process (n75jg review). Unparseable: warn, no trip.
+                        from nexus.rate_brake import get_brake, parse_retry_after  # noqa: PLC0415 — deferred import: leaf module, keeps this otherwise-urllib-only module's load-time graph unchanged
+                        clamped = parse_retry_after({"Retry-After": str(retry_after)})
+                        if clamped is None:
+                            _log.warning(
+                                "rerank_retry_after_unparseable",
+                                value=retry_after, source="rerank",
+                            )
+                        else:
+                            meta["retry_after_seconds"] = clamped
+                            get_brake().trip(clamped, source="rerank")
                 else:
                     # nexus-znwc2: an object envelope WITHOUT the degrade flag
                     # cannot attest rerank ran. The engine's RerankStage emits
@@ -2300,6 +2442,7 @@ class HttpVectorClient:
                             "server reranked; treating results as "
                             "distance-ordered"
                         ),
+                        "retry_after_seconds": None,
                     }
                 results = results["results"]
             else:
@@ -2311,6 +2454,7 @@ class HttpVectorClient:
                         "converges the local engine (managed cloud: server "
                         "upgrade pending)"
                     ),
+                    "retry_after_seconds": None,
                 }
             if rerank_meta_out is not None:
                 rerank_meta_out.update(meta)

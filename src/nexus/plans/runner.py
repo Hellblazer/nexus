@@ -1428,10 +1428,36 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
         return {"contents": ["" for _ in tumbler_ids], "missing": list(tumbler_ids)}
     manifests = cat.get_manifests(tumbler_ids)
 
+    # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review round 3):
+    # best-effort non_evidentiary-stamp exclusion — one extra batched
+    # round trip (``resolve_many``, the same batched primitive
+    # ``search_engine.py``'s ``_attach_display_paths`` uses) alongside the
+    # ``get_manifests`` call this function already makes. A
+    # ``resolve_many`` failure, or a tumbler it cannot resolve, degrades
+    # to "no stamp for this id" — never raises, never excludes a document
+    # it cannot classify (see ``_entry_is_non_evidentiary``).
+    try:
+        catalog_entries = cat.resolve_many(tumbler_ids)
+    except Exception:  # noqa: BLE001 — best-effort exclusion; a lookup failure must degrade to "leave every candidate in", never crash the hydration
+        _log.warning(
+            "hydrate_tumbler_ids_resolve_many_failed",
+            tumbler_count=len(tumbler_ids),
+        )
+        catalog_entries = {}
+    excluded_doc_ids = {
+        doc_id for doc_id, entry in catalog_entries.items()
+        if _entry_is_non_evidentiary(entry)
+    }
+
     flat_ids: list[str] = []
     flat_collections: list[str] = []
     owner: list[str] = []
     for doc_id in tumbler_ids:
+        if doc_id in excluded_doc_ids:
+            # Contributes no chunks -- per_doc[doc_id] stays empty, so
+            # the existing contents/missing construction below already
+            # reports it exactly like any other unusable document.
+            continue
         rows = manifests.get(doc_id) or []
         for row in sorted(rows, key=lambda r: r.position):
             if not row.collection:
@@ -1457,15 +1483,196 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
         ids=flat_ids, collections=flat_collections, structured=True,
     )
     chunk_contents = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
+    # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, Sam's decision 3):
+    # ``section_types`` rides the SAME store_get_many call above -- no
+    # extra round trip. A package/import-only chunk (``section_type ==
+    # "imports"``, stamped at index time by
+    # ``nexus.code_indexer._is_import_only_chunk``) is structural, not
+    # evidentiary; drop it from the reassembled document exactly like an
+    # empty content string already is below. Missing/malformed
+    # ``section_types`` (an older cached hydration shape, a test double
+    # stubbing only ``contents``) degrades to "" per position -- never
+    # excludes a chunk it cannot classify.
+    chunk_section_types = (
+        hydrated.get("section_types", []) if isinstance(hydrated, dict) else []
+    )
 
     per_doc: dict[str, list[str]] = {doc_id: [] for doc_id in tumbler_ids}
-    for doc_id, content in zip(owner, chunk_contents):
-        if content:
-            per_doc[doc_id].append(content)
+    for i, (doc_id, content) in enumerate(zip(owner, chunk_contents)):
+        if not content:
+            continue
+        section_type = chunk_section_types[i] if i < len(chunk_section_types) else ""
+        if section_type == "imports":
+            continue
+        per_doc[doc_id].append(content)
 
     contents = ["\n\n".join(per_doc[doc_id]) for doc_id in tumbler_ids]
     missing = [doc_id for doc_id in tumbler_ids if not per_doc[doc_id]]
     return {"contents": contents, "missing": missing}
+
+
+#: RDR-200 Phase 1c evidence hygiene (nexus-4jj40). Review round 3
+#: replaces round 2's hard-coded source_uri path-prefix rule (a global
+#: ``"/tests/"`` marker drops any conexus USER's real test-file evidence
+#: in ANY indexed repo, not just this one's) with a per-document catalog
+#: stamp: :data:`nexus.catalog.types.NON_EVIDENTIARY_META_KEY` in
+#: ``Document.meta``. An operator sets it via the EXISTING
+#: ``nx catalog update --meta '{"non_evidentiary": true}'`` command (no
+#: new CLI); ``nx index repo`` auto-stamps it at register time ONLY for
+#: files under ``tests/fixtures/`` (fixture DATA, never a sibling test
+#: MODULE — see ``nexus.catalog.types.is_fixture_path``'s docstring;
+#: ``nexus.indexer._register_time_meta`` is the write side). A document
+#: with no resolvable catalog entry, or whose ``meta`` carries no stamp
+#: at all, is left in untouched — best-effort exclusion, never a silent
+#: drop of evidence this cannot classify.
+#:
+#: Round 1 of this bead's review shipped a category-based rule (drop
+#: "code" whenever "paper" shared the batch); round 2 shipped the
+#: source_uri path-prefix rule above. Both removed entirely: category
+#: dropped EVERY code-category candidate whenever a paper candidate
+#: shared the batch (breaking a legitimate "paper's algorithm plus its
+#: implementation" plan); source_uri's global "/tests/" marker is unsafe
+#: for any OTHER conexus user's repo, not just this one's fixtures.
+
+
+def _entry_is_non_evidentiary(entry: Any) -> bool:
+    """True when *entry* (a ``CatalogEntry``) carries the non_evidentiary
+    stamp in its ``meta`` dict. A missing/malformed ``meta`` is never
+    non-evidentiary — a caller with no resolvable stamp must leave the
+    candidate in, never exclude it."""
+    from nexus.catalog.types import NON_EVIDENTIARY_META_KEY  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+    meta = getattr(entry, "meta", None)
+    if not isinstance(meta, dict):
+        return False
+    return bool(meta.get(NON_EVIDENTIARY_META_KEY))
+
+
+def _resolve_non_evidentiary_chashes(chashes: list[str]) -> set[str]:
+    """Best-effort, batched chash -> "belongs to a non_evidentiary-
+    stamped document" set, for the chash-shaped hydration path (plain
+    ``search()`` results).
+
+    Two batched round trips total for the WHOLE input list, never one
+    per chash: ``docs_for_chashes`` (chash -> [doc_id, ...], the same
+    primitive ``search_engine.py``'s ``_attach_doc_ids_from_catalog``
+    already uses) then ``resolve_many`` (doc_id -> ``CatalogEntry``, the
+    same primitive :func:`_hydrate_tumbler_ids` uses for the tumbler-
+    shaped path). Either call failing, the catalog being unavailable, or
+    *chashes* being empty degrades to an empty set — never raises, never
+    excludes a chash it cannot classify.
+    """
+    from nexus.mcp_infra import get_catalog as _get_catalog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+    if not chashes:
+        return set()
+    cat = _get_catalog()
+    if cat is None:
+        return set()
+    try:
+        chash_to_docs = cat.docs_for_chashes(chashes)
+        if not isinstance(chash_to_docs, dict) or not chash_to_docs:
+            return set()
+        all_doc_ids = sorted({
+            doc_id for docs in chash_to_docs.values() for doc_id in (docs or [])
+        })
+        if not all_doc_ids:
+            return set()
+        entries = cat.resolve_many(all_doc_ids)
+        if not isinstance(entries, dict):
+            return set()
+    except Exception:  # noqa: BLE001 — best-effort exclusion; ANY failure here (a raised exception or a malformed/unconfigured catalog return) must degrade to "leave every candidate in", never crash the hydration
+        _log.warning(
+            "resolve_non_evidentiary_chashes_failed",
+            chash_count=len(chashes),
+        )
+        return set()
+    non_evidentiary_doc_ids = {
+        doc_id for doc_id, entry in entries.items()
+        if _entry_is_non_evidentiary(entry)
+    }
+    if not non_evidentiary_doc_ids:
+        return set()
+    return {
+        chash for chash, docs in chash_to_docs.items()
+        # nexus-4jj40 (review round 4): all(), not any() -- a chash
+        # SHARED by a stamped and an unstamped document (identical
+        # chunk text indexed in more than one document, RDR-180) is
+        # excluded only when EVERY owning document is stamped. any()
+        # would drop a genuinely evidentiary chash just because it
+        # happens to ALSO belong to one non_evidentiary document.
+        # all() on an empty (docs or []) is vacuously True in Python,
+        # but that can never fire here: chash_to_docs only ever
+        # contains keys docs_for_chashes itself returned with at
+        # least one doc_id, never an empty list.
+        if docs and all(doc_id in non_evidentiary_doc_ids for doc_id in docs)
+    }
+
+
+def _import_only_ids_from_hydrated(
+    hydrated: Any, id_list: list[Any],
+) -> set[str]:
+    """Return the subset of *id_list* whose hydrated chunk carries the
+    import-only ``section_type`` stamp (RDR-200 Phase 1c evidence
+    hygiene, nexus-4jj40 Sam's decision 3): a chunk consisting only of a
+    package/module declaration plus import statements
+    (``nexus.code_indexer._is_import_only_chunk``, index time) is
+    structural, not evidentiary -- near-identical header boilerplate
+    embeds close together across unrelated, self-indexed repos and
+    crowds out real matches.
+
+    ``section_types`` rides the SAME ``store_get_many`` fetch *hydrated*
+    already came from (see that function's ``structured=True`` return) --
+    zero extra round trips, unlike :func:`_resolve_non_evidentiary_chashes`
+    which needs its own catalog lookups because the non_evidentiary stamp
+    lives on the catalog Document, not the T3 chunk.
+
+    Degrades to an empty set for anything it cannot classify: a
+    non-dict *hydrated* (a raw string, an error payload), a missing or
+    malformed ``section_types`` list (an older cached hydration shape, a
+    test double stubbing only ``contents``/``missing``) -- never raises,
+    never excludes a chash it cannot classify.
+    """
+    if not isinstance(hydrated, dict):
+        return set()
+    section_types = hydrated.get("section_types")
+    if not isinstance(section_types, list):
+        return set()
+    return {
+        str(doc_id) for doc_id, st in zip(id_list, section_types)
+        if st == "imports"
+    }
+
+
+def _drop_intent_from_list_args(
+    args: dict[str, Any], *, intent: Any,
+) -> dict[str, Any]:
+    """Drop any list-arg element equal to the caller's raw *intent* text.
+
+    RDR-200 Phase 1c evidence hygiene (nexus-4jj40): a composed or
+    ad-hoc-grown plan step can reference ``$intent`` inside an
+    items/inputs-shaped list arg to give an operator step (rank,
+    compare, ...) context -- e.g.
+    ``{"items": ["$intent", "$step2.contents"]}``. Once ``$intent``
+    resolves (``plan_run``'s ``_resolve_args``), that list contains the
+    literal question STRING sitting beside real retrieved evidence, and
+    an items-consuming operator has no way to tell "this is context" from
+    "this is a candidate" -- it ranks/compares the question against
+    itself. Measured: the question string appeared as a rank candidate in
+    5 of 15 composed Phase 1c runs (T2 [24082]).
+
+    A flat membership check against every list-valued arg in *args* -- no
+    tool-name special-casing, no additional round trip. A non-string or
+    empty *intent* is a no-op (``$intent`` unbound, or bound to something
+    that could never collide with real evidence).
+    """
+    if not isinstance(intent, str) or not intent:
+        return args
+    out = dict(args)
+    for key, value in args.items():
+        if isinstance(value, list) and intent in value:
+            out[key] = [v for v in value if v != intent]
+    return out
 
 
 def _hydrate_operator_args(
@@ -1540,11 +1747,33 @@ def _hydrate_operator_args(
                 id_count=len(id_list_raw),
             )
             hydrated = _hydrate_tumbler_ids([str(i) for i in id_list_raw])
+            excluded_ids: set[str] = set()
         else:
             hydrated = mcp_core.store_get_many(
                 ids=ids, collections=collections, structured=True,
             )
-        contents = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
+            # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review
+            # round 3): the chash-shaped path -- the far more common
+            # shape (plain search() results) round 2 left uncovered.
+            # docs_for_chashes + resolve_many, one batched call each
+            # (never one per chash), mirroring _hydrate_tumbler_ids'
+            # own resolve_many use for the tumbler-shaped path.
+            excluded_ids = _resolve_non_evidentiary_chashes(
+                [str(i) for i in id_list_raw],
+            )
+            # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, Sam's
+            # decision 3): import-only chunks, resolved from the
+            # section_types the store_get_many call above already
+            # fetched -- no extra round trip.
+            excluded_ids |= _import_only_ids_from_hydrated(hydrated, id_list_raw)
+        contents_raw = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
+        if excluded_ids:
+            contents = [
+                "" if str(cid) in excluded_ids else c
+                for cid, c in zip(id_list_raw, contents_raw)
+            ]
+        else:
+            contents = contents_raw
         non_empty = [c for c in contents if c]
         original_count = len(non_empty)
         truncation_metadata: dict[str, Any] | None = None
@@ -2372,6 +2601,12 @@ async def plan_run(
                         b_raw_args, bindings=merged, step_outputs=step_outputs,
                         deferred_step_indices=deferred_indices,
                     )
+                    # nexus-4jj40: strip a literal $intent from any
+                    # items/inputs-shaped list arg before it reaches the
+                    # bundle composer -- see _drop_intent_from_list_args.
+                    b_resolved = _drop_intent_from_list_args(
+                        b_resolved, intent=merged.get("intent"),
+                    )
                     # Capture source collection(s) BEFORE hydration strips
                     # them from args, so the composer can attach a "source:"
                     # line to the prompt for parallel-branch attribution.
@@ -2434,6 +2669,12 @@ async def plan_run(
                         b_resolved = _resolve_args(
                             b_raw_args, bindings=merged,
                             step_outputs=step_outputs,
+                        )
+                        # nexus-4jj40: see the main bundle path's identical
+                        # call above -- this is the oversized-bundle,
+                        # per-step-dispatch fallback of the same segment.
+                        b_resolved = _drop_intent_from_list_args(
+                            b_resolved, intent=merged.get("intent"),
                         )
                         # RDR-196 .p1b: per-bi timing, NOT the segment-aggregate
                         # timer below — this loop dispatches N separate
@@ -2656,6 +2897,12 @@ async def plan_run(
 
             resolved = _resolve_args(
                 raw_args, bindings=merged, step_outputs=step_outputs,
+            )
+            # nexus-4jj40: strip a literal $intent from any items/inputs-
+            # shaped list arg before this step dispatches -- see
+            # _drop_intent_from_list_args.
+            resolved = _drop_intent_from_list_args(
+                resolved, intent=merged.get("intent"),
             )
             _check_embedding_domain(index, tool, scope, resolved)
             # SC-3: forward scope.taxonomy_domain → corpus and scope.topic

@@ -21,6 +21,7 @@ import os
 import subprocess
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -54,6 +55,8 @@ from nexus.code_indexer import (  # noqa: F401
 _log = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
+    import httpx
+
     from nexus.catalog.catalog_protocol import CatalogReader
     from nexus.catalog.tumbler import Tumbler
     from nexus.hook_registry import HookRegistry
@@ -68,7 +71,22 @@ DEFAULT_IGNORE: list[str] = _DEFAULT_IGNORE
 # History:
 #   v1-v3: pre-versioning (no version stamp in collection metadata)
 #   v4:    RDR-028 language registry + RDR-014 CCE prefixes
-PIPELINE_VERSION: str = "4"
+#   v5:    RDR-200 Phase 1c evidence hygiene, nexus-4jj40 -- code chunk
+#          classification gained section_type="imports". This bump has NO
+#          operational effect on any real (service-backed) install: every
+#          T3 collection handle is a _ServiceCollectionStub
+#          (http_vector_client.py) with no `metadata`/`modify` surface, so
+#          get_collection_pipeline_version() always returns None and
+#          check_pipeline_staleness() is always False -- --force-stale can
+#          structurally never detect this version change (T2 critique
+#          [24618]). The ONLY way to reclassify already-indexed code is an
+#          explicit `nx index repo --force` (bypasses per-file
+#          check_staleness); pass `--re-embed` too only for a genuine
+#          embedding-model recompute -- plain reclassification (this bump)
+#          does not need it, since the server's existence-partition
+#          refreshes chunk metadata for free when the chash is unchanged
+#          (nexus-4jj40 round 5).
+PIPELINE_VERSION: str = "5"
 
 # Concurrent ChunkBatcher flush workers during a repo index run. 3 is the
 # empirical choice from the 3midv sweep (sequential flushes cost 76-112s of
@@ -979,6 +997,30 @@ def _catalog_progress(
         write(stripped + "\n")
 
 
+def _register_time_meta(rel_path: str, file_hash: str) -> dict | None:
+    """Build a register/update-time ``meta`` dict for *rel_path*.
+
+    nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review round 3):
+    stamps :data:`nexus.catalog.types.NON_EVIDENTIARY_META_KEY` for a
+    file under :data:`nexus.catalog.types.FIXTURE_PATH_MARKER` (fixture
+    DATA, never a sibling test MODULE — see ``is_fixture_path``'s
+    docstring). ``None`` when there is nothing to stamp at all (no
+    content hash AND not a fixture path), preserving the pre-existing
+    "meta: None when file_hash is empty" behaviour exactly.
+    """
+    from nexus.catalog.types import (  # noqa: PLC0415 — deliberate function-scoped import (avoid a module-level catalog dep in the indexer)
+        NON_EVIDENTIARY_META_KEY,
+        is_fixture_path,
+    )
+
+    meta: dict = {}
+    if file_hash:
+        meta["content_hash"] = file_hash
+    if is_fixture_path(rel_path):
+        meta[NON_EVIDENTIARY_META_KEY] = True
+    return meta or None
+
+
 def _catalog_hook(
     repo: Path,
     repo_name: str,
@@ -990,6 +1032,7 @@ def _catalog_hook(
     stale_fence_doc_ids: set[str] | None = None,
     on_phase: Callable[[str], None] | None = None,
     complete_doc_hashes: dict[str, str] | None = None,
+    needs_fence: dict[str, tuple[str, str]] | None = None,
 ) -> dict[Path, str]:
     """Register/update indexed files in catalog. Silently skipped if catalog absent.
 
@@ -1043,6 +1086,35 @@ def _catalog_hook(
     is exhausted; ``"wait"`` proceeds after the budget (never permanently
     starve the batch). The per-repo advisory lock keeps its orthogonal job
     (two ``nx index repo`` on the same repo) up in ``index_repository``.
+
+    ``needs_fence`` (nexus-hg2dw) is an optional OUT-param:
+    ``doc_id -> (file_hash, physical_collection)`` for every document THIS
+    call determines needs real indexing work this run — a brand-new
+    registration, or an EXISTING document whose file content genuinely
+    changed (the ``file_hash != existing.meta["content_hash"]`` signal
+    already trusted elsewhere in this function for ``relink_rdr_tumblers``,
+    deliberately narrower than the broader ``changed`` flag that also
+    fires on a bare head_hash/mtime/collection bump with the file's
+    content untouched).
+
+    ROUND 2 CORRECTION (T2 critique-nexus-hg2dw-36602c67f [24598] finding
+    1, CRITICAL): this set is NOT fence-begun in bulk here or anywhere
+    else right after registration — an earlier version of this fix did
+    that (one round trip per collection, immediately after Pass 1) and it
+    enlarged an UNCATCHABLE exit's (SIGKILL/OOM-kill) blast radius from
+    the original incident's small in-flight batch to the run's entire
+    not-yet-processed file set, since a hard kill never runs
+    ``index_repository``'s ``finally``. The fence now begins PER FILE
+    instead, inside ``prose_indexer.index_prose_file`` /
+    ``code_indexer.index_code_file``, immediately before that file's own
+    chunking starts — this out-param exists purely to SCOPE the exit-time
+    reconciliation (``_reconcile_needs_fence``, called from
+    ``index_repository``'s existing ``finally``, catchable exits only) to
+    exactly the documents Pass 1 determined need checking, without a
+    full-corpus catalog scan. A doc whose content did NOT change is
+    deliberately excluded from this set entirely — including it would let
+    reconciliation clobber a correct 'complete' stamp for a file this run
+    never touches.
     """
     from nexus.catalog.write_priority import await_fair_window  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     file_to_doc_id: dict[Path, str] = {}
@@ -1323,7 +1395,7 @@ def _catalog_hook(
                         "file_path": rel_path,
                         "physical_collection": collection_name,
                         "head_hash": head_hash,
-                        "meta": {"content_hash": file_hash} if file_hash else None,
+                        "meta": _register_time_meta(rel_path, file_hash),
                         "source_mtime": source_mtime,
                     }))
                 else:
@@ -1336,21 +1408,26 @@ def _catalog_hook(
                     # JSON); a storage change that truncates precision
                     # flips this to always-changed (harmless) — never
                     # compare with tolerance, drift means changed.
+                    # nexus-hg2dw: the CONTENT-specific signal, isolated from
+                    # the broader `changed` (head_hash/mtime/collection) flag
+                    # below — a bare HEAD bump flips `changed` for the WHOLE
+                    # repo on every commit regardless of any file's actual
+                    # content, so it cannot drive fence-begin without forcing
+                    # every unchanged document to 'indexing' on every run.
+                    content_hash_changed = (
+                        bool(file_hash)
+                        and existing.meta.get("content_hash", "") != file_hash
+                    )
                     changed = (
                         existing.head_hash != head_hash
                         or existing.physical_collection != collection_name
                         or existing.source_mtime != source_mtime
-                        or (
-                            file_hash
-                            and existing.meta.get("content_hash", "") != file_hash
-                        )
+                        or content_hash_changed
                     )
-                    if (
-                        content_type == "rdr"
-                        and file_hash
-                        and existing.meta.get("content_hash", "") != file_hash
-                    ):
+                    if content_type == "rdr" and content_hash_changed:
                         relink_rdr_tumblers.append(existing.tumbler)
+                    if needs_fence is not None and content_hash_changed:
+                        needs_fence[str(existing.tumbler)] = (file_hash, collection_name)
                     if changed:
                         # nexus-xedhp: accumulate for the batched update_many
                         # below instead of an inline per-file writer.update()
@@ -1362,7 +1439,7 @@ def _catalog_hook(
                             "tumbler": str(existing.tumbler),
                             "head_hash": head_hash,
                             "physical_collection": collection_name,
-                            "meta": {"content_hash": file_hash} if file_hash else None,
+                            "meta": _register_time_meta(rel_path, file_hash),
                             "source_mtime": source_mtime,
                         }))
                     file_to_doc_id[abs_path] = str(existing.tumbler)
@@ -1516,6 +1593,11 @@ def _catalog_hook(
                     if created:
                         new_tumblers.append(tum)
                         new_content_types.add(doc.get("content_type", ""))
+                        if needs_fence is not None:
+                            needs_fence[str(tum)] = (
+                                (doc.get("meta") or {}).get("content_hash", ""),
+                                doc.get("physical_collection", ""),
+                            )
                         continue
                     # The owner-scoped snapshot had no row for this path,
                     # yet the server reconciled onto a live row by
@@ -1547,6 +1629,11 @@ def _catalog_hook(
                         if created:
                             new_tumblers.append(tum)
                             new_content_types.add(doc.get("content_type", ""))
+                            if needs_fence is not None:
+                                needs_fence[str(tum)] = (
+                                    (doc.get("meta") or {}).get("content_hash", ""),
+                                    doc.get("physical_collection", ""),
+                                )
                         else:
                             reconciled.append((path, str(tum)))
                             _log.warning(
@@ -1739,6 +1826,106 @@ def _catalog_hook(
     return file_to_doc_id
 
 
+def _reconcile_needs_fence(fence_run_state: dict) -> None:
+    """nexus-hg2dw: run-exit reconciliation for the registration-time
+    fence above. Called unconditionally from ``index_repository``'s
+    EXISTING ``finally`` block (already wraps the ``_run_index`` call and
+    already runs on normal return, an exception propagating out of
+    ``_run_index``, OR a ``KeyboardInterrupt`` — Python's ``finally``
+    fires for all three), so this closes point (2) of the nexus-hg2dw
+    fix: at run exit, fail-stamp anything registered but unflushed.
+
+    ``fence_run_state`` is a plain ``{"needs_fence": ..., "owner": ...}``
+    dict ``_run_index`` populates in place immediately after Pass 1 (near
+    the very top of the run, well before any per-file work can crash) —
+    so it survives regardless of WHERE later in the run a crash happens.
+
+    Design: re-read the CURRENT fence state for every ``needs_fence`` doc
+    from the catalog (ONE ``by_owner`` round trip, not per-doc) rather
+    than tracking "did this doc's completion get attempted" through every
+    producer's own code path (the batched flush-grain path, EACH content
+    type's direct-upload fallback, RDR's shared prose path...). Reading
+    ground truth back from the engine is what lets this work uniformly
+    across every producer without touching any of them: a doc that
+    genuinely reached 'complete', or was already resolved 'failed' by an
+    in-loop handler, is left alone; a doc still 'indexing' or entirely
+    unreported (never even begun) is fail-stamped. Skipped entirely (no
+    round trip at all) when ``needs_fence`` is empty — the common
+    warm-rerun case where nothing changed.
+
+    Critique T2 critique-nexus-hg2dw-36602c67f [24598] finding 5: an
+    unresolved ``owner`` (the resolve in ``_run_index`` failed) or a
+    ``by_owner`` transport failure previously disabled reconciliation for
+    the ENTIRE run — every needs_fence doc across every collection — as a
+    silent no-op. Falls back here to a PER-DOC read
+    (``doc_indexer._index_fence_state``, N round trips instead of one,
+    acceptable at this rare, run-exit-only path) so a degraded owner
+    resolution still fail-stamps what it can, loudly logged either way.
+
+    Fail-open: never raises. A reconciliation failure must never mask the
+    run's own outcome (matches every fence helper's contract, doc_indexer.py).
+    """
+    needs_fence: dict[str, tuple[str, str]] = fence_run_state.get("needs_fence") or {}
+    owner = fence_run_state.get("owner")
+    if not needs_fence:
+        return
+
+    from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+
+    def _should_fail(state: str | None) -> bool:
+        # 'complete' -> genuinely resolved this run, leave it alone.
+        # 'failed' -> already resolved (an in-loop failure handler, e.g.
+        # prose_indexer's upload-exception fence-fail, already ran) —
+        # re-failing is a harmless no-op state-wise but a needless
+        # duplicate write and log line every time. Only None (never even
+        # begun) and 'indexing' (begun, never resolved — the actual gap
+        # this closes) get fail-stamped here.
+        return state not in ("complete", "failed")
+
+    entries: dict[str, object] | None = None
+    if owner is not None:
+        try:
+            from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred import; test patch target
+
+            cat = make_catalog_reader()
+            if cat is not None:
+                entries = {str(e.tumbler): e for e in cat.by_owner(owner)}
+        except Exception as exc:  # noqa: BLE001 — advisory reconciliation must never mask the run's own outcome
+            _log.warning(
+                "index_run_fence_reconcile_bulk_read_failed",
+                error=str(exc), doc_count=len(needs_fence),
+            )
+            entries = None
+
+    if entries is not None:
+        for doc_id in needs_fence:
+            entry = entries.get(doc_id)
+            state = getattr(entry, "index_state", None) if entry is not None else None
+            if _should_fail(state):
+                _fence_fail(doc_id, "index run exited without completing this document")
+        return
+
+    # Degraded path: no owner, or the bulk read itself failed. Loudly
+    # logged (never a silent no-op) and per-doc from here — slower, but
+    # correctness for THIS run's needs_fence set no longer depends on one
+    # single owner-resolution or bulk-read round trip succeeding.
+    _log.warning(
+        "index_run_fence_reconcile_degraded_per_doc",
+        reason="owner_unresolved" if owner is None else "bulk_read_failed",
+        doc_count=len(needs_fence),
+    )
+    from nexus.doc_indexer import _index_fence_state  # noqa: PLC0415 — deferred import; test patch target
+
+    for doc_id in needs_fence:
+        try:
+            state, _hash = _index_fence_state(doc_id)
+        except Exception as exc:  # noqa: BLE001 — one doc's read failure must not abort the rest
+            _log.warning("index_run_fence_reconcile_doc_read_failed", doc_id=doc_id, error=str(exc))
+            continue
+        if _should_fail(state):
+            _fence_fail(doc_id, "index run exited without completing this document")
+
+
 def _maybe_run_housekeeping(
     cat,
     owner,
@@ -1835,6 +2022,25 @@ def _run_housekeeping(
         orphan_hash = (entry.meta or {}).get("content_hash", "")
         if orphan_hash and orphan_hash in hash_to_entry:
             new_entry = hash_to_entry[orphan_hash]
+            # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review
+            # round 4): carry the non_evidentiary stamp across a
+            # rename. The old entry is about to be deleted below —
+            # without this, a manually-stamped document (`nx catalog
+            # update --meta '{"non_evidentiary": true}'`) is silently
+            # un-stamped by the very next `nx index repo` after a
+            # `git mv`. Only THIS one key transfers: the new entry's
+            # OWN meta (its freshly-computed content_hash, its own
+            # path's auto-stamp, if any) is authoritative for the new
+            # file and must not be clobbered by the old entry's other
+            # fields. A no-op when the new entry already carries the
+            # stamp (e.g. renamed INTO tests/fixtures/).
+            from nexus.catalog.types import NON_EVIDENTIARY_META_KEY  # noqa: PLC0415 — deliberate function-scoped import (avoid a module-level catalog dep in the indexer)
+            old_meta = entry.meta or {}
+            if old_meta.get(NON_EVIDENTIARY_META_KEY):
+                new_meta = dict(new_entry.meta or {})
+                if not new_meta.get(NON_EVIDENTIARY_META_KEY):
+                    new_meta[NON_EVIDENTIARY_META_KEY] = True
+                    w.update(new_entry.tumbler, meta=new_meta)
             # Transfer links from old entry to new entry
             old_links = cat.links_from(entry.tumbler)
             for lnk in old_links:
@@ -1908,6 +2114,7 @@ def index_repository(
     frecency_only: bool = False,
     chunk_lines: int | None = None,
     force: bool = False,
+    force_re_embed: bool = False,
     force_stale: bool = False,
     since_head: bool = False,
     on_locked: str = "wait",
@@ -1917,6 +2124,7 @@ def index_repository(
     on_flush: "Callable[[int, int, str, float, str | None], None] | None" = None,
     on_stage_timers: Callable[[Path, "StageTimers"], None] | None = None,
     hooks: "HookRegistry | None" = None,
+    client: "httpx.Client | None" = None,
 ) -> dict[str, int]:
     """Index all files in *repo* into T3 code__ and docs__ collections.
 
@@ -1935,6 +2143,16 @@ def index_repository(
 
     *chunk_lines* overrides the default chunk size (150 lines) for code files.
     When None, the module default is used.
+
+    *force_re_embed* (nexus-4jj40 round 5, T2 [24618]): DECOUPLED from
+    *force* -- see ``IndexContext.force_re_embed``'s docstring for the full
+    rationale. *force* alone re-chunks and re-sends every file, bypassing
+    the per-file staleness check; the server's own existence-partition
+    still skips the billed Voyage re-embed for byte-identical chunk text,
+    refreshing only the chunk's stored metadata. Pass *force_re_embed=True*
+    (``nx index repo --force --re-embed``) only for a genuine embedding-
+    model recompute; the default keeps a plain reclassification-only
+    ``--force`` pass near-zero cost.
 
     *on_locked* controls behaviour when another process holds the repo lock:
     ``'wait'`` (default) blocks until the lock is released; ``'skip'`` returns
@@ -1977,31 +2195,59 @@ def index_repository(
         hooks = HookRegistry()
         install_default_hooks(hooks)
 
-    try:
-        # RDR-137 Phase 3.8 (nexus-tts0d.13): registry.update(status=...)
-        # writes dropped per A2 verdict — status is write-only with no
-        # consumers. head_hash now writes to owners.head_hash on the
-        # catalog (Phase 1.5b column) via _set_owner_head_hash.
-        # RDR-137 followup IMP-21 (nexus-43qgm.21): inner try/except
-        # removed — both handlers unconditionally re-raised and added
-        # zero behaviour; the outer try/finally is the only meaningful
-        # guard. Vestige of the dropped status-write path.
-        if frecency_only:
-            _run_index_frecency_only(repo, registry)
-            stats: dict[str, int] = {}
-        else:
-            stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_stale=force_stale, since_head=since_head, on_locked=on_locked, on_start=on_start, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks)
-            _set_owner_head_hash(repo, _current_head(repo))
-        return stats
-    finally:
-        if lock_fd is not None:
-            unlock_file(lock_fd)
-            lock_fd.close()
-        if lock_path is not None:
-            try:
-                lock_path.unlink()
-            except FileNotFoundError:
-                pass  # already gone — harmless
+    # nexus-hg2dw: populated by ``_run_index`` in place, immediately after
+    # Pass 1 registration — near the very top of the run, well before any
+    # per-file work could crash — so it survives regardless of where later
+    # in the run an exception or KeyboardInterrupt actually fires. This
+    # `finally` already wraps every exit path (return, exception, SIGINT);
+    # the reconciliation call below is the ONLY new step, added at the end
+    # so it never interferes with the pre-existing lock cleanup.
+    _fence_run_state: dict = {"needs_fence": None, "owner": None}
+    # nexus-m20mf P3 fold-in: scope the ONE shared T2 client (built by the
+    # caller, e.g. `nx index repo`'s Click group) to this run -- every
+    # per-document hook-failure record (hook_registry.py's fire_single/
+    # fire_batch/fire_document -> _record_*_hook_failure ->
+    # _persist_hook_failure -> mcp_infra.t2_ctx()) and every direct
+    # record_catalog_hook_failure call (catalog/store_hook.py,
+    # doc_indexer.py, pipeline_stages.py, indexer.py's own two sites, all
+    # of which fire from inside a FIXED hook-function call signature that
+    # cannot itself carry a `client=` argument) picks this up automatically
+    # via t2_ctx()'s own resolution rule. A no-op scope when client=None
+    # (every existing caller): t2_ctx() falls back to its pre-P3 fresh-
+    # client-per-call behavior exactly as before.
+    from nexus.mcp_infra import use_shared_t2_client_for_index_run  # noqa: PLC0415 — deferred to avoid circular import
+    with use_shared_t2_client_for_index_run(client):
+        try:
+            # RDR-137 Phase 3.8 (nexus-tts0d.13): registry.update(status=...)
+            # writes dropped per A2 verdict — status is write-only with no
+            # consumers. head_hash now writes to owners.head_hash on the
+            # catalog (Phase 1.5b column) via _set_owner_head_hash.
+            # RDR-137 followup IMP-21 (nexus-43qgm.21): inner try/except
+            # removed — both handlers unconditionally re-raised and added
+            # zero behaviour; the outer try/finally is the only meaningful
+            # guard. Vestige of the dropped status-write path.
+            if frecency_only:
+                _run_index_frecency_only(repo, registry)
+                stats: dict[str, int] = {}
+            else:
+                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_re_embed=force_re_embed, force_stale=force_stale, since_head=since_head, on_locked=on_locked, on_start=on_start, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks, fence_run_state=_fence_run_state)
+                _set_owner_head_hash(repo, _current_head(repo))
+            return stats
+        finally:
+            if lock_fd is not None:
+                unlock_file(lock_fd)
+                lock_fd.close()
+            if lock_path is not None:
+                try:
+                    lock_path.unlink()
+                except FileNotFoundError:
+                    pass  # already gone — harmless
+            # nexus-hg2dw point (2): runs on EVERY exit — normal return, an
+            # exception propagating out of `_run_index`, or a KeyboardInterrupt
+            # (SIGINT) — fail-stamping anything Pass 1 registered as needing
+            # work this run that never reached 'complete'. A no-op (no round
+            # trip) when nothing needed fencing this run.
+            _reconcile_needs_fence(_fence_run_state)
 
 
 def _build_frecency_doc_id_map(
@@ -2285,11 +2531,30 @@ def _contain_transient_upsert(fn: "Callable[[], int]", file: "Path") -> int:
     """Run per-file index ``fn``; on a TRANSIENT upsert 5xx (gateway/pool), log
     and return 0 (file deferred to staleness) instead of propagating. Permanent
     errors (4xx, transport, non-transient 5xx) still raise (nexus-7yfe6).
+
+    nexus-8hdg9 phase 1 critique (ship-blocker fix): ``VectorUpsertTimeoutError``
+    (retry.py -- raised when an upsert times out and ``retry_on_timeout=False``
+    refuses to retry it) is a SIBLING ``RuntimeError``, not a ``VectorServiceError``
+    subclass, so it must be caught here explicitly or it bypasses this containment
+    entirely and aborts the whole ``nx index repo`` run on the first slow response
+    -- exactly the failure class this function exists to prevent for the 5xx
+    codes below. Deferred to staleness identically: a different boundary from
+    nexus-deyd5's ``UnextractableContentError`` skip counter (a PERMANENT,
+    per-document extraction failure), this is a TRANSIENT upsert condition that
+    self-heals via the next run's RDR-181 existence-partition retry, same as any
+    other entry in ``_TRANSIENT_UPSERT_CODES``.
     """
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance: nexus.db.http_vector_client
+    from nexus.retry import VectorUpsertTimeoutError  # noqa: PLC0415 -- circular-dep avoidance: nexus.retry
 
     try:
         return fn()
+    except VectorUpsertTimeoutError as exc:
+        _log.warning(
+            "index_file_transient_upsert_deferred",
+            file=str(file), code="upsert-timeout", error=str(exc),
+        )
+        return 0
     except VectorServiceError as exc:
         if exc.code in _TRANSIENT_UPSERT_CODES:
             _log.warning(
@@ -2321,6 +2586,7 @@ def _index_code_file(
     chunk_lines: int | None = None,
     force: bool = False,
     *,
+    force_re_embed: bool = False,
     embed_fn: Callable | None = None,
     stage_timers: "StageTimers | None" = None,
     doc_id_resolver: Callable[[Path], str] | None = None,
@@ -2345,6 +2611,11 @@ def _index_code_file(
     ``staleness_cache`` is the orchestrator-built collection-wide
     staleness map. When supplied, the per-file ``check_staleness`` is
     a dict lookup instead of a Chroma roundtrip.
+
+    ``force_re_embed`` (nexus-4jj40 round 5, T2 [24618]): DECOUPLED from
+    ``force`` -- see ``IndexContext.force_re_embed``'s docstring. Defaults
+    False so a plain ``--force`` reclassification pass never pays for a
+    full Voyage re-embed of unchanged content.
     """
     from nexus.code_indexer import index_code_file  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.index_context import IndexContext  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
@@ -2362,6 +2633,7 @@ def _index_code_file(
         score=score,
         chunk_lines=chunk_lines,
         force=force,
+        force_re_embed=force_re_embed,
         embed_fn=embed_fn,
         stage_timers=stage_timers,
         doc_id_resolver=doc_id_resolver,
@@ -3864,6 +4136,7 @@ def _run_index(
     chunk_lines: int | None = None,
     *,
     force: bool = False,
+    force_re_embed: bool = False,
     force_stale: bool = False,
     since_head: bool = False,
     on_locked: str = "wait",
@@ -3873,6 +4146,7 @@ def _run_index(
     on_flush: "Callable[[int, int, str, float, str | None], None] | None" = None,
     on_stage_timers: Callable[[Path, "StageTimers"], None] | None = None,
     hooks: "HookRegistry | None" = None,
+    fence_run_state: dict | None = None,
 ) -> dict[str, int]:
     """Full indexing pipeline: classify → route → embed → upsert → prune.
 
@@ -3914,6 +4188,13 @@ def _run_index(
     from nexus.mcp_infra import reset_taxonomy_assign_run_stats  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
 
     reset_taxonomy_assign_run_stats()
+    # nexus-hg2dw round 3 (T2 code-review-nexus-hg2dw-52d06c8c5 [24626]
+    # finding 2): same process-lifetime-global rationale as the three
+    # resets above — zero the fence-begin failure counter so the
+    # end-of-run summary line covers exactly THIS run.
+    from nexus.doc_indexer import reset_fence_begin_failure_count  # noqa: PLC0415 — deferred to avoid circular import (doc_indexer)
+
+    reset_fence_begin_failure_count()
 
     # RDR-103 Phase 3a: registry value preserves the legacy name when
     # the repo was added before the migration; fallback queries the
@@ -4479,6 +4760,10 @@ def _run_index(
     # nexus-vayt7: tumbler -> index_content_hash for every doc fenced
     # 'complete', from the same fetch; overlaid onto the caches below.
     _complete_doc_hashes: dict[str, str] = {}
+    # nexus-hg2dw: doc_id -> (file_hash, collection) for every document
+    # this run's registration determined needs real indexing work (new,
+    # or genuinely content-changed) — see _catalog_hook's own docstring.
+    _needs_fence: dict[str, tuple[str, str]] = {}
     file_to_doc_id = _catalog_hook(
         repo=repo,
         repo_name=_repo_basename,
@@ -4492,11 +4777,45 @@ def _run_index(
         stale_fence_doc_ids=_stale_fence_doc_ids,
         on_phase=on_phase,
         complete_doc_hashes=_complete_doc_hashes,
+        needs_fence=_needs_fence,
     )
     if on_phase is not None:
         on_phase(
             f"Catalog registration done ({time.monotonic() - _catalog_t0:.1f}s)"
         )
+
+    # nexus-hg2dw / critique round 2 (T2 critique-nexus-hg2dw-36602c67f
+    # [24598], finding 1 CRITICAL): the FIRST version of this fix began
+    # the fence for the WHOLE needs_fence set right here, in one shot —
+    # closing the registration-to-first-flush window, but enlarging an
+    # UNCATCHABLE exit's (SIGKILL/OOM-kill/forced-quit) blast radius from
+    # the original incident's small in-flight batch to this run's ENTIRE
+    # not-yet-processed file set, since `finally` (and therefore
+    # _reconcile_needs_fence below) never runs on a hard kill. Reverted:
+    # there is no longer a blanket begin call here. `fence_run_state` is
+    # still populated NOW (near the very top of the run, so it reflects
+    # this run's real registered set even if a crash happens anywhere
+    # LATER in this function) purely as the SCOPE for the exit-time
+    # reconciliation (_reconcile_needs_fence, catchable exits only) —
+    # per-file fence-begin itself moved to each producer's own
+    # determination-of-real-work point (prose_indexer.index_prose_file,
+    # code_indexer.index_code_file), immediately before that file's own
+    # chunking starts, so an uncatchable kill only strands whatever is
+    # ACTIVELY in flight at that instant (bounded by `_concurrency`),
+    # matching the original incident's narrow scope, and heals via the
+    # pre-existing nexus-cp46b fence-aware staleness check on the very
+    # next normal run either way.
+    if fence_run_state is not None:
+        fence_run_state["needs_fence"] = _needs_fence
+        try:
+            from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred import
+            _owner_reader = make_catalog_reader()
+            fence_run_state["owner"] = (
+                _owner_reader.owner_for_repo(_repo_hash)
+                if _owner_reader is not None else None
+            )
+        except Exception as exc:  # noqa: BLE001 — advisory: exit-time reconciliation degrades to a no-op, never blocks indexing
+            _log.warning("index_run_fence_owner_resolve_failed", error=str(exc))
 
     # nexus-kgyoz seam 2: the resolver closure is lifted to
     # indexer_utils.build_doc_id_resolver so _run_index stays a thin
@@ -4664,10 +4983,16 @@ def _run_index(
             # independently-tested _build_combined_write_payload.
             #
             # RDR-181 §Approach step 3: force_re_embed closes over the
-            # enclosing _run_index's ``force`` (constant for the whole
-            # run, like ``db`` above) so ``--force`` reaches the server's
-            # forceReEmbed escape for the batched flush path too, not
-            # just the per-file fallback below.
+            # enclosing _run_index's OWN ``force_re_embed`` parameter
+            # (constant for the whole run, like ``db`` above), NOT
+            # ``force`` (nexus-4jj40 round 5, T2 [24618]: the two were
+            # coupled here, which meant a plain ``--force`` reclassify
+            # pass paid full Voyage re-embed for unchanged content on
+            # this, the DEFAULT batched flush path). ``--force`` alone
+            # still reaches the server's existence-partition metadata-
+            # only refresh; ``--re-embed`` is the explicit opt-in that
+            # sets ``force_re_embed=True`` and reaches forceReEmbed here
+            # too, not just the per-file fallback below.
             (
                 chunks_payload, full_docs, complete_map,
                 orphan_ids, orphan_docs, orphan_metas,
@@ -4698,7 +5023,7 @@ def _run_index(
                     documents=orphan_docs,
                     embeddings=[[] for _ in orphan_ids],  # Seam B: server embeds
                     metadatas=orphan_metas,
-                    force_re_embed=force,
+                    force_re_embed=force_re_embed,
                 )
 
             if not full_docs:
@@ -4748,7 +5073,7 @@ def _run_index(
                     sweep=True,
                     chunks=chunks_payload,
                     collection=collection,
-                    force_re_embed=force,
+                    force_re_embed=force_re_embed,
                 )
             finally:
                 _close = getattr(cat, "close", None)
@@ -5080,6 +5405,7 @@ def _run_index(
             voyage_client, git_meta, now_iso, score,
             chunk_lines=effective_chunk_lines,
             force=force,
+            force_re_embed=force_re_embed,
             embed_fn=_embed_fn,
             stage_timers=timers,
             doc_id_resolver=_doc_id_resolver,
@@ -5632,9 +5958,105 @@ def _run_index(
     _files_attempted_total = (
         len(code_files) + len(prose_files) + len(pdf_files) + len(rdr_md_paths)
     )
+
+    # nexus-nukn3: durable per-file failure record, ENQUEUED and moved on
+    # from — Sam's design, 2026-08-21. Every skip collected in _skipped_files
+    # above is written as one durable row (nexus.index_failures) in ONE
+    # batch transaction, tagged with a fresh run_id so a later `nx index
+    # failures --run-id ...` or `nx doctor --check-index-failures` can find
+    # exactly this run's backlog. error_class is hardcoded to
+    # UnextractableContentError's name rather than threaded through
+    # run_file_loop's on_skip callback: nexus-deyd5's classification
+    # boundary is the ONLY thing that ever sets skip_reason (see
+    # indexer_utils.run_file_loop._process), so it is the only class that
+    # can reach here — enriching the callback signature to derive it would
+    # touch the very classification this bead's scope fence excludes from
+    # change, for no behavioral gain today.
+    #
+    # The write is advisory, matching every other telemetry call site's
+    # posture (record_hook_failure et al.): a transport failure here must
+    # never crash an otherwise-successful index run. On success, the count
+    # is READ BACK from the same durable store (proving the round trip
+    # actually works, not merely assumed) and used as skip_floor_breached's
+    # input in place of the in-memory list length — "the queue replaces the
+    # RECORD, not the VERDICT" (bead nexus-nukn3). On any failure the
+    # in-memory count is the fallback, so telemetry downtime degrades
+    # observability, never correctness of the exit-code decision.
+    #
+    # Fold-in (critic Significant finding, T2
+    # critique-nexus-nukn3-410720f6a [24569]): the WRITE and the READ-BACK
+    # are now two SEPARATE try/except blocks, not one. The original single
+    # block silently dropped the durable row on a write-side transport
+    # failure with only a structlog line -- exactly the pre-bead problem
+    # (a failure record that dies with the process), just narrowed to the
+    # telemetry-down case. `_index_failures_write_failed` distinguishes
+    # that class (nothing durable exists; index_repo_cmd surfaces it loudly
+    # in the run summary) from a write-SUCCESS/read-back-FAILURE (the
+    # durable row exists; only the re-confirmation query failed, so the
+    # in-memory count is still accurate and no loud warning is warranted).
+    _durable_skipped_count = len(_skipped_files)
+    _index_failures_write_failed = False
+    if _skipped_files:
+        _index_run_id = uuid.uuid4().hex
+        _tel_store = None
+        try:
+            from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred to avoid import-time cost / circular deps
+            from nexus.mcp_infra import current_index_run_t2_client  # noqa: PLC0415 — deferred to avoid circular import
+
+            # nexus-m20mf P3 fold-in: shares this run's T2 client (if any)
+            # instead of opening an unshared 9th pool for this one durable
+            # write. Falls back to None (this store's own default
+            # construction) outside a live index_repository() run.
+            _tel_store = HttpTelemetryStore(client=current_index_run_t2_client())
+            _tel_store.record_index_failures_batch(
+                [
+                    (str(path), "UnextractableContentError", reason, "")
+                    for path, reason in _skipped_files
+                ],
+                run_id=_index_run_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — advisory write; never fail an otherwise-successful run over telemetry downtime
+            _index_failures_write_failed = True
+            _log.warning(
+                "index_failures_durable_write_failed",
+                error=str(exc), skipped=len(_skipped_files),
+            )
+        if _tel_store is not None and not _index_failures_write_failed:
+            try:
+                _durable_skipped_count = _tel_store.list_index_failures(
+                    run_id=_index_run_id, limit=1,
+                )["total"]
+            except Exception as exc:  # noqa: BLE001 — the write succeeded; a read-back blip does not undercount (in-memory count still matches what was durably written), so this stays a quiet degrade
+                _log.warning(
+                    "index_failures_read_back_failed",
+                    error=str(exc), skipped=len(_skipped_files),
+                )
+
     _systemic_extraction_failure = skip_floor_breached(
-        len(_skipped_files), _files_attempted_total,
+        _durable_skipped_count, _files_attempted_total,
     )
+
+    # nexus-hg2dw round 3 (T2 code-review-nexus-hg2dw-52d06c8c5 [24626]
+    # finding 2): one run-summary line when the fail-open fence-begin
+    # counter is non-zero, in ADDITION to the existing per-doc WARNING —
+    # a burst of these is a real signal ("is the catalog unreachable for
+    # this whole run?") that a per-file log line alone is easy to miss on
+    # a large run. Read AFTER the batcher's drain above so it covers the
+    # flush-grain begin-many calls too, not just the per-file ones.
+    from nexus.doc_indexer import fence_begin_failure_count  # noqa: PLC0415 — deferred to avoid circular import (doc_indexer)
+
+    _fence_begin_failures = fence_begin_failure_count()
+    if _fence_begin_failures:
+        _log.warning(
+            "index_run_fence_begin_failures_summary",
+            count=_fence_begin_failures,
+        )
+        if on_phase is not None:
+            on_phase(
+                f"NOTE: {_fence_begin_failures} fence-begin failure(s), "
+                f"catalog unreachable? (advisory only — indexing itself "
+                f"was not affected; see logs for per-doc detail)"
+            )
 
     # nexus-7lw6a: final snapshot for the return dict below — read fresh
     # here (rather than reusing the `if _batcher is not None:` block's
@@ -5673,7 +6095,21 @@ def _run_index(
         # files, no data was lost by skipping ONE file. index_repo_cmd
         # reports this count informationally UNLESS
         # systemic_extraction_failure is also True (see below).
-        "skipped_unextractable_files": len(_skipped_files),
+        #
+        # nexus-nukn3: this is now _durable_skipped_count — the count READ
+        # BACK from nexus.index_failures after the batch write above, not
+        # the in-memory list length directly (they agree on the durable
+        # write's success path; the in-memory value is only the fallback
+        # on a telemetry-write failure — see that block's own comment).
+        "skipped_unextractable_files": _durable_skipped_count,
+        # nexus-nukn3 fold-in: True iff the durable WRITE (not merely the
+        # read-back) failed this run -- no row exists in nexus.index_failures
+        # for any of this run's skips. index_repo_cmd surfaces this loudly
+        # ("N failures not durably recorded") since it is the one case where
+        # `nx index failures` / `nx doctor --check-index-failures` cannot see
+        # what actually happened; the exit-code verdict above already used
+        # the in-memory fallback count regardless.
+        "index_failures_write_failed": _index_failures_write_failed,
         # nexus-deyd5 round 3: the denominator for the ratio above, and
         # for index_repo_cmd's "attempted N, skipped M" message.
         "files_attempted_total": _files_attempted_total,

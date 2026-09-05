@@ -676,6 +676,508 @@ class TelemetryRepositoryTest {
         assertThat(blankRow.get("batch_doc_ids")).isEqualTo("");
     }
 
+    // ── index_failures (nexus-nukn3) ─────────────────────────────────────────
+
+    @Test @Order(57)
+    @SuppressWarnings("unchecked")
+    void indexFailures_recordAndBatch_readBackByRun() {
+        final String tenant = "tel-idxfail-" + System.nanoTime();
+        final String runA = "run-a-" + System.nanoTime();
+        final String runB = "run-b-" + System.nanoTime();
+
+        repo.recordIndexFailure(tenant, runA, "/repo/broken.pdf",
+            "UnextractableContentError", "produced empty output", null);
+        int inserted = repo.recordIndexFailuresBatch(tenant, List.of(
+            new Object[]{runA, "/repo/other.pdf", "UnextractableContentError", "scanned image", null},
+            new Object[]{runB, "/repo/unrelated.pdf", "UnextractableContentError", "boom", null}
+        ));
+        assertThat(inserted).isEqualTo(2);
+
+        var runAOnly = repo.getIndexFailures(tenant, runA, 0, 100, false);
+        var runARows = (List<Map<String, Object>>) runAOnly.get("rows");
+        assertThat(runAOnly.get("total")).as("run-scoped count excludes the other run").isEqualTo(2);
+        assertThat(runARows).extracting(r -> r.get("file_path"))
+            .containsExactlyInAnyOrder("/repo/broken.pdf", "/repo/other.pdf");
+        assertThat(runARows).extracting(r -> r.get("error_class"))
+            .allMatch("UnextractableContentError"::equals);
+
+        var everything = repo.getIndexFailures(tenant, "", 0, 100, false);
+        assertThat(everything.get("total")).as("blank run_id returns every run").isEqualTo(3);
+    }
+
+    @Test @Order(58)
+    @SuppressWarnings("unchecked")
+    void indexFailures_read_aggregatesIgnoreThePageLimit() {
+        // Same non-vacuity shape as hookFailures_read_aggregatesIgnoreThePageLimit:
+        // the deyd5 systemic-skip floor and `nx doctor --check-index-failures` both
+        // read `total`, which must reflect the WHOLE backlog, not one page of it.
+        final String tenant = "tel-idxfail-cap-" + System.nanoTime();
+        final String runId = "run-cap-" + System.nanoTime();
+        List<Object[]> rows = new java.util.ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            rows.add(new Object[]{runId, "/repo/f" + i + ".pdf", "UnextractableContentError", "boom", null});
+        }
+        repo.recordIndexFailuresBatch(tenant, rows);
+
+        var capped = repo.getIndexFailures(tenant, runId, 0, 1, false);
+
+        assertThat((List<Map<String, Object>>) capped.get("rows"))
+            .as("the page honours limit").hasSize(1);
+        assertThat(capped.get("total"))
+            .as("total counts every matching row, not the page").isEqualTo(5);
+    }
+
+    @Test @Order(59)
+    @SuppressWarnings("unchecked")
+    void indexFailures_read_isTenantScoped() {
+        final String mine = "tel-idxfail-mine-" + System.nanoTime();
+        final String theirs = "tel-idxfail-theirs-" + System.nanoTime();
+        final String runId = "run-shared-" + System.nanoTime();
+        repo.recordIndexFailure(mine, runId, "/repo/mine.pdf", "UnextractableContentError", "boom", null);
+        repo.recordIndexFailure(theirs, runId, "/repo/theirs.pdf", "UnextractableContentError", "boom", null);
+
+        var out = repo.getIndexFailures(mine, runId, 0, 100, false);
+
+        assertThat(out.get("total")).isEqualTo(1);
+        assertThat((List<Map<String, Object>>) out.get("rows"))
+            .extracting(r -> r.get("file_path")).containsExactly("/repo/mine.pdf");
+    }
+
+    @Test @Order(60)
+    void indexFailures_recordBatch_rejectsShortRow() {
+        // Code-review minor (nexus-nukn3 fold-in): a malformed row must 400
+        // (IllegalArgumentException), never an ArrayIndexOutOfBoundsException
+        // surfacing as a 500 from inside the transaction.
+        final String tenant = "tel-idxfail-arity-" + System.nanoTime();
+        assertThatThrownBy(() -> repo.recordIndexFailuresBatch(tenant, List.<Object[]>of(
+            new Object[]{"run-1", "/repo/short.pdf", "UnextractableContentError"}
+        ))).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test @Order(61)
+    @SuppressWarnings("unchecked")
+    void indexFailures_trim_byRunId_deletesOnlyThatRun() {
+        final String tenant = "tel-idxfail-trim-run-" + System.nanoTime();
+        final String runA = "run-a-" + System.nanoTime();
+        final String runB = "run-b-" + System.nanoTime();
+        repo.recordIndexFailuresBatch(tenant, List.of(
+            new Object[]{runA, "/repo/a1.pdf", "UnextractableContentError", "boom", null},
+            new Object[]{runA, "/repo/a2.pdf", "UnextractableContentError", "boom", null},
+            new Object[]{runB, "/repo/b1.pdf", "UnextractableContentError", "boom", null}
+        ));
+
+        int deleted = repo.trimIndexFailures(tenant, runA, 0);
+
+        assertThat(deleted).isEqualTo(2);
+        var remaining = repo.getIndexFailures(tenant, "", 0, 100, false);
+        assertThat(remaining.get("total")).isEqualTo(1);
+        assertThat((List<Map<String, Object>>) remaining.get("rows"))
+            .extracting(r -> r.get("run_id")).containsExactly(runB);
+    }
+
+    @Test @Order(62)
+    @SuppressWarnings("unchecked")
+    void indexFailures_trim_byDays_deletesOnlyOlderRows() {
+        final String tenant = "tel-idxfail-trim-days-" + System.nanoTime();
+        String oldTs = OffsetDateTime.now(ZoneOffset.UTC).minusDays(60).toString();
+        String freshTs = OffsetDateTime.now(ZoneOffset.UTC).toString();
+        repo.recordIndexFailure(tenant, "run-old", "/repo/old.pdf",
+            "UnextractableContentError", "boom", oldTs);
+        repo.recordIndexFailure(tenant, "run-fresh", "/repo/fresh.pdf",
+            "UnextractableContentError", "boom", freshTs);
+
+        int deleted = repo.trimIndexFailures(tenant, "", 30);
+
+        assertThat(deleted).isEqualTo(1);
+        var remaining = repo.getIndexFailures(tenant, "", 0, 100, false);
+        assertThat(remaining.get("total")).isEqualTo(1);
+        assertThat((List<Map<String, Object>>) remaining.get("rows"))
+            .extracting(r -> r.get("file_path")).containsExactly("/repo/fresh.pdf");
+    }
+
+    @Test @Order(63)
+    void indexFailures_trim_combinedRunIdAndDays_bothMustMatch() {
+        // run_id AND days together are ANDed, not ORed -- a row must satisfy
+        // both predicates to be deleted.
+        final String tenant = "tel-idxfail-trim-combo-" + System.nanoTime();
+        String oldTs = OffsetDateTime.now(ZoneOffset.UTC).minusDays(60).toString();
+        String freshTs = OffsetDateTime.now(ZoneOffset.UTC).toString();
+        repo.recordIndexFailure(tenant, "run-x", "/repo/old-x.pdf",
+            "UnextractableContentError", "boom", oldTs);
+        repo.recordIndexFailure(tenant, "run-y", "/repo/old-y.pdf",
+            "UnextractableContentError", "boom", oldTs);
+        repo.recordIndexFailure(tenant, "run-x", "/repo/fresh-x.pdf",
+            "UnextractableContentError", "boom", freshTs);
+
+        // Only run-x's OLD row matches both predicates.
+        int deleted = repo.trimIndexFailures(tenant, "run-x", 30);
+
+        assertThat(deleted).isEqualTo(1);
+        var remaining = repo.getIndexFailures(tenant, "", 0, 100, false);
+        assertThat(remaining.get("total")).isEqualTo(2);
+    }
+
+    // ── index_failures acknowledgment (nexus-nukn3 fold-in, critic Critical) ───
+
+    @Test @Order(64)
+    void indexFailures_acknowledge_requiresNonBlankErrorClass() {
+        final String tenant = "tel-idxfail-ack-guard-" + System.nanoTime();
+        assertThatThrownBy(() -> repo.recordIndexFailureAcknowledgment(
+            tenant, "/repo/a.pdf", "", "reason"
+        )).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repo.recordIndexFailureAcknowledgment(
+            tenant, "/repo/a.pdf", null, "reason"
+        )).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test @Order(65)
+    @SuppressWarnings("unchecked")
+    void indexFailures_acknowledge_byFile_coversOnlyThatExactFileAndClass() {
+        final String tenant = "tel-idxfail-ack-file-" + System.nanoTime();
+        String freshTs = OffsetDateTime.now(ZoneOffset.UTC).toString();
+        repo.recordIndexFailure(tenant, "run-1", "/repo/broken.pdf",
+            "UnextractableContentError", "encrypted", freshTs);
+
+        repo.recordIndexFailureAcknowledgment(tenant, "/repo/broken.pdf",
+            "UnextractableContentError", "known encrypted PDF, accepted");
+
+        // THE motivating case: a re-run mints a NEW run_id for the SAME file
+        // + error_class -- the acknowledgment must still cover it.
+        repo.recordIndexFailure(tenant, "run-2", "/repo/broken.pdf",
+            "UnextractableContentError", "encrypted", freshTs);
+
+        var unacked = repo.getIndexFailures(tenant, "", 0, 100, true);
+        assertThat(unacked.get("total")).as("both recurrences are covered").isEqualTo(0);
+
+        // The plain (non-filtered) list still shows both failure rows, each
+        // marked acknowledged -- "ack shown in the list".
+        var all = repo.getIndexFailures(tenant, "", 0, 100, false);
+        assertThat(all.get("total")).isEqualTo(2);
+        var rows = (List<Map<String, Object>>) all.get("rows");
+        assertThat(rows).allSatisfy(r -> assertThat(r.get("acknowledged")).isEqualTo(true));
+
+        // A NEW file (unrelated) still gates.
+        repo.recordIndexFailure(tenant, "run-3", "/repo/other.pdf",
+            "UnextractableContentError", "boom", freshTs);
+        var unackedAfterNewFile = repo.getIndexFailures(tenant, "", 0, 100, true);
+        assertThat(unackedAfterNewFile.get("total")).isEqualTo(1);
+        assertThat((List<Map<String, Object>>) unackedAfterNewFile.get("rows"))
+            .extracting(r -> r.get("file_path")).containsExactly("/repo/other.pdf");
+    }
+
+    @Test @Order(66)
+    void indexFailures_acknowledge_byFile_doesNotCoverANewErrorClassForThatFile() {
+        // "a new error class for an acknowledged file DOES gate" -- the
+        // acknowledgment's scope is the (file_path, error_class) pair, not
+        // the file alone.
+        final String tenant = "tel-idxfail-ack-newclass-" + System.nanoTime();
+        String freshTs = OffsetDateTime.now(ZoneOffset.UTC).toString();
+        repo.recordIndexFailure(tenant, "run-1", "/repo/broken.pdf",
+            "UnextractableContentError", "encrypted", freshTs);
+        repo.recordIndexFailureAcknowledgment(tenant, "/repo/broken.pdf",
+            "UnextractableContentError", "accepted");
+
+        repo.recordIndexFailure(tenant, "run-2", "/repo/broken.pdf",
+            "SomeOtherError", "a genuinely different problem", freshTs);
+
+        var unacked = repo.getIndexFailures(tenant, "", 0, 100, true);
+        assertThat(unacked.get("total")).as("the new error class is NOT covered").isEqualTo(1);
+    }
+
+    @Test @Order(67)
+    @SuppressWarnings("unchecked")
+    void indexFailures_acknowledge_byErrorClassAlone_coversAnyFile() {
+        final String tenant = "tel-idxfail-ack-class-" + System.nanoTime();
+        String freshTs = OffsetDateTime.now(ZoneOffset.UTC).toString();
+        // Error-class-scoped: blank file_path.
+        repo.recordIndexFailureAcknowledgment(tenant, "", "UnextractableContentError",
+            "corpus-wide: scanned PDFs without OCR are a known limitation");
+
+        repo.recordIndexFailure(tenant, "run-1", "/repo/scan-a.pdf",
+            "UnextractableContentError", "scanned", freshTs);
+        repo.recordIndexFailure(tenant, "run-1", "/repo/scan-b.pdf",
+            "UnextractableContentError", "scanned", freshTs);
+
+        var unacked = repo.getIndexFailures(tenant, "", 0, 100, true);
+        assertThat(unacked.get("total")).isEqualTo(0);
+
+        var all = repo.getIndexFailures(tenant, "", 0, 100, false);
+        assertThat((List<Map<String, Object>>) all.get("rows"))
+            .allSatisfy(r -> assertThat(r.get("acknowledged")).isEqualTo(true));
+    }
+
+    @Test @Order(68)
+    void indexFailures_acknowledgmentRow_neverAppearsInFailuresList() {
+        // kind='acknowledgment' rows are markers, not failures -- they must
+        // never surface as a "failure" row themselves (run_id is always ''
+        // for an acknowledgment, which would otherwise pollute a blank-
+        // run_id "all runs" listing).
+        final String tenant = "tel-idxfail-ack-notlisted-" + System.nanoTime();
+        repo.recordIndexFailureAcknowledgment(tenant, "/repo/a.pdf",
+            "UnextractableContentError", "accepted");
+
+        var all = repo.getIndexFailures(tenant, "", 0, 100, false);
+        assertThat(all.get("total")).isEqualTo(0);
+    }
+
+    // ── index_failures trim: dry-run + cross-tenant isolation (fold-in,
+    // code-review suggestion [24595]) ──────────────────────────────────────
+
+    @Test @Order(69)
+    @SuppressWarnings("unchecked")
+    void indexFailures_trim_dryRun_previewsWithoutDeleting() {
+        final String tenant = "tel-idxfail-trim-dryrun-" + System.nanoTime();
+        repo.recordIndexFailuresBatch(tenant, List.of(
+            new Object[]{"run-1", "/repo/a.pdf", "UnextractableContentError", "boom", null},
+            new Object[]{"run-1", "/repo/b.pdf", "UnextractableContentError", "boom", null}
+        ));
+
+        int previewed = repo.trimIndexFailures(tenant, "run-1", 0, true);
+
+        assertThat(previewed).isEqualTo(2);
+        // Nothing was actually deleted.
+        var remaining = repo.getIndexFailures(tenant, "", 0, 100, false);
+        assertThat(remaining.get("total")).isEqualTo(2);
+
+        // A real (non-dry-run) trim with the same predicate deletes exactly
+        // what the preview counted.
+        int deleted = repo.trimIndexFailures(tenant, "run-1", 0, false);
+        assertThat(deleted).isEqualTo(previewed);
+        assertThat(repo.getIndexFailures(tenant, "", 0, 100, false).get("total")).isEqualTo(0);
+    }
+
+    @Test @Order(70)
+    void indexFailures_trim_neverDeletesAnAcknowledgmentRow() {
+        final String tenant = "tel-idxfail-trim-ack-safe-" + System.nanoTime();
+        String oldTs = OffsetDateTime.now(ZoneOffset.UTC).minusDays(90).toString();
+        repo.recordIndexFailure(tenant, "run-old", "/repo/old.pdf",
+            "UnextractableContentError", "boom", oldTs);
+        repo.recordIndexFailureAcknowledgment(tenant, "/repo/old.pdf",
+            "UnextractableContentError", "accepted permanently");
+
+        // An age-sweep old enough to catch the failure row must NOT also
+        // reap the acknowledgment (which has no run_id/age relevance --
+        // it is a permanent policy marker).
+        int deleted = repo.trimIndexFailures(tenant, "", 30);
+        assertThat(deleted).isEqualTo(1);
+
+        // The acknowledgment survives: recording the SAME failure again
+        // must still be covered by it.
+        repo.recordIndexFailure(tenant, "run-new", "/repo/old.pdf",
+            "UnextractableContentError", "boom", OffsetDateTime.now(ZoneOffset.UTC).toString());
+        var unacked = repo.getIndexFailures(tenant, "", 0, 100, true);
+        assertThat(unacked.get("total"))
+            .as("the acknowledgment must have survived the age-sweep").isEqualTo(0);
+    }
+
+    @Test @Order(71)
+    void indexFailures_trim_isTenantScoped() {
+        // Cross-tenant isolation on the DELETE path (code-review suggestion
+        // [24595]): a trim in one tenant must never touch another tenant's
+        // rows, even with matching run_id/days.
+        final String mine = "tel-idxfail-trim-mine-" + System.nanoTime();
+        final String theirs = "tel-idxfail-trim-theirs-" + System.nanoTime();
+        final String sharedRunId = "shared-run-id";
+        String ts = OffsetDateTime.now(ZoneOffset.UTC).toString();
+        repo.recordIndexFailure(mine, sharedRunId, "/repo/mine.pdf",
+            "UnextractableContentError", "boom", ts);
+        repo.recordIndexFailure(theirs, sharedRunId, "/repo/theirs.pdf",
+            "UnextractableContentError", "boom", ts);
+
+        int deleted = repo.trimIndexFailures(mine, sharedRunId, 0);
+
+        assertThat(deleted).isEqualTo(1);
+        assertThat(repo.getIndexFailures(mine, "", 0, 100, false).get("total")).isEqualTo(0);
+        assertThat(repo.getIndexFailures(theirs, "", 0, 100, false).get("total"))
+            .as("the other tenant's row must survive").isEqualTo(1);
+    }
+
+    // ── index_failures acknowledgment list + revoke (nexus-nukn3 third
+    // fold-in, critic Critical finding [24621]: the ack mechanism was
+    // write-only) ────────────────────────────────────────────────────────
+
+    @Test @Order(72)
+    void indexFailures_listAcknowledgments_emptyWhenNoneExist() {
+        final String tenant = "tel-idxfail-acks-empty-" + System.nanoTime();
+        var acks = repo.listIndexFailureAcknowledgments(tenant);
+        assertThat(acks.get("total")).isEqualTo(0);
+    }
+
+    @Test @Order(73)
+    @SuppressWarnings("unchecked")
+    void indexFailures_listAcknowledgments_showsFileAndClassScopedAcks() {
+        final String tenant = "tel-idxfail-acks-list-" + System.nanoTime();
+        repo.recordIndexFailureAcknowledgment(tenant, "/repo/broken.pdf",
+            "UnextractableContentError", "known encrypted PDF");
+        repo.recordIndexFailureAcknowledgment(tenant, "",
+            "SomeSystemicClass", "corpus-wide exemption");
+
+        var acks = repo.listIndexFailureAcknowledgments(tenant);
+
+        assertThat(acks.get("total")).isEqualTo(2);
+        var rows = (List<Map<String, Object>>) acks.get("rows");
+        var fileScoped = rows.stream()
+            .filter(r -> "/repo/broken.pdf".equals(r.get("file_path"))).findFirst().orElseThrow();
+        assertThat(fileScoped.get("error_class")).isEqualTo("UnextractableContentError");
+        assertThat(fileScoped.get("reason")).isEqualTo("known encrypted PDF");
+        assertThat(fileScoped.get("created_at")).isNotNull();
+
+        var classScoped = rows.stream()
+            .filter(r -> "SomeSystemicClass".equals(r.get("error_class"))).findFirst().orElseThrow();
+        assertThat(classScoped.get("file_path")).isEqualTo("");
+        assertThat(classScoped.get("reason")).isEqualTo("corpus-wide exemption");
+    }
+
+    @Test @Order(74)
+    void indexFailures_listAcknowledgments_isTenantScoped() {
+        final String mine = "tel-idxfail-acks-mine-" + System.nanoTime();
+        final String theirs = "tel-idxfail-acks-theirs-" + System.nanoTime();
+        repo.recordIndexFailureAcknowledgment(mine, "/repo/mine.pdf", "X", "r");
+        repo.recordIndexFailureAcknowledgment(theirs, "/repo/theirs.pdf", "X", "r");
+
+        assertThat(repo.listIndexFailureAcknowledgments(mine).get("total")).isEqualTo(1);
+    }
+
+    @Test @Order(75)
+    void indexFailures_revokeAcknowledgment_requiresNonBlankErrorClass() {
+        final String tenant = "tel-idxfail-unack-guard-" + System.nanoTime();
+        assertThatThrownBy(() -> repo.revokeIndexFailureAcknowledgment(tenant, "/repo/a.pdf", ""))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repo.revokeIndexFailureAcknowledgment(tenant, "/repo/a.pdf", null))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test @Order(76)
+    void indexFailures_revokeAcknowledgment_makesTheRecurringFailureGateAgain() {
+        // THE motivating case: revoke must make an acknowledged, recurring
+        // failure visible to unacknowledgedOnly again -- the whole point
+        // of the fold-in.
+        final String tenant = "tel-idxfail-unack-revives-" + System.nanoTime();
+        String freshTs = OffsetDateTime.now(ZoneOffset.UTC).toString();
+        repo.recordIndexFailure(tenant, "run-1", "/repo/broken.pdf",
+            "UnextractableContentError", "encrypted", freshTs);
+        repo.recordIndexFailureAcknowledgment(tenant, "/repo/broken.pdf",
+            "UnextractableContentError", "accepted");
+        assertThat(repo.getIndexFailures(tenant, "", 0, 100, true).get("total"))
+            .as("covered by the ack").isEqualTo(0);
+
+        int deleted = repo.revokeIndexFailureAcknowledgment(tenant, "/repo/broken.pdf",
+            "UnextractableContentError");
+
+        assertThat(deleted).isEqualTo(1);
+        assertThat(repo.getIndexFailures(tenant, "", 0, 100, true).get("total"))
+            .as("no longer covered -- the failure gates again").isEqualTo(1);
+        assertThat(repo.listIndexFailureAcknowledgments(tenant).get("total")).isEqualTo(0);
+    }
+
+    @Test @Order(77)
+    void indexFailures_revokeAcknowledgment_classWideRequiresExplicitErrorClassAndBlankFile() {
+        // "a class-wide ack requires --error-class explicitly to revoke,
+        // mirroring how it was created" -- revoking with a NON-blank
+        // file_path must NOT touch the class-wide (blank-file_path) ack.
+        final String tenant = "tel-idxfail-unack-classwide-" + System.nanoTime();
+        repo.recordIndexFailureAcknowledgment(tenant, "", "UnextractableContentError",
+            "corpus-wide");
+
+        int wrongScopeAttempt = repo.revokeIndexFailureAcknowledgment(
+            tenant, "/repo/unrelated.pdf", "UnextractableContentError");
+        assertThat(wrongScopeAttempt).isEqualTo(0);
+        assertThat(repo.listIndexFailureAcknowledgments(tenant).get("total"))
+            .as("the class-wide ack must survive a mismatched-scope revoke attempt")
+            .isEqualTo(1);
+
+        int correctScope = repo.revokeIndexFailureAcknowledgment(
+            tenant, "", "UnextractableContentError");
+        assertThat(correctScope).isEqualTo(1);
+        assertThat(repo.listIndexFailureAcknowledgments(tenant).get("total")).isEqualTo(0);
+    }
+
+    @Test @Order(78)
+    void indexFailures_revokeAcknowledgment_neverTouchesAFailureRow() {
+        // Disjoint predicate from trimIndexFailures: revoke must never
+        // delete a kind='failure' row, even one whose error_class matches
+        // exactly what would be passed to revoke.
+        final String tenant = "tel-idxfail-unack-safe-" + System.nanoTime();
+        repo.recordIndexFailure(tenant, "run-1", "/repo/a.pdf",
+            "UnextractableContentError", "boom", OffsetDateTime.now(ZoneOffset.UTC).toString());
+
+        int deleted = repo.revokeIndexFailureAcknowledgment(tenant, "/repo/a.pdf",
+            "UnextractableContentError");
+
+        assertThat(deleted).as("no acknowledgment exists to revoke").isEqualTo(0);
+        assertThat(repo.getIndexFailures(tenant, "", 0, 100, false).get("total"))
+            .as("the failure row survives untouched").isEqualTo(1);
+    }
+
+    @Test @Order(79)
+    void indexFailures_trim_stillNeverReapsAnAcknowledgment_afterRevokeExists() {
+        // Regression guard: adding the revoke DELETE path must not have
+        // weakened trimIndexFailures's own kind='failure' scoping.
+        final String tenant = "tel-idxfail-trim-vs-unack-" + System.nanoTime();
+        String oldTs = OffsetDateTime.now(ZoneOffset.UTC).minusDays(90).toString();
+        repo.recordIndexFailure(tenant, "run-old", "/repo/old.pdf",
+            "UnextractableContentError", "boom", oldTs);
+        repo.recordIndexFailureAcknowledgment(tenant, "/repo/old.pdf",
+            "UnextractableContentError", "accepted");
+
+        int trimmed = repo.trimIndexFailures(tenant, "", 30);
+
+        assertThat(trimmed).isEqualTo(1);
+        assertThat(repo.listIndexFailureAcknowledgments(tenant).get("total"))
+            .as("the acknowledgment must survive the age-sweep").isEqualTo(1);
+    }
+
+    @Test @Order(80)
+    @SuppressWarnings("unchecked")
+    void indexFailures_filePathFilter_narrowsToExactFile() {
+        // Code-review finding [24624]: nx index failures --acknowledge
+        // --file's error_class auto-resolve was paging 1000 rows
+        // tenant-wide and filtering client-side; this server-side filter
+        // is the direct fix.
+        final String tenant = "tel-idxfail-filepath-" + System.nanoTime();
+        repo.recordIndexFailure(tenant, "run-1", "/repo/a.pdf",
+            "UnextractableContentError", "boom", null);
+        repo.recordIndexFailure(tenant, "run-1", "/repo/b.pdf",
+            "SomeOtherError", "boom", null);
+
+        var scoped = repo.getIndexFailures(tenant, "", 0, 100, false, "/repo/a.pdf");
+
+        assertThat(scoped.get("total")).isEqualTo(1);
+        var rows = (List<Map<String, Object>>) scoped.get("rows");
+        assertThat(rows).extracting(r -> r.get("error_class"))
+            .containsExactly("UnextractableContentError");
+
+        // Blank file_path stays unfiltered -- the 5-arg overload's behavior.
+        var unfiltered = repo.getIndexFailures(tenant, "", 0, 100, false, "");
+        assertThat(unfiltered.get("total")).isEqualTo(2);
+    }
+
+    @Test @Order(81)
+    @SuppressWarnings("unchecked")
+    void indexFailures_listAcknowledgments_filePathFilter_narrowsToExactFile() {
+        // Round-5 fold-in, code-review [24635] item 2: nx index failures
+        // --unacknowledge --file's error_class auto-resolve was paging
+        // every acknowledgment tenant-wide and filtering client-side --
+        // the same class of gap as order-80's fix for --acknowledge --file,
+        // now closed on the acknowledgments list too.
+        final String tenant = "tel-idxfail-acks-filepath-" + System.nanoTime();
+        repo.recordIndexFailureAcknowledgment(tenant, "/repo/a.pdf",
+            "UnextractableContentError", "known");
+        repo.recordIndexFailureAcknowledgment(tenant, "/repo/b.pdf",
+            "SomeOtherClass", "known");
+
+        var scoped = repo.listIndexFailureAcknowledgments(tenant, "/repo/a.pdf");
+
+        assertThat(scoped.get("total")).isEqualTo(1);
+        var rows = (List<Map<String, Object>>) scoped.get("rows");
+        assertThat(rows).extracting(r -> r.get("error_class"))
+            .containsExactly("UnextractableContentError");
+
+        // Blank file_path stays unfiltered -- equivalent to the 1-arg overload.
+        var unfiltered = repo.listIndexFailureAcknowledgments(tenant, "");
+        assertThat(unfiltered.get("total")).isEqualTo(2);
+    }
+
     // ── frecency ───────────────────────────────────────────────────────────────
 
     @Test @Order(12)

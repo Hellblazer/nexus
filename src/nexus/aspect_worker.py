@@ -1691,7 +1691,28 @@ def _best_effort_queue_depth() -> int | None:
     construct — expected on this diagnostic path.)"""
     try:
         from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — deferred; service-side
+        from nexus.mcp_infra import current_index_run_t2_client  # noqa: PLC0415 — deferred to avoid circular import
 
+        # nexus-m20mf P3 fold-in (round-2 critique finding 2): the earlier
+        # "sharing here would defeat the 2s cap" framing was self-
+        # inflicted, not fundamental -- _get() (and HttpAspectQueue's own
+        # _get override, and pending_count()) now carry the SAME optional
+        # per-request timeout= override _post() already had (nexus-y9t08),
+        # so the strict 2s cap and pool sharing are no longer mutually
+        # exclusive: share the ACTIVE index run's client when there is
+        # one (constructed WITHOUT a constructor-time timeout= -- the
+        # mixin rejects client=+non-default-timeout= together -- and cap
+        # THIS call via pending_count(timeout=2.0) instead), falling back
+        # to this diagnostic's own dedicated short-timeout client exactly
+        # as before when no run is active (e.g. a live MCP store-hook
+        # call, outside any index_repository() run).
+        shared_client = current_index_run_t2_client()
+        if shared_client is not None:
+            q = HttpAspectQueue(tenant=_ENQUEUE_TENANT, client=shared_client)
+            try:
+                return int(q.pending_count(timeout=2.0))
+            finally:
+                q.close()  # no-op: shared client is not owned by this store
         q = HttpAspectQueue(tenant=_ENQUEUE_TENANT, timeout=2.0)
         try:
             return int(q.pending_count())

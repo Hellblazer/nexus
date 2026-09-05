@@ -52,11 +52,17 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * </ol>
  *
  * <p>A chash present in the request's {@code chunks} array but resolved
- * as "already have identical text" is deliberately OMITTED from the
- * returned map — it needs no chunks_&lt;dim&gt; write at all, and {@link
+ * as "already have identical text" is OMITTED from the returned
+ * {@code resolved} map (no embedding/text/vector write) but, since
+ * nexus-4jj40 round 5, gets its own metadata refreshed via a direct
+ * {@link PgVectorRepository#batchUpdateMetadata} call BEFORE the embed
+ * phase runs -- a caller whose only change since the last index is
+ * chunk metadata (byte-identical text) still lands. {@link
  * CatalogRepository}'s per-doc chunk-upsert only writes chashes present in
  * the map, treating everything else as "must already exist" (verified
- * in-transaction, per doc, at the point a manifest actually references it).
+ * in-transaction, per doc, at the point a manifest actually references it,
+ * true by construction since this method's own existence-partition already
+ * confirmed it moments earlier).
  *
  * <p><b>Observability (nexus-acvi7, T2 {@code
  * engine-embed-path-hardening-design-v0.1.70} §2.5(a)):</b> the
@@ -153,20 +159,62 @@ public final class CombinedWriteService {
             dedupMetas.add(sanitizeNulDeep(meta));
         }
 
-        // Phase 2a: existence-partition — one short, independently-committed
-        // transaction (never a manifest write; composes safely ahead of the
-        // combined write's per-doc transactions below). RDR-181: a chash
-        // already stored with IDENTICAL text is never re-embedded.
-        Map<String, String> existingText = dedupChashes.isEmpty() ? Map.of()
-            : tenantScope.withTenant(tenant, ctx -> selectExistingText(ctx, ch, tenant, collection, dedupChashes));
-
-        List<Integer> needEmbedIdx = new ArrayList<>();
-        for (int i = 0; i < dedupChashes.size(); i++) {
-            String stored = existingText.get(dedupChashes.get(i));
-            if (forceReEmbed || stored == null || !stored.equals(dedupTexts.get(i))) {
-                needEmbedIdx.add(i);
-            }
-        }
+        // Phase 2a: existence-partition + metadata-only refresh -- ONE
+        // short, independently-committed transaction (never a manifest
+        // write; composes safely ahead of the combined write's per-doc
+        // transactions below). RDR-181: a chash already stored with
+        // IDENTICAL text is never re-embedded.
+        //
+        // nexus-4jj40 round 6 (T2 code-review-nexus-4jj40-be444581c
+        // [24633] Important finding): the metadata-only UPDATE below runs
+        // in the SAME transaction as the existence SELECT that found the
+        // chash -- true parity with PgVectorRepository.resolveNeedEmbedIdx
+        // (SELECT + have-vector UPDATE in one transaction), and one fewer
+        // DB round trip per flush batch than round 5's version (which ran
+        // the UPDATE in a second, separate withTenant call; the round-5
+        // comment claimed "same discipline" without this actually being
+        // true, since correctness there still held via the zeroAffected
+        // reroute regardless of transaction boundary -- see that finding's
+        // full analysis).
+        //
+        // Chashes that already carry IDENTICAL stored text and are NOT
+        // forced -- the RDR-181 skip set -- used to be OMITTED from
+        // `resolved` entirely (original nexus-kl2z6 design: "no
+        // chunks_<dim> write at all"), so a caller whose ONLY change
+        // between two indexing runs is chunk METADATA (byte-identical
+        // text, e.g. RDR-200 Phase 1c's section_type reclassification)
+        // never saw that metadata land. The metadataOnly subset below gets
+        // an explicit metadata-only UPDATE, mirroring PgVectorRepository's
+        // own have-vector branch (resolveNeedEmbedIdx / batchUpdateMetadata)
+        // -- the DIRECT upsert path already had this; the combined-write
+        // path did not.
+        List<Integer> needEmbedIdx = dedupChashes.isEmpty() ? new ArrayList<>()
+            : tenantScope.withTenant(tenant, ctx -> {
+                Map<String, String> existingText =
+                    selectExistingText(ctx, ch, tenant, collection, dedupChashes);
+                List<Integer> need = new ArrayList<>();
+                List<Integer> metadataOnly = new ArrayList<>();
+                for (int i = 0; i < dedupChashes.size(); i++) {
+                    String stored = existingText.get(dedupChashes.get(i));
+                    if (forceReEmbed || stored == null || !stored.equals(dedupTexts.get(i))) {
+                        need.add(i);
+                    } else {
+                        metadataOnly.add(i);
+                    }
+                }
+                if (!metadataOnly.isEmpty()) {
+                    // A chash present at the existence SELECT above but
+                    // gone by the time this UPDATE runs, INSIDE THIS SAME
+                    // transaction (concurrent orphan-GC pass), affects 0
+                    // rows; batchUpdateMetadata reports it back and it is
+                    // rerouted to need-embed, never silently dropped --
+                    // the SAME concurrent-delete race guard
+                    // PgVectorRepository's own caller already relies on.
+                    need.addAll(PgVectorRepository.batchUpdateMetadata(
+                        ctx, ch, collection, dedupChashes, dedupMetas, metadataOnly));
+                }
+                return need;
+            });
 
         List<String> textsToEmbed = new ArrayList<>(needEmbedIdx.size());
         for (int idx : needEmbedIdx) {

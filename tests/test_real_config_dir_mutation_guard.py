@@ -63,13 +63,13 @@ class TestDiffConfigDirSnapshots:
         before: dict[str, tuple[int, int]] = {}
         after = {"new_file.json": (100, 10)}
         changed = _diff_config_dir_snapshots(before, after)
-        assert changed == ["ADDED new_file.json"]
+        assert changed == [("ADDED", "new_file.json")]
 
     def test_modified_file_reported(self) -> None:
         before = {"backfill_state.json": (100, 20)}
         after = {"backfill_state.json": (200, 25)}
         changed = _diff_config_dir_snapshots(before, after)
-        assert changed == ["MODIFIED backfill_state.json"]
+        assert changed == [("MODIFIED", "backfill_state.json")]
 
     def test_modified_file_same_size_different_mtime_reported(self) -> None:
         """The exact overwrite shape found in the wild (nexus-pfuns): a
@@ -78,13 +78,13 @@ class TestDiffConfigDirSnapshots:
         before = {"lockstep.log": (100, 4684)}
         after = {"lockstep.log": (999, 4684)}
         changed = _diff_config_dir_snapshots(before, after)
-        assert changed == ["MODIFIED lockstep.log"]
+        assert changed == [("MODIFIED", "lockstep.log")]
 
     def test_removed_file_reported(self) -> None:
         before = {"gone.json": (100, 10)}
         after: dict[str, tuple[int, int]] = {}
         changed = _diff_config_dir_snapshots(before, after)
-        assert changed == ["REMOVED gone.json"]
+        assert changed == [("REMOVED", "gone.json")]
 
     def test_unchanged_file_not_reported(self) -> None:
         before = {"stable.json": (100, 10)}
@@ -95,7 +95,9 @@ class TestDiffConfigDirSnapshots:
         before = {"a.json": (1, 1), "b.json": (1, 1)}
         after = {"a.json": (2, 1), "c.json": (1, 1)}
         changed = _diff_config_dir_snapshots(before, after)
-        assert changed == ["ADDED c.json", "MODIFIED a.json", "REMOVED b.json"]
+        assert changed == [
+            ("ADDED", "c.json"), ("MODIFIED", "a.json"), ("REMOVED", "b.json"),
+        ]
 
     def test_allowlisted_addition_not_reported(self) -> None:
         before: dict[str, tuple[int, int]] = {}
@@ -113,7 +115,24 @@ class TestDiffConfigDirSnapshots:
         before = {"aspect_worker_addr.default": (1, 245), "backfill_state.json": (1, 10)}
         after = {"aspect_worker_addr.default": (2, 245), "backfill_state.json": (2, 15)}
         changed = _diff_config_dir_snapshots(before, after)
-        assert changed == ["MODIFIED backfill_state.json"]
+        assert changed == [("MODIFIED", "backfill_state.json")]
+
+    def test_index_log_truncation_is_reachable_and_reported(self) -> None:
+        """nexus-wjkc7 regression pin: ``index.log`` used to sit in BOTH
+        ``_REAL_CONFIG_DIR_ALLOWLIST_PREFIXES`` and
+        ``_APPEND_ONLY_REAL_CONFIG_LOGS``. The allowlist match runs first,
+        inside this function, so a truncation/rewrite of ``index.log``
+        never even reached the diff -- making the append-only set's
+        stricter (still-catches-a-truncation) rule for it unreachable.
+        Now that ``index.log`` is allowlist-free, a shrink must show up
+        here as a real diff entry."""
+        before = {"index.log": (1, 500)}
+        after = {"index.log": (2, 10)}
+        changed = _diff_config_dir_snapshots(before, after)
+        assert changed == [("MODIFIED", "index.log")], (
+            "a non-append write to index.log must reach the diff, not be "
+            "silently absorbed by the allowlist"
+        )
 
 
 class TestAllowlist:
@@ -127,9 +146,16 @@ class TestAllowlist:
             "logs/mcp.log",
             "current_session",
             "t1_session_lease.",
-            "index.log",
         }
         assert expected.issubset(set(_REAL_CONFIG_DIR_ALLOWLIST_PREFIXES))
+
+    def test_index_log_is_not_on_the_allowlist(self) -> None:
+        """nexus-wjkc7: ``index.log`` is governed solely by
+        ``_APPEND_ONLY_REAL_CONFIG_LOGS`` now -- it must never come back to
+        this allowlist, which would make that stricter rule unreachable
+        again (the allowlist's prefix match runs first, inside
+        ``_diff_config_dir_snapshots``)."""
+        assert "index.log" not in _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES
 
     def test_dead_t1_addr_carveout_removed(self) -> None:
         """nexus-pfuns round 2 (coordinator directive): `t1_addr.*` was the
@@ -145,7 +171,6 @@ class TestAllowlist:
         assert _is_allowlisted_config_dir_path("current_session") is True
         assert _is_allowlisted_config_dir_path("logs/mcp.log") is True
         assert _is_allowlisted_config_dir_path("logs/mcp.log.1") is True
-        assert _is_allowlisted_config_dir_path("index.log") is True
 
     def test_service_registry_election_flocks_are_allowlisted(self) -> None:
         """ServiceRegistry per-scope election flocks churn independently of
@@ -189,3 +214,7 @@ class TestAllowlist:
         assert _is_allowlisted_config_dir_path("lockstep.log") is False
         assert _is_allowlisted_config_dir_path("logs/deferred_labeling.log") is False
         assert _is_allowlisted_config_dir_path("t1_addr.default") is False
+        # nexus-wjkc7: index.log is governed by _APPEND_ONLY_REAL_CONFIG_LOGS
+        # only -- the allowlist must reject it so a truncation reaches the
+        # diff instead of being silently exempted.
+        assert _is_allowlisted_config_dir_path("index.log") is False
