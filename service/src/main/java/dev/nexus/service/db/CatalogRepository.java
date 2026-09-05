@@ -6155,8 +6155,21 @@ public final class CatalogRepository {
      * (catalog-029-3) — same F8a/F10b class-B shape, Java call site instead of a
      * stored function. Hoisted into its own named method (RawSqlGateTest's
      * SANCTIONED_STATEMENTS is method-granular and cannot see into a lambda body).
+     *
+     * <p><b>PUBLIC (nexus-eanej review follow-up): the ONE sanctioned copy of this
+     * statement, project-wide.</b> SET CONSTRAINTS has no jOOQ typed-DSL form at all
+     * (verified via Context7 against jOOQ 3.21) — Sam's no-raw-SQL-strings directive
+     * (RawSqlGateTest's sentinel list only shrinks) means a second, test-tree copy of
+     * this exact string is not an option. {@code
+     * StagingPromoteOpsIntegrationTest}'s {@code danglingManifestCountDsl_*} tests
+     * call this method directly (over a raw, uncommitted, test-owned {@link
+     * DSLContext}) to defer the SAME constraint for the SAME reason — seeding a
+     * momentarily-dangling manifest row to exercise {@link ChashSqlIdioms
+     * #danglingManifestCountDsl} — rather than hand-typing their own {@code
+     * ctx.execute("SET CONSTRAINTS ...")}. Widened from {@code private} to {@code
+     * public} for exactly that reachability; the method's own behavior is unchanged.
      */
-    private static void deferManifestChunkFk(DSLContext ctx) {
+    public static void deferManifestChunkFk(DSLContext ctx) {
         ctx.execute("SET CONSTRAINTS fk_catalog_chunks_chunk DEFERRED");
     }
 

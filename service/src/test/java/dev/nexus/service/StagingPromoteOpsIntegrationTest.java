@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.ChashSqlIdioms;
 import dev.nexus.service.db.StagingPromoteOps;
 import dev.nexus.service.db.StagingPromoteOps.PromotePreconditionException;
@@ -1662,18 +1663,6 @@ class StagingPromoteOpsIntegrationTest {
     // assert against that SAME uncommitted connection/DSLContext, then roll
     // back — no dangling row is ever persisted past the test.
 
-    /** Defers {@code fk_catalog_chunks_chunk} on {@code conn}'s open transaction —
-     *  the ONLY way a manifest row lacking a same-triple content row can exist even
-     *  transiently, since the constraint otherwise rejects the INSERT immediately.
-     *  Mirrors {@code CatalogRepository#deferManifestChunkFk} exactly (SANCTIONED
-     *  RAW there per catalog-029-3's own comment: SET CONSTRAINTS is PostgreSQL
-     *  transaction-control syntax with no jOOQ typed-DSL form at all). */
-    private static void deferManifestChunkFk(Connection conn) throws SQLException {
-        try (var st = conn.createStatement()) {
-            st.execute("SET CONSTRAINTS fk_catalog_chunks_chunk DEFERRED");
-        }
-    }
-
     @Test
     @Order(38)
     void danglingManifestCountDsl_chashResolvesOnlyInAnotherCollection_stillCountedDangling() throws Exception {
@@ -1692,8 +1681,10 @@ class StagingPromoteOpsIntegrationTest {
         try (Connection conn = dsConnection()) {
             conn.setAutoCommit(false);
             PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
-            deferManifestChunkFk(conn);
             var ctx = DSL.using(conn, SQLDialect.POSTGRES);
+            // The ONE sanctioned copy of this statement project-wide (see its
+            // javadoc) -- SET CONSTRAINTS has no jOOQ typed-DSL form at all.
+            CatalogRepository.deferManifestChunkFk(ctx);
 
             ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
                .values(tenant, collReal)
@@ -1745,8 +1736,10 @@ class StagingPromoteOpsIntegrationTest {
         try (Connection conn = dsConnection()) {
             conn.setAutoCommit(false);
             PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
-            deferManifestChunkFk(conn);
             var ctx = DSL.using(conn, SQLDialect.POSTGRES);
+            // The ONE sanctioned copy of this statement project-wide (see its
+            // javadoc) -- SET CONSTRAINTS has no jOOQ typed-DSL form at all.
+            CatalogRepository.deferManifestChunkFk(ctx);
 
             ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
                .values(tenant, coll)

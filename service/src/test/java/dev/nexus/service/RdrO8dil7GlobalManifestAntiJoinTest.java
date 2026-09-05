@@ -94,10 +94,23 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p><strong>Anti-join key: {@code (tenant_id, collection, chash)}</strong>
  * — deliberately NOT {@link dev.nexus.service.db.ChashSqlIdioms
- * #danglingManifestCountDsl}, which is chash-only (no tenant, no
- * collection predicate) and is the exact shape that understated the live
- * corpus census by 2.2x (T2 {@code nexus/rdr-191-dangling-definition-of-
- * record} [22364]'s reconciliation section). <strong>Also deliberately NOT
+ * #danglingManifestCountDsl}, kept as an INDEPENDENT implementation rather
+ * than a caller of it. {@code danglingManifestCountDsl} WAS chash-only (no
+ * tenant, no collection predicate) — the exact shape that understated the
+ * live corpus census by 2.2x (T2 {@code nexus/rdr-191-dangling-definition-
+ * of-record} [22364]'s reconciliation section) — until nexus-eanej
+ * (2026-09-05) re-keyed it to this SAME {@code (tenant_id, collection,
+ * chash)} triple. It is STILL not reused here, for two reasons that
+ * outlive that fix: (1) a tripwire sharing implementation with the thing
+ * it guards cannot catch a regression common to both — this class computes
+ * the anti-join itself so a future change to {@code danglingManifestCountDsl}
+ * (or a revert of nexus-eanej) is caught by an INDEPENDENT count, not
+ * reflected back at itself; (2) {@code danglingManifestCountDsl} carries no
+ * owner-liveness predicate at all — a manifest row whose owning document is
+ * soft-tombstoned (class b) is invisible to it either way, whereas {@link
+ * #globalDanglingCount} below explicitly joins {@code catalog_documents} and
+ * requires {@code d.deleted_at IS NULL}, so class (b) rows are correctly
+ * excluded rather than incidentally absent. <strong>Also deliberately NOT
  * built on {@code nexus.manifest_verify}/{@code manifest_verify_all} or
  * {@code manifest_orphans}</strong> — this tripwire must survive RDR-191
  * Phase 6 deleting those functions (the plan's own retirement item), so it
