@@ -63,6 +63,17 @@ _SAFE_PATH = f"{_PYTHON3_ISOLATED_DIR}:/usr/bin:/bin"
 _ROUTING_LOG_ISOLATED_DIR = Path(tempfile.mkdtemp(prefix="nx-hook-test-routing-log-"))
 _ISOLATED_ROUTING_LOG_PATH = _ROUTING_LOG_ISOLATED_DIR / "routing_log.jsonl"
 
+# nexus-gjv9b PART 2 writer swap: `log_routing_event` no longer writes
+# `routing_log.jsonl` at all in this subprocess (no NX_SERVICE_HOST/PORT/
+# TOKEN reaches it here) -- it degrades straight to a METERED DROP, which
+# falls back to the REAL `~/.config/nexus/dropped_writes.jsonl` whenever
+# NX_DROPPED_WRITES_LOG_PATH is unset. Same isolation discipline as the
+# routing-log default above: every `_run_hook` call gets its own isolated
+# drop-meter path, or this file reintroduces the exact real-home-dir leak
+# class the routing-log isolation was built to close.
+_DROPPED_WRITES_ISOLATED_DIR = Path(tempfile.mkdtemp(prefix="nx-hook-test-dropped-writes-"))
+_ISOLATED_DROPPED_WRITES_LOG_PATH = _DROPPED_WRITES_ISOLATED_DIR / "dropped_writes.jsonl"
+
 
 def _make_payload(
     tool_name: str = "Bash",
@@ -194,8 +205,16 @@ def _run_hook(
         **os.environ,
         "PATH": path,
         "NX_ROUTING_LOG_PATH": str(_ISOLATED_ROUTING_LOG_PATH),
+        "NX_DROPPED_WRITES_LOG_PATH": str(_ISOLATED_DROPPED_WRITES_LOG_PATH),
         **(env_overrides or {}),
     }
+    # Never let a real NX_SERVICE_HOST/PORT/TOKEN leak in from the outer
+    # shell and cause the routing hook to actually attempt a network call
+    # in a test that didn't ask for one (nexus-gjv9b PART 2's endpoint
+    # resolution reads these three verbatim).
+    for _service_var in ("NX_SERVICE_HOST", "NX_SERVICE_PORT", "NX_SERVICE_TOKEN"):
+        if _service_var not in (env_overrides or {}):
+            env.pop(_service_var, None)
     # Never let a real NX_REVIEW_GATE_OVERRIDE leak in from the outer shell
     # into a test that didn't ask for it.
     if "NX_REVIEW_GATE_OVERRIDE" not in (env_overrides or {}):
@@ -297,6 +316,35 @@ class TestRunHookIsolatesRoutingLog:
         _run_hook(_make_payload(), env_overrides={"NX_ROUTING_LOG_PATH": "/tmp/explicit-override.jsonl"})
 
         assert captured["env"]["NX_ROUTING_LOG_PATH"] == "/tmp/explicit-override.jsonl"
+
+    def test_default_env_always_carries_isolated_dropped_writes_log_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-gjv9b PART 2: log_routing_event's service-down fallback is
+        now a metered drop (NX_DROPPED_WRITES_LOG_PATH), not the JSONL log
+        -- this default must be just as isolated as NX_ROUTING_LOG_PATH's,
+        or this file reintroduces the real-home-dir leak class the
+        routing-log isolation above was built to close."""
+        captured: dict[str, dict[str, str]] = {}
+
+        def _fake_run(*args, **kwargs):
+            captured["env"] = kwargs.get("env") or {}
+
+            class _Result:
+                returncode = 0
+                stdout = '{"hookSpecificOutput": {"permissionDecision": "allow"}}'
+                stderr = ""
+
+            return _Result()
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        _run_hook(_make_payload())
+
+        assert "NX_DROPPED_WRITES_LOG_PATH" in captured["env"]
+        drop_path = captured["env"]["NX_DROPPED_WRITES_LOG_PATH"]
+        real_path = str(Path.home() / ".config" / "nexus" / "dropped_writes.jsonl")
+        assert drop_path != real_path
+        assert drop_path == str(_ISOLATED_DROPPED_WRITES_LOG_PATH)
 
 
 class TestFastNoops:
@@ -993,39 +1041,48 @@ class TestF2EnvPrefixOverride:
     def test_inline_override_emits_an_escape_routing_event(
         self, mock_config_env, fake_nx, tmp_path
     ) -> None:
+        """nexus-gjv9b PART 2 writer swap: this subprocess has no
+        NX_SERVICE_HOST/PORT/TOKEN, so `log_routing_event` degrades
+        straight to a metered drop rather than the JSONL log
+        (:func:`_record_dropped_routing_event`) -- the routing_log.jsonl
+        assertion this test used to make no longer applies; a dropped
+        write for hook="routing_events" is the observable proxy that an
+        escape event was attempted."""
         env = mock_config_env({"on_close": True})
         fake_bin = fake_nx("No scratch entries.")
-        log_path = tmp_path / "routing_log.jsonl"
+        drop_path = tmp_path / "dropped_writes.jsonl"
         result = _run_hook(
             _make_payload(command="NX_REVIEW_GATE_OVERRIDE=1 bd close nexus-abc12"),
             path_prefix=str(fake_bin),
-            env_overrides={**env, "NX_ROUTING_LOG_PATH": str(log_path)},
+            env_overrides={**env, "NX_DROPPED_WRITES_LOG_PATH": str(drop_path)},
         )
         parsed = json.loads(result.stdout)
         assert _get_decision(parsed) == "allow", parsed
-        assert log_path.exists(), "no routing event was logged for the override"
-        events = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
-        assert any(e.get("outcome") == "escape" for e in events), events
+        assert drop_path.exists(), "no routing event drop was recorded for the override"
+        drops = [json.loads(l) for l in drop_path.read_text().splitlines() if l.strip()]
+        assert any(d.get("hook") == "routing_events" for d in drops), drops
 
     def test_ambient_env_override_also_emits_an_escape_routing_event(
         self, mock_config_env, fake_nx, tmp_path
     ) -> None:
+        """See test_inline_override_emits_an_escape_routing_event's
+        docstring for why this checks the drop meter, not routing_log.jsonl."""
         env = mock_config_env({"on_close": True})
         fake_bin = fake_nx("No scratch entries.")
-        log_path = tmp_path / "routing_log.jsonl"
+        drop_path = tmp_path / "dropped_writes.jsonl"
         result = _run_hook(
             _make_payload(command="bd close nexus-abc12"),
             path_prefix=str(fake_bin),
             env_overrides={
                 **env,
-                "NX_ROUTING_LOG_PATH": str(log_path),
+                "NX_DROPPED_WRITES_LOG_PATH": str(drop_path),
                 "NX_REVIEW_GATE_OVERRIDE": "1",
             },
         )
         parsed = json.loads(result.stdout)
         assert _get_decision(parsed) == "allow", parsed
-        events = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
-        assert any(e.get("outcome") == "escape" for e in events), events
+        drops = [json.loads(l) for l in drop_path.read_text().splitlines() if l.strip()]
+        assert any(d.get("hook") == "routing_events" for d in drops), drops
 
 
 class TestF3ReasonBlindIdHarvesting:
