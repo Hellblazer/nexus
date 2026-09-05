@@ -1374,6 +1374,26 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             return []
         return list(resp.get("rows") or [])
 
+    def trim_capability_census(self, days: int = 30, *, dry_run: bool = False) -> int:
+        """Delete (or, with ``dry_run=True``, COUNT without deleting)
+        ``capability_census`` rows older than *days* days (nexus-gjv9b
+        review fold-in, critique Significant 4).
+
+        Calls ``POST /v1/telemetry/capability_census/trim``. Same dry-run-
+        reuses-the-delete's-own-predicate contract as
+        :meth:`trim_hook_failures` — the preview and the real delete share
+        one server-side ``ts < cutoff`` predicate, so the count returned
+        with ``dry_run=True`` is exactly what a subsequent ``dry_run=False``
+        call removes (barring rows that cross the cutoff in the interim).
+        ``dry_run`` defaults to ``False``.
+        """
+        if days < 1:
+            raise ValueError(f"days must be >= 1; got {days}")
+        resp = self._post(
+            "/v1/telemetry/capability_census/trim", {"days": days, "dry_run": dry_run}
+        )
+        return int(resp.get("deleted", 0))
+
     # ── routing_events (nexus-gjv9b PART 2) ─────────────────────────────────
 
     def record_routing_event(
@@ -1447,6 +1467,23 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         if not isinstance(resp, dict):  # defensive: a stripped proxy response
             return []
         return list(resp.get("rows") or [])
+
+    def trim_routing_events(self, days: int = 30, *, dry_run: bool = False) -> int:
+        """Delete (or, with ``dry_run=True``, COUNT without deleting)
+        ``routing_events`` rows older than *days* days (nexus-gjv9b review
+        fold-in, critique Significant 4).
+
+        Calls ``POST /v1/telemetry/routing_events/trim``. Same dry-run-
+        reuses-the-delete's-own-predicate contract as
+        :meth:`trim_hook_failures`/:meth:`trim_capability_census`.
+        ``dry_run`` defaults to ``False``.
+        """
+        if days < 1:
+            raise ValueError(f"days must be >= 1; got {days}")
+        resp = self._post(
+            "/v1/telemetry/routing_events/trim", {"days": days, "dry_run": dry_run}
+        )
+        return int(resp.get("deleted", 0))
 
 
 def tier_writes_read_failure_message(exc: Exception) -> str:

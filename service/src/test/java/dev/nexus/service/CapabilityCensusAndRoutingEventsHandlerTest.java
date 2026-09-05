@@ -293,6 +293,79 @@ class CapabilityCensusAndRoutingEventsHandlerTest {
     }
 
     @Test
+    void census_trim_deletesOlderThanDays_dryRunPreviewsWithoutDeleting() throws Exception {
+        // nexus-gjv9b review fold-in, critique Significant 4: retention for
+        // capability_census, same age-only trim discipline as hook_failures.
+        post("/v1/telemetry/capability_census/record", TOKEN, TENANT,
+            "{\"session_id\":\"sess-trim-old\",\"ts\":\"2026-01-01T00:00:00Z\","
+            + "\"blindspot\":false,\"capabilities\":{\"skill\":1},\"dispatches\":0,\"total_calls\":1}");
+        post("/v1/telemetry/capability_census/record", TOKEN, TENANT,
+            "{\"session_id\":\"sess-trim-fresh\",\"blindspot\":false,"
+            + "\"capabilities\":{\"skill\":1},\"dispatches\":0,\"total_calls\":1}");
+
+        // dry_run=true must COUNT without deleting.
+        var preview = post("/v1/telemetry/capability_census/trim", TOKEN, TENANT,
+            "{\"days\":30,\"dry_run\":true}");
+        assertThat(preview.statusCode()).isEqualTo(200);
+        var previewBody = mapper.readValue(preview.body(), MAP_T);
+        assertThat((Boolean) previewBody.get("dry_run")).isTrue();
+        assertThat(((Number) previewBody.get("deleted")).intValue()).isGreaterThanOrEqualTo(1);
+        assertThat(censusRows(TOKEN, TENANT, "sess-trim-old"))
+            .as("dry_run must not actually delete anything")
+            .hasSize(1);
+
+        var real = post("/v1/telemetry/capability_census/trim", TOKEN, TENANT,
+            "{\"days\":30}");
+        assertThat(real.statusCode()).isEqualTo(200);
+        var realBody = mapper.readValue(real.body(), MAP_T);
+        assertThat((Boolean) realBody.get("dry_run")).isFalse();
+        assertThat(((Number) realBody.get("deleted")).intValue()).isGreaterThanOrEqualTo(1);
+
+        assertThat(censusRows(TOKEN, TENANT, "sess-trim-old"))
+            .as("the row older than the cutoff must be gone")
+            .isEmpty();
+        assertThat(censusRows(TOKEN, TENANT, "sess-trim-fresh"))
+            .as("a fresh row within the retention window must survive the trim")
+            .hasSize(1);
+    }
+
+    @Test
+    void routing_trim_deletesOlderThanDays_dryRunPreviewsWithoutDeleting() throws Exception {
+        post("/v1/telemetry/routing_events/record", TOKEN, TENANT,
+            "{\"session_id\":\"sess-route-trim-old\",\"ts\":\"2026-01-01T00:00:00Z\","
+            + "\"rule\":\"r-trim\",\"outcome\":\"allow\"}");
+        post("/v1/telemetry/routing_events/record", TOKEN, TENANT,
+            "{\"session_id\":\"sess-route-trim-fresh\",\"rule\":\"r-trim\",\"outcome\":\"allow\"}");
+
+        var preview = post("/v1/telemetry/routing_events/trim", TOKEN, TENANT,
+            "{\"days\":30,\"dry_run\":true}");
+        assertThat(preview.statusCode()).isEqualTo(200);
+        var previewBody = mapper.readValue(preview.body(), MAP_T);
+        assertThat((Boolean) previewBody.get("dry_run")).isTrue();
+        assertThat(((Number) previewBody.get("deleted")).intValue()).isGreaterThanOrEqualTo(1);
+        var beforeReal = routingRows(TOKEN, TENANT).stream()
+            .filter(r -> "sess-route-trim-old".equals(r.get("session_id"))).toList();
+        assertThat(beforeReal)
+            .as("dry_run must not actually delete anything")
+            .hasSize(1);
+
+        var real = post("/v1/telemetry/routing_events/trim", TOKEN, TENANT,
+            "{\"days\":30}");
+        assertThat(real.statusCode()).isEqualTo(200);
+        var realBody = mapper.readValue(real.body(), MAP_T);
+        assertThat((Boolean) realBody.get("dry_run")).isFalse();
+        assertThat(((Number) realBody.get("deleted")).intValue()).isGreaterThanOrEqualTo(1);
+
+        var rows = routingRows(TOKEN, TENANT);
+        assertThat(rows.stream().anyMatch(r -> "sess-route-trim-old".equals(r.get("session_id"))))
+            .as("the row older than the cutoff must be gone")
+            .isFalse();
+        assertThat(rows.stream().anyMatch(r -> "sess-route-trim-fresh".equals(r.get("session_id"))))
+            .as("a fresh row within the retention window must survive the trim")
+            .isTrue();
+    }
+
+    @Test
     void routing_missingRule_rejected400() throws Exception {
         var resp = post("/v1/telemetry/routing_events/record", TOKEN, TENANT,
             "{\"outcome\":\"allow\"}");

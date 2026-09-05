@@ -123,6 +123,36 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
                 })
             self._send(200, {"ok": True})
 
+        elif pp == "/v1/telemetry/capability_census/trim":
+            # nexus-gjv9b review fold-in (critique Significant 4): same
+            # dry-run-reuses-the-delete's-own-predicate contract as
+            # /hook_failures/trim above.
+            days = int(body.get("days", 30))
+            dry_run = bool(body.get("dry_run", False))
+            cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+            with _STORE_LOCK:
+                if dry_run:
+                    deleted = sum(1 for r in _capability_census.values() if r["ts"] < cutoff)
+                else:
+                    before = len(_capability_census)
+                    for sid in [sid for sid, r in _capability_census.items() if r["ts"] < cutoff]:
+                        del _capability_census[sid]
+                    deleted = before - len(_capability_census)
+            self._send(200, {"deleted": deleted, "dry_run": dry_run})
+
+        elif pp == "/v1/telemetry/routing_events/trim":
+            days = int(body.get("days", 30))
+            dry_run = bool(body.get("dry_run", False))
+            cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+            with _STORE_LOCK:
+                if dry_run:
+                    deleted = sum(1 for r in _routing_events if r["ts"] < cutoff)
+                else:
+                    before = len(_routing_events)
+                    _routing_events[:] = [r for r in _routing_events if r["ts"] >= cutoff]
+                    deleted = before - len(_routing_events)
+            self._send(200, {"deleted": deleted, "dry_run": dry_run})
+
         elif pp == "/v1/telemetry/relevance/log":
             with _STORE_LOCK:
                 _ID_SEQ["rel"] += 1
@@ -1747,6 +1777,87 @@ class TestRecordRoutingEvent:
         client.record_routing_event(rule="r1", outcome="allow")
         rows = client.list_routing_events()
         assert len(rows) == 2
+
+
+class TestTrimCapabilityCensus:
+    """nexus-gjv9b review fold-in, critique Significant 4: retention for
+    capability_census, same age-only trim discipline as TestTrimHookFailures."""
+
+    def test_trim_days_validation(self, client):
+        with pytest.raises(ValueError, match="days must be >= 1"):
+            client.trim_capability_census(days=0)
+
+    def test_trim_removes_old(self, client):
+        client.record_capability_census(
+            session_id="sess-trim-old", ts="2020-01-01T00:00:00+00:00",
+            blindspot=False, capabilities={"skill": 1}, dispatches=0, total_calls=1,
+        )
+        client.record_capability_census(
+            session_id="sess-trim-new", ts=datetime.now(UTC).isoformat(),
+            blindspot=False, capabilities={"skill": 1}, dispatches=0, total_calls=1,
+        )
+        deleted = client.trim_capability_census(days=365 * 3)
+        assert deleted == 1
+        remaining = client.query_capability_census(session_id="sess-trim-old")
+        assert remaining == []
+
+    def test_dry_run_previews_then_matches_the_real_trim(self, client):
+        client.record_capability_census(
+            session_id="sess-dr-old", ts="2020-01-01T00:00:00+00:00",
+            blindspot=False, capabilities={"skill": 1}, dispatches=0, total_calls=1,
+        )
+        client.record_capability_census(
+            session_id="sess-dr-new", ts=datetime.now(UTC).isoformat(),
+            blindspot=False, capabilities={"skill": 1}, dispatches=0, total_calls=1,
+        )
+
+        preview = client.trim_capability_census(days=365 * 3, dry_run=True)
+        assert preview == 1
+        assert client.trim_capability_census(days=365 * 3, dry_run=True) == preview
+        assert client.query_capability_census(session_id="sess-dr-old") != []
+
+        deleted = client.trim_capability_census(days=365 * 3, dry_run=False)
+        assert deleted == preview
+        assert client.trim_capability_census(days=365 * 3, dry_run=True) == 0
+
+
+class TestTrimRoutingEvents:
+    """nexus-gjv9b review fold-in, critique Significant 4: retention for
+    routing_events, same age-only trim discipline as TestTrimHookFailures."""
+
+    def test_trim_days_validation(self, client):
+        with pytest.raises(ValueError, match="days must be >= 1"):
+            client.trim_routing_events(days=0)
+
+    def test_trim_removes_old(self, client):
+        client.record_routing_event(
+            rule="r-trim-old", outcome="allow", ts="2020-01-01T00:00:00+00:00",
+        )
+        client.record_routing_event(
+            rule="r-trim-new", outcome="allow", ts=datetime.now(UTC).isoformat(),
+        )
+        deleted = client.trim_routing_events(days=365 * 3)
+        assert deleted == 1
+        remaining = [r for r in client.list_routing_events() if r["rule"] == "r-trim-old"]
+        assert remaining == []
+
+    def test_dry_run_previews_then_matches_the_real_trim(self, client):
+        client.record_routing_event(
+            rule="r-dr-old", outcome="allow", ts="2020-01-01T00:00:00+00:00",
+        )
+        client.record_routing_event(
+            rule="r-dr-new", outcome="allow", ts=datetime.now(UTC).isoformat(),
+        )
+
+        preview = client.trim_routing_events(days=365 * 3, dry_run=True)
+        assert preview == 1
+        assert client.trim_routing_events(days=365 * 3, dry_run=True) == preview
+        still_there = [r for r in client.list_routing_events() if r["rule"] == "r-dr-old"]
+        assert still_there != []
+
+        deleted = client.trim_routing_events(days=365 * 3, dry_run=False)
+        assert deleted == preview
+        assert client.trim_routing_events(days=365 * 3, dry_run=True) == 0
 
 
 class TestCapabilityCensusAndRoutingEventProductionWriteGuard:

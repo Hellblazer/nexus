@@ -433,6 +433,13 @@ class TestDoctorTrimTelemetry:
         spy = MagicMock()
         spy.trim_search_telemetry.return_value = 1
         spy.trim_hook_failures.return_value = 0
+        # nexus-gjv9b review fold-in, critique Significant 4: the sweep
+        # now covers four tables, not two -- pin explicit return values
+        # rather than relying on MagicMock's auto-attr default so a
+        # comparison against these later fails loud instead of quietly
+        # matching a MagicMock instance.
+        spy.trim_capability_census.return_value = 3
+        spy.trim_routing_events.return_value = 5
         args = ["doctor", "--trim-telemetry"]
         if trim_days is not None:
             args += ["--days", str(trim_days)]
@@ -451,7 +458,11 @@ class TestDoctorTrimTelemetry:
         assert result.exit_code == 0, result.output
         spy.trim_search_telemetry.assert_called_once_with(days=30, dry_run=False)
         spy.trim_hook_failures.assert_called_once_with(days=30, dry_run=False)
+        spy.trim_capability_census.assert_called_once_with(days=30, dry_run=False)
+        spy.trim_routing_events.assert_called_once_with(days=30, dry_run=False)
         assert "Trimmed 1 search_telemetry" in result.output
+        assert "Trimmed 3 capability_census" in result.output
+        assert "Trimmed 5 routing_events" in result.output
 
     def test_aggressive_retention_days_7(
         self, runner: CliRunner,
@@ -461,6 +472,8 @@ class TestDoctorTrimTelemetry:
         assert result.exit_code == 0, result.output
         spy.trim_search_telemetry.assert_called_once_with(days=7, dry_run=False)
         spy.trim_hook_failures.assert_called_once_with(days=7, dry_run=False)
+        spy.trim_capability_census.assert_called_once_with(days=7, dry_run=False)
+        spy.trim_routing_events.assert_called_once_with(days=7, dry_run=False)
 
     def test_dry_run_previews_the_count_and_says_would_trim(
         self, runner: CliRunner,
@@ -472,6 +485,8 @@ class TestDoctorTrimTelemetry:
         spy = MagicMock()
         spy.trim_search_telemetry.return_value = 4
         spy.trim_hook_failures.return_value = 2
+        spy.trim_capability_census.return_value = 6
+        spy.trim_routing_events.return_value = 8
         # nexus-5uoxu: stub the dry-run engine-version gate as satisfied —
         # this test is about the preview plumbing, not the belt (the gate
         # has its own suite in test_false_clean_diagnostics_service_mode).
@@ -491,8 +506,12 @@ class TestDoctorTrimTelemetry:
         assert result.exit_code == 0, result.output
         spy.trim_search_telemetry.assert_called_once_with(days=30, dry_run=True)
         spy.trim_hook_failures.assert_called_once_with(days=30, dry_run=True)
+        spy.trim_capability_census.assert_called_once_with(days=30, dry_run=True)
+        spy.trim_routing_events.assert_called_once_with(days=30, dry_run=True)
         assert "Would trim 4 search_telemetry" in result.output
         assert "Would trim 2 hook_failures" in result.output
+        assert "Would trim 6 capability_census" in result.output
+        assert "Would trim 8 routing_events" in result.output
         assert "Trimmed" not in result.output
 
     def test_empty_table_is_safe(

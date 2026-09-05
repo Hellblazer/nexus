@@ -369,6 +369,11 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
             'capabilities', 'dispatches', 'total_calls', 'timeout',
         ],
         'query_capability_census': ['session_id', 'since', 'limit'],
+        # nexus-gjv9b review fold-in, critique Significant 4: retention,
+        # same age-only trim_hook_failures shape (days positional,
+        # dry_run keyword-only) rather than trim_index_failures's
+        # all-keyword-only shape — capability_census has no run_id axis.
+        'trim_capability_census': ['days'],
         # nexus-gjv9b PART 2: routing_events replaces
         # ~/.config/nexus/routing_log.jsonl (same Sam directive) —
         # service-only by construction, same no-twin shape.
@@ -377,6 +382,7 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
             'command_fragment', 'escape_reason', 'timeout',
         ],
         'list_routing_events': ['since', 'limit'],
+        'trim_routing_events': ['days'],
     },
 }
 

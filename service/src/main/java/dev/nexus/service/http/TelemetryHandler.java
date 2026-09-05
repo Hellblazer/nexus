@@ -68,9 +68,13 @@ import java.util.Map;
  *   POST /v1/telemetry/capability_census/record upsert one session's capability census
  *                                                (nexus-gjv9b PART 1)
  *   GET  /v1/telemetry/capability_census/query  read capability_census rows, newest first
+ *   POST /v1/telemetry/capability_census/trim   trim old capability_census rows; same dry_run=true
+ *                                                preview contract as hook_failures/trim
  *   POST /v1/telemetry/routing_events/record    append one routing-hook event (nexus-gjv9b PART 2)
  *   POST /v1/telemetry/routing_events/batch     append a batch of routing-hook events
  *   GET  /v1/telemetry/routing_events/list      read routing_events rows, newest first
+ *   POST /v1/telemetry/routing_events/trim      trim old routing_events rows; same dry_run=true
+ *                                                preview contract as hook_failures/trim
  * </pre>
  *
  * <p>All endpoints require {@code Authorization: Bearer <token>} (via {@link AuthFilter})
@@ -164,9 +168,11 @@ public final class TelemetryHandler implements HttpHandler {
                 case "/ids/probe"               -> handleIdsProbe(exchange, tenant, method);
                 case "/capability_census/record" -> handleCapabilityCensusRecord(exchange, tenant, method);
                 case "/capability_census/query"  -> handleCapabilityCensusQuery(exchange, tenant, method);
+                case "/capability_census/trim"   -> handleCapabilityCensusTrim(exchange, tenant, method);
                 case "/routing_events/record"    -> handleRoutingEventRecord(exchange, tenant, method);
                 case "/routing_events/batch"     -> handleRoutingEventsBatch(exchange, tenant, method);
                 case "/routing_events/list"      -> handleRoutingEventsList(exchange, tenant, method);
+                case "/routing_events/trim"      -> handleRoutingEventsTrim(exchange, tenant, method);
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
         } catch (IllegalArgumentException e) {
@@ -696,6 +702,21 @@ public final class TelemetryHandler implements HttpHandler {
         HttpUtil.send(ex, 200, json(Map.of("rows", repo.queryCapabilityCensus(tenant, sessionId, since, limit))));
     }
 
+    /**
+     * POST /v1/telemetry/capability_census/trim — same {@code dry_run}
+     * contract as {@link #handleHookFailureTrim} (nexus-gjv9b review
+     * fold-in, critique Significant 4). Body: {@code days} (default 30),
+     * {@code dry_run}.
+     */
+    private void handleCapabilityCensusTrim(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        int days = optInt(body, "days", 30);
+        boolean dryRun = Boolean.TRUE.equals(body.get("dry_run"));
+        int deleted = repo.trimCapabilityCensus(tenant, days, dryRun);
+        HttpUtil.send(ex, 200, json(Map.of("deleted", deleted, "dry_run", dryRun)));
+    }
+
     // ── routing_events (nexus-gjv9b PART 2) ─────────────────────────────────────
 
     /**
@@ -771,6 +792,21 @@ public final class TelemetryHandler implements HttpHandler {
         String since = params.getOrDefault("since", "");
         int limit = parseIntParam(params, "limit", 1000);
         HttpUtil.send(ex, 200, json(Map.of("rows", repo.listRoutingEvents(tenant, since, limit))));
+    }
+
+    /**
+     * POST /v1/telemetry/routing_events/trim — same {@code dry_run}
+     * contract as {@link #handleHookFailureTrim} (nexus-gjv9b review
+     * fold-in, critique Significant 4). Body: {@code days} (default 30),
+     * {@code dry_run}.
+     */
+    private void handleRoutingEventsTrim(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        int days = optInt(body, "days", 30);
+        boolean dryRun = Boolean.TRUE.equals(body.get("dry_run"));
+        int deleted = repo.trimRoutingEvents(tenant, days, dryRun);
+        HttpUtil.send(ex, 200, json(Map.of("deleted", deleted, "dry_run", dryRun)));
     }
 
     // ── frecency ───────────────────────────────────────────────────────────────

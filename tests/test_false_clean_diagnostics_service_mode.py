@@ -218,26 +218,37 @@ class TestTrimTelemetryRoutes:
              patch("sqlite3.connect") as sqlite_connect:
             http_store.return_value.trim_search_telemetry.return_value = 7
             http_store.return_value.trim_hook_failures.return_value = 3
+            # nexus-gjv9b review fold-in, critique Significant 4: the sweep
+            # grew from two live tables to four.
+            http_store.return_value.trim_capability_census.return_value = 5
+            http_store.return_value.trim_routing_events.return_value = 9
             doctor_mod._run_trim_telemetry(days=30)
 
         http_store.return_value.trim_search_telemetry.assert_called_once_with(
             days=30, dry_run=False)
         http_store.return_value.trim_hook_failures.assert_called_once_with(
             days=30, dry_run=False)
+        http_store.return_value.trim_capability_census.assert_called_once_with(
+            days=30, dry_run=False)
+        http_store.return_value.trim_routing_events.assert_called_once_with(
+            days=30, dry_run=False)
         sqlite_connect.assert_not_called(), "must not open the frozen SQLite"
 
     def test_dry_run_previews_both_tables_without_deleting(
         self, service_mode: None,
     ) -> None:
-        """``dry_run=True`` must reach BOTH stores — a partial preview
-        (search_telemetry previewed, hook_failures for-real deleted, or vice
-        versa) would be a worse footgun than the missing feature."""
+        """``dry_run=True`` must reach ALL FOUR stores (nexus-gjv9b review
+        fold-in, critique Significant 4, grew this from two) — a partial
+        preview (one table previewed, another for-real deleted) would be a
+        worse footgun than the missing feature."""
         from nexus.commands import doctor as doctor_mod
 
         with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as http_store, \
              _engine_version_probe("0.1.81"):
             http_store.return_value.trim_search_telemetry.return_value = 2
             http_store.return_value.trim_hook_failures.return_value = 1
+            http_store.return_value.trim_capability_census.return_value = 4
+            http_store.return_value.trim_routing_events.return_value = 6
             runner = CliRunner()
             with runner.isolation() as (out, _err, _):
                 doctor_mod._run_trim_telemetry(days=30, dry_run=True)
@@ -247,8 +258,14 @@ class TestTrimTelemetryRoutes:
             days=30, dry_run=True)
         http_store.return_value.trim_hook_failures.assert_called_once_with(
             days=30, dry_run=True)
+        http_store.return_value.trim_capability_census.assert_called_once_with(
+            days=30, dry_run=True)
+        http_store.return_value.trim_routing_events.assert_called_once_with(
+            days=30, dry_run=True)
         assert "Would trim 2 search_telemetry" in printed, printed
         assert "Would trim 1 hook_failures" in printed, printed
+        assert "Would trim 4 capability_census" in printed, printed
+        assert "Would trim 6 routing_events" in printed, printed
         assert "Trimmed" not in printed, (
             "dry-run output must never read like a completed deletion"
         )

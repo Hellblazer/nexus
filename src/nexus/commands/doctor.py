@@ -860,19 +860,23 @@ def _run_trim_telemetry(days: int, dry_run: bool = False) -> None:
     """Delete (or, with ``dry_run=True``, PREVIEW) aged audit-log rows older
     than *days* (RDR-087 P2.4; nexus-7365x).
 
-    Trims both ``search_telemetry`` (RDR-087) and ``hook_failures`` (RDR-164 P0
-    audit-table TTL parity) — the two age-reaped, no-cascade audit tables.
+    Trims ``search_telemetry`` (RDR-087), ``hook_failures`` (RDR-164 P0
+    audit-table TTL parity), ``capability_census``, and ``routing_events``
+    (nexus-gjv9b review fold-in, critique Significant 4 -- the two new
+    engine-half tables need the same retention every other age-reaped,
+    no-cascade audit table already has) — four age-reaped, no-cascade
+    audit tables, one sweep.
 
     ``dry_run=True`` reports what WOULD be removed without deleting anything
     (the search_telemetry trim-preview gap this closes: until now there was
     no way to learn the row count before ``--trim-telemetry`` deleted it —
-    see T2 ``nexus/shakedown-2026-08-11-s11-telemetry``). Both tables are
-    previewed together under one ``--dry-run`` — trimming ``search_telemetry``
-    for real while only previewing ``hook_failures`` (or vice versa) would be
-    a worse footgun than the missing feature, so
-    :meth:`HttpTelemetryStore.trim_hook_failures` grew the identical
-    ``dry_run`` contract alongside :meth:`trim_search_telemetry` rather than
-    leaving it a partial, single-table preview.
+    see T2 ``nexus/shakedown-2026-08-11-s11-telemetry``). All four tables are
+    previewed together under one ``--dry-run`` — trimming one for real while
+    only previewing another would be a worse footgun than the missing
+    feature, so :meth:`HttpTelemetryStore.trim_hook_failures`,
+    :meth:`trim_capability_census`, and :meth:`trim_routing_events` all grew
+    the identical ``dry_run`` contract :meth:`trim_search_telemetry`
+    established, rather than leaving any of them a partial preview.
     """
     # nexus-ingey: this used to construct Telemetry(db_path) unconditionally.
     # On a migrated box that is the FROZEN SQLite — the verb trimmed a file
@@ -936,6 +940,8 @@ def _run_trim_telemetry(days: int, dry_run: bool = False) -> None:
         store = HttpTelemetryStore()
         deleted_search = store.trim_search_telemetry(days=days, dry_run=dry_run)
         deleted_hooks = store.trim_hook_failures(days=days, dry_run=dry_run)
+        deleted_census = store.trim_capability_census(days=days, dry_run=dry_run)
+        deleted_routing = store.trim_routing_events(days=days, dry_run=dry_run)
     except (httpx.HTTPError, RuntimeError) as exc:
         # Same class as _report_aspect_queue_service above (review
         # 2026-07-25): store CONSTRUCTION resolves the endpoint and raises
@@ -958,6 +964,8 @@ def _run_trim_telemetry(days: int, dry_run: bool = False) -> None:
     for table, deleted in (
         ("search_telemetry", deleted_search),
         ("hook_failures", deleted_hooks),
+        ("capability_census", deleted_census),
+        ("routing_events", deleted_routing),
     ):
         noun = "row" if deleted == 1 else "rows"
         click.echo(f"{verb} {deleted} {table} {noun} older than {days} days.")

@@ -2208,6 +2208,33 @@ public final class TelemetryRepository {
         });
     }
 
+    /**
+     * Delete (or, with {@code dryRun=true}, COUNT without deleting)
+     * capability_census rows older than {@code days} days (nexus-gjv9b
+     * review fold-in, critique Significant 4: both new tables need
+     * retention, same as every other audit-log table). Filters on
+     * {@code ts}; same age-only, no-run-id shape and dry-run-reuses-the-
+     * delete's-own-predicate discipline as {@link #trimHookFailures(String,
+     * int, boolean)} — capability_census has no run concept, only a
+     * per-session upsert timestamp, so age is the only sensible axis.
+     */
+    public int trimCapabilityCensus(String tenant, int days, boolean dryRun) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusDays(days);
+            var predicate = CAPABILITY_CENSUS.TS.lt(cutoff);
+            if (dryRun) {
+                Integer count = ctx.selectCount()
+                    .from(CAPABILITY_CENSUS)
+                    .where(predicate)
+                    .fetchOne(0, Integer.class);
+                return count != null ? count : 0;
+            }
+            return ctx.deleteFrom(CAPABILITY_CENSUS)
+                .where(predicate)
+                .execute();
+        });
+    }
+
     // ── routing_events (nexus-gjv9b PART 2) ─────────────────────────────────────
 
     /**
@@ -2313,6 +2340,31 @@ public final class TelemetryRepository {
                     "tool_name",        r.value5(),
                     "command_fragment", r.value6(),
                     "escape_reason",    r.value7()));
+        });
+    }
+
+    /**
+     * Delete (or, with {@code dryRun=true}, COUNT without deleting)
+     * routing_events rows older than {@code days} days (nexus-gjv9b
+     * review fold-in, critique Significant 4). Filters on {@code ts};
+     * event-log shape, same age-only trim discipline as {@link
+     * #trimHookFailures(String, int, boolean)} — a routing-hook fire has
+     * no run concept to scope by, only age.
+     */
+    public int trimRoutingEvents(String tenant, int days, boolean dryRun) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusDays(days);
+            var predicate = ROUTING_EVENTS.TS.lt(cutoff);
+            if (dryRun) {
+                Integer count = ctx.selectCount()
+                    .from(ROUTING_EVENTS)
+                    .where(predicate)
+                    .fetchOne(0, Integer.class);
+                return count != null ? count : 0;
+            }
+            return ctx.deleteFrom(ROUTING_EVENTS)
+                .where(predicate)
+                .execute();
         });
     }
 }
