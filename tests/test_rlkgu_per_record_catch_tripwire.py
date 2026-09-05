@@ -399,6 +399,18 @@ _COMMAND_LEVEL_REASONS: dict[str, str] = {
         "single-file command wrapper; not reachable from the --dir / "
         "nx dt index per-record loops."
     ),
+    "EphemeralPathRefusedError": (
+        "Same shape as SourceUriNotFoundError above (nexus-3o4lt): a "
+        "single-record IDENTITY precondition raised by _repo_home_for "
+        "before any chunk or catalog write, when a repo file exists only "
+        "in a nested worktree. index_pdf_cmd/index_md_cmd's wrappers "
+        "convert it to click.ClickException at the single-file command "
+        "boundary. PDFs and DEVONthink records are exempt from the repo-"
+        "owner rule by construction, so the --dir loop and nx dt index "
+        "never see it; the only batch path that can (batch_index_markdowns "
+        "under nx index rdr) already catches Exception per file and "
+        "records the file as failed."
+    ),
     "PutOversizedError": (
         "Raised only from T3Database.put (the MCP store_put / `nx store "
         "put` path, db/t3.py), which per the class's own docstring has "
