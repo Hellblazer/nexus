@@ -145,7 +145,7 @@ def _patch_t2(t2_path, monkeypatch):
     monkeypatch.setattr(mod, "_t2_ctx", lambda: T2Database(t2_path))
     # nexus-j5geq: plan_save now routes through the daemon write seam;
     # in this daemonless E2E, execute the write callback directly.
-    monkeypatch.setattr(mod, "_t2_index_write", lambda fn: fn(T2Database(t2_path)))
+    monkeypatch.setattr(mod, "_t2_index_write", lambda fn, **_kw: fn(T2Database(t2_path)))
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
