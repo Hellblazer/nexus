@@ -2,6 +2,15 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.Record2;
+import org.jooq.Record3;
+import org.jooq.Result;
+import org.jooq.SQLDialect;
+import org.jooq.Table;
+import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -10,9 +19,12 @@ import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Set;
 
+import static dev.nexus.service.jooq.nexus.Tables.LADDER_COMPLETIONS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -44,6 +56,17 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *   <li>RLS fail-closed: unstamped service connection sees zero rows</li>
  *   <li>RLS WITH CHECK: cross-tenant INSERT rejected</li>
  * </ol>
+ *
+ * <p>nexus-cbo4a batch 6 (Sam's no-raw-SQL-in-Java directive, nexus-zrcj7): every
+ * remaining raw {@code execute}/{@code fetch}/{@code prepareStatement} call is
+ * retired onto the generated {@code LADDER_COMPLETIONS} jOOQ table (a real
+ * product table has codegen — no {@code DSL.table(DSL.name(...))} fallback
+ * needed here) or typed {@code DSL.table(DSL.name(...))}/{@code
+ * DSL.field(DSL.name(...), Class)} composition over the pg_catalog views
+ * ({@code pg_class}/{@code pg_namespace}/{@code pg_policies}) that have no
+ * jOOQ codegen. {@code su.getMetaData().getColumns}/{@code getPrimaryKeys}
+ * (tests 1 and 3) are plain JDBC {@code DatabaseMetaData} calls, not raw SQL
+ * text, and were never flagged — left untouched.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class LadderSchemaLiquibaseTest {
@@ -102,28 +125,47 @@ class LadderSchemaLiquibaseTest {
     @Test
     void ladderTable_rlsEnabledForcedAndPolicyOnTenantGuc() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet cls = su.createStatement().executeQuery(
-                "SELECT relrowsecurity, relforcerowsecurity " +
-                "FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid " +
-                "WHERE n.nspname = 'nexus' AND c.relname = 'ladder_completions'");
-            assertThat(cls.next()).as("nexus.ladder_completions must exist in pg_class").isTrue();
-            assertThat(cls.getBoolean("relrowsecurity"))
-                .as("RLS must be ENABLED").isTrue();
-            assertThat(cls.getBoolean("relforcerowsecurity"))
-                .as("RLS must be FORCED (owner is subject to policy too)").isTrue();
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
 
-            ResultSet pol = su.createStatement().executeQuery(
-                "SELECT policyname, qual, with_check FROM pg_policies " +
-                "WHERE schemaname = 'nexus' AND tablename = 'ladder_completions'");
-            assertThat(pol.next()).as("a policy must exist on nexus.ladder_completions").isTrue();
-            assertThat(pol.getString("qual"))
+            Table<?> pgClass = DSL.table(DSL.name("pg_class")).as("c");
+            Table<?> pgNamespace = DSL.table(DSL.name("pg_namespace")).as("n");
+            Field<Boolean> relrowsecurity = DSL.field(DSL.name("c", "relrowsecurity"), Boolean.class);
+            Field<Boolean> relforcerowsecurity =
+                DSL.field(DSL.name("c", "relforcerowsecurity"), Boolean.class);
+            Field<Object> relnamespace = DSL.field(DSL.name("c", "relnamespace"));
+            Field<Object> nsOid = DSL.field(DSL.name("n", "oid"));
+            Field<String> nspname = DSL.field(DSL.name("n", "nspname"), String.class);
+            Field<String> relname = DSL.field(DSL.name("c", "relname"), String.class);
+
+            Record2<Boolean, Boolean> cls = ctx.select(relrowsecurity, relforcerowsecurity)
+                .from(pgClass)
+                .join(pgNamespace).on(relnamespace.eq(nsOid))
+                .where(nspname.eq("nexus")).and(relname.eq("ladder_completions"))
+                .fetchOne();
+            assertThat(cls).as("nexus.ladder_completions must exist in pg_class").isNotNull();
+            assertThat(cls.value1()).as("RLS must be ENABLED").isTrue();
+            assertThat(cls.value2()).as("RLS must be FORCED (owner is subject to policy too)").isTrue();
+
+            Table<?> pgPolicies = DSL.table(DSL.name("pg_policies"));
+            Field<String> policyname = DSL.field(DSL.name("policyname"), String.class);
+            Field<String> qual = DSL.field(DSL.name("qual"), String.class);
+            Field<String> withCheck = DSL.field(DSL.name("with_check"), String.class);
+            Field<String> schemaname = DSL.field(DSL.name("schemaname"), String.class);
+            Field<String> tablename = DSL.field(DSL.name("tablename"), String.class);
+
+            Result<Record3<String, String, String>> pol = ctx.select(policyname, qual, withCheck)
+                .from(pgPolicies)
+                .where(schemaname.eq("nexus")).and(tablename.eq("ladder_completions"))
+                .fetch();
+            assertThat(pol).as("a policy must exist on nexus.ladder_completions").isNotEmpty();
+            Record3<String, String, String> row = pol.get(0);
+            assertThat(row.value2())
                 .as("USING predicate must read the nexus.tenant GUC")
                 .contains("current_setting('" + TenantConstants.GUC_NAME + "'");
-            assertThat(pol.getString("with_check"))
+            assertThat(row.value3())
                 .as("WITH CHECK predicate must read the nexus.tenant GUC")
                 .contains("current_setting('" + TenantConstants.GUC_NAME + "'");
-            assertThat(pol.next())
-                .as("exactly one policy expected on nexus.ladder_completions").isFalse();
+            assertThat(pol).as("exactly one policy expected on nexus.ladder_completions").hasSize(1);
         }
     }
 
@@ -154,20 +196,22 @@ class LadderSchemaLiquibaseTest {
     void ladderTable_detailDefaultsToEmptyString() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
-            try (var ps = su.prepareStatement("SELECT set_config(?, ?, true)")) {
-                ps.setString(1, TenantConstants.GUC_NAME);
-                ps.setString(2, "default-probe");
-                ps.execute();
-            }
-            su.createStatement().execute(
-                "INSERT INTO nexus.ladder_completions " +
-                "(tenant_id, rung_name, verified_at, package_version) " +
-                "VALUES ('default-probe', 'probe-rung', now(), '6.11.0')");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT detail FROM nexus.ladder_completions " +
-                "WHERE tenant_id = 'default-probe' AND rung_name = 'probe-rung'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getString("detail"))
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.select(DSL.function("set_config", SQLDataType.VARCHAR,
+                    DSL.val(TenantConstants.GUC_NAME), DSL.val("default-probe"), DSL.inline(true)))
+                .fetch();
+            ctx.insertInto(LADDER_COMPLETIONS,
+                    LADDER_COMPLETIONS.TENANT_ID, LADDER_COMPLETIONS.RUNG_NAME,
+                    LADDER_COMPLETIONS.VERIFIED_AT, LADDER_COMPLETIONS.PACKAGE_VERSION)
+                .values("default-probe", "probe-rung", OffsetDateTime.now(ZoneOffset.UTC), "6.11.0")
+                .execute();
+            var row = ctx.select(LADDER_COMPLETIONS.DETAIL)
+                .from(LADDER_COMPLETIONS)
+                .where(LADDER_COMPLETIONS.TENANT_ID.eq("default-probe"))
+                .and(LADDER_COMPLETIONS.RUNG_NAME.eq("probe-rung"))
+                .fetchOne();
+            assertThat(row).isNotNull();
+            assertThat(row.value1())
                 .as("detail must default to '' (mirrors SQLite DEFAULT '')")
                 .isEmpty();
             su.rollback();
@@ -187,15 +231,19 @@ class LadderSchemaLiquibaseTest {
         }
 
         List<String> alphaRungs = tenantScope.withTenant("alpha", ctx ->
-            ctx.fetch("SELECT rung_name FROM nexus.ladder_completions ORDER BY rung_name")
-               .getValues("rung_name", String.class));
+            ctx.select(LADDER_COMPLETIONS.RUNG_NAME)
+               .from(LADDER_COMPLETIONS)
+               .orderBy(LADDER_COMPLETIONS.RUNG_NAME)
+               .fetch(LADDER_COMPLETIONS.RUNG_NAME));
         assertThat(alphaRungs)
             .as("tenant-alpha must see exactly its 2 rung records")
             .containsExactly("engine-install", "t2-schema");
 
         List<String> betaRungs = tenantScope.withTenant("beta", ctx ->
-            ctx.fetch("SELECT rung_name FROM nexus.ladder_completions ORDER BY rung_name")
-               .getValues("rung_name", String.class));
+            ctx.select(LADDER_COMPLETIONS.RUNG_NAME)
+               .from(LADDER_COMPLETIONS)
+               .orderBy(LADDER_COMPLETIONS.RUNG_NAME)
+               .fetch(LADDER_COMPLETIONS.RUNG_NAME));
         assertThat(betaRungs)
             .as("tenant-beta must see exactly its 1 rung record")
             .containsExactly("engine-install");
@@ -213,11 +261,13 @@ class LadderSchemaLiquibaseTest {
         }
 
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(DISTINCT tenant_id) AS tenants FROM nexus.ladder_completions " +
-                "WHERE tenant_id IN ('gamma-su', 'delta-su')");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getLong("tenants"))
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            Field<Long> cnt = DSL.countDistinct(LADDER_COMPLETIONS.TENANT_ID).cast(SQLDataType.BIGINT);
+            Long tenants = ctx.select(cnt)
+                .from(LADDER_COMPLETIONS)
+                .where(LADDER_COMPLETIONS.TENANT_ID.in("gamma-su", "delta-su"))
+                .fetchOne(cnt);
+            assertThat(tenants)
                 .as("superuser (rolsuper → implicit RLS bypass) must see rows across tenants")
                 .isEqualTo(2L);
         }
@@ -235,12 +285,11 @@ class LadderSchemaLiquibaseTest {
 
         try (Connection svc = svcDs.getConnection()) {
             svc.setAutoCommit(true);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT COUNT(*) AS cnt FROM nexus.ladder_completions");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getLong("cnt"))
+            DSLContext ctx = DSL.using(svc, SQLDialect.POSTGRES);
+            int count = ctx.fetchCount(LADDER_COMPLETIONS);
+            assertThat(count)
                 .as("unstamped service connection must see zero rows (RLS fail-closed)")
-                .isEqualTo(0L);
+                .isZero();
         }
     }
 
@@ -250,12 +299,13 @@ class LadderSchemaLiquibaseTest {
     void rls_withCheck_blocksCrossTenantInsert() throws Exception {
         assertThatThrownBy(() ->
             tenantScope.withTenant("epsilon", ctx ->
-                ctx.execute(
-                    "INSERT INTO nexus.ladder_completions " +
-                    "(tenant_id, rung_name, verified_at, package_version) " +
-                    "VALUES (?, ?, now(), ?)",
-                    "zeta",  // tenant_id mismatch — WITH CHECK must reject
-                    "rung-x", "6.11.0"))
+                ctx.insertInto(LADDER_COMPLETIONS,
+                        LADDER_COMPLETIONS.TENANT_ID, LADDER_COMPLETIONS.RUNG_NAME,
+                        LADDER_COMPLETIONS.VERIFIED_AT, LADDER_COMPLETIONS.PACKAGE_VERSION)
+                    .values(
+                        "zeta",  // tenant_id mismatch — WITH CHECK must reject
+                        "rung-x", OffsetDateTime.now(ZoneOffset.UTC), "6.11.0")
+                    .execute())
         )
         .as("INSERT with tenant_id != GUC value must be rejected by RLS WITH CHECK")
         .isInstanceOf(Exception.class)
@@ -276,19 +326,16 @@ class LadderSchemaLiquibaseTest {
 
     /** Insert a completion row via superuser connection (bypasses RLS for seeding). */
     private void insertRow(Connection su, String tenant, String rungName) throws Exception {
-        try (var ps = su.prepareStatement("SELECT set_config(?, ?, true)")) {
-            ps.setString(1, TenantConstants.GUC_NAME);
-            ps.setString(2, tenant);
-            ps.execute();
-        }
-        try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.ladder_completions " +
-                "(tenant_id, rung_name, verified_at, package_version) " +
-                "VALUES (?, ?, now(), 'test-seed') " +
-                "ON CONFLICT (tenant_id, rung_name) DO NOTHING")) {
-            ps.setString(1, tenant);
-            ps.setString(2, rungName);
-            ps.executeUpdate();
-        }
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        ctx.select(DSL.function("set_config", SQLDataType.VARCHAR,
+                DSL.val(TenantConstants.GUC_NAME), DSL.val(tenant), DSL.inline(true)))
+            .fetch();
+        ctx.insertInto(LADDER_COMPLETIONS,
+                LADDER_COMPLETIONS.TENANT_ID, LADDER_COMPLETIONS.RUNG_NAME,
+                LADDER_COMPLETIONS.VERIFIED_AT, LADDER_COMPLETIONS.PACKAGE_VERSION)
+            .values(tenant, rungName, OffsetDateTime.now(ZoneOffset.UTC), "test-seed")
+            .onConflict(LADDER_COMPLETIONS.TENANT_ID, LADDER_COMPLETIONS.RUNG_NAME)
+            .doNothing()
+            .execute();
     }
 }
