@@ -833,7 +833,7 @@ def test_search_corpus_routing(corpus_arg, available, expected_in, expected_not_
 # The floor is RELATIVE to fan-out sibling health, not a flat
 # per-collection cutoff: a collection is excluded from a bare-prefix
 # fan-out ("code", "knowledge,code,docs", "all") only when it is both
-# below _FANOUT_MIN_COLLECTION_COUNT AND at least one OTHER collection
+# below _FANOUT_MIN_COLLECTION_CHUNK_COUNT AND at least one OTHER collection
 # under the same prefix is at or above it -- a thin collection riding
 # beside a populous sibling is pure fan-out noise (the 2026-08-31
 # search_telemetry baseline: code__1-4 at 95.9% zero-hit / 1 document,
@@ -847,10 +847,10 @@ def test_search_corpus_routing(corpus_arg, available, expected_in, expected_not_
 def test_fanout_floor_excludes_thin_collection_beside_healthy_sibling():
     """Tiny beside big, same prefix: the tiny one is fan-out noise and is
     dropped; the healthy one stays."""
-    from nexus.mcp.core import _FANOUT_MIN_COLLECTION_COUNT
+    from nexus.mcp.core import _FANOUT_MIN_COLLECTION_CHUNK_COUNT
     _mock_t3([
-        {"name": "code__thin", "count": _FANOUT_MIN_COLLECTION_COUNT - 1},
-        {"name": "code__healthy", "count": _FANOUT_MIN_COLLECTION_COUNT + 10},
+        {"name": "code__thin", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT - 1},
+        {"name": "code__healthy", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT + 10},
     ])
     captured, fake = _capture_search()
     with patch("nexus.search_engine.search_cross_corpus", fake):
@@ -865,7 +865,7 @@ def test_fanout_floor_keeps_single_tiny_collection_under_prefix():
     sibling to be noise beside, so it is never excluded. This is the
     fresh-install case: the first note lands alone in knowledge__knowledge
     at 1 chunk, and the default corpus must still find it."""
-    from nexus.mcp.core import _FANOUT_MIN_COLLECTION_COUNT
+    from nexus.mcp.core import _FANOUT_MIN_COLLECTION_CHUNK_COUNT
     _mock_t3([{"name": "knowledge__notes", "count": 1}])
     captured, fake = _capture_search()
     with patch("nexus.search_engine.search_cross_corpus", fake):
@@ -878,10 +878,10 @@ def test_fanout_floor_keeps_two_tiny_siblings():
     """Two thin siblings under the same prefix, neither reaching the
     floor: no healthy sibling exists to mark either as noise BY
     COMPARISON, so both stay in the fan-out."""
-    from nexus.mcp.core import _FANOUT_MIN_COLLECTION_COUNT
+    from nexus.mcp.core import _FANOUT_MIN_COLLECTION_CHUNK_COUNT
     _mock_t3([
         {"name": "code__a", "count": 1},
-        {"name": "code__b", "count": _FANOUT_MIN_COLLECTION_COUNT - 1},
+        {"name": "code__b", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT - 1},
     ])
     captured, fake = _capture_search()
     with patch("nexus.search_engine.search_cross_corpus", fake):
@@ -894,8 +894,8 @@ def test_fanout_floor_keeps_two_tiny_siblings():
 def test_fanout_floor_honours_explicit_collection_name():
     """A below-floor collection named directly (not reached via prefix
     resolution) is always searched -- the floor only prunes fan-out."""
-    from nexus.mcp.core import _FANOUT_MIN_COLLECTION_COUNT
-    _mock_t3([{"name": "code__thin__voyage-code-3__v1", "count": _FANOUT_MIN_COLLECTION_COUNT - 1}])
+    from nexus.mcp.core import _FANOUT_MIN_COLLECTION_CHUNK_COUNT
+    _mock_t3([{"name": "code__thin__voyage-code-3__v1", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT - 1}])
     captured, fake = _capture_search()
     with patch("nexus.search_engine.search_cross_corpus", fake):
         _search_render("test query", corpus="code__thin__voyage-code-3__v1")
@@ -908,11 +908,11 @@ def test_fanout_floor_applies_under_all_alias():
     fan-out group is still evaluated independently (a healthy code__
     sibling excludes the thin code__ collection; the lone knowledge__
     collection, healthy anyway, is unaffected)."""
-    from nexus.mcp.core import _FANOUT_MIN_COLLECTION_COUNT
+    from nexus.mcp.core import _FANOUT_MIN_COLLECTION_CHUNK_COUNT
     _mock_t3([
-        {"name": "code__thin", "count": _FANOUT_MIN_COLLECTION_COUNT - 1},
-        {"name": "code__healthy", "count": _FANOUT_MIN_COLLECTION_COUNT + 10},
-        {"name": "knowledge__notes", "count": _FANOUT_MIN_COLLECTION_COUNT + 5},
+        {"name": "code__thin", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT - 1},
+        {"name": "code__healthy", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT + 10},
+        {"name": "knowledge__notes", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT + 5},
     ])
     captured, fake = _capture_search()
     with patch("nexus.search_engine.search_cross_corpus", fake):
@@ -927,10 +927,10 @@ def test_fanout_floor_boundary_exact():
     """count == floor stays IN; count == floor - 1 is dropped (given a
     healthy sibling -- here, the at-floor one -- to be noise beside).
     Pins the strict less-than comparison, not <=."""
-    from nexus.mcp.core import _FANOUT_MIN_COLLECTION_COUNT
+    from nexus.mcp.core import _FANOUT_MIN_COLLECTION_CHUNK_COUNT
     _mock_t3([
-        {"name": "code__at_floor", "count": _FANOUT_MIN_COLLECTION_COUNT},
-        {"name": "code__below_floor", "count": _FANOUT_MIN_COLLECTION_COUNT - 1},
+        {"name": "code__at_floor", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT},
+        {"name": "code__below_floor", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT - 1},
     ])
     captured, fake = _capture_search()
     with patch("nexus.search_engine.search_cross_corpus", fake):
@@ -943,10 +943,10 @@ def test_fanout_floor_boundary_exact():
 def test_fanout_floor_applies_to_query_tool_too():
     """``query()`` shares ``_resolve_corpus_target`` with ``search()``
     (nexus-z4j8d) -- the floor must apply identically there."""
-    from nexus.mcp.core import _FANOUT_MIN_COLLECTION_COUNT
+    from nexus.mcp.core import _FANOUT_MIN_COLLECTION_CHUNK_COUNT
     _mock_t3([
-        {"name": "code__thin", "count": _FANOUT_MIN_COLLECTION_COUNT - 1},
-        {"name": "code__healthy", "count": _FANOUT_MIN_COLLECTION_COUNT + 10},
+        {"name": "code__thin", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT - 1},
+        {"name": "code__healthy", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT + 10},
     ])
     captured, fake = _capture_search()
     with patch("nexus.search_engine.search_cross_corpus", fake):
@@ -977,6 +977,96 @@ def test_fanout_floor_fails_open_when_count_unknown():
     assert len(captured) == 1
     assert "code__mystery" in captured[0]
     assert "code__healthy" in captured[0]
+
+
+def test_fanout_floor_negative_count_sentinel_fails_open():
+    """CRITICAL review finding (code-review-nexus-rbhci-516701aa3):
+    ``HttpVectorClient._list_collections_via_count``'s real failed-count
+    output is ``{"name": ..., "count": -1}`` -- not an omitted key. Feed
+    that exact shape through the REAL ``_mock_t3`` -> mcp_infra cache path
+    (not a monkeypatched ``_get_collection_counts``) and confirm the -1
+    collection is kept beside a healthy sibling, exactly like a missing
+    count -- and never itself counts as the "healthy sibling" that would
+    justify excluding someone else (a second, genuinely-thin collection
+    stays in too)."""
+    _mock_t3([
+        {"name": "code__failed_count", "count": -1},
+        {"name": "code__healthy", "count": 20},
+        {"name": "code__thin", "count": 1},
+    ])
+    captured, fake = _capture_search()
+    with patch("nexus.search_engine.search_cross_corpus", fake):
+        _search_render("test query", corpus="code")
+    assert len(captured) == 1
+    assert "code__failed_count" in captured[0], (
+        "a -1 (failed-count) collection must fail open, not read as a "
+        "known-thin collection and be excluded"
+    )
+    assert "code__healthy" in captured[0]
+    assert "code__thin" not in captured[0], (
+        "the genuinely-thin sibling is still correctly excluded by the "
+        "real healthy neighbour -- the -1 fix must not disable exclusion "
+        "entirely"
+    )
+
+
+# ── Fan-out exclusion visibility (Significant review finding) ──────────────
+#
+# Silent exclusion reads as a genuine miss. search()/query() must name what
+# the fan-out floor skipped, the same way _no_results_message already
+# names backend-failed collections (nexus-pebfx.8).
+
+def test_fanout_floor_exclusion_visible_in_search_hit_footer():
+    from nexus.mcp.core import _FANOUT_MIN_COLLECTION_CHUNK_COUNT
+    _mock_t3([
+        {"name": "code__thin", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT - 1},
+        {"name": "code__healthy", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT + 10},
+    ])
+    fake = lambda *a, **kw: [  # noqa: E731 — inline fixture fake, local to this test
+        SearchResult(id="r1", content="hit", distance=0.1,
+                     collection="code__healthy", metadata={})
+    ]
+    with patch("nexus.search_engine.search_cross_corpus", fake):
+        out = _search_render("test query", corpus="code")
+    assert "[excluded below fan-out floor: code__thin]" in out
+
+
+def test_fanout_floor_exclusion_visible_on_zero_hit():
+    from nexus.mcp.core import _FANOUT_MIN_COLLECTION_CHUNK_COUNT
+    _mock_t3([
+        {"name": "code__thin", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT - 1},
+        {"name": "code__healthy", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT + 10},
+    ])
+    with patch("nexus.search_engine.search_cross_corpus", lambda *a, **kw: []):
+        out = _search_render("test query", corpus="code")
+    assert "[excluded below fan-out floor: code__thin]" in out
+
+
+def test_fanout_floor_no_footer_when_nothing_excluded():
+    _mock_t3([{"name": "knowledge__notes", "count": 1}])
+    fake = lambda *a, **kw: [  # noqa: E731 — inline fixture fake, local to this test
+        SearchResult(id="r1", content="hit", distance=0.1,
+                     collection="knowledge__notes", metadata={})
+    ]
+    with patch("nexus.search_engine.search_cross_corpus", fake):
+        out = _search_render("test query", corpus="knowledge")
+    assert "excluded below fan-out floor" not in out
+
+
+def test_fanout_floor_exclusion_visible_in_query_footer():
+    """``query()`` shares the same visibility fix as ``search()``."""
+    from nexus.mcp.core import _FANOUT_MIN_COLLECTION_CHUNK_COUNT
+    _mock_t3([
+        {"name": "code__thin", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT - 1},
+        {"name": "code__healthy", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT + 10},
+    ])
+    fake = lambda *a, **kw: [  # noqa: E731 — inline fixture fake, local to this test
+        SearchResult(id="r1", content="hit", distance=0.1,
+                     collection="code__healthy", metadata={"title": "doc"})
+    ]
+    with patch("nexus.search_engine.search_cross_corpus", fake):
+        out = query(question="test query", corpus="code")
+    assert "[excluded below fan-out floor: code__thin]" in out
 
 
 # ── query() corpus resolution parity with search() (nexus-z4j8d) ───────────
@@ -1330,6 +1420,44 @@ def test_store_delete_invalidates_page_cache(t3, monkeypatch):
         _search_render(query="q", corpus="knowledge", limit=2, offset=0)
 
     assert len(calls) == 2, "a store_delete must invalidate the page cache"
+
+
+def test_store_put_invalidates_collections_cache(t3, monkeypatch):
+    """Cache-coherence review finding (Important, code-review-nexus-
+    rbhci-516701aa3): unlike ``_page_cache``, ``_collections_cache``
+    (names + fan-out-floor counts) was TTL-only -- a collection crossing
+    ``_FANOUT_MIN_COLLECTION_CHUNK_COUNT`` from below to at-or-above
+    stayed excluded from the default fan-out for up to
+    ``_COLLECTIONS_CACHE_TTL`` seconds after the write that should have
+    un-excluded it. ``store_put`` must invalidate it immediately, mirroring
+    the existing ``_page_cache_invalidate()`` call at the same site."""
+    from nexus.mcp import core as mcp_core
+    spy = MagicMock()
+    monkeypatch.setattr(mcp_core, "_invalidate_collections_cache", spy)
+    store_put(content="cache invalidation trigger", collection="knowledge",
+              title="civ-put")
+    assert spy.called, (
+        "store_put must call invalidate_collections_cache() on a "
+        "committed write"
+    )
+
+
+def test_store_delete_invalidates_collections_cache(t3, monkeypatch):
+    """Same cache-coherence review finding as the store_put test above,
+    for the delete path."""
+    from nexus.mcp import core as mcp_core
+    _seed_for_store_put("civ delete me", "knowledge")
+    put_result = store_put(
+        content="civ delete me", collection="knowledge", title="civ-del"
+    )
+    real_doc_id = put_result.split("Stored: ")[1].split()[0]
+    spy = MagicMock()
+    monkeypatch.setattr(mcp_core, "_invalidate_collections_cache", spy)
+    store_delete(doc_id=real_doc_id, collection="knowledge")
+    assert spy.called, (
+        "store_delete must call invalidate_collections_cache() on a "
+        "committed delete"
+    )
 
 
 def test_cached_zero_hit_preserves_threshold_diag(monkeypatch):

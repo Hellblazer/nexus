@@ -1227,6 +1227,88 @@ def _run_check_engine_activity() -> None:
     _report_engine_activity()
 
 
+# ── --check-fanout-floor (nexus-rbhci) ───────────────────────────────────────
+
+
+def _report_fanout_floor_census() -> None:
+    """List collections currently excluded from the default MCP
+    search()/query() corpus fan-out by the sibling-relative floor
+    (``nexus.mcp.core._FANOUT_MIN_COLLECTION_CHUNK_COUNT``).
+
+    Review finding (code-review-nexus-rbhci-516701aa3): an excluded
+    collection stops contributing to ``search_telemetry``'s zero-hit-rate
+    figure the moment it drops out of the default fan-out, since
+    ``search_cross_corpus`` only measures the collections it is actually
+    asked to search. A genuinely broken/partial index — the bead's own
+    original hypothesis about ``code__1-4`` before it was ruled out as
+    legitimate small-corpus noise — would go quiet rather than visibly
+    zero-hit if this ever recurs. This check keeps that blind spot
+    visible: it names, on every ``nx doctor`` run, exactly which
+    collections are currently sitting below the floor beside a healthy
+    sibling, so "why did this collection's zero-hit rate stop moving" has
+    an answer without reading debug logs.
+
+    Read-only and cheap: ONE ``list_collections()`` call (this doctor
+    process's own cache, cold on every invocation — the same cost `nx
+    collection list` already pays), then the identical pure grouping rule
+    ``_resolve_corpus_target`` uses (``_fanout_exclusions_for_group``,
+    imported here so the two can never drift apart). No per-collection
+    round trip, no write, no effect on ``nx doctor``'s exit code —
+    informational only, same posture as ``--check-engine-activity``.
+    """
+    from nexus.mcp.core import _fanout_exclusions_for_group  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+
+    try:
+        from nexus.db import make_t3  # noqa: PLC0415 - deferred: heavy import, keep CLI startup fast
+
+        rows = make_t3().list_collections()
+    except Exception as exc:  # noqa: BLE001 — informational check; a T3 failure here is reported, not raised
+        click.echo(f"  fan-out floor census: UNAVAILABLE ({type(exc).__name__}: {exc})")
+        return
+
+    names = [row["name"] for row in rows]
+    counts: dict[str, int] = {}
+    for row in rows:
+        raw = row.get("count")
+        if raw is None:
+            continue
+        count = int(raw)
+        if count < 0:
+            continue  # failed-count sentinel; unknown, not a real size
+        counts[row["name"]] = count
+
+    groups: dict[str, list[str]] = {}
+    for name in names:
+        prefix = name.split("__", 1)[0]
+        if prefix:
+            groups.setdefault(prefix, []).append(name)
+
+    census: dict[str, list[str]] = {}
+    for prefix, members in groups.items():
+        excluded = _fanout_exclusions_for_group(members, counts)
+        if excluded:
+            census[prefix] = sorted(excluded)
+
+    if not census:
+        click.echo("  fan-out floor: no collections currently excluded")
+        return
+    total_excluded = sum(len(v) for v in census.values())
+    click.echo(
+        f"  fan-out floor: {total_excluded} collection(s) currently excluded "
+        f"from the default corpus fan-out (below floor beside a healthy "
+        f"sibling; zero-hit telemetry is NOT accumulating for these):"
+    )
+    for prefix, excluded_names in sorted(census.items()):
+        for name in excluded_names:
+            click.echo(f"    {prefix}: {name} ({counts.get(name)} chunks)")
+
+
+def _run_check_fanout_floor() -> None:
+    """Census of collections currently excluded from the default corpus
+    fan-out by the sibling-relative floor (nexus-rbhci)."""
+    _report_fanout_floor_census()
+
+
 # ── --check-tier-discipline (nexus-a52i) ─────────────────────────────────────
 
 
@@ -1649,6 +1731,16 @@ def _run_check_mineru() -> None:
 #                                          | this bead names explicitly):
 #                                          | any nonzero backlog raises
 #                                          | Exit(1) with a ✗ FAIL: marker.
+#   (no --check-fanout-floor flag)| YES       | ONE list_collections() call
+#                                          | (no per-collection round trip);
+#                                          | always exit 0 (informational,
+#                                          | like --check-wal-retention) --
+#                                          | names collections currently
+#                                          | excluded from the default MCP
+#                                          | search()/query() corpus
+#                                          | fan-out (nexus-rbhci), whose
+#                                          | zero-hit telemetry has gone
+#                                          | quiet as a result.
 #
 # Non-gating by design: a supplementary check's failure is printed, never
 # folded into the default sweep's exit code. Two of the five (schema-
@@ -1667,7 +1759,7 @@ def _run_check_mineru() -> None:
 #: this file, after ``doctor_cmd``).
 _SUPPLEMENTARY_CHECK_NAMES: tuple[str, ...] = (
     "resources", "plan-library", "taxonomy", "aspect-queue", "t1", "engine-activity",
-    "index-failures",
+    "index-failures", "fanout-floor",
 )
 
 #: The remaining opt-in-only flags -- named in the summary line at the end
@@ -1705,6 +1797,7 @@ def _run_supplementary_checks() -> None:
         "t1": _run_check_t1,
         "engine-activity": _run_check_engine_activity,
         "index-failures": _run_check_index_failures,
+        "fanout-floor": _run_check_fanout_floor,
     }
     click.echo(
         "\nSupplementary checks (cheap/read-only subset of the opt-in "

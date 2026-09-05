@@ -185,6 +185,7 @@ class TestSupplementaryChecks:
         "--- aspect-queue ---",
         "--- t1 ---",
         "--- engine-activity ---",
+        "--- fanout-floor ---",
     ])
     def test_each_promoted_check_runs(self, runner, mock_reg, marker):
         result = _invoke(runner, mock_reg)
@@ -248,6 +249,77 @@ class TestSupplementaryChecks:
         # The rest of the sweep still ran.
         assert "--- t1 ---" in result.output
         assert "Remaining opt-in-only checks" in result.output
+
+
+# ── --check-fanout-floor census content (nexus-rbhci) ───────────────────────
+#
+# The marker-presence test above (test_each_promoted_check_runs) only
+# proves the check RUNS; these prove what it actually reports, against a
+# controlled list_collections() fixture -- exactly the shape
+# HttpVectorClient.list_collections() returns.
+
+
+def test_fanout_floor_census_lists_excluded_collection(runner, mock_reg):
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [
+        {"name": "code__thin", "count": 1},
+        {"name": "code__healthy", "count": 20},
+    ]
+    result = _invoke(
+        runner, mock_reg,
+        extra_patches=[patch("nexus.db.make_t3", return_value=mock_t3)],
+    )
+    assert result.exit_code == 0
+    assert "1 collection(s) currently excluded" in result.output
+    assert "code__thin" in result.output
+    assert "code__healthy" not in result.output.split(
+        "collection(s) currently excluded", 1
+    )[1]
+
+
+def test_fanout_floor_census_clean_when_nothing_excluded(runner, mock_reg):
+    """A lone collection under its prefix is never excluded (nexus-rbhci
+    sibling-relative rule) -- the census must say so plainly, not just
+    omit a section."""
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [
+        {"name": "knowledge__notes", "count": 1},
+    ]
+    result = _invoke(
+        runner, mock_reg,
+        extra_patches=[patch("nexus.db.make_t3", return_value=mock_t3)],
+    )
+    assert result.exit_code == 0
+    assert "no collections currently excluded" in result.output
+
+
+def test_fanout_floor_census_ignores_negative_count_sentinel(runner, mock_reg):
+    """A -1 (HttpVectorClient's failed-per-collection-count sentinel) must
+    read as unknown here too, never as a genuinely thin collection --
+    same normalization as the live search()/query() path."""
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [
+        {"name": "code__mystery", "count": -1},
+        {"name": "code__healthy", "count": 20},
+    ]
+    result = _invoke(
+        runner, mock_reg,
+        extra_patches=[patch("nexus.db.make_t3", return_value=mock_t3)],
+    )
+    assert result.exit_code == 0
+    assert "no collections currently excluded" in result.output
+    assert "code__mystery" not in result.output
+
+
+def test_fanout_floor_census_unavailable_on_t3_failure(runner, mock_reg):
+    result = _invoke(
+        runner, mock_reg,
+        extra_patches=[
+            patch("nexus.db.make_t3", side_effect=RuntimeError("no service")),
+        ],
+    )
+    assert result.exit_code == 0
+    assert "fan-out floor census: UNAVAILABLE" in result.output
 
 
 # ── Missing credentials ─────────────────────────────────────────────────────

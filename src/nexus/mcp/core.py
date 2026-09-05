@@ -46,6 +46,7 @@ from nexus.mcp_infra import (
     get_t3 as _get_t3,
     inject_t1 as _inject_t1,
     inject_t3 as _inject_t3,
+    invalidate_collections_cache as _invalidate_collections_cache,
     record_search_trace as _record_search_trace,
     reset_singletons as _reset_singletons,
     t2_ctx as _t2_ctx,
@@ -1752,6 +1753,20 @@ def _record_tier_write(
 # ── Registered tools ─────────────────────────────────────────────────────────
 
 
+def _append_fanout_excluded_note(text: str, excluded: list[str]) -> str:
+    """Append a one-line footer naming collections the default fan-out
+    floor excluded (nexus-rbhci review finding: silent exclusion reads as
+    a genuine miss -- the same class of problem ``_no_results_message``'s
+    nexus-pebfx.8 failed-collections note already solves for backend
+    errors). Appended AFTER any ``_cap_text_result`` truncation, same as
+    that function's own capped-result marker, so it is never itself
+    truncated away. No-op when nothing was excluded.
+    """
+    if not excluded:
+        return text
+    return f"{text}\n[excluded below fan-out floor: {', '.join(excluded)}]"
+
+
 def _no_results_message(diagnostics: list, *, base: str = "No results.") -> str:
     """Surface a threshold-drop instead of a silent zero-hit (nexus-uro6c).
 
@@ -1919,7 +1934,8 @@ def _search_render(
         # (nexus-hmxi) + resolve_corpus logic -- one implementation
         # instead of two that can drift (query()'s plain-corpus branch was
         # exactly that drift: nexus-z4j8d fix 1).
-        target = _resolve_corpus_target(corpus, t3)
+        fanout_excluded: list[str] = []
+        target = _resolve_corpus_target(corpus, t3, excluded_out=fanout_excluded)
 
         if not target:
             return f"No collections match corpus {corpus!r}"
@@ -1993,7 +2009,7 @@ def _search_render(
         if not results:
             if structured:
                 return _structured_no_results(diag)
-            return _no_results_message(diag)
+            return _append_fanout_excluded_note(_no_results_message(diag), fanout_excluded)
 
         # nexus-0bmhd: render-layer file-diversity cap. `results` was just
         # cached above (fresh path) or read back unmodified (cache-HIT
@@ -2018,7 +2034,7 @@ def _search_render(
             _off_msg = f"No results at offset {offset} (total {total})."
             if structured:
                 return _structured_no_results(diag, base=_off_msg)
-            return _off_msg
+            return _append_fanout_excluded_note(_off_msg, fanout_excluded)
 
         # Record search trace for RDR-061 E2 retrieval feedback correlation.
         # Non-fatal — session may be unavailable in test contexts.
@@ -2088,7 +2104,9 @@ def _search_render(
         else:
             lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total} (end)")
 
-        return _cap_text_result("\n\n".join(lines), "search")
+        return _append_fanout_excluded_note(
+            _cap_text_result("\n\n".join(lines), "search"), fanout_excluded,
+        )
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("search", e)
 
@@ -2305,51 +2323,111 @@ def _reset_page_cache_for_tests() -> None:
         _page_cache.clear()
 
 
-#: Minimum row count (chunks, tombstone-filtered -- see
-#: ``get_collection_counts``'s docstring) for a collection to count as
-#: "healthy" within its own bare-prefix fan-out group ("code",
-#: "knowledge,code,docs", "all"). This is NOT a flat per-collection cutoff:
-#: it only ever excludes a collection that is both below the floor AND
-#: sharing its prefix with at least one collection at or above it -- see
-#: ``_resolve_corpus_target``'s docstring for why. Deliberately small:
-#: this targets collections too thin to be worth the fan-out cost beside a
-#: real sibling, not merely small ones -- a real but modest corpus (dozens
-#: of documents) clears it easily. Naming a collection explicitly (an
-#: exact ``__``-qualified corpus, or the short 2-segment form) always
-#: searches it regardless of this floor; see the "__" branch below, which
-#: never consults it.
-_FANOUT_MIN_COLLECTION_COUNT = 3
+#: Minimum row count for a collection to count as "healthy" within its own
+#: bare-prefix fan-out group ("code", "knowledge,code,docs", "all"). This
+#: is NOT a flat per-collection cutoff: it only ever excludes a collection
+#: that is both below the floor AND sharing its prefix with at least one
+#: collection at or above it -- see ``_resolve_corpus_target``'s docstring
+#: for why. Deliberately small: this targets collections too thin to be
+#: worth the fan-out cost beside a real sibling, not merely small ones --
+#: a real but modest corpus (dozens of chunks) clears it easily, and a
+#: two-file repo (which produces well over 3 chunks in practice) stays
+#: searchable. Naming a collection explicitly (an exact ``__``-qualified
+#: corpus, or the short 2-segment form) always searches it regardless of
+#: this floor; see the "__" branch below, which never consults it.
+#:
+#: CHUNKS, deliberately, not documents (review finding, nexus-rbhci): this
+#: counts what ``list_collections()`` reports -- tombstone-filtered vector
+#: rows -- not catalog document counts, even though the bead that requested
+#: this floor spoke of "document-count" and cited document-level evidence
+#: (code__1-4's "1 doc"). A genuine document-count source exists
+#: (``HttpCatalogClient.collection_doc_counts()``, one batched call) and
+#: was considered and rejected: it requires ``get_catalog()`` to be
+#: non-None (local/no-catalog installs would see EVERY count as unknown,
+#: turning this floor off entirely rather than degrading), and its
+#: ``physical_collection`` keys cover only catalog-registered documents --
+#: a T3 collection with no catalog entry at all (a real, named category in
+#: this codebase, see ``classify_t3_orphan_collections``) would never get a
+#: count and would always fail open, which is exactly backwards: an
+#: orphaned collection is disproportionately likely to be the kind of thin,
+#: noisy collection this floor exists to catch. Chunk counts, by contrast,
+#: come from the exact ``list_collections()`` call already made below for
+#: every live collection unconditionally, with no dependency on catalog
+#: state -- uniform coverage over a metric that is a less precise proxy,
+#: preferred here over precise coverage of only part of the corpus.
+_FANOUT_MIN_COLLECTION_CHUNK_COUNT = 3
 
 
-def _resolve_corpus_target(corpus: str, t3: Any) -> list[str]:
+def _fanout_exclusions_for_group(fanned_out: list[str], counts: dict[str, int]) -> set[str]:
+    """Pure function: which members of one bare-prefix fan-out group are
+    excluded by the sibling-relative floor (nexus-rbhci).
+
+    Shared by :func:`_resolve_corpus_target` (per live search/query call)
+    and the ``nx doctor`` fan-out-floor census (informational, across every
+    live prefix at once) so the two can never drift apart -- a census that
+    computed this rule independently could report collections as excluded
+    that a live search would actually still reach, or vice versa.
+
+    A collection is excluded only when it is BOTH below
+    :data:`_FANOUT_MIN_COLLECTION_CHUNK_COUNT` AND at least one *other*
+    collection sharing the group is at or above it -- a thin collection
+    riding beside a populous sibling is pure fan-out noise (it never
+    contributes a hit, only search cost), but a thin collection with no
+    healthy sibling is simply what that corpus currently holds, and
+    dropping it would silently empty the search (concretely: a fresh
+    install's first note lands alone in ``knowledge__knowledge`` at 1
+    chunk -- a flat floor would make the very first search on the default
+    corpus return nothing). A group of size < 2 is therefore never
+    touched, and a group where every member is below the floor is left
+    alone too -- there is no healthy sibling to make any of them noise BY
+    COMPARISON.
+
+    *counts* is looked up via plain ``.get()``: a missing key (unknown
+    count) is treated identically to a present-but-negative one -- see
+    :func:`nexus.mcp_infra.get_collection_counts`'s docstring, which
+    normalizes ``HttpVectorClient``'s ``-1`` failed-per-collection-count
+    sentinel out of the dict entirely so callers here never see it. Either
+    way, an unknown count fails OPEN (kept) and never itself counts as the
+    "healthy sibling" that would justify excluding someone else.
+    """
+    if len(fanned_out) < 2:
+        return set()
+    healthy_sibling_exists = any(
+        (c := counts.get(name)) is not None and c >= _FANOUT_MIN_COLLECTION_CHUNK_COUNT
+        for name in fanned_out
+    )
+    if not healthy_sibling_exists:
+        return set()
+    return {
+        name for name in fanned_out
+        if (c := counts.get(name)) is not None and c < _FANOUT_MIN_COLLECTION_CHUNK_COUNT
+    }
+
+
+def _resolve_corpus_target(
+    corpus: str, t3: Any, *, excluded_out: list[str] | None = None,
+) -> list[str]:
     """Resolve a comma-separated corpus/collection spec to collection names.
 
     Mirrors the ``search`` tool's routing: ``all`` expands to every live
     prefix; a ``__``-qualified part is a collection name; a bare part is a
     corpus prefix resolved against the live collection list.
 
-    Within one bare-prefix part's fan-out, a collection is dropped only
-    when it is BOTH below :data:`_FANOUT_MIN_COLLECTION_COUNT` AND at
-    least one *other* collection sharing that same prefix is at or above
-    it (nexus-rbhci) -- a thin collection riding beside a populous sibling
-    is pure fan-out noise (it never contributes a hit, only search cost),
-    but a thin collection with no healthy sibling is simply what that
-    corpus currently holds, and dropping it would silently empty the
-    search (concretely: a fresh install's first note lands alone in
-    ``knowledge__knowledge`` at 1 chunk -- a flat floor would make the
-    very first `nx search` on the default corpus return nothing). A group
-    of size 1 is therefore never touched, and a group where every member
-    is below the floor is left alone too -- there is no healthy sibling to
-    make any of them noise BY COMPARISON. An explicitly named collection
+    Within one bare-prefix part's fan-out, a collection is dropped per
+    :func:`_fanout_exclusions_for_group` (nexus-rbhci) -- see that
+    function's docstring for the full rule. An explicitly named collection
     (the ``"__" in part`` branch) is never subject to this floor at all.
+
+    *excluded_out*, when given a list, has every excluded collection name
+    APPENDED to it (review finding: exclusion was previously invisible to
+    the caller). ``search()``/``query()`` pass this so their rendered
+    result can name what was skipped, the same way ``_no_results_message``
+    already names backend-failed collections (nexus-pebfx.8).
 
     Counts come from :func:`nexus.mcp_infra.get_collection_counts`, which
     shares its cache with :func:`nexus.mcp_infra.get_collection_names` --
     the same ``list_collections()`` call this function already makes
-    below, so the floor check costs no additional round trip. A
-    collection with no reported count (never seen by ``list_collections()``,
-    e.g. a stale test double) fails OPEN -- it is kept, and it never
-    itself counts as the "healthy sibling" that would drop another.
+    below, so the floor check costs no additional round trip.
     """
     all_names = _get_collection_names()
     if corpus == "all":
@@ -2368,31 +2446,19 @@ def _resolve_corpus_target(corpus: str, t3: Any) -> list[str]:
             target.append(t3_collection_name(part, t3=t3))
         else:
             fanned_out = resolve_corpus(part, all_names)
-            if len(fanned_out) < 2:
-                # Nothing else under this prefix to be noise beside --
-                # never drop the last (or only) collection of a prefix.
-                target.extend(fanned_out)
-                continue
             counts = _get_collection_counts()
-            sibling_counts = [counts.get(name) for name in fanned_out]
-            healthy_sibling_exists = any(
-                c is not None and c >= _FANOUT_MIN_COLLECTION_COUNT
-                for c in sibling_counts
-            )
+            excluded = _fanout_exclusions_for_group(fanned_out, counts)
             for name in fanned_out:
-                count = counts.get(name)
-                if (
-                    healthy_sibling_exists
-                    and count is not None
-                    and count < _FANOUT_MIN_COLLECTION_COUNT
-                ):
+                if name in excluded:
                     _log.debug(
                         "corpus_fanout_excluded_below_floor",
                         collection=name,
-                        count=count,
-                        floor=_FANOUT_MIN_COLLECTION_COUNT,
+                        count=counts.get(name),
+                        floor=_FANOUT_MIN_COLLECTION_CHUNK_COUNT,
                         corpus_part=part,
                     )
+                    if excluded_out is not None:
+                        excluded_out.append(name)
                     continue
                 target.append(name)
     return list(dict.fromkeys(target))
@@ -3473,7 +3539,8 @@ def query(
         # 2-segment legacy/prefix corpus (e.g. ``knowledge__art``) that
         # ``search()`` resolves to a live collection reached the engine
         # verbatim here and 400'd as "not four-segment conformant".
-        target = _resolve_corpus_target(corpus, t3)
+        fanout_excluded_q: list[str] = []
+        target = _resolve_corpus_target(corpus, t3, excluded_out=fanout_excluded_q)
 
         if not target:
             return f"No collections match corpus {corpus!r}"
@@ -3524,7 +3591,7 @@ def query(
                     f"follow_links may have missed collections. Narrow `subtree` or "
                     f"split into multiple queries.]\n{no_results_msg}"
                 )
-            return no_results_msg
+            return _append_fanout_excluded_note(no_results_msg, fanout_excluded_q)
 
         if structured:
             page = results[:limit]
@@ -3710,7 +3777,9 @@ def query(
         if total > limit:
             lines.append(f"\n--- showing 1-{len(sorted_docs)} of {total} documents. Results are capped at limit={limit}.")
 
-        return _cap_text_result("\n".join(lines), "query")
+        return _append_fanout_excluded_note(
+            _cap_text_result("\n".join(lines), "query"), fanout_excluded_q,
+        )
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("query", e)
 
@@ -3932,6 +4001,11 @@ def store_put(
         # A committed write makes any cached page burst stale — drop it so a
         # same-identity search re-fetches (batch-f1655f55 critique).
         _page_cache_invalidate()
+        # nexus-rbhci review finding: a collection whose count just crossed
+        # _FANOUT_MIN_COLLECTION_CHUNK_COUNT (or a brand-new collection)
+        # must be visible to the default fan-out immediately, not up to
+        # _COLLECTIONS_CACHE_TTL seconds later.
+        _invalidate_collections_cache()
         # Auto-link from T1 scratch link-context.
         # nexus-a414: replace prior bare-except with named-exception capture
         # so unexpected errors surface at WARNING instead of silently passing.
@@ -5503,6 +5577,8 @@ def store_delete(doc_id: str, collection: str = "knowledge") -> str:
         deleted = t3.delete_by_id(col_name, doc_id)
         if deleted:
             _page_cache_invalidate()
+            # nexus-rbhci review finding: see the store_put call site.
+            _invalidate_collections_cache()
             if cleanup_error:
                 return (
                     f"Deleted: {doc_id} from {col_name} (WARNING: catalog "

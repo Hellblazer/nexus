@@ -418,6 +418,25 @@ def _refresh_collections_cache_if_stale() -> None:
     the per-collection count map, so :func:`get_collection_names` and
     :func:`get_collection_counts` share this single fetch instead of each
     hitting T3 independently (nexus-rbhci).
+
+    A row's ``count`` is stored ONLY when it is a genuine non-negative
+    reading. ``HttpVectorClient._list_collections_via_count`` (the
+    pre-catalog-005 deployment-skew fallback path) deliberately reports
+    ``-1``, not an absent field, when a per-collection count fetch fails --
+    "a failing per-collection count is reported as -1 rather than dropping
+    the collection" (that module's own docstring), so the collection stays
+    NAMED even though its size could not be read. Review finding
+    (code-review-nexus-rbhci-516701aa3, CRITICAL): storing that ``-1``
+    verbatim let a transient count-fetch failure silently exclude a real,
+    populated collection from the default fan-out for up to
+    ``_COLLECTIONS_CACHE_TTL`` seconds, inverting this module's own "fails
+    open on unknown" contract -- ``-1 is not None`` and ``-1 < floor`` are
+    both true, so the consuming guard treated a FAILURE as a genuinely
+    tiny collection. Skipping the entry here instead of normalizing it in
+    every consumer fixes the bug at its one source: a collection with a
+    failed count is simply absent from this dict, indistinguishable from
+    any other "never seen this collection's size" case, which every
+    consumer already treats as unknown / fail-open.
     """
     global _collections_cache
     _names, _counts, ts = _collections_cache
@@ -425,7 +444,15 @@ def _refresh_collections_cache_if_stale() -> None:
     if now - ts > _COLLECTIONS_CACHE_TTL:
         rows = get_t3().list_collections()
         new_names = [row["name"] for row in rows]
-        new_counts = {row["name"]: int(row.get("count") or 0) for row in rows}
+        new_counts: dict[str, int] = {}
+        for row in rows:
+            raw = row.get("count")
+            if raw is None:
+                continue
+            count = int(raw)
+            if count < 0:
+                continue  # failed-count sentinel (see docstring) -- unknown, not a real size
+            new_counts[row["name"]] = count
         _collections_cache = (new_names, new_counts, now)
 
 
@@ -444,17 +471,43 @@ def get_collection_counts() -> dict[str, int]:
     other reads its half of the same cached tuple for free. This is what
     ``list_collections()`` itself reports as ``count`` -- the vector
     store's live row count for the collection (chunks, tombstone-filtered;
-    see ``HttpVectorClient.list_collections``'s docstring) -- used as a
-    cheap per-collection health signal for the default corpus fan-out
-    floor in ``nexus.mcp.core._resolve_corpus_target``: a collection is
-    excluded from a bare-prefix fan-out only when it is thin AND a
-    sibling under the same prefix is not, never as a flat per-collection
-    cutoff (a lone thin collection -- e.g. a fresh install's first note --
-    is always kept; see that function's docstring for the full rule). A
-    collection named explicitly is unaffected by any of this.
+    see ``HttpVectorClient.list_collections``'s docstring), with any
+    negative (failed-count) reading normalized OUT of the dict by
+    :func:`_refresh_collections_cache_if_stale` -- used as a cheap
+    per-collection health signal for the default corpus fan-out floor in
+    ``nexus.mcp.core._resolve_corpus_target``: a collection is excluded
+    from a bare-prefix fan-out only when it is thin AND a sibling under
+    the same prefix is not, never as a flat per-collection cutoff (a lone
+    thin collection -- e.g. a fresh install's first note -- is always
+    kept; see that function's docstring for the full rule). A collection
+    named explicitly is unaffected by any of this.
+
+    Invalidated (alongside the page-turn cache) on every committed
+    ``store_put``/``store_delete`` via :func:`invalidate_collections_cache`
+    -- a collection crossing the floor from below to at-or-above (or vice
+    versa, on delete) is visible to the very next call, not up to
+    ``_COLLECTIONS_CACHE_TTL`` seconds later.
     """
     _refresh_collections_cache_if_stale()
     return _collections_cache[1]
+
+
+def invalidate_collections_cache() -> None:
+    """Force the next :func:`get_collection_names`/:func:`get_collection_counts`
+    call to refetch from T3 rather than serving up to
+    ``_COLLECTIONS_CACHE_TTL`` seconds of stale collection existence/counts.
+
+    Called after a committed ``store_put``/``store_delete`` (review finding,
+    code-review-nexus-rbhci-516701aa3: ``_collections_cache`` was
+    TTL-only, unlike the page-turn cache it sits beside, so a collection
+    crossing :data:`nexus.mcp.core._FANOUT_MIN_COLLECTION_CHUNK_COUNT`
+    from below to at-or-above could stay excluded from the default fan-out
+    for up to 60s after the write that should have un-excluded it).
+    Mirrors the existing ``_page_cache_invalidate()`` call at the same
+    write sites in ``nexus.mcp.core``.
+    """
+    global _collections_cache
+    _collections_cache = ([], {}, 0.0)
 
 
 def t2_ctx():
