@@ -48,14 +48,21 @@ mechanize, it matters enough to ship.
   ships, the installed hook stays fully silent on every skip.
 - `conexus/hooks/scripts/routing/_lib.py` (nexus-gjv9b PART 2): `log_routing_event`
   now records to the engine's `routing_events` table (best-effort POST via
-  `urllib`, ~250ms timeout) instead of appending to `routing_log.jsonl`; a
-  write that cannot reach the engine (service down, or no
-  `NX_SERVICE_HOST`/`PORT`/`TOKEN` exported — the common interactive-session
-  case) is counted in `nx doctor`'s drop meter (`nexus.dropped_writes`,
-  `hook="routing_events"`), never appended to the JSONL log. Requires an
-  engine carrying the `routing_events` table + `POST /v1/telemetry/
+  `urllib`, ~250ms timeout) instead of appending to `routing_log.jsonl`.
+  The endpoint resolves via a live ServiceRegistry lease file,
+  `config.yml` credentials, or `NX_SERVICE_*` env vars (same
+  t2_prefix_scan.py-style stdlib-only discovery every other T2 client
+  uses, review fix pass) — MEASURED against a real engine substrate:
+  100 calls, p50=1.19ms p95=1.86ms max=20.42ms, well under the 250ms
+  budget, zero drops. A write that cannot reach the engine (service
+  genuinely down, or nothing resolvable at all) is counted in `nx
+  doctor`'s drop meter (`nexus.dropped_writes`, `hook="routing_events"`),
+  never appended to the JSONL log — there is no JSONL fallback on this
+  path any more, on any install, once this ships. Requires an engine
+  carrying the `routing_events` table + `POST /v1/telemetry/
   routing_events/record` route (engine tag TBD, see
   `docs/wire-contract-pending.md`'s nexus-gjv9b entries) — until both the
   plugin cut and the engine tag ship, the installed hook keeps writing
-  `routing_log.jsonl` exactly as before, and `nx hook routing-stats`
-  without `--from-store` keeps reading it.
+  `routing_log.jsonl` exactly as before (the OLD code is what is
+  installed; this description is of the NEW code once the cut lands),
+  and `nx hook routing-stats` without `--from-store` keeps reading it.
