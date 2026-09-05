@@ -288,10 +288,40 @@ def _is_retryable_vector_error(exc: BaseException) -> bool:
     return any(fragment in msg for fragment in _RETRYABLE_FRAGMENTS)
 
 
+class VectorUpsertTimeoutError(RuntimeError):
+    """Raised for an upsert (write) call that read-timed-out while
+    ``retry_read_timeout=False`` (nexus-8hdg9 phase 1).
+
+    Unlike a search timeout, an upsert timeout means the request body was
+    already sent -- the engine may still be embedding this exact batch
+    server-side, so blindly re-POSTing it stacks a second embed pass on top
+    of the first. This is surfaced loud rather than retried or dropped.
+    """
+
+
+def _is_bare_read_timeout(exc: BaseException) -> bool:
+    """True if *exc* is (or directly chains to, one level via
+    ``__context__``/``__cause__``) a bare ``TimeoutError``.
+
+    nexus-8hdg9: this codebase already treats ``TimeoutError`` as a
+    DIFFERENT signature from the connection-level family
+    (``urllib.error.URLError`` / ``ConnectionError``, which includes
+    ``ConnectionResetError`` and ``ConnectionRefusedError`` --see the
+    ``_request`` re-resolve classifier's comment, ``http_vector_client.py``:
+    "TimeoutError is intentionally NOT in this retry classifier; it is not
+    an auto-restart signature"). A connection-level error means the peer
+    (or the connect attempt itself) is confirmably gone, safe to retry; a
+    bare ``TimeoutError`` on an established connection means the request
+    was sent and the server may still be working on it.
+    """
+    return _find_chained_exc(exc, (TimeoutError,)) is not None
+
+
 def _vector_with_retry(
     fn: Callable[..., Any],
     *args: Any,
     max_attempts: int = 5,
+    retry_read_timeout: bool = True,
     **kwargs: Any,
 ) -> Any:
     """Call *fn* with exponential backoff on transient vector-store errors.
@@ -299,6 +329,14 @@ def _vector_with_retry(
     Renamed from ``_chroma_with_retry`` at RDR-155 P4b P0d. Retries up to
     *max_attempts* times (default 5).  Backoff starts at 2 s, doubles each
     attempt, capped at 30 s.  Non-retryable errors raise immediately.
+
+    ``retry_read_timeout`` (default True, unchanged behaviour for every
+    existing caller including search/read) narrows retry for a bare
+    ``TimeoutError`` when set False: instead of retrying, raises
+    :class:`VectorUpsertTimeoutError` naming the engine's possible in-flight
+    work and ``GET /v1/status`` (nexus-8hdg9 phase 1 -- the upsert call site
+    passes False; a connection-level error, e.g. ``ConnectionResetError``,
+    is a different exception family and keeps retrying either way).
 
     nexus-cy9u7: every attempt first calls the process-wide
     :class:`~nexus.rate_brake.RateLimitBrake`'s ``wait()`` — a no-op unless
@@ -358,6 +396,19 @@ def _vector_with_retry(
         except Exception as exc:
             if not _is_retryable_vector_error(exc):
                 raise
+            if not retry_read_timeout and _is_bare_read_timeout(exc):
+                _log.warning(
+                    "vector_upsert_read_timeout_not_retried",
+                    attempt=attempt,
+                    error=str(exc)[:200],
+                )
+                raise VectorUpsertTimeoutError(
+                    "Upsert timed out waiting for a response; the request "
+                    "was already sent and the engine may still be embedding "
+                    "this batch server-side. Check GET /v1/status for "
+                    f"in-flight embed/admission activity before retrying "
+                    f"manually. ({exc})"
+                ) from exc
             rate_limit_err = _rate_limit_signal(exc)
             effective_max_attempts = (
                 max(max_attempts, _RATE_LIMIT_MAX_ATTEMPTS)

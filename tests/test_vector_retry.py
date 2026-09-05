@@ -14,7 +14,11 @@ import pytest
 import nexus.retry as retry_mod
 from nexus.db.http_vector_client import VectorServiceError
 from nexus.rate_brake import RateLimitBrake, reset_brake
-from nexus.retry import _is_retryable_vector_error, _vector_with_retry
+from nexus.retry import (
+    VectorUpsertTimeoutError,
+    _is_retryable_vector_error,
+    _vector_with_retry,
+)
 
 
 class _FakeClock:
@@ -606,6 +610,68 @@ def test_connectivity_error_trips_shared_brake(monkeypatch) -> None:
     ):
         assert _vector_with_retry(fn) == "ok"
     test_brake.trip.assert_called_once_with(None, source="vector")
+
+
+# ── nexus-8hdg9 phase 1: upsert-path retry narrowing on read timeout ───────
+#
+# retry.py:281-283 treats a bare TimeoutError as retryable for every vector
+# call, including upsert (write). For an upsert a read timeout means the
+# request body was already sent and the engine may still be embedding it
+# server-side (the nexus-8hdg9 diagnosis) -- re-POSTing the identical body
+# stacks a second embed pass on top of the first attempt. The narrowing is
+# opt-in via ``retry_read_timeout=False`` at the upsert call site only; the
+# global classifier and every other caller (search/read) are unchanged.
+
+
+def test_upsert_read_timeout_is_not_retried_at_the_ordinary_schedule() -> None:
+    """A bare TimeoutError with retry_read_timeout=False fails loud on the
+    FIRST attempt (no retry schedule, no sleep) with a message naming the
+    engine's possible in-flight work and GET /v1/status -- not a silent
+    drop."""
+    fn = MagicMock(side_effect=TimeoutError("timed out"))
+    with patch("nexus.retry.time.sleep") as mock_sleep, pytest.raises(
+        VectorUpsertTimeoutError, match="GET /v1/status",
+    ):
+        _vector_with_retry(fn, max_attempts=5, retry_read_timeout=False)
+    fn.assert_called_once()
+    mock_sleep.assert_not_called()
+
+
+def test_upsert_read_timeout_wrapped_in_vector_service_error_is_not_retried() -> None:
+    """The managed-endpoint shape (VectorServiceError(code=None) chained
+    from a bare TimeoutError -- see _make_connectivity_vector_service_error)
+    must be narrowed identically to the unwrapped local/lease shape."""
+    wrapped = _make_connectivity_vector_service_error(TimeoutError("timed out"))
+    fn = MagicMock(side_effect=wrapped)
+    with patch("nexus.retry.time.sleep"), pytest.raises(VectorUpsertTimeoutError):
+        _vector_with_retry(fn, retry_read_timeout=False)
+    fn.assert_called_once()
+
+
+@pytest.mark.parametrize("exc", [
+    ConnectionResetError("reset"),
+    ConnectionRefusedError("refused"),
+    urllib.error.URLError("Connection refused"),
+], ids=["connection-reset", "connection-refused", "url-error"])
+def test_upsert_connect_timeout_still_retried(exc: BaseException) -> None:
+    """A connection-level failure (dead/refused peer, or a connect that
+    never reached the engine) is a DIFFERENT exception family from a bare
+    read TimeoutError -- it stays retryable even with
+    retry_read_timeout=False, per the ordinary schedule."""
+    fn = MagicMock(side_effect=[exc, "ok"])
+    with patch("nexus.retry.time.sleep"):
+        assert _vector_with_retry(fn, max_attempts=3, retry_read_timeout=False) == "ok"
+    assert fn.call_count == 2
+
+
+def test_search_read_timeout_retry_is_unchanged() -> None:
+    """Anti-regression: a caller that does NOT pass retry_read_timeout (the
+    search/read path, e.g. t3.py's query/get/count callers) keeps retrying
+    a bare TimeoutError exactly as before the narrowing landed."""
+    fn = MagicMock(side_effect=[TimeoutError("timed out"), TimeoutError("timed out"), "ok"])
+    with patch("nexus.retry.time.sleep"):
+        assert _vector_with_retry(fn, max_attempts=3) == "ok"
+    assert fn.call_count == 3
 
 
 # ── nexus-cy9u7 CRITICAL-1: end-to-end through the REAL HttpVectorClient ────

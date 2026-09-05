@@ -1936,6 +1936,13 @@ class HttpVectorClient:
 
                 result = _vector_with_retry(
                     _post, "/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600,
+                    # nexus-8hdg9 phase 1: a read timeout on an upsert means
+                    # the request was already sent -- the engine may still be
+                    # embedding this exact batch server-side, so re-POSTing it
+                    # would stack a second embed pass. A connection-level
+                    # error (dead/refused peer) is a different signature and
+                    # still retries normally.
+                    retry_read_timeout=False,
                 )
             else:
                 result = _post(
