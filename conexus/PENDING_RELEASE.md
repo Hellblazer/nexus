@@ -31,4 +31,8 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.31.0)
 
-(none)
+- `conexus/skills/rdr-research/SKILL.md` (nexus-zu1q0): the add step now shells
+  out to `nx rdr preamble rdr-research -- add <id> <text>`, which computes the
+  next `<id>-research-N` sequence in Python and never overwrites an existing
+  title. Until this ships, the installed skill still does the list-and-upsert
+  itself and can land two adds on the same title.
