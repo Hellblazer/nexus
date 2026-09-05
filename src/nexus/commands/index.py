@@ -192,6 +192,66 @@ def index() -> None:
         )
 
 
+@index.command("failures")
+@click.option(
+    "--run-id",
+    default=None,
+    help="Only show failures from this run (default: every run).",
+)
+@click.option(
+    "--days",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Only show failures within the last N days (0 = unbounded).",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=100,
+    show_default=True,
+    help="Max rows to print. The printed count is always the exact total, "
+    "regardless of this cap.",
+)
+def index_failures_cmd(run_id: str | None, days: int, limit: int) -> None:
+    """List durable per-file index-failure records (nexus-nukn3).
+
+    A repo-index run that skips a file it could not extract writes a
+    durable row here (file path, error class, reason, run id) instead of
+    only a log line and an in-memory counter that die with the process —
+    ``nx index repo``'s systemic-skip floor (nexus-deyd5) reads this same
+    backlog. Pair with ``nx doctor --check-index-failures`` for a
+    pass/fail signal, or run this verb directly to see *which* files.
+
+    \b
+    Examples:
+      nx index failures                  # every recorded failure
+      nx index failures --run-id abc123  # one run only
+      nx index failures --days 7         # last week
+    """
+    from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    store = HttpTelemetryStore()
+    result = store.list_index_failures(run_id=run_id or "", days=days, limit=limit)
+    rows = result["rows"]
+    total = result["total"]
+
+    scope = f" for run {run_id}" if run_id else ""
+    if not rows:
+        click.echo(f"index_failures: no recorded failures{scope}.")
+        return
+
+    click.echo(f"index_failures: {total} row(s){scope} (showing {len(rows)}):")
+    for row in rows:
+        click.echo(
+            f"  {row.get('occurred_at', '?')}  {row.get('file_path', '?')}  "
+            f"[{row.get('error_class', '?')}] {row.get('error', '')}  "
+            f"(run {row.get('run_id', '?')})"
+        )
+    if total > len(rows):
+        click.echo(f"\n({total - len(rows)} more not shown — raise --limit to see them.)")
+
+
 def _discover_taxonomy(collection_name, taxonomy, t3, *, force=False, quiet=False):
     """Wrapper for discover_for_collection — importable for patching in tests.
 

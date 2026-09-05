@@ -253,6 +253,17 @@ T2_STORE_CONTRACT: dict[str, dict[str, list[str]]] = {
 # Landing only the first four would have left the blind spot half-open while the
 # comments here asserted it closed. Verified independently before adding.
 #
+# ADDED nexus-nukn3 (2026-09-05), same criteria — index_failures has no
+# SQLite twin at all (the table is brand new, post-dating RDR-158 P4's
+# SQLite deletion):
+#   telemetry.record_index_failure         indexer.py — _run_index's end-of-
+#                                            run per-file failure write
+#   telemetry.record_index_failures_batch  indexer.py — the batch form of
+#                                            the same write
+#   telemetry.list_index_failures          index_cmd.py's `nx index failures`
+#                                            verb; doctor.py's
+#                                            --check-index-failures
+#
 # DELIBERATELY EXCLUDED: the ~20 uncovered `import_*` ETL methods across
 # memory/plans/telemetry/chash_index/document_aspects/document_highlights/
 # aspect_queue/taxonomy. They meet the mechanical criteria but are slated for
@@ -327,6 +338,14 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         # the read surface's first and only home, not a port of a SQLite
         # reader, so it needs the supplemental entry.
         'query_nx_answer_runs': ['since', 'limit'],
+        # nexus-nukn3: index_failures is a brand-new table (no SQLite
+        # predecessor at all — RDR-158 P4 had already deleted every SQLite
+        # store before this table existed), so all three methods are
+        # service-mode-only by construction, same shape as the
+        # hook_failures/nx_answer_runs entries above.
+        'record_index_failure': ['run_id', 'file_path', 'error_class', 'error', 'occurred_at'],
+        'record_index_failures_batch': ['rows', 'run_id'],
+        'list_index_failures': ['run_id', 'days', 'limit'],
     },
 }
 

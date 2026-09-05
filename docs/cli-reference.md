@@ -67,6 +67,7 @@ nx index repo ./my-project
 | `rdr [PATH]` | Index RDR documents in `docs/rdr/` into `rdr__` collection (default: current dir) |
 | `pdf PATH` | Index a PDF document into T3 `docs__CORPUS` |
 | `md PATH` | Index a Markdown file into T3 `docs__CORPUS` |
+| `failures` | List durable per-file index-failure records (nexus-nukn3) |
 
 **Unchunkable sources (nexus-rqsh1, Hal directive 2026-08-15):** the indexer never registers a catalog document for a file it will not chunk. `repo` discovery silently skips zero-byte and binary-content files (counted in a `skipped_unchunkable` summary line — expected noise in an unbounded walk); the single-file forms (`md`, `pdf`, `rdr`) instead FAIL LOUD with a clean error naming the file (the operator named that exact file, so plain success with nothing registered would mislead), before any catalog write. In `rdr`'s batch walk an unchunkable file fails that file only, counted, never aborting the batch. `repo` staleness also now treats a doc whose catalog `index_state` is `indexing`/`failed` as stale regardless of content-hash match (nexus-cp46b) — a doc stranded by a failed upload drains on the next normal run, no `--force` needed.
 
@@ -304,6 +305,28 @@ nx search "" --corpus knowledge --where extraction_method=mineru --files
   There is no backfill for pre-fix chunks (re-extraction would be required
   to recover the value honestly); treat a missing key as *unknown*, never as
   a negative result. Tracked as nexus-0qc4b.
+
+### nx index failures
+
+```
+nx index failures [--run-id ID] [--days N] [--limit N]
+```
+
+Lists durable per-file index-failure records (nexus-nukn3, Sam's design: "when a file fails, ENQUEUE the failure and move on"). A `repo` run that skips a file it cannot extract (`nexus.errors.UnextractableContentError`) now writes a durable row — file path, error class, reason, run id — to `nexus.index_failures` (engine-side PG table, event-log shape, mirrors `hook_failures`) instead of only a log line and an in-memory counter that die with the process. `nx index repo`'s systemic-skip floor (nexus-deyd5) reads this same durable count rather than the in-memory list.
+
+| Flag | Description |
+|------|-------------|
+| `--run-id ID` | Only show failures from this run (default: every run) |
+| `--days N` | Only show failures within the last N days (default: `0`, unbounded) |
+| `--limit N` | Max rows to print (default: `100`). The printed count is always the exact total, independent of this cap |
+
+```bash
+nx index failures                  # every recorded failure
+nx index failures --run-id abc123  # one run only
+nx index failures --days 7         # last week
+```
+
+Pairs with `nx doctor --check-index-failures` for a pass/fail signal on the backlog; this verb answers *which* files.
 
 ---
 
@@ -2543,9 +2566,12 @@ The `--check-post-store-hooks` flag (introduced 4.18.0, `nexus-b0ka`) prints eve
 ```
 nx doctor --check-aspect-queue       # Surface RDR-089 aspect-extraction worker depth
 nx doctor --check-engine-activity    # Live engine embed activity from GET /v1/status (nexus-s71lr)
+nx doctor --check-index-failures     # Surface the durable index-failures backlog (nexus-nukn3)
 ```
 
 The `--check-aspect-queue` flag (introduced 4.18.0, `nexus-1pfq`) reports the `aspect_extraction_queue` row count plus per-status breakdown (`pending`, `processing`, `failed`, `completed`), the oldest non-completed `enqueued_at` as a lag indicator, and the top failed rows with their `last_error`. The same data surfaces in the `nx console` Aspect Queue card on `/health` for live monitoring. Pre-RDR-089 databases (no queue table) report cleanly as "table not present" rather than erroring. A transport failure (service unreachable) reports UNKNOWN and exits 0 — not reporting pass or fail; a reachable queue with one or more `failed` rows is a real backlog signal and exits 1 with a `✗ FAIL:` marker, matching the other promoted supplementary checks (nexus-fylxo).
+
+The `--check-index-failures` flag (introduced nexus-nukn3, also part of the default sweep) reports the `nexus.index_failures` row count (see `nx index failures` above) and, on a nonzero backlog, the top rows with file path and error class. Deliberately written FAIL-FIRST rather than retrofitted: this is the exact bead nexus-fylxo names as the trap to avoid — a durable failure queue whose reader never raises reproduces the aspect-queue check's original silent-backlog defect for a second queue. A transport failure reports UNKNOWN and exits 0; any nonzero recorded-failure count exits 1 with a `✗ FAIL:` marker.
 
 ---
 

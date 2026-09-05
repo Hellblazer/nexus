@@ -541,3 +541,86 @@ class TestEndpointUnresolvableDegradesCleanly:
         assert "search_telemetry" not in printed, (
             f"must not report the partial success as a completed trim: {printed}"
         )
+
+
+# ── nx doctor --check-index-failures (nexus-nukn3) ──────────────────────────
+
+
+class TestIndexFailuresCheckRoutes:
+    """Non-vacuity: this check must fire loudly on a seeded failure row --
+    the exact nexus-fylxo trap named on this bead (a durable failure queue
+    whose reader never raises reproduces the aspect-queue check's original
+    defect for a second queue). Written FAIL-FIRST rather than retrofitted."""
+
+    def test_zero_failures_does_not_signal_failure(
+        self, service_mode: None,
+    ) -> None:
+        import click
+
+        from nexus.commands import doctor as doctor_mod
+
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+            store.return_value.list_index_failures.return_value = {
+                "rows": [], "total": 0, "oldest_occurred_at": "",
+            }
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                exit_code = None
+                try:
+                    doctor_mod._run_check_index_failures()
+                except click.exceptions.Exit as exc:
+                    exit_code = exc.exit_code
+                printed = out.getvalue().decode() + err.getvalue().decode()
+
+        assert exit_code is None
+        assert "0 recorded failure" in printed
+        assert "FAIL" not in printed
+
+    def test_seeded_failure_row_signals_failure_loudly(
+        self, service_mode: None,
+    ) -> None:
+        """THE motivating case: a genuine backlog must raise Exit(1) with a
+        ✗/FAIL: marker, never read as healthy (nexus-fylxo class)."""
+        import click
+
+        from nexus.commands import doctor as doctor_mod
+
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+            store.return_value.list_index_failures.return_value = {
+                "rows": [{
+                    "run_id": "run-1", "file_path": "/repo/broken.pdf",
+                    "error_class": "UnextractableContentError",
+                    "error": "produced empty output",
+                    "occurred_at": "2026-09-05T00:00:00Z",
+                }],
+                "total": 1,
+                "oldest_occurred_at": "2026-09-05T00:00:00Z",
+            }
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                exit_code = None
+                try:
+                    doctor_mod._run_check_index_failures()
+                except click.exceptions.Exit as exc:
+                    exit_code = exc.exit_code
+                printed = out.getvalue().decode() + err.getvalue().decode()
+
+        assert exit_code == 1
+        assert "✗" in printed or "FAIL:" in printed, printed
+        assert "/repo/broken.pdf" in printed
+        assert "UnextractableContentError" in printed
+
+    def test_unreachable_service_reports_UNKNOWN_not_zero(
+        self, service_mode: None,
+    ) -> None:
+        from nexus.commands import doctor as doctor_mod
+
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+            store.side_effect = httpx.ConnectError("refused")
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                doctor_mod._run_check_index_failures()
+                printed = out.getvalue().decode() + err.getvalue().decode()
+
+        assert "UNKNOWN" in printed, printed
+        assert "0 recorded failure" not in printed

@@ -21,6 +21,7 @@ import os
 import subprocess
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -5675,8 +5676,55 @@ def _run_index(
     _files_attempted_total = (
         len(code_files) + len(prose_files) + len(pdf_files) + len(rdr_md_paths)
     )
+
+    # nexus-nukn3: durable per-file failure record, ENQUEUED and moved on
+    # from — Sam's design, 2026-08-21. Every skip collected in _skipped_files
+    # above is written as one durable row (nexus.index_failures) in ONE
+    # batch transaction, tagged with a fresh run_id so a later `nx index
+    # failures --run-id ...` or `nx doctor --check-index-failures` can find
+    # exactly this run's backlog. error_class is hardcoded to
+    # UnextractableContentError's name rather than threaded through
+    # run_file_loop's on_skip callback: nexus-deyd5's classification
+    # boundary is the ONLY thing that ever sets skip_reason (see
+    # indexer_utils.run_file_loop._process), so it is the only class that
+    # can reach here — enriching the callback signature to derive it would
+    # touch the very classification this bead's scope fence excludes from
+    # change, for no behavioral gain today.
+    #
+    # The write is advisory, matching every other telemetry call site's
+    # posture (record_hook_failure et al.): a transport failure here must
+    # never crash an otherwise-successful index run. On success, the count
+    # is READ BACK from the same durable store (proving the round trip
+    # actually works, not merely assumed) and used as skip_floor_breached's
+    # input in place of the in-memory list length — "the queue replaces the
+    # RECORD, not the VERDICT" (bead nexus-nukn3). On any failure the
+    # in-memory count is the fallback, so telemetry downtime degrades
+    # observability, never correctness of the exit-code decision.
+    _durable_skipped_count = len(_skipped_files)
+    if _skipped_files:
+        _index_run_id = uuid.uuid4().hex
+        try:
+            from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred to avoid import-time cost / circular deps
+
+            _tel_store = HttpTelemetryStore()
+            _tel_store.record_index_failures_batch(
+                [
+                    (str(path), "UnextractableContentError", reason, "")
+                    for path, reason in _skipped_files
+                ],
+                run_id=_index_run_id,
+            )
+            _durable_skipped_count = _tel_store.list_index_failures(
+                run_id=_index_run_id, limit=1,
+            )["total"]
+        except Exception as exc:  # noqa: BLE001 — advisory write; never fail an otherwise-successful run over telemetry downtime
+            _log.warning(
+                "index_failures_durable_write_failed",
+                error=str(exc), skipped=len(_skipped_files),
+            )
+
     _systemic_extraction_failure = skip_floor_breached(
-        len(_skipped_files), _files_attempted_total,
+        _durable_skipped_count, _files_attempted_total,
     )
 
     # nexus-7lw6a: final snapshot for the return dict below — read fresh
@@ -5716,7 +5764,13 @@ def _run_index(
         # files, no data was lost by skipping ONE file. index_repo_cmd
         # reports this count informationally UNLESS
         # systemic_extraction_failure is also True (see below).
-        "skipped_unextractable_files": len(_skipped_files),
+        #
+        # nexus-nukn3: this is now _durable_skipped_count — the count READ
+        # BACK from nexus.index_failures after the batch write above, not
+        # the in-memory list length directly (they agree on the durable
+        # write's success path; the in-memory value is only the fallback
+        # on a telemetry-write failure — see that block's own comment).
+        "skipped_unextractable_files": _durable_skipped_count,
         # nexus-deyd5 round 3: the denominator for the ratio above, and
         # for index_repo_cmd's "attempted N, skipped M" message.
         "files_attempted_total": _files_attempted_total,

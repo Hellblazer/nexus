@@ -1060,6 +1060,72 @@ def _run_check_aspect_queue() -> None:
     _report_aspect_queue_service()
 
 
+# ── --check-index-failures (nexus-nukn3) ─────────────────────────────────────
+
+
+def _report_index_failures_service() -> None:
+    """Report the durable index-failures backlog (nexus-nukn3).
+
+    A repo-index run that skips a file it could not extract now writes a
+    durable row here instead of only a log line and an in-memory counter
+    that die with the process — see ``nexus.indexer._run_index``. Without
+    a reader, that queue accumulates silently, exactly the trap named on
+    this bead: nexus-fylxo found ``--check-aspect-queue`` printing a
+    failed-row backlog without ever raising or emitting a ✗/FAIL: marker.
+    This check is written FAIL-FIRST to avoid repeating that: any nonzero
+    backlog raises ``click.exceptions.Exit(1)`` with a ✗ FAIL: marker from
+    the start, matching the 4 original supplementary-check siblings
+    (resources / plan-library / taxonomy / t1).
+
+    A transport error is reported as UNKNOWN (never a false "0 failures")
+    and does not raise — matching ``_report_aspect_queue_service``'s own
+    posture for the identical failure mode.
+    """
+    import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    try:
+        store = HttpTelemetryStore()
+        result = store.list_index_failures(limit=20)
+    except (httpx.HTTPError, RuntimeError) as exc:
+        # RuntimeError: store construction resolves the service endpoint and
+        # raises ServiceEndpointUnresolvableError (a RuntimeError, not an
+        # httpx error) when it cannot — same class as
+        # _report_aspect_queue_service's identical try/except.
+        click.echo(
+            f"index_failures: service backend unreachable ({exc}). "
+            "Backlog UNKNOWN — not reporting a count.",
+            err=True,
+        )
+        return
+
+    total = result["total"]
+    rows = result["rows"]
+    click.echo(f"index_failures: {total} recorded failure(s) (service backend)")
+    if not total:
+        return
+
+    click.echo(f"\nFailed rows (showing top {min(len(rows), 20)}):")
+    for row in rows[:20]:
+        click.echo(
+            f"  {row.get('file_path', '?')} :: {row.get('error_class', '?')} "
+            f"(run {row.get('run_id', '?')})"
+        )
+    click.echo("\nSee them all with: nx index failures")
+    click.echo(
+        f"\n✗ FAIL: {total} durable index-failure row(s) recorded.",
+        err=True,
+    )
+    raise click.exceptions.Exit(1)
+
+
+def _run_check_index_failures() -> None:
+    """Report the durable index-failures backlog. See
+    :func:`_report_index_failures_service` for the fail-loud contract."""
+    _report_index_failures_service()
+
+
 # ── --check-engine-activity (nexus-s71lr) ────────────────────────────────────
 
 
@@ -1501,6 +1567,15 @@ def _run_check_mineru() -> None:
 #                                          | like --check-wal-retention) --
 #                                          | "what is the engine doing right
 #                                          | now" (nexus-s71lr).
+#   --check-index-failures        | YES       | ONE HTTP GET, real backlog
+#                                          | signal nothing else watches
+#                                          | (nx index repo's durable
+#                                          | per-file failure record,
+#                                          | nexus-nukn3). FAIL-FIRST by
+#                                          | design (the nexus-fylxo trap
+#                                          | this bead names explicitly):
+#                                          | any nonzero backlog raises
+#                                          | Exit(1) with a ✗ FAIL: marker.
 #
 # Non-gating by design: a supplementary check's failure is printed, never
 # folded into the default sweep's exit code. Two of the five (schema-
@@ -1519,6 +1594,7 @@ def _run_check_mineru() -> None:
 #: this file, after ``doctor_cmd``).
 _SUPPLEMENTARY_CHECK_NAMES: tuple[str, ...] = (
     "resources", "plan-library", "taxonomy", "aspect-queue", "t1", "engine-activity",
+    "index-failures",
 )
 
 #: The remaining opt-in-only flags -- named in the summary line at the end
@@ -1555,6 +1631,7 @@ def _run_supplementary_checks() -> None:
         "aspect-queue": _run_check_aspect_queue,
         "t1": _run_check_t1,
         "engine-activity": _run_check_engine_activity,
+        "index-failures": _run_check_index_failures,
     }
     click.echo(
         "\nSupplementary checks (cheap/read-only subset of the opt-in "
@@ -1826,6 +1903,16 @@ def _run_supplementary_checks() -> None:
          "unreachable or predates the route. nexus-s71lr.",
 )
 @click.option(
+    "--check-index-failures",
+    "check_index_failures",
+    is_flag=True,
+    default=False,
+    help="Report the durable index-failures backlog (nx index repo's "
+         "per-file failure record, nexus-nukn3). Also part of the default "
+         "sweep. Exits 1 with a ✗ FAIL: marker on any nonzero backlog; "
+         "UNKNOWN (never a traceback) when the service is unreachable.",
+)
+@click.option(
     "--days",
     "days",
     default=30,
@@ -1861,6 +1948,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_t1: bool,
                check_wal_retention: bool,
                check_engine_activity: bool,
+               check_index_failures: bool,
                check_tier_discipline: bool,
                check_storage_boundary: bool,
                fail_on_violation: bool,
@@ -1886,6 +1974,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             "--check-t1": check_t1,
             "--check-wal-retention": check_wal_retention,
             "--check-engine-activity": check_engine_activity,
+            "--check-index-failures": check_index_failures,
             "--fix": fix,
             "--fix-paths": fix_paths,
             "--clean-checkpoints": clean_checkpoints,
@@ -1963,6 +2052,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if check_engine_activity:
         _run_check_engine_activity()
+        return
+
+    if check_index_failures:
+        _run_check_index_failures()
         return
 
     if check_tier_discipline:

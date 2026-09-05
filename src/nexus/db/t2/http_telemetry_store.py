@@ -47,6 +47,9 @@ Route mapping (matches TelemetryHandler Java):
                                            target_title, the aggregate query route cannot
                                            carry it; capped page + exact total, same
                                            envelope discipline as list_hook_failures)
+    POST /v1/telemetry/index_failures/record        — record_index_failure (nexus-nukn3)
+    POST /v1/telemetry/index_failures/record_batch  — record_index_failures_batch
+    GET  /v1/telemetry/index_failures/list          — list_index_failures
 """
 
 from __future__ import annotations
@@ -843,6 +846,90 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "/v1/telemetry/hook_failures/trim", {"days": days, "dry_run": dry_run}
         )
         return int(resp.get("deleted", 0))
+
+    # ── index_failures (nexus-nukn3) ──────────────────────────────────────────
+    #
+    # Durable per-file failure record for the repo-index path (Sam's design:
+    # "when a file fails, ENQUEUE the failure and move on"). Event-log shape,
+    # like hook_failures — not aspect_extraction_queue's work-queue shape:
+    # nothing ever claims or retries a row here (no retry worker in scope,
+    # nexus-nukn3's explicit scope fence).
+
+    def record_index_failure(
+        self,
+        *,
+        run_id: str,
+        file_path: str,
+        error_class: str = "",
+        error: str = "",
+        occurred_at: str | None = None,
+    ) -> None:
+        """Record one durable index failure. Calls
+        ``POST /v1/telemetry/index_failures/record``.
+        """
+        payload: dict[str, Any] = {
+            "run_id":      run_id,
+            "file_path":   file_path,
+            "error_class": error_class,
+            "error":       error,
+        }
+        if occurred_at is not None:
+            payload["occurred_at"] = occurred_at
+        self._post("/v1/telemetry/index_failures/record", payload)
+
+    def record_index_failures_batch(
+        self,
+        rows: list[tuple[str, str, str, str]],
+        *,
+        run_id: str,
+    ) -> int:
+        """Record N index failures from one run in ONE transaction.
+
+        *rows* is ``(file_path, error_class, error, occurred_at)`` tuples —
+        ``occurred_at`` may be ``""`` to let the server stamp ``now()``.
+        Mirrors :meth:`log_search_batch`'s row-tuple shape. Returns the
+        service's ``inserted`` ack (0, with a warning, on a stripped/absent
+        response — see :meth:`_batch_ack` — never a fabricated full count).
+        """
+        if not rows:
+            return 0
+        payload: dict[str, Any] = {
+            "rows": [[run_id, file_path, error_class, error, occurred_at or None]
+                     for file_path, error_class, error, occurred_at in rows]
+        }
+        resp = self._post("/v1/telemetry/index_failures/record_batch", payload)
+        return self._batch_ack(resp, len(rows))
+
+    def list_index_failures(
+        self,
+        *,
+        run_id: str = "",
+        days: int = 0,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Read index failures, newest first, optionally scoped to one
+        ``run_id`` (blank = every run).
+
+        Calls ``GET /v1/telemetry/index_failures/list``.
+
+        Returns ``{"rows": [...], "total": int, "oldest_occurred_at": str}``.
+        ``total`` is computed server-side over the WHOLE filtered set, not
+        the returned page — same non-vacuity shape as
+        :meth:`list_hook_failures`: a caller reading a count (the
+        deyd5 systemic-skip floor, ``nx doctor --check-index-failures``)
+        must never under-report because the backlog exceeded ``limit``.
+        """
+        params: dict[str, Any] = {"days": days, "limit": limit}
+        if run_id:
+            params["run_id"] = run_id
+        resp = self._get("/v1/telemetry/index_failures/list", params)
+        if not isinstance(resp, dict):  # defensive: a stripped proxy response
+            return {"rows": [], "total": 0, "oldest_occurred_at": ""}
+        return {
+            "rows": list(resp.get("rows") or []),
+            "total": int(resp.get("total") or 0),
+            "oldest_occurred_at": str(resp.get("oldest_occurred_at") or ""),
+        }
 
     def rename_collection(self, *, old: str, new: str) -> dict[str, int]:
         """Re-point collection columns from ``old`` to ``new`` in all telemetry tables.

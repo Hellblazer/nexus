@@ -526,6 +526,67 @@ class TestTimestampPreservationPerTable:
         )
 
 
+class TestIndexFailuresRoundTrip:
+    """nexus-nukn3: durable per-file index-failure record. Real Java-service
+    round trip — proves the wire shape between HttpTelemetryStore and
+    TelemetryHandler/TelemetryRepository actually matches, which the
+    mocked unit tests (tests/test_deyd5_systemic_skip_run_level.py,
+    tests/test_false_clean_diagnostics_service_mode.py) cannot."""
+
+    def test_record_and_batch_read_back_by_run(self, tel_store):
+        run_id = f"itest-run-{time.time_ns()}"
+        tel_store.record_index_failure(
+            run_id=run_id, file_path="/repo/a.pdf",
+            error_class="UnextractableContentError", error="produced empty output",
+        )
+        inserted = tel_store.record_index_failures_batch(
+            [
+                ("/repo/b.pdf", "UnextractableContentError", "scanned image", ""),
+                ("/repo/c.pdf", "UnextractableContentError", "boom", ""),
+            ],
+            run_id=run_id,
+        )
+        assert inserted == 2
+
+        result = tel_store.list_index_failures(run_id=run_id, limit=100)
+        assert result["total"] == 3
+        paths = {row["file_path"] for row in result["rows"]}
+        assert paths == {"/repo/a.pdf", "/repo/b.pdf", "/repo/c.pdf"}
+        assert all(row["error_class"] == "UnextractableContentError" for row in result["rows"])
+
+    def test_aggregates_ignore_the_page_limit(self, tel_store):
+        run_id = f"itest-cap-{time.time_ns()}"
+        tel_store.record_index_failures_batch(
+            [(f"/repo/f{i}.pdf", "UnextractableContentError", "boom", "") for i in range(5)],
+            run_id=run_id,
+        )
+
+        capped = tel_store.list_index_failures(run_id=run_id, limit=1)
+
+        assert len(capped["rows"]) == 1
+        assert capped["total"] == 5, "total must count every matching row, not the page"
+
+    def test_blank_run_id_returns_every_run(self, tel_store):
+        run_a = f"itest-all-a-{time.time_ns()}"
+        run_b = f"itest-all-b-{time.time_ns()}"
+        tel_store.record_index_failure(
+            run_id=run_a, file_path="/repo/one.pdf",
+            error_class="UnextractableContentError", error="boom",
+        )
+        tel_store.record_index_failure(
+            run_id=run_b, file_path="/repo/two.pdf",
+            error_class="UnextractableContentError", error="boom",
+        )
+
+        scoped = tel_store.list_index_failures(run_id=run_a, limit=100)
+        assert scoped["total"] == 1
+
+        # Both rows are visible without a run_id filter, somewhere within the
+        # tenant's full (unbounded) history -- confirmed via a wide days=0 window.
+        unscoped = tel_store.list_index_failures(limit=1000)
+        assert unscoped["total"] >= 2
+
+
 class TestNxAnswerStepsRoundTrip:
     """RDR-196 .p1d (nexus-nyry9.10): direct-store-read proof that
     ``HttpTelemetryStore.record_nx_answer_run(..., steps=[...])`` actually
