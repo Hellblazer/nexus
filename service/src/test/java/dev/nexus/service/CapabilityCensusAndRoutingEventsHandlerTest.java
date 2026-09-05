@@ -231,6 +231,55 @@ class CapabilityCensusAndRoutingEventsHandlerTest {
     }
 
     @Test
+    void routing_batchInsert_overCapIsRejected400() throws Exception {
+        var events = new StringBuilder("{\"events\":[");
+        for (int i = 0; i < 301; i++) {
+            if (i > 0) events.append(",");
+            events.append("{\"session_id\":\"sess-overcap\",\"rule\":\"r\",\"outcome\":\"allow\"}");
+        }
+        events.append("]}");
+        var resp = post("/v1/telemetry/routing_events/batch", TOKEN, TENANT, events.toString());
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("300");
+
+        var mine = routingRows(TOKEN, TENANT).stream()
+            .filter(r -> "sess-overcap".equals(r.get("session_id")))
+            .toList();
+        assertThat(mine).isEmpty();
+    }
+
+    @Test
+    void routing_batchInsert_nonObjectElementIsRejected400() throws Exception {
+        var resp = post("/v1/telemetry/routing_events/batch", TOKEN, TENANT,
+            "{\"events\":[\"not-an-object\"]}");
+        assertThat(resp.statusCode()).isEqualTo(400);
+    }
+
+    @Test
+    void routing_batchInsert_missingRuleInOneElementIsRejected400() throws Exception {
+        var resp = post("/v1/telemetry/routing_events/batch", TOKEN, TENANT,
+            "{\"events\":["
+            + "{\"session_id\":\"sess-partial\",\"rule\":\"ok\",\"outcome\":\"allow\"},"
+            + "{\"session_id\":\"sess-partial\",\"outcome\":\"allow\"}"
+            + "]}");
+        assertThat(resp.statusCode()).isEqualTo(400);
+
+        // A malformed batch must reject the WHOLE request, not partially
+        // apply the valid entries ahead of the bad one.
+        var mine = routingRows(TOKEN, TENANT).stream()
+            .filter(r -> "sess-partial".equals(r.get("session_id")))
+            .toList();
+        assertThat(mine).isEmpty();
+    }
+
+    @Test
+    void routing_batchInsert_nonArrayEventsIsRejected400() throws Exception {
+        var resp = post("/v1/telemetry/routing_events/batch", TOKEN, TENANT,
+            "{\"events\":\"not-an-array\"}");
+        assertThat(resp.statusCode()).isEqualTo(400);
+    }
+
+    @Test
     void routing_rls_otherTenantsRowsInvisible() throws Exception {
         post("/v1/telemetry/routing_events/record", OTHER_TOKEN, OTHER_TENANT,
             "{\"session_id\":\"sess-route-other\",\"rule\":\"r\",\"outcome\":\"allow\"}");

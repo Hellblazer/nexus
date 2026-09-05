@@ -92,6 +92,15 @@ public final class TelemetryHandler implements HttpHandler {
     private static final int MAX_PROBE_KEYS = 300;
 
     /**
+     * nexus-gjv9b PART 2 review fix (code-review IMPORTANT 2): max events
+     * per {@code POST /v1/telemetry/routing_events/batch} request, same
+     * {@link #MAX_PROBE_KEYS} batch-discipline pattern — a batch larger
+     * than this is rejected with HTTP 400 rather than silently accepted
+     * unbounded.
+     */
+    private static final int MAX_ROUTING_EVENTS_BATCH = 300;
+
+    /**
      * RDR-196 .p1c-b review fix (nexus-lme1s): max {@code limit} for
      * {@code GET /nx_answer_runs/query}, matching the project's
      * {@code MAX_QUERY_RESULTS} paging convention (src/nexus/db/limits.py).
@@ -712,24 +721,37 @@ public final class TelemetryHandler implements HttpHandler {
     /**
      * POST /v1/telemetry/routing_events/batch — {@code {events: [...]}},
      * each entry shaped like the single-event body above. Returns
-     * {@code {inserted: N}}.
+     * {@code {inserted: N}}. A batch larger than
+     * {@value #MAX_ROUTING_EVENTS_BATCH} is rejected with HTTP 400
+     * rather than silently accepted unbounded (nexus-gjv9b PART 2 review
+     * fix, same {@link #MAX_PROBE_KEYS} discipline); a non-array
+     * {@code events} field, or any element that is not a JSON object,
+     * is likewise a 400 — never silently skipped.
      */
     private void handleRoutingEventsBatch(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
         var body = readBody(ex);
         Object rawEvents = body.get("events");
-        var events = new ArrayList<TelemetryRepository.RoutingEventInput>();
-        if (rawEvents instanceof List<?> list) {
-            for (Object o : list) {
-                if (!(o instanceof Map<?, ?> m)) continue;
-                @SuppressWarnings("unchecked")
-                Map<String, Object> e = (Map<String, Object>) m;
-                events.add(new TelemetryRepository.RoutingEventInput(
-                    optStr(e, "ts"), optStr(e, "session_id"),
-                    requireString(e, "rule"), requireString(e, "outcome"),
-                    optStr(e, "tool_name"), optStr(e, "command_fragment"),
-                    optStr(e, "escape_reason")));
+        if (!(rawEvents instanceof List<?> list)) {
+            throw new IllegalArgumentException("field 'events' must be a JSON array");
+        }
+        if (list.size() > MAX_ROUTING_EVENTS_BATCH) {
+            throw new IllegalArgumentException(
+                "field 'events' exceeds max batch size of " + MAX_ROUTING_EVENTS_BATCH
+                + " (got " + list.size() + ")");
+        }
+        var events = new ArrayList<TelemetryRepository.RoutingEventInput>(list.size());
+        for (Object o : list) {
+            if (!(o instanceof Map<?, ?> m)) {
+                throw new IllegalArgumentException("each element of 'events' must be a JSON object");
             }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> e = (Map<String, Object>) m;
+            events.add(new TelemetryRepository.RoutingEventInput(
+                optStr(e, "ts"), optStr(e, "session_id"),
+                requireString(e, "rule"), requireString(e, "outcome"),
+                optStr(e, "tool_name"), optStr(e, "command_fragment"),
+                optStr(e, "escape_reason")));
         }
         int inserted = repo.recordRoutingEventsBatch(tenant, events);
         HttpUtil.send(ex, 200, json(Map.of("inserted", inserted)));
