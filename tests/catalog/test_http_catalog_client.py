@@ -869,7 +869,7 @@ class TestHttpCatalogClientRoundTrip:
         docs = [{"title": f"d{i}", "file_path": f"{i}.py"} for i in range(2500)]
         page_sizes: list[int] = []
 
-        def _fake_post(path: str, body: dict | None = None) -> Any:
+        def _fake_post(path: str, body: dict | None = None, **_kwargs: Any) -> Any:
             assert path == "/doc/register_many"
             assert body["owner_prefix"] == "1.1"
             page = body["docs"]
@@ -893,7 +893,7 @@ class TestHttpCatalogClientRoundTrip:
         docs2 = [{"title": f"d{i}", "file_path": f"{i}.py"} for i in range(3)]
         single_calls: list[str] = []
 
-        def _fake_post_fallback(path: str, body: dict | None = None) -> Any:
+        def _fake_post_fallback(path: str, body: dict | None = None, **_kwargs: Any) -> Any:
             if path == "/doc/register_many":
                 raise RuntimeError("500 batch failed")
             assert path == "/doc/register"
@@ -915,7 +915,7 @@ class TestHttpCatalogClientRoundTrip:
         the per-doc fallback, where register() supplies the flag."""
         docs = [{"title": f"d{i}", "file_path": f"{i}.py"} for i in range(3)]
 
-        def _fake_post(path: str, body: dict | None = None) -> Any:
+        def _fake_post(path: str, body: dict | None = None, **_kwargs: Any) -> Any:
             assert path == "/doc/register_many"
             return {"tumblers": ["1.1.1", "1.10.41", "1.1.2"], "created": [True, False, True]}
 
@@ -950,7 +950,7 @@ class TestHttpCatalogClientRoundTrip:
         updates = [{"tumbler": f"1.1.{i}", "head_hash": "abc"} for i in range(2500)]
         page_sizes: list[int] = []
 
-        def _fake_post(path: str, body: dict | None = None) -> Any:
+        def _fake_post(path: str, body: dict | None = None, **_kwargs: Any) -> Any:
             assert path == "/update_many"
             page = body["updates"]
             page_sizes.append(len(page))
@@ -968,7 +968,7 @@ class TestHttpCatalogClientRoundTrip:
         updates2 = [{"tumbler": f"1.1.{i}", "head_hash": "abc"} for i in range(3)]
         single_calls: list[str] = []
 
-        def _fake_post_fallback(path: str, body: dict | None = None) -> Any:
+        def _fake_post_fallback(path: str, body: dict | None = None, **_kwargs: Any) -> Any:
             if path == "/update_many":
                 raise RuntimeError("500 batch failed")
             assert path == "/update"
@@ -991,7 +991,7 @@ class TestHttpCatalogClientRoundTrip:
         tumblers = [f"1.1.{i}" for i in range(2500)]
         page_sizes: list[int] = []
 
-        def _fake_post(path: str, body: dict | None = None) -> Any:
+        def _fake_post(path: str, body: dict | None = None, **_kwargs: Any) -> Any:
             assert path == "/delete_many"
             page = body["tumblers"]
             page_sizes.append(len(page))
@@ -1008,7 +1008,7 @@ class TestHttpCatalogClientRoundTrip:
         tumblers2 = ["1.1.0", "1.1.1", "1.1.2"]
         single_calls: list[str] = []
 
-        def _fake_post_fallback(path: str, body: dict | None = None) -> Any:
+        def _fake_post_fallback(path: str, body: dict | None = None, **_kwargs: Any) -> Any:
             if path == "/delete_many":
                 raise RuntimeError("500 batch failed")
             assert path == "/delete"
@@ -1297,7 +1297,7 @@ class TestHttpCatalogClientRoundTrip:
         doc_ids = [f"doc-{i}" for i in range(2500)]
         posts: list[list[str]] = []
 
-        def _fake_post(path: str, body: dict | None = None) -> Any:
+        def _fake_post(path: str, body: dict | None = None, **_kwargs: Any) -> Any:
             assert path == "/manifest/get_many"
             batch = body["doc_ids"]
             posts.append(batch)
@@ -1328,7 +1328,7 @@ class TestHttpCatalogClientRoundTrip:
         doc_ids = [f"doc-{i}" for i in range(2500)]
         calls: list[int] = []
 
-        def _fake_post(path: str, body: dict | None = None) -> Any:
+        def _fake_post(path: str, body: dict | None = None, **_kwargs: Any) -> Any:
             calls.append(len(body["doc_ids"]))
             if len(calls) == 2:  # second page (doc-1000..doc-1999) fails
                 raise RuntimeError("transient 502")
@@ -1349,7 +1349,7 @@ class TestHttpCatalogClientRoundTrip:
         # nexus-b9puj: the engine emits `count` unconditionally (floor >=
         # v0.1.61) — a response without it means a field-stripping hop
         # interposed, so the client refuses to merge an unverifiable page.
-        def _fake_post(path: str, body: dict | None = None) -> Any:
+        def _fake_post(path: str, body: dict | None = None, **_kwargs: Any) -> Any:
             return {"manifests": {"1.1.1": [{"chash": CHASH_A, "position": 0}]}}
 
         client._post = _fake_post  # type: ignore[method-assign]
@@ -1368,7 +1368,7 @@ class TestHttpCatalogClientRoundTrip:
         # sites the first time a batch contains a manifest-less doc. This
         # test is the tripwire: fewer-than-requested + honest count must
         # NOT raise and must return exactly what the engine sent.
-        def _fake_post(path: str, body: dict | None = None) -> Any:
+        def _fake_post(path: str, body: dict | None = None, **_kwargs: Any) -> Any:
             return {
                 "manifests": {"1.1.1": [{"chash": CHASH_A, "position": 0}]},
                 "count": 1,
@@ -1383,7 +1383,7 @@ class TestHttpCatalogClientRoundTrip:
     ) -> None:
         # A truncated page (fewer manifests than the server's own count)
         # must never be merged silently.
-        def _fake_post(path: str, body: dict | None = None) -> Any:
+        def _fake_post(path: str, body: dict | None = None, **_kwargs: Any) -> Any:
             return {
                 "manifests": {"1.1.1": [{"chash": CHASH_A, "position": 0}]},
                 "count": 2,
@@ -1401,7 +1401,7 @@ class TestHttpCatalogClientRoundTrip:
         doc_ids = [f"doc-{i}" for i in range(2500)]
         posts: list[list[str]] = []
 
-        def _fake_post(path: str, body: dict | None = None) -> Any:
+        def _fake_post(path: str, body: dict | None = None, **_kwargs: Any) -> Any:
             assert path == "/resolve_many"
             posts.append(body["doc_ids"])
             return {
@@ -1687,7 +1687,7 @@ class TestHttpCatalogClientRoundTrip:
         request = httpx.Request("POST", "http://engine/collections/supersede")
         response = httpx.Response(status, json={"error": detail}, request=request)
 
-        def _fake_post(path: str, body: dict) -> dict:
+        def _fake_post(path: str, body: dict, **_kwargs: Any) -> dict:
             raise httpx.HTTPStatusError("refused", request=request, response=response)
 
         client._post = _fake_post  # type: ignore[method-assign]
@@ -1708,7 +1708,7 @@ class TestHttpCatalogClientRoundTrip:
         request = httpx.Request("POST", "http://engine/collections/supersede")
         response = httpx.Response(500, json={"error": "boom"}, request=request)
 
-        def _fake_post(path: str, body: dict) -> dict:
+        def _fake_post(path: str, body: dict, **_kwargs: Any) -> dict:
             raise httpx.HTTPStatusError("boom", request=request, response=response)
 
         client._post = _fake_post  # type: ignore[method-assign]
@@ -1722,7 +1722,7 @@ class TestHttpCatalogClientRoundTrip:
         """Call register_collection and return the body it POSTed."""
         sent: dict = {}
 
-        def _fake_post(path: str, body: dict) -> dict:
+        def _fake_post(path: str, body: dict, **_kwargs: Any) -> dict:
             assert path == "/collections/upsert", path
             sent.update(body)
             return {}

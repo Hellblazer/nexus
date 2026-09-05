@@ -435,6 +435,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         *,
         timeout: float | None = None,
         retry_read_timeout: bool = True,
+        mutates: bool = True,
     ) -> Any:
         """``timeout`` (nexus-y9t08): optional per-call override forwarded
         to the mixin's ``_post`` — see that method's docstring. ``None``
@@ -447,9 +448,26 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         means every existing call site keeps retrying a ``ReadTimeout``
         exactly as before this kwarg existed. Only
         ``write_manifest_many``'s chunk-carrying branch passes ``False``.
+
+        ``mutates`` (nexus-a2qhz): forwarded to the mixin's ``_post``
+        unchanged — default ``True`` since most call sites through this
+        override really are writes; the identified read-shaped POST call
+        sites (``traverse``, ``resolve_many``, ``manifest/get_many``,
+        ``manifest/docs_for_chashes``, ``owners/by_type``,
+        ``docs/chunk-counts``, ``links/from-batch``, ``relation_counts``)
+        pass ``mutates=False``. THIS OVERRIDE previously dropped the kwarg
+        silently mismatched against the mixin's signature — a caller
+        passing ``mutates=False`` (or, before this fix, any future
+        ``mutates=True`` caller once the mixin required it) would have hit
+        a ``TypeError`` on every call, the identical regression class
+        caught in ``HttpTokenStore.list_tokens`` during review.
         """
         return super()._post(
-            f"/v1/catalog{path}", body or {}, timeout=timeout, retry_read_timeout=retry_read_timeout,
+            f"/v1/catalog{path}",
+            body or {},
+            timeout=timeout,
+            retry_read_timeout=retry_read_timeout,
+            mutates=mutates,
         )
 
     def _docs_from(self, result: Any) -> list[CatalogEntry]:
@@ -980,7 +998,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         if not relations:
             return {}
         result = self._post(
-            "/verify/relation-counts", {"relations": relations},
+            "/verify/relation-counts", {"relations": relations}, mutates=False,
         )
         counts = (result or {}).get("counts", {})
         return {k: int(v) for k, v in counts.items() if v is not None}

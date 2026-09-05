@@ -907,59 +907,88 @@ else silently inherits whatever the ambient config resolves to.
 The design (locked by the bead's three recorded incidents): gate WRITES
 with an explicit opt-in, fail loud naming the opt-in, never a silent
 cwd-based redirect. `nexus.db.service_endpoint.guard_production_write` is
-the one function every HTTP storage client's write path calls —
-`RefreshableHttpStoreMixin._send` (the T2 domain stores and the catalog
-client, which share this one transport) for every non-`GET` verb, and
+the one function every HTTP storage client's write path calls:
+`RefreshableHttpStoreMixin._send` for every non-`GET` verb (the T2 domain
+stores and the catalog client, which share this one transport),
 `http_vector_client._post` for T3's write-shaped endpoint suffixes
 (`store-put`, `store-delete`, `update-metadata`, `upsert-chunks`, the
-`gc/*` mutation routes). Reads are never guarded.
+`gc/*` mutation routes), and — since neither rides the mixin, each being a
+bespoke bearer-header-baked client — `HttpTokenStore._post` and
+`HttpScratchStore._post` (T1) call it directly. Reads are never guarded.
 
-Two independent conditions must both hold before a write is refused:
+**Detection is import-based, never cwd-based.** The scratchpad-script
+incident's danger came from an IMPORT resolving nexus's package to the
+checkout's editable install while the script's OWN cwd was a scratchpad
+directory entirely outside the checkout — a cwd check would have missed
+it. `service_endpoint._dev_checkout_root` walks up from
+`service_endpoint.py`'s own resolved file looking for an ancestor that is
+both a git checkout (`.git` — a directory for a plain clone, a file for a
+worktree) and carries a `pyproject.toml` naming the `conexus` project. An
+installed generation (`<tools>/gen-*/.../site-packages/nexus/...`) or a
+plain `uv tool install` copy has no such ancestor at any depth, since
+nothing under `site-packages` ships a `pyproject.toml` — Sam's real
+installed `nx` never trips this, regardless of env state. Cached per
+process (the checkout root cannot change for the life of the
+interpreter). **Known limit**: a copied tree with NEITHER a `.git` nor a
+`pyproject.toml` ancestor at any depth (e.g. a Docker build stage that
+`COPY`s `src/` without git metadata) is not detected as a dev checkout —
+undocumented territory this guard does not cover, tracked as a residual
+rather than fixed here.
 
-1. **Dev-checkout detection is import-based, never cwd-based.** The
-   scratchpad-script incident's danger came from an IMPORT resolving
-   nexus's package to the checkout's editable install while the script's
-   OWN cwd was a scratchpad directory entirely outside the checkout — a
-   cwd check would have missed it. `service_endpoint._dev_checkout_root`
-   walks up from `service_endpoint.py`'s own resolved file looking for an
-   ancestor that is both a git checkout (`.git` — a directory for a plain
-   clone, a file for a worktree) and carries a `pyproject.toml` naming the
-   `conexus` project. An installed generation
-   (`<tools>/gen-*/.../site-packages/nexus/...`) or a plain `uv tool
-   install` copy has no such ancestor at any depth, since nothing under
-   `site-packages` ships a `pyproject.toml` — Sam's real installed `nx`
-   never trips this, regardless of env state. Cached per process (the
-   checkout root cannot change for the life of the interpreter).
-2. **The endpoint must be the ambient default, not an explicit pin.**
-   Keyed on whether `NX_SERVICE_URL` / `NX_SERVICE_HOST` /
-   `NX_SERVICE_PORT` / `NX_SERVICE_TOKEN` is set for THIS process, never
-   on the resolved URL's shape — a real local supervisor and a test engine
-   can both be `http://127.0.0.1:<port>`, indistinguishable by string
-   alone. pytest's `t2_service_env` fixture always sets `NX_SERVICE_URL` +
-   `NX_SERVICE_TOKEN` per test, so the suite is exempt by construction
-   with no special-casing. Absent all four, resolution fell through to a
-   persisted `config.yml` credential or a discovered supervisor lease —
-   the same substrate a normal, unconfigured `nx` invocation reaches.
+**Every dev-checkout write is refused unless the opt-in carries a
+reason** — there is deliberately no other exemption. An earlier revision
+of this guard treated an explicit `NX_SERVICE_URL` / `NX_SERVICE_HOST` /
+`NX_SERVICE_PORT` / `NX_SERVICE_TOKEN` as proof the endpoint was
+"pinned," reasoning that a real local supervisor and a test engine both
+resolve to `http://127.0.0.1:<port>` and can't be told apart by string —
+so an EXPLICIT env var must mean the caller knows what they're doing.
+That heuristic was defeated by conexus's own documented cloud onboarding
+(`docs/getting-started.md`, `docs/managed-onboarding.md`): both instruct
+`export NX_SERVICE_URL=https://api.conexus-nexus.com`, a permanently
+exported shell variable — exactly the shape every one of the three
+recorded incidents ran under. An exported env var cannot distinguish "a
+fixture pinned an ephemeral endpoint for this one process" from "this
+shell always points at the operator's live service," so it is no longer
+consulted at all. `NX_ALLOW_PROD_WRITE` (`service_endpoint.PROD_WRITE_OPT_IN_ENV`)
+must carry an actual reason string — a bare `"1"` (the retired spelling)
+or any other boolean lookalike (`0`/`true`/`false`/`yes`/`no`,
+case-insensitively) is refused exactly like an unset var
+(`_OPT_IN_BOOLEAN_LOOKALIKES`), so the intent stays greppable rather than
+inviting a reflexive `=1` export — two of the bead's three recorded
+incidents were AI subagents doing exploratory scripting, and a fix-it-
+style message ("just set this flag") would have handed them exactly that
+reflex. `ProductionWriteGuardError`'s message is a stop-and-verify
+prompt: it states the target is presumed to be the operator's real, live
+store, that the write must be deliberate and reviewed, and that the
+reason must be named in the opt-in itself.
 
-`NX_ALLOW_PROD_WRITE=1` (`service_endpoint.PROD_WRITE_OPT_IN_ENV`) is the
-explicit opt-in — a visible, greppable, reviewable statement that THIS
-write is deliberate (e.g. an arc-end MVV that must exercise the real
-production substrate to prove anything). `ProductionWriteGuardError`
-names the opt-in, the target endpoint, and why the process was classified
-as a dev checkout.
+pytest's own suite is exempt via the SAME mechanism every other caller
+uses, not a silent heuristic: `tests/conftest.py`'s autouse
+`_exempt_pytest_from_production_write_guard` fixture sets
+`NX_ALLOW_PROD_WRITE` to a real, reviewable reason ("every store this
+suite constructs targets a throwaway test substrate, never production")
+for every test, unconditionally — covering the engine-backed
+`t2_service_env` fixture, a fake local `HTTPServer`
+(`tests/db/test_refreshable_client.py`), and an explicitly pinned
+`base_url` alike, since all three would otherwise be refused. A test that
+wants to exercise the guard's OWN refusal logic
+(`tests/db/test_production_write_guard*.py`) `monkeypatch.delenv`s the
+var back out for its own duration.
 
-Because many T2 domain stores (and the catalog client) send a READ over
-POST when the query does not fit a GET query string (search/lookup
-bodies, batch resolves, `HttpCatalogClient.traverse`, `operator-query`,
-`plan_search`), `RefreshableHttpStoreMixin._post` carries a `mutates: bool
-= True` kwarg — the safe default, since most `_post` call sites really
-are writes. The identified read-shaped POST call sites pass
-`mutates=False` to exempt themselves from the guard; `_get` and `_delete`
-need no such parameter (GET is always a read, and no DELETE endpoint in
-this codebase is a query). T3's `_post` is a single funnel for both reads
-and writes for a different reason (there is no `_get`/`_post` split at
-all — everything goes over POST), so it keys on the endpoint PATH's
-suffix instead (`_T3_WRITE_PATH_SUFFIXES`) rather than a per-call flag.
+Because many T2 domain stores (and the catalog client, and T1's
+`HttpScratchStore`) send a READ over POST when the query does not fit a
+GET query string (search/lookup bodies, batch resolves,
+`HttpCatalogClient.traverse`, `operator-query`, `plan_search`,
+`HttpScratchStore.search`/`list_entries`/`flagged_entries`), each
+bespoke/mixin `_post` carries a `mutates: bool = True` kwarg — the safe
+default, since most `_post` call sites really are writes. The identified
+read-shaped POST call sites pass `mutates=False` to exempt themselves
+from the guard; `_get` and `_delete` need no such parameter (GET is
+always a read, and no DELETE endpoint in this codebase is a query). T3's
+`_post` is a single funnel for both reads and writes for a different
+reason (there is no `_get`/`_post` split at all — everything goes over
+POST), so it keys on the endpoint PATH's suffix instead
+(`_T3_WRITE_PATH_SUFFIXES`) rather than a per-call flag.
 
 ### Concurrency Model ([RDR-063](rdr/rdr-063-t2-domain-split.md) Phase 2) — HISTORICAL
 

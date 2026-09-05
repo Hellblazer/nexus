@@ -463,31 +463,44 @@ def resolve_service_endpoint(
 # script that imports nexus (or a tests helper that imports nexus), from
 # anywhere, regardless of that script's own location.
 #
-# Production/default-config identity: keyed on whether the CALLER pinned an
-# explicit endpoint for THIS process (`NX_SERVICE_URL` / `NX_SERVICE_HOST` /
-# `NX_SERVICE_PORT` / `NX_SERVICE_TOKEN` env), never on the resolved URL's
-# shape (a real local supervisor and a test engine can both be
-# `http://127.0.0.1:<port>` — indistinguishable by string alone). Any of
-# those four env vars being set means resolution took an EXPLICIT,
-# caller-supplied path — pytest's `t2_service_env` fixture always sets
-# `NX_SERVICE_URL` + `NX_SERVICE_TOKEN` for every test, so the suite is
-# exempt by construction, with no need to special-case "this looks like a
-# test". Absent all four, resolution fell through to the AMBIENT default
-# (a persisted `config.yml` credential, or a discovered supervisor lease) —
-# the same substrate a normal, unconfigured `nx` invocation reaches.
+# KNOWN LIMIT (documented, not fixed here): a copied tree with neither a
+# `.git` nor a `pyproject.toml` ancestor at any depth — e.g. a Docker build
+# stage that `COPY`s `src/` without git metadata — is NOT detected as a dev
+# checkout and receives zero guard coverage regardless of env state. See
+# docs/architecture.md's "Dev-checkout production-write guard" section.
+#
+# Production identity, REVISED (nexus-a2qhz, second review round): the
+# first cut of this guard exempted a write whenever ANY of `NX_SERVICE_URL`
+# / `NX_SERVICE_HOST` / `NX_SERVICE_PORT` / `NX_SERVICE_TOKEN` was set,
+# reasoning that an explicit env var meant "the caller deliberately pinned
+# this endpoint." That heuristic is DEFEATED by conexus's own documented
+# cloud onboarding: docs/getting-started.md and docs/managed-onboarding.md
+# both instruct `export NX_SERVICE_URL=https://api.conexus-nexus.com` —
+# exactly the permanently-exported shell shape every one of the three
+# recorded incidents ran under. An exported env var cannot distinguish "a
+# fixture pinned an ephemeral endpoint for THIS process" from "this shell
+# always points at the operator's live production service." So the
+# exemption is GONE: env-var presence is no longer consulted at all. A
+# dev-checkout process is refused on every write regardless of how its
+# endpoint resolved — the ONLY bypass is the named opt-in below, which
+# requires a REASON (not a bare truthy flag), so pytest's own substrate
+# fixtures declare their exemption explicitly (see
+# tests/conftest.py's `_exempt_pytest_from_production_write_guard`) rather
+# than being silently inferred.
 
 #: The opt-in that lets a dev-checkout process perform a deliberate WRITE
-#: against the ambient default-config endpoint. Named in every refusal.
+#: against the endpoint it resolved. Named in every refusal. Must carry a
+#: REASON — a bare boolean-shaped value (see
+#: :data:`_OPT_IN_BOOLEAN_LOOKALIKES`) is refused exactly like an unset
+#: var, so the intent stays greppable (nexus-a2qhz review: "1 alone
+#: invites reflexive bypass by an agent — two of the three recorded
+#: incidents were subagents").
 PROD_WRITE_OPT_IN_ENV = "NX_ALLOW_PROD_WRITE"
 
-#: Env vars that make an endpoint resolution EXPLICIT for this process
-#: rather than the ambient default. Mirrors the four halves
-#: resolve_service_endpoint()/resolve_service_config() read.
-_EXPLICIT_ENDPOINT_ENV_VARS: tuple[str, ...] = (
-    "NX_SERVICE_URL",
-    "NX_SERVICE_HOST",
-    "NX_SERVICE_PORT",
-    "NX_SERVICE_TOKEN",
+#: Values that look like a leftover boolean flag rather than a reason —
+#: refused exactly like an unset opt-in. Case-insensitive.
+_OPT_IN_BOOLEAN_LOOKALIKES: frozenset[str] = frozenset(
+    {"0", "1", "true", "false", "yes", "no"}
 )
 
 #: Ancestors of this module's own file to inspect while looking for the
@@ -510,12 +523,15 @@ _dev_checkout_root_cache: Any = _DEV_CHECKOUT_ROOT_UNSET
 
 class ProductionWriteGuardError(RuntimeError):
     """Raised by :func:`guard_production_write` when a dev-checkout process
-    attempts an HTTP WRITE against the ambient default-config service
-    endpoint without the explicit :data:`PROD_WRITE_OPT_IN_ENV` opt-in.
+    attempts an HTTP WRITE without the explicit, reason-bearing
+    :data:`PROD_WRITE_OPT_IN_ENV` opt-in.
 
     Design of record: bead nexus-a2qhz. Reads are unaffected; only writes
-    (T2 domain stores, the catalog client, and T3's vector upsert/delete
-    paths) route through :func:`guard_production_write`.
+    route through :func:`guard_production_write` — every
+    ``RefreshableHttpStoreMixin`` adopter (the T2 domain stores and the
+    catalog client, which share that one transport), T3's module-level
+    ``_post``, and the two bespoke (non-mixin) clients, ``HttpTokenStore``
+    and ``HttpScratchStore`` (T1).
     """
 
 
@@ -575,47 +591,71 @@ def reset_dev_checkout_cache_for_tests() -> None:
     _dev_checkout_root_cache = _DEV_CHECKOUT_ROOT_UNSET
 
 
-def guard_production_write(base_url: str) -> None:
-    """Refuse an HTTP WRITE to *base_url* from a dev-checkout process about
-    to reach the ambient default-config (production) endpoint, unless
-    :data:`PROD_WRITE_OPT_IN_ENV` is set to ``"1"``.
+def _opt_in_reason() -> str | None:
+    """The caller's stated reason for bypassing the guard, or ``None`` when
+    no valid opt-in is present.
 
-    Called from every HTTP storage client's write path (the T2
-    ``RefreshableHttpStoreMixin._send`` for non-GET verbs, the catalog
-    client via the same mixin, and T3's module-level ``_post``) — never
-    from a read path. No-ops (returns) in every one of these cases:
-
-    - The opt-in env var is set — a visible, greppable, reviewable
-      statement that THIS write is deliberate (e.g. an arc-end MVV that
-      must exercise the real production substrate).
-    - Any of ``NX_SERVICE_URL`` / ``NX_SERVICE_HOST`` / ``NX_SERVICE_PORT``
-      / ``NX_SERVICE_TOKEN`` is set — the endpoint was explicitly pinned
-      for this process (pytest's ``t2_service_env`` fixture always does
-      this), so it is not "the ambient default-config" endpoint by
-      construction.
-    - This process is not a dev checkout (an installed generation, a
-      plain ``uv tool install``, or any process whose ``nexus`` package
-      did not resolve from an editable checkout) — Sam's real installed
-      ``nx`` must never trip this, regardless of env state.
-
-    Otherwise raises :class:`ProductionWriteGuardError` naming the opt-in,
-    the target endpoint, and why the process was classified as a dev
-    checkout.
+    A valid opt-in is a non-empty :data:`PROD_WRITE_OPT_IN_ENV` value that
+    is not a boolean lookalike (:data:`_OPT_IN_BOOLEAN_LOOKALIKES`, checked
+    case-insensitively) — a bare ``"1"`` (the RETIRED spelling) or a
+    leftover ``"0"``/``"true"``/``"false"``/``"yes"``/``"no"`` all fail
+    this check exactly like an unset var. Anything else is treated as a
+    reason and returned verbatim (for logging/messages) — this function
+    does not, and cannot, judge whether the text is a GOOD reason, only
+    that it is not a rebadged boolean flag.
     """
-    if (os.environ.get(PROD_WRITE_OPT_IN_ENV, "") or "").strip() == "1":
-        return
-    if any((os.environ.get(var, "") or "").strip() for var in _EXPLICIT_ENDPOINT_ENV_VARS):
+    raw = (os.environ.get(PROD_WRITE_OPT_IN_ENV, "") or "").strip()
+    if not raw or raw.lower() in _OPT_IN_BOOLEAN_LOOKALIKES:
+        return None
+    return raw
+
+
+def guard_production_write(base_url: str) -> None:
+    """Refuse an HTTP WRITE to *base_url* from a dev-checkout process
+    unless :data:`PROD_WRITE_OPT_IN_ENV` carries an explicit reason.
+
+    Called from every HTTP storage client's write path: every
+    ``RefreshableHttpStoreMixin`` adopter's ``_send`` (T2 domain stores +
+    the catalog client) for non-GET verbs with ``mutates=True``, T3's
+    module-level ``_post`` for its write-shaped path suffixes, and the two
+    bespoke (non-mixin) clients' own write methods — ``HttpTokenStore``
+    and ``HttpScratchStore`` (T1).
+
+    Exactly two conditions exempt a write, checked in this order:
+
+    1. A REASON-bearing opt-in is present (:func:`_opt_in_reason`) — a
+       visible, greppable, reviewable statement that THIS write is
+       deliberate (e.g. an arc-end MVV that must exercise the real
+       substrate). Endpoint-resolution env vars (``NX_SERVICE_URL`` etc.)
+       are NEVER consulted here — a permanently-exported cloud
+       ``NX_SERVICE_URL`` (conexus's own documented onboarding) must not
+       silently exempt a write, since that is the exact shell shape every
+       recorded incident ran under.
+    2. This process is not a dev checkout (an installed generation, a
+       plain ``uv tool install``, or any process whose ``nexus`` package
+       did not resolve from an editable checkout) — Sam's real installed
+       ``nx`` must never trip this, regardless of env state.
+
+    Otherwise raises :class:`ProductionWriteGuardError` — a stop-and-verify
+    message, not a fix-it instruction: it names the target as the
+    operator's real store, states that the write must be deliberate and
+    reviewed, and requires a reason rather than inviting a reflexive
+    export.
+    """
+    if _opt_in_reason() is not None:
         return
     checkout_root = _dev_checkout_root()
     if checkout_root is None:
         return
     raise ProductionWriteGuardError(
-        f"refusing a WRITE to {base_url!r}: this process's nexus package "
-        f"resolves from a dev checkout ({checkout_root}), and none of "
-        "NX_SERVICE_URL / NX_SERVICE_HOST / NX_SERVICE_PORT / "
-        "NX_SERVICE_TOKEN is set for this process, so the write would land "
-        "on the ambient default-config endpoint (a persisted config.yml "
-        "credential or a discovered supervisor lease) — the same "
-        f"substrate a real install reaches. Set {PROD_WRITE_OPT_IN_ENV}=1 "
-        "to confirm this write is deliberate."
+        f"STOP: refusing a WRITE to {base_url!r}. This process's nexus "
+        f"package resolves from a dev checkout ({checkout_root}), so this "
+        "write is presumed to target the OPERATOR'S REAL, LIVE STORE — "
+        "the same substrate a real install reaches — regardless of how "
+        "the endpoint was resolved (an exported NX_SERVICE_URL included). "
+        "Do not bypass this reflexively. If, and only if, this write is "
+        "genuinely deliberate and has been reviewed, state WHY in the "
+        f"opt-in itself: {PROD_WRITE_OPT_IN_ENV}=\"<why this write is "
+        f"safe and intended>\" (a bare \"1\", or any other boolean-shaped "
+        "value, is refused exactly like an unset var — name the reason)."
     )

@@ -141,6 +141,47 @@ class TestScriptOutsideTestsImportingFixtureOpsRefused:
         assert "NX_ALLOW_PROD_WRITE" in proc.stderr
 
 
+class TestExportedProductionServiceUrlStillRefused:
+    """Ship-blocker fix (second review round): conexus's own documented
+    cloud onboarding (docs/getting-started.md, docs/managed-onboarding.md)
+    instructs `export NX_SERVICE_URL=https://api.conexus-nexus.com` --
+    exactly the permanently-exported shell shape every recorded incident
+    ran under. The guard must refuse this write anyway; only the
+    reason-bearing opt-in exempts it. SAFE: the guard raises inside
+    _send(), BEFORE _request_once ever dials the URL -- construction
+    itself resolves the (env-supplied) host/token from plain env reads,
+    no network -- so this subprocess never attempts a real connection to
+    the managed host."""
+
+    def test_write_with_production_host_exported_is_refused(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "nexus-config"
+        config_dir.mkdir(parents=True)
+        env = dict(os.environ)
+        for var in ("NX_SERVICE_HOST", "NX_SERVICE_PORT", "NX_MINT_TOKEN", "NX_ALLOW_PROD_WRITE"):
+            env.pop(var, None)
+        env["NEXUS_CONFIG_DIR"] = str(config_dir)
+        env["NX_SERVICE_URL"] = "https://api.conexus-nexus.com"
+        env["NX_SERVICE_TOKEN"] = "a-real-looking-bearer-token"
+
+        proc = subprocess.run(
+            [sys.executable, "-c", _T2_WRITE_SCRIPT],
+            cwd=_REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        assert proc.returncode != 0, (
+            f"expected the write to be refused despite the exported production "
+            f"NX_SERVICE_URL; stdout={proc.stdout!r} stderr={proc.stderr!r}"
+        )
+        assert "WRITE-SUCCEEDED" not in proc.stdout
+        assert "ProductionWriteGuardError" in proc.stderr
+        assert "NX_ALLOW_PROD_WRITE" in proc.stderr
+        assert "api.conexus-nexus.com" in proc.stderr
+
+
 class _CountingEchoHandler(BaseHTTPRequestHandler):
     """Minimal local stub: 200s every POST, echoing the body. Used only to
     prove the write PATH proceeds past the guard when opted in — never a
@@ -177,7 +218,15 @@ class TestOptInProceedsToStubSubstrate:
         try:
             config_dir = tmp_path / "nexus-config"
             _write_fake_prod_config(config_dir, service_url=f"http://127.0.0.1:{port}")
-            env = _scrubbed_env(config_dir, extra={"NX_ALLOW_PROD_WRITE": "1"})
+            env = _scrubbed_env(
+                config_dir,
+                extra={
+                    "NX_ALLOW_PROD_WRITE": (
+                        "acceptance-test proof that the opt-in lets a write "
+                        "proceed -- targets a local stub, never production"
+                    )
+                },
+            )
 
             proc = subprocess.run(
                 [sys.executable, "-c", _T2_WRITE_SCRIPT],

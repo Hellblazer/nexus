@@ -175,7 +175,24 @@ class HttpTokenStore:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
-    def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+    def _post(self, path: str, body: dict[str, Any], *, mutates: bool = True) -> dict[str, Any]:
+        """POST *body* to *path*.
+
+        ``mutates`` (nexus-a2qhz) defaults to ``True`` since every write
+        method on this class (``create_tenant``, ``issue_token``,
+        ``rotate_token``, ``revoke_token``, ``start_session``,
+        ``close_session``) calls this. ``list_tokens`` is the one read
+        sent over POST (its filter body doesn't fit a GET query string)
+        and passes ``mutates=False``. This class is not a
+        ``RefreshableHttpStoreMixin`` adopter (bespoke bearer-header-baked
+        transport), so it calls
+        :func:`~nexus.db.service_endpoint.guard_production_write` directly
+        rather than inheriting the mixin's wiring.
+        """
+        if mutates:
+            from nexus.db.service_endpoint import guard_production_write  # noqa: PLC0415 — deferred to avoid circular import
+
+            guard_production_write(self._base_url)
         try:
             resp = self._client.post(path, json=body)
         except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError):

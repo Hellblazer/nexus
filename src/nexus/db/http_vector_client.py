@@ -1263,7 +1263,7 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
     import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
     if any(path.endswith(suffix) for suffix in _T3_WRITE_PATH_SUFFIXES):
-        from nexus.db.service_endpoint import guard_production_write  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.db.service_endpoint import guard_production_write  # noqa: PLC0415 — deferred: only on the write-shaped-path branch, no circular import (service_endpoint imports no nexus.* modules)
 
         base_url, _ = _resolve_endpoint()
         guard_production_write(base_url)

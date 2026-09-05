@@ -135,8 +135,17 @@ class HttpCentroidStore(RefreshableHttpStoreMixin):
     # still goes through the inherited, self-healing super()._post/_get
     # (RefreshableHttpStoreMixin._send), never self._client directly.
 
-    def _post(self, path: str, body: dict[str, Any], *, idempotent: bool = True) -> Any:
-        return super()._post(f"/v1/taxonomy/centroids{path}", body, idempotent=idempotent)
+    def _post(
+        self, path: str, body: dict[str, Any], *, idempotent: bool = True, mutates: bool = True
+    ) -> Any:
+        # nexus-a2qhz: mutates forwarded to the mixin unchanged (default True
+        # covers every write here; ann_query -- the one read sent over POST --
+        # passes mutates=False). Missing this forward previously TypeError'd
+        # every call passing the kwarg, the same class of regression caught
+        # in HttpTokenStore.list_tokens during review.
+        return super()._post(
+            f"/v1/taxonomy/centroids{path}", body, idempotent=idempotent, mutates=mutates
+        )
 
     def _get(self, path: str, params: dict[str, Any] | None = None, *, idempotent: bool = True) -> Any:
         q = {k: str(v) for k, v in (params or {}).items() if v is not None}

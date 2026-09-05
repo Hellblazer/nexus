@@ -1647,6 +1647,42 @@ def _isolate_service_endpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _exempt_pytest_from_production_write_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-a2qhz: this whole suite's ONE declared exemption from the
+    dev-checkout production-write guard.
+
+    ``guard_production_write`` (``nexus.db.service_endpoint``) refuses
+    every write a dev-checkout process makes unless
+    ``NX_ALLOW_PROD_WRITE`` carries an explicit reason — there is no more
+    "an NX_SERVICE_* env var is set" heuristic (that was defeated by
+    conexus's own documented cloud onboarding, which permanently exports
+    ``NX_SERVICE_URL`` in the shell — exactly the shape every recorded
+    incident ran under). Every test in this suite runs from this dev
+    checkout and constructs real store instances against SOME test
+    substrate — the engine-backed ``t2_service_env`` fixture, a fake local
+    ``HTTPServer`` (e.g. ``tests/db/test_refreshable_client.py``), or an
+    explicitly pinned ``base_url`` — none of which is production, and all
+    of which the guard would otherwise refuse.
+
+    This is the ONE place that declares the exemption, unconditionally,
+    for every test, regardless of which substrate fixture a given test
+    uses — deliberately NOT scoped behind ``_pin_t2_substrate`` /
+    ``NX_TEST_T2_SUBSTRATE``, since a test that opts out of the ENGINE
+    substrate may still construct a store against its own fake server and
+    perform a real write. A test that wants to exercise the guard's OWN
+    refusal logic (tests/db/test_production_write_guard*.py) explicitly
+    ``monkeypatch.delenv``s this var — the same "a later call on the same
+    fixture instance wins" contract as ``_isolate_config_dir``.
+    """
+    monkeypatch.setenv(
+        "NX_ALLOW_PROD_WRITE",
+        "pytest test suite (tests/conftest.py autouse) — every store this "
+        "suite constructs targets a throwaway test substrate, never "
+        "production; see nexus-a2qhz.",
+    )
+
+
+@pytest.fixture(autouse=True)
 def _pin_t2_substrate(request: pytest.FixtureRequest) -> None:
     """Route every test to the session's T2 substrate — the ENGINE.
 

@@ -535,17 +535,18 @@ class HttpScratchStore:
         resp = self._post(
             "/v1/t1/search",
             {"query": query, "session_id": self._session_id, "limit": n_results},
+            mutates=False,
         )
         return resp.get("results", [])
 
     def list_entries(self) -> list[dict]:
         """Return all entries for this session (ordered ts desc)."""
-        resp = self._post("/v1/t1/list", {"session_id": self._session_id})
+        resp = self._post("/v1/t1/list", {"session_id": self._session_id}, mutates=False)
         return resp.get("entries", [])
 
     def flagged_entries(self) -> list[dict]:
         """Return all flagged entries for this session."""
-        resp = self._post("/v1/t1/flagged", {"session_id": self._session_id})
+        resp = self._post("/v1/t1/flagged", {"session_id": self._session_id}, mutates=False)
         return resp.get("entries", [])
 
     # ── Flag / unflag ──────────────────────────────────────────────────────────
@@ -681,11 +682,26 @@ class HttpScratchStore:
 
     # ── HTTP helpers ───────────────────────────────────────────────────────────
 
-    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post(self, path: str, payload: dict[str, Any], *, mutates: bool = True) -> dict[str, Any]:
         """POST *payload* to *path* and return the parsed JSON body.
 
         Raises RuntimeError on non-2xx responses.
+
+        ``mutates`` (nexus-a2qhz) defaults to ``True`` — most callers here
+        (``put``, ``flag``, ``unflag``, ``delete``, ``clear``,
+        ``close_session``) really are writes against T1. ``search``,
+        ``list_entries``, and ``flagged_entries`` send a query over POST
+        (the filter body doesn't fit a GET query string) and pass
+        ``mutates=False``. ``_post_raw`` (``get``) never guards at all —
+        it is read-only. This class is not a ``RefreshableHttpStoreMixin``
+        adopter (bespoke bearer-header-baked transport, same family as
+        ``HttpTokenStore``), so it calls
+        :func:`~nexus.db.service_endpoint.guard_production_write` directly.
         """
+        if mutates:
+            from nexus.db.service_endpoint import guard_production_write  # noqa: PLC0415 — deferred to avoid circular import
+
+            guard_production_write(self._base_url)
         sent_token = getattr(self, "_session_token", "")
         # critic S4 (nexus-ssqk9): resolve the Authorization header FRESH
         # for this request rather than the client's construction-time
