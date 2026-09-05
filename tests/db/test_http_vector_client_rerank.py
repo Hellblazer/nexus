@@ -101,6 +101,50 @@ def test_rate_limited_degrade_reports_retry_after_and_engages_brake(client, monk
     rate_brake.reset_brake()
 
 
+def test_absurd_retry_after_is_clamped_before_tripping_the_brake(client, monkeypatch):
+    """The engine forwards Voyage's Retry-After unbounded above; the brake
+    must never be tripped for longer than the shared clamp (n75jg review)."""
+    from nexus import rate_brake
+
+    _patch_post(monkeypatch, {
+        "results": [{"id": "a", "content": "x", "distance": 0.2,
+                     "collection": "knowledge__t"}],
+        "rerank_degraded": True,
+        "rerank_error": "Voyage AI rerank rate limited",
+        "rerank_retry_after_seconds": 10_000_000,
+    }, [])
+    rate_brake.reset_brake()
+
+    meta: dict = {}
+    client.search("q", ["knowledge__t"], rerank=True, rerank_meta_out=meta)
+
+    assert meta["retry_after_seconds"] == rate_brake._RETRY_AFTER_CLAMP_MAX  # noqa: SLF001
+    brake = rate_brake.get_brake()
+    assert brake._resume_at - brake._clock() <= rate_brake._RETRY_AFTER_CLAMP_MAX  # noqa: SLF001
+    rate_brake.reset_brake()
+
+
+def test_non_numeric_retry_after_warns_and_does_not_trip_the_brake(client, monkeypatch):
+    from nexus import rate_brake
+
+    _patch_post(monkeypatch, {
+        "results": [{"id": "a", "content": "x", "distance": 0.2,
+                     "collection": "knowledge__t"}],
+        "rerank_degraded": True,
+        "rerank_error": "Voyage AI rerank rate limited",
+        "rerank_retry_after_seconds": "soon",
+    }, [])
+    rate_brake.reset_brake()
+
+    meta: dict = {}
+    client.search("q", ["knowledge__t"], rerank=True, rerank_meta_out=meta)
+
+    assert meta["retry_after_seconds"] == "soon"
+    brake = rate_brake.get_brake()
+    assert brake._resume_at <= brake._clock()  # noqa: SLF001 — never tripped
+    rate_brake.reset_brake()
+
+
 def test_non_rate_limited_degrade_reports_no_retry_after_and_does_not_engage_brake(
     client, monkeypatch,
 ):

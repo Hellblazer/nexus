@@ -2312,8 +2312,22 @@ class HttpVectorClient:
                         # server already served a 200 with distance-order
                         # rows; the brake trip is purely a signal for
                         # OTHER callers sharing this process.
-                        from nexus.rate_brake import get_brake  # noqa: PLC0415 — deferred import: leaf module, keeps this otherwise-urllib-only module's load-time graph unchanged
-                        get_brake().trip(float(retry_after), source="rerank")
+                        # Clamped through the same parser every other
+                        # trip() call site uses: the engine forwards
+                        # Voyage's Retry-After unbounded above, and
+                        # trip() only floors, so an absurd or non-numeric
+                        # value must never stall every writer in the
+                        # process (n75jg review). Unparseable: warn, no trip.
+                        from nexus.rate_brake import get_brake, parse_retry_after  # noqa: PLC0415 — deferred import: leaf module, keeps this otherwise-urllib-only module's load-time graph unchanged
+                        clamped = parse_retry_after({"Retry-After": str(retry_after)})
+                        if clamped is None:
+                            _log.warning(
+                                "rerank_retry_after_unparseable",
+                                value=retry_after, source="rerank",
+                            )
+                        else:
+                            meta["retry_after_seconds"] = clamped
+                            get_brake().trip(clamped, source="rerank")
                 else:
                     # nexus-znwc2: an object envelope WITHOUT the degrade flag
                     # cannot attest rerank ran. The engine's RerankStage emits
