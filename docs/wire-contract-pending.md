@@ -59,7 +59,7 @@ carries no method signature for a contract change to reconcile against) is a
 
 ## Unshipped
 
-
+- `940cb5a0aeb0e2d6de88ab32cb68b3614828bcb7` -- bead nexus-n75jg -- engine tag `TBD (next engine-service cut, not yet tagged)` -- [additive] rerank degrade envelope gains a structured `rerank_retry_after_seconds` field (RerankStage.java), populated only for an UpstreamRateLimitedException-caused degrade (1vpal critic finding 2), so the client rate brake (conexus-cy9u7) can pace on rerank-driven throttling instead of parsing rerank_error's free text. Client half in the same commit: HttpVectorClient.search's rerank_meta_out gains retry_after_seconds (None when absent) and feeds it to nexus.rate_brake.get_brake().trip(source="rerank") when present. Direction safety, both directions: NEW client + OLD engine -- the new field is never in the envelope, retry_after_seconds stays None, brake never trips on this signal (unchanged behavior, the gap this bead exists to close persists until the engine deploys); OLD client + NEW engine -- the client ignores the unknown rerank_retry_after_seconds key entirely (unchanged behavior). No existing request or response shape changed. Ack condition: the client release whose REQUIRED_ENGINE_VERSION bumps to the engine tag carrying this field.
 
 ## Shipped
 
