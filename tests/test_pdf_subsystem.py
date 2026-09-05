@@ -386,6 +386,74 @@ class TestDoclingRegressionGuard:
         )
 
 
+# ── nexus-gup3b: ff-ligature-drop regression guard ──────────────────────────
+#
+# MinerU >=3.3.0's ``_deduplicate_near_identical_chars`` (mineru/utils/
+# pdf_text_tool.py, commits 41931b861 / c6e4b1265, 2026-06-09) drops a
+# visible char whose (char, font, rotation) signature matches an earlier one
+# within 1.0pt on all four bbox coords. pdftext gives every letter of an
+# expanded "ff" ligature the SAME glyph bbox, so the second "f" is deleted:
+# "efficient" -> "eficient", "difference" -> "diference", "offer" -> "ofer".
+# Locked bisect record: T2 nexus/mineru-ff-ligature-bisect-gup3b-2026-09-04.
+#
+# Two independent words, not one, so a partial fix (one word patched by
+# coincidence, the dedup logic untouched) still fails loud. The corrupted
+# form is derived from the word itself (first "ff" -> "f") rather than
+# hand-typed, so the check and its own fixture can never drift apart.
+_FF_LIGATURE_WORDS: tuple[str, ...] = ("efficient", "difference")
+
+
+def _assert_ff_ligature_words_intact(text: str) -> None:
+    """Assert every locked ff-ligature word survives verbatim in ``text``
+    and its single-f collapsed form (MinerU >=3.3.0 class, nexus-gup3b) is
+    absent.
+
+    A pure function of its input so it can be exercised directly against a
+    small fixture string (``TestFFLigatureHelper`` below) without ever
+    invoking MinerU — proving the check itself works, independent of the
+    ``-m slow`` test that is not part of any default or scheduled run.
+    """
+    for word in _FF_LIGATURE_WORDS:
+        assert "ff" in word, f"fixture bug: {word!r} has no 'ff' to collapse"
+        corrupted = word.replace("ff", "f", 1)
+        assert word in text, (
+            f"'{word}' missing from extracted text — an ff ligature was "
+            f"dropped (nexus-gup3b, MinerU >=3.3.0 class)"
+        )
+        assert corrupted not in text, (
+            f"'{corrupted}' found in extracted text — the 'ff' in {word!r} "
+            f"collapsed to a single 'f' (nexus-gup3b, MinerU >=3.3.0 class)"
+        )
+
+
+class TestFFLigatureHelper:
+    """nexus-gup3b: proves ``_assert_ff_ligature_words_intact`` itself works,
+    without MinerU. The ``-m slow`` fixture test below reuses this exact
+    helper against real extracted text; this class is the fast (default
+    suite, no ``slow`` marker) proof that the check would actually catch
+    the MinerU >=3.3.0 ligature-collapse class if it recurred.
+    """
+
+    def test_passes_on_intact_ligatures(self) -> None:
+        _assert_ff_ligature_words_intact(
+            "An efficient index makes little difference to a small corpus."
+        )
+
+    def test_fails_on_dropped_ligature(self) -> None:
+        with pytest.raises(AssertionError, match="eficient"):
+            _assert_ff_ligature_words_intact("An eficient index.")
+
+    def test_fails_on_second_word_dropped_ligature(self) -> None:
+        with pytest.raises(AssertionError, match="diference"):
+            _assert_ff_ligature_words_intact(
+                "An efficient index makes little diference to a small corpus."
+            )
+
+    def test_fails_when_word_missing_entirely(self) -> None:
+        with pytest.raises(AssertionError, match="difference"):
+            _assert_ff_ligature_words_intact("An efficient index.")
+
+
 # ── nexus-2fyb: real-fixture formula-preservation regression guard ──────────
 
 class TestFormulaPreservationOnRealPdf:
@@ -581,6 +649,14 @@ class TestFormulaPreservationOnRealPdf:
             f"mangling the ff ligature again (MinerU 3.4.5 class)."
         )
         assert "eficient" not in text
+
+        # nexus-gup3b: a second, independent ff-ligature word. The bisect
+        # (T2 nexus/mineru-ff-ligature-bisect-gup3b-2026-09-04) found the
+        # collapse hits every "ff" in the paper, not just "efficient" — this
+        # generalizes the guard so a fix that patches one word without
+        # touching the dedup logic still fails here. Same helper, exercised
+        # against a canned string (no MinerU) by TestFFLigatureHelper above.
+        _assert_ff_ligature_words_intact(text)
 
         # Verbatim snippet — the bloom-filter false-positive-rate formula.
         # If the symbolic content of the canonical formula in this paper
