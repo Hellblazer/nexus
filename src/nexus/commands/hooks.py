@@ -110,120 +110,14 @@ disown
 {end}""".format(begin=SENTINEL_BEGIN, end=SENTINEL_END)
 
 
-# ── per-commit review (bead nexus-jh86x) ──────────────────────────────────────
-
-#: Appended INSIDE the sentinel block, for ``post-commit`` ONLY.
-#:
-#: Not post-merge and not post-rewrite, deliberately. A merge brings in
-#: commits already reviewed where they were authored, and post-rewrite
-#: fires once per rewritten commit, so a single interactive rebase of
-#: twenty commits would dispatch twenty reviews of work that has already
-#: been reviewed. Fire where authorship happens, once.
-#:
-#: BURST SHAPE (raised by the sibling session nexus-13, 2026-09-02, from a
-#: live 7.27.0 cut): a release is not one commit. It is a release commit,
-#: a back-merge, and any fix-forward, landing in quick succession. The
-#: pgrep guard below is the same instrument the indexing stanza above uses
-#: for the same reason, and it SERIALISES a burst rather than firing N
-#: concurrent ``claude -p`` children. It does not reduce total spend --
-#: the per-dispatch cap does that, and the arithmetic is written down at
-#: ``config.COMMIT_REVIEW_DEFAULT_BUDGET_USD``.
-#:
-#: Never blocks: the dispatch is detached and disowned exactly like the
-#: indexer, and ``nx review commit`` itself always exits 0. A post-commit
-#: hook that can fail is a footgun during a tag-push sequence that has to
-#: land in tight succession.
-#:
-#: PLACED BEFORE THE INDEXING GUARDS, and that position is the whole
-#: point (code review of a461db0b7, 2 Critical). The indexing stanza
-#: carries two ``exit 0`` guards -- the linked-worktree skip and the
-#: "an indexer for this repo is already running" pgrep -- and BOTH sit
-#: above the indexer's own dispatch. Appended after them, as this stanza
-#: first was, the review inherited both exits and was silently skipped:
-#:   * whenever a previous commit's indexer was still running, which on
-#:     this repo is measured at 64-131 minutes, so an ordinary burst of
-#:     commits would review the first and silently drop the rest -- the
-#:     exact release-cut case this stanza's own pgrep guard exists for;
-#:   * on every commit made in a linked worktree, which is this
-#:     project's standard agent-dispatch workflow.
-#: In both cases the only log line written mentioned INDEXING being
-#: skipped, so a human reading the log would see a hook that ran fine.
-#: A gate that skip-passes without saying so is the nexus-moht0 class.
-#:
-#: Ordering costs nothing: both dispatches are backgrounded and disowned,
-#: so running the review first does not delay the indexer by anything.
-#: The earlier ordering rationale ("do not make the cheap local index
-#: wait on a network dispatch") was simply wrong about that.
-#:
-#: Uses ``$HOME/.config/nexus/index.log`` literally rather than
-#: ``$NX_INDEX_LOG``: that variable is not assigned until AFTER the
-#: guards, i.e. after this block. The linked-worktree guard above writes
-#: its own line the same way, for the same reason.
-_REVIEW_STANZA = """\
-# PER-COMMIT REVIEW (nexus-jh86x). Reviews the commit just made, in the
-# background, and records findings in T2. Never blocks: see the bead for
-# why this fires per commit rather than on demand.
-# Opt out with NX_COMMIT_REVIEW=0 (env beats config), or persistently via
-# .nexus.yml#commit_review.enabled. Uninstall removes this with the rest
-# of the stanza.
-if [ "$NX_COMMIT_REVIEW" != "0" ]; then
-  _NX_REVIEW_LOG="$HOME/.config/nexus/index.log"
-  # Serialise a burst (release cut = commit + back-merge + fix-forward in
-  # quick succession) rather than firing N concurrent children. A hit is
-  # QUEUED, not dropped: the sha goes to <git-common-dir>/nx-review-queue
-  # (one queue per repository, shared by every linked worktree, read by
-  # nexus.commit_review.review_queue_path) and the running reviewer,
-  # dispatched with --drain, reviews it before exiting. Until 2026-09-04 a
-  # hit only logged SKIPPED and 6 of 9 commits in one push went unreviewed.
-  # A hit is also LOGGED: a skipped review that says nothing is
-  # indistinguishable from a review that found nothing.
-  if pgrep -f "nx review commit .* --repo $REPO_TOP" > /dev/null 2>&1; then
-    _NX_REVIEW_COMMON="$(cd "$(git rev-parse --git-common-dir)" 2>/dev/null && pwd -P)"
-    if [ -n "$_NX_REVIEW_COMMON" ] && git rev-parse HEAD >> "$_NX_REVIEW_COMMON/nx-review-queue" 2>/dev/null; then
-      echo "=== nx review post-commit QUEUED (review already running) $REPO_TOP $(date '+%Y-%m-%dT%H:%M:%S%z') ===" \\
-        >> "$_NX_REVIEW_LOG"
-    else
-      # An empty common dir would have written to /nx-review-queue and the
-      # log would still have said QUEUED (review [24406] Major). Say what
-      # happened instead: this commit has no record and the census names it.
-      echo "=== nx review post-commit NOT QUEUED (queue unwritable; nx census reviews will list this commit) $REPO_TOP $(date '+%Y-%m-%dT%H:%M:%S%z') ===" \\
-        >> "$_NX_REVIEW_LOG"
-    fi
-  else
-    echo "=== nx review post-commit $REPO_TOP $(date '+%Y-%m-%dT%H:%M:%S%z') ===" \\
-      >> "$_NX_REVIEW_LOG"
-    nx review commit "$(git rev-parse HEAD)" --repo "$REPO_TOP" --drain \\
-      >> "$_NX_REVIEW_LOG" 2>&1 &
-    disown
-  fi
-fi
-"""
-
-
 def _stanza_for(hook_name: str) -> str:
-    """The stanza body installed for *hook_name*.
-
-    ``post-commit`` carries the indexing stanza PLUS the review stanza,
-    inside ONE sentinel block so ``nx hooks uninstall`` still removes both
-    with a single sentinel match. Every other hook gets the indexing
-    stanza unchanged, byte for byte -- which is also what keeps
-    :data:`_STANZA` a valid comparison target for the two callers that
-    hold it (``nexus.health``'s drift check and the ws67k guard tests).
-    """
-    if hook_name != "post-commit":
-        return _STANZA
-    # Insert immediately after REPO_TOP is assigned and BEFORE the two
-    # indexing ``exit 0`` guards -- see _REVIEW_STANZA's own note. The
-    # anchor is the REPO_TOP line because that is the one thing the review
-    # block needs and the last line guaranteed to precede every guard.
-    anchor = 'REPO_TOP="$(git rev-parse --show-toplevel)"\n'
-    if anchor not in _STANZA:  # pragma: no cover - guarded by test_stanza_anchor_exists
-        raise RuntimeError(
-            "the post-commit review stanza's anchor line is gone from _STANZA; "
-            "re-derive the insertion point rather than appending at the end, "
-            "which is what silently disabled the reviewer behind two exit 0 guards"
-        )
-    return _STANZA.replace(anchor, anchor + _REVIEW_STANZA, 1)
+    """The stanza body installed for *hook_name*: the indexing stanza,
+    identical for every hook. (The per-commit review stanza that
+    ``post-commit`` carried from nexus-jh86x to 2026-09-05 was deleted
+    with the reviewer; the parameter stays so the two callers that resolve
+    a hook's body by name keep one call shape.)"""
+    del hook_name
+    return _STANZA
 
 
 # ── git helpers ───────────────────────────────────────────────────────────────
@@ -269,15 +163,13 @@ def hook_stanza_state(repo: Path, hook_name: str = "post-commit") -> str:
 
     ``armed``: the installed stanza equals the current template.
     ``stale``: a nexus stanza is installed but differs from the template
-    (a release changed it and ``nx hooks update`` has not run; the
-    per-commit reviewer was silently absent for two days this way,
+    (a release changed it and ``nx hooks update`` has not run,
     nexus-trwxr). ``unmanaged``: a hook exists without a nexus sentinel.
     ``not installed``: no hook file. ``unknown``: not a git repository.
 
     ``nx doctor`` has computed the stale case since nexus-mkj6u, but as a
     line in a long report nobody was reading; doctor now resolves each
-    hook's state through this function too, so there is one comparison,
-    and ``nx census reviews`` prints it where someone will act on it.
+    hook's state through this function too, so there is one comparison.
     """
     try:
         # core.hooksPath honoured, like install/update/status and nx doctor

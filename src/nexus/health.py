@@ -1661,10 +1661,8 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
     def _canonical_stanza_body(hook_name: str) -> str | None:
         """Canonical body for *hook_name*.
 
-        Per-hook since nexus-jh86x: ``post-commit`` carries the review
-        stanza inside the same sentinel block, so comparing every hook
-        against one template would report a correctly-installed
-        post-commit as drifted on every ``nx doctor`` run.
+        Resolved per hook by name (``_stanza_for``) so a hook-specific
+        stanza, should one return, compares against its own template.
         """
         try:
             from nexus.commands.hooks import _stanza_for  # noqa: PLC0415 — deferred to avoid circular import
@@ -1788,9 +1786,9 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
                     # body means the user is running an old stanza
                     # (e.g. pre-pgrep-guard, vulnerable to the multi-
                     # indexer pile-up race).
-                    # One comparison, shared with ``nx census reviews``
-                    # (commands/hooks.py hook_stanza_state, nexus-trwxr):
-                    # a second copy of this selector drifted on arrival.
+                    # One comparison (commands/hooks.py hook_stanza_state,
+                    # nexus-trwxr): a second copy of this selector drifted
+                    # on arrival.
                     drifted: list[str] = []
                     for name in installed:
                         if canonical_by_hook.get(name) is None:

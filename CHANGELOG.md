@@ -6,6 +6,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- The per-commit reviewer (`nx review commit` / `nx review show`, the
+  post-commit review stanza, `nx census reviews`, the SessionStart FIX-NOW
+  notice, `.nexus.yml#commit_review`). Deleted 2026-09-05 (Sam): its
+  `claude -p` child was never tool-free, so it explored the repository
+  instead of judging the diff and hit its $0.25 cap 22 times in one day
+  with no verdict; nobody read the records it did write. Existing hooks
+  keep working; `nx hooks update` rewrites the stanza without the block.
+
+### Added
+
+- The garbage sweep (`nexus.garbage`): `nx doctor` reaps stale
+  `t1_mint_*.lock` files, rotated logs past 14 days and operator dispatch
+  dumps past 7 on every run, counts orphaned catalog links and tombstones
+  past one day, and `nx doctor --fix` reclaims them.
+
+### Changed
+
+- Operator dispatch passes `--tools ""`: a tool-free child has no built-in
+  Read/Grep/Bash either.
+- `nx catalog purge-trash` defaults to a one-day window, not thirty.
+- The per-session T1 mint lock file is removed with the lease at session end.
+
 ## [7.31.0] - 2026-09-05
 
 Engine identity unchanged: `engine-service-v0.1.100`.

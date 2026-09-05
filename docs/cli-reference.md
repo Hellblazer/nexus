@@ -2011,8 +2011,6 @@ nx hooks install [PATH]
 
 Hooks run `nx index repo` in the background after each qualifying git operation, appending output to `~/.config/nexus/index.log`. If a hook file already exists, the nexus stanza is appended (sentinel-bounded) without overwriting existing content.
 
-`post-commit` additionally runs [`nx review commit`](#nx-review) (bead nexus-jh86x) in the background. `post-merge` and `post-rewrite` do not: a merge brings in commits already reviewed where they were authored, and post-rewrite fires once per rewritten commit, so one interactive rebase of twenty commits would dispatch twenty reviews of already-reviewed work.
-
 **Hook status values:** `not installed` · `owned` (nexus-created) · `appended` (added to existing hook) · `unmanaged` (no nexus sentinel)
 
 ### nx hook routing-stats
@@ -3675,65 +3673,11 @@ output — "SAME QUERIES, SAME BUCKETS, EVERY TIME" (playbook §4.5).
 
 ---
 
-## nx review
-
-Automated review of committed work (bead nexus-jh86x). Fired by the `post-commit` git hook, and usable by hand.
-
-```
-nx review commit [REV] [--repo PATH] [--quiet] [--drain]
-nx review show [REV] [--repo PATH]
-```
-
-| Subcommand | Description |
-|------------|-------------|
-| `commit [REV]` | Review REV (default `HEAD`) and record findings in T2. **Always exits 0** — a hook that can fail a commit is a footgun during a tag-push sequence. `--drain`: after REV, pop and review every sha the post-commit hook queued while a reviewer was running, until the queue is empty (the hook passes this; a hand-run review need not) |
-| `show [REV]` | Print the stored review record for REV |
-
-**Bursts are queued, not dropped** (2026-09-04). The post-commit hook serialises reviews with a `pgrep` guard. When a reviewer is already running, the hook appends `HEAD` to `<git-common-dir>/nx-review-queue` (one queue per repository, shared by every linked worktree) and logs `QUEUED (review already running)`; the running reviewer, dispatched with `--drain`, reviews the queued shas before it exits. Before this the hook logged `SKIPPED` and the commit was never reviewed: 6 of 9 commits in one push. A sha stranded in the queue (the reviewer exited between the hook's guard and its append) is picked up by the next commit's reviewer, and shows up as unreviewed in [`nx census reviews`](#nx-census) until then. A queued sha that cannot be reviewed is reported and dropped, never re-queued.
-
-The reviewer is a **tool-free** `claude -p` dispatch over `git show REV` alone. It cannot read the RDR corpus, the bead board, or prior reviews, and that independence is the point: a reviewer that has read the design record tends to agree with it.
-
-Findings carry one of three verdicts:
-
-| Verdict | Meaning |
-|---------|---------|
-| `FIX-NOW` | A defect that should be corrected before the work goes further |
-| `FILE` | A real issue worth tracking, but not urgent |
-| `DROP` | An observation considered and explicitly set aside |
-
-Nothing is auto-applied and nothing is auto-filed. Triage is a human act. Expect an instrument that mostly comments on test quality and occasionally catches a design error; if its FIX-NOW rate turns out to be dominated by noise, narrow or retire it rather than learning to ignore it.
-
-Records land in T2 project `nexus`, titled `review-<12-hex>`, with a default 90-day TTL. Count them with [`nx census reviews`](#nx-census).
-
-Each record carries a `Diff-Hash:` line, the sha256 of the first-parent patch with the sha/subject/author header stripped. A commit whose hash already has a record is skipped without a dispatch (`skipped (same diff already reviewed as review-<12-hex>)` on stderr) and gets no record of its own: an amend that rewords a message or a rebase that moves a change is the same review, and re-reviewing them was a quarter of the reviewer's spend when measured (nexus-yh25a). A rebase that changes the patch text, context lines included, hashes differently and is reviewed again.
-
-**Findings are surfaced, not merely stored.** SessionStart reports how many commits in the last 7 days carry `FIX-NOW` findings, because a verdict meaning "fix before this work goes further" that nobody sees is theatre. It counts commits rather than findings (two `FIX-NOW`s on one commit is one thing to look at), and the window is bounded on purpose: there is no "resolved" state on a review record, so an unbounded count would become the line people learn to scroll past.
-
-**Configuration** (`.nexus.yml#commit_review`, all optional):
-
-| Key | Default | Meaning |
-|-----|---------|---------|
-| `enabled` | `true` | Master switch |
-| `max_budget_usd` | `0.25` | Per-dispatch hard cap, passed to `claude -p --max-budget-usd`. A hard abort at cap, not a truncation |
-| `timeout_seconds` | `180` | Subprocess kill deadline |
-| `max_diff_bytes` | `200000` | Larger diffs are truncated, and the truncation is stated in both the prompt and the record |
-| `ttl_days` | `90` | Review records age out; a per-commit writer with a permanent TTL is an unbounded accumulator |
-| `model` | unset | Override the dispatch model |
-
-`NX_COMMIT_REVIEW=0` disables the reviewer for one shell or one command; `NX_COMMIT_REVIEW=1` re-enables it over a disabling config key. **The environment variable wins over the config key**, so silencing a noisy afternoon never requires editing a file.
-
-A release cut is a burst — a release commit, a back-merge, and any fix-forward landing in quick succession. The hook's `pgrep` guard serialises the burst rather than firing concurrent children; the cap is per dispatch, so an N-commit burst has an N × `max_budget_usd` ceiling.
-
 ## nx census
 
 ```
 nx census capability [--session SESSION_ID] [--since ISO_DATE] [--project-dir PATH] [--json]
-nx census reviews [--as-json]
 ```
-
-`nx census reviews` counts per-commit review findings by verdict across the T2 records [`nx review commit`](#nx-review) writes, and reports **reviewed-and-clean separately from not-reviewed**: a census that could not tell those apart would read an unarmed hook as a clean codebase (the nexus-moht0 vacuous-gate doctrine). The first line reports the current repository's post-commit hook state (`armed`, `stale`, `not installed`, `unmanaged`, `unknown`; `hook_state` under `--as-json`), the same comparison `nx doctor` makes, so the census answers the hook-armed question rather than asking it. Records are selected by title prefix AND their first line `Commit review: `; human review notes sharing the prefix are not counted.
-
-When run inside a git repository the census also **names the gaps**: every commit reachable from `HEAD` since the newest reachable tag (or the last 100 commits when no tag is reachable) that has no review record. A commit is covered when a record carries its sha OR a record's `Diff-Hash` equals its own patch hash (an amend or rebase is reviewed under the sha it first had, and the reviewer deliberately writes nothing for the new sha; a truncated diff is never matched by hash). Patch-less commits (`merge -s ours`, `--allow-empty`) are counted, not listed, since the reviewer skips them by design. The line `Review queue: N waiting` appears when the post-commit hook's burst queue is non-empty (see [`nx review`](#nx-review)). Under `--as-json` these land in `coverage` (`since`, `commits`, `patchless`, `unreviewed[]`) and `queued`.
 
 Counts tool calls per capability across Claude Code session transcripts, split **orchestrator vs subagent** (nexus-h33x8.1). Buckets are `skill`, `agent`, `serena`, `nx_answer`, `search_query`, `other_nx_mcp`, `baseline` (Bash/Read/Edit/Write), `other`.
 
