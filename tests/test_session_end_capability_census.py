@@ -78,6 +78,46 @@ class TestBuildCapabilityCensusRecord:
         assert record["capabilities"]["baseline"] == 3
         assert record["total_calls"] == 3
 
+    def test_capabilities_orchestrator_and_subagent_split_is_computed(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """nexus-gjv9b PART 3 prerequisite: the record carries the
+        orchestrator/subagent-split dimension the transcript-walk reader
+        already has, alongside (not instead of) the merged
+        ``capabilities`` total."""
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+        sid = "sess-scope-split"
+        _write_transcript(
+            project_dir / f"{sid}.jsonl",
+            [_tool_use_record("Bash"), _tool_use_record("Skill")],
+        )
+        sub_dir = project_dir / sid / "subagents"
+        sub_dir.mkdir(parents=True)
+        _write_transcript(
+            sub_dir / "agent-a1.jsonl",
+            [_tool_use_record("mcp__plugin_conexus_nexus__search")],
+        )
+
+        from nexus._session_end_census import build_capability_census_record
+        from nexus.census import CAPABILITIES
+
+        record = build_capability_census_record(project_dir, sid)
+
+        assert record["blindspot"] is False
+        assert set(record["capabilities_orchestrator"]) == set(CAPABILITIES)
+        assert set(record["capabilities_subagent"]) == set(CAPABILITIES)
+        assert record["capabilities_orchestrator"]["baseline"] == 1
+        assert record["capabilities_orchestrator"]["skill"] == 1
+        assert record["capabilities_orchestrator"]["search_query"] == 0
+        assert record["capabilities_subagent"]["search_query"] == 1
+        assert record["capabilities_subagent"]["baseline"] == 0
+        # the merged total is unchanged -- the split is additive detail,
+        # never a replacement for the existing precedent.
+        assert record["capabilities"]["baseline"] == 1
+        assert record["capabilities"]["skill"] == 1
+        assert record["capabilities"]["search_query"] == 1
+
     def test_genuinely_zero_tool_calls_is_a_measured_zero_not_blindspot(
         self, tmp_path: pathlib.Path,
     ) -> None:
@@ -111,6 +151,10 @@ class TestBuildCapabilityCensusRecord:
         assert record["dispatches"] == 0
         assert record["total_calls"] == 0
         assert "unmeasurable_reason" not in record
+        # nexus-gjv9b PART 3 prerequisite: a measured zero is a real zero
+        # at BOTH scopes, not merely the merged total.
+        assert record["capabilities_orchestrator"] == dict.fromkeys(CAPABILITIES, 0)
+        assert record["capabilities_subagent"] == dict.fromkeys(CAPABILITIES, 0)
 
     def test_reports_counts_not_verdicts(self, tmp_path: pathlib.Path) -> None:
         """Bead: 'REPORT COUNTS, NOT VERDICTS' -- no advisory text field."""
@@ -173,6 +217,10 @@ class TestBuildCapabilityCensusRecord:
         assert record["session_id"] == sid
         assert "capabilities" not in record
         assert record["unmeasurable_reason"]
+        # nexus-gjv9b PART 3 prerequisite: a blindspot record carries no
+        # scope split either -- nothing was measured at either scope.
+        assert "capabilities_orchestrator" not in record
+        assert "capabilities_subagent" not in record
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX chmod permission semantics")
     def test_unreadable_transcript_yields_blindspot_not_zero(
@@ -384,6 +432,64 @@ class TestWriteSessionCapabilityCensus:
         # line, not just cross-referenced from the record separately.
         assert "blindspot" in dropped_entry, dropped_entry
         assert dropped_entry["blindspot"] is record.get("blindspot")
+
+    def test_post_forwards_scope_split_to_the_store(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-gjv9b PART 3 prerequisite: ``_post_capability_census``
+        must forward ``capabilities_orchestrator``/``capabilities_subagent``
+        from the built record straight through to
+        ``HttpTelemetryStore.record_capability_census`` -- the wire half
+        of the writer swap, exercised without a live engine (the real
+        HTTP round trip is covered separately by
+        ``CapabilityCensusAndRoutingEventsHandlerTest`` on the Java side
+        and ``test_http_t2_store_parity.py`` on this side)."""
+        monkeypatch.setattr(
+            "nexus.db.service_endpoint.resolve_service_endpoint",
+            lambda: ("http://engine.invalid", "static-token"),
+        )
+
+        class _FakeDataTokenManager:
+            def bearer_for(self, base_url: str, tenant: str) -> None:
+                return None
+
+        monkeypatch.setattr(
+            "nexus.db.data_token.get_data_token_manager", _FakeDataTokenManager,
+        )
+
+        calls: list[dict] = []
+
+        class _FakeStore:
+            def __init__(self, *, base_url: str, _token: str) -> None:
+                self.base_url = base_url
+
+            def record_capability_census(self, **kwargs) -> None:
+                calls.append(kwargs)
+
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore", _FakeStore,
+        )
+
+        import nexus._session_end_census as mod
+
+        record = {
+            "session_id": "sess-forward-scope",
+            "timestamp": "2026-09-05T00:00:00Z",
+            "blindspot": False,
+            "capabilities": {"skill": 1},
+            "dispatches": 0,
+            "total_calls": 1,
+            "capabilities_orchestrator": {"skill": 1},
+            "capabilities_subagent": {"skill": 0},
+        }
+        mod._post_capability_census(record)
+
+        assert len(calls) == 1
+        assert calls[0]["capabilities_orchestrator"] == {"skill": 1}
+        assert calls[0]["capabilities_subagent"] == {"skill": 0}
 
     def test_no_session_id_resolvable_is_a_silent_noop(
         self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,

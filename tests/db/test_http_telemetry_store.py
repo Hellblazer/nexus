@@ -98,15 +98,30 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
         body = self._body()
 
         if pp == "/v1/telemetry/capability_census/record":
+            # nexus-gjv9b PART 3 prerequisite: capabilities_orchestrator /
+            # capabilities_subagent combine into ONE capabilities_by_scope
+            # field on write, mirroring TelemetryHandler.
+            # handleCapabilityCensusRecord's real engine behavior -- NULL
+            # (omitted here) when a blindspot record, or neither is sent.
+            blindspot = bool(body.get("blindspot", False))
+            by_scope = None
+            if not blindspot and (
+                body.get("capabilities_orchestrator") or body.get("capabilities_subagent")
+            ):
+                by_scope = {
+                    "orchestrator": body.get("capabilities_orchestrator") or {},
+                    "subagent":     body.get("capabilities_subagent") or {},
+                }
             with _STORE_LOCK:
                 _capability_census[body["session_id"]] = {
-                    "session_id":          body.get("session_id", ""),
-                    "ts":                  body.get("ts", ""),
-                    "blindspot":           bool(body.get("blindspot", False)),
-                    "unmeasurable_reason": body.get("unmeasurable_reason"),
-                    "capabilities":        body.get("capabilities") or {},
-                    "dispatches":          body.get("dispatches"),
-                    "total_calls":         body.get("total_calls"),
+                    "session_id":            body.get("session_id", ""),
+                    "ts":                    body.get("ts", ""),
+                    "blindspot":             blindspot,
+                    "unmeasurable_reason":   body.get("unmeasurable_reason"),
+                    "capabilities":          body.get("capabilities") or {},
+                    "dispatches":            body.get("dispatches"),
+                    "total_calls":           body.get("total_calls"),
+                    "capabilities_by_scope": by_scope,
                 }
             self._send(200, {"ok": True})
 
@@ -1762,6 +1777,37 @@ class TestRecordCapabilityCensus:
         rows = client.query_capability_census(session_id="sess-up")
         assert len(rows) == 1
         assert rows[0]["total_calls"] == 5
+
+    def test_scope_split_roundtrips_as_nested_object(self, client):
+        """nexus-gjv9b PART 3 prerequisite: capabilities_orchestrator /
+        capabilities_subagent combine engine-side into ONE
+        capabilities_by_scope column and round-trip as a nested
+        {"orchestrator": {...}, "subagent": {...}} object — a real
+        engine round trip, not a mocked wire shape."""
+        client.record_capability_census(
+            session_id="sess-scope-rt", ts="2026-09-05T00:00:00Z", blindspot=False,
+            capabilities={"skill": 3, "agent": 1},
+            capabilities_orchestrator={"skill": 2, "agent": 1},
+            capabilities_subagent={"skill": 1, "agent": 0},
+            dispatches=1, total_calls=4,
+        )
+        rows = client.query_capability_census(session_id="sess-scope-rt")
+        assert len(rows) == 1
+        by_scope = rows[0]["capabilities_by_scope"]
+        assert by_scope["orchestrator"]["skill"] == 2
+        assert by_scope["orchestrator"]["agent"] == 1
+        assert by_scope["subagent"]["skill"] == 1
+        assert by_scope["subagent"]["agent"] == 0
+
+    def test_no_scope_split_sent_leaves_capabilities_by_scope_absent(self, client):
+        """Additive: a caller that never passes the split gets exactly
+        the pre-PART-3 wire shape back, no fabricated breakdown."""
+        client.record_capability_census(
+            session_id="sess-no-scope-rt", ts="2026-09-05T00:00:00Z", blindspot=False,
+            capabilities={"skill": 1}, dispatches=0, total_calls=1,
+        )
+        rows = client.query_capability_census(session_id="sess-no-scope-rt")
+        assert rows[0].get("capabilities_by_scope") is None
 
 
 class TestRecordRoutingEvent:

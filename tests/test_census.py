@@ -476,6 +476,34 @@ def test_cli_from_store_reports_measured_row(monkeypatch: pytest.MonkeyPatch) ->
     assert fake.closed is True
 
 
+def test_cli_from_store_text_mode_renders_scope_split_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-gjv9b PART 3 prerequisite: a row carrying
+    ``capabilities_by_scope`` renders a second ``by_scope`` line; a row
+    without it (the pre-PART-3 shape, exercised by
+    ``test_cli_from_store_reports_measured_row`` above) renders exactly
+    as before -- additive, never a required field."""
+    fake = _FakeCapabilityCensusStore([{
+        "session_id": "sess-scope", "ts": "2026-09-05T00:00:00Z", "blindspot": False,
+        "capabilities": {"skill": 3, "agent": 1}, "dispatches": 1, "total_calls": 4,
+        "capabilities_by_scope": {
+            "orchestrator": {"skill": 2, "agent": 1},
+            "subagent": {"skill": 1, "agent": 0},
+        },
+    }])
+    monkeypatch.setattr(
+        "nexus.db.t2.http_telemetry_store.HttpTelemetryStore", lambda: fake,
+    )
+
+    res = _invoke(["capability", "--from-store", "--session", "sess-scope"])
+
+    assert res.exit_code == 0, res.output
+    assert "by_scope" in res.output
+    assert "skill=orch:2/sub:1" in res.output
+    assert "agent=orch:1/sub:0" in res.output
+
+
 def test_cli_from_store_reports_blindspot_row(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeCapabilityCensusStore([{
         "session_id": "sess-2", "ts": "2026-09-01T00:00:00Z", "blindspot": True,
@@ -605,6 +633,75 @@ def test_cli_from_store_and_transcript_walk_agree_on_the_empty_exit_code(
     assert transcript_walk.exit_code != 0, transcript_walk.output
     assert from_store.exit_code != 0, from_store.output
     assert transcript_walk.exit_code == from_store.exit_code == 1
+
+
+def test_cli_from_store_capabilities_by_scope_matches_transcript_walk_on_seeded_data(
+    monkeypatch: pytest.MonkeyPatch, corpus: pathlib.Path,
+) -> None:
+    """nexus-gjv9b PART 3 prerequisite: the store-backed reader's
+    ``capabilities_by_scope`` must carry the SAME orchestrator/subagent
+    per-capability counts the transcript-walk reader computes for the
+    identical session -- proven on seeded data, not asserted by
+    construction.
+
+    Three-way check against ``sess-b`` in the shared ``corpus`` fixture
+    (orchestrator: Agent=1, Bash=1; subagent: plan_search=1, scratch=1,
+    Serena find_symbol=1):
+
+    1. :func:`nexus._session_end_census.build_capability_census_record`
+       (the WRITER's own computation over the transcript) produces
+       ``capabilities_orchestrator``/``capabilities_subagent``.
+    2. :func:`nexus.census.census_corpus` scoped to the same session (the
+       transcript-walk READER's own computation) produces the identical
+       per-capability orchestrator/subagent counts via
+       ``orchestrator_calls``/``subagent_calls``.
+    3. The CLI's ``--from-store`` rendering of a row carrying (1)'s
+       output as its wire-shaped ``capabilities_by_scope`` reproduces
+       those same counts verbatim in its JSON payload -- the store-backed
+       reader neither drops nor distorts what the writer measured.
+    """
+    from nexus._session_end_census import build_capability_census_record
+    from nexus.census import CAPABILITIES, census_corpus
+
+    written = build_capability_census_record(corpus, "sess-b")
+    assert written["blindspot"] is False
+
+    walked = census_corpus(corpus, session="sess-b")
+    expected_orchestrator = {cap: walked.orchestrator_calls(cap) for cap in CAPABILITIES}
+    expected_subagent = {cap: walked.subagent_calls(cap) for cap in CAPABILITIES}
+
+    # Sanity: the fixture actually exercises both scopes non-trivially --
+    # a parity test against two zeroed dicts would pass vacuously.
+    assert expected_orchestrator["agent"] == 1
+    assert expected_orchestrator["baseline"] == 1
+    assert expected_subagent["other_nx_mcp"] == 2
+    assert expected_subagent["serena"] == 1
+
+    # The writer's own transcript-walk computation must agree with the
+    # reader's, before the store round trip is even in the picture.
+    assert written["capabilities_orchestrator"] == expected_orchestrator
+    assert written["capabilities_subagent"] == expected_subagent
+
+    fake = _FakeCapabilityCensusStore([{
+        "session_id": "sess-b", "ts": "2026-09-05T00:00:00Z", "blindspot": False,
+        "capabilities": written["capabilities"],
+        "dispatches": written["dispatches"], "total_calls": written["total_calls"],
+        "capabilities_by_scope": {
+            "orchestrator": written["capabilities_orchestrator"],
+            "subagent": written["capabilities_subagent"],
+        },
+    }])
+    monkeypatch.setattr(
+        "nexus.db.t2.http_telemetry_store.HttpTelemetryStore", lambda: fake,
+    )
+
+    res = _invoke(["capability", "--from-store", "--session", "sess-b", "--json"])
+
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    by_scope = payload["rows"][0]["capabilities_by_scope"]
+    assert by_scope["orchestrator"] == expected_orchestrator
+    assert by_scope["subagent"] == expected_subagent
 
 
 def test_cli_registered_on_main() -> None:

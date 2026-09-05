@@ -119,6 +119,67 @@ class CapabilityCensusAndRoutingEventsHandlerTest {
     }
 
     @Test
+    void census_record_withScopeSplit_queryReturnsNestedOrchestratorSubagent() throws Exception {
+        // nexus-gjv9b PART 3 prerequisite: capabilities_orchestrator /
+        // capabilities_subagent on the request combine into ONE
+        // capabilities_by_scope JSONB column, round-tripping as a nested
+        // {"orchestrator": {...}, "subagent": {...}} object on read.
+        var resp = post("/v1/telemetry/capability_census/record", TOKEN, TENANT,
+            "{\"session_id\":\"sess-scope-1\",\"ts\":\"2026-09-05T00:00:00Z\","
+            + "\"blindspot\":false,\"capabilities\":{\"skill\":3,\"agent\":1,\"serena\":1,"
+            + "\"nx_answer\":0,\"search_query\":0,\"other_nx_mcp\":0,\"baseline\":0,\"other\":0},"
+            + "\"capabilities_orchestrator\":{\"skill\":2,\"agent\":1,\"serena\":0},"
+            + "\"capabilities_subagent\":{\"skill\":1,\"agent\":0,\"serena\":1},"
+            + "\"dispatches\":1,\"total_calls\":5}");
+        assertThat(resp.statusCode()).isEqualTo(200);
+
+        var row = censusRows(TOKEN, TENANT, "sess-scope-1").get(0);
+        @SuppressWarnings("unchecked")
+        var byScope = (Map<String, Object>) row.get("capabilities_by_scope");
+        assertThat(byScope).isNotNull();
+        @SuppressWarnings("unchecked")
+        var orch = (Map<String, Object>) byScope.get("orchestrator");
+        @SuppressWarnings("unchecked")
+        var sub = (Map<String, Object>) byScope.get("subagent");
+        assertThat(orch.get("skill")).isEqualTo(2);
+        assertThat(orch.get("agent")).isEqualTo(1);
+        assertThat(sub.get("skill")).isEqualTo(1);
+        assertThat(sub.get("serena")).isEqualTo(1);
+    }
+
+    @Test
+    void census_record_withoutScopeSplit_capabilitiesByScopeIsNull() throws Exception {
+        // Additive: a caller that never sends the split (an old client,
+        // this bead's own PART-1/PART-2 writer prior to PART 3) leaves
+        // the new column NULL, never a fabricated all-zero breakdown.
+        var resp = post("/v1/telemetry/capability_census/record", TOKEN, TENANT,
+            "{\"session_id\":\"sess-no-scope\",\"blindspot\":false,"
+            + "\"capabilities\":{\"skill\":1},\"dispatches\":0,\"total_calls\":1}");
+        assertThat(resp.statusCode()).isEqualTo(200);
+
+        var row = censusRows(TOKEN, TENANT, "sess-no-scope").get(0);
+        assertThat(row.get("capabilities_by_scope")).isNull();
+    }
+
+    @Test
+    void census_blindspotRow_ignoresScopeSplitEvenIfSent() throws Exception {
+        // A blindspot record's capabilities/dispatches/total_calls are
+        // always NULL regardless of what the client sends; the split
+        // must follow the same rule, never a measured breakdown for a
+        // session that was never actually measured.
+        var resp = post("/v1/telemetry/capability_census/record", TOKEN, TENANT,
+            "{\"session_id\":\"sess-blind-scope\",\"blindspot\":true,"
+            + "\"unmeasurable_reason\":\"no-transcript-found\","
+            + "\"capabilities_orchestrator\":{\"skill\":9},"
+            + "\"capabilities_subagent\":{\"skill\":9}}");
+        assertThat(resp.statusCode()).isEqualTo(200);
+
+        var row = censusRows(TOKEN, TENANT, "sess-blind-scope").get(0);
+        assertThat(row.get("blindspot")).isEqualTo(true);
+        assertThat(row.get("capabilities_by_scope")).isNull();
+    }
+
+    @Test
     void census_reRecordingSameSession_upsertsNotDuplicates() throws Exception {
         post("/v1/telemetry/capability_census/record", TOKEN, TENANT,
             "{\"session_id\":\"sess-up\",\"blindspot\":false,"
