@@ -283,6 +283,51 @@ class TestWriteSessionCapabilityCensus:
         assert len(drops) == 1
         assert drops[0]["hook"] == "capability_census"
 
+    def test_write_failure_also_logs_a_structlog_warning(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Review fix (nexus-gjv9b fold-in): a dropped write must be
+        diagnosable from the logs, not just countable via nx doctor's
+        drop meter -- _write_capability_census's own except-Exception
+        never fires for this path (write_session_capability_census
+        never raises), so the warning must be logged AT the point of
+        failure, inside _post_capability_census itself."""
+        import logging
+
+        import structlog
+        from structlog.testing import capture_logs
+
+        cfg_dir = tmp_path / "cfgdir"
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg_dir))
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+        monkeypatch.setenv("NX_CENSUS_PROJECT_DIR", str(project_dir))
+        sid = "sess-write-fails-logged"
+        _write_transcript(project_dir / f"{sid}.jsonl", [_tool_use_record("Bash")])
+
+        import nexus._session_end_census as mod
+
+        def _boom(base_url_unused: str) -> tuple[str, str]:
+            raise RuntimeError("service unreachable")
+
+        monkeypatch.setattr(
+            "nexus.db.service_endpoint.resolve_service_endpoint", _boom,
+        )
+        monkeypatch.setattr(
+            "nexus.dropped_writes.record_drop", lambda **kw: None,
+        )
+
+        structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING))
+        try:
+            with capture_logs() as cap:
+                record = mod.write_session_capability_census(sid)  # must not raise
+        finally:
+            structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING))
+
+        assert record is not None
+        events = [entry["event"] for entry in cap]
+        assert "capability_census_write_dropped" in events, events
+
     def test_no_session_id_resolvable_is_a_silent_noop(
         self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

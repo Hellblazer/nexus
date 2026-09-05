@@ -392,8 +392,19 @@ def _post_capability_census(record: dict[str, Any]) -> None:
     see :meth:`HttpTelemetryStore.record_capability_census`'s docstring
     for why this bypasses the mixin's gateway-retry/re-resolve
     composition). ANY failure — resolution, auth, network, an old engine
-    that 404s the route — degrades to a metered drop and returns; never
-    raises, never retries.
+    that 404s the route — degrades to a metered drop AND a structlog
+    warning, then returns; never raises, never retries.
+
+    Review fix (nexus-gjv9b fold-in): a prior version metered the drop
+    but never logged it — ``write_session_capability_census``'s own
+    docstring claimed "the caller... logs the record either way", but
+    ``_session_end_launcher._write_capability_census``'s ``except
+    Exception`` only fires when THIS function raises, which it never
+    does for a write failure (only for a measurement failure upstream).
+    A dropped write was therefore invisible in the logs — countable via
+    ``nx doctor``'s drop meter, but undiagnosable from a log grep. The
+    warning below closes that gap directly at the point of failure,
+    independent of what any caller's own exception handling does.
     """
     try:
         from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred; only needed here
@@ -423,6 +434,16 @@ def _post_capability_census(record: dict[str, Any]) -> None:
             except Exception:  # noqa: BLE001 — best-effort close; never mask the write outcome
                 pass
     except Exception as exc:  # noqa: BLE001 — best-effort write; degrade to a metered drop, never raise
+        try:
+            import structlog  # noqa: PLC0415 — deferred; only needed on this rare failure path
+
+            structlog.get_logger(__name__).warning(
+                "capability_census_write_dropped",
+                session_id=record.get("session_id", ""),
+                error=str(exc),
+            )
+        except Exception:  # noqa: BLE001 — even the warning log is best-effort
+            pass
         try:
             from nexus.dropped_writes import record_drop  # noqa: PLC0415 — deferred; only needed on this rare failure path
 
