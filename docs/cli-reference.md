@@ -77,7 +77,7 @@ nx index repo ./my-project
 
 | Flag | Description |
 |------|-------------|
-| `--force` | Force re-indexing, bypassing staleness check (re-chunks and re-embeds in-place) |
+| `--force` | Force re-indexing, bypassing staleness check (re-chunks and re-embeds in-place). For `pdf`/`md`/`rdr` this always re-embeds every chunk. For `repo` (nexus-4jj40 round 5), it re-chunks and re-sends every file but does NOT by itself force a Voyage re-embed; see the `repo`-only `--re-embed` flag below |
 | `--monitor` | Print per-file progress lines. For `pdf` and `md`, also shows a per-chunk tqdm progress bar during embedding. Auto-enabled when stdout is not a TTY (piped, backgrounded, CI) |
 
 **`repo`-only flags:**
@@ -85,6 +85,7 @@ nx index repo ./my-project
 | Flag | Description |
 |------|-------------|
 | `--frecency-only` | Update frecency scores only; skip re-embedding (faster, for re-ranking refresh). Mutually exclusive with `--force` |
+| `--re-embed` | Requires `--force`. Also forces a Voyage re-embed of every chunk, even one whose text is unchanged (the pre-nexus-4jj40 `--force` behaviour). Without it, `--force` alone re-chunks and re-sends every file; the server's own existence-partition still skips the billed embed call for a chunk whose text is byte-identical to what is already stored, refreshing only its metadata (e.g. a chunker classification change). Reserve `--re-embed` for a genuine embedding-model change |
 | `--force-stale` | Re-index only if collection pipeline version is outdated (smart force — skips current collections) |
 | `--since-head` | Index only the git delta since the last indexed commit (`owners.head_hash`): changed files re-index, deleted files' docs prune, full-tree passes (staleness pulls, housekeeping, misclassified/orphan prunes, rg cache rebuild) are skipped. Worktree-inclusive. Falls back to a full index when no usable base exists; ignored with `--force`/`--force-stale`. The per-commit hook's fast path |
 | `--corpus [docs\|knowledge]` | Corpus routing for auto-classified prose/PDF files (default: `docs`). `docs` routes to `docs__` collections; `knowledge` routes to `knowledge__` collections instead |

@@ -596,6 +596,41 @@ def test_index_repo_force_frecency_mutual_exclusion(runner, repo_dir, mock_reg):
     assert "mutually exclusive" in result.output.lower()
 
 
+# ── --re-embed flag (nexus-4jj40 round 5, T2 [24618]) ────────────────────────
+
+def test_index_repo_re_embed_requires_force(runner, repo_dir, mock_reg):
+    """--re-embed alone (no --force) is a UsageError -- a file the
+    staleness check skips never reaches the server, so there is nothing
+    to re-embed."""
+    with patch("nexus.commands.index._registry", return_value=mock_reg):
+        result = runner.invoke(
+            main, ["index", "repo", str(repo_dir), "--re-embed"]
+        )
+    assert result.exit_code != 0
+    assert "--re-embed requires --force" in result.output
+
+
+def test_index_repo_force_without_re_embed_defaults_false(runner, repo_dir, mock_reg):
+    """--force alone must NOT set force_re_embed=True on the server call
+    (nexus-4jj40 round 5's decoupling -- the whole point of this bead)."""
+    result, mock_idx = _invoke_repo(runner, [str(repo_dir), "--force"], mock_reg)
+    assert result.exit_code == 0, result.output
+    _, kw = mock_idx.call_args
+    assert kw.get("force") is True
+    assert kw.get("force_re_embed") is False
+
+
+def test_index_repo_force_and_re_embed_together(runner, repo_dir, mock_reg):
+    """--force --re-embed reaches index_repository as force_re_embed=True."""
+    result, mock_idx = _invoke_repo(
+        runner, [str(repo_dir), "--force", "--re-embed"], mock_reg
+    )
+    assert result.exit_code == 0, result.output
+    _, kw = mock_idx.call_args
+    assert kw.get("force") is True
+    assert kw.get("force_re_embed") is True
+
+
 def test_index_pdf_force_flag(runner, fake_pdf):
     with patch("nexus.doc_indexer.index_pdf", return_value={**PDF_RESULT, "chunks": 5}) as m:
         result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--force"])

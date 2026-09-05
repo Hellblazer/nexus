@@ -696,7 +696,7 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
                 documents=documents,
                 embeddings=embeddings,
                 metadatas=metadatas,
-                force_re_embed=ctx.force,
+                force_re_embed=ctx.force_re_embed,
             )
         except Exception as upload_exc:
             # nexus-bhlfy: mirrors commands/store.py's cotmr fix — stamp

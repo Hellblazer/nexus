@@ -52,11 +52,17 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * </ol>
  *
  * <p>A chash present in the request's {@code chunks} array but resolved
- * as "already have identical text" is deliberately OMITTED from the
- * returned map — it needs no chunks_&lt;dim&gt; write at all, and {@link
+ * as "already have identical text" is OMITTED from the returned
+ * {@code resolved} map (no embedding/text/vector write) but, since
+ * nexus-4jj40 round 5, gets its own metadata refreshed via a direct
+ * {@link PgVectorRepository#batchUpdateMetadata} call BEFORE the embed
+ * phase runs -- a caller whose only change since the last index is
+ * chunk metadata (byte-identical text) still lands. {@link
  * CatalogRepository}'s per-doc chunk-upsert only writes chashes present in
  * the map, treating everything else as "must already exist" (verified
- * in-transaction, per doc, at the point a manifest actually references it).
+ * in-transaction, per doc, at the point a manifest actually references it,
+ * true by construction since this method's own existence-partition already
+ * confirmed it moments earlier).
  *
  * <p><b>Observability (nexus-acvi7, T2 {@code
  * engine-embed-path-hardening-design-v0.1.70} §2.5(a)):</b> the
@@ -161,11 +167,41 @@ public final class CombinedWriteService {
             : tenantScope.withTenant(tenant, ctx -> selectExistingText(ctx, ch, tenant, collection, dedupChashes));
 
         List<Integer> needEmbedIdx = new ArrayList<>();
+        // nexus-4jj40 round 5: chashes that already carry IDENTICAL stored
+        // text and are NOT forced -- the RDR-181 skip set -- used to be
+        // OMITTED from `resolved` entirely (original nexus-kl2z6 design:
+        // "no chunks_<dim> write at all"), so a caller whose ONLY change
+        // between two indexing runs is chunk METADATA (byte-identical text,
+        // e.g. RDR-200 Phase 1c's section_type reclassification) never saw
+        // that metadata land. metadataOnlyIdx now gets an explicit
+        // metadata-only UPDATE below, mirroring PgVectorRepository's own
+        // have-vector branch (resolveNeedEmbedIdx / batchUpdateMetadata) --
+        // the DIRECT upsert path already had this; the combined-write path
+        // did not.
+        List<Integer> metadataOnlyIdx = new ArrayList<>();
         for (int i = 0; i < dedupChashes.size(); i++) {
             String stored = existingText.get(dedupChashes.get(i));
             if (forceReEmbed || stored == null || !stored.equals(dedupTexts.get(i))) {
                 needEmbedIdx.add(i);
+            } else {
+                metadataOnlyIdx.add(i);
             }
+        }
+
+        if (!metadataOnlyIdx.isEmpty()) {
+            // Own short, independently-committed transaction -- same
+            // discipline as the existence-partition SELECT above and
+            // PgVectorRepository.resolveNeedEmbedIdx's have-vector UPDATE.
+            // A chash present at the existence SELECT above but gone by the
+            // time this UPDATE runs (concurrent orphan-GC pass) affects 0
+            // rows; batchUpdateMetadata reports it back and it is rerouted
+            // to need-embed below, never silently dropped -- the SAME
+            // concurrent-delete race guard PgVectorRepository's own caller
+            // already relies on.
+            List<Integer> zeroAffected = tenantScope.withTenant(tenant, ctx ->
+                PgVectorRepository.batchUpdateMetadata(
+                    ctx, ch, collection, dedupChashes, dedupMetas, metadataOnlyIdx));
+            needEmbedIdx.addAll(zeroAffected);
         }
 
         List<String> textsToEmbed = new ArrayList<>(needEmbedIdx.size());

@@ -8,10 +8,14 @@ from unittest.mock import MagicMock
 
 def test_pipeline_version_constant():
     from nexus.indexer import PIPELINE_VERSION
-    # v5: RDR-200 Phase 1c evidence hygiene, nexus-4jj40 round 4 fold-in --
-    # code chunk classification gained section_type="imports", which
-    # invalidates existing chunk-level metadata for already-indexed
-    # content the same way the v4 chunking-registry change did.
+    # v5: RDR-200 Phase 1c evidence hygiene, nexus-4jj40 -- code chunk
+    # classification gained section_type="imports". This bump itself has
+    # NO operational effect on any real (service-backed) install -- see
+    # TestServiceCollectionStubDeadSignal below and indexer.py's v5
+    # history comment. The reachable reclassify path is `nx index repo
+    # --force` (re-chunk + re-send; the server's existence-partition
+    # refreshes metadata for free on an unchanged chash), never
+    # `--force-stale`.
     assert PIPELINE_VERSION == "5"
     assert isinstance(PIPELINE_VERSION, str)
 
@@ -241,3 +245,67 @@ def test_stamp_collection_version_calls_modify_when_available() -> None:
     col.modify.assert_called_once_with(
         metadata={"existing": "v", "pipeline_version": PIPELINE_VERSION}
     )
+
+
+class TestServiceCollectionStubDeadSignal:
+    """nexus-4jj40 round 5 (T2 critique [24618]): every test above this
+    class uses ``MagicMock()`` or a hand-rolled stub, which fabricates a
+    ``.metadata``/``.modify`` surface the REAL production collection
+    handle does not have -- "verified against fiction". Every T3
+    collection handle has been a ``_ServiceCollectionStub``
+    (``nexus.db.http_vector_client``) since the Chroma removal (RDR-155
+    P4b), on both local and cloud mode; this class pins its ACTUAL
+    behaviour against the real class, not a double, so the pipeline-
+    version staleness signal's dead state is asserted honestly rather
+    than assumed clean by an untested code path.
+    """
+
+    def test_get_collection_pipeline_version_is_always_none(self) -> None:
+        """The real stub carries no ``.metadata`` attribute at all --
+        ``getattr(col, "metadata", None) or {}`` degrades to ``{}``, so
+        this always returns None, regardless of PIPELINE_VERSION."""
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        from nexus.indexer import get_collection_pipeline_version
+
+        col = _ServiceCollectionStub(name="code__test__voyage-code-3__v1")
+        assert not hasattr(col, "metadata")
+        assert get_collection_pipeline_version(col) is None
+
+    def test_stamp_collection_version_is_a_silent_noop(self) -> None:
+        """The real stub carries no ``.modify`` method -- stamping must
+        not raise, but it also does not persist anything: the version
+        read immediately after stamping is STILL None, never the
+        current PIPELINE_VERSION."""
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        from nexus.indexer import (
+            get_collection_pipeline_version,
+            stamp_collection_version,
+        )
+
+        col = _ServiceCollectionStub(name="code__test__voyage-code-3__v1")
+        assert not hasattr(col, "modify")
+        stamp_collection_version(col)  # must not raise
+        assert get_collection_pipeline_version(col) is None
+
+    def test_check_pipeline_staleness_is_always_false(self) -> None:
+        """Consequence of the above: ``check_pipeline_staleness`` treats
+        a None-version collection as "new, never stale" -- so on a real
+        install this is False no matter how far PIPELINE_VERSION has
+        moved, and ``--force-stale``'s ``any_stale`` escalation
+        (indexer.py's ``_run_index``) can structurally never fire
+        against a service-backed collection. The only reachable
+        reclassify path is an explicit ``nx index repo --force``."""
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        from nexus.indexer import (
+            PIPELINE_VERSION,
+            check_pipeline_staleness,
+            stamp_collection_version,
+        )
+
+        col = _ServiceCollectionStub(name="code__test__voyage-code-3__v1")
+        assert check_pipeline_staleness(col, "code__test__voyage-code-3__v1") is False
+        # Even after an attempted stamp -- the dead signal holds
+        # regardless of what PIPELINE_VERSION is.
+        assert PIPELINE_VERSION  # sanity: constant is non-empty
+        stamp_collection_version(col)
+        assert check_pipeline_staleness(col, "code__test__voyage-code-3__v1") is False

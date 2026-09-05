@@ -717,7 +717,25 @@ class _PhaseHeartbeat:
     "--force",
     is_flag=True,
     default=False,
-    help="Force re-indexing all files, bypassing staleness check (re-chunks and re-embeds in-place).",
+    help="Force re-indexing all files, bypassing staleness check (re-chunks "
+         "and re-sends every chunk in place). Does NOT force a Voyage "
+         "re-embed on its own (nexus-4jj40 round 5): the server's own "
+         "existence-partition still skips the embed call for a chunk whose "
+         "text is byte-identical to what is already stored, refreshing "
+         "only its metadata. Add --re-embed for the old force-re-embeds-"
+         "everything behaviour.",
+)
+@click.option(
+    "--re-embed",
+    "re_embed",
+    is_flag=True,
+    default=False,
+    help="With --force: also force a Voyage re-embed of every chunk, even "
+         "ones whose text is unchanged (the pre-nexus-4jj40 --force "
+         "behaviour). Has no effect without --force -- there is nothing to "
+         "re-embed for a file the staleness check already skips. Reserve "
+         "for a genuine embedding-model change; a plain reclassification-"
+         "only pass (e.g. a chunker metadata change) does not need it.",
 )
 @click.option("--monitor", is_flag=True, default=False,
               help="Print per-file progress lines. Auto-enabled when stdout is not a TTY.")
@@ -762,7 +780,7 @@ class _PhaseHeartbeat:
     ),
 )
 def index_repo_cmd(
-    path: Path, frecency_only: bool, force: bool, monitor: bool,
+    path: Path, frecency_only: bool, force: bool, re_embed: bool, monitor: bool,
     force_stale: bool, since_head: bool, on_locked: str, no_taxonomy: bool,
     debug_timing: bool, corpus_choice: str,
 ) -> None:
@@ -782,6 +800,12 @@ def index_repo_cmd(
         raise click.UsageError("--force-stale and --force are mutually exclusive.")
     if force_stale and frecency_only:
         raise click.UsageError("--force-stale and --frecency-only are mutually exclusive.")
+    if re_embed and not force:
+        raise click.UsageError(
+            "--re-embed requires --force -- a file the staleness check "
+            "skips never reaches the server, so there is nothing to "
+            "re-embed."
+        )
 
     reg = _registry()
     path = path.resolve()
@@ -1149,6 +1173,7 @@ def index_repo_cmd(
         stats: dict = {}
         try:
             stats = index_repository(path, reg, frecency_only=frecency_only, force=force,
+                                     force_re_embed=re_embed,
                                      force_stale=force_stale, since_head=since_head,
                                      on_locked=on_locked, on_start=on_start, on_file=on_file,
                                      on_phase=on_phase,

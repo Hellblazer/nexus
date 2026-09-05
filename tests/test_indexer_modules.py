@@ -391,6 +391,55 @@ def test_index_code_file_happy_path_new_file(tmp_path, make_ctx):
     assert len(call_kwargs["ids"]) == result
 
 
+def test_index_code_file_force_re_embed_decoupled_from_force(tmp_path, make_ctx):
+    """nexus-4jj40 round 5 (T2 critique [24618]): ctx.force=True must NOT
+    imply force_re_embed=True on the server call -- the two are
+    deliberately decoupled so a plain --force reclassification pass never
+    pays for a full Voyage re-embed. ctx.force_re_embed defaults False."""
+    from nexus.code_indexer import index_code_file
+
+    py_file = tmp_path / "example.py"
+    py_file.write_text("def greet(name):\n    return f'Hello {name}'\n")
+
+    mock_db = MagicMock()
+
+    def fake_embed_fn(texts):
+        return [[0.1] * 128 for _ in texts]
+
+    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn,
+                   git_meta={"git_project_name": "test"}, force=True)
+
+    assert ctx.force_re_embed is False, "force_re_embed must default False"
+    index_code_file(ctx, py_file)
+
+    call_kwargs = mock_db.upsert_chunks_with_embeddings.call_args[1]
+    assert call_kwargs["force_re_embed"] is False, (
+        "ctx.force=True must not leak into force_re_embed=True"
+    )
+
+
+def test_index_code_file_force_re_embed_explicit_opt_in(tmp_path, make_ctx):
+    """The explicit opt-in still reaches the server call when set."""
+    from nexus.code_indexer import index_code_file
+
+    py_file = tmp_path / "example.py"
+    py_file.write_text("def greet(name):\n    return f'Hello {name}'\n")
+
+    mock_db = MagicMock()
+
+    def fake_embed_fn(texts):
+        return [[0.1] * 128 for _ in texts]
+
+    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn,
+                   git_meta={"git_project_name": "test"}, force=True,
+                   force_re_embed=True)
+
+    index_code_file(ctx, py_file)
+
+    call_kwargs = mock_db.upsert_chunks_with_embeddings.call_args[1]
+    assert call_kwargs["force_re_embed"] is True
+
+
 def test_index_code_file_stamps_import_only_chunk_section_type(tmp_path, make_ctx):
     """RDR-200 Phase 1c evidence hygiene (nexus-4jj40 Sam's decision 3):
     a chunk consisting only of an import statement gets

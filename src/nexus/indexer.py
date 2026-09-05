@@ -70,10 +70,20 @@ DEFAULT_IGNORE: list[str] = _DEFAULT_IGNORE
 #   v1-v3: pre-versioning (no version stamp in collection metadata)
 #   v4:    RDR-028 language registry + RDR-014 CCE prefixes
 #   v5:    RDR-200 Phase 1c evidence hygiene, nexus-4jj40 -- code chunk
-#          classification gained section_type="imports"; a routine
-#          `nx index repo`/`--force-stale` run must re-chunk already-
-#          indexed code to apply the new stamp (check_staleness alone
-#          never fires on unchanged content).
+#          classification gained section_type="imports". This bump has NO
+#          operational effect on any real (service-backed) install: every
+#          T3 collection handle is a _ServiceCollectionStub
+#          (http_vector_client.py) with no `metadata`/`modify` surface, so
+#          get_collection_pipeline_version() always returns None and
+#          check_pipeline_staleness() is always False -- --force-stale can
+#          structurally never detect this version change (T2 critique
+#          [24618]). The ONLY way to reclassify already-indexed code is an
+#          explicit `nx index repo --force` (bypasses per-file
+#          check_staleness); pass `--re-embed` too only for a genuine
+#          embedding-model recompute -- plain reclassification (this bump)
+#          does not need it, since the server's existence-partition
+#          refreshes chunk metadata for free when the chash is unchanged
+#          (nexus-4jj40 round 5).
 PIPELINE_VERSION: str = "5"
 
 # Concurrent ChunkBatcher flush workers during a repo index run. 3 is the
@@ -2102,6 +2112,7 @@ def index_repository(
     frecency_only: bool = False,
     chunk_lines: int | None = None,
     force: bool = False,
+    force_re_embed: bool = False,
     force_stale: bool = False,
     since_head: bool = False,
     on_locked: str = "wait",
@@ -2129,6 +2140,16 @@ def index_repository(
 
     *chunk_lines* overrides the default chunk size (150 lines) for code files.
     When None, the module default is used.
+
+    *force_re_embed* (nexus-4jj40 round 5, T2 [24618]): DECOUPLED from
+    *force* -- see ``IndexContext.force_re_embed``'s docstring for the full
+    rationale. *force* alone re-chunks and re-sends every file, bypassing
+    the per-file staleness check; the server's own existence-partition
+    still skips the billed Voyage re-embed for byte-identical chunk text,
+    refreshing only the chunk's stored metadata. Pass *force_re_embed=True*
+    (``nx index repo --force --re-embed``) only for a genuine embedding-
+    model recompute; the default keeps a plain reclassification-only
+    ``--force`` pass near-zero cost.
 
     *on_locked* controls behaviour when another process holds the repo lock:
     ``'wait'`` (default) blocks until the lock is released; ``'skip'`` returns
@@ -2192,7 +2213,7 @@ def index_repository(
             _run_index_frecency_only(repo, registry)
             stats: dict[str, int] = {}
         else:
-            stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_stale=force_stale, since_head=since_head, on_locked=on_locked, on_start=on_start, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks, fence_run_state=_fence_run_state)
+            stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_re_embed=force_re_embed, force_stale=force_stale, since_head=since_head, on_locked=on_locked, on_start=on_start, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks, fence_run_state=_fence_run_state)
             _set_owner_head_hash(repo, _current_head(repo))
         return stats
     finally:
@@ -2548,6 +2569,7 @@ def _index_code_file(
     chunk_lines: int | None = None,
     force: bool = False,
     *,
+    force_re_embed: bool = False,
     embed_fn: Callable | None = None,
     stage_timers: "StageTimers | None" = None,
     doc_id_resolver: Callable[[Path], str] | None = None,
@@ -2572,6 +2594,11 @@ def _index_code_file(
     ``staleness_cache`` is the orchestrator-built collection-wide
     staleness map. When supplied, the per-file ``check_staleness`` is
     a dict lookup instead of a Chroma roundtrip.
+
+    ``force_re_embed`` (nexus-4jj40 round 5, T2 [24618]): DECOUPLED from
+    ``force`` -- see ``IndexContext.force_re_embed``'s docstring. Defaults
+    False so a plain ``--force`` reclassification pass never pays for a
+    full Voyage re-embed of unchanged content.
     """
     from nexus.code_indexer import index_code_file  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.index_context import IndexContext  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
@@ -2589,6 +2616,7 @@ def _index_code_file(
         score=score,
         chunk_lines=chunk_lines,
         force=force,
+        force_re_embed=force_re_embed,
         embed_fn=embed_fn,
         stage_timers=stage_timers,
         doc_id_resolver=doc_id_resolver,
@@ -4091,6 +4119,7 @@ def _run_index(
     chunk_lines: int | None = None,
     *,
     force: bool = False,
+    force_re_embed: bool = False,
     force_stale: bool = False,
     since_head: bool = False,
     on_locked: str = "wait",
@@ -4937,10 +4966,16 @@ def _run_index(
             # independently-tested _build_combined_write_payload.
             #
             # RDR-181 §Approach step 3: force_re_embed closes over the
-            # enclosing _run_index's ``force`` (constant for the whole
-            # run, like ``db`` above) so ``--force`` reaches the server's
-            # forceReEmbed escape for the batched flush path too, not
-            # just the per-file fallback below.
+            # enclosing _run_index's OWN ``force_re_embed`` parameter
+            # (constant for the whole run, like ``db`` above), NOT
+            # ``force`` (nexus-4jj40 round 5, T2 [24618]: the two were
+            # coupled here, which meant a plain ``--force`` reclassify
+            # pass paid full Voyage re-embed for unchanged content on
+            # this, the DEFAULT batched flush path). ``--force`` alone
+            # still reaches the server's existence-partition metadata-
+            # only refresh; ``--re-embed`` is the explicit opt-in that
+            # sets ``force_re_embed=True`` and reaches forceReEmbed here
+            # too, not just the per-file fallback below.
             (
                 chunks_payload, full_docs, complete_map,
                 orphan_ids, orphan_docs, orphan_metas,
@@ -4971,7 +5006,7 @@ def _run_index(
                     documents=orphan_docs,
                     embeddings=[[] for _ in orphan_ids],  # Seam B: server embeds
                     metadatas=orphan_metas,
-                    force_re_embed=force,
+                    force_re_embed=force_re_embed,
                 )
 
             if not full_docs:
@@ -5021,7 +5056,7 @@ def _run_index(
                     sweep=True,
                     chunks=chunks_payload,
                     collection=collection,
-                    force_re_embed=force,
+                    force_re_embed=force_re_embed,
                 )
             finally:
                 _close = getattr(cat, "close", None)
@@ -5353,6 +5388,7 @@ def _run_index(
             voyage_client, git_meta, now_iso, score,
             chunk_lines=effective_chunk_lines,
             force=force,
+            force_re_embed=force_re_embed,
             embed_fn=_embed_fn,
             stage_timers=timers,
             doc_id_resolver=_doc_id_resolver,

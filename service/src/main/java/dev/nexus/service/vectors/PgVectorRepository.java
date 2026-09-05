@@ -2797,8 +2797,25 @@ public final class PgVectorRepository {
      *         the time this UPDATE runs (concurrent orphan-GC pass) must be rerouted
      *         to need-embed, never silently dropped. Order matches the SUBSEQUENCE of
      *         {@code idxToUpdate} whose statement affected 0 rows (page-by-page).
+     *
+     * <p>{@code public} (nexus-4jj40 round 5): {@link
+     * dev.nexus.service.db.CombinedWriteService#writeManyCombined} in the
+     * {@code dev.nexus.service.db} package reuses this exact primitive for
+     * the SAME purpose (a metadata-only refresh for a chash that already
+     * has identical stored text), because {@code CatalogRepository.
+     * upsertManifestChunkVectors} had NO equivalent: a chash resolved as
+     * "already have identical text" there was OMITTED from the resolved map
+     * entirely and therefore never written at all (not even a metadata
+     * refresh), by original nexus-kl2z6 design. That was fine until a
+     * caller's ONLY change between two indexing runs is chunk METADATA (e.g.
+     * RDR-200 Phase 1c's {@code section_type} reclassification) with
+     * byte-identical chunk text; the combined-write path silently dropped
+     * that metadata update on the floor. Calling this shared primitive from
+     * both write paths keeps the "identical text -> metadata-only UPDATE,
+     * concurrent-delete reroutes to need-embed" contract in exactly one
+     * place.
      */
-    private static List<Integer> batchUpdateMetadata(DSLContext ctx, DimTables.ChunkTable ch,
+    public static List<Integer> batchUpdateMetadata(DSLContext ctx, DimTables.ChunkTable ch,
                                                        String collection, List<String> ids,
                                                        List<Map<String, Object>> metadatas,
                                                        List<Integer> idxToUpdate) {
