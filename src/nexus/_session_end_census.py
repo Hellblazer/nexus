@@ -10,10 +10,23 @@ documented there is untouched by this module's existence.
 VISIBILITY IS SETTLED BY SOURCE, not experiment (bead nexus-h33x8.3,
 2026-08-01 comment): the grandchild's stdio is redirected to
 ``/dev/null`` before this module is ever imported, so anything this
-module does is PROVABLY INVISIBLE on screen. The durable JSONL append
-below is therefore the PRIMARY artifact, not a fallback -- readable
-later via ``nx census capability --session <id>`` or a direct read of
-the log.
+module does is PROVABLY INVISIBLE on screen. The durable write below is
+therefore the PRIMARY artifact, not a fallback -- readable later via
+``nx census capability --session <id>`` (nexus-gjv9b PART 1: this reads
+the ``capability_census`` engine table now, not the JSONL log below).
+
+WRITER SWAP (nexus-gjv9b PART 1, Sam directive 2026-08-20): the durable
+write target moved from the JSONL log below to the PG-backed
+``capability_census`` engine table -- see
+:func:`write_session_capability_census`'s own docstring for the full
+design decision (metered drop on service-down, never a JSONL fallback).
+The JSONL machinery (:func:`capability_census_log_path`,
+:func:`_rotate_log_if_oversized`, :func:`_is_duplicate_of_last_record`)
+below is UNCHANGED and still describes the log this module wrote before
+this swap -- it has no caller from this module any more, kept
+deliberately in place per this bead's PART 3 (deferred until the plugin
+pin advances: an install still running pre-swap code is a legacy JSONL
+writer this machinery still protects).
 
 A parent-side (post-fork) VISIBLE line was considered and rejected on
 cost grounds, not skipped for convenience: a full per-session capability
@@ -320,17 +333,45 @@ def build_capability_census_record(
 
 
 def write_session_capability_census(session_id: str | None = None) -> dict[str, Any] | None:
-    """Append one capability-census record to the durable JSONL log.
+    """Upsert one session's capability census to the engine (nexus-gjv9b
+    PART 1 writer swap — Sam directive 2026-08-20: leverage PG instead of
+    flat-file gymnastics).
 
-    Returns the record written, or ``None`` when no session id resolves
+    Returns the record built, or ``None`` when no session id resolves
     (nothing meaningful to census -- mirrors
     ``_print_service_tier_summary``'s own silent no-op in that case).
+    The RETURN VALUE reflects the census MEASUREMENT regardless of whether
+    the write below actually landed -- a metered-drop degradation is not a
+    measurement failure, and the caller (``_session_end_launcher
+    ._write_capability_census``) logs the record either way.
 
-    Does NOT swallow exceptions raised while measuring or writing --
-    that is the caller's job
-    (``_session_end_launcher._write_capability_census``), which wraps
-    this call and logs failures via structlog so a census bug can never
-    break SessionEnd cleanup.
+    DESIGN DECISION (this bead's own "decide at design time" instruction):
+    service-down degrades to a METERED DROP
+    (:func:`nexus.dropped_writes.record_drop`), never a JSONL fallback
+    append. The table's UPSERT-on-``(tenant_id, session_id)`` semantics
+    already collapse SessionEnd's many re-fires per session for free (no
+    client-side dedup-by-tail-read needed any more -- see
+    :func:`build_capability_census_record`'s docstring for the historical
+    duplicate-row problem this table structurally avoids), so there is no
+    reduced-but-still-useful JSONL half-measure to fall back to that would
+    not immediately re-introduce that exact problem. The rotation
+    machinery below (:func:`_rotate_log_if_oversized`,
+    :func:`_is_duplicate_of_last_record`) is INTENTIONALLY left in place
+    with no caller from this function any more -- PART 3 of this bead
+    defers its deletion until the plugin pin advances, because an
+    install still running PRE-nexus-gjv9b code is a legacy JSONL writer
+    this machinery still protects from unbounded growth in the interim.
+
+    BLINDSPOT-when-unmeasurable semantics survive unchanged: they are a
+    property of :func:`build_capability_census_record`'s MEASUREMENT
+    logic (independent of transport), not of how the record is written.
+
+    Does NOT swallow exceptions raised while MEASURING -- that remains
+    the caller's job (``_session_end_launcher._write_capability_census``),
+    which wraps this call and logs failures via structlog so a census bug
+    can never break SessionEnd cleanup. The WRITE half below, by
+    contrast, is entirely self-contained best-effort: a write failure
+    never propagates past this function.
     """
     from nexus.census import default_project_dir  # noqa: PLC0415 — deferred; only needed here
     from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred; only needed here
@@ -341,60 +382,55 @@ def write_session_capability_census(session_id: str | None = None) -> dict[str, 
 
     project_dir = default_project_dir()
     record = build_capability_census_record(project_dir, sid)
-
-    log_path = capability_census_log_path()
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        _rotate_log_if_oversized(log_path)
-    except Exception as exc:  # noqa: BLE001 — rotation is best-effort; the durable record below is not
-        # A rotation failure (anything beyond the FileNotFoundError race
-        # _rotate_log_if_oversized already tolerates internally -- e.g. a
-        # permission error on the rename, or on opening the rotate lock
-        # file) must never prevent the append. code-review Important #4
-        # (fix pass, 2026-08-20): a bare swallow here contradicted
-        # _rotate_log_if_oversized's own "stays diagnosable" promise --
-        # log it at debug level (matches
-        # ``_session_end_launcher._write_capability_census``'s identical
-        # discipline for its analogous failure case) so an environment
-        # whose rotation silently fails forever is still debuggable from
-        # the logs, not just from a growing file someone eventually
-        # notices.
-        try:
-            import structlog  # noqa: PLC0415 — deferred; only needed on this rare failure path
-
-            structlog.get_logger(__name__).debug(
-                "capability_census_rotation_failed",
-                error=str(exc),
-            )
-        except Exception:  # noqa: BLE001 — even the debug log is best-effort
-            pass
-    # nexus-h33x8 follow-on, 2026-08-22: SessionEnd fires MANY times per
-    # session (measured: 306 rows across 28 distinct sessions, one session
-    # alone accounting for 134 of them), so an unconditional append made ~91
-    # pct of this file duplicate rows and any naive aggregate over it
-    # overcount by ~2.2x. Skip the append when the newest record for THIS
-    # session is identical modulo its timestamp — a re-fire with no new
-    # activity has nothing to record.
-    #
-    # Deliberately a tail read, never a read-modify-write: the file is
-    # concurrency-safe by line-atomic append (see this module's docstring),
-    # and rewriting it is the exact bug class that docstring forbids. A
-    # re-fire that DID see new activity still appends, which is correct.
-    if _is_duplicate_of_last_record(log_path, record):
-        return record
-    with log_path.open("a", encoding="utf-8") as fh:
-        # code-review Important #2 (fix pass, 2026-08-20): ONE fh.write()
-        # call with the complete line (payload + newline), matching the
-        # codebase's own precedent for this exact append-log problem
-        # (conexus/hooks/scripts/routing/_lib.py::log_routing_event).
-        # Concurrent SessionEnd appenders from multiple Claude Code
-        # sessions can hit this file near-simultaneously; two separate
-        # write() calls relied on CPython's buffering happening to
-        # coalesce them into one OS-level write, an implementation
-        # detail rather than a guarantee against interleaved partial
-        # lines from another process.
-        fh.write(json.dumps(record, sort_keys=True) + "\n")
+    _post_capability_census(record)
     return record
+
+
+def _post_capability_census(record: dict[str, Any]) -> None:
+    """Best-effort HTTP write of *record* — single-attempt, hard 2s
+    timeout (matches ``_print_service_tier_summary``'s own precedent;
+    see :meth:`HttpTelemetryStore.record_capability_census`'s docstring
+    for why this bypasses the mixin's gateway-retry/re-resolve
+    composition). ANY failure — resolution, auth, network, an old engine
+    that 404s the route — degrades to a metered drop and returns; never
+    raises, never retries.
+    """
+    try:
+        from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred; only needed here
+        from nexus.db.service_endpoint import resolve_service_endpoint  # noqa: PLC0415 — deferred; only needed here
+        from nexus.db.t2._refreshable_client import DEFAULT_TENANT  # noqa: PLC0415 — deferred; only needed here
+        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred; only needed here
+
+        base_url, token = resolve_service_endpoint()
+        data_token = get_data_token_manager().bearer_for(base_url, DEFAULT_TENANT)
+        if data_token is not None:
+            token = data_token
+        store = HttpTelemetryStore(base_url=base_url, _token=token)
+        try:
+            store.record_capability_census(
+                session_id=record["session_id"],
+                ts=record["timestamp"],
+                blindspot=record["blindspot"],
+                unmeasurable_reason=record.get("unmeasurable_reason"),
+                capabilities=record.get("capabilities"),
+                dispatches=record.get("dispatches"),
+                total_calls=record.get("total_calls"),
+                timeout=2.0,
+            )
+        finally:
+            try:
+                store.close()
+            except Exception:  # noqa: BLE001 — best-effort close; never mask the write outcome
+                pass
+    except Exception as exc:  # noqa: BLE001 — best-effort write; degrade to a metered drop, never raise
+        try:
+            from nexus.dropped_writes import record_drop  # noqa: PLC0415 — deferred; only needed on this rare failure path
+
+            record_drop(
+                hook="capability_census", collection="", rows=1, error=str(exc)
+            )
+        except Exception:  # noqa: BLE001 — the meter is itself best-effort
+            pass
 
 
 def _is_duplicate_of_last_record(

@@ -50,6 +50,14 @@ Route mapping (matches TelemetryHandler Java):
     POST /v1/telemetry/index_failures/record        — record_index_failure (nexus-nukn3)
     POST /v1/telemetry/index_failures/record_batch  — record_index_failures_batch
     GET  /v1/telemetry/index_failures/list          — list_index_failures
+    POST /v1/telemetry/capability_census/record — record_capability_census (nexus-gjv9b
+                                           PART 1: upsert on (tenant_id, session_id))
+    GET  /v1/telemetry/capability_census/query  — query_capability_census
+    POST /v1/telemetry/routing_events/record    — record_routing_event (nexus-gjv9b
+                                           PART 2: NOT called by the routing hooks
+                                           themselves, which POST via urllib directly —
+                                           see that method's own docstring)
+    GET  /v1/telemetry/routing_events/list      — list_routing_events
 """
 
 from __future__ import annotations
@@ -1200,6 +1208,141 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             )
             present.extend(resp.get("present") or [])
         return present
+
+    # ── capability_census (nexus-gjv9b PART 1) ──────────────────────────────
+
+    def record_capability_census(
+        self,
+        *,
+        session_id: str,
+        ts: str,
+        blindspot: bool,
+        unmeasurable_reason: str | None = None,
+        capabilities: dict[str, int] | None = None,
+        dispatches: int | None = None,
+        total_calls: int | None = None,
+        timeout: float = 2.0,
+    ) -> None:
+        """Upsert one session's capability census. Calls
+        ``POST /v1/telemetry/capability_census/record``.
+
+        Single-attempt with a hard *timeout* (default 2.0s, matching
+        ``_print_service_tier_summary``'s own precedent) — this method is
+        called from the SessionEnd grandchild path
+        (``_session_end_census.write_session_capability_census``), which
+        has no retry budget to spend: any failure is the caller's cue to
+        fall back to a metered drop, never to retry. Bypasses the mixin's
+        gateway-retry/re-resolve composition the same way
+        :meth:`query_tier_writes_once` does for the identical reason.
+        """
+        import httpx  # noqa: PLC0415 — deferred import — only needed on this path
+
+        payload: dict[str, Any] = {
+            "session_id": session_id,
+            "ts":         ts,
+            "blindspot":  blindspot,
+        }
+        if blindspot:
+            payload["unmeasurable_reason"] = unmeasurable_reason or ""
+        else:
+            payload["capabilities"] = capabilities or {}
+            payload["dispatches"] = dispatches
+            payload["total_calls"] = total_calls
+        resp = self._client.request(
+            "POST",
+            self._base_url + "/v1/telemetry/capability_census/record",
+            headers=self._auth_headers(),
+            json=payload,
+            timeout=httpx.Timeout(timeout),
+        )
+        resp.raise_for_status()
+
+    def query_capability_census(
+        self,
+        *,
+        session_id: str | None = None,
+        since: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Read capability_census rows, newest first — the read half of
+        ``nx census capability`` (nexus-gjv9b PART 1, S11 doctrine). Calls
+        ``GET /v1/telemetry/capability_census/query``.
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if session_id:
+            params["session_id"] = session_id
+        elif since:
+            params["since"] = normalize_since_filter(since)
+        resp = self._get("/v1/telemetry/capability_census/query", params=params)
+        if not isinstance(resp, dict):  # defensive: a stripped proxy response
+            return []
+        return list(resp.get("rows") or [])
+
+    # ── routing_events (nexus-gjv9b PART 2) ─────────────────────────────────
+
+    def record_routing_event(
+        self,
+        *,
+        rule: str,
+        outcome: str,
+        ts: str = "",
+        session_id: str = "",
+        tool_name: str = "",
+        command_fragment: str = "",
+        escape_reason: str = "",
+        timeout: float = 0.25,
+    ) -> None:
+        """Append one routing-hook event. Calls
+        ``POST /v1/telemetry/routing_events/record``.
+
+        NOTE: this method exists for in-process callers that already hold
+        an :class:`HttpTelemetryStore` (e.g. ``nx hook routing-stats``
+        replaying events, or a future non-hook writer). The routing hooks
+        THEMSELVES (``conexus/hooks/scripts/routing/_lib.py``) are
+        standalone scripts with no ``nexus`` import (RDR-121 § Contract)
+        and POST to the same route directly via ``urllib`` — they cannot
+        call this method. Single-attempt with a hard *timeout* (default
+        0.25s — the routing-hook latency budget); any failure is the
+        caller's cue to drop, never to retry, same discipline as
+        :meth:`record_capability_census`.
+        """
+        import httpx  # noqa: PLC0415 — deferred import — only needed on this path
+
+        payload: dict[str, Any] = {
+            "rule":             rule,
+            "outcome":          outcome,
+            "ts":               ts,
+            "session_id":       session_id,
+            "tool_name":        tool_name,
+            "command_fragment": command_fragment,
+            "escape_reason":    escape_reason,
+        }
+        resp = self._client.request(
+            "POST",
+            self._base_url + "/v1/telemetry/routing_events/record",
+            headers=self._auth_headers(),
+            json=payload,
+            timeout=httpx.Timeout(timeout),
+        )
+        resp.raise_for_status()
+
+    def list_routing_events(
+        self,
+        *,
+        since: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Read routing_events rows, newest first — the read half of
+        :mod:`nexus.routing_stats` (nexus-gjv9b PART 2, S11 doctrine). Calls
+        ``GET /v1/telemetry/routing_events/list``.
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if since:
+            params["since"] = normalize_since_filter(since)
+        resp = self._get("/v1/telemetry/routing_events/list", params=params)
+        if not isinstance(resp, dict):  # defensive: a stripped proxy response
+            return []
+        return list(resp.get("rows") or [])
 
 
 def tier_writes_read_failure_message(exc: Exception) -> str:

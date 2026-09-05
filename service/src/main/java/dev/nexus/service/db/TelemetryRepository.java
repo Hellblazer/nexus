@@ -1933,4 +1933,243 @@ public final class TelemetryRepository {
             return Optional.<Map<String, Object>>of(result);
         });
     }
+
+    // ── capability_census (nexus-gjv9b PART 1) ──────────────────────────────────
+
+    /**
+     * Upsert one session's capability census (live write path).
+     *
+     * <p>The capability vocabulary this table stamps one column per —
+     * {@code skill}, {@code agent}, {@code serena}, {@code nx_answer},
+     * {@code search_query}, {@code other_nx_mcp}, {@code baseline},
+     * {@code other} — matches {@code nexus.census.CAPABILITIES}
+     * (src/nexus/_session_end_census.py) exactly. A {@code capabilities}
+     * key outside this set is silently ignored rather than rejected: the
+     * census client is the sole writer and this repository must not
+     * become a second place that has to be updated in lockstep with the
+     * client's own tuple every time a capability is added or renamed.
+     *
+     * <p>UPSERT on {@code (tenant_id, session_id)} — unlike every other
+     * table in this repository, this is not an event log: SessionEnd fires
+     * many times per session (measured: 306 rows across 28 sessions in the
+     * JSONL era, one session alone 134 of them — see
+     * {@code _session_end_census.py}'s follow-on note), and the LATEST
+     * measurement for a session is simply what this table should hold, no
+     * dedup-by-tail-read needed client-side any more.
+     *
+     * @param blindspot true for an unmeasurable-transcript record; when
+     *     true, {@code capabilities}/{@code dispatches}/{@code totalCalls}
+     *     are stored NULL (nothing was measured), never a fabricated zero.
+     * @param capabilities per-capability call counts, keyed by the
+     *     8-value vocabulary named above; ignored entirely when
+     *     {@code blindspot} is true.
+     */
+    public void recordCapabilityCensus(String tenant,
+                                       String sessionId,
+                                       String tsIso,
+                                       boolean blindspot,
+                                       String unmeasurableReason,
+                                       Map<String, Integer> capabilities,
+                                       Integer dispatches,
+                                       Integer totalCalls) {
+        OffsetDateTime ts = tsIso != null && !tsIso.isBlank()
+            ? parseTs(tsIso) : OffsetDateTime.now(ZoneOffset.UTC);
+        Map<String, Integer> caps = blindspot || capabilities == null ? Map.of() : capabilities;
+        tenantScope.withTenant(tenant, ctx -> {
+            var insert = ctx.insertInto(CAPABILITY_CENSUS)
+                .set(CAPABILITY_CENSUS.TENANT_ID, tenant)
+                .set(CAPABILITY_CENSUS.SESSION_ID, sessionId)
+                .set(CAPABILITY_CENSUS.TS, ts)
+                .set(CAPABILITY_CENSUS.BLINDSPOT, blindspot)
+                .set(CAPABILITY_CENSUS.UNMEASURABLE_REASON, blindspot ? str(unmeasurableReason) : null)
+                .set(CAPABILITY_CENSUS.CAP_SKILL, caps.get("skill"))
+                .set(CAPABILITY_CENSUS.CAP_AGENT, caps.get("agent"))
+                .set(CAPABILITY_CENSUS.CAP_SERENA, caps.get("serena"))
+                .set(CAPABILITY_CENSUS.CAP_NX_ANSWER, caps.get("nx_answer"))
+                .set(CAPABILITY_CENSUS.CAP_SEARCH_QUERY, caps.get("search_query"))
+                .set(CAPABILITY_CENSUS.CAP_OTHER_NX_MCP, caps.get("other_nx_mcp"))
+                .set(CAPABILITY_CENSUS.CAP_BASELINE, caps.get("baseline"))
+                .set(CAPABILITY_CENSUS.CAP_OTHER, caps.get("other"))
+                .set(CAPABILITY_CENSUS.DISPATCHES, blindspot ? null : dispatches)
+                .set(CAPABILITY_CENSUS.TOTAL_CALLS, blindspot ? null : totalCalls);
+            insert.onConflict(CAPABILITY_CENSUS.TENANT_ID, CAPABILITY_CENSUS.SESSION_ID)
+                .doUpdate()
+                .set(CAPABILITY_CENSUS.TS, field(name("excluded", "ts"), OffsetDateTime.class))
+                .set(CAPABILITY_CENSUS.BLINDSPOT, field(name("excluded", "blindspot"), Boolean.class))
+                .set(CAPABILITY_CENSUS.UNMEASURABLE_REASON, field(name("excluded", "unmeasurable_reason"), String.class))
+                .set(CAPABILITY_CENSUS.CAP_SKILL, field(name("excluded", "cap_skill"), Integer.class))
+                .set(CAPABILITY_CENSUS.CAP_AGENT, field(name("excluded", "cap_agent"), Integer.class))
+                .set(CAPABILITY_CENSUS.CAP_SERENA, field(name("excluded", "cap_serena"), Integer.class))
+                .set(CAPABILITY_CENSUS.CAP_NX_ANSWER, field(name("excluded", "cap_nx_answer"), Integer.class))
+                .set(CAPABILITY_CENSUS.CAP_SEARCH_QUERY, field(name("excluded", "cap_search_query"), Integer.class))
+                .set(CAPABILITY_CENSUS.CAP_OTHER_NX_MCP, field(name("excluded", "cap_other_nx_mcp"), Integer.class))
+                .set(CAPABILITY_CENSUS.CAP_BASELINE, field(name("excluded", "cap_baseline"), Integer.class))
+                .set(CAPABILITY_CENSUS.CAP_OTHER, field(name("excluded", "cap_other"), Integer.class))
+                .set(CAPABILITY_CENSUS.DISPATCHES, field(name("excluded", "dispatches"), Integer.class))
+                .set(CAPABILITY_CENSUS.TOTAL_CALLS, field(name("excluded", "total_calls"), Integer.class))
+                .execute();
+            return null;
+        });
+    }
+
+    /**
+     * Read capability_census rows, newest first (nx census capability
+     * --from-store). Filter precedence: {@code sessionId} (exact match, at
+     * most one row) &gt; {@code sinceIso} (ts &gt;= filter) &gt; no filter (all
+     * rows for the tenant, capped by {@code limit}).
+     */
+    public List<Map<String, Object>> queryCapabilityCensus(String tenant,
+                                                            String sessionId,
+                                                            String sinceIso,
+                                                            int limit) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var cond = noCondition();
+            if (sessionId != null && !sessionId.isEmpty()) {
+                cond = CAPABILITY_CENSUS.SESSION_ID.eq(sessionId);
+            } else if (sinceIso != null && !sinceIso.isEmpty()) {
+                cond = CAPABILITY_CENSUS.TS.ge(parseSinceFilter(sinceIso));
+            }
+            return ctx.select(
+                    CAPABILITY_CENSUS.SESSION_ID, CAPABILITY_CENSUS.TS,
+                    CAPABILITY_CENSUS.BLINDSPOT, CAPABILITY_CENSUS.UNMEASURABLE_REASON,
+                    CAPABILITY_CENSUS.CAP_SKILL, CAPABILITY_CENSUS.CAP_AGENT,
+                    CAPABILITY_CENSUS.CAP_SERENA, CAPABILITY_CENSUS.CAP_NX_ANSWER,
+                    CAPABILITY_CENSUS.CAP_SEARCH_QUERY, CAPABILITY_CENSUS.CAP_OTHER_NX_MCP,
+                    CAPABILITY_CENSUS.CAP_BASELINE, CAPABILITY_CENSUS.CAP_OTHER,
+                    CAPABILITY_CENSUS.DISPATCHES, CAPABILITY_CENSUS.TOTAL_CALLS)
+                .from(CAPABILITY_CENSUS)
+                .where(cond)
+                .orderBy(CAPABILITY_CENSUS.TS.desc())
+                .limit(limit)
+                .fetch()
+                .map(r -> {
+                    var caps = new java.util.LinkedHashMap<String, Object>();
+                    caps.put("skill",        r.value5());
+                    caps.put("agent",        r.value6());
+                    caps.put("serena",       r.value7());
+                    caps.put("nx_answer",    r.value8());
+                    caps.put("search_query", r.value9());
+                    caps.put("other_nx_mcp", r.value10());
+                    caps.put("baseline",     r.value11());
+                    caps.put("other",        r.value12());
+                    var row = new java.util.LinkedHashMap<String, Object>();
+                    row.put("session_id",          r.value1());
+                    row.put("ts",                  r.value2().toString());
+                    row.put("blindspot",           r.value3());
+                    row.put("unmeasurable_reason", r.value4());
+                    row.put("capabilities",        caps);
+                    row.put("dispatches",          r.value13());
+                    row.put("total_calls",         r.value14());
+                    return (Map<String, Object>) row;
+                });
+        });
+    }
+
+    // ── routing_events (nexus-gjv9b PART 2) ─────────────────────────────────────
+
+    /**
+     * Append one routing-hook event (live write path — event log, never an
+     * upsert: a hook firing is a genuinely distinct event every time,
+     * unlike capability_census's one-row-per-session collapse above).
+     */
+    public void recordRoutingEvent(String tenant,
+                                   String tsIso,
+                                   String sessionId,
+                                   String rule,
+                                   String outcome,
+                                   String toolName,
+                                   String commandFragment,
+                                   String escapeReason) {
+        OffsetDateTime ts = tsIso != null && !tsIso.isBlank()
+            ? parseTs(tsIso) : OffsetDateTime.now(ZoneOffset.UTC);
+        tenantScope.withTenant(tenant, ctx -> {
+            ctx.insertInto(ROUTING_EVENTS)
+                .set(ROUTING_EVENTS.TENANT_ID, tenant)
+                .set(ROUTING_EVENTS.TS, ts)
+                .set(ROUTING_EVENTS.SESSION_ID, str(sessionId))
+                .set(ROUTING_EVENTS.RULE, rule)
+                .set(ROUTING_EVENTS.OUTCOME, outcome)
+                .set(ROUTING_EVENTS.TOOL_NAME, str(toolName))
+                .set(ROUTING_EVENTS.COMMAND_FRAGMENT, str(commandFragment))
+                .set(ROUTING_EVENTS.ESCAPE_REASON, str(escapeReason))
+                .execute();
+            return null;
+        });
+    }
+
+    /** One routing event within a batch — see {@link #recordRoutingEventsBatch}. */
+    public record RoutingEventInput(String tsIso,
+                                    String sessionId,
+                                    String rule,
+                                    String outcome,
+                                    String toolName,
+                                    String commandFragment,
+                                    String escapeReason) {}
+
+    /**
+     * Append a batch of routing-hook events in one round trip. Returns the
+     * number of rows inserted (always {@code events.size()} — no conflict
+     * target to skip on).
+     */
+    public int recordRoutingEventsBatch(String tenant, List<RoutingEventInput> events) {
+        if (events.isEmpty()) {
+            return 0;
+        }
+        return tenantScope.withTenant(tenant, ctx -> {
+            var batch = ctx.batch(
+                events.stream().map(e -> {
+                    OffsetDateTime ts = e.tsIso() != null && !e.tsIso().isBlank()
+                        ? parseTs(e.tsIso()) : OffsetDateTime.now(ZoneOffset.UTC);
+                    return ctx.insertInto(ROUTING_EVENTS)
+                        .set(ROUTING_EVENTS.TENANT_ID, tenant)
+                        .set(ROUTING_EVENTS.TS, ts)
+                        .set(ROUTING_EVENTS.SESSION_ID, str(e.sessionId()))
+                        .set(ROUTING_EVENTS.RULE, e.rule())
+                        .set(ROUTING_EVENTS.OUTCOME, e.outcome())
+                        .set(ROUTING_EVENTS.TOOL_NAME, str(e.toolName()))
+                        .set(ROUTING_EVENTS.COMMAND_FRAGMENT, str(e.commandFragment()))
+                        .set(ROUTING_EVENTS.ESCAPE_REASON, str(e.escapeReason()));
+                }).toList()
+            ).execute();
+            int inserted = 0;
+            for (int n : batch) {
+                inserted += Math.max(n, 0);
+            }
+            return inserted;
+        });
+    }
+
+    /**
+     * List routing events, newest first — the read half of
+     * {@code nexus.routing_stats.aggregate}/{@code escape_events} (nexus-
+     * gjv9b PART 2, S11 doctrine). {@code sinceIso} filters {@code ts &gt;=
+     * filter}; empty/blank means no time bound. {@code limit} caps the
+     * page (aggregation over a capped page is a caller concern — the
+     * historical JSONL reader had no cap at all, since the rotated file
+     * bounded its own size instead).
+     */
+    public List<Map<String, Object>> listRoutingEvents(String tenant, String sinceIso, int limit) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var cond = (sinceIso != null && !sinceIso.isEmpty())
+                ? ROUTING_EVENTS.TS.ge(parseSinceFilter(sinceIso))
+                : noCondition();
+            return ctx.select(
+                    ROUTING_EVENTS.TS, ROUTING_EVENTS.SESSION_ID, ROUTING_EVENTS.RULE,
+                    ROUTING_EVENTS.OUTCOME, ROUTING_EVENTS.TOOL_NAME,
+                    ROUTING_EVENTS.COMMAND_FRAGMENT, ROUTING_EVENTS.ESCAPE_REASON)
+                .from(ROUTING_EVENTS)
+                .where(cond)
+                .orderBy(ROUTING_EVENTS.TS.desc())
+                .limit(limit)
+                .fetch()
+                .map(r -> Map.<String, Object>of(
+                    "ts",               r.value1().toString(),
+                    "session_id",       r.value2(),
+                    "rule",             r.value3(),
+                    "outcome",          r.value4(),
+                    "tool_name",        r.value5(),
+                    "command_fragment", r.value6(),
+                    "escape_reason",    r.value7()));
+        });
+    }
 }

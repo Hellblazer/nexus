@@ -40,18 +40,39 @@ def census_group() -> None:
     default=False,
     help="Emit JSON (carries per-tool counts) instead of the human table.",
 )
+@click.option(
+    "--from-store",
+    is_flag=True,
+    default=False,
+    help="Read the durable capability_census engine table (written at every "
+    "SessionEnd, nexus-gjv9b PART 1) instead of re-parsing transcripts. "
+    "Reuses --session/--since/--json; --project-dir is ignored.",
+)
 def capability_cmd(
     session: str | None,
     since: str | None,
     project_dir: str | None,
     as_json: bool,
+    from_store: bool,
 ) -> None:
     """Count tool calls per capability, split orchestrator vs subagent.
 
     Exits non-zero when the run measured *nothing* — an empty, corrupt,
     or tool-call-free scope reports UNMEASURABLE rather than a clean
     zero. A zero row in a measurable run is a real zero.
+
+    ``--from-store`` reads a fundamentally different artifact: the
+    already-measured ``capability_census`` engine table (nexus-gjv9b
+    PART 1's replacement for ``capability_census.jsonl``), never a fresh
+    transcript walk — so it carries no UNMEASURABLE/BLINDSPOT distinction
+    of its own; a session absent from the table is reported as absent,
+    and a ``blindspot`` row (the transcript WAS unmeasurable at the time
+    it was recorded) is surfaced verbatim.
     """
+    if from_store:
+        _capability_from_store(session=session, since=since, as_json=as_json)
+        return
+
     import pathlib as _pathlib  # noqa: PLC0415 — stdlib deferred to subcommand scope
 
     from nexus.census import (  # noqa: PLC0415 — deferred; census only needed here
@@ -66,6 +87,51 @@ def capability_cmd(
     click.echo(to_json(result) if as_json else render_text(result), nl=False)
     if result.exit_code:
         raise SystemExit(result.exit_code)
+
+
+def _capability_from_store(*, session: str | None, since: str | None, as_json: bool) -> None:
+    """The store-backed reader half of ``nx census capability
+    --from-store`` (nexus-gjv9b PART 1, S11 doctrine: no writer ships
+    without its reader). Normal HttpTelemetryStore construction (full
+    resolve/retry mixin) — this is an interactive CLI command, not the
+    SessionEnd hot path, so there is no reason to bypass it the way
+    ``_print_service_tier_summary``'s single-attempt read does.
+    """
+    import json as _json  # noqa: PLC0415 — stdlib deferred to subcommand scope
+
+    try:
+        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred; only needed here
+
+        store = HttpTelemetryStore()
+        try:
+            rows = store.query_capability_census(session_id=session, since=since, limit=100)
+        finally:
+            store.close()
+    except Exception as exc:  # noqa: BLE001 — boundary catch; degrade to an honest, non-zero-exit message
+        click.echo(f"UNAVAILABLE: capability_census read failed: {exc}", nl=True)
+        raise SystemExit(1) from exc
+
+    if as_json:
+        click.echo(_json.dumps({"rows": rows}, sort_keys=True))
+        return
+
+    if not rows:
+        click.echo("No capability_census rows found for the given filter.")
+        return
+
+    lines = []
+    for row in rows:
+        header = f"session={row.get('session_id')} ts={row.get('ts')}"
+        if row.get("blindspot"):
+            lines.append(f"{header} BLINDSPOT reason={row.get('unmeasurable_reason')}")
+            continue
+        caps = row.get("capabilities") or {}
+        cap_str = " ".join(f"{k}={v}" for k, v in caps.items())
+        lines.append(
+            f"{header} total_calls={row.get('total_calls')} "
+            f"dispatches={row.get('dispatches')} {cap_str}"
+        )
+    click.echo("\n".join(lines))
 
 
 @census_group.command("dispatches")

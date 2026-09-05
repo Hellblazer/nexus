@@ -69,8 +69,9 @@ def _run_session_end_synchronously() -> None:
     as of 4.13.0); calling stop_t1_server here would race those paths
     and was the documented source of double-stop failures.
 
-    nexus-h33x8.3: also appends this session's capability census to the
-    durable JSONL log, in its own failure-isolated step -- a census bug
+    nexus-h33x8.3: also records this session's capability census (nexus-
+    gjv9b PART 1: to the ``capability_census`` engine table now, not a
+    JSONL log), in its own failure-isolated step -- a census bug
     must never prevent (or be prevented by) the storage flush above.
     This is the ONLY place the census writer runs: the grandchild's
     stdio is already redirected to /dev/null by the time this function

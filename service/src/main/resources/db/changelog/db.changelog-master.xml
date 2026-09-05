@@ -1065,6 +1065,25 @@
          own <include> comments for the identical reasoning). -->
     <include file="db/changelog/telemetry-009-index-failures.xml"/>
 
+    <!-- nexus-gjv9b PART 1 (Sam directive 2026-08-20, h33x8.3 rotation
+         review) — capability_census: PG home for the per-session
+         capability census, replacing capability_census.jsonl. Depends on
+         no other changeset. Placed after telemetry-009-index-failures.xml
+         (current tail, nexus-nukn3) and before the grants-nexus-svc.xml
+         runAlways block, matching the established late-append convention
+         (D0.1). Renumbered from telemetry-009 to telemetry-010 on rebase
+         (nexus-nukn3 claimed telemetry-009-index-failures.xml first). -->
+    <include file="db/changelog/telemetry-010-capability-census.xml"/>
+
+    <!-- nexus-gjv9b PART 2 (same Sam directive) — routing_events: PG home
+         for the RDR-121 routing-hook telemetry log, replacing
+         routing_log.jsonl. Depends on no other changeset. Placed after
+         telemetry-010-capability-census.xml (current tail) and before the
+         grants-nexus-svc.xml runAlways block, matching the established
+         late-append convention (D0.1). Renumbered from telemetry-010 to
+         telemetry-011 on the same rebase. -->
+    <include file="db/changelog/telemetry-011-routing-events.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

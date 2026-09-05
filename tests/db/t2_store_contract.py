@@ -346,6 +346,23 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         'record_index_failure': ['run_id', 'file_path', 'error_class', 'error', 'occurred_at'],
         'record_index_failures_batch': ['rows', 'run_id'],
         'list_index_failures': ['run_id', 'days', 'limit'],
+        # nexus-gjv9b PART 1: capability_census replaces
+        # ~/.config/nexus/capability_census.jsonl (Sam directive
+        # 2026-08-20) — service-only by construction, no SQLite twin ever
+        # existed for a table that did not exist until this bead.
+        'record_capability_census': [
+            'session_id', 'ts', 'blindspot', 'unmeasurable_reason',
+            'capabilities', 'dispatches', 'total_calls', 'timeout',
+        ],
+        'query_capability_census': ['session_id', 'since', 'limit'],
+        # nexus-gjv9b PART 2: routing_events replaces
+        # ~/.config/nexus/routing_log.jsonl (same Sam directive) —
+        # service-only by construction, same no-twin shape.
+        'record_routing_event': [
+            'rule', 'outcome', 'ts', 'session_id', 'tool_name',
+            'command_fragment', 'escape_reason', 'timeout',
+        ],
+        'list_routing_events': ['since', 'limit'],
     },
 }
 

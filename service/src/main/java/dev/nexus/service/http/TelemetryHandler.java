@@ -57,6 +57,12 @@ import java.util.Map;
  *   POST /v1/telemetry/import                  fidelity ETL for all 6 tables
  *   POST /v1/telemetry/import_batch             bulk fidelity ETL for one table
  *   POST /v1/telemetry/ids/probe                membership probe (verify-fill inner loop)
+ *   POST /v1/telemetry/capability_census/record upsert one session's capability census
+ *                                                (nexus-gjv9b PART 1)
+ *   GET  /v1/telemetry/capability_census/query  read capability_census rows, newest first
+ *   POST /v1/telemetry/routing_events/record    append one routing-hook event (nexus-gjv9b PART 2)
+ *   POST /v1/telemetry/routing_events/batch     append a batch of routing-hook events
+ *   GET  /v1/telemetry/routing_events/list      read routing_events rows, newest first
  * </pre>
  *
  * <p>All endpoints require {@code Authorization: Bearer <token>} (via {@link AuthFilter})
@@ -137,6 +143,11 @@ public final class TelemetryHandler implements HttpHandler {
                 case "/import"                 -> handleImport(exchange, tenant, method);
                 case "/import_batch"           -> handleImportBatch(exchange, tenant, method);
                 case "/ids/probe"               -> handleIdsProbe(exchange, tenant, method);
+                case "/capability_census/record" -> handleCapabilityCensusRecord(exchange, tenant, method);
+                case "/capability_census/query"  -> handleCapabilityCensusQuery(exchange, tenant, method);
+                case "/routing_events/record"    -> handleRoutingEventRecord(exchange, tenant, method);
+                case "/routing_events/batch"     -> handleRoutingEventsBatch(exchange, tenant, method);
+                case "/routing_events/list"      -> handleRoutingEventsList(exchange, tenant, method);
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
         } catch (IllegalArgumentException e) {
@@ -565,6 +576,121 @@ public final class TelemetryHandler implements HttpHandler {
         int days  = parseIntParam(params, "days", 0);
         int limit = parseIntParam(params, "limit", 100);
         HttpUtil.send(ex, 200, json(repo.getIndexFailures(tenant, runId, days, limit)));
+    }
+
+    // ── capability_census (nexus-gjv9b PART 1) ──────────────────────────────────
+
+    /**
+     * POST /v1/telemetry/capability_census/record — upsert on
+     * {@code (tenant_id, session_id)}. {@code capabilities} is an object
+     * keyed by the 8-value vocabulary ({@code skill}, {@code agent},
+     * {@code serena}, {@code nx_answer}, {@code search_query},
+     * {@code other_nx_mcp}, {@code baseline}, {@code other}); omitted
+     * entirely (or {@code null}) on a {@code blindspot=true} record, which
+     * this handler never rejects — a census that could not measure the
+     * transcript still records THAT fact.
+     */
+    private void handleCapabilityCensusRecord(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        String sessionId = requireString(body, "session_id");
+        String ts        = optStr(body, "ts");
+        boolean blindspot = Boolean.TRUE.equals(body.get("blindspot"));
+        String unmeasurableReason = optStrNull(body, "unmeasurable_reason");
+        Map<String, Integer> capabilities = new java.util.LinkedHashMap<>();
+        Object rawCaps = body.get("capabilities");
+        if (rawCaps instanceof Map<?, ?> m) {
+            for (var e : m.entrySet()) {
+                if (e.getKey() instanceof String k && e.getValue() instanceof Number n) {
+                    capabilities.put(k, n.intValue());
+                }
+            }
+        }
+        Integer dispatches = optInt(body, "dispatches");
+        Integer totalCalls = optInt(body, "total_calls");
+        repo.recordCapabilityCensus(tenant, sessionId, ts, blindspot, unmeasurableReason,
+            capabilities, dispatches, totalCalls);
+        HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    /**
+     * GET /v1/telemetry/capability_census/query — the read half of
+     * {@code nx census capability --from-store}. {@code ?session_id=}
+     * returns at most one row; else {@code ?since=} bounds by {@code ts};
+     * else every row for the tenant, capped by {@code ?limit=} (default
+     * 100).
+     */
+    private void handleCapabilityCensusQuery(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        var params = queryParams(ex);
+        String sessionId = params.getOrDefault("session_id", "");
+        String since      = params.getOrDefault("since", "");
+        int limit = parseIntParam(params, "limit", 100);
+        HttpUtil.send(ex, 200, json(Map.of("rows", repo.queryCapabilityCensus(tenant, sessionId, since, limit))));
+    }
+
+    // ── routing_events (nexus-gjv9b PART 2) ─────────────────────────────────────
+
+    /**
+     * POST /v1/telemetry/routing_events/record — append one routing-hook
+     * event. Called by the standalone (no-nexus-import) routing hooks via
+     * urllib with a short (~250ms) timeout; a failure here is the caller's
+     * cue to fall back to a metered local drop, never to retry.
+     */
+    private void handleRoutingEventRecord(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        String ts               = optStr(body, "ts");
+        String sessionId        = optStr(body, "session_id");
+        String rule             = requireString(body, "rule");
+        String outcome          = requireString(body, "outcome");
+        String toolName         = optStr(body, "tool_name");
+        String commandFragment  = optStr(body, "command_fragment");
+        String escapeReason     = optStr(body, "escape_reason");
+        repo.recordRoutingEvent(tenant, ts, sessionId, rule, outcome, toolName, commandFragment, escapeReason);
+        HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    /**
+     * POST /v1/telemetry/routing_events/batch — {@code {events: [...]}},
+     * each entry shaped like the single-event body above. Returns
+     * {@code {inserted: N}}.
+     */
+    private void handleRoutingEventsBatch(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        Object rawEvents = body.get("events");
+        var events = new ArrayList<TelemetryRepository.RoutingEventInput>();
+        if (rawEvents instanceof List<?> list) {
+            for (Object o : list) {
+                if (!(o instanceof Map<?, ?> m)) continue;
+                @SuppressWarnings("unchecked")
+                Map<String, Object> e = (Map<String, Object>) m;
+                events.add(new TelemetryRepository.RoutingEventInput(
+                    optStr(e, "ts"), optStr(e, "session_id"),
+                    requireString(e, "rule"), requireString(e, "outcome"),
+                    optStr(e, "tool_name"), optStr(e, "command_fragment"),
+                    optStr(e, "escape_reason")));
+            }
+        }
+        int inserted = repo.recordRoutingEventsBatch(tenant, events);
+        HttpUtil.send(ex, 200, json(Map.of("inserted", inserted)));
+    }
+
+    /**
+     * GET /v1/telemetry/routing_events/list — the read half of
+     * {@code nexus.routing_stats.aggregate}/{@code escape_events}
+     * (nexus-gjv9b PART 2). {@code ?since=} bounds by {@code ts};
+     * {@code ?limit=} caps the page (default 1000 — routing-hook events
+     * fire far more often than hook_failures/tier_writes, and a soak
+     * review reads the whole recent window at once).
+     */
+    private void handleRoutingEventsList(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        var params = queryParams(ex);
+        String since = params.getOrDefault("since", "");
+        int limit = parseIntParam(params, "limit", 1000);
+        HttpUtil.send(ex, 200, json(Map.of("rows", repo.listRoutingEvents(tenant, since, limit))));
     }
 
     // ── frecency ───────────────────────────────────────────────────────────────

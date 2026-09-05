@@ -2077,7 +2077,7 @@ Hooks run `nx index repo` in the background after each qualifying git operation,
 The `nx hook` group (hidden from `nx --help`) hosts Claude Code lifecycle plumbing: `session-start`, `session-end`, `session-end-flush`, and `session-end-detach` are invoked by the conexus plugin's SessionStart/SessionEnd hooks with a JSON payload on stdin and are not intended for manual use. `routing-stats` is the group's one operator-facing verb.
 
 ```
-nx hook routing-stats [--log-path PATH] [--json]
+nx hook routing-stats [--log-path PATH] [--json] [--escapes] [--from-store] [--since ISO_DATE]
 ```
 
 Aggregates the per-rule JSONL log written by the RDR-121 routing-hook
@@ -2090,6 +2090,8 @@ escape-rate per rule.
 | `--log-path PATH` | Read from this path instead of the default |
 | `--json` | Emit aggregated stats as JSON instead of a table |
 | `--escapes` | List escape events with their `# routing-allow:` reasons (the escape-audit surface); combines with `--json` |
+| `--from-store` | Read the durable `routing_events` engine table (nexus-gjv9b PART 2's replacement for the JSONL log) instead; `--log-path` is ignored |
+| `--since ISO_DATE` | With `--from-store`: only events at or after this date/datetime |
 
 JSON output shape (nexus-mzvwa.9): `{"rules": {<rule>: {...}}, "selftest_excluded": N,
 "unregistered_rules": [...]}` — `unregistered_rules` present only when a
@@ -2104,6 +2106,19 @@ Default log path resolves to `$NX_ROUTING_LOG_PATH`, falling back to
 `~/.config/nexus/routing_log.jsonl`. Used at the 30-day soak review
 (RDR-121 §Phase 4) to spot false positives (high escape rate), inert
 matchers (zero fires), or overly broad blocks (high block rate).
+
+**Writer swap (nexus-gjv9b PART 2, 2026-09):** the routing hooks record
+to the engine's `routing_events` table now (best-effort, ~250ms POST via
+`urllib`, no `nexus` import — see `conexus/hooks/scripts/routing/_lib.py`'s
+`log_routing_event`), not the JSONL log this command reads by default. Use
+`--from-store` to read the table instead — an unreachable service exits
+non-zero with `UNAVAILABLE: <reason>`, never a fabricated empty report. A
+routing event that could not reach the engine (service down, or an
+`NX_SERVICE_HOST`/`PORT`/`TOKEN`-less session — the common case for a
+plain interactive terminal) is counted in `nx doctor`'s drop meter
+(`nexus.dropped_writes`, `hook="routing_events"`), never appended to the
+JSONL log — that machinery stays in place only to protect installs still
+running pre-swap code, until this bead's deferred PART 3 removes it.
 
 ---
 
@@ -3739,7 +3754,7 @@ output — "SAME QUERIES, SAME BUCKETS, EVERY TIME" (playbook §4.5).
 ## nx census
 
 ```
-nx census capability [--session SESSION_ID] [--since ISO_DATE] [--project-dir PATH] [--json]
+nx census capability [--session SESSION_ID] [--since ISO_DATE] [--project-dir PATH] [--json] [--from-store]
 ```
 
 Counts tool calls per capability across Claude Code session transcripts, split **orchestrator vs subagent** (nexus-h33x8.1). Buckets are `skill`, `agent`, `serena`, `nx_answer`, `search_query`, `other_nx_mcp`, `baseline` (Bash/Read/Edit/Write), `other`.
@@ -3755,6 +3770,8 @@ The split is the point, not a detail: the same instruction delivered at Subagent
 **Exits non-zero when the run measured *nothing*.** An empty, unreadable, unparseable, or tool-call-free scope reports `UNMEASURABLE` with a reason rather than a clean zero; a zero row inside a measurable run is a real zero. Sessions that legitimately carry no tool call are the majority of transcripts — they are counted, listed by reason, and reported as a share, but they do not fail the run. The exit code answers "did this measure anything at all", **not** "is this corpus healthy"; a caller needing a health threshold must read `unmeasurable_share`, not `$?`.
 
 **It reports counts and refuses a verdict.** Non-use of a capability may be a forgotten affordance or a correct rejection, and nothing in the transcript distinguishes them; `--json` carries a `verdict: null` field and per-tool counts so narrower slices stay derivable. The refusal governs what this command renders — it is not, and cannot be, an enforcement boundary against verdicts computed downstream from these numbers.
+
+**`--from-store`** (nexus-gjv9b PART 1) reads the durable `capability_census` engine table instead of re-parsing transcripts — the table every SessionEnd hook upserts to now, replacing the retired `capability_census.jsonl` writer. Reuses `--session`/`--since`/`--json`; `--project-dir` is ignored (there is no transcript walk on this path). A row's `blindspot`/`unmeasurable_reason` are surfaced verbatim from whatever the writing session recorded — this flag reads an already-measured artifact, so it carries no UNMEASURABLE-vs-zero distinction of its own; a session absent from the table is reported as absent, and a service-unreachable read exits non-zero with `UNAVAILABLE: <reason>`.
 
 ```
 nx census dispatches [--session SESSION_ID] [--project-dir PATH] [--json]

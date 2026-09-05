@@ -214,11 +214,20 @@ class TestBuildCapabilityCensusRecord:
 
 
 class TestWriteSessionCapabilityCensus:
-    def test_appends_record_to_durable_jsonl(
+    """nexus-gjv9b PART 1 writer swap: the durable write target moved from
+    the JSONL log to the PG-backed ``capability_census`` engine table.
+    These tests exercise :func:`write_session_capability_census`'s two
+    halves at the seam (``_post_capability_census``): the record is
+    always BUILT and returned regardless of write outcome, and the write
+    itself is HTTP-first with a metered-drop fallback, never a JSONL
+    append (see that function's own docstring for the design decision).
+    """
+
+    def test_measures_and_posts_via_http(
         self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """VERIFICATION 1 continued: the record is FOUND IN THE DURABLE
-        LOG afterwards -- the log assertion is the real one."""
+        """VERIFICATION 1 continued: the record is POSTED to the engine
+        table -- the post-call assertion is the real one now."""
         cfg_dir = tmp_path / "cfgdir"
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg_dir))
         project_dir = tmp_path / "proj"
@@ -227,96 +236,52 @@ class TestWriteSessionCapabilityCensus:
         sid = "sess-durable-log"
         _write_transcript(project_dir / f"{sid}.jsonl", [_tool_use_record("Bash")])
 
-        from nexus._session_end_census import capability_census_log_path, write_session_capability_census
+        import nexus._session_end_census as mod
 
-        record = write_session_capability_census(sid)
+        posted: list[dict] = []
+        monkeypatch.setattr(mod, "_post_capability_census", posted.append)
+
+        record = mod.write_session_capability_census(sid)
 
         assert record is not None
         assert record["session_id"] == sid
         assert record["capabilities"]["skill"] == 0
+        assert posted == [record]
 
-        log_path = capability_census_log_path()
-        assert log_path.exists()
-        lines = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
-        assert any(r["session_id"] == sid and r["capabilities"]["skill"] == 0 for r in lines)
-
-    def test_appends_record_via_a_single_write_call(
+    def test_write_failure_degrades_to_metered_drop_never_raises(
         self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """code-review Important #2 (fix pass, 2026-08-20): concurrent
-        SessionEnd appenders from multiple Claude Code sessions must not
-        interleave partial lines. The codebase's own precedent for this
-        exact problem (``conexus/hooks/scripts/routing/_lib.py::log_routing_event``)
-        writes the whole ``json.dumps(...) + \"\\n\"`` string in ONE
-        ``fh.write()`` call -- two separate ``write()`` calls (payload,
-        then newline) rely on CPython's buffering happening to coalesce
-        them into one OS write, which is an implementation detail, not a
-        guarantee."""
+        """Service-down (or an old engine 404ing the route) must never
+        propagate past :func:`write_session_capability_census` -- the
+        design decision is a metered drop, never a JSONL fallback."""
         cfg_dir = tmp_path / "cfgdir"
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg_dir))
         project_dir = tmp_path / "proj"
         project_dir.mkdir()
         monkeypatch.setenv("NX_CENSUS_PROJECT_DIR", str(project_dir))
-        sid = "sess-single-write"
+        sid = "sess-write-fails"
         _write_transcript(project_dir / f"{sid}.jsonl", [_tool_use_record("Bash")])
 
-        writes: list[str] = []
+        import nexus._session_end_census as mod
 
-        class _RecordingFile:
-            def __enter__(self) -> "_RecordingFile":
-                return self
+        def _boom(base_url_unused: str) -> tuple[str, str]:
+            raise RuntimeError("service unreachable")
 
-            def __exit__(self, *exc_info: object) -> bool:
-                return False
+        monkeypatch.setattr(
+            "nexus.db.service_endpoint.resolve_service_endpoint", _boom,
+        )
+        drops: list[dict] = []
+        monkeypatch.setattr(
+            "nexus.dropped_writes.record_drop",
+            lambda **kw: drops.append(kw),
+        )
 
-            def write(self, data: str) -> int:
-                writes.append(data)
-                return len(data)
+        record = mod.write_session_capability_census(sid)  # must not raise
 
-        original_open = pathlib.Path.open
-
-        def fake_open(self: pathlib.Path, *args: object, **kwargs: object):  # noqa: ANN001, ANN002, ANN003
-            if self.name == "capability_census.jsonl":
-                return _RecordingFile()
-            return original_open(self, *args, **kwargs)
-
-        monkeypatch.setattr(pathlib.Path, "open", fake_open)
-
-        from nexus._session_end_census import write_session_capability_census
-
-        write_session_capability_census(sid)
-
-        assert len(writes) == 1, f"expected exactly one fh.write() call, got {len(writes)}: {writes!r}"
-        assert writes[0].endswith("\n")
-        # The single write is itself one complete, parseable JSON line --
-        # exactly the shape a concurrent reader/appender must see, never
-        # a half-written payload with the newline pending in a second call.
-        json.loads(writes[0])
-
-    def test_appends_multiple_sessions_without_clobbering(
-        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        cfg_dir = tmp_path / "cfgdir"
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg_dir))
-        project_dir = tmp_path / "proj"
-        project_dir.mkdir()
-        monkeypatch.setenv("NX_CENSUS_PROJECT_DIR", str(project_dir))
-
-        for sid in ("sess-a", "sess-b"):
-            _write_transcript(project_dir / f"{sid}.jsonl", [_tool_use_record("Bash")])
-            write_result = __import__(
-                "nexus._session_end_census", fromlist=["write_session_capability_census"],
-            ).write_session_capability_census(sid)
-            assert write_result is not None
-
-        from nexus._session_end_census import capability_census_log_path
-
-        lines = [
-            json.loads(line)
-            for line in capability_census_log_path().read_text().splitlines()
-            if line.strip()
-        ]
-        assert {r["session_id"] for r in lines} == {"sess-a", "sess-b"}
+        assert record is not None
+        assert record["session_id"] == sid
+        assert len(drops) == 1
+        assert drops[0]["hook"] == "capability_census"
 
     def test_no_session_id_resolvable_is_a_silent_noop(
         self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
@@ -328,17 +293,20 @@ class TestWriteSessionCapabilityCensus:
         import nexus.session
         monkeypatch.setattr(nexus.session, "read_claude_session_id", lambda: None)
 
-        from nexus._session_end_census import capability_census_log_path, write_session_capability_census
+        import nexus._session_end_census as mod
 
-        result = write_session_capability_census()
+        posted: list[dict] = []
+        monkeypatch.setattr(mod, "_post_capability_census", posted.append)
+
+        result = mod.write_session_capability_census()
 
         assert result is None
-        assert not capability_census_log_path().exists()
+        assert posted == []
 
-    def test_blindspot_record_is_appended_too(
+    def test_blindspot_record_is_posted_too(
         self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A BLINDSPOT session still gets written -- it is a real, durable
+        """A BLINDSPOT session still gets posted -- it is a real, durable
         record of the failure to measure, not dropped."""
         cfg_dir = tmp_path / "cfgdir"
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg_dir))
@@ -346,18 +314,16 @@ class TestWriteSessionCapabilityCensus:
         project_dir.mkdir()
         monkeypatch.setenv("NX_CENSUS_PROJECT_DIR", str(project_dir))
 
-        from nexus._session_end_census import capability_census_log_path, write_session_capability_census
+        import nexus._session_end_census as mod
 
-        record = write_session_capability_census("sess-blindspot-durable")
+        posted: list[dict] = []
+        monkeypatch.setattr(mod, "_post_capability_census", posted.append)
+
+        record = mod.write_session_capability_census("sess-blindspot-durable")
 
         assert record is not None
         assert record["blindspot"] is True
-        lines = [
-            json.loads(line)
-            for line in capability_census_log_path().read_text().splitlines()
-            if line.strip()
-        ]
-        assert any(r.get("blindspot") is True for r in lines)
+        assert posted == [record]
 
 
 class TestLogRotation:
@@ -433,79 +399,15 @@ class TestLogRotation:
 
         mod._rotate_log_if_oversized(log_path)  # must not raise
 
-    def test_write_session_capability_census_rotates_before_append(
-        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Integration: an oversize log rotates, and the new record lands
-        in the fresh (post-rotation) file, not the rotated-away one."""
-        cfg_dir = tmp_path / "cfgdir"
-        cfg_dir.mkdir()
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg_dir))
-        project_dir = tmp_path / "proj"
-        project_dir.mkdir()
-        monkeypatch.setenv("NX_CENSUS_PROJECT_DIR", str(project_dir))
-
-        import nexus._session_end_census as mod
-
-        monkeypatch.setattr(mod, "_LOG_ROTATION_MAX_BYTES", 10)
-        log_path = cfg_dir / "capability_census.jsonl"
-        log_path.write_text("x" * 100)
-
-        sid = "sess-after-rotate"
-        _write_transcript(project_dir / f"{sid}.jsonl", [_tool_use_record("Bash")])
-
-        record = mod.write_session_capability_census(sid)
-
-        assert record is not None
-        rotated = cfg_dir / "capability_census.jsonl.1"
-        assert rotated.read_text() == "x" * 100
-
-        lines = [
-            json.loads(line) for line in log_path.read_text().splitlines() if line.strip()
-        ]
-        assert len(lines) == 1
-        assert lines[0]["session_id"] == sid
-
-    def test_rotation_failure_never_breaks_the_append(
-        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A non-ENOENT rotation failure (e.g. a permission error on the
-        rename) must still let the append proceed -- rotation is best
-        effort, the durable record is not."""
-        cfg_dir = tmp_path / "cfgdir"
-        cfg_dir.mkdir()
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg_dir))
-        project_dir = tmp_path / "proj"
-        project_dir.mkdir()
-        monkeypatch.setenv("NX_CENSUS_PROJECT_DIR", str(project_dir))
-
-        import nexus._session_end_census as mod
-
-        monkeypatch.setattr(mod, "_LOG_ROTATION_MAX_BYTES", 10)
-        log_path = cfg_dir / "capability_census.jsonl"
-        # Trailing newline: real log content is always line-terminated
-        # (every write ends in "\n") -- keeps the pre-existing oversize
-        # content and the new append parseable as separate JSONL lines
-        # even though rotation is simulated to fail.
-        log_path.write_text("x" * 100 + "\n")
-
-        def _boom(_src: object, _dst: object) -> None:
-            raise PermissionError("simulated rotation failure")
-
-        monkeypatch.setattr(mod.os, "replace", _boom)
-
-        sid = "sess-rotate-fails"
-        _write_transcript(project_dir / f"{sid}.jsonl", [_tool_use_record("Bash")])
-
-        record = mod.write_session_capability_census(sid)  # must not raise
-
-        assert record is not None
-        assert log_path.exists()
-        # The pre-existing "x" * 100 filler line is deliberately not
-        # valid JSON (synthetic oversize content); only the newly
-        # appended LAST line is asserted on.
-        last_line = log_path.read_text().splitlines()[-1]
-        assert json.loads(last_line)["session_id"] == sid
+    # nexus-gjv9b PART 1 writer swap: the two integration tests formerly
+    # here (rotation-before-append, rotation-failure-never-breaks-append)
+    # exercised _rotate_log_if_oversized through
+    # write_session_capability_census -- a call chain that no longer
+    # exists (see that function's own docstring: rotation has no caller
+    # from this module any more, kept in place only for PART 3's deferred
+    # deletion). _rotate_log_if_oversized itself is still fully covered,
+    # directly, by the tests above and by TestRotationTOCTOUSerialization
+    # below.
 
 
 class TestRotationTOCTOUSerialization:
@@ -645,128 +547,12 @@ class TestRotationTOCTOUSerialization:
         assert (tmp_path / "capability_census.jsonl.1").read_text() == "x" * 100
 
 
-class TestRotationFailureLogging:
-    """code-review Important #4 (fix pass, 2026-08-20): the rotation-
-    failure guard in write_session_capability_census was a bare
-    ``except Exception: pass``, contradicting its own docstring's
-    no-swallow claim for this module. A rotation failure must be
-    diagnosable from the logs, matching
-    ``_session_end_launcher._write_capability_census``'s own
-    debug-level structlog discipline for its analogous failure case."""
-
-    def test_rotation_failure_is_logged_via_structlog(
-        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        import logging
-
-        import structlog
-        from structlog.testing import capture_logs
-
-        cfg_dir = tmp_path / "cfgdir"
-        cfg_dir.mkdir()
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg_dir))
-        project_dir = tmp_path / "proj"
-        project_dir.mkdir()
-        monkeypatch.setenv("NX_CENSUS_PROJECT_DIR", str(project_dir))
-
-        import nexus._session_end_census as mod
-
-        monkeypatch.setattr(mod, "_LOG_ROTATION_MAX_BYTES", 10)
-        log_path = cfg_dir / "capability_census.jsonl"
-        log_path.write_text("x" * 100 + "\n")
-
-        def _boom(*_a: object, **_kw: object) -> None:
-            raise RuntimeError("simulated rotation failure")
-
-        monkeypatch.setattr(mod, "_rotate_log_if_oversized", _boom)
-
-        sid = "sess-rotate-logs-failure"
-        _write_transcript(project_dir / f"{sid}.jsonl", [_tool_use_record("Bash")])
-
-        structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG))
-        try:
-            with capture_logs() as cap:
-                record = mod.write_session_capability_census(sid)  # must not raise
-        finally:
-            structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING))
-
-        assert record is not None
-        events = [entry["event"] for entry in cap]
-        assert any("rotat" in e.lower() for e in events), (
-            f"expected a structlog event naming the rotation failure; got {events!r}"
-        )
-
-
-# ── duplicate-append guard (2026-08-22) ──────────────────────────────────────
-#
-# SessionEnd fires many times per session. Measured on a working box: 306 rows
-# across 28 DISTINCT sessions, one session alone writing 134 of them, so ~91
-# pct of the file was duplicate rows and any naive aggregate overcounted by
-# ~2.2x. The guard is a bounded TAIL read, never a read-modify-write — this
-# module's docstring forbids the latter as a concurrency bug class.
-
-def _read_rows(path) -> list[dict]:
-    import json as _json
-    return [_json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
-
-
-def test_refire_with_no_new_activity_does_not_append(tmp_path, monkeypatch):
-    from nexus import _session_end_census as mod
-
-    log = tmp_path / "capability_census.jsonl"
-    monkeypatch.setattr(mod, "capability_census_log_path", lambda: log)
-    record = {"session_id": "s1", "total_calls": 10, "capabilities": {"agent": 1}}
-    monkeypatch.setattr(
-        mod, "build_capability_census_record", lambda *a, **k: dict(record)
-    )
-    monkeypatch.setattr(mod, "census_project_dir", lambda: tmp_path, raising=False)
-
-    for _ in range(5):
-        mod.write_session_capability_census("s1")
-
-    rows = _read_rows(log)
-    assert len(rows) == 1, f"expected 1 row after 5 re-fires, got {len(rows)}"
-
-
-def test_refire_WITH_new_activity_still_appends(tmp_path, monkeypatch):
-    """A growing session must still be recorded — the guard is not a mute."""
-    from nexus import _session_end_census as mod
-
-    log = tmp_path / "capability_census.jsonl"
-    monkeypatch.setattr(mod, "capability_census_log_path", lambda: log)
-    calls = iter([10, 10, 42])
-    monkeypatch.setattr(
-        mod,
-        "build_capability_census_record",
-        lambda *a, **k: {"session_id": "s1", "total_calls": next(calls)},
-    )
-    monkeypatch.setattr(mod, "census_project_dir", lambda: tmp_path, raising=False)
-
-    for _ in range(3):
-        mod.write_session_capability_census("s1")
-
-    rows = _read_rows(log)
-    assert [r["total_calls"] for r in rows] == [10, 42]
-
-
-def test_a_different_session_always_appends(tmp_path, monkeypatch):
-    from nexus import _session_end_census as mod
-
-    log = tmp_path / "capability_census.jsonl"
-    monkeypatch.setattr(mod, "capability_census_log_path", lambda: log)
-    sids = iter(["s1", "s2"])
-    monkeypatch.setattr(
-        mod,
-        "build_capability_census_record",
-        lambda *a, **k: {"session_id": next(sids), "total_calls": 10},
-    )
-    monkeypatch.setattr(mod, "census_project_dir", lambda: tmp_path, raising=False)
-
-    mod.write_session_capability_census("s1")
-    mod.write_session_capability_census("s2")
-
-    assert [r["session_id"] for r in _read_rows(log)] == ["s1", "s2"]
-
+# nexus-gjv9b PART 1 writer swap: TestRotationFailureLogging and the
+# three refire/dedup-through-write-session tests formerly here exercised
+# write_session_capability_census's OLD JSONL-append call chain — gone
+# now that the table's UPSERT-on-(tenant_id, session_id) semantics
+# collapse re-fires server-side (see that function's own docstring).
+# _is_duplicate_of_last_record itself is still directly covered below.
 
 def test_guard_degrades_to_appending_when_the_tail_is_unreadable(tmp_path):
     """A census that cannot check must append, never drop."""

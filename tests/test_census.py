@@ -434,6 +434,105 @@ def test_cli_json_mode_is_parseable(corpus: pathlib.Path) -> None:
     assert payload["measurable_sessions"] == 2
 
 
+class _FakeCapabilityCensusStore:
+    """Stand-in for HttpTelemetryStore in the --from-store CLI tests below —
+    the real store requires a live engine; these tests exercise the CLI
+    command's own rendering/plumbing, not the HTTP transport (already
+    covered end-to-end by the Java handler test and
+    test_http_t2_store_parity.py)."""
+
+    def __init__(self, rows: list[dict], *, raises: Exception | None = None) -> None:
+        self._rows = rows
+        self._raises = raises
+        self.closed = False
+        self.query_kwargs: dict | None = None
+
+    def query_capability_census(self, *, session_id, since, limit):
+        if self._raises is not None:
+            raise self._raises
+        self.query_kwargs = {"session_id": session_id, "since": since, "limit": limit}
+        return self._rows
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_cli_from_store_reports_measured_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeCapabilityCensusStore([{
+        "session_id": "sess-1", "ts": "2026-09-01T00:00:00Z", "blindspot": False,
+        "unmeasurable_reason": None,
+        "capabilities": {"skill": 3, "agent": 0}, "dispatches": 1, "total_calls": 3,
+    }])
+    monkeypatch.setattr(
+        "nexus.db.t2.http_telemetry_store.HttpTelemetryStore", lambda: fake,
+    )
+
+    res = _invoke(["capability", "--from-store", "--session", "sess-1"])
+
+    assert res.exit_code == 0, res.output
+    assert "session=sess-1" in res.output
+    assert "skill=3" in res.output
+    assert fake.query_kwargs == {"session_id": "sess-1", "since": None, "limit": 100}
+    assert fake.closed is True
+
+
+def test_cli_from_store_reports_blindspot_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeCapabilityCensusStore([{
+        "session_id": "sess-2", "ts": "2026-09-01T00:00:00Z", "blindspot": True,
+        "unmeasurable_reason": "no-transcript-found",
+        "capabilities": {}, "dispatches": None, "total_calls": None,
+    }])
+    monkeypatch.setattr(
+        "nexus.db.t2.http_telemetry_store.HttpTelemetryStore", lambda: fake,
+    )
+
+    res = _invoke(["capability", "--from-store", "--session", "sess-2"])
+
+    assert res.exit_code == 0, res.output
+    assert "BLINDSPOT" in res.output
+    assert "no-transcript-found" in res.output
+
+
+def test_cli_from_store_json_mode_is_parseable(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeCapabilityCensusStore([{
+        "session_id": "sess-3", "ts": "2026-09-01T00:00:00Z", "blindspot": False,
+        "capabilities": {"skill": 1}, "dispatches": 0, "total_calls": 1,
+    }])
+    monkeypatch.setattr(
+        "nexus.db.t2.http_telemetry_store.HttpTelemetryStore", lambda: fake,
+    )
+
+    res = _invoke(["capability", "--from-store", "--json"])
+
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["rows"][0]["session_id"] == "sess-3"
+
+
+def test_cli_from_store_no_rows_is_a_clean_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+        lambda: _FakeCapabilityCensusStore([]),
+    )
+
+    res = _invoke(["capability", "--from-store", "--session", "sess-nope"])
+
+    assert res.exit_code == 0, res.output
+    assert "No capability_census rows" in res.output
+
+
+def test_cli_from_store_service_failure_exits_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+        lambda: _FakeCapabilityCensusStore([], raises=RuntimeError("service down")),
+    )
+
+    res = _invoke(["capability", "--from-store"])
+
+    assert res.exit_code != 0
+    assert "UNAVAILABLE" in res.output
+
+
 def test_cli_registered_on_main() -> None:
     assert "census" in main.commands
 
