@@ -96,6 +96,10 @@ query(question="database design", follow_links="cites", depth=1)  # + citation g
 | `where` | string | Vector-store metadata filter. Any operator (`bib_year>=2020,section_type!=references`) when NO catalog param is set. Equality-only (`tags=arch`) when combined with a catalog param (`author`/`content_type`/`follow_links`/`subtree`) — the combined-query path applies it as JSONB containment; an operator shape combined with a catalog param is a loud error, not a silent drop. |
 | `structured` | boolean | Return a structured dict instead of the human-readable string (plan-runner use; default false) |
 
+### Default corpus fan-out floor (nexus-rbhci)
+
+`search()` and `query()` share one corpus resolver (`_resolve_corpus_target` in `src/nexus/mcp/core.py`). A bare prefix (`code`, `knowledge,code,docs`, or `all`) expands to every live collection under that prefix; a collection whose row count is below `_FANOUT_MIN_COLLECTION_COUNT` (3) is dropped from that expansion — it would only add a zero-hit search to every fan-out call, never a result (measured on the 2026-08-31 `search_telemetry` baseline: a 1-document collection at 95.9% zero-hit, a 211-document one at 94.0%). Naming a collection explicitly — a full conformant name (`code__myrepo__voyage-code-3__v1`) or the short 2-segment form (`code__myrepo`) — always searches it regardless of size; the floor only prunes the bare-prefix branch. The row count comes from `list_collections()`, the same call the resolver already makes to enumerate live collections, so the floor check adds no extra round trip. Each excluded collection is logged at `structlog` debug level (`corpus_fanout_excluded_below_floor`).
+
 ### How catalog routing works
 
 Catalog params (`author`, `content_type`, `follow_links`, `subtree`) require service mode (pgvector) — a non-service T3 with any of these set returns a loud error naming the requirement, not a degraded local search.

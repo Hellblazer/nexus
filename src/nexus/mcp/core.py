@@ -39,6 +39,7 @@ from nexus.hook_registry import HookRegistry as _HookRegistry, install_default_h
 from nexus.mcp_infra import (
     catalog_auto_link as _catalog_auto_link,
     get_catalog as _get_catalog,
+    get_collection_counts as _get_collection_counts,
     get_collection_names as _get_collection_names,
     get_recent_search_traces as _get_recent_search_traces,
     get_t1 as _get_t1,
@@ -2304,12 +2305,43 @@ def _reset_page_cache_for_tests() -> None:
         _page_cache.clear()
 
 
+#: Minimum row count (chunks, tombstone-filtered -- see
+#: ``get_collection_counts``'s docstring) for a collection to be included
+#: when it is reached via *prefix* fan-out ("code", "knowledge,code,docs",
+#: "all"). Below this, a collection is thin enough that it never
+#: contributes a hit -- it just adds a zero-hit search to every fan-out
+#: call (nexus-rbhci: 2026-08-31 search_telemetry baseline measured
+#: code__1-4 at 95.9% zero-hit against 1 document, code__1-43 at 94.0%
+#: against 211 -- both riding the default "code" fan-out share for
+#: essentially no recall). Deliberately small: this excludes only
+#: collections too thin to be worth the fan-out cost, not merely small
+#: ones -- a real but modest corpus (dozens of documents) clears it easily.
+#: Naming a collection explicitly (an exact ``__``-qualified corpus, or the
+#: short 2-segment form) always searches it regardless of this floor; see
+#: the "__" branch below, which never consults it.
+_FANOUT_MIN_COLLECTION_COUNT = 3
+
+
 def _resolve_corpus_target(corpus: str, t3: Any) -> list[str]:
     """Resolve a comma-separated corpus/collection spec to collection names.
 
     Mirrors the ``search`` tool's routing: ``all`` expands to every live
     prefix; a ``__``-qualified part is a collection name; a bare part is a
     corpus prefix resolved against the live collection list.
+
+    A collection resolved via the bare-prefix branch is dropped when its
+    row count is below :data:`_FANOUT_MIN_COLLECTION_COUNT`
+    (nexus-rbhci) -- it never contributes a hit through the default fan-out
+    and only pays search cost. An explicitly named collection (the
+    ``"__" in part`` branch) is never subject to this floor. Counts come
+    from :func:`nexus.mcp_infra.get_collection_counts`, which shares its
+    cache with :func:`nexus.mcp_infra.get_collection_names` -- the same
+    ``list_collections()`` call this function already makes below, so the
+    floor check costs no additional round trip. A collection with no
+    reported count (never seen by ``list_collections()``, e.g. a stale
+    test double) fails OPEN -- it is kept, not dropped -- since the floor
+    exists to trim known-thin collections, not to silently drop unknown
+    ones.
     """
     all_names = _get_collection_names()
     if corpus == "all":
@@ -2327,7 +2359,20 @@ def _resolve_corpus_target(corpus: str, t3: Any) -> list[str]:
         if "__" in part:
             target.append(t3_collection_name(part, t3=t3))
         else:
-            target.extend(resolve_corpus(part, all_names))
+            fanned_out = resolve_corpus(part, all_names)
+            counts = _get_collection_counts()
+            for name in fanned_out:
+                count = counts.get(name)
+                if count is not None and count < _FANOUT_MIN_COLLECTION_COUNT:
+                    _log.debug(
+                        "corpus_fanout_excluded_below_floor",
+                        collection=name,
+                        count=count,
+                        floor=_FANOUT_MIN_COLLECTION_COUNT,
+                        corpus_part=part,
+                    )
+                    continue
+                target.append(name)
     return list(dict.fromkeys(target))
 
 

@@ -828,6 +828,101 @@ def test_search_corpus_routing(corpus_arg, available, expected_in, expected_not_
         assert name not in captured[0]
 
 
+# ── Default corpus fan-out document-count floor (nexus-rbhci) ──────────────
+#
+# A collection thin enough that it contributes near-zero hits (the
+# 2026-08-31 search_telemetry baseline: code__1-4 at 95.9% zero-hit / 1
+# document, code__1-43 at 94.0% / 211) is dropped from the *prefix*
+# fan-out ("code", "knowledge,code,docs", "all") -- it only pays search
+# cost. Naming the collection explicitly always searches it regardless.
+
+def test_fanout_floor_excludes_thin_collection_from_bare_prefix():
+    from nexus.mcp.core import _FANOUT_MIN_COLLECTION_COUNT
+    _mock_t3([
+        {"name": "code__thin", "count": _FANOUT_MIN_COLLECTION_COUNT - 1},
+        {"name": "code__healthy", "count": _FANOUT_MIN_COLLECTION_COUNT + 10},
+    ])
+    captured, fake = _capture_search()
+    with patch("nexus.search_engine.search_cross_corpus", fake):
+        _search_render("test query", corpus="code")
+    assert len(captured) == 1
+    assert "code__healthy" in captured[0]
+    assert "code__thin" not in captured[0]
+
+
+def test_fanout_floor_honours_explicit_collection_name():
+    """A below-floor collection named directly (not reached via prefix
+    resolution) is always searched -- the floor only prunes fan-out."""
+    from nexus.mcp.core import _FANOUT_MIN_COLLECTION_COUNT
+    _mock_t3([{"name": "code__thin__voyage-code-3__v1", "count": _FANOUT_MIN_COLLECTION_COUNT - 1}])
+    captured, fake = _capture_search()
+    with patch("nexus.search_engine.search_cross_corpus", fake):
+        _search_render("test query", corpus="code__thin__voyage-code-3__v1")
+    assert len(captured) == 1
+    assert captured[0] == ["code__thin__voyage-code-3__v1"]
+
+
+def test_fanout_floor_applies_under_all_alias():
+    from nexus.mcp.core import _FANOUT_MIN_COLLECTION_COUNT
+    _mock_t3([
+        {"name": "code__thin", "count": _FANOUT_MIN_COLLECTION_COUNT - 1},
+        {"name": "knowledge__notes", "count": _FANOUT_MIN_COLLECTION_COUNT + 5},
+    ])
+    captured, fake = _capture_search()
+    with patch("nexus.search_engine.search_cross_corpus", fake):
+        _search_render("test query", corpus="all")
+    assert len(captured) == 1
+    assert "knowledge__notes" in captured[0]
+    assert "code__thin" not in captured[0]
+
+
+def test_fanout_floor_boundary_exact():
+    """count == floor stays IN; count == floor - 1 is dropped. Pins the
+    strict less-than comparison, not <=."""
+    from nexus.mcp.core import _FANOUT_MIN_COLLECTION_COUNT
+    _mock_t3([
+        {"name": "code__at_floor", "count": _FANOUT_MIN_COLLECTION_COUNT},
+        {"name": "code__below_floor", "count": _FANOUT_MIN_COLLECTION_COUNT - 1},
+    ])
+    captured, fake = _capture_search()
+    with patch("nexus.search_engine.search_cross_corpus", fake):
+        _search_render("test query", corpus="code")
+    assert len(captured) == 1
+    assert "code__at_floor" in captured[0]
+    assert "code__below_floor" not in captured[0]
+
+
+def test_fanout_floor_applies_to_query_tool_too():
+    """``query()`` shares ``_resolve_corpus_target`` with ``search()``
+    (nexus-z4j8d) -- the floor must apply identically there."""
+    from nexus.mcp.core import _FANOUT_MIN_COLLECTION_COUNT
+    _mock_t3([
+        {"name": "code__thin", "count": _FANOUT_MIN_COLLECTION_COUNT - 1},
+        {"name": "code__healthy", "count": _FANOUT_MIN_COLLECTION_COUNT + 10},
+    ])
+    captured, fake = _capture_search()
+    with patch("nexus.search_engine.search_cross_corpus", fake):
+        query(question="test query", corpus="code")
+    assert len(captured) == 1
+    assert "code__healthy" in captured[0]
+    assert "code__thin" not in captured[0]
+
+
+def test_fanout_floor_fails_open_when_count_unknown():
+    """A collection with no entry in ``get_collection_counts()`` (a T3
+    backend that omits ``count``, or a stale cache read) stays IN the
+    fan-out -- unknown never means dropped."""
+    import nexus.mcp.core as mcp_core
+
+    _mock_t3([{"name": "code__mystery", "count": 5}])
+    captured, fake = _capture_search()
+    with patch.object(mcp_core, "_get_collection_counts", return_value={}), \
+         patch("nexus.search_engine.search_cross_corpus", fake):
+        _search_render("test query", corpus="code")
+    assert len(captured) == 1
+    assert "code__mystery" in captured[0]
+
+
 # ── query() corpus resolution parity with search() (nexus-z4j8d) ───────────
 
 @pytest.mark.parametrize("corpus_arg, available, expected_in, expected_not_in", [
@@ -1012,8 +1107,8 @@ def test_collections_cache_ttl_expiry_refetches():
     # Force TTL expiry by rewinding the cached timestamp past the
     # TTL window, then update the mock to return a different set so
     # we can verify the re-fetch path returns fresh state.
-    names, _ts = mi._collections_cache
-    mi._collections_cache = (names, 0.0)  # 0.0 << time.monotonic() - TTL
+    names, counts, _ts = mi._collections_cache
+    mi._collections_cache = (names, counts, 0.0)  # 0.0 << time.monotonic() - TTL
     mock.list_collections.return_value = [{"name": "knowledge__after", "count": 1}]
 
     third = _get_collection_names()
@@ -1133,13 +1228,17 @@ def test_store_put_invalidates_page_cache(t3, monkeypatch):
                              collection="knowledge__knowledge", metadata={})
                 for i in range(6)]
 
+    # nexus-rbhci: the freshly-seeded collection holds exactly 1 chunk,
+    # below the default corpus fan-out's document-count floor -- name it
+    # explicitly (bypasses the floor, same as any "__"-qualified corpus)
+    # since this test is about page-cache invalidation, not fan-out sizing.
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        _search_render(query="q", corpus="knowledge", limit=2, offset=0)
-        _search_render(query="q", corpus="knowledge", limit=2, offset=2)
+        _search_render(query="q", corpus="knowledge__knowledge", limit=2, offset=0)
+        _search_render(query="q", corpus="knowledge__knowledge", limit=2, offset=2)
         assert len(calls) == 1, "page-turn burst must serve from cache pre-write"
         store_put(content="written mid-burst", collection="knowledge",
                   title="cache-inval")
-        _search_render(query="q", corpus="knowledge", limit=2, offset=2)
+        _search_render(query="q", corpus="knowledge__knowledge", limit=2, offset=2)
 
     assert len(calls) == 2, (
         "a store_put must invalidate the page cache — a repeat search "
@@ -1163,11 +1262,13 @@ def test_store_delete_invalidates_page_cache(t3, monkeypatch):
                              collection="knowledge__knowledge", metadata={})
                 for i in range(6)]
 
+    # nexus-rbhci: explicit collection name bypasses the fan-out
+    # document-count floor (see the sibling test above).
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        _search_render(query="q", corpus="knowledge", limit=2, offset=0)
+        _search_render(query="q", corpus="knowledge__knowledge", limit=2, offset=0)
         assert len(calls) == 1
         store_delete(doc_id=real_doc_id, collection="knowledge")
-        _search_render(query="q", corpus="knowledge", limit=2, offset=0)
+        _search_render(query="q", corpus="knowledge__knowledge", limit=2, offset=0)
 
     assert len(calls) == 2, "a store_delete must invalidate the page cache"
 

@@ -96,7 +96,7 @@ _t1_lock = threading.Lock()
 _t3_instance = None
 _t3_lock = threading.Lock()
 
-_collections_cache: tuple[list[str], float] = ([], 0.0)
+_collections_cache: tuple[list[str], dict[str, int], float] = ([], {}, 0.0)
 _COLLECTIONS_CACHE_TTL = 60.0
 
 # nexus-53x7s: SERVICE-mode t2_index_write cache. Reuses one T2Database (and
@@ -411,16 +411,50 @@ def get_t3():
     return _t3_instance
 
 
-def get_collection_names() -> list[str]:
-    """Return cached T3 collection names, refreshing every _COLLECTIONS_CACHE_TTL seconds."""
+def _refresh_collections_cache_if_stale() -> None:
+    """Refresh ``_collections_cache`` when older than ``_COLLECTIONS_CACHE_TTL``.
+
+    One ``list_collections()`` round trip populates both the name list and
+    the per-collection count map, so :func:`get_collection_names` and
+    :func:`get_collection_counts` share this single fetch instead of each
+    hitting T3 independently (nexus-rbhci).
+    """
     global _collections_cache
-    names, ts = _collections_cache
+    _names, _counts, ts = _collections_cache
     now = time.monotonic()
     if now - ts > _COLLECTIONS_CACHE_TTL:
-        new_names = [c["name"] for c in get_t3().list_collections()]
-        _collections_cache = (new_names, now)
-        return new_names
-    return names
+        rows = get_t3().list_collections()
+        new_names = [row["name"] for row in rows]
+        new_counts = {row["name"]: int(row.get("count") or 0) for row in rows}
+        _collections_cache = (new_names, new_counts, now)
+
+
+def get_collection_names() -> list[str]:
+    """Return cached T3 collection names, refreshing every _COLLECTIONS_CACHE_TTL seconds."""
+    _refresh_collections_cache_if_stale()
+    return _collections_cache[0]
+
+
+def get_collection_counts() -> dict[str, int]:
+    """Return cached per-collection row counts, keyed by collection name.
+
+    Shares the ``_COLLECTIONS_CACHE_TTL``-windowed cache with
+    :func:`get_collection_names`: whichever of the two is called first in a
+    given window pays for the ``list_collections()`` round trip, and the
+    other reads its half of the same cached tuple for free. This is what
+    ``list_collections()`` itself reports as ``count`` -- the vector
+    store's live row count for the collection (chunks, tombstone-filtered;
+    see ``HttpVectorClient.list_collections``'s docstring) -- used as a
+    cheap proxy for "does this collection hold enough content to be worth
+    searching by default": a collection with a handful of chunks reads as
+    near-empty by the same measure whether the underlying corpus has one
+    tiny file or one large one nobody indexed yet. A collection named
+    explicitly is unaffected: this proxy only feeds the default
+    prefix-fan-out floor in ``nexus.mcp.core._resolve_corpus_target``, never
+    a hard block on searching a named collection.
+    """
+    _refresh_collections_cache_if_stale()
+    return _collections_cache[1]
 
 
 def t2_ctx():
@@ -2250,7 +2284,7 @@ def reset_singletons():
     _t1_instance = None
     _t1_isolated = False
     _t3_instance = None
-    _collections_cache = ([], 0.0)
+    _collections_cache = ([], {}, 0.0)
     with _service_t2_lock:
         if _service_t2_db is not None:
             _service_t2_db.close()
