@@ -1204,9 +1204,9 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         #   can be appended only for --check-schema, +11 lines before this
         #   region): :1130 -> :1141, :1134 -> :1145, :1182 -> :1193. Same 3
         #   sites, same rationale -- only an earlier, unrelated loop grew.
-        "tests/e2e/release-sandbox.sh:1173",
-        "tests/e2e/release-sandbox.sh:1177",
-        "tests/e2e/release-sandbox.sh:1225",
+        "tests/e2e/release-sandbox.sh:1230",
+        "tests/e2e/release-sandbox.sh:1234",
+        "tests/e2e/release-sandbox.sh:1282",
     }
 )
 _PIPEFAIL_OR_TRUE_SITES_CEILING = 9

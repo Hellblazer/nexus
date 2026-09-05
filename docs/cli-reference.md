@@ -2540,6 +2540,7 @@ The `--check-post-store-hooks` flag (introduced 4.18.0, `nexus-b0ka`) prints eve
 
 ```
 nx doctor --check-aspect-queue       # Surface RDR-089 aspect-extraction worker depth
+nx doctor --check-engine-activity    # Live engine embed activity from GET /v1/status (nexus-s71lr)
 ```
 
 The `--check-aspect-queue` flag (introduced 4.18.0, `nexus-1pfq`) reports the `aspect_extraction_queue` row count plus per-status breakdown (`pending`, `processing`, `failed`, `completed`), the oldest non-completed `enqueued_at` as a lag indicator, and the top failed rows with their `last_error`. The same data surfaces in the `nx console` Aspect Queue card on `/health` for live monitoring. Pre-RDR-089 databases (no queue table) report cleanly as "table not present" rather than erroring. A transport failure (service unreachable) reports UNKNOWN and exits 0 — not reporting pass or fail; a reachable queue with one or more `failed` rows is a real backlog signal and exits 1 with a `✗ FAIL:` marker, matching the other promoted supplementary checks (nexus-fylxo).
