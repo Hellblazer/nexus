@@ -31,6 +31,29 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.31.0)
 
+- `sn/hooks/scripts/worktree_guard.py` (nexus-ftpk3): NEW. Linked-worktree
+  detector (the cwd's nearest `.git` is a file whose gitdir points under
+  `.git/worktrees/`) plus the set of Serena tools that write through the
+  server's startup root. Shared by both sn hooks below.
+- `sn/hooks/scripts/auto_approve_sn_mcp.py` (nexus-ftpk3): a Serena write
+  tool called with a linked-worktree cwd is DENIED on PreToolUse and
+  PermissionRequest. Serena resolves paths against the root fixed at
+  startup, so worktree subagents wrote into the shared primary checkout
+  while the tool reported success (three incidents, latest 2026-09-05).
+  Until this ships the installed hook still approves those writes.
+- `sn/hooks/scripts/mcp-inject.sh` (nexus-ftpk3): reads the payload cwd and,
+  for a linked worktree, injects `worktree-section.md` ahead of the routing
+  table. Until this ships worktree subagents get only the routing table,
+  which tells them to prefer Serena for edits.
+- `sn/hooks/scripts/worktree-section.md` (nexus-ftpk3): NEW. The injected
+  worktree guidance: built-in `LSP` tool for navigation, Edit/Write with
+  absolute paths for edits, `git status --short` after every write.
+- `sn/hooks/scripts/serena-section.md` (nexus-ftpk3): states the
+  fixed-at-startup root rule under the routing table header.
+- `sn/hooks/scripts/session-start.sh` (nexus-ftpk3): one line telling the
+  main session how worktree dispatches are handled and to verify the
+  primary tree after a fan-out.
+
 - `conexus/skills/rdr-research/SKILL.md` (nexus-zu1q0): the add step now shells
   out to `nx rdr preamble rdr-research -- add <id> <text>`, which computes the
   next `<id>-research-N` sequence in Python and never overwrites an existing

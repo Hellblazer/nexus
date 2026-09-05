@@ -18,6 +18,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- sn worktree guard (nexus-ftpk3). Serena's MCP server resolves paths
+  against the project root fixed at startup, so a subagent dispatched with
+  `isolation: "worktree"` wrote into the shared primary checkout while the
+  tool reported success (three incidents). The sn PreToolUse and
+  PermissionRequest hooks now deny every Serena write tool when the hook's
+  cwd is a linked git worktree, and the SubagentStart hook injects a
+  worktree section routing such agents to the built-in `LSP` tool and
+  Edit with absolute paths. Detection is one shared module,
+  `sn/hooks/scripts/worktree_guard.py`.
 - The garbage sweep (`nexus.garbage`): `nx doctor` reaps stale
   `t1_mint_*.lock` files, rotated logs past 14 days and operator dispatch
   dumps past 7 on every run, counts orphaned catalog links and tombstones

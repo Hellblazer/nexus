@@ -41,6 +41,17 @@ Every subagent receives a `system-reminder` block containing:
 
 Parameter signatures are delegated to Serena's own `initial_instructions` tool, which is backend-aware.
 
+### Worktree Guidance and Guard
+
+Serena resolves every path against the project root it found at startup (`--project-from-cwd` is read once). Claude Code subagents share the parent's MCP connection, so a subagent dispatched with `isolation: "worktree"` sends its edits to that server, and the server writes them into the primary checkout. Three incidents; the tool reported success each time.
+
+The plugin handles this in two places, both keyed on the `cwd` field of the hook payload and one detector (`hooks/scripts/worktree_guard.py`: the cwd's nearest `.git` is a file whose `gitdir:` points under `.git/worktrees/`):
+
+- **SubagentStart**: a worktree agent gets `worktree-section.md` ahead of the routing table: use the built-in `LSP` tool for navigation and `Edit`/`Write` with absolute paths for edits; Serena read tools stay available.
+- **PreToolUse / PermissionRequest**: every Serena write tool (`replace_in_files`, `replace_symbol_body`, `insert_*`, `rename_symbol`, `jet_brains_rename`/`move`/`safe_delete`/`inline_symbol`, `*_lines`, `replace_content`, memory writes) is denied with a reason naming the worktree. Read tools are approved as before.
+
+For the read side to work in worktrees, install the native LSP plugins for your languages (`claude plugin install pyright-lsp@claude-plugins-official`, likewise `jdtls-lsp`, `kotlin-lsp`, `typescript-lsp`) and their binaries.
+
 ### Context7 Guidance
 
 - **Workflow**: `resolve-library-id` then `query-docs`
@@ -81,6 +92,8 @@ sn/
 │       ├── context7-section.md    # injected Context7 guidance
 │       ├── auto-approve-sn-mcp.sh # PreToolUse / PermissionRequest wrapper
 │       ├── auto_approve_sn_mcp.py # the allowlist decision (stdlib only)
+│       ├── worktree_guard.py      # linked-worktree detection + Serena write-tool set
+│       ├── worktree-section.md    # injected ahead of the routing table in worktrees
 │       └── serena-tools.txt       # generated Serena tool snapshot
 └── README.md
 ```

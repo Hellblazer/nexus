@@ -273,3 +273,159 @@ class TestSnHookOutput:
         body = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
         assert "## Serena MCP" in body
         assert "## Context7 MCP" in body
+
+
+# ── Worktree guard (nexus-ftpk3) ─────────────────────────────────────────────
+
+
+sys.path.insert(0, str(SN_DIR / "hooks" / "scripts"))
+from worktree_guard import SERENA_WRITE_TOOLS, is_linked_worktree, is_serena_write_tool  # noqa: E402
+
+AUTO_APPROVE = SN_DIR / "hooks" / "scripts" / "auto_approve_sn_mcp.py"
+SNAPSHOT = SN_DIR / "hooks" / "scripts" / "serena-tools.txt"
+INJECT = SN_DIR / "hooks" / "scripts" / "mcp-inject.sh"
+
+
+def _make_repo_with_worktree(tmp_path: Path) -> tuple[Path, Path]:
+    """A real primary checkout plus one linked worktree, so the detector is tested against git, not a fake."""
+    primary = tmp_path / "primary"
+    primary.mkdir()
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+           "HOME": str(tmp_path), "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"}
+    def git(*args: str, cwd: Path = primary) -> None:
+        subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, env=env, timeout=30)
+    git("init", "-q", "-b", "main")
+    (primary / "f.txt").write_text("x\n")
+    git("add", "f.txt")
+    git("commit", "-q", "-m", "init")
+    worktree = tmp_path / "wt"
+    git("worktree", "add", "-q", str(worktree), "-b", "agent-branch")
+    return primary, worktree
+
+
+def _run_auto_approve(payload: dict) -> dict | None:
+    result = subprocess.run(
+        [sys.executable, str(AUTO_APPROVE), str(SNAPSHOT)],
+        input=json.dumps(payload), capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout) if result.stdout.strip() else None
+
+
+def _run_inject(payload: dict) -> str:
+    result = subprocess.run(
+        ["bash", str(INJECT)], input=json.dumps(payload), capture_output=True, text=True, timeout=10, cwd=str(REPO_ROOT)
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+
+
+class TestWorktreeDetection:
+    def test_primary_checkout_is_not_a_worktree(self, tmp_path: Path) -> None:
+        primary, _ = _make_repo_with_worktree(tmp_path)
+        (primary / "sub").mkdir()
+        assert not is_linked_worktree(primary)
+        assert not is_linked_worktree(primary / "sub")
+
+    def test_linked_worktree_detected_from_root_and_subdir(self, tmp_path: Path) -> None:
+        _, worktree = _make_repo_with_worktree(tmp_path)
+        (worktree / "src" / "pkg").mkdir(parents=True)
+        assert is_linked_worktree(worktree)
+        assert is_linked_worktree(worktree / "src" / "pkg")
+
+    def test_this_repo_primary_is_not_a_worktree(self) -> None:
+        """Non-vacuity: the detector says 'primary' for the checkout the suite runs in."""
+        assert not is_linked_worktree(REPO_ROOT)
+
+    def test_empty_and_missing_cwd_are_not_worktrees(self, tmp_path: Path) -> None:
+        assert not is_linked_worktree("")
+        assert not is_linked_worktree(tmp_path / "nowhere")
+
+    def test_submodule_pointer_is_not_a_worktree(self, tmp_path: Path) -> None:
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / ".git").write_text("gitdir: /some/repo/.git/modules/sub\n")
+        assert not is_linked_worktree(sub)
+
+    def test_write_tool_set_is_a_subset_of_the_snapshot(self) -> None:
+        """Every guarded name is a tool the pinned Serena ships; a rename upstream must fail here, not silently unguard."""
+        _, available, _ = parse_snapshot()
+        assert SERENA_WRITE_TOOLS <= set(available), sorted(SERENA_WRITE_TOOLS - set(available))
+        for name in ("replace_in_files", "replace_symbol_body", "insert_after_symbol", "rename_symbol", "jet_brains_rename"):
+            assert is_serena_write_tool(f"mcp__plugin_sn_serena__{name}")
+        for name in ("find_symbol", "get_symbols_overview", "jet_brains_find_symbol", "read_memory"):
+            assert not is_serena_write_tool(f"mcp__plugin_sn_serena__{name}")
+
+
+class TestWorktreeGuardHook:
+    @pytest.mark.parametrize("event", ["PreToolUse", "PermissionRequest"])
+    def test_write_tool_denied_in_worktree(self, tmp_path: Path, event: str) -> None:
+        _, worktree = _make_repo_with_worktree(tmp_path)
+        out = _run_auto_approve({"cwd": str(worktree), "hook_event_name": event,
+                                 "tool_name": "mcp__plugin_sn_serena__replace_in_files"})
+        assert out is not None
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == event
+        if event == "PreToolUse":
+            assert hso["permissionDecision"] == "deny"
+            assert str(worktree) in hso["permissionDecisionReason"]
+        else:
+            assert hso["decision"]["behavior"] == "deny"
+            assert str(worktree) in hso["decision"]["message"]
+
+    def test_every_write_tool_denied_in_worktree(self, tmp_path: Path) -> None:
+        _, worktree = _make_repo_with_worktree(tmp_path)
+        for name in sorted(SERENA_WRITE_TOOLS):
+            out = _run_auto_approve({"cwd": str(worktree), "hook_event_name": "PreToolUse",
+                                     "tool_name": f"mcp__plugin_sn_serena__{name}"})
+            assert out and out["hookSpecificOutput"]["permissionDecision"] == "deny", name
+
+    def test_read_tool_still_allowed_in_worktree(self, tmp_path: Path) -> None:
+        _, worktree = _make_repo_with_worktree(tmp_path)
+        out = _run_auto_approve({"cwd": str(worktree), "hook_event_name": "PreToolUse",
+                                 "tool_name": "mcp__plugin_sn_serena__find_symbol"})
+        assert out and out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    def test_write_tool_allowed_in_primary(self, tmp_path: Path) -> None:
+        primary, _ = _make_repo_with_worktree(tmp_path)
+        out = _run_auto_approve({"cwd": str(primary), "hook_event_name": "PreToolUse",
+                                 "tool_name": "mcp__plugin_sn_serena__replace_in_files"})
+        assert out and out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    def test_payload_without_cwd_falls_through_to_allowlist(self) -> None:
+        out = _run_auto_approve({"hook_event_name": "PreToolUse", "tool_name": "mcp__plugin_sn_serena__replace_in_files"})
+        assert out and out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    def test_context7_unaffected_in_worktree(self, tmp_path: Path) -> None:
+        _, worktree = _make_repo_with_worktree(tmp_path)
+        out = _run_auto_approve({"cwd": str(worktree), "hook_event_name": "PreToolUse",
+                                 "tool_name": "mcp__plugin_sn_context7__query-docs"})
+        assert out and out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
+class TestWorktreeInjection:
+    def test_worktree_agent_gets_section_first(self, tmp_path: Path) -> None:
+        _, worktree = _make_repo_with_worktree(tmp_path)
+        body = _run_inject({"cwd": str(worktree), "agent_type": "conexus:developer"})
+        assert body.lstrip().startswith("## Worktree isolation")
+        assert "## Serena MCP" in body and "## Context7 MCP" in body
+        assert body.index("## Worktree isolation") < body.index("## Serena MCP")
+        assert "`LSP`" in body
+        assert "git status --short" in body
+
+    def test_primary_agent_gets_no_worktree_section(self, tmp_path: Path) -> None:
+        primary, _ = _make_repo_with_worktree(tmp_path)
+        body = _run_inject({"cwd": str(primary)})
+        assert "## Worktree isolation" not in body
+        assert "## Serena MCP" in body and "## Context7 MCP" in body
+
+    def test_serena_section_names_the_startup_root_rule(self) -> None:
+        body = _run_inject({"cwd": str(REPO_ROOT)})
+        assert "Root is fixed at server start" in body
+
+    def test_worktree_section_names_only_real_tools(self) -> None:
+        _, available, _ = parse_snapshot()
+        text = (SN_DIR / "hooks" / "scripts" / "worktree-section.md").read_text()
+        named = set(re.findall(r"`((?:jet_brains_)?[a-z_]+)`", text)) & {n for n in available}
+        assert named <= set(available)
+        assert "replace_in_files" in named and "replace_symbol_body" in named
