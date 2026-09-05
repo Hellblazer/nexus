@@ -565,6 +565,15 @@
                                 <id>generate-jooq-sources</id>
                                 <phase>none</phase>
                             </execution>
+                            <!-- nexus-cbo4a batch 5 (7a5204749) added a SECOND codegen
+                                 execution for test-only schema objects; a release build
+                                 (-DskipTests) has no use for it and macOS release runners
+                                 have no Docker. engine-service-v0.1.102's mac-arm64 leg
+                                 failed on exactly this, 2026-09-05. -->
+                            <execution>
+                                <id>generate-jooq-test-sources</id>
+                                <phase>none</phase>
+                            </execution>
                         </executions>
                     </plugin>
                 </plugins>
