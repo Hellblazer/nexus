@@ -759,3 +759,82 @@ class TestIndexFailuresCheckRoutes:
 
         assert "UNKNOWN" in printed, printed
         assert "0 recorded failure" not in printed
+
+    def test_active_acknowledgments_are_named_in_the_footnote(
+        self, service_mode: None,
+    ) -> None:
+        """Round-4 fold-in (critique [24621] item 1): the doctor footnote
+        must name the ACTIVE acknowledgment count and point at the list
+        surface, alongside the pre-existing "N are acknowledged" line."""
+        import click
+
+        from nexus.commands import doctor as doctor_mod
+
+        now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        row = {
+            "run_id": "run-9", "file_path": "/repo/known-encrypted.pdf",
+            "error_class": "UnextractableContentError",
+            "error": "encrypted", "occurred_at": now_iso,
+        }
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+            store.return_value.list_index_failures.side_effect = self._scoped_mock(
+                all_time={"rows": [row], "total": 2, "oldest_occurred_at": now_iso},
+                unacked_all_time={"rows": [], "total": 0, "oldest_occurred_at": ""},
+            )
+            store.return_value.list_index_failure_acknowledgments.return_value = {
+                "rows": [{
+                    "file_path": "/repo/known-encrypted.pdf",
+                    "error_class": "UnextractableContentError",
+                    "reason": "known limitation", "created_at": now_iso,
+                }],
+                "total": 1,
+            }
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                exit_code = None
+                try:
+                    doctor_mod._run_check_index_failures()
+                except click.exceptions.Exit as exc:
+                    exit_code = exc.exit_code
+                printed = out.getvalue().decode() + err.getvalue().decode()
+
+        assert exit_code is None, printed
+        assert "1 active acknowledgment(s)" in printed, printed
+        assert "nx index failures --acks" in printed, printed
+
+    def test_ack_lookup_failure_does_not_break_the_footnote(
+        self, service_mode: None,
+    ) -> None:
+        """The footnote's own lookup is advisory: a transport error there
+        must never turn the (already-clean) all-time summary into a hard
+        failure, mirroring the outer store-construction posture."""
+        import click
+
+        from nexus.commands import doctor as doctor_mod
+
+        now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        row = {
+            "run_id": "run-9", "file_path": "/repo/known-encrypted.pdf",
+            "error_class": "UnextractableContentError",
+            "error": "encrypted", "occurred_at": now_iso,
+        }
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+            store.return_value.list_index_failures.side_effect = self._scoped_mock(
+                all_time={"rows": [row], "total": 2, "oldest_occurred_at": now_iso},
+                unacked_all_time={"rows": [], "total": 0, "oldest_occurred_at": ""},
+            )
+            store.return_value.list_index_failure_acknowledgments.side_effect = (
+                httpx.ConnectError("refused")
+            )
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                exit_code = None
+                try:
+                    doctor_mod._run_check_index_failures()
+                except click.exceptions.Exit as exc:
+                    exit_code = exc.exit_code
+                printed = out.getvalue().decode() + err.getvalue().decode()
+
+        assert exit_code is None, printed
+        assert "FAIL" not in printed
+        assert "acknowledged" in printed

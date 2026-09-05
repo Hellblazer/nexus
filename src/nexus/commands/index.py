@@ -230,11 +230,19 @@ def index() -> None:
 @click.option(
     "--older-than-days",
     "older_than_days",
-    type=int,
-    default=0,
-    show_default=True,
-    help="With --clear: also delete rows older than N days (0 = no age "
-    "bound; combine with --run-id, or use alone to age-sweep every run).",
+    type=click.IntRange(min=1),
+    default=None,
+    help="With --clear: also delete rows older than N days (>= 1; omit "
+    "for no age bound -- combine with --run-id, or use alone to "
+    "age-sweep every run).",
+)
+@click.option(
+    "--dry-run",
+    "dry_run",
+    is_flag=True,
+    default=False,
+    help="With --clear: preview the count that would be deleted, using "
+    "the identical predicate, without deleting anything.",
 )
 @click.option(
     "--acknowledge",
@@ -249,22 +257,41 @@ def index() -> None:
     "--error-class.",
 )
 @click.option(
+    "--unacknowledge",
+    "unacknowledge",
+    is_flag=True,
+    default=False,
+    help="Revoke a durable acknowledgment instead of creating one. "
+    "Requires --file and/or --error-class -- a class-wide acknowledgment "
+    "(created with --error-class alone) is revoked the same way, "
+    "--error-class alone with no --file.",
+)
+@click.option(
+    "--acks",
+    "acks",
+    is_flag=True,
+    default=False,
+    help="List durable acknowledgments instead of failures.",
+)
+@click.option(
     "--file",
     "file_path",
     default=None,
-    help="With --acknowledge: the file to acknowledge (file-scoped -- only "
-    "that exact file+error-class pair is covered going forward). Combine "
+    help="With --acknowledge/--unacknowledge: the file (file-scoped -- "
+    "only that exact file+error-class pair is covered/revoked). Combine "
     "with --error-class to skip the lookup, or omit it to auto-resolve "
-    "the file's most recently recorded error_class.",
+    "the file's most recently recorded error_class (--acknowledge) or "
+    "its existing acknowledgment's error_class (--unacknowledge).",
 )
 @click.option(
     "--error-class",
     "error_class",
     default=None,
-    help="With --acknowledge: the error class to acknowledge. Alone (no "
-    "--file), covers ANY file with this error_class -- the broader, "
-    "corpus-wide exemption for a known systemic issue (e.g. scanned PDFs "
-    "with no OCR configured).",
+    help="With --acknowledge/--unacknowledge: the error class. Alone (no "
+    "--file), targets the error-class-scoped acknowledgment covering ANY "
+    "file with this error_class -- the broader, corpus-wide exemption "
+    "for a known systemic issue (e.g. scanned PDFs with no OCR "
+    "configured).",
 )
 @click.option(
     "--reason",
@@ -275,12 +302,13 @@ def index() -> None:
 )
 def index_failures_cmd(
     run_id: str | None, days: int, limit: int,
-    clear: bool, older_than_days: int,
-    acknowledge: bool, file_path: str | None, error_class: str | None,
+    clear: bool, older_than_days: int | None, dry_run: bool,
+    acknowledge: bool, unacknowledge: bool, acks: bool,
+    file_path: str | None, error_class: str | None,
     reason: str | None,
 ) -> None:
-    """List, clear, or acknowledge durable per-file index-failure records
-    (nexus-nukn3).
+    """List, clear, acknowledge, unacknowledge, or list acknowledgments of
+    durable per-file index-failure records (nexus-nukn3).
 
     A repo-index run that skips a file it could not extract writes a
     durable row here (file path, error class, reason, run id) instead of
@@ -296,8 +324,12 @@ def index_failures_cmd(
       nx index failures --days 7                      # last week
       nx index failures --clear --run-id abc123        # retire one run
       nx index failures --clear --older-than-days 90   # age-sweep
+      nx index failures --clear --older-than-days 90 --dry-run  # preview
       nx index failures --acknowledge --file broken.pdf --reason "encrypted"
       nx index failures --acknowledge --error-class UnextractableContentError
+      nx index failures --acks                         # list acknowledgments
+      nx index failures --unacknowledge --file broken.pdf
+      nx index failures --unacknowledge --error-class UnextractableContentError
 
     \b
     ``--clear`` is a ONE-TIME delete: the next index run that hits the same
@@ -307,14 +339,19 @@ def index_failures_cmd(
     permanent marker the read path (and the doctor gate) treats as
     "known", so a recurring failure for an acknowledged file no longer
     gates, while a genuinely NEW file or a NEW error class for that same
-    file still does.
+    file still does. ``--unacknowledge`` revokes that marker; ``--acks``
+    lists every active one.
     """
     import httpx  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-    if clear and acknowledge:
-        raise click.UsageError("--clear and --acknowledge are mutually exclusive.")
+    modes = [clear, acknowledge, unacknowledge, acks]
+    if sum(modes) > 1:
+        raise click.UsageError(
+            "--clear, --acknowledge, --unacknowledge, and --acks are "
+            "mutually exclusive."
+        )
 
     try:
         store = HttpTelemetryStore()
@@ -323,66 +360,154 @@ def index_failures_cmd(
             f"index_failures: service backend unreachable ({exc})."
         ) from exc
 
-    if acknowledge:
-        if not file_path and not error_class:
-            raise click.UsageError(
-                "--acknowledge requires --file and/or --error-class."
-            )
-        resolved_class = error_class
-        if not resolved_class:
-            # Auto-resolve: the file's most recently recorded error_class.
-            # No file_path filter exists on list_index_failures (a small
-            # table; fetch a wide page and filter client-side rather than
-            # growing the wire contract for a one-shot CLI lookup).
-            try:
-                candidates = store.list_index_failures(limit=1000)
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 404:
-                    raise click.ClickException(
-                        "index_failures/list route not found on this engine "
-                        "-- the engine predates nexus-nukn3."
-                    ) from exc
-                raise click.ClickException(f"index_failures: request failed ({exc}).") from exc
-            except (httpx.HTTPError, RuntimeError) as exc:
-                raise click.ClickException(
-                    f"index_failures: service backend unreachable ({exc})."
-                ) from exc
-            matching = [
-                row for row in candidates["rows"] if row.get("file_path") == file_path
-            ]
-            if not matching:
-                raise click.ClickException(
-                    f"no recorded failure for {file_path!r} -- pass "
-                    "--error-class explicitly to acknowledge it anyway."
-                )
-            resolved_class = str(matching[0].get("error_class") or "")
-            if not resolved_class:
-                raise click.ClickException(
-                    f"the recorded failure for {file_path!r} has no "
-                    "error_class -- pass --error-class explicitly."
-                )
+    if acks:
         try:
-            store.acknowledge_index_failure(
-                error_class=resolved_class, file_path=file_path or "",
-                reason=reason or "",
-            )
-        except ValueError as exc:
-            raise click.UsageError(str(exc)) from exc
+            result = store.list_index_failure_acknowledgments()
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 raise click.ClickException(
-                    "index_failures/acknowledge route not found on this "
-                    "engine -- the engine predates nexus-nukn3's "
-                    "--acknowledge support. Upgrade the engine "
-                    "(nx upgrade / redeploy)."
+                    "index_failures/acks route not found on this engine -- "
+                    "the engine predates nexus-nukn3's --acks support. "
+                    "Upgrade the engine (nx upgrade / redeploy)."
                 ) from exc
-            raise click.ClickException(f"index_failures --acknowledge failed: {exc}.") from exc
+            raise click.ClickException(f"index_failures --acks failed: {exc}.") from exc
         except (httpx.HTTPError, RuntimeError) as exc:
             raise click.ClickException(
                 f"index_failures: service backend unreachable ({exc})."
             ) from exc
-        scope = f"{file_path!r} + {resolved_class}" if file_path else f"any file with {resolved_class}"
-        click.echo(f"Acknowledged: {scope}.")
+        ack_rows = result["rows"]
+        if not ack_rows:
+            click.echo("index_failures: no active acknowledgments.")
+            return
+        click.echo(f"index_failures: {result['total']} active acknowledgment(s):")
+        for row in ack_rows:
+            scope = row.get("file_path") or "(any file)"
+            click.echo(
+                f"  {row.get('created_at', '?')}  {scope}  "
+                f"[{row.get('error_class', '?')}] {row.get('reason', '')}"
+            )
+        return
+
+    if acknowledge or unacknowledge:
+        if not file_path and not error_class:
+            flag = "--acknowledge" if acknowledge else "--unacknowledge"
+            raise click.UsageError(f"{flag} requires --file and/or --error-class.")
+        resolved_class = error_class
+        if not resolved_class:
+            # Auto-resolve the error_class: --acknowledge looks it up from
+            # the most recent FAILURE for this file (server-side exact
+            # file_path filter, fold-in fix -- code-review finding [24624]:
+            # this used to page 1000 rows tenant-wide and filter
+            # client-side); --unacknowledge looks it up from the file's
+            # existing ACKNOWLEDGMENT instead (the failures table is not
+            # the right oracle for "what was this file acknowledged as").
+            if acknowledge:
+                try:
+                    candidates = store.list_index_failures(limit=1, file_path=file_path)
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code == 404:
+                        raise click.ClickException(
+                            "index_failures/list route not found on this "
+                            "engine -- the engine predates nexus-nukn3."
+                        ) from exc
+                    raise click.ClickException(f"index_failures: request failed ({exc}).") from exc
+                except (httpx.HTTPError, RuntimeError) as exc:
+                    raise click.ClickException(
+                        f"index_failures: service backend unreachable ({exc})."
+                    ) from exc
+                if not candidates["rows"]:
+                    raise click.ClickException(
+                        f"no recorded failure for {file_path!r} -- pass "
+                        "--error-class explicitly to acknowledge it anyway."
+                    )
+                resolved_class = str(candidates["rows"][0].get("error_class") or "")
+                if not resolved_class:
+                    raise click.ClickException(
+                        f"the recorded failure for {file_path!r} has no "
+                        "error_class -- pass --error-class explicitly."
+                    )
+            else:
+                try:
+                    acks_result = store.list_index_failure_acknowledgments()
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code == 404:
+                        raise click.ClickException(
+                            "index_failures/acks route not found on this "
+                            "engine -- the engine predates nexus-nukn3's "
+                            "--acks support."
+                        ) from exc
+                    raise click.ClickException(f"index_failures --acks failed: {exc}.") from exc
+                except (httpx.HTTPError, RuntimeError) as exc:
+                    raise click.ClickException(
+                        f"index_failures: service backend unreachable ({exc})."
+                    ) from exc
+                matching = [
+                    row for row in acks_result["rows"]
+                    if row.get("file_path") == file_path
+                ]
+                if not matching:
+                    raise click.ClickException(
+                        f"no acknowledgment found for {file_path!r} -- pass "
+                        "--error-class explicitly to target one anyway."
+                    )
+                if len(matching) > 1:
+                    classes = sorted({str(r.get("error_class") or "") for r in matching})
+                    raise click.UsageError(
+                        f"{file_path!r} has acknowledgments under multiple "
+                        f"error classes ({', '.join(classes)}) -- pass "
+                        "--error-class explicitly to disambiguate."
+                    )
+                resolved_class = str(matching[0].get("error_class") or "")
+
+        if acknowledge:
+            try:
+                store.acknowledge_index_failure(
+                    error_class=resolved_class, file_path=file_path or "",
+                    reason=reason or "",
+                )
+            except ValueError as exc:
+                raise click.UsageError(str(exc)) from exc
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    raise click.ClickException(
+                        "index_failures/acknowledge route not found on this "
+                        "engine -- the engine predates nexus-nukn3's "
+                        "--acknowledge support. Upgrade the engine "
+                        "(nx upgrade / redeploy)."
+                    ) from exc
+                raise click.ClickException(f"index_failures --acknowledge failed: {exc}.") from exc
+            except (httpx.HTTPError, RuntimeError) as exc:
+                raise click.ClickException(
+                    f"index_failures: service backend unreachable ({exc})."
+                ) from exc
+            scope = f"{file_path!r} + {resolved_class}" if file_path else f"any file with {resolved_class}"
+            click.echo(f"Acknowledged: {scope}.")
+        else:
+            try:
+                deleted = store.unacknowledge_index_failure(
+                    error_class=resolved_class, file_path=file_path or "",
+                )
+            except ValueError as exc:
+                raise click.UsageError(str(exc)) from exc
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    raise click.ClickException(
+                        "index_failures/unacknowledge route not found on "
+                        "this engine -- the engine predates nexus-nukn3's "
+                        "--unacknowledge support. Upgrade the engine "
+                        "(nx upgrade / redeploy)."
+                    ) from exc
+                raise click.ClickException(f"index_failures --unacknowledge failed: {exc}.") from exc
+            except (httpx.HTTPError, RuntimeError) as exc:
+                raise click.ClickException(
+                    f"index_failures: service backend unreachable ({exc})."
+                ) from exc
+            if not deleted:
+                scope = f"{file_path!r} + {resolved_class}" if file_path else f"any file with {resolved_class}"
+                click.echo(f"No acknowledgment found for: {scope}.")
+            else:
+                scope = f"{file_path!r} + {resolved_class}" if file_path else f"any file with {resolved_class}"
+                click.echo(f"Revoked acknowledgment: {scope}.")
         return
 
     if clear:
@@ -390,13 +515,16 @@ def index_failures_cmd(
         # purpose, defense in depth): fail fast with a UsageError before
         # even attempting the wire call, and give the same message
         # regardless of which layer would have refused first.
-        if not run_id and older_than_days <= 0:
+        older_than_days_value = older_than_days or 0
+        if not run_id and older_than_days_value <= 0:
             raise click.UsageError(
                 "--clear requires --run-id and/or --older-than-days "
                 "(refusing to clear the entire backlog unscoped)."
             )
         try:
-            deleted = store.trim_index_failures(run_id=run_id or "", days=older_than_days)
+            deleted = store.trim_index_failures(
+                run_id=run_id or "", days=older_than_days_value, dry_run=dry_run,
+            )
         except ValueError as exc:
             raise click.UsageError(str(exc)) from exc
         except httpx.HTTPStatusError as exc:
@@ -411,7 +539,8 @@ def index_failures_cmd(
             raise click.ClickException(
                 f"index_failures: service backend unreachable ({exc})."
             ) from exc
-        click.echo(f"Cleared {deleted} index-failure row(s).")
+        verb = "Would clear" if dry_run else "Cleared"
+        click.echo(f"{verb} {deleted} index-failure row(s).")
         return
 
     try:

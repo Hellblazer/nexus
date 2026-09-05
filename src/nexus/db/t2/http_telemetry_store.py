@@ -52,6 +52,8 @@ Route mapping (matches TelemetryHandler Java):
     GET  /v1/telemetry/index_failures/list          — list_index_failures
     POST /v1/telemetry/index_failures/trim          — trim_index_failures
     POST /v1/telemetry/index_failures/acknowledge   — acknowledge_index_failure
+    GET  /v1/telemetry/index_failures/acks          — list_index_failure_acknowledgments
+    POST /v1/telemetry/index_failures/unacknowledge — unacknowledge_index_failure
     POST /v1/telemetry/capability_census/record — record_capability_census (nexus-gjv9b
                                            PART 1: upsert on (tenant_id, session_id))
     GET  /v1/telemetry/capability_census/query  — query_capability_census
@@ -917,6 +919,7 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         days: int = 0,
         limit: int = 100,
         unacknowledged_only: bool = False,
+        file_path: str = "",
     ) -> dict[str, Any]:
         """Read index failures, newest first, optionally scoped to one
         ``run_id`` (blank = every run).
@@ -926,22 +929,35 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         Returns ``{"rows": [...], "total": int, "oldest_occurred_at": str}``.
         ``total`` is computed server-side over the WHOLE filtered set, not
         the returned page — same non-vacuity shape as
-        :meth:`list_hook_failures`: a caller reading a count (the
-        deyd5 systemic-skip floor, ``nx doctor --check-index-failures``)
-        must never under-report because the backlog exceeded ``limit``.
+        :meth:`list_hook_failures`: a caller reading a count (``nx doctor
+        --check-index-failures``) must never under-report because the
+        backlog exceeded ``limit``.
 
         Each row carries an ``acknowledged`` boolean (nexus-nukn3 fold-in,
         critic Critical finding: the doctor gate needs a durable
         adjudication that survives a fresh ``run_id`` every re-run --
         ``nx index failures --acknowledge``). ``unacknowledged_only=True``
         additionally excludes any covered row from both ``rows`` and
-        ``total`` -- the doctor gate's and the deyd5 floor's input.
+        ``total`` -- the DOCTOR GATE's input only. Deliberately NOT the
+        deyd5 systemic-skip floor's input (code-review finding, T2
+        code-review-nexus-nukn3-4d5520bf4 [24624]): ``nexus.indexer.
+        _run_index`` calls this method for that floor WITHOUT
+        ``unacknowledged_only`` — correctly, since acknowledging a failure
+        records an operator's adjudication, not that the file actually
+        indexed; the skip-ratio math must count it regardless.
+
+        ``file_path`` (third fold-in, code-review finding [24624]) narrows
+        to an exact file server-side -- the fix for ``nx index failures
+        --acknowledge --file``'s error_class auto-resolve, which used to
+        page 1000 rows tenant-wide and filter client-side.
         """
         params: dict[str, Any] = {"days": days, "limit": limit}
         if run_id:
             params["run_id"] = run_id
         if unacknowledged_only:
             params["unacknowledged_only"] = True
+        if file_path:
+            params["file_path"] = file_path
         resp = self._get("/v1/telemetry/index_failures/list", params)
         if not isinstance(resp, dict):  # defensive: a stripped proxy response
             return {"rows": [], "total": 0, "oldest_occurred_at": ""}
@@ -950,6 +966,55 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "total": int(resp.get("total") or 0),
             "oldest_occurred_at": str(resp.get("oldest_occurred_at") or ""),
         }
+
+    def list_index_failure_acknowledgments(self) -> dict[str, Any]:
+        """List every durable acknowledgment for the tenant, newest first
+        (nexus-nukn3 third fold-in, critic Critical finding T2
+        critique-nexus-nukn3-4d5520bf4 [24621]: the ack mechanism was
+        write-only -- created via :meth:`acknowledge_index_failure` but
+        never listable or revocable).
+
+        Calls ``GET /v1/telemetry/index_failures/acks``.
+
+        Returns ``{"rows": [{"id", "file_path", "error_class", "reason",
+        "created_at"}, ...], "total": int}``. ``file_path`` is ``""`` for
+        an error-class-scoped (corpus-wide) acknowledgment.
+        """
+        resp = self._get("/v1/telemetry/index_failures/acks", {})
+        if not isinstance(resp, dict):  # defensive: a stripped proxy response
+            return {"rows": [], "total": 0}
+        return {
+            "rows": list(resp.get("rows") or []),
+            "total": int(resp.get("total") or 0),
+        }
+
+    def unacknowledge_index_failure(
+        self, *, error_class: str, file_path: str = "",
+    ) -> int:
+        """Revoke a durable acknowledgment (nexus-nukn3 third fold-in,
+        critic Critical finding [24621]: an ack that could be created but
+        never undone).
+
+        Calls ``POST /v1/telemetry/index_failures/unacknowledge``. Deletes
+        ONLY the row matching the EXACT scope it was created under --
+        ``error_class`` REQUIRED non-blank (mirrors
+        :meth:`acknowledge_index_failure`'s own guard: revoking "every
+        acknowledgment for a file regardless of class" is never the
+        intended scope); ``file_path`` blank targets the error-class-scoped
+        acknowledgment, mirroring how it was created.
+
+        Returns the number of rows deleted (0 if no matching acknowledgment
+        exists).
+        """
+        if not error_class:
+            raise ValueError(
+                "unacknowledge_index_failure requires a non-blank error_class"
+            )
+        payload: dict[str, Any] = {"error_class": error_class}
+        if file_path:
+            payload["file_path"] = file_path
+        resp = self._post("/v1/telemetry/index_failures/unacknowledge", payload)
+        return int(resp.get("deleted", 0))
 
     def acknowledge_index_failure(
         self,

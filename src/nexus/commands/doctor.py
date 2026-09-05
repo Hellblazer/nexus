@@ -1194,6 +1194,22 @@ def _report_index_failures_service() -> None:
             f"({total_all_time - total_unacknowledged} of those are "
             "acknowledged — see: nx index failures)"
         )
+        # Informational footnote only (round-4 fold-in, critique
+        # [24621] item 1): name the ACTIVE acknowledgment count and that
+        # it can be listed. A failure here must never turn the ALL-TIME
+        # summary above into a hard failure — same non-fatal posture as
+        # the outer store-construction try/except.
+        try:
+            acks = store.list_index_failure_acknowledgments()
+        except (httpx.HTTPError, RuntimeError):
+            pass
+        else:
+            ack_total = acks["total"]
+            if ack_total:
+                click.echo(
+                    f"{ack_total} active acknowledgment(s) — see: "
+                    "nx index failures --acks"
+                )
     rows = newest_unacked["rows"]
     if not rows:
         return

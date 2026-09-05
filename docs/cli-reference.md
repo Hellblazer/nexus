@@ -311,22 +311,29 @@ nx search "" --corpus knowledge --where extraction_method=mineru --files
 
 ```
 nx index failures [--run-id ID] [--days N] [--limit N]
-nx index failures --clear [--run-id ID] [--older-than-days N]
+nx index failures --clear [--run-id ID] [--older-than-days N] [--dry-run]
 nx index failures --acknowledge (--file PATH | --error-class CLASS) [--reason TEXT]
+nx index failures --acks
+nx index failures --unacknowledge (--file PATH | --error-class CLASS)
 ```
 
-Lists, clears, or acknowledges durable per-file index-failure records (nexus-nukn3, Sam's design: "when a file fails, ENQUEUE the failure and move on"). A `repo` run that skips a file it cannot extract (`nexus.errors.UnextractableContentError`) now writes a durable row — file path, error class, reason, run id — to `nexus.index_failures` (engine-side PG table, event-log shape, mirrors `hook_failures`) instead of only a log line and an in-memory counter that die with the process. `nx index repo`'s systemic-skip floor (nexus-deyd5) reads this same durable count rather than the in-memory list.
+Lists, clears, acknowledges, unacknowledges, or lists acknowledgments of durable per-file index-failure records (nexus-nukn3, Sam's design: "when a file fails, ENQUEUE the failure and move on"). A `repo` run that skips a file it cannot extract (`nexus.errors.UnextractableContentError`) now writes a durable row — file path, error class, reason, run id — to `nexus.index_failures` (engine-side PG table, event-log shape, mirrors `hook_failures`) instead of only a log line and an in-memory counter that die with the process. `nx index repo`'s systemic-skip floor (nexus-deyd5) reads this same durable count rather than the in-memory list — see the note on `--acknowledge` below for why that floor deliberately does NOT honor acknowledgments.
+
+`--clear`, `--acknowledge`, `--unacknowledge`, and `--acks` are pairwise mutually exclusive.
 
 | Flag | Description |
 |------|-------------|
 | `--run-id ID` | Only show (or, with `--clear`, only clear) failures from this run (default: every run) |
-| `--days N` | Only show failures within the last N days (default: `0`, unbounded). Ignored with `--clear`/`--acknowledge` |
-| `--limit N` | Max rows to print (default: `100`). The printed count is always the exact total, independent of this cap. Ignored with `--clear`/`--acknowledge` |
-| `--clear` | Delete rows instead of listing them, scoped by `--run-id` and/or `--older-than-days` (at least one is required — an unscoped `--clear` is refused). Mutually exclusive with `--acknowledge` |
-| `--older-than-days N` | With `--clear`: also delete rows older than N days (default: `0`, no age bound). Combine with `--run-id`, or use alone to age-sweep every run |
-| `--acknowledge` | Durably adjudicate a recurring failure instead of listing or clearing. Requires `--file` and/or `--error-class`. Mutually exclusive with `--clear` |
-| `--file PATH` | With `--acknowledge`: the file to acknowledge (file-scoped — only that exact file + error-class pair is covered going forward). Omit `--error-class` to auto-resolve the file's most recently recorded error class |
-| `--error-class CLASS` | With `--acknowledge`: the error class to acknowledge. Alone (no `--file`), covers ANY file with this error class — a corpus-wide exemption for a known systemic issue |
+| `--days N` | Only show failures within the last N days (default: `0`, unbounded). Ignored with `--clear`/`--acknowledge`/`--unacknowledge`/`--acks` |
+| `--limit N` | Max rows to print (default: `100`). The printed count is always the exact total, independent of this cap. Ignored with `--clear`/`--acknowledge`/`--unacknowledge`/`--acks` |
+| `--clear` | Delete rows instead of listing them, scoped by `--run-id` and/or `--older-than-days` (at least one is required — an unscoped `--clear` is refused) |
+| `--older-than-days N` | With `--clear`: also delete rows older than N days (>= 1; omit for no age bound). Combine with `--run-id`, or use alone to age-sweep every run |
+| `--dry-run` | With `--clear`: preview the count that would be deleted, using the identical predicate, without deleting anything |
+| `--acknowledge` | Durably adjudicate a recurring failure instead of listing or clearing. Requires `--file` and/or `--error-class` |
+| `--unacknowledge` | Revoke a durable acknowledgment instead of creating one. Requires `--file` and/or `--error-class`, mirroring how it was created — a class-wide acknowledgment (created with `--error-class` alone) is revoked the same way |
+| `--acks` | List durable acknowledgments instead of failures (scope, error class, reason, created-at) |
+| `--file PATH` | With `--acknowledge`/`--unacknowledge`: the file (file-scoped — only that exact file + error-class pair is covered/revoked). Omit `--error-class` to auto-resolve: `--acknowledge` resolves from the file's most recently recorded failure; `--unacknowledge` resolves from the file's existing acknowledgment (refused as ambiguous if the file has acknowledgments under more than one error class — pass `--error-class` explicitly) |
+| `--error-class CLASS` | With `--acknowledge`/`--unacknowledge`: the error class. Alone (no `--file`), targets the error-class-scoped acknowledgment covering ANY file with this error class — a corpus-wide exemption for a known systemic issue |
 | `--reason TEXT` | With `--acknowledge`: optional free-text note, shown against the acknowledged row(s) in the list view |
 
 ```bash
@@ -335,13 +342,19 @@ nx index failures --run-id abc123               # one run only
 nx index failures --days 7                      # last week
 nx index failures --clear --run-id abc123        # retire one run
 nx index failures --clear --older-than-days 90   # age-sweep
+nx index failures --clear --older-than-days 90 --dry-run  # preview first
 nx index failures --acknowledge --file broken.pdf --reason "known encrypted PDF"
 nx index failures --acknowledge --error-class UnextractableContentError
+nx index failures --acks                         # list active acknowledgments
+nx index failures --unacknowledge --file broken.pdf
+nx index failures --unacknowledge --error-class UnextractableContentError
 ```
 
-`--clear` is a ONE-TIME delete: the next index run that hits the same file mints a fresh row (and a fresh run id), so a permanently unextractable file re-indexed on a cadence undoes a bare `--clear` every time. `--acknowledge` is the durable fix — it writes a permanent `kind='acknowledgment'` marker into the same table that the read path (and the doctor gate) treats as "known", so a recurring failure for an acknowledged file no longer gates while a genuinely new file, or a new error class for that same file, still does. Acknowledged rows are marked `[ACKNOWLEDGED]` in the list view. An unreachable service, or a `--clear`/`--acknowledge` call against an engine that predates the corresponding nexus-nukn3 route, raises a clean `ClickException` naming the condition rather than a raw traceback.
+`--clear` is a ONE-TIME delete: the next index run that hits the same file mints a fresh row (and a fresh run id), so a permanently unextractable file re-indexed on a cadence undoes a bare `--clear` every time. `--acknowledge` is the durable fix — it writes a permanent `kind='acknowledgment'` marker into the same table that the read path (and the doctor gate) treats as "known", so a recurring failure for an acknowledged file no longer gates while a genuinely new file, or a new error class for that same file, still does. `--unacknowledge` revokes that marker (an exact-match delete mirroring the scope it was created with — never a fuzzy match); `--acks` lists every active one, since a write-only acknowledgment that can never be listed or revoked cannot be audited. Acknowledged rows are marked `[ACKNOWLEDGED]` in the list view. An unreachable service, or a call against an engine that predates the corresponding nexus-nukn3 route, raises a clean `ClickException` naming the condition rather than a raw traceback.
 
-Pairs with `nx doctor --check-index-failures` for a pass/fail signal on the backlog; this verb answers *which* files.
+`--acknowledge` is deliberately NOT read by `nx index repo`'s systemic-skip floor (nexus-deyd5): acknowledging a failure records that an operator has adjudicated it, not that the file actually indexed, so the floor keeps counting every failed file regardless of acknowledgment state.
+
+Pairs with `nx doctor --check-index-failures` for a pass/fail signal on the backlog; this verb answers *which* files. The doctor check's own footnote also names the count of active acknowledgments when any exist, pointing at `nx index failures --acks`.
 
 ---
 
