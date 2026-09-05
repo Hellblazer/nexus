@@ -686,10 +686,13 @@ def _post_routing_event_http(record: dict, *, timeout: float = 0.25) -> str:
     a 2xx response, else a short CAUSE string classifying the failure —
     never raises.
 
-    Cause vocabulary (nexus-gjv9b review fold-in round 3, critique
-    CRITICAL 1/2 and code-review item 1): ``"unresolvable"`` (no
+    Cause vocabulary (nexus-gjv9b review fold-in rounds 3-4, critique
+    CRITICAL 1/2, code-review item 1): ``"unresolvable"`` (no
     endpoint/credential at all — :func:`_engine_endpoint` returned
-    ``(None, None)``), ``"401"``/``"403"``/``"5xx"``/``"http_<code>"``
+    ``(None, None)``), ``"401"``/``"403"``/``"route_absent"``
+    (HTTP 404/405 — the serving engine predates this route entirely, the
+    plugin-cut-ahead-of-the-engine case a doctor check must never read
+    as a failing service)/``"5xx"``/``"http_<code>"``
     (a non-2xx response, read straight from the raised
     ``urllib.error.HTTPError.code`` — never guessed from response text),
     ``"timeout"`` (a connect/read timeout), ``"connect"`` (any other
@@ -728,6 +731,14 @@ def _post_routing_event_http(record: dict, *, timeout: float = 0.25) -> str:
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
             return str(exc.code)
+        if exc.code in (404, 405):
+            # nexus-gjv9b review fold-in round 4: a plugin cut can ship
+            # this hook ahead of the paired engine tag -- the SERVING
+            # engine simply predates the routing_events route, on every
+            # call, until the engine catches up. Version skew, not a
+            # failure of anything; _check_t2_dropped_writes treats a
+            # route_absent-only window as informational, never a WARN.
+            return "route_absent"
         if 500 <= exc.code < 600:
             return "5xx"
         return f"http_{exc.code}"

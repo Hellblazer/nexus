@@ -2734,6 +2734,27 @@ def _check_t2_dropped_writes() -> list[HealthResult]:
                 detail += f", last {summary.last_ts}"
             return [HealthResult(label="T2 best-effort writes", ok=True, detail=detail)]
 
+        # nexus-gjv9b review fold-in round 4: a window whose OTHER causes
+        # are all route_absent (a plugin cut shipping this hook ahead of
+        # the paired engine tag -- every decision 404s until the engine
+        # catches up), alone or mixed with guard_refused, is version skew,
+        # not a failing service. recent_all_benign is a strict superset of
+        # recent_all_guard_refused (checked above) -- reaching here means
+        # the window is NOT all guard_refused, so an info framing here
+        # implies at least one route_absent drop is present. A SINGLE
+        # cause outside {guard_refused, route_absent} still falls through
+        # to the real WARN below -- same all-or-nothing discipline.
+        if summary.recent_all_benign:
+            detail = (
+                f"{summary.recent_total} drop(s) in the last 24h, most recently "
+                f"from {summary.recent_last_hook!r} — engine behind the client; "
+                f"{summary.recent_last_hook!r} not yet served "
+                f"({summary.total} lifetime, {summary.rows} rows)"
+            )
+            if summary.last_ts:
+                detail += f", last {summary.last_ts}"
+            return [HealthResult(label="T2 best-effort writes", ok=True, detail=detail)]
+
         detail = (
             f"{summary.recent_total} drop(s) in the last 24h "
             f"({summary.total} lifetime, {summary.rows} rows), most recently "

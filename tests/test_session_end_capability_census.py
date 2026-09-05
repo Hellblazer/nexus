@@ -283,6 +283,56 @@ class TestWriteSessionCapabilityCensus:
         assert len(drops) == 1
         assert drops[0]["hook"] == "capability_census"
 
+    def test_404_from_the_engine_is_metered_with_cause_route_absent(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-gjv9b review fold-in round 4: a plugin cut can ship this
+        writer ahead of the paired engine tag -- the cloud engine has no
+        capability_census route yet, so every SessionEnd 404s until the
+        engine catches up. Must classify as route_absent (version skew),
+        not a generic failure -- lets the REAL dropped_writes.record_drop
+        run (not a spy) so its own classify_drop_cause fallback is what
+        is under test here."""
+        cfg_dir = tmp_path / "cfgdir"
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg_dir))
+        drop_path = tmp_path / "drops.jsonl"
+        monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+        monkeypatch.setenv("NX_CENSUS_PROJECT_DIR", str(project_dir))
+        sid = "sess-404-route-absent"
+        _write_transcript(project_dir / f"{sid}.jsonl", [_tool_use_record("Bash")])
+
+        import nexus._session_end_census as mod
+
+        def _boom() -> tuple[str, str]:
+            # resolve_service_endpoint() takes no arguments; mirrors
+            # RefreshableHttpStoreMixin._raise_for_status's exact message
+            # shape for a 404 -- classify_drop_cause matches on the
+            # literal "HTTP 404" substring, never a re-dispatch. (The
+            # sibling fixtures in this file declare an unused
+            # base_url_unused parameter that resolve_service_endpoint()
+            # never actually passes -- harmless there since they never
+            # assert on the resulting cause, but this test does, so the
+            # signature must match the real call.)
+            raise RuntimeError(
+                "HttpTelemetryStore.record_capability_census failed: "
+                "HTTP 404: Not Found"
+            )
+
+        monkeypatch.setattr(
+            "nexus.db.service_endpoint.resolve_service_endpoint", _boom,
+        )
+
+        record = mod.write_session_capability_census(sid)  # must not raise
+
+        assert record is not None
+        lines = drop_path.read_text().splitlines()
+        assert len(lines) == 1
+        dropped = json.loads(lines[0])
+        assert dropped["hook"] == "capability_census"
+        assert dropped["cause"] == "route_absent"
+
     def test_write_failure_also_logs_a_structlog_warning(
         self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

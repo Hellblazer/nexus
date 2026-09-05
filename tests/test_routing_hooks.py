@@ -935,6 +935,55 @@ def test_log_routing_event_401_response_meters_with_cause_401(tmp_path, monkeypa
     assert drops[0]["cause"] == "401"
 
 
+def test_log_routing_event_404_response_meters_with_cause_route_absent(tmp_path, monkeypatch):
+    """nexus-gjv9b review fold-in round 4: a plugin cut can ship this
+    hook ahead of the paired engine tag -- the cloud engine has no
+    routing_events route yet, so every hook decision 404s until the
+    engine catches up. Must classify as route_absent (version skew),
+    never a generic failure."""
+    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    drop_path = tmp_path / "dropped_writes.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
+    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+    monkeypatch.setenv("NX_SERVICE_PORT", "4242")
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "some-token")
+    lib = _load_lib()
+
+    def _fake_urlopen(req, timeout=None):  # noqa: ARG001
+        raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+
+    import urllib.request as _ur
+    monkeypatch.setattr(_ur, "urlopen", _fake_urlopen)
+
+    lib.log_routing_event(rule="rule_404", outcome="allow")
+
+    drops = _drop_records(drop_path)
+    assert len(drops) == 1
+    assert drops[0]["cause"] == "route_absent"
+
+
+def test_log_routing_event_405_response_meters_with_cause_route_absent(tmp_path, monkeypatch):
+    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    drop_path = tmp_path / "dropped_writes.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
+    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+    monkeypatch.setenv("NX_SERVICE_PORT", "4242")
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "some-token")
+    lib = _load_lib()
+
+    def _fake_urlopen(req, timeout=None):  # noqa: ARG001
+        raise urllib.error.HTTPError(req.full_url, 405, "Method Not Allowed", {}, None)
+
+    import urllib.request as _ur
+    monkeypatch.setattr(_ur, "urlopen", _fake_urlopen)
+
+    lib.log_routing_event(rule="rule_405", outcome="allow")
+
+    drops = _drop_records(drop_path)
+    assert len(drops) == 1
+    assert drops[0]["cause"] == "route_absent"
+
+
 def test_log_routing_event_5xx_response_meters_with_cause_5xx(tmp_path, monkeypatch):
     _isolate_endpoint_discovery(tmp_path, monkeypatch)
     drop_path = tmp_path / "dropped_writes.jsonl"

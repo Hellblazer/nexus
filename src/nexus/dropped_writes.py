@@ -58,6 +58,11 @@ _log = structlog.get_logger(__name__)
 #:       403" message (:meth:`RefreshableHttpStoreMixin._raise_for_status`'s
 #:       exact wording), or a stdlib ``urllib.error.HTTPError`` cause
 #:       string a caller already reduced to this literal token.
+#:   route_absent  -- HTTP 404/405: the SERVING engine predates this
+#:       route entirely (a plugin cut shipping the client half ahead of
+#:       the paired engine tag -- version skew, not a failure of
+#:       anything). Checked BEFORE ``5xx`` (disjoint status ranges, order
+#:       is cosmetic here) and BEFORE the generic ``other`` fallback.
 #:   5xx           -- "HTTP 5xx" shaped, any 500-599 status.
 #:   timeout       -- a connect/read/write/pool timeout.
 #:   connect       -- a transport-level connection failure (refused, DNS,
@@ -71,11 +76,22 @@ _CAUSE_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
     ("guard_refused", re.compile(r"refusing a write|productionwriteguarderror", re.IGNORECASE)),
     ("401", re.compile(r"\bhttp[ _]?401\b|\b401\b.*unauthorized", re.IGNORECASE)),
     ("403", re.compile(r"\bhttp[ _]?403\b|\b403\b.*forbidden", re.IGNORECASE)),
+    ("route_absent", re.compile(r"\bhttp[ _]?404\b|\bhttp[ _]?405\b", re.IGNORECASE)),
     ("5xx", re.compile(r"\bhttp[ _]?5\d\d\b", re.IGNORECASE)),
     ("timeout", re.compile(r"timed? ?out|timeout", re.IGNORECASE)),
     ("connect", re.compile(r"connect|connection refused|name or service not known|dns", re.IGNORECASE)),
     ("unresolvable", re.compile(r"unresolvable|not resolvable|no service_url|no.*token is resolvable", re.IGNORECASE)),
 )
+
+#: Causes that, ALONE or in combination with each other, excuse a drop
+#: window from the real-failure WARN (nexus-gjv9b review fold-in round
+#: 4: a plugin cut can ship the client half of a route ahead of the
+#: paired engine tag by design -- a 404/405 window is version skew, not
+#: a service problem, exactly like an un-opted-in dev checkout's
+#: guard_refused is a correctly-behaving guard, not a service problem).
+#: A window with even ONE cause outside this set stays a real WARN --
+#: see :attr:`DropSummary.recent_all_benign`.
+_BENIGN_DROP_CAUSES = frozenset({"guard_refused", "route_absent"})
 
 
 def classify_drop_cause(error: str) -> str:
@@ -156,6 +172,20 @@ class DropSummary:
     #: mixed in stays a real WARN — this flag is deliberately all-or-
     #: nothing, not "mostly guard refusals".
     recent_all_guard_refused: bool = False
+    #: True iff ``recent_total > 0`` and EVERY in-window drop's cause is
+    #: in :data:`_BENIGN_DROP_CAUSES` (nexus-gjv9b review fold-in round
+    #: 4) -- a strict SUPERSET of :attr:`recent_all_guard_refused`: also
+    #: true for a window of only ``route_absent`` drops (a plugin cut
+    #: shipping the client half of a route ahead of the paired engine
+    #: tag — every hook decision 404s until the engine catches up, which
+    #: is version skew, not a failing service), or a MIX of
+    #: ``guard_refused`` and ``route_absent`` (a dev checkout's guard
+    #: refusal and a properly-opted-in install hitting a not-yet-served
+    #: route can land in the SAME window since the meter aggregates
+    #: across every producer/process). A window with even one cause
+    #: outside this set stays a real WARN -- same all-or-nothing
+    #: discipline as :attr:`recent_all_guard_refused`.
+    recent_all_benign: bool = False
 
 
 def record_drop(*, hook: str, collection: str, rows: int, error: str, cause: str = "") -> None:
@@ -288,6 +318,10 @@ def count_drops(recent_hours: float = _DEFAULT_RECENT_HOURS) -> DropSummary:
     # AFFIRMATIVELY classified as guard_refused may excuse the window,
     # never one we simply have no opinion about.
     recent_non_guard_refused = 0
+    # Same discipline, widened to the full benign set (nexus-gjv9b review
+    # fold-in round 4): only a drop AFFIRMATIVELY classified as
+    # guard_refused OR route_absent may excuse the window.
+    recent_non_benign = 0
 
     def _finish() -> DropSummary:
         dominant_cause = ""
@@ -304,6 +338,7 @@ def count_drops(recent_hours: float = _DEFAULT_RECENT_HOURS) -> DropSummary:
             recent_dominant_cause=dominant_cause,
             recent_dominant_cause_count=dominant_count,
             recent_all_guard_refused=(recent_total > 0 and recent_non_guard_refused == 0),
+            recent_all_benign=(recent_total > 0 and recent_non_benign == 0),
         )
 
     try:
@@ -337,6 +372,8 @@ def count_drops(recent_hours: float = _DEFAULT_RECENT_HOURS) -> DropSummary:
                         cause_last_epoch[cause] = max(cause_last_epoch.get(cause, -1.0), epoch)
                     if cause != "guard_refused":
                         recent_non_guard_refused += 1
+                    if cause not in _BENIGN_DROP_CAUSES:
+                        recent_non_benign += 1
     except OSError:
         return _finish()
 

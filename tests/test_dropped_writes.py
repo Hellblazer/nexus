@@ -185,6 +185,22 @@ def test_classify_drop_cause_403():
     ) == "403"
 
 
+def test_classify_drop_cause_route_absent_404():
+    """nexus-gjv9b review fold-in round 4: a plugin cut can ship the
+    client half of a route ahead of the paired engine tag -- the SERVING
+    engine predates the route entirely, on every call, until the engine
+    catches up. Version skew, not a failure."""
+    assert dropped_writes.classify_drop_cause(
+        "HttpTelemetryStore.record_routing_event failed: HTTP 404: Not Found"
+    ) == "route_absent"
+
+
+def test_classify_drop_cause_route_absent_405():
+    assert dropped_writes.classify_drop_cause(
+        "HttpTelemetryStore.record_capability_census failed: HTTP 405: Method Not Allowed"
+    ) == "route_absent"
+
+
 def test_classify_drop_cause_5xx():
     assert dropped_writes.classify_drop_cause(
         "HttpTelemetryStore.record_capability_census failed: HTTP 503: unavailable"
@@ -341,3 +357,65 @@ def test_count_drops_recent_all_guard_refused_false_when_cause_unclassified(
 def test_count_drops_recent_all_guard_refused_false_with_no_drops():
     summary = dropped_writes.DropSummary()
     assert summary.recent_all_guard_refused is False
+
+
+# ---------------------------------------------------------------------------
+# recent_all_benign (nexus-gjv9b review fold-in round 4): a strict
+# superset of recent_all_guard_refused -- also excuses a window of only
+# route_absent drops, or a MIX of guard_refused and route_absent (a
+# plugin cut ahead of the engine and an un-opted-in dev checkout can
+# both land in the same meter window).
+# ---------------------------------------------------------------------------
+
+
+def test_recent_all_benign_true_for_route_absent_only_window(tmp_path, monkeypatch):
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl"))
+    for _ in range(3):
+        dropped_writes.record_drop(
+            hook="routing_events", collection="", rows=1,
+            error="routing_events POST failed: route_absent", cause="route_absent",
+        )
+    summary = dropped_writes.count_drops()
+    assert summary.recent_all_benign is True
+    assert summary.recent_all_guard_refused is False, (
+        "route_absent alone must not also satisfy the narrower "
+        "guard_refused-only flag"
+    )
+
+
+def test_recent_all_benign_true_for_mixed_guard_refused_and_route_absent(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl"))
+    dropped_writes.record_drop(
+        hook="capability_census", collection="", rows=1,
+        error="STOP: refusing a WRITE",
+    )
+    dropped_writes.record_drop(
+        hook="routing_events", collection="", rows=1,
+        error="route_absent", cause="route_absent",
+    )
+    summary = dropped_writes.count_drops()
+    assert summary.recent_all_benign is True
+
+
+def test_recent_all_benign_false_with_one_other_cause_mixed_in(tmp_path, monkeypatch):
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl"))
+    dropped_writes.record_drop(
+        hook="routing_events", collection="", rows=1,
+        error="route_absent", cause="route_absent",
+    )
+    dropped_writes.record_drop(
+        hook="routing_events", collection="", rows=1,
+        error="HTTP 401: unauthorized",
+    )
+    summary = dropped_writes.count_drops()
+    assert summary.recent_all_benign is False, (
+        "a single non-benign cause in the window must keep the real "
+        "WARN path live -- all-or-nothing, not 'mostly benign'"
+    )
+
+
+def test_recent_all_benign_false_with_no_drops():
+    summary = dropped_writes.DropSummary()
+    assert summary.recent_all_benign is False
