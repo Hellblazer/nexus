@@ -352,6 +352,13 @@ class _PhaseHeartbeat:
     ETA format is meaningless once the per-file loop ends, whereas this
     heartbeat covers every phase, including the ones the ticker never
     saw at all.
+
+    nexus-s71lr: *prefix* (default ``"post"``, preserving every existing
+    caller's exact tick text) lets a second, independently-labelled
+    instance cover a DIFFERENT silent stretch — the per-file embedding
+    loop itself, which used to have no heartbeat at all (see
+    :meth:`touch`) — without the two instances' tick lines being
+    indistinguishable in the transcript.
     """
 
     def __init__(
@@ -360,10 +367,12 @@ class _PhaseHeartbeat:
         is_tty: bool,
         echo: Callable[[str, bool], None],
         interval: float | None = None,
+        prefix: str = "post",
     ) -> None:
         self._interval = interval if interval is not None else (10.0 if is_tty else 30.0)
         self._is_tty = is_tty
         self._echo = echo
+        self._prefix = prefix
         self._done = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -383,6 +392,28 @@ class _PhaseHeartbeat:
             target=self._loop, name="nx-phase-heartbeat", daemon=True,
         )
         self._thread.start()
+
+    def touch(self, label: str | None = None) -> None:
+        """Reset the elapsed-time clock (and optionally the label) of an
+        ALREADY-armed heartbeat, without stopping/restarting its background
+        thread.
+
+        nexus-s71lr: the per-file loop calls this once per completed file so
+        the heartbeat's "Xs elapsed" always measures silence since the LAST
+        completed unit of work — i.e. how long the CURRENT (still-running)
+        file has been embedding — rather than cumulative time since the
+        whole loop started. Unlike :meth:`arm`, this never joins or spawns a
+        thread, so it is cheap enough to call once per file even across a
+        run of thousands of files. A call before the heartbeat has ever
+        been armed is a no-op (there is no live thread reading the clock
+        yet, so resetting it would have nothing to observe it).
+        """
+        if self._thread is None:
+            return
+        with self._lock:
+            if label is not None:
+                self._label = label
+            self._start_mono = time.monotonic()
 
     def disarm(self) -> None:
         self._done.set()
@@ -406,7 +437,7 @@ class _PhaseHeartbeat:
         if not label:
             return
         elapsed = time.monotonic() - start
-        msg = f"  [post] {label} still running ({elapsed:.0f}s elapsed)"
+        msg = f"  [{self._prefix}] {label} still running ({elapsed:.0f}s elapsed)"
         self._ticked = True
         if self._is_tty:
             self._echo(f"\r{msg}", False)
@@ -616,7 +647,20 @@ def index_repo_cmd(
         total = 0
         total_chunks = 0
         skipped_files = 0
-        eta_ticker = _ETATicker(emit=lambda msg: click.echo(f"  {msg}", err=True))
+        # nexus-s71lr: 5s (was 60s) — the bead's own reproduction ("a
+        # 33-chunk file is 15 seconds of silence") falls entirely inside
+        # the old 60s window, so this ticker never got a chance to fire
+        # during exactly the silence the bead reports. This is the ONLY
+        # thing live during the per-file loop (see on_file's n==1 branch
+        # below, which disarms phase_heartbeat once real per-file progress
+        # exists) — a second, independent heartbeat here was tried and
+        # reverted: it collided with the T2-22168 double-fire invariant
+        # ``test_eta_ticker_and_phase_heartbeat_never_double_fire`` protects
+        # (no "still running" line may appear once genuine per-file eta
+        # ticks exist). Tightening this interval reuses that already-
+        # reviewed single-ticker design instead of reintroducing a second
+        # one.
+        eta_ticker = _ETATicker(interval=5.0, emit=lambda msg: click.echo(f"  {msg}", err=True))
         phase_heartbeat = _PhaseHeartbeat(
             is_tty=sys.stdout.isatty(),
             echo=lambda msg, nl: click.echo(msg, nl=nl, err=True),
@@ -2487,12 +2531,27 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
 
     bar = tqdm(total=len(rdr_files), disable=None, desc="RDR", unit="doc")
     n = 0
+    # nexus-s71lr: `nx index rdr` had NO signal at all between per-file
+    # completion lines \u2014 no ETA ticker, no phase heartbeat, nothing. This is
+    # the exact command the bead's own reproduction used ("212 RDR files ...
+    # 13 minutes ... no output"). Armed for the whole batch_index_markdowns
+    # call below; `touch()`-ed on every file completion so its "Xs elapsed"
+    # measures silence since the LAST completed file, never cumulative run
+    # time. Always on (not gated behind --monitor).
+    file_heartbeat = _PhaseHeartbeat(
+        is_tty=sys.stdout.isatty(),
+        echo=lambda msg, nl: click.echo(msg, nl=nl, err=True),
+        interval=5.0,
+        prefix="embed",
+    )
+    file_heartbeat.arm(f"0/{len(rdr_files)} RDR document(s)")
 
     def on_file(fpath: Path, chunks: int, elapsed: float) -> None:
         nonlocal n
         n += 1
         bar.update(1)
         bar.set_postfix(now=fpath.name)
+        file_heartbeat.touch(f"{n}/{len(rdr_files)} RDR document(s)")
         if monitor or not sys.stdout.isatty():
             lbl = f"{chunks} chunks" if chunks else "skipped"
             line = f"  [{n}/{len(rdr_files)}] {fpath.name} \u2014 {lbl}  ({elapsed:.1f}s)"
@@ -2525,9 +2584,12 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
             # floats or ints, got [[np.float32(...)..."
             return [[float(x) for x in v] for v in _local_ef(texts)], model
 
-    results = batch_index_markdowns(rdr_files, corpus=basename, collection_name=collection,
-                                    content_type="rdr", force=force, on_file=on_file,
-                                    base_path=repo_root, embed_fn=_embed_fn)
+    try:
+        results = batch_index_markdowns(rdr_files, corpus=basename, collection_name=collection,
+                                        content_type="rdr", force=force, on_file=on_file,
+                                        base_path=repo_root, embed_fn=_embed_fn)
+    finally:
+        file_heartbeat.disarm()
     bar.close()
     # nexus-5xn3k.6 AC4: batch_index_markdowns already distinguishes
     # indexed/skipped/failed per file (doc_indexer.py) — the gap was that

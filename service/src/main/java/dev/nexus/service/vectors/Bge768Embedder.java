@@ -131,6 +131,16 @@ public final class Bge768Embedder implements Embedder {
      */
     private static final long MIN_MODEL_BYTES = 200_000_000L;
 
+    /**
+     * Bead nexus-s71lr: cap on how often {@code embedSubBatched} emits an INFO-level
+     * progress line, shared across every concurrent {@code embed()} call on this instance
+     * (see {@link EmbedProgressGate}'s javadoc for why global, not per-call). "About once
+     * per 5 seconds" is the bead's own ask, sized against the reported incident (a 13-minute
+     * bulk embed with zero log lines between the run's start and its per-document upsert
+     * completions).
+     */
+    private static final long PROGRESS_LOG_INTERVAL_NANOS = java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+
     private final OrtEnvironment      ortEnv;
     private final OrtSession          session;
     private final HuggingFaceTokenizer tokenizer;
@@ -146,6 +156,9 @@ public final class Bge768Embedder implements Embedder {
      * package-private test-access convention).
      */
     private final AtomicInteger onnxInvocationCount = new AtomicInteger(0);
+
+    /** Bead nexus-s71lr: shared rate limiter for the embed-progress INFO log below. */
+    private final EmbedProgressGate progressGate = new EmbedProgressGate(PROGRESS_LOG_INTERVAL_NANOS);
 
     /** Construct with the canonical bge artifact paths. */
     public Bge768Embedder() {
@@ -278,6 +291,13 @@ public final class Bge768Embedder implements Embedder {
             lens[i] = Math.min((int) encodings[i].getIds().length, MAX_SEQ_LEN);
         }
 
+        // Bead nexus-s71lr: this call's own clock, for the "elapsed"/"chunks_per_sec"
+        // fields on the progress line below. Independent of progressGate's clock, which
+        // is shared instance-wide across every concurrent embed() call.
+        long callStartNanos = System.nanoTime();
+        int chunksDone = 0;
+        int subBatchIndex = 0;
+
         List<float[]> results = new ArrayList<>(n);
         int start = 0;
         while (start < n) {
@@ -297,6 +317,22 @@ public final class Bge768Embedder implements Embedder {
                         start, end - start, groupMaxLen, n);
             }
             results.addAll(runOnnxSubBatch(encodings, start, end, groupMaxLen));
+            chunksDone += end - start;
+
+            // Bead nexus-s71lr: the fix for "the engine logs nothing between per-document
+            // upserts" — a structured INFO line per sub-batch, rate-limited (progressGate,
+            // shared across every concurrent embed() call on this instance) to about once
+            // per PROGRESS_LOG_INTERVAL_NANOS so a large bulk run does not flood INFO.
+            long nowNanos = System.nanoTime();
+            if (progressGate.shouldLog(nowNanos)) {
+                double elapsedSec = (nowNanos - callStartNanos) / 1_000_000_000.0;
+                double chunksPerSec = elapsedSec > 0.0 ? chunksDone / elapsedSec : 0.0;
+                log.info("event=bge768_embed_progress sub_batch={} sub_batch_size={} max_len={} "
+                        + "chunks_done={} chunks_total={} elapsed_s={} chunks_per_sec={}",
+                        subBatchIndex, end - start, groupMaxLen, chunksDone, n,
+                        String.format("%.1f", elapsedSec), String.format("%.1f", chunksPerSec));
+            }
+            subBatchIndex++;
             start = end;
         }
         return results;

@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nx index rdr — RDR document discovery and indexing command tests."""
+import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -198,3 +200,83 @@ def test_index_rdr_single_file_fallback_layout(
     paths_arg = mock_batch.call_args[0][0]
     assert len(paths_arg) == 1
     assert paths_arg[0].name == "002-adopt-click.md"
+
+
+# ── nexus-s71lr: in-loop heartbeat, always on (not gated behind --monitor) ──
+#
+# `nx index rdr` is the exact command the bead's own reproduction used
+# ("212 RDR files ... 13 minutes ... no output"): unlike `nx index repo`
+# (which already had an ETA ticker + phase heartbeat), this command had NO
+# signal at all between per-file completion lines.
+
+
+def test_index_rdr_heartbeat_ticks_during_a_slow_file_by_default(
+    runner: CliRunner, repo_with_rdrs: Path, monkeypatch,
+) -> None:
+    """A file embed slow enough to clear the heartbeat's interval must
+    produce a "[embed] ... still running" line even WITHOUT --monitor —
+    the exact default-visibility gap the bead reports."""
+    import nexus.commands.index as index_mod
+
+    class _FastPhaseHeartbeat(index_mod._PhaseHeartbeat):
+        def __init__(self, *, is_tty, echo, interval=None, prefix="post"):
+            super().__init__(is_tty=is_tty, echo=echo, interval=0.02, prefix=prefix)
+
+    monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
+
+    def fake_batch_index_markdowns(paths, **kwargs):
+        on_file = kwargs.get("on_file")
+        time.sleep(0.09)  # several 0.02s intervals elapse with nothing done
+        on_file(paths[0], 5, 0.09)
+        return {str(p): "indexed" for p in paths}
+
+    with patch(
+        "nexus.doc_indexer.batch_index_markdowns", side_effect=fake_batch_index_markdowns,
+    ):
+        result = runner.invoke(main, ["index", "rdr", str(repo_with_rdrs)])
+
+    assert result.exit_code == 0, result.output
+    assert "[embed]" in result.output
+    assert "still running" in result.output
+    assert "elapsed)" in result.output
+
+
+def test_index_rdr_heartbeat_silent_on_a_fast_run(
+    runner: CliRunner, repo_with_rdrs: Path,
+) -> None:
+    """The default (real, non-fast) heartbeat interval must NOT fire for a
+    normal, fast test run — no flooding for the common case."""
+    with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}):
+        result = runner.invoke(main, ["index", "rdr", str(repo_with_rdrs)])
+
+    assert result.exit_code == 0, result.output
+    assert "[embed]" not in result.output
+    assert "still running" not in result.output
+
+
+def test_index_rdr_heartbeat_disarmed_on_exception(
+    runner: CliRunner, repo_with_rdrs: Path, monkeypatch,
+) -> None:
+    """A crash inside batch_index_markdowns must still disarm the
+    heartbeat — no leaked background thread, no tick after CLI exit."""
+    import nexus.commands.index as index_mod
+
+    class _FastPhaseHeartbeat(index_mod._PhaseHeartbeat):
+        def __init__(self, *, is_tty, echo, interval=None, prefix="post"):
+            super().__init__(is_tty=is_tty, echo=echo, interval=0.02, prefix=prefix)
+
+    monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
+
+    def fake_batch_index_markdowns(paths, **kwargs):
+        raise RuntimeError("boom")
+
+    with patch(
+        "nexus.doc_indexer.batch_index_markdowns", side_effect=fake_batch_index_markdowns,
+    ):
+        result = runner.invoke(main, ["index", "rdr", str(repo_with_rdrs)])
+
+    assert result.exit_code != 0
+    # Give any leaked ticker thread a beat to misbehave, then confirm none
+    # of the live threads are the heartbeat's.
+    time.sleep(0.05)
+    assert not any(t.name == "nx-phase-heartbeat" for t in threading.enumerate())

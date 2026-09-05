@@ -1145,6 +1145,38 @@ def test_eta_ticker_stops_when_file_loop_completes_not_on_phase(
     assert result.exit_code == 0, result.output
 
 
+# ── in-loop ETA ticker cadence (nexus-s71lr) ────────────────────────────────
+
+
+def test_repo_eta_ticker_interval_tightened_to_five_seconds(
+    runner, repo_dir, mock_reg, monkeypatch,
+):
+    """`nx index repo` must construct its ``_ETATicker`` with a 5s interval
+    (was 60s) — a single file taking anywhere under 60s produced zero
+    in-loop signal at the old cadence (the bead's own example: "a 33-chunk
+    file is 15 seconds of silence"). A second, independent heartbeat for
+    this same window was tried and reverted (it collided with
+    ``test_eta_ticker_and_phase_heartbeat_never_double_fire``'s protected
+    invariant below) — tightening the existing ticker's cadence is the
+    fix that reuses the already-reviewed single-ticker design instead."""
+    import nexus.commands.index as index_mod
+
+    captured: dict = {}
+    real_eta_ticker = index_mod._ETATicker
+
+    class _CapturingETATicker(real_eta_ticker):
+        def __init__(self, interval=60.0, emit=None):
+            captured["interval"] = interval
+            super().__init__(interval=interval, emit=emit)
+
+    monkeypatch.setattr(index_mod, "_ETATicker", _CapturingETATicker)
+
+    result, _ = _invoke_repo(runner, [str(repo_dir)], mock_reg)
+
+    assert result.exit_code == 0, result.output
+    assert captured.get("interval") == 5.0
+
+
 # ── heartbeat double-fire fix (T2 22168 engine-w0-503 follow-up) ───────────
 
 
@@ -1177,8 +1209,8 @@ def test_eta_ticker_and_phase_heartbeat_never_double_fire(runner, repo_dir, mock
             super().__init__(interval=0.02, emit=emit)
 
     class _FastPhaseHeartbeat(index_mod._PhaseHeartbeat):
-        def __init__(self, *, is_tty, echo, interval=None):
-            super().__init__(is_tty=is_tty, echo=echo, interval=0.02)
+        def __init__(self, *, is_tty, echo, interval=None, prefix="post"):
+            super().__init__(is_tty=is_tty, echo=echo, interval=0.02, prefix=prefix)
 
     monkeypatch.setattr(index_mod, "_ETATicker", _FastETATicker)
     monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
@@ -1289,6 +1321,62 @@ def test_phase_heartbeat_rearm_stops_previous_phase_ticks():
         assert max(a_indices) < min(b_indices), "a Phase A tick fired after Phase B was armed"
 
 
+def test_phase_heartbeat_custom_prefix() -> None:
+    """nexus-s71lr: a caller-supplied ``prefix`` replaces the hardcoded
+    ``[post]`` tag — the mechanism that lets a second heartbeat instance
+    (e.g. `nx index rdr`'s in-loop embed heartbeat) be visually
+    distinguishable from the existing pre/post-phase one."""
+    from nexus.commands.index import _PhaseHeartbeat
+    calls: list[str] = []
+    hb = _PhaseHeartbeat(
+        is_tty=False, echo=lambda msg, nl: calls.append(msg), interval=0.02, prefix="embed",
+    )
+    hb.arm("3/10 files")
+    time.sleep(0.05)
+    hb.disarm()
+    ticks = [c for c in calls if "still running" in c]
+    assert ticks, "expected at least one tick"
+    for msg in ticks:
+        assert msg.startswith("  [embed] ")
+        assert "[post]" not in msg
+
+
+def test_phase_heartbeat_touch_resets_elapsed_without_new_thread() -> None:
+    """nexus-s71lr: ``touch()`` restarts the elapsed clock (so the next
+    tick reports time since the touch, not since the original ``arm()``)
+    and updates the label, WITHOUT spawning a new background thread."""
+    from nexus.commands.index import _PhaseHeartbeat
+    calls: list[str] = []
+    hb = _PhaseHeartbeat(is_tty=False, echo=lambda msg, nl: calls.append(msg), interval=0.05)
+    hb.arm("0/2 files")
+    thread_after_arm = hb._thread  # noqa: SLF001 -- white-box: proving no thread churn
+    time.sleep(0.03)
+    hb.touch("1/2 files")
+    assert hb._thread is thread_after_arm, "touch() must not spawn a new thread"  # noqa: SLF001
+    time.sleep(0.03)  # 0.06s since touch(), 0.09s since the original arm()
+    hb.disarm()
+    ticks = [c for c in calls if "still running" in c]
+    assert ticks, "expected at least one tick"
+    # The label reflects the touch(), and no tick claims >=90ms elapsed --
+    # if the clock were NOT reset by touch(), the interval-0.05s tick would
+    # have fired at ~90ms (0.03+0.03+0.03 since arm), past the touch point.
+    for msg in ticks:
+        assert "1/2 files" in msg
+        assert "0/2 files" not in msg
+
+
+def test_phase_heartbeat_touch_before_arm_is_a_noop() -> None:
+    """touch() on a never-armed heartbeat must not raise or spawn anything
+    -- an in-loop caller may legitimately call it before the loop's first
+    file completes if wiring is ever reordered."""
+    from nexus.commands.index import _PhaseHeartbeat
+    calls: list[str] = []
+    hb = _PhaseHeartbeat(is_tty=False, echo=lambda msg, nl: calls.append(msg), interval=5.0)
+    hb.touch("should be a no-op")  # must not raise
+    assert calls == []
+    assert hb._thread is None  # noqa: SLF001 -- white-box: proving no thread was spawned
+
+
 def test_on_phase_heartbeat_fires_for_silent_long_phase(runner, repo_dir, mock_reg, monkeypatch):
     """Integration: on_phase wiring arms/disarms the heartbeat and prints
     it on the ``[post]`` channel with the exact liveness constraints."""
@@ -1296,8 +1384,8 @@ def test_on_phase_heartbeat_fires_for_silent_long_phase(runner, repo_dir, mock_r
     import nexus.commands.index as index_mod
 
     class _FastPhaseHeartbeat(index_mod._PhaseHeartbeat):
-        def __init__(self, *, is_tty, echo, interval=None):
-            super().__init__(is_tty=is_tty, echo=echo, interval=0.02)
+        def __init__(self, *, is_tty, echo, interval=None, prefix="post"):
+            super().__init__(is_tty=is_tty, echo=echo, interval=0.02, prefix=prefix)
 
     monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
 
