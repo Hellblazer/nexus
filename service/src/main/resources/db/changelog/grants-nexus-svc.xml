@@ -389,5 +389,4 @@ $$;
         <rollback><!-- Revoke is a DBA operation; not automated. --></rollback>
     </changeSet>
 
-
 </databaseChangeLog>

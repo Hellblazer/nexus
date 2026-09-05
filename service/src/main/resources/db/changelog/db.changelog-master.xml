@@ -1056,7 +1056,6 @@
          <include> comment for the identical reasoning). -->
     <include file="db/changelog/vectors-013-taxonomy-ann-query.xml"/>
 
-
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
