@@ -488,7 +488,7 @@ class TestIndexCmdExitCodeRule:
 
         fake_gather.append(("U1", "/a.pdf"))
         monkeypatch.setattr("nexus.commands.dt._index_record",
-                            lambda uuid, path, *, collection, corpus, dry_run, extractor="auto": (True, 1))
+                            lambda uuid, path, *, collection, corpus, dry_run, extractor="auto", force=False: (True, 1))
         # DT unreachable, but no --link-semantic/--writeback/--highlights
         # flag was passed -> the probe never even runs (Gap 0 preserved).
         monkeypatch.setattr("nexus.mcp_client.devonthink.available", lambda **kw: False)
@@ -503,7 +503,7 @@ class TestIndexCmdExitCodeRule:
 
         fake_gather.append(("U1", "/a.pdf"))
         monkeypatch.setattr("nexus.commands.dt._index_record",
-                            lambda uuid, path, *, collection, corpus, dry_run, extractor="auto": (True, 1))
+                            lambda uuid, path, *, collection, corpus, dry_run, extractor="auto", force=False: (True, 1))
         monkeypatch.setattr("nexus.mcp_client.devonthink.available", lambda **kw: True)
         monkeypatch.setattr("nexus.commands.dt._link_semantic_record", lambda uuid: True)
         result = runner.invoke(main, ["dt", "index", "--uuid", "U1", "--link-semantic"])
@@ -517,7 +517,7 @@ class TestIndexCmdExitCodeRule:
 
         fake_gather.append(("U1", "/a.pdf"))
         monkeypatch.setattr("nexus.commands.dt._index_record",
-                            lambda uuid, path, *, collection, corpus, dry_run, extractor="auto": (True, 1))
+                            lambda uuid, path, *, collection, corpus, dry_run, extractor="auto", force=False: (True, 1))
         monkeypatch.setattr("nexus.mcp_client.devonthink.available", lambda **kw: False)
         monkeypatch.setattr(
             "nexus.mcp_client.devonthink.last_unreachable_detail",
@@ -537,7 +537,7 @@ class TestIndexCmdExitCodeRule:
 
         fake_gather.append(("U1", "/a.pdf"))
         monkeypatch.setattr("nexus.commands.dt._index_record",
-                            lambda uuid, path, *, collection, corpus, dry_run, extractor="auto": (True, 1))
+                            lambda uuid, path, *, collection, corpus, dry_run, extractor="auto", force=False: (True, 1))
         monkeypatch.setattr("nexus.mcp_client.devonthink.available", lambda **kw: False)
         result = runner.invoke(
             main,
@@ -602,7 +602,7 @@ class TestIndexCmdExitCodeRule:
 
         monkeypatch.setattr("nexus.mcp_client.devonthink.available", _fake_available)
         monkeypatch.setattr("nexus.commands.dt._index_record",
-                            lambda uuid, path, *, collection, corpus, dry_run, extractor="auto": (True, 1))
+                            lambda uuid, path, *, collection, corpus, dry_run, extractor="auto", force=False: (True, 1))
         monkeypatch.setattr("nexus.commands.dt._link_semantic_record", lambda uuid: True)
         result = runner.invoke(
             main, ["dt", "index", "--uuid", "U1", "--link-semantic", "--dt-content"],
