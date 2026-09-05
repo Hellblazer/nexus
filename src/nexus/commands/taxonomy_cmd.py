@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from contextlib import nullcontext
@@ -842,15 +843,41 @@ def _show_merge_targets(
 )
 @click.option(
     "--yes", "-y", is_flag=True,
-    help="Skip the destructive-action confirmation prompt (--auto only)",
+    help=(
+        "No longer sufficient alone to skip the destructive-action "
+        "confirmation (nexus-afnht) — pass --apply-destructive as well. "
+        "Kept for CLI compatibility"
+    ),
 )
 @click.option(
     "--dry-run", is_flag=True,
-    help="Print verdicts without applying any mutations (--auto only)",
+    help=(
+        "Print verdicts without applying any mutations (--auto only). "
+        "Persists the verdicts (per topic, keyed by a content hash of its "
+        "id/label/terms) so a subsequent --auto on the same collection "
+        "applies THESE verdicts rather than re-sampling claude_dispatch, "
+        "as long as the topic is unchanged (nexus-afnht)"
+    ),
 )
 @click.option(
     "--batch-size", default=40, type=int, show_default=True,
     help="Topics per claude_dispatch call (--auto only)",
+)
+@click.option(
+    "--apply-destructive", is_flag=True,
+    help=(
+        "Skip the destructive-action (delete/merge) confirmation prompt "
+        "and apply unattended (--auto, non-dry-run only). Required in "
+        "addition to accept/rename automation — --yes alone no longer "
+        "does this (nexus-afnht)"
+    ),
+)
+@click.option(
+    "--accept-only", is_flag=True,
+    help=(
+        "Apply accept/rename verdicts only; leave delete/merge verdicts "
+        "pending for explicit human review (--auto, non-dry-run only)"
+    ),
 )
 def review_cmd(
     collection: str,
@@ -859,13 +886,18 @@ def review_cmd(
     yes: bool,
     dry_run: bool,
     batch_size: int,
+    apply_destructive: bool,
+    accept_only: bool,
 ) -> None:
     """Interactive topic review — accept, rename, merge, delete, or skip."""
     resolved_limit = limit if limit is not None else (5000 if auto else 15)
 
     if auto:
         with _T2Database(_default_db_path()) as db:
-            _review_auto(db, collection, resolved_limit, yes, dry_run, batch_size)
+            _review_auto(
+                db, collection, resolved_limit, yes, dry_run, batch_size,
+                apply_destructive, accept_only,
+            )
         return
 
     with _T2Database(_default_db_path()) as db:
@@ -1606,6 +1638,86 @@ def _print_review_destructive_plan(
             )
 
 
+_REVIEW_CACHE_PROJECT = "nexus_taxonomy_review_cache"
+
+
+def _review_cache_title(collection: str) -> str:
+    """T2 memory title for the ``--dry-run`` verdict cache of *collection*."""
+    return f"dry-run-verdicts:{collection or '(all)'}"
+
+
+def _topic_content_hash(topic_id: int, label: str, terms: list[str]) -> str:
+    """Deterministic short hash of a topic's reviewable content (nexus-afnht).
+
+    Covers id + label + terms (terms sorted, so reordering the same set does
+    not change the hash). Used to detect whether a topic changed between a
+    ``--dry-run`` preview and a later ``--auto`` apply, so a cached verdict
+    is only reused when the taxonomy it was computed against is unchanged.
+    """
+    payload = json.dumps(
+        {"id": topic_id, "label": label, "terms": sorted(terms)}, sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _load_review_cache(db: Any, collection: str) -> dict[int, dict[str, Any]]:
+    """Load persisted ``--dry-run`` verdicts for *collection*, keyed by topic id.
+
+    Each value is ``{"hash": <topic content hash>, "verdict": <verdict dict>}``.
+    Returns ``{}`` on a cache miss or any malformed/legacy content — a
+    corrupt or absent cache degrades to "nothing cached, re-sample
+    everything", never a crash.
+    """
+    entry = db.memory.get(project=_REVIEW_CACHE_PROJECT, title=_review_cache_title(collection))
+    if not entry:
+        return {}
+    content = entry.get("content") if isinstance(entry, dict) else None
+    if not content:
+        return {}
+    try:
+        raw = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    topics = raw.get("topics") if isinstance(raw, dict) else None
+    if not isinstance(topics, dict):
+        return {}
+    out: dict[int, dict[str, Any]] = {}
+    for key, value in topics.items():
+        try:
+            topic_id = int(key)
+        except (TypeError, ValueError):
+            continue
+        if (
+            isinstance(value, dict)
+            and isinstance(value.get("hash"), str)
+            and isinstance(value.get("verdict"), dict)
+        ):
+            out[topic_id] = value
+    return out
+
+
+def _save_review_cache(collection: str, cache: dict[int, dict[str, Any]]) -> None:
+    """Persist ``--dry-run`` verdicts for *collection*, keyed by topic id.
+
+    Routed through ``t2_index_write`` — the module's established write path
+    (see every ``db.taxonomy`` mutation in ``_review_auto``/``review_cmd``).
+    TTL is 7 days: a preview should not silently authorize an apply run
+    against a long-stale taxonomy snapshot (nexus-afnht) — an operator who
+    wants a longer window just re-runs ``--dry-run``.
+    """
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+    content = json.dumps({"topics": {str(k): v for k, v in cache.items()}})
+    t2_index_write(
+        lambda db: db.memory.put(
+            project=_REVIEW_CACHE_PROJECT,
+            title=_review_cache_title(collection),
+            content=content,
+            ttl=7,
+        )
+    )
+
+
 def _review_auto(
     db: Any,
     collection: str,
@@ -1613,14 +1725,40 @@ def _review_auto(
     yes: bool,
     dry_run: bool,
     batch_size: int,
+    apply_destructive: bool = False,
+    accept_only: bool = False,
 ) -> None:
     """Batched, unattended review: swaps the human judge for ``claude_dispatch``.
 
     accept/rename apply immediately (unless ``dry_run``); delete/merge are
-    held as a destructive plan requiring ``click.confirm`` or ``--yes``
-    (``dry_run`` suppresses ALL mutations, including accept/rename).
-    Dispatch is sequential per batch — no parallelism (V1 non-goal,
-    nexus-6i01g).
+    held as a destructive plan requiring ``click.confirm`` or
+    ``--apply-destructive`` (``dry_run`` suppresses ALL mutations, including
+    accept/rename). ``--yes`` no longer skips the destructive confirmation by
+    itself (nexus-afnht) — see ``--apply-destructive``. Dispatch is
+    sequential per batch — no parallelism (V1 non-goal, nexus-6i01g).
+
+    **Verdict cache (nexus-afnht).** ``--dry-run`` persists every verdict it
+    computes, per topic, keyed by (collection, topic id) plus a content hash
+    of that topic's (id, label, terms). A later ``--auto`` on the same
+    collection reuses a cached verdict for any topic whose hash still
+    matches — so an operator who reviewed a ``--dry-run`` preview and then
+    applies gets EXACTLY the verdicts they saw, not an independent re-sample.
+    (The bug this closes: two batched ``claude_dispatch`` passes are two
+    independent, unseeded stochastic draws, so a preview predicted nothing
+    about the apply that followed it.) A topic with no cached entry, or
+    whose hash no longer matches (label/terms changed since the preview —
+    a discover/rebuild/manual edit happened in between), is re-dispatched
+    fresh, with a loud one-line notice naming which topics were invalidated.
+    ``--dry-run`` itself reads the cache first too (so two back-to-back
+    previews of an unchanged taxonomy are stable and dispatch-free), and
+    always rewrites the cache with the full verdict set it ends up with.
+
+    ``--accept-only`` restricts APPLY to accept/rename verdicts: pending
+    delete/merge verdicts are left untouched (topics stay pending) without
+    ever printing the destructive plan or prompting. It has no effect on
+    ``--dry-run`` (which always previews everything) or on the cache (every
+    verdict actually computed is still cached, whether or not this run acts
+    on it).
 
     Merge validation runs in a second pass once the whole batch's verdicts
     are known (guard order documented inline below), including a CRITICAL
@@ -1643,6 +1781,37 @@ def _review_auto(
 
     click.echo(f"Auto-reviewing {len(topics)} topic(s) in batches of {batch_size}...")
 
+    cache = _load_review_cache(db, collection)
+
+    parsed_terms: dict[int, list[str]] = {}
+    current_hash: dict[int, str] = {}
+    verdict_by_topic: dict[int, dict[str, Any] | None] = {}
+    to_dispatch: list[dict[str, Any]] = []
+    invalidated_ids: list[int] = []
+
+    for t in topics:
+        try:
+            terms = json.loads(t["terms"]) if t.get("terms") else []
+        except (json.JSONDecodeError, TypeError):
+            terms = []
+        parsed_terms[t["id"]] = terms
+        current_hash[t["id"]] = _topic_content_hash(t["id"], t["label"], terms)
+        cached = cache.get(t["id"])
+        if cached is not None and cached["hash"] == current_hash[t["id"]]:
+            verdict_by_topic[t["id"]] = cached["verdict"]
+        else:
+            if cached is not None:
+                invalidated_ids.append(t["id"])
+            to_dispatch.append(t)
+
+    if invalidated_ids:
+        click.echo(
+            f"NOTE: {len(invalidated_ids)} cached --dry-run verdict(s) "
+            "invalidated (topic changed since the last preview) and will "
+            f"be re-sampled: topic id(s) {', '.join(str(i) for i in invalidated_ids)}.",
+            err=True,
+        )
+
     accepted = 0
     renamed = 0
     skipped = 0
@@ -1653,50 +1822,22 @@ def _review_auto(
     # the demoted per-failure INFO events land in the file while the
     # terminal gets one rollup line at the end.
     dispatch_failures: list[str] = []
-    n_batches = (len(topics) + batch_size - 1) // batch_size
+    n_batches = (len(to_dispatch) + batch_size - 1) // batch_size if to_dispatch else 0
 
     with open_run_log("taxonomy-review") as run_log_path:
-        for start in range(0, len(topics), batch_size):
-            batch = topics[start : start + batch_size]
+        for start in range(0, len(to_dispatch), batch_size):
+            batch = to_dispatch[start : start + batch_size]
             items: list[tuple[int, str, list[str], list[str], str]] = []
             for t in batch:
-                try:
-                    terms = json.loads(t["terms"]) if t.get("terms") else []
-                except (json.JSONDecodeError, TypeError):
-                    terms = []
                 doc_ids = db.taxonomy.get_topic_doc_ids(t["id"], limit=3)
-                items.append((t["id"], t["label"], terms, doc_ids, t["collection"]))
+                items.append((t["id"], t["label"], parsed_terms[t["id"]], doc_ids, t["collection"]))
 
             verdicts = asyncio.run(
                 _generate_review_verdicts_batch(items, failures=dispatch_failures)
             )
 
             for topic, verdict in zip(batch, verdicts):
-                if verdict is None:
-                    skipped += 1
-                    continue
-                action = verdict["action"]
-                if action == "accept":
-                    if not dry_run:
-                        _tid = topic["id"]
-                        t2_index_write(lambda db, _t=_tid: db.taxonomy.mark_topic_reviewed(_t, "accepted"))
-                    accepted += 1
-                elif action == "rename":
-                    if not dry_run:
-                        _tid = topic["id"]
-                        _lbl = verdict["label"]
-                        t2_index_write(lambda db, _t=_tid, _l=_lbl: db.taxonomy.rename_topic(_t, _l))
-                    renamed += 1
-                elif action == "delete":
-                    candidate_deletes.append({**topic, "_reason": verdict.get("reason", "")})
-                elif action == "merge":
-                    candidate_merges.append(
-                        {
-                            **topic,
-                            "_target_id": verdict.get("target_id"),
-                            "_reason": verdict.get("reason", ""),
-                        }
-                    )
+                verdict_by_topic[topic["id"]] = verdict
 
         # nexus-l1qpj: ONE rollup line instead of a WARNING per failed
         # batch; the per-failure records are in the run log (demoted to
@@ -1709,6 +1850,35 @@ def _review_auto(
                 f"details: {run_log_path}. First: "
                 f"{dispatch_failures[0][:200]}",
                 err=True,
+            )
+
+    new_cache: dict[int, dict[str, Any]] = {}
+    for topic in topics:
+        tid = topic["id"]
+        verdict = verdict_by_topic.get(tid)
+        if verdict is None:
+            skipped += 1
+            continue
+        new_cache[tid] = {"hash": current_hash[tid], "verdict": verdict}
+        action = verdict["action"]
+        if action == "accept":
+            if not dry_run:
+                t2_index_write(lambda db, _t=tid: db.taxonomy.mark_topic_reviewed(_t, "accepted"))
+            accepted += 1
+        elif action == "rename":
+            if not dry_run:
+                _lbl = verdict["label"]
+                t2_index_write(lambda db, _t=tid, _l=_lbl: db.taxonomy.rename_topic(_t, _l))
+            renamed += 1
+        elif action == "delete":
+            candidate_deletes.append({**topic, "_reason": verdict.get("reason", "")})
+        elif action == "merge":
+            candidate_merges.append(
+                {
+                    **topic,
+                    "_target_id": verdict.get("target_id"),
+                    "_reason": verdict.get("reason", ""),
+                }
             )
 
     # Second pass: validate merges only once the full delete- and
@@ -1759,6 +1929,10 @@ def _review_auto(
         )
 
     if dry_run:
+        # nexus-afnht: the preview is the authoritative verdict set — persist
+        # it so a subsequent --auto apply on this collection reuses exactly
+        # what was shown here, instead of re-sampling claude_dispatch.
+        _save_review_cache(collection, new_cache)
         if candidate_deletes or pending_merges:
             _print_review_destructive_plan(candidate_deletes, pending_merges)
         click.echo(
@@ -1772,11 +1946,40 @@ def _review_auto(
     merged = 0
     failed = 0
     if candidate_deletes or pending_merges:
+        if accept_only:
+            # nexus-afnht acceptance item 4: restrict apply to accept/rename;
+            # destructive verdicts are never shown or prompted for, and stay
+            # pending for explicit human review.
+            n_withheld = len(candidate_deletes) + len(pending_merges)
+            skipped += n_withheld
+            click.echo(
+                f"{n_withheld} destructive verdict(s) withheld (--accept-only); "
+                "topics remain pending for explicit human review."
+            )
+            click.echo(
+                f"\nAuto-review complete: {accepted} accepted, {renamed} renamed, "
+                f"{deleted} deleted, {merged} merged, {skipped} skipped, {failed} failed."
+            )
+            return
+
         _print_review_destructive_plan(candidate_deletes, pending_merges)
-        try:
-            proceed = yes or click.confirm("Apply the above destructive actions?")
-        except (click.Abort, EOFError):
-            proceed = False
+        if apply_destructive:
+            proceed = True
+        else:
+            # nexus-afnht acceptance item 3: --yes alone no longer skips this
+            # confirmation for destructive verdicts — --apply-destructive is
+            # the explicit, separate opt-in for unattended destructive apply.
+            if yes:
+                click.echo(
+                    "NOTE: --yes no longer skips the destructive-action "
+                    "confirmation by itself; pass --apply-destructive as "
+                    "well to apply deletes/merges unattended (nexus-afnht).",
+                    err=True,
+                )
+            try:
+                proceed = click.confirm("Apply the above destructive actions?")
+            except (click.Abort, EOFError):
+                proceed = False
 
         if proceed:
             for d in candidate_deletes:

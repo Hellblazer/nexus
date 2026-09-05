@@ -1489,8 +1489,9 @@ nx taxonomy show 5                              # docs assigned to topic 5
 nx taxonomy show 5 --assignments                # per-assignment quality: chunk/confidence/provenance
 nx taxonomy review                              # interactive: accept/rename/merge/delete/skip
 nx taxonomy review --auto                       # unattended: batched claude_dispatch verdicts
-nx taxonomy review --auto --dry-run             # preview verdicts, apply nothing
-nx taxonomy review --auto --yes                 # skip the destructive-action confirm prompt
+nx taxonomy review --auto --dry-run             # preview verdicts; persists them for a later apply
+nx taxonomy review --auto --apply-destructive   # skip the destructive-action confirm prompt
+nx taxonomy review --auto --accept-only         # apply accept/rename only; leave delete/merge pending
 nx taxonomy review --auto --batch-size 20       # topics per claude_dispatch call (default 40)
 nx taxonomy label                               # batch-relabel with Claude haiku
 nx taxonomy assign doc-id "topic label"         # manually assign a doc (see below)
@@ -1563,16 +1564,40 @@ nx taxonomy review --auto                       # default: up to 5000 pending to
 nx taxonomy review --auto -c docs__nexus         # scope to one collection
 nx taxonomy review --auto --limit 200            # cap topics considered
 nx taxonomy review --auto --batch-size 20        # topics per claude_dispatch call
-nx taxonomy review --auto --dry-run              # print verdicts, apply nothing
-nx taxonomy review --auto --yes                  # skip the destructive-action confirm prompt
+nx taxonomy review --auto --dry-run              # print verdicts, persist them for a later apply
+nx taxonomy review --auto --apply-destructive    # skip the destructive-action confirm prompt
+nx taxonomy review --auto --accept-only          # apply accept/rename only; delete/merge stay pending
 ```
 
 `accept` and `rename` apply immediately (unless `--dry-run`, which suppresses
 every mutation including those). `delete` and `merge` are held and printed as
 a grouped destructive plan — topic id, label, doc count, and the model's
 one-line reason for deletes; source label -> target label and doc counts for
-merges — then applied only after an interactive `y/N` confirm or `--yes`.
-Declining leaves those topics pending.
+merges — then applied only after an interactive `y/N` confirm or
+`--apply-destructive`. Declining leaves those topics pending. `--yes`/`-y` no
+longer skips this confirmation by itself (nexus-afnht) — it is kept for CLI
+compatibility, but a plain `--yes` run with destructive verdicts pending now
+prints a one-line notice and still prompts; pass `--apply-destructive` (with
+or without `--yes`) for unattended destructive apply. `--accept-only` is the
+alternative for the common case ("label and accept these N topics"): it
+applies accept/rename and withholds delete/merge entirely — no prompt, no
+printed plan, topics stay pending for explicit human review.
+
+**`--dry-run` is authoritative, not merely indicative (nexus-afnht).** Two
+independent batched `claude_dispatch` passes are two independent, unseeded
+stochastic draws — before this fix, a `--dry-run` preview predicted nothing
+about the destructive set a following `--auto` apply actually deleted or
+merged. `--dry-run` now persists every verdict it computes, per topic, keyed
+by collection plus a content hash of that topic's (id, label, terms). A
+later `--auto` on the same collection reuses a cached verdict for any topic
+whose hash still matches — so reviewing a preview and then applying it
+produces EXACTLY the verdicts shown, never an independent re-sample. A topic
+with no cached verdict, or whose hash no longer matches (a discover/rebuild
+pass or a manual edit changed its label/terms in between), is re-dispatched
+fresh, with a loud `NOTE:` line naming which topic ids were invalidated.
+Running `--dry-run` twice in a row with nothing changed dispatches only
+once — the second preview is served entirely from the cache and reports the
+identical verdict set. The cached entry expires after 7 days.
 
 Fail-open throughout: a `claude_dispatch` exception, a malformed response, or
 an invalid verdict entry leaves that topic pending rather than raising.
