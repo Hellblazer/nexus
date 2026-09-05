@@ -24,6 +24,7 @@ inside a best-effort hook whose contract forbids propagating.
 """
 from __future__ import annotations
 
+import calendar
 import json
 import os
 import time
@@ -61,6 +62,18 @@ class DropSummary:
     #: rather than assuming every drop is from the retired chash
     #: dual-write hook.
     last_hook: str = ""
+    #: Drops within :func:`count_drops`'s ``recent_hours`` decay window
+    #: (nexus-gjv9b review fold-in, critique CRITICAL 2): a live producer
+    #: is expected to have OCCASIONAL drops during a real outage, and once
+    #: the outage clears those drops must eventually stop being CURRENT
+    #: evidence — without a decay window, one drop from months ago would
+    #: soft-WARN ``nx doctor`` forever, exactly the "permanent false
+    #: alarm" nexus-piwya.9's own retirement of the founding chash-hook
+    #: alarm already learned not to ship. ``total``/``last_hook`` above
+    #: stay LIFETIME figures (audit visibility never shrinks); these two
+    #: are the DECISION inputs for "is this failing RIGHT NOW".
+    recent_total: int = 0
+    recent_last_hook: str = ""
 
 
 def record_drop(*, hook: str, collection: str, rows: int, error: str) -> None:
@@ -106,21 +119,58 @@ def record_drop(*, hook: str, collection: str, rows: int, error: str) -> None:
         _log.debug("dropped_write_meter_record_failed", exc_info=True)
 
 
-def count_drops() -> DropSummary:
+#: Default decay window for :func:`count_drops`'s ``recent_*`` fields
+#: (nexus-gjv9b review fold-in, critique CRITICAL 2). 24 hours: this meter
+#: answers "is a best-effort write failing RIGHT NOW", an operational
+#: question on the same cadence as a live outage, not an audit/retention
+#: question like ``expire_relevance_log``'s 90-day default — a drop from
+#: last week is not evidence anything is broken today.
+_DEFAULT_RECENT_HOURS = 24.0
+
+#: The record_drop ``ts`` format (``time.strftime`` in ``record_drop``
+#: itself) — UTC, second precision, trailing literal ``Z``.
+_TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _parse_drop_ts_epoch(ts: str) -> float | None:
+    """``ts`` (the exact ``record_drop``-written format) to a UTC epoch
+    float, or ``None`` on anything that does not parse — a malformed or
+    foreign-shaped timestamp must never crash the aggregate, only fall
+    out of the recency window (never counted as "recent", which is the
+    safe direction: it can only make the alarm LESS sticky, never more).
+    """
+    try:
+        return calendar.timegm(time.strptime(ts, _TS_FORMAT))
+    except (ValueError, TypeError):
+        return None
+
+
+def count_drops(recent_hours: float = _DEFAULT_RECENT_HOURS) -> DropSummary:
     """Aggregate the drop log into a :class:`DropSummary`.
 
     A missing log file means zero drops (the steady state). Malformed lines
     are skipped so a partial last write never poisons the count.
+
+    ``recent_hours`` (nexus-gjv9b review fold-in) bounds the
+    ``recent_total``/``recent_last_hook`` fields to drops whose ``ts`` is
+    within this many hours of "now" — the decay window that keeps
+    ``_check_t2_dropped_writes``'s soft-WARN from becoming a permanent
+    false alarm over one drop from months ago. ``total``/``last_hook``
+    remain LIFETIME figures, unaffected by this window.
     """
     path = default_log_path()
     if not path.exists():
         return DropSummary()
 
+    cutoff = time.time() - (recent_hours * 3600.0)
     total = 0
     rows = 0
     last_ts: str | None = None
     last_collection = ""
     last_hook = ""
+    recent_total = 0
+    recent_last_hook = ""
+    recent_last_epoch = -1.0
     try:
         with path.open("r", encoding="utf-8") as f:
             for line in f:
@@ -140,13 +190,21 @@ def count_drops() -> DropSummary:
                     last_ts = ts
                 last_collection = rec.get("collection", "") or last_collection
                 last_hook = rec.get("hook", "") or last_hook
+                epoch = _parse_drop_ts_epoch(ts) if ts else None
+                if epoch is not None and epoch >= cutoff:
+                    recent_total += 1
+                    if epoch >= recent_last_epoch:
+                        recent_last_epoch = epoch
+                        recent_last_hook = rec.get("hook", "") or recent_last_hook
     except OSError:
         return DropSummary(
             total=total, rows=rows, last_ts=last_ts,
             last_collection=last_collection, last_hook=last_hook,
+            recent_total=recent_total, recent_last_hook=recent_last_hook,
         )
 
     return DropSummary(
         total=total, rows=rows, last_ts=last_ts,
         last_collection=last_collection, last_hook=last_hook,
+        recent_total=recent_total, recent_last_hook=recent_last_hook,
     )

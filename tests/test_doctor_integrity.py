@@ -254,6 +254,57 @@ class TestCheckT2DroppedWrites:
         assert "routing_events" in r.detail
         assert "historical" not in r.detail.lower()
 
+    def test_aged_out_live_producer_drop_is_no_longer_soft_warn(self, tmp_path, monkeypatch):
+        """nexus-gjv9b review fold-in (critique CRITICAL 2): a decay
+        window is required, or one drop from months ago soft-WARNs nx
+        doctor FOREVER — exactly the permanent-false-alarm class
+        nexus-piwya.9 already retired the founding chash-hook alarm to
+        avoid. A drop older than the 24h recency window must fall back
+        to the historical/ok=True framing, while the LIFETIME total
+        stays visible in the detail."""
+        import json as _json
+
+        log_path = tmp_path / "drops.jsonl"
+        monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(log_path))
+        old_record = {
+            "ts": "2020-01-01T00:00:00Z",
+            "hook": "routing_events",
+            "collection": "",
+            "rows": 1,
+            "error": "connection refused",
+        }
+        log_path.write_text(_json.dumps(old_record) + "\n")
+
+        results = _check_t2_dropped_writes()
+        r = results[0]
+        assert r.ok is True, r.detail
+        assert "1" in r.detail  # lifetime total stays visible
+        assert "routing_events" in r.detail
+
+    def test_recent_and_aged_drops_both_counted_lifetime_only_recent_alarms(
+        self, tmp_path, monkeypatch,
+    ):
+        """A mix of an old (aged-out) and a fresh drop: the fresh one
+        alone must drive the soft-WARN, and the lifetime total must
+        still include both."""
+        from nexus import dropped_writes
+
+        log_path = tmp_path / "drops.jsonl"
+        monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(log_path))
+        log_path.write_text(
+            '{"ts": "2020-01-01T00:00:00Z", "hook": "routing_events", '
+            '"collection": "", "rows": 1, "error": "old"}\n'
+        )
+        dropped_writes.record_drop(
+            hook="capability_census", collection="", rows=1, error="fresh failure",
+        )
+
+        results = _check_t2_dropped_writes()
+        r = results[0]
+        assert r.ok is False
+        assert "capability_census" in r.detail
+        assert "2" in r.detail  # lifetime total = 2 (old + fresh)
+
 
 # ── T2 daemon singleton / multiplicity (RDR-129 A3, nexus-exa2p) ────────────
 

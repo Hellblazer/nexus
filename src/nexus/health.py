@@ -2679,19 +2679,25 @@ def _check_t2_dropped_writes() -> list[HealthResult]:
     chash dual-write hook — but nexus-gjv9b PARTs 1/2 gave it two LIVE
     ones (see :data:`_LIVE_DROP_PRODUCER_HOOKS`): the capability_census
     and routing_events writer swaps both degrade here on service-down.
-    Framing keys on :attr:`DropSummary.last_hook` (the docstring
-    previously here claimed the meter could no longer grow at all — see
-    :func:`nexus.dropped_writes.record_drop`'s own docstring for that
-    history):
+    Framing keys on :attr:`DropSummary.recent_last_hook` — a WINDOWED
+    field (:func:`nexus.dropped_writes.count_drops`'s ``recent_hours``,
+    24h default), NOT the lifetime ``last_hook`` (review fold-in,
+    critique CRITICAL 2): a live producer is expected to have OCCASIONAL
+    drops during a real outage, and once the window passes with no new
+    ones, this check must stop soft-WARNing — a decision keyed on the
+    lifetime field would soft-WARN forever over one drop from months ago,
+    exactly the "permanent false alarm" class nexus-piwya.9 already
+    retired the founding chash-hook alarm to avoid re-introducing here.
 
-    - ``last_hook`` in :data:`_LIVE_DROP_PRODUCER_HOOKS`: soft-WARN
-      (``ok=False``) — a live producer dropping now IS current evidence
-      of a best-effort write actually failing (service down, or an old
-      engine missing the route), the exact posture RDR-129 B4 restores
-      for a future adopter.
-    - ``last_hook`` anything else (empty, or the retired chash hook's own
-      historical value): unchanged HISTORICAL framing, ``ok=True``, count
-      frozen.
+    - ``recent_last_hook`` in :data:`_LIVE_DROP_PRODUCER_HOOKS`: soft-WARN
+      (``ok=False``) — a live producer dropping WITHIN THE WINDOW IS
+      current evidence of a best-effort write actually failing (service
+      down, or an old engine missing the route), the exact posture
+      RDR-129 B4 restores for a future adopter.
+    - Anything else (empty, or the retired chash hook's historical
+      value, or a live producer's drop that has AGED OUT of the window):
+      HISTORICAL framing, ``ok=True`` — the lifetime ``total`` stays
+      visible in the detail either way, audit visibility never shrinks.
     """
     from nexus.dropped_writes import count_drops  # noqa: PLC0415 — deferred to avoid circular import
 
@@ -2707,20 +2713,25 @@ def _check_t2_dropped_writes() -> list[HealthResult]:
             label="T2 best-effort writes", ok=True, detail="no drops recorded",
         )]
 
-    if summary.last_hook in _LIVE_DROP_PRODUCER_HOOKS:
+    if summary.recent_last_hook in _LIVE_DROP_PRODUCER_HOOKS:
         detail = (
-            f"{summary.total} drop(s) ({summary.rows} rows), most recently "
-            f"from {summary.last_hook!r} — a best-effort write to the engine "
-            f"is failing (service down, or an old engine missing the route)"
+            f"{summary.recent_total} drop(s) in the last 24h "
+            f"({summary.total} lifetime, {summary.rows} rows), most recently "
+            f"from {summary.recent_last_hook!r} — a best-effort write to the "
+            f"engine is failing (service down, or an old engine missing the route)"
         )
         if summary.last_ts:
             detail += f", last {summary.last_ts}"
         return [HealthResult(label="T2 best-effort writes", ok=False, detail=detail)]
 
     detail = (
-        f"{summary.total} historical drop(s) under lock contention "
-        f"({summary.rows} rows) from the retired chash dual-write hook "
-        f"(writer retired by RDR-187; count frozen)"
+        f"{summary.total} historical drop(s) "
+        f"({summary.rows} rows)"
+        + (
+            f" from the retired chash dual-write hook (writer retired by RDR-187; count frozen)"
+            if summary.last_hook not in _LIVE_DROP_PRODUCER_HOOKS
+            else f" from {summary.last_hook!r} (outside the 24h recency window — not currently failing)"
+        )
     )
     if summary.last_ts:
         detail += f", last {summary.last_ts}"
