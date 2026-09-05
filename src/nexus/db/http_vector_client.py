@@ -2114,8 +2114,11 @@ class HttpVectorClient:
         a parity gap — see EXCLUSIONS comment in the parity test.
 
         Single-chunk: one HTTP call per put() call. T3Database.put uses
-        ``fail_on_oversized=True``; the server is responsible for rejecting
-        oversized content on the HTTP path.
+        ``fail_on_oversized=True``; this method enforces the SAME check
+        client-side (nexus-xzyr3) before the HTTP call is ever made —
+        the server does NOT reject oversized content on this path (see
+        ``VectorHandler.handleStorePut`` / ``PgVectorRepository
+        .upsertChunksInternal``, neither of which validates byte length).
         """
         from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (corpus)
             embedding_model_for_collection_name,
@@ -2143,6 +2146,29 @@ class HttpVectorClient:
         content_hash = hashlib.sha256(content.encode()).hexdigest()
         doc_id = content_hash
         now_iso = datetime.now(UTC).isoformat()
+
+        # nexus-xzyr3: fail_on_oversized=True parity with T3Database.put()
+        # (t3.py's _write_batch), enforced HERE rather than assumed
+        # server-side. This docstring used to claim "the server is
+        # responsible for rejecting oversized content on the HTTP path" —
+        # that was never true: VectorHandler.handleStorePut and
+        # PgVectorRepository.upsertChunksInternal admit any byte count, so
+        # nine knowledge__knowledge notes up to 32,735 bytes were written
+        # this way between 2026-07-10 and 2026-09-04 (T2
+        # nexus/xzyr3-oversize-rows-2026-09-05). Refuse client-side, before
+        # the HTTP call, exactly like the put path's local-mode twin.
+        doc_bytes = len(content.encode())
+        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits), matches this module's other call sites
+
+        if doc_bytes > QUOTAS.MAX_DOCUMENT_BYTES:
+            from nexus.errors import PutOversizedError  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+            raise PutOversizedError(
+                doc_id=doc_id,
+                doc_bytes=doc_bytes,
+                max_bytes=QUOTAS.MAX_DOCUMENT_BYTES,
+                collection=collection,
+            )
 
         # Derive content_type from collection prefix — mirrors T3Database.put
         # at t3.py:860-870 exactly.

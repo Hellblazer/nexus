@@ -526,6 +526,63 @@ class TestPutBehavior:
             f"put() must be single-chunk (1 HTTP call); got {len(store_put_calls)}"
         )
 
+    def test_put_raises_on_oversized_content(self, monkeypatch):
+        """nexus-xzyr3: HttpVectorClient.put() must match T3Database.put()'s
+        fail_on_oversized=True contract exactly — raise PutOversizedError
+        BEFORE any HTTP call, never rely on the server to reject an oversized
+        document. T3Database.put()'s own test is
+        test_put_raises_on_oversized_content in tests/test_t3.py; this is its
+        parity twin.
+
+        This was the live admitting path for nexus-xzyr3: HttpVectorClient
+        is the ONLY production T3 handle (RDR-155 P4a.2 — Chroma serving
+        paths are retired), but put() posted straight to
+        /v1/vectors/store-put with no client-side size check, and the
+        engine's handleStorePut has no server-side check either. Nine
+        knowledge__knowledge chunks up to 32,735 bytes were admitted this
+        way between 2026-07-10 and 2026-09-04 (T2 nexus/xzyr3-oversize-rows
+        -2026-09-05).
+        """
+        from nexus.db.limits import QUOTAS
+        from nexus.errors import PutOversizedError
+
+        client = HttpVectorClient()
+        calls: list = []
+        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
+
+        oversized = "x" * (QUOTAS.MAX_DOCUMENT_BYTES + 1)
+
+        with pytest.raises(PutOversizedError) as exc_info:
+            client.put(
+                collection="knowledge__nexus__minilm-l6-v2-384__v1",
+                content=oversized,
+                title="big.md",
+            )
+
+        assert exc_info.value.doc_bytes > QUOTAS.MAX_DOCUMENT_BYTES
+        assert exc_info.value.max_bytes == QUOTAS.MAX_DOCUMENT_BYTES
+        assert exc_info.value.collection == "knowledge__nexus__minilm-l6-v2-384__v1"
+        # No HTTP call must have been made: the refusal is client-side,
+        # before the POST, never a round trip the server has to reject.
+        assert calls == [], (
+            f"put() must refuse oversized content before any HTTP call; got {calls}"
+        )
+
+    def test_put_under_cap_still_succeeds_http(self, monkeypatch):
+        """Regression guard mirroring test_t3.py's own: content under the
+        cap must still write normally through the HTTP path."""
+        client = HttpVectorClient()
+        calls: list = []
+        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
+
+        doc_id = client.put(
+            collection="knowledge__nexus__minilm-l6-v2-384__v1",
+            content="small body",
+            title="ok.md",
+        )
+        assert isinstance(doc_id, str) and len(doc_id) == 64
+        assert len(calls) == 1
+
     def test_put_accepts_all_t3_kwargs_without_typeerror(self, monkeypatch):
         """All T3Database.put() parameters must be accepted without TypeError."""
         client = HttpVectorClient()
