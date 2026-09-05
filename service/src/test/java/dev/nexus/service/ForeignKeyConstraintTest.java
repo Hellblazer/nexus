@@ -732,8 +732,15 @@ class ForeignKeyConstraintTest {
             insertCatalogDocument(su, TENANT_A, "rls-check-tumbler");
         }
 
-        // Query via svc role with Tenant-B GUC — must see 0 rows
+        // Query via svc role with Tenant-B GUC — must see 0 rows.
+        // isLocal=true (SET LOCAL) only survives to the guarded SELECT if this
+        // connection is in an explicit transaction — the pool hands out
+        // autoCommit=true connections, so an implicit-commit boundary between
+        // setTenant() and the SELECT would silently discard the GUC and this
+        // test would exercise RLS default-deny instead of the claimed
+        // cross-tenant mismatch (nexus-gcbp4).
         try (Connection svc = svcDs.getConnection()) {
+            svc.setAutoCommit(false);
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_B, true);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.catalog_documents " +
@@ -742,6 +749,7 @@ class ForeignKeyConstraintTest {
             assertThat(rs.getInt(1))
                 .as("Tenant-B must not see Tenant-A catalog_documents after FK addition")
                 .isZero();
+            svc.rollback();
         }
     }
 
@@ -763,6 +771,7 @@ class ForeignKeyConstraintTest {
         }
 
         try (Connection svc = svcDs.getConnection()) {
+            svc.setAutoCommit(false);
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_B, true);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.topic_assignments WHERE doc_id=decode('" + hexChash("rls-ta-tumbler") + "', 'hex')");
@@ -770,6 +779,7 @@ class ForeignKeyConstraintTest {
             assertThat(rs.getInt(1))
                 .as("Tenant-B must not see Tenant-A topic_assignments after FK addition")
                 .isZero();
+            svc.rollback();
         }
     }
 
@@ -786,6 +796,7 @@ class ForeignKeyConstraintTest {
         }
 
         try (Connection svc = svcDs.getConnection()) {
+            svc.setAutoCommit(false);
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_B, true);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.document_aspects WHERE doc_id='rls-asp-tumbler'");
@@ -793,6 +804,7 @@ class ForeignKeyConstraintTest {
             assertThat(rs.getInt(1))
                 .as("Tenant-B must not see Tenant-A document_aspects after FK addition")
                 .isZero();
+            svc.rollback();
         }
     }
 

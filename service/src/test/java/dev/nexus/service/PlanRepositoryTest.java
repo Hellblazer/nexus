@@ -690,14 +690,25 @@ class PlanRepositoryTest {
         // Attempting to INSERT with tenant_id != GUC must raise a PSQLException.
         // We stamp TENANT_A in the GUC but try to insert with TENANT_B manually.
         // TenantScope.withTenant stamps the GUC, so we reach below it via raw SQL.
+        // isLocal=true (SET LOCAL) needs an explicit transaction to survive to the
+        // guarded INSERT — autoCommit=true (the prior shape here) discards the GUC
+        // before the INSERT runs, so the test would exercise RLS default-deny (no
+        // tenant context at all) rather than the claimed TENANT_A-vs-TENANT_B
+        // mismatch (nexus-gcbp4). The INSERT is expected to throw, so rollback()
+        // runs in a finally — this pooled connection must not return to svcDs with
+        // an open transaction and a stale GUC still stamped.
         assertThatThrownBy(() -> {
             try (var conn = svcDs.getConnection()) {
-                conn.setAutoCommit(true);
-                // Set GUC to TENANT_A but try to insert with TENANT_B — WITH CHECK violation
-                PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, true);
-                conn.createStatement().execute(
-                    "INSERT INTO nexus.plans (tenant_id, project, query, plan_json) " +
-                    "VALUES ('" + TENANT_B + "', 'bad-proj', 'RLS violation test', '{}')");
+                conn.setAutoCommit(false);
+                try {
+                    // Set GUC to TENANT_A but try to insert with TENANT_B — WITH CHECK violation
+                    PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, true);
+                    conn.createStatement().execute(
+                        "INSERT INTO nexus.plans (tenant_id, project, query, plan_json) " +
+                        "VALUES ('" + TENANT_B + "', 'bad-proj', 'RLS violation test', '{}')");
+                } finally {
+                    conn.rollback();
+                }
             }
         })
         .as("RLS WITH CHECK must reject INSERT where tenant_id != nexus.tenant GUC")

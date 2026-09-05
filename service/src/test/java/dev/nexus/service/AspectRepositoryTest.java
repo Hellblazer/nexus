@@ -409,14 +409,25 @@ class AspectRepositoryTest {
 
     @Test @Order(14)
     void rls_withCheck_crossTenantInsert_rejected() {
+        // isLocal=true (SET LOCAL) needs an explicit transaction to survive to the
+        // guarded INSERT — autoCommit=true (the prior shape here) discards the GUC
+        // before the INSERT runs, so the test would exercise RLS default-deny (no
+        // tenant context at all) rather than the claimed TENANT_A-vs-TENANT_B
+        // mismatch (nexus-gcbp4). The INSERT is expected to throw, so rollback()
+        // runs in a finally — this pooled connection must not return to svcDs with
+        // an open transaction and a stale GUC still stamped.
         assertThatThrownBy(() -> {
             try (var conn = svcDs.getConnection()) {
-                conn.setAutoCommit(true);
-                PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, true);
-                conn.createStatement().execute(
-                    "INSERT INTO nexus.document_aspects " +
-                    "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name) " +
-                    "VALUES ('" + TENANT_B + "', 'bad-coll', 'bad.pdf', now(), 'v1', 'bad')");
+                conn.setAutoCommit(false);
+                try {
+                    PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, true);
+                    conn.createStatement().execute(
+                        "INSERT INTO nexus.document_aspects " +
+                        "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name) " +
+                        "VALUES ('" + TENANT_B + "', 'bad-coll', 'bad.pdf', now(), 'v1', 'bad')");
+                } finally {
+                    conn.rollback();
+                }
             }
         })
         .as("RLS WITH CHECK must reject aspect INSERT where tenant_id != nexus.tenant GUC")
