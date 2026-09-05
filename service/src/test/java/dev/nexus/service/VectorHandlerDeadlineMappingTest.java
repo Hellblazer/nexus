@@ -7,17 +7,12 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.db.TokenHashing;
 import dev.nexus.service.vectors.EmbedResult;
 import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.PgVectorRepository;
 import dev.nexus.service.vectors.RequestDeadlineExceededException;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -44,10 +39,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  * own deadline is an honest slow-server signal the client should retry, not
  * a guaranteed-to-fail-again oversize body.
  *
- * <p>Mirrors {@code VectorHandlerVoyageTooManyTokensTest}'s harness exactly
- * (Testcontainers PG, full Liquibase changelog, a stub {@link Embedder} that
+ * <p>Mirrors {@code CatalogHandlerCollectionCountsTest}'s converted bootstrap
+ * (Testcontainers PG, {@link PgContainerHelper#applyProductSchema} +
+ * {@link PgContainerHelper#bootstrapServiceRole} + {@link
+ * PgContainerHelper#seedServiceToken} -- Sam's no-raw-SQL-strings-in-Java
+ * directive, nexus-zrcj7/nexus-cbo4a) with a stub {@link Embedder} that
  * throws the typed exception directly, {@code PgVectorRepository} injected
- * via the 5-arg {@link NexusService} overload, port 0, {@code PER_CLASS}) --
+ * via the 5-arg {@link NexusService} overload, port 0, {@code PER_CLASS} --
  * this phase adds only the exception and its mapping, no embed-loop check
  * point raises it yet (phases 3/4, nexus-8hdg9.3/.4), so a stub embedder
  * throwing directly is the smallest fixture that exercises the real {@code
@@ -58,8 +56,10 @@ class VectorHandlerDeadlineMappingTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    private static final String TOKEN  = "tok-rdln-test-0123456789abcdef00000000";
-    private static final String TENANT = "rdln-tenant";
+    private static final String TOKEN    = "tok-rdln-test-0123456789abcdef00000000";
+    private static final String SVC_ROLE = "svc_rdln";
+    private static final String SVC_PASS = "svc_rdln_pass";
+    private static final String TENANT   = "rdln-tenant";
     private static final String COLLECTION = "code__rdln__voyage-code-3__v1";
 
     PostgreSQLContainer<?> pg;
@@ -70,43 +70,19 @@ class VectorHandlerDeadlineMappingTest {
     @BeforeAll
     void startAll() throws Exception {
         pg = PgContainerHelper.start();
-
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
-                "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' NOSUPERUSER NOBYPASSRLS; " +
-                "  END IF; " +
-                "END $$");
+            PgContainerHelper.applyProductSchema(su);
         }
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                          new ClassLoaderResourceAccessor(), db)
-                .update(new Contexts());
-        }
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "ALTER ROLE nexus_svc SET search_path TO nexus, public");
-        }
-        try (Connection su = pg.createConnection("");
-             var ps = su.prepareStatement(
-                 "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label)"
-                 + " VALUES (?, ?, ?) ON CONFLICT (token_hash) DO NOTHING")) {
-            su.setAutoCommit(true);
-            ps.setString(1, TokenHashing.sha256Hex(TOKEN));
-            ps.setString(2, TENANT);
-            ps.setString(3, "rdln-test");
-            ps.executeUpdate();
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
+            PgContainerHelper.seedServiceToken(
+                DSL.using(su, SQLDialect.POSTGRES), TOKEN, TENANT, "rdln-test");
         }
 
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
-        cfg.setUsername("nexus_svc");
-        cfg.setPassword("nexus_svc_pass");
+        cfg.setUsername(SVC_ROLE);
+        cfg.setPassword(SVC_PASS);
         cfg.setMaximumPoolSize(5);
         cfg.setAutoCommit(true);
         svcDs = new HikariDataSource(cfg);
