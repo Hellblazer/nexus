@@ -3022,6 +3022,11 @@ def _check_mint_token() -> list[HealthResult]:
 _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.aspect_extraction_queue",
     "nexus.aspect_promotion_log",
+    # nexus.capability_census: nexus-gjv9b PART 1 (telemetry-010-capability-
+    # census.xml), replacing capability_census.jsonl. Per-session UPSERT
+    # (tenant_id, session_id) with the usual ENABLE + FORCE + tenant_isolation
+    # RLS shape.
+    "nexus.capability_census",
     "nexus.catalog_collections",
     "nexus.catalog_document_chunks",
     "nexus.catalog_documents",
@@ -3081,6 +3086,10 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.plans",
     "nexus.relevance_log",
     "nexus.retention_markers",
+    # nexus.routing_events: nexus-gjv9b PART 2 (telemetry-011-routing-
+    # events.xml), replacing routing_log.jsonl. Append-only event log, same
+    # RLS shape as relevance_log/search_telemetry.
+    "nexus.routing_events",
     "nexus.search_telemetry",
     # nexus.taxonomy_centroids: RDR-191 Phase 4 unify (nexus-o8dil.51/.47 "one
     # era" ruling). Same rationale as nexus.chunks above: added alongside
