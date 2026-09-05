@@ -628,8 +628,11 @@ fi
 # touches unused entries, so this is safe even with other builds up.
 preflight_docker_prune() {
   local reclaimable_gb
-  reclaimable_gb="$(docker system df --format '{{.Type}} {{.Reclaimable}}' 2>/dev/null \
-    | awk '/^Build Cache/ {v=$3+0; if ($3 ~ /TB/) v=v*1024; else if ($3 !~ /GB/) v=0; print int(v)}')"
+  # A probe, never a gate: a transient daemon error here must not kill the
+  # rehearsal under pipefail (observed 2026-09-05 while another Testcontainers
+  # run shared the daemon), so the pipeline is guarded and defaults to 0.
+  reclaimable_gb="$( { docker system df --format '{{.Type}} {{.Reclaimable}}' 2>/dev/null \
+    | awk '/^Build Cache/ {v=$3+0; if ($3 ~ /TB/) v=v*1024; else if ($3 !~ /GB/) v=0; print int(v)}'; } || true)"
   reclaimable_gb="${reclaimable_gb:-0}"
   if [ "${reclaimable_gb:-0}" -gt 40 ] 2>/dev/null; then
     echo "[preflight] Docker build cache reclaimable ~${reclaimable_gb}GB (>40GB) — pruning (reserved-space 40GB keeps hot layers incl. the bge model + the split deps layer)…"
