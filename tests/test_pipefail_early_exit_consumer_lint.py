@@ -856,18 +856,18 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # probe-set phase, shifting every site below by +12. Numbers
         # regenerated from the detector itself (_early_exit_consumer_hits),
         # not arithmetic.
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:87",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:171",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:174",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:184",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:190",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:195",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:201",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:210",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:221",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:229",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:233",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:295",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:133",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:217",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:220",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:230",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:236",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:241",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:247",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:256",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:267",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:275",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:279",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:343",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:142",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:193",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:238",
@@ -1183,8 +1183,8 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         #   this guarded site itself gates nothing.
         #   Retargeted AGAIN (nexus-l8xnz): +12 for the Phase F header
         #   addition described above -- :264 -> :276, :128 -> :140.
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:293",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:140",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:341",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:186",
         # tests/e2e/release-sandbox.sh (3 entries): the already-commented
         # `|| true: head is an early-exit consumer...` idiom this file's
         # own docstring cites as the sanctioned shape -- readback for
