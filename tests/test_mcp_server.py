@@ -828,6 +828,59 @@ def test_search_corpus_routing(corpus_arg, available, expected_in, expected_not_
         assert name not in captured[0]
 
 
+# ── query() corpus resolution parity with search() (nexus-z4j8d) ───────────
+
+@pytest.mark.parametrize("corpus_arg, available, expected_in, expected_not_in", [
+    pytest.param(
+        "knowledge",
+        [{"name": "knowledge__notes", "count": 5}, {"name": "code__repo", "count": 10}],
+        ["knowledge__notes"], ["code__repo"],
+        id="single-corpus-backward-compat",
+    ),
+    pytest.param(
+        "all",
+        [{"name": "knowledge__notes", "count": 5}, {"name": "code__repo", "count": 10},
+         {"name": "docs__manual", "count": 3}, {"name": "rdr__decisions", "count": 7}],
+        ["knowledge__notes", "code__repo", "docs__manual", "rdr__decisions"], [],
+        id="all-alias",
+    ),
+    pytest.param(
+        # A true fully-qualified 4-segment name passes through unchanged.
+        "knowledge__notes__voyage-context-3__v1",
+        [{"name": "knowledge__notes__voyage-context-3__v1", "count": 5},
+         {"name": "knowledge__other__voyage-context-3__v1", "count": 2}],
+        ["knowledge__notes__voyage-context-3__v1"],
+        ["knowledge__other__voyage-context-3__v1"],
+        id="fully-qualified-collection",
+    ),
+    pytest.param(
+        # nexus-z4j8d bug repro: a 2-segment ``__``-qualified corpus with
+        # no matching live collection must be auto-promoted to the
+        # conformant 4-segment name (nexus-hmxi), exactly as search()
+        # does via t3_collection_name -- not sent to the engine verbatim
+        # (which 400s there as "not four-segment conformant").
+        "knowledge__art",
+        [{"name": "code__repo", "count": 10}],
+        ["knowledge__art__voyage-context-3__v1"],
+        ["knowledge__art"],
+        id="legacy-2-segment-promoted-like-search",
+    ),
+])
+def test_query_corpus_routing_matches_search(corpus_arg, available, expected_in, expected_not_in):
+    """``query()`` must resolve a corpus argument identically to
+    ``search()`` -- via the shared ``_resolve_corpus_target`` helper, not
+    a hand-rolled copy that skips the ``t3_collection_name`` promotion."""
+    _mock_t3(available)
+    captured, fake = _capture_search()
+    with patch("nexus.search_engine.search_cross_corpus", fake):
+        query(question="test query", corpus=corpus_arg)
+    assert len(captured) == 1
+    for name in expected_in:
+        assert name in captured[0]
+    for name in expected_not_in:
+        assert name not in captured[0]
+
+
 # ── collection_list ──────────────────────────────────────────────────────────
 
 def test_collection_list_returns_names_and_counts():

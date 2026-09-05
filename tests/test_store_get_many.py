@@ -656,3 +656,78 @@ class TestStoreGetManyLimitPerSource:
 
         assert len(result["contents"]) == 4
         assert result["contents"] == ["body-a0", "body-a1", "body-b0", "body-b1"]
+
+
+class TestStoreGetManyHumanReadableRendersContent:
+    """nexus-z4j8d: the human-readable mode (``structured=False``) of a
+    HYDRATION tool must actually render hydrated content, not just a
+    ``Hydrated N/N docs`` count. Pre-fix, ``structured=True`` was
+    effectively mandatory to see any text."""
+
+    def test_renders_each_documents_content(self):
+        from nexus.mcp.core import store_get_many
+
+        ids = ["doc-1", "doc-2"]
+        found = {
+            "doc-1": {"content": "alpha content body"},
+            "doc-2": {"content": "beta content body"},
+        }
+        mock_t3, _ = _make_stub_t3({"*": found})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(ids=ids, collections="knowledge", structured=False)
+
+        assert isinstance(result, str)
+        assert "Hydrated 2/2 docs" in result
+        assert "doc-1" in result
+        assert "alpha content body" in result
+        assert "doc-2" in result
+        assert "beta content body" in result
+        # The doc-1 body must appear before the doc-2 body (order preserved).
+        assert result.index("alpha content body") < result.index("beta content body")
+
+    def test_renders_missing_ids_without_fabricating_content(self):
+        from nexus.mcp.core import store_get_many
+
+        ids = ["exists-1", "missing-1"]
+        found = {"exists-1": {"content": "real body"}}
+        mock_t3, _ = _make_stub_t3({"*": found})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(ids=ids, collections="knowledge", structured=False)
+
+        assert "Hydrated 1/2 docs" in result
+        assert "real body" in result
+        assert "Missing: missing-1" in result
+
+    def test_all_missing_has_no_content_blocks(self):
+        from nexus.mcp.core import store_get_many
+
+        ids = ["missing-1", "missing-2"]
+        mock_t3, _ = _make_stub_t3({"*": {}})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(ids=ids, collections="knowledge", structured=False)
+
+        assert "Hydrated 0/2 docs" in result
+        assert "Missing: missing-1, missing-2" in result
+
+    def test_truncation_marker_visible_in_human_mode(self):
+        from nexus.mcp.core import store_get_many
+
+        long_body = "x" * 100
+        found = {"doc-1": {"content": long_body}}
+        mock_t3, _ = _make_stub_t3({"*": found})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(
+                ids=["doc-1"], collections="knowledge",
+                structured=False, max_chars_per_doc=10,
+            )
+
+        assert "Hydrated 1/1 docs" in result
+        assert "x" * 10 in result
+        # nexus-lugwx: the cut must be visibly marked, never a bare
+        # truncation with no signal.
+        assert "…" in result
+        assert "x" * 100 not in result

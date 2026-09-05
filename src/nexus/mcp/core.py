@@ -3422,25 +3422,16 @@ def query(
         # dance, whose catalog_collections variable is gone too); every
         # query reaching here is the plain corpus-based path.
         routing_note = ""
-        all_names = _get_collection_names()
-
-        if corpus == "all":
-            seen_prefixes: list[str] = []
-            for n in all_names:
-                prefix = n.split("__", 1)[0]
-                if prefix and prefix not in seen_prefixes:
-                    seen_prefixes.append(prefix)
-            corpus = ",".join(seen_prefixes) if seen_prefixes else "knowledge,code,docs,rdr"
-
-        target: list[str] = []
-        for part in corpus.split(","):
-            part = part.strip()
-            if not part:
-                continue
-            if "__" in part:
-                target.append(part)
-            else:
-                target.extend(resolve_corpus(part, all_names))
+        # nexus-z4j8d: resolve *corpus* through the same helper the
+        # combined-query tools (search_metadata_scoped, search_graph_hop,
+        # search_topic_scoped, search_aspect_scoped, and this function's
+        # own catalog-param branch above) already share, instead of a
+        # hand-rolled copy. The prior copy skipped the ``__``-qualified
+        # branch's ``t3_collection_name`` promotion (nexus-hmxi), so a
+        # 2-segment legacy/prefix corpus (e.g. ``knowledge__art``) that
+        # ``search()`` resolves to a live collection reached the engine
+        # verbatim here and 400'd as "not four-segment conformant".
+        target = _resolve_corpus_target(corpus, t3)
 
         if not target:
             return f"No collections match corpus {corpus!r}"
@@ -4245,8 +4236,12 @@ def store_get_many(
         max_chars_per_doc: Per-document truncation cap (default 4 KB). A cut
             body ends in an ellipsis plus ``display_truncation_marker(cap)``
             so a reader never mistakes the cut for a defect (nexus-lugwx).
-        structured: Return ``{contents, missing}`` dict when True;
-            human-readable string when False.
+        structured: Return ``{contents, missing}`` dict when True. When
+            False (default), returns a human-readable string: a
+            ``Hydrated N/M docs`` header, each found document's content
+            under an ``[id]`` line (respecting ``max_chars_per_doc`` and
+            its truncation marker), and a trailing ``Missing: ...`` line
+            naming any unresolved ids.
         limit_per_source: Cap input IDs before hydration (RDR-097 P1.0).
             - ``None`` (default): no truncation; preserves prior behavior.
             - ``int``: truncate ``ids`` to first N entries. With
@@ -4449,7 +4444,24 @@ def store_get_many(
 
         if structured:
             return {"contents": contents, "missing": missing}
+
+        # nexus-z4j8d: the human-readable mode of a HYDRATION tool must
+        # render the hydrated content, not just a count -- pre-fix this
+        # branch returned only "Hydrated N/N docs", making
+        # structured=True effectively mandatory to see any text. `entries`
+        # (still in scope, index-aligned with id_list/contents) is the
+        # reliable found/missing signal -- checking it directly instead of
+        # reconstructing a set from `missing` avoids misattribution if
+        # id_list carries a duplicate id.
         lines = [f"Hydrated {len(contents) - len(missing)}/{len(id_list)} docs"]
+        blocks = [
+            f"[{doc_id}]\n{body}"
+            for doc_id, entry, body in zip(id_list, entries, contents)
+            if entry is not None
+        ]
+        if blocks:
+            lines.append("")
+            lines.append("\n\n".join(blocks))
         if missing:
             lines.append(f"Missing: {', '.join(missing[:10])}")
         return "\n".join(lines)
