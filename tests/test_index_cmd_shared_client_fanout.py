@@ -160,16 +160,21 @@ def test_real_index_repo_command_shares_one_t2_httpx_client(
         f"{t2_snapshots}"
     )
 
-    # Total httpx.Client count includes ONE unrelated T3 probe
+    # Total httpx.Client count includes AT MOST one unrelated T3 probe
     # (make_t3() -> HttpVectorClient -> a one-shot httpx.get() managed-
-    # service probe) alongside the ONE T2 shared client -- 2 total, not
-    # the 16 two independent T2Database facades would have built before
-    # this wiring, and not the naive "1 shared client only" expectation
-    # either, since T3 is a genuinely separate mechanism.
-    assert len(client_tally) == 2, (
-        f"expected 2 total httpx.Client constructions (1 T2 shared client "
-        f"+ 1 unrelated T3 managed-service probe inside make_t3()); got "
-        f"{len(client_tally)}"
+    # service probe) alongside the ONE T2 shared client -- 1 or 2 total
+    # (never 0, never >2), not the 16 two independent T2Database facades
+    # would have built before this wiring. Exactly 2 vs 1 depends on
+    # whether an EARLIER test in the same pytest session already warmed
+    # get_http_vector_client()'s process-lifetime cache (nexus-m20mf P3
+    # fold-in fix: the original ==2 pin was order-dependent and failed
+    # when run after tests/test_index_cmd.py in the same session) -- the
+    # property this assertion actually needs to prove (T2 collapsed from
+    # 16 to 1, T3 unaffected either way) does not depend on which.
+    assert 1 <= len(client_tally) <= 2, (
+        f"expected 1 or 2 total httpx.Client constructions (1 T2 shared "
+        f"client, +1 more only if T3's process-lifetime probe cache was "
+        f"cold going into this test); got {len(client_tally)}"
     )
 
 

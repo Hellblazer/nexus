@@ -77,8 +77,17 @@ class HttpCentroidStore(RefreshableHttpStoreMixin):
         *,
         _token: str | None = None,
         _transport: httpx.BaseTransport | None = None,
+        client: httpx.Client | None = None,
     ) -> None:
-        super().__init__(base_url, tenant, _token=_token)
+        # nexus-m20mf P3 fold-in (code-review Important finding): client=
+        # is mutually exclusive with the _transport test seam below (which
+        # unconditionally rebuilds self._client) -- pass client= only when
+        # _transport is not also supplied. Threaded to the mixin so
+        # discover/rebuild/split (the taxonomy subcommands that actually
+        # touch centroid ops, named in taxonomy_cmd.py's own _T2Database
+        # boundary-allow comment) share HttpTaxonomyStore's pool instead of
+        # opening an unshared 9th client.
+        super().__init__(base_url, tenant, _token=_token, client=None if _transport is not None else client)
         if _transport is not None:
             # Test seam (MockTransport): the mixin's __init__ already built
             # a plain (transport-less) httpx.Client; swap it for one wired

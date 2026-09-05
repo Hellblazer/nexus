@@ -1692,6 +1692,15 @@ def _best_effort_queue_depth() -> int | None:
     try:
         from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — deferred; service-side
 
+        # nexus-m20mf P3 fold-in: deliberately NOT wired to any shared T2
+        # client. This diagnostic's entire point is a hard 2s cap so a
+        # full-outage probe never blocks the store hook for the shared
+        # client's ~30s default timeout (review H1, docstring above); a
+        # shared client (RefreshableHttpStoreMixin now raises on
+        # client= + a non-default timeout=, see _refreshable_client.py)
+        # would either break this call outright or, if permitted, silently
+        # trade away the 2s cap. Sharing here would defeat the property
+        # this code exists for.
         q = HttpAspectQueue(tenant=_ENQUEUE_TENANT, timeout=2.0)
         try:
             return int(q.pending_count())

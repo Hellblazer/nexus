@@ -83,6 +83,14 @@ from typing import Any
 #: in this file.
 _HOLD_ECHO_EVENT: threading.Event | None = None
 _ECHO_ENTERED_EVENT: threading.Event | None = None
+#: nexus-m20mf P3 fold-in (critic item C3): one entry appended EVERY time a
+#: request reaches ``_maybe_hold`` while ``_HOLD_ECHO_EVENT`` is armed --
+#: unlike ``_ECHO_ENTERED_EVENT`` (a single one-shot signal), this lets a
+#: test with MANY concurrent held requests poll ``len(_HELD_ECHO_COUNT)``
+#: to know exactly how many are currently parked before releasing them all
+#: at once via ``_HOLD_ECHO_EVENT.set()``.
+_HELD_ECHO_COUNT: list[int] = []
+_HELD_ECHO_COUNT_LOCK = threading.Lock()
 #: nexus-m20mf P3: X-Nexus-Tenant header value received on each /v1/echo
 #: request, in arrival order -- lets a test prove auth/tenant headers are
 #: still built PER REQUEST even when multiple stores share one headerless
@@ -137,6 +145,8 @@ def _reset_fake_service_state() -> None:
     _HOLD_ECHO_EVENT = None
     _ECHO_ENTERED_EVENT = None
     _RECEIVED_TENANTS.clear()
+    with _HELD_ECHO_COUNT_LOCK:
+        _HELD_ECHO_COUNT.clear()
 
 
 class _FakeHandler(BaseHTTPRequestHandler):
@@ -193,7 +203,9 @@ class _FakeHandler(BaseHTTPRequestHandler):
         if _ECHO_ENTERED_EVENT is not None:
             _ECHO_ENTERED_EVENT.set()
         if _HOLD_ECHO_EVENT is not None:
-            _HOLD_ECHO_EVENT.wait(timeout=5.0)
+            with _HELD_ECHO_COUNT_LOCK:
+                _HELD_ECHO_COUNT.append(1)
+            _HOLD_ECHO_EVENT.wait(timeout=10.0)
 
     def do_POST(self):  # noqa: N802
         path = self.path.split("?")[0]
@@ -241,6 +253,28 @@ def _free_port() -> int:
 def _start_fake_server() -> tuple[HTTPServer, int]:
     port = _free_port()
     server = HTTPServer(("127.0.0.1", port), _FakeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, port
+
+
+def _start_threaded_fake_server() -> tuple[Any, int]:
+    """nexus-m20mf P3 fold-in (critic item C3): a THREADED variant, used
+    ONLY by the production-limit concurrency test below. The plain
+    single-threaded ``_start_fake_server()`` above processes one
+    connection at a time -- fine for every other test in this file (each
+    needs at most ONE request held server-side to occupy a client-pool
+    slot; a second store's request never needs to reach the server at
+    all, since pool exhaustion is a client-side queuing decision made
+    before the request is even sent). Proving MANY genuinely simultaneous
+    holds (the realistic-concurrency and beyond-the-limit stress cases)
+    needs the server to actually process >1 request concurrently, so this
+    helper is kept separate rather than changing the shared fixture every
+    other test in this file depends on."""
+    import http.server
+
+    port = _free_port()
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), _FakeHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, port
@@ -1542,6 +1576,44 @@ class TestSharedClient:
             "must not regress under the additive client= kwarg"
         )
 
+    def test_client_with_non_default_timeout_raises(self) -> None:
+        """``client=`` and a non-default ``timeout=`` together must fail
+        loud (code-review Suggestion) -- an injected client's OWN baked-in
+        timeout always wins, so silently accepting both would mean the
+        caller's ``timeout=`` is quietly ignored with no signal at all.
+        CAN FAIL: removing the raise (accepting both silently) makes this
+        test fail on the missing ``pytest.raises``."""
+        from nexus.db.t2._refreshable_client import (
+            _DEFAULT_TIMEOUT_S,
+            build_shared_t2_client,
+        )
+
+        shared = build_shared_t2_client()
+        try:
+            with pytest.raises(ValueError, match="timeout"):
+                _make_echo_store(
+                    base_url="http://127.0.0.1:1", _token="tok",
+                    client=shared, timeout=_DEFAULT_TIMEOUT_S + 5.0,
+                )
+        finally:
+            shared.close()
+
+    def test_client_with_default_timeout_does_not_raise(self) -> None:
+        """A caller passing ``client=`` WITHOUT an explicit ``timeout=``
+        (the overwhelming majority shape -- e.g. every ``T2Database``
+        domain store) must not be affected: the mixin's own
+        ``timeout: float = _DEFAULT_TIMEOUT_S`` default equals the
+        sentinel exactly, so no conflict is ever raised for the common
+        case."""
+        from nexus.db.t2._refreshable_client import build_shared_t2_client
+
+        shared = build_shared_t2_client()
+        try:
+            store = _make_echo_store(base_url="http://127.0.0.1:1", _token="tok", client=shared)
+            assert store._client is shared
+        finally:
+            shared.close()
+
     def test_injected_client_is_not_closed_by_store_close(self) -> None:
         """The OWNER of an injected client is whoever built and passed it
         in, never the store it was injected into. Falsify by removing the
@@ -1625,28 +1697,53 @@ class TestSharedClient:
         finally:
             shared.close()
 
-    def test_pool_limits_are_pinned_not_httpx_defaults(self) -> None:
+    def test_pool_limits_are_pinned_not_httpx_defaults(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """``build_shared_t2_client()`` must set EXPLICIT ``httpx.Limits``
         rather than inherit httpx's own defaults (100 connections / 20
         keepalive) -- the design record's risk note: an unbounded shared
         pool defers connection-pool exhaustion to a surprising place
-        instead of a deliberately chosen, tested bound."""
+        instead of a deliberately chosen, tested bound.
+
+        Behavioral check (code-review Suggestion): asserts on the
+        ``httpx.Limits`` OBJECT actually passed to ``httpx.Client(...)``,
+        not on httpx's private ``_transport._pool`` attributes -- fragile
+        against httpx internals moving within the pinned version range.
+        The companion ``test_shared_client_pool_exhaustion_raises_pool_
+        timeout_not_hang`` already proves the limit is functionally real
+        end-to-end; this test only needs to prove build_shared_t2_client()
+        actually PASSES pinned values rather than silently omitting
+        ``limits=`` and falling back to httpx's own defaults."""
         from nexus.db.t2._refreshable_client import (
-            _SHARED_CLIENT_KEEPALIVE_EXPIRY_S,
-            _SHARED_CLIENT_MAX_CONNECTIONS,
-            _SHARED_CLIENT_MAX_KEEPALIVE_CONNECTIONS,
+            _SHARED_CLIENT_LIMITS,
             build_shared_t2_client,
         )
 
-        default_limits = httpx.Client()._transport._pool
+        captured_limits: list[httpx.Limits | None] = []
+        orig_init = httpx.Client.__init__
+
+        def _capturing_init(self: httpx.Client, *args: Any, **kwargs: Any) -> None:
+            captured_limits.append(kwargs.get("limits"))
+            orig_init(self, *args, **kwargs)
+
+        monkeypatch.setattr(httpx.Client, "__init__", _capturing_init)
+
         shared = build_shared_t2_client()
         try:
-            pool = shared._transport._pool
-            assert pool._max_connections == _SHARED_CLIENT_MAX_CONNECTIONS == 16
-            assert pool._max_keepalive_connections == _SHARED_CLIENT_MAX_KEEPALIVE_CONNECTIONS == 8
-            assert pool._keepalive_expiry == _SHARED_CLIENT_KEEPALIVE_EXPIRY_S == 30.0
+            assert len(captured_limits) == 1
+            passed = captured_limits[0]
+            assert passed is not None, (
+                "build_shared_t2_client() constructed httpx.Client() with "
+                "no limits= at all -- falls back to httpx's own 100/20 "
+                "defaults instead of the pinned, tested bound"
+            )
+            assert passed == _SHARED_CLIENT_LIMITS
+            assert passed.max_connections == 16
+            assert passed.max_keepalive_connections == 8
+            assert passed.keepalive_expiry == 30.0
             # The whole point: pinned, not whatever httpx ships as default.
-            assert pool._max_connections != default_limits._max_connections
+            assert passed != httpx.Limits()
         finally:
             shared.close()
 
@@ -1704,3 +1801,157 @@ class TestSharedClient:
                 "would otherwise leak a background thread across tests"
             )
             shared.close()
+
+    def test_realistic_concurrency_at_flush_bound_never_hits_pool_limit(
+        self,
+    ) -> None:
+        """nexus-m20mf P3 fold-in (critic item C3): at the REAL indexer
+        concurrency bound (``indexer.FLUSH_CONCURRENCY``, currently 3 --
+        the empirical ChunkBatcher flush-worker count, ``min(3,
+        QUOTAS.MAX_CONCURRENT_WRITES)``), a client using the PRODUCTION
+        pinned limits (``_SHARED_CLIENT_LIMITS``, ``max_connections=16``)
+        never exhausts -- 3 concurrent connections comfortably fit in 16
+        slots. This is "impossible by construction" at the realistic
+        bound, not merely untested: a future regression that shrank
+        ``_SHARED_CLIENT_MAX_CONNECTIONS`` below ``FLUSH_CONCURRENCY``
+        would fail this test."""
+        from nexus.db.t2._refreshable_client import _SHARED_CLIENT_LIMITS
+        from nexus.indexer import FLUSH_CONCURRENCY
+
+        assert FLUSH_CONCURRENCY < _SHARED_CLIENT_LIMITS.max_connections, (
+            "the real indexer flush concurrency must stay comfortably "
+            "under the shared client's pinned pool size -- if this ever "
+            "fails, the 'impossible by construction' claim below no "
+            "longer holds and the pool-exhaustion path needs revisiting"
+        )
+
+        server, port = _start_threaded_fake_server()
+        try:
+            base_url = f"http://127.0.0.1:{port}"
+            shared = httpx.Client(
+                limits=_SHARED_CLIENT_LIMITS, timeout=httpx.Timeout(5.0, pool=2.0),
+            )
+            try:
+                stores = [
+                    _make_echo_store(base_url=base_url, _token=_VALID_BEARER, client=shared)
+                    for _ in range(FLUSH_CONCURRENCY)
+                ]
+                errors: list[BaseException] = []
+
+                def _run(s: Any) -> None:
+                    try:
+                        s.echo_post("concurrent-flush-worker")
+                    except BaseException as exc:  # noqa: BLE001 — captured for the assertion below, not swallowed
+                        errors.append(exc)
+
+                threads = [threading.Thread(target=_run, args=(s,)) for s in stores]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=10.0)
+                    assert not t.is_alive(), "a flush-bound-concurrency request hung"
+
+                assert errors == [], (
+                    f"expected zero errors at the real FLUSH_CONCURRENCY "
+                    f"={FLUSH_CONCURRENCY} against a 16-slot pool; got "
+                    f"{errors!r}"
+                )
+            finally:
+                shared.close()
+        finally:
+            _stop_fake_server(server)
+
+    def test_pool_exhaustion_beyond_production_limit_is_caught_not_crashed(
+        self,
+    ) -> None:
+        """nexus-m20mf P3 fold-in (critic item C3): push CONCURRENCY
+        deliberately PAST the production pool size (16) through the ACTUAL
+        best-effort hook-failure recording path
+        (``hook_registry._persist_hook_failure`` -> ``mcp_infra.t2_ctx()``)
+        and confirm the documented conclusion end to end: a
+        ``PoolTimeout`` on this path is CAUGHT and logged
+        (``hook_failure_persist_dropped``), never propagated to the
+        caller and never a hang -- exactly the existing best-effort
+        contract this function already carries for every OTHER persist
+        failure mode, extended here to the shared-client-under-real-
+        contention case the critic named.
+
+        Mechanism: ``max_connections`` set BELOW the concurrency this test
+        drives (not the full 16, to keep the test fast and deterministic
+        rather than needing 17+ real threads) -- the PROPERTY under test
+        (PoolTimeout is caught, not crashed) does not depend on the exact
+        pool size, only on PoolTimeout actually firing under contention,
+        which a small pool reproduces reliably and quickly."""
+        import nexus.hook_registry as hook_registry_mod
+        from nexus.mcp_infra import use_shared_t2_client_for_index_run
+
+        server, port = _start_threaded_fake_server()
+        try:
+            base_url = f"http://127.0.0.1:{port}"
+            monkey_env = {
+                "NX_SERVICE_HOST": "127.0.0.1",
+                "NX_SERVICE_PORT": str(port),
+                "NX_SERVICE_TOKEN": _VALID_BEARER,
+            }
+            saved_env = {k: os.environ.get(k) for k in monkey_env}
+            saved_url = os.environ.pop("NX_SERVICE_URL", None)
+            os.environ.update(monkey_env)
+            try:
+                small_pool = httpx.Client(
+                    limits=httpx.Limits(max_connections=2, max_keepalive_connections=2),
+                    timeout=httpx.Timeout(5.0, pool=0.3),
+                )
+                n_concurrent = 6  # deliberately > max_connections=2
+                errors: list[BaseException] = []
+                completed = []
+
+                def _record(i: int) -> None:
+                    try:
+                        hook_registry_mod._persist_hook_failure(
+                            doc_id=f"doc-{i}", collection="code__test",
+                            hook_name="stress_test_hook", error="boom",
+                            chain="single",
+                        )
+                        completed.append(i)
+                    except BaseException as exc:  # noqa: BLE001 — best-effort function must never raise; captured to PROVE it, not to swallow a real bug
+                        errors.append(exc)
+
+                try:
+                    with use_shared_t2_client_for_index_run(small_pool):
+                        threads = [
+                            threading.Thread(target=_record, args=(i,))
+                            for i in range(n_concurrent)
+                        ]
+                        for t in threads:
+                            t.start()
+                        for t in threads:
+                            t.join(timeout=10.0)
+                            assert not t.is_alive(), (
+                                "a hook-failure record under pool contention "
+                                "hung instead of failing loud+caught"
+                            )
+                finally:
+                    small_pool.close()
+
+                assert errors == [], (
+                    f"_persist_hook_failure must NEVER propagate -- it is "
+                    f"documented best-effort, and this is exactly the "
+                    f"contention shape (shared client, more concurrent "
+                    f"callers than pool slots) that must degrade to a "
+                    f"caught, logged drop rather than a crash. Got: {errors!r}"
+                )
+                # Every call site completed (either it actually persisted,
+                # or it hit PoolTimeout/whatever and was silently caught) --
+                # "completed" here means "the function returned", the whole
+                # point of best-effort.
+                assert len(completed) == n_concurrent
+            finally:
+                for k, v in saved_env.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+                if saved_url is not None:
+                    os.environ["NX_SERVICE_URL"] = saved_url
+        finally:
+            _stop_fake_server(server)

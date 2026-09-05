@@ -6,11 +6,16 @@ Separated from tool definitions (mcp_server.py) to isolate concerns.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import threading
 import time
+from typing import TYPE_CHECKING
 
 from nexus.config import default_db_path
+
+if TYPE_CHECKING:
+    import httpx
 
 
 def _parse_version(ver: str) -> tuple[int, ...]:
@@ -510,7 +515,56 @@ def invalidate_collections_cache() -> None:
     _collections_cache = ([], {}, 0.0)
 
 
-def t2_ctx():
+#: nexus-m20mf P3 fold-in (critic finding 1/1b): the CURRENT `nx index
+#: repo` run's shared httpx.Client, or None outside one. Process-global by
+#: DESIGN, not a mistake -- unlike the CLI-layer Click-context lookup the
+#: critic ruled out for the DATA layer (taxonomy_cmd._T2Database, index.py's
+#: run_collection_postprocessing/_collections_without_topics, which now take
+#: an explicit `client` parameter instead), this value is set and torn down
+#: by ONE owner (index_repository, via use_shared_t2_client_for_index_run
+#: below) for the exact duration of its own run, visible to every thread the
+#: run itself spawns (ChunkBatcher flush workers) -- global visibility across
+#: threads is the REQUIRED property here, not a hazard, since the whole point
+#: is that concurrent workers of the SAME run share the SAME pool. It exists
+#: because the per-document hook-failure chain (hook_registry.py's
+#: fire_single/fire_batch/fire_document -> _record_*_hook_failure ->
+#: _persist_hook_failure -> t2_ctx()) and 5 independent direct
+#: record_catalog_hook_failure call sites (catalog/store_hook.py,
+#: doc_indexer.py, pipeline_stages.py, indexer.py x2) sit behind a FIXED
+#: hook-function call signature shared by every registered hook -- threading
+#: an explicit client parameter through that interface would mean changing
+#: every hook's signature codebase-wide for one caller's benefit. t2_ctx()
+#: is ALREADY this codebase's documented, sanctioned escape hatch for paths
+#: that cannot route through the ordinary daemon/singleton machinery; this
+#: extends its OWN resolution rule (explicit client argument wins; otherwise
+#: the current run's shared client; otherwise build fresh, exactly as
+#: before) rather than inventing a second mechanism.
+_current_index_run_t2_client: "httpx.Client | None" = None
+
+
+@contextlib.contextmanager
+def use_shared_t2_client_for_index_run(client: "httpx.Client | None"):
+    """Scope ``_current_index_run_t2_client`` to one ``index_repository()``
+    call. Save/restore (not a bare set), so a caller nested inside another
+    (not a realistic shape today, but cheap to make safe) unwinds to the
+    OUTER value rather than clobbering it to ``None``. ``client=None`` is a
+    harmless no-op scope -- every ``t2_ctx()`` call inside still falls back
+    to building its own client, byte-identical to pre-P3 behavior."""
+    global _current_index_run_t2_client
+    previous = _current_index_run_t2_client
+    _current_index_run_t2_client = client
+    try:
+        yield
+    finally:
+        _current_index_run_t2_client = previous
+
+
+def current_index_run_t2_client() -> "httpx.Client | None":
+    """The active index run's shared client, or ``None`` outside one."""
+    return _current_index_run_t2_client
+
+
+def t2_ctx(client: "httpx.Client | None" = None):
     """Return a T2Database context manager — fresh per call.
 
     Reserved for the paths that genuinely cannot route through the daemon
@@ -538,9 +592,20 @@ def t2_ctx():
     yet converted -- now route through t2_index_write. See that function's
     call sites in mcp/core.py and T2 nexus/design-nexus-m20mf-single-t2-
     transport for the closure-purity rule those conversions follow.
+
+    nexus-m20mf P3 fold-in: *client*, when supplied, is used as-is (an
+    explicit argument always wins). When omitted, falls back to
+    :func:`current_index_run_t2_client` -- the active ``nx index repo``
+    run's shared client, or ``None`` outside one, which is what lets the
+    per-document hook-failure chain and the direct
+    ``record_catalog_hook_failure`` call sites share the run's pool without
+    any change to their own signatures. Both branches are additive: a
+    caller passing nothing outside an active index run gets byte-identical
+    behavior to before this parameter existed.
     """
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import (db.t2)
-    return T2Database(default_db_path())  # boundary-allow: aspect_worker persist (document_aspects.upsert AspectRecord arg cannot round-trip the daemon RPC); not the every-poll hot path (RDR-128 P3)
+    resolved = client if client is not None else _current_index_run_t2_client
+    return T2Database(default_db_path(), client=resolved)  # boundary-allow: aspect_worker persist (document_aspects.upsert AspectRecord arg cannot round-trip the daemon RPC); not the every-poll hot path (RDR-128 P3)
 
 
 
