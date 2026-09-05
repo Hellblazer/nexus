@@ -1100,8 +1100,11 @@ class TestReviewAutoCLI:
                 source_collection="proj",
             )
             topic_before = db.taxonomy.get_topic_by_id(tid)
+        # Label and terms are untouched by the new assignment; the real store
+        # does bump doc_count on import, so the drift signal under test is
+        # the doc SAMPLE in the hash, not the count.
         assert topic_before["label"] == "junk"
-        assert topic_before["doc_count"] == 1  # unchanged: proves label/terms/doc_count alone hide this drift
+        assert topic_before["terms"] == '["term-a", "term-b"]'
 
         fresh_dispatch = AsyncMock(
             side_effect=_dispatch_by_topic_id({tid: {"action": "accept"}})
