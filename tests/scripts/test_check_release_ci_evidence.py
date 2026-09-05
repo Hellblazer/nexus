@@ -846,3 +846,24 @@ def test_deferred_required_contexts_match_service_ci_job_names():
         "renamed, or drop it if the job is gone and branch protection no "
         "longer requires it."
     )
+
+
+def test_script_imports_under_a_bare_interpreter() -> None:
+    """release.yml runs this script BEFORE `uv sync`, under the runner's own
+    python3, where the nexus package is not installed. `python3 -I -S` (isolated, no site:
+    no site-packages at all, not even the venv's, no PYTHONPATH) is that environment
+    on any box. v7.31.0's first publish run died at import time on the
+    `nexus.gate_advisory` import nexus-1c7oq added; every gate in the battery
+    ran the script inside the dev venv and saw nothing."""
+    import subprocess
+    import sys
+
+    script = Path(__file__).resolve().parents[2] / "scripts" / "check_release_ci_evidence.py"
+    proc = subprocess.run(
+        [sys.executable, "-I", "-S", str(script), "--help"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "ModuleNotFoundError" not in proc.stderr
