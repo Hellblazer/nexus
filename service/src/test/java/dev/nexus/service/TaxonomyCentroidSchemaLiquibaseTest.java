@@ -1,16 +1,15 @@
 package dev.nexus.service;
 
+import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.Record2;
+import org.jooq.SQLDialect;
+import org.jooq.Table;
+import org.jooq.impl.DSL;
 import org.testcontainers.containers.PostgreSQLContainer;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -31,6 +30,22 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code hnsw}, opclass {@code vector_cosine_ops}, and carry the
  * {@code m=16, ef_construction=64} reloptions — the centroid-ANN read path
  * (assign_single / compute_assignments parity) depends on cosine distance.
+ *
+ * <p>nexus-cbo4a batch 6 fold-in (Sam's no-raw-SQL-in-Java directive,
+ * nexus-zrcj7): all 11 raw execute()/executeQuery() call sites are retired
+ * onto typed jOOQ DSL. The DO-block CREATE ROLE + hand-rolled Liquibase ->
+ * {@link PgContainerHelper#applyProductSchema}; information_schema/pg_catalog
+ * reads -> {@code DSLContext#meta()} or typed
+ * {@code DSL.table(DSL.name(...))}/{@code DSL.field(DSL.name(...), Class)}
+ * composition -- same category and shape as the other three files converted
+ * in this batch. The two sites that genuinely unnest a Postgres array
+ * ({@code primaryKeyColumns}'s {@code unnest(con.conkey) WITH ORDINALITY},
+ * {@code indexReloptions}'s {@code unnest(reloptions)}) use jOOQ's typed
+ * {@code DSL.unnest(Field)}/{@code Table#withOrdinality()} plus
+ * {@code Table#crossApply(TableLike)} (renders {@code CROSS JOIN LATERAL} on
+ * Postgres) -- verified present in the pinned jOOQ 3.20.11 jar via javap,
+ * correcting this file's initial (batch-6-draft) exclusion, which assumed no
+ * typed form existed for either shape.
  */
 class TaxonomyCentroidSchemaLiquibaseTest {
 
@@ -44,44 +59,36 @@ class TaxonomyCentroidSchemaLiquibaseTest {
         try (PostgreSQLContainer<?> pg = PgContainerHelper.start()) {
 
             try (Connection su = pg.createConnection("")) {
-                su.createStatement().execute(
-                    "DO $$ BEGIN " +
-                    "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
-                    "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; " +
-                    "  END IF; " +
-                    "END $$");
-
-                Database db = DatabaseFactory.getInstance()
-                    .findCorrectDatabaseImplementation(new JdbcConnection(su));
-                Liquibase lb = new Liquibase(
-                    "db/changelog/db.changelog-master.xml",
-                    new ClassLoaderResourceAccessor(), db);
-                lb.update(new Contexts());
+                PgContainerHelper.applyProductSchema(su);
             }
 
             try (Connection c = pg.createConnection("")) {
+                DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+
                 // Table exists in nexus schema
-                ResultSet rs = c.createStatement().executeQuery(
-                    "SELECT 1 FROM information_schema.tables " +
-                    "WHERE table_schema='nexus' AND table_name='" + TABLE + "'");
-                assertThat(rs.next()).as("table nexus." + TABLE + " must exist").isTrue();
+                boolean exists = !ctx.meta()
+                    .filterSchemas(s -> s.getName().equals("nexus"))
+                    .filterTables(t -> t.getName().equals(TABLE))
+                    .getTables()
+                    .isEmpty();
+                assertThat(exists).as("table nexus." + TABLE + " must exist").isTrue();
 
                 // Exact column set: three nullable embedding_<dim> columns, no chash
                 // (taxonomy-007's own DIVERGENCE 1 note: centroids have no content-hash
                 // concept at all).
-                List<String> cols = columnNames(c, "nexus", TABLE);
+                List<String> cols = columnNames(ctx, "nexus", TABLE);
                 assertThat(cols).as("columns of nexus." + TABLE).containsExactlyInAnyOrder(
                     "tenant_id", "collection", "topic_id",
                     "embedding_384", "embedding_768", "embedding_1024",
                     "label", "doc_count", "created_at");
 
                 // Primary key is (tenant_id, collection, topic_id) in order
-                assertThat(primaryKeyColumns(c, "nexus", TABLE))
+                assertThat(primaryKeyColumns(ctx, "nexus", TABLE))
                     .as("PK of nexus." + TABLE)
                     .containsExactly("tenant_id", "collection", "topic_id");
 
                 // exactly-one-embedding CHECK constraint present
-                assertThat(constraintExists(c, "taxonomy_centroids_exactly_one_embedding"))
+                assertThat(constraintExists(ctx, "taxonomy_centroids_exactly_one_embedding"))
                     .as("taxonomy_centroids_exactly_one_embedding CHECK must exist").isTrue();
 
                 for (int dim : DIMS) {
@@ -89,106 +96,184 @@ class TaxonomyCentroidSchemaLiquibaseTest {
                     String index = "idx_taxonomy_centroids_embedding_" + dim;
 
                     // embedding_<dim> column is vector(dim)
-                    assertThat(vectorDimension(c, "nexus", TABLE, column))
+                    assertThat(vectorDimension(ctx, "nexus", TABLE, column))
                         .as("dimension of nexus." + TABLE + "." + column).isEqualTo(dim);
 
                     // HNSW cosine index: access method, opclass, reloptions
-                    assertThat(indexAccessMethod(c, index))
+                    assertThat(indexAccessMethod(ctx, index))
                         .as("access method of " + index).isEqualTo("hnsw");
-                    assertThat(indexOpclass(c, index))
+                    assertThat(indexOpclass(ctx, index))
                         .as("opclass of " + index).isEqualTo("vector_cosine_ops");
-                    List<String> reloptions = indexReloptions(c, index);
+                    List<String> reloptions = indexReloptions(ctx, index);
                     assertThat(reloptions).as("reloptions of " + index)
                         .contains("m=16", "ef_construction=64");
                 }
 
                 // RLS enabled + FORCED (once, on the unified table)
-                ResultSet rlsRs = c.createStatement().executeQuery(
-                    "SELECT relrowsecurity, relforcerowsecurity FROM pg_class " +
-                    "WHERE relname='" + TABLE + "' AND relnamespace=" +
-                    "(SELECT oid FROM pg_namespace WHERE nspname='nexus')");
-                assertThat(rlsRs.next()).as("pg_class entry for " + TABLE).isTrue();
-                assertThat(rlsRs.getBoolean("relrowsecurity"))
-                    .as("RLS enabled on nexus." + TABLE).isTrue();
-                assertThat(rlsRs.getBoolean("relforcerowsecurity"))
-                    .as("RLS forced on nexus." + TABLE).isTrue();
+                Table<?> pgClass = DSL.table(DSL.name("pg_class"));
+                Table<?> pgNamespace = DSL.table(DSL.name("pg_namespace"));
+                Field<Boolean> relrowsecurity =
+                    DSL.field(DSL.name("pg_class", "relrowsecurity"), Boolean.class);
+                Field<Boolean> relforcerowsecurity =
+                    DSL.field(DSL.name("pg_class", "relforcerowsecurity"), Boolean.class);
+                Record2<Boolean, Boolean> rlsRow = ctx.select(relrowsecurity, relforcerowsecurity)
+                    .from(pgClass)
+                    .join(pgNamespace)
+                        .on(DSL.field(DSL.name("pg_class", "relnamespace"))
+                            .eq(DSL.field(DSL.name("pg_namespace", "oid"))))
+                    .where(DSL.field(DSL.name("pg_class", "relname"), String.class).eq(TABLE))
+                    .and(DSL.field(DSL.name("pg_namespace", "nspname"), String.class).eq("nexus"))
+                    .fetchOne();
+                assertThat(rlsRow).as("pg_class entry for " + TABLE).isNotNull();
+                assertThat(rlsRow.value1()).as("RLS enabled on nexus." + TABLE).isTrue();
+                assertThat(rlsRow.value2()).as("RLS forced on nexus." + TABLE).isTrue();
 
                 // tenant_isolation policy present (once, on the unified table)
-                ResultSet polRs = c.createStatement().executeQuery(
-                    "SELECT 1 FROM pg_policies " +
-                    "WHERE schemaname='nexus' AND tablename='" + TABLE + "' " +
-                    "AND policyname='tenant_isolation'");
-                assertThat(polRs.next())
+                boolean policyExists = ctx.fetchExists(DSL.table(DSL.name("pg_policies")),
+                    DSL.field(DSL.name("schemaname"), String.class).eq("nexus")
+                        .and(DSL.field(DSL.name("tablename"), String.class).eq(TABLE))
+                        .and(DSL.field(DSL.name("policyname"), String.class).eq("tenant_isolation")));
+                assertThat(policyExists)
                     .as("tenant_isolation policy on nexus." + TABLE).isTrue();
             }
         }
     }
 
-    private static List<String> columnNames(Connection c, String schema, String table) throws Exception {
-        ResultSet rs = c.createStatement().executeQuery(
-            "SELECT column_name FROM information_schema.columns " +
-            "WHERE table_schema='" + schema + "' AND table_name='" + table + "'");
+    private static List<String> columnNames(DSLContext ctx, String schema, String table) {
+        List<Table<?>> tables = ctx.meta()
+            .filterSchemas(s -> s.getName().equals(schema))
+            .filterTables(t -> t.getName().equals(table))
+            .getTables();
         List<String> cols = new ArrayList<>();
-        while (rs.next()) cols.add(rs.getString("column_name"));
+        if (!tables.isEmpty()) {
+            for (Field<?> f : tables.get(0).fields()) {
+                cols.add(f.getName());
+            }
+        }
         return cols;
     }
 
     /** pgvector stores the declared dimension in atttypmod (no -4 adjustment for vector). */
-    private static int vectorDimension(Connection c, String schema, String table, String column) throws Exception {
-        ResultSet rs = c.createStatement().executeQuery(
-            "SELECT a.atttypmod FROM pg_attribute a " +
-            "JOIN pg_class cl ON a.attrelid = cl.oid " +
-            "JOIN pg_namespace n ON cl.relnamespace = n.oid " +
-            "WHERE n.nspname='" + schema + "' AND cl.relname='" + table + "' " +
-            "AND a.attname='" + column + "'");
-        assertThat(rs.next()).as("atttypmod row for " + table + "." + column).isTrue();
-        return rs.getInt("atttypmod");
+    private static int vectorDimension(DSLContext ctx, String schema, String table, String column) {
+        Table<?> pgAttribute = DSL.table(DSL.name("pg_attribute")).as("a");
+        Table<?> pgClass = DSL.table(DSL.name("pg_class")).as("cl");
+        Table<?> pgNamespace = DSL.table(DSL.name("pg_namespace")).as("n");
+        Field<Integer> atttypmod = DSL.field(DSL.name("a", "atttypmod"), Integer.class);
+
+        Integer value = ctx.select(atttypmod)
+            .from(pgAttribute)
+            .join(pgClass).on(DSL.field(DSL.name("a", "attrelid")).eq(DSL.field(DSL.name("cl", "oid"))))
+            .join(pgNamespace)
+                .on(DSL.field(DSL.name("cl", "relnamespace")).eq(DSL.field(DSL.name("n", "oid"))))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(schema))
+            .and(DSL.field(DSL.name("cl", "relname"), String.class).eq(table))
+            .and(DSL.field(DSL.name("a", "attname"), String.class).eq(column))
+            .fetchOne(atttypmod);
+        assertThat(value).as("atttypmod row for " + table + "." + column).isNotNull();
+        return value;
     }
 
-    private static List<String> primaryKeyColumns(Connection c, String schema, String table) throws Exception {
-        // Ordered by key position via the conkey array.
-        ResultSet rs = c.createStatement().executeQuery(
-            "SELECT a.attname FROM pg_constraint con " +
-            "JOIN pg_class cl ON con.conrelid = cl.oid " +
-            "JOIN pg_namespace n ON cl.relnamespace = n.oid " +
-            "JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON true " +
-            "JOIN pg_attribute a ON a.attrelid = cl.oid AND a.attnum = k.attnum " +
-            "WHERE con.contype='p' AND n.nspname='" + schema + "' AND cl.relname='" + table + "' " +
-            "ORDER BY k.ord");
-        List<String> cols = new ArrayList<>();
-        while (rs.next()) cols.add(rs.getString("attname"));
-        return cols;
+    /** Ordered by key position via the conkey array. {@code con.conkey} is a
+     * Postgres {@code int2[]} (smallint array); {@link DSL#unnest(Field)} +
+     * {@link Table#withOrdinality()} render the same
+     * {@code unnest(...) WITH ORDINALITY} the raw SQL used, and
+     * {@link Table#crossApply(org.jooq.TableLike)} renders
+     * {@code CROSS JOIN LATERAL} on Postgres (the standard-SQL form of the
+     * original's {@code JOIN LATERAL ... ON true}). */
+    private static List<String> primaryKeyColumns(DSLContext ctx, String schema, String table) {
+        Table<?> pgConstraint = DSL.table(DSL.name("pg_constraint")).as("con");
+        Table<?> pgClass = DSL.table(DSL.name("pg_class")).as("cl");
+        Table<?> pgNamespace = DSL.table(DSL.name("pg_namespace")).as("n");
+        Table<?> pgAttribute = DSL.table(DSL.name("pg_attribute")).as("a");
+
+        Field<Short[]> conkey = DSL.field(DSL.name("con", "conkey"), Short[].class);
+        Table<?> k = DSL.unnest(conkey).withOrdinality().as("k", "attnum", "ord");
+        Field<Short> kAttnum = DSL.field(DSL.name("k", "attnum"), Short.class);
+        Field<Long> kOrd = DSL.field(DSL.name("k", "ord"), Long.class);
+        Field<String> attname = DSL.field(DSL.name("a", "attname"), String.class);
+
+        return ctx.select(attname)
+            .from(pgConstraint
+                .join(pgClass)
+                    .on(DSL.field(DSL.name("con", "conrelid")).eq(DSL.field(DSL.name("cl", "oid"))))
+                .join(pgNamespace)
+                    .on(DSL.field(DSL.name("cl", "relnamespace")).eq(DSL.field(DSL.name("n", "oid"))))
+                .crossApply(k)
+                .join(pgAttribute)
+                    .on(DSL.field(DSL.name("a", "attrelid")).eq(DSL.field(DSL.name("cl", "oid"))))
+                    .and(DSL.field(DSL.name("a", "attnum"), Short.class).eq(kAttnum)))
+            .where(DSL.field(DSL.name("con", "contype"), String.class).eq("p"))
+            .and(DSL.field(DSL.name("n", "nspname"), String.class).eq(schema))
+            .and(DSL.field(DSL.name("cl", "relname"), String.class).eq(table))
+            .orderBy(kOrd)
+            .fetch(attname);
     }
 
-    private static boolean constraintExists(Connection c, String conname) throws Exception {
-        ResultSet rs = c.createStatement().executeQuery(
-            "SELECT 1 FROM pg_constraint WHERE conname='" + conname + "'");
-        return rs.next();
+    private static boolean constraintExists(DSLContext ctx, String conname) {
+        return ctx.fetchExists(DSL.table(DSL.name("pg_constraint")),
+            DSL.field(DSL.name("conname"), String.class).eq(conname));
     }
 
-    private static String indexAccessMethod(Connection c, String index) throws Exception {
-        ResultSet rs = c.createStatement().executeQuery(
-            "SELECT am.amname FROM pg_class i " +
-            "JOIN pg_am am ON i.relam = am.oid WHERE i.relname='" + index + "'");
-        assertThat(rs.next()).as("index " + index + " must exist").isTrue();
-        return rs.getString("amname");
+    private static String indexAccessMethod(DSLContext ctx, String index) {
+        Table<?> pgClass = DSL.table(DSL.name("pg_class")).as("i");
+        Table<?> pgAm = DSL.table(DSL.name("pg_am")).as("am");
+        Field<String> amname = DSL.field(DSL.name("am", "amname"), String.class);
+
+        String value = ctx.select(amname)
+            .from(pgClass)
+            .join(pgAm).on(DSL.field(DSL.name("i", "relam")).eq(DSL.field(DSL.name("am", "oid"))))
+            .where(DSL.field(DSL.name("i", "relname"), String.class).eq(index))
+            .fetchOne(amname);
+        assertThat(value).as("index " + index + " must exist").isNotNull();
+        return value;
     }
 
-    private static String indexOpclass(Connection c, String index) throws Exception {
-        ResultSet rs = c.createStatement().executeQuery(
-            "SELECT opc.opcname FROM pg_index ix " +
-            "JOIN pg_class i ON ix.indexrelid = i.oid " +
-            "JOIN pg_opclass opc ON opc.oid = ix.indclass[0] " +
-            "WHERE i.relname='" + index + "'");
-        assertThat(rs.next()).as("opclass row for " + index).isTrue();
-        return rs.getString("opcname");
+    /** {@code pg_index.indclass} is a Postgres {@code oidvector} -- a system-
+     * catalog pseudo-array type, 0-INDEXED by internal Postgres convention
+     * (unlike a normal array, which defaults to 1-based). {@link
+     * DSL#arrayGet(Field, int)} passes its {@code int} argument straight
+     * through into the rendered {@code (...)[index]} subscript with no
+     * normalization (jOOQ's own docs: "these values are passed directly to
+     * the SQL engine without interpretation") -- {@code arrayGet(indclass, 0)}
+     * therefore renders the exact {@code indclass[0]} the raw SQL used, not
+     * jOOQ's own 1-based array convention. The element type is left as
+     * {@code Object[]}/{@code Object} (matching this file's other untyped
+     * oid comparisons) since the subscripted value is never fetched
+     * directly -- only compared against {@code pg_opclass.oid} inside the
+     * JOIN condition -- so no JDBC array marshaling of {@code oidvector}
+     * (which has no standard array read support) is ever needed. */
+    private static String indexOpclass(DSLContext ctx, String index) {
+        Table<?> pgIndex = DSL.table(DSL.name("pg_index")).as("ix");
+        Table<?> pgClass = DSL.table(DSL.name("pg_class")).as("i");
+        Table<?> pgOpclass = DSL.table(DSL.name("pg_opclass")).as("opc");
+        Field<String> opcname = DSL.field(DSL.name("opc", "opcname"), String.class);
+        Field<Object[]> indclass = DSL.field(DSL.name("ix", "indclass"), Object[].class);
+        Field<Object> indclass0 = DSL.arrayGet(indclass, 0);
+
+        String value = ctx.select(opcname)
+            .from(pgIndex)
+            .join(pgClass)
+                .on(DSL.field(DSL.name("ix", "indexrelid")).eq(DSL.field(DSL.name("i", "oid"))))
+            .join(pgOpclass).on(DSL.field(DSL.name("opc", "oid")).eq(indclass0))
+            .where(DSL.field(DSL.name("i", "relname"), String.class).eq(index))
+            .fetchOne(opcname);
+        assertThat(value).as("opclass row for " + index).isNotNull();
+        return value;
     }
 
-    private static List<String> indexReloptions(Connection c, String index) throws Exception {
-        ResultSet rs = c.createStatement().executeQuery(
-            "SELECT unnest(reloptions) AS opt FROM pg_class WHERE relname='" + index + "'");
-        List<String> opts = new ArrayList<>();
-        while (rs.next()) opts.add(rs.getString("opt"));
-        return opts;
+    /** {@code reloptions} is a Postgres {@code text[]}; {@link DSL#unnest(Field)}
+     * + {@link Table#crossApply(org.jooq.TableLike)} render the same
+     * {@code unnest(reloptions)} the raw SQL used, without WITH ORDINALITY
+     * (the original selected only the unnested value, never the position). */
+    private static List<String> indexReloptions(DSLContext ctx, String index) {
+        Table<?> pgClass = DSL.table(DSL.name("pg_class"));
+        Field<String[]> reloptions = DSL.field(DSL.name("reloptions"), String[].class);
+        Table<?> opt = DSL.unnest(reloptions).as("opt");
+        Field<String> optField = DSL.field(DSL.name("opt"), String.class);
+
+        return ctx.select(optField)
+            .from(pgClass.crossApply(opt))
+            .where(DSL.field(DSL.name("relname"), String.class).eq(index))
+            .fetch(optField);
     }
 }

@@ -681,13 +681,21 @@ class RawSqlGateTest {
      * CEILING that must be lowered, never left as unclaimed slack).
      *
      * <p>Batch history: nexus-cbo4a batch 6 seeded this map from the
-     * post-batch-5 tree (1538 call sites across 146 files) after converting
+     * post-batch-5 tree (1538 call sites across 146 files), converting
      * {@code CatalogSchemaLiquibaseTest}, {@code TaxonomySchemaLiquibaseTest},
      * {@code LadderSchemaLiquibaseTest}, and {@code ChashIndexDropLiquibaseTest}
      * (29 call sites across 4 files) onto typed jOOQ DSL / the {@code Meta}
-     * API / the generated {@code LADDER_COMPLETIONS} table -- those four files
-     * carry NO entry here because their count is now zero, and any raw SQL
-     * reappearing in them fails loud as a file the ratchet has never seen.
+     * API / the generated {@code LADDER_COMPLETIONS} table. A same-batch
+     * review round (T2 [24653]) found the batch's initial exclusion of
+     * {@code TaxonomyCentroidSchemaLiquibaseTest} (11 sites) unfounded --
+     * jOOQ 3.20.11 has typed {@code DSL.unnest(Field)}/{@code
+     * Table#withOrdinality()}/{@code Table#crossApply(TableLike)} for both of
+     * its genuinely array-unnesting sites, and the other 9 match shapes
+     * already converted elsewhere in this batch -- so it converts in the
+     * SAME batch, fold-in commit. All five files carry NO entry here because
+     * their count is now zero (40 call sites across 5 files total), and any
+     * raw SQL reappearing in them fails loud as a file the ratchet has never
+     * seen.
      */
     private static final Map<String, Integer> TEST_TREE_RAW_SQL_CEILING = Map.ofEntries(
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 8),
@@ -793,7 +801,6 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/TaxonomyAssignFromChashesRepositoryTest.java", 5),
         Map.entry("dev/nexus/service/TaxonomyCentroidAnnPlanShapeTest.java", 12),
         Map.entry("dev/nexus/service/TaxonomyCentroidRepositoryTest.java", 1),
-        Map.entry("dev/nexus/service/TaxonomyCentroidSchemaLiquibaseTest.java", 11),
         Map.entry("dev/nexus/service/TaxonomyPersistHandlerTest.java", 3),
         Map.entry("dev/nexus/service/TaxonomyRepositoryTest.java", 8),
         Map.entry("dev/nexus/service/TelemetryRepositoryTest.java", 15),
@@ -849,7 +856,7 @@ class RawSqlGateTest {
      * addition to the test tree (a new SANCTIONED-style unavoidable case),
      * never as a side effect of an unrelated change.
      */
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1538;
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1527;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
