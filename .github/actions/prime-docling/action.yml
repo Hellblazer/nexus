@@ -27,7 +27,7 @@ inputs:
       actions/cache key. Use an arch-qualified key for multi-arch matrix
       jobs so each runner architecture caches independently.
     required: false
-    default: docling-artifacts-${{ runner.os }}-v1
+    default: ""
   asset-tag:
     description: >-
       GitHub release tag that hosts docling-artifacts-v1.tar.gz. Regenerate
@@ -43,13 +43,14 @@ runs:
   steps:
     - name: Restore docling artifacts cache
       id: cache
-      # STABLE key — the extracted models are an immutable upstream export,
-      # so they download ONCE on a cold cache and restore thereafter; bump
-      # the -v suffix in the key only if the model SOURCE changes.
+      # Keyed on the ASSET TAG (nexus-tl7bu): the extracted models are an
+      # immutable export of that tag, so they download once per tag and
+      # restore thereafter; cutting a new asset tag invalidates the cache
+      # by construction, with no separate key bump to forget.
       uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
       with:
         path: ~/.cache/nexus/docling-artifacts
-        key: ${{ inputs.cache-key }}
+        key: ${{ inputs.cache-key != '' && inputs.cache-key || format('docling-{0}-{1}', inputs.asset-tag, runner.os) }}
 
     - name: Fetch docling models from our own mirror on cache miss
       # WE HOST THESE. Nothing here may reach HuggingFace.

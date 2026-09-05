@@ -76,10 +76,11 @@ def test_prime_docling_action_cache_key_uses_asset_tag_input() -> None:
     steps = action["runs"]["steps"]
     cache_step = next(s for s in steps if s.get("uses", "").startswith("actions/cache@"))
     key = cache_step["with"]["key"]
-    assert "cache-key" in key, f"cache key should be parameterised via inputs.cache-key: {key}"
+    assert "inputs.asset-tag" in key, f"cache key must derive from inputs.asset-tag: {key}"
+    assert "cache-key" in key, f"cache key should still honour an explicit inputs.cache-key: {key}"
 
     cache_key_default = action["inputs"]["cache-key"]["default"]
-    assert "docling-artifacts" in cache_key_default
+    assert cache_key_default == "", "an explicit cache-key default would bypass the asset-tag derivation"
 
 
 def test_prime_docling_action_restores_to_expected_path() -> None:
