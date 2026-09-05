@@ -1,0 +1,124 @@
+# Plugin-surface release-sandbox smoke (nexus-98gpl, RDR-197 F1 follow-on).
+#
+# docs/rdr/rdr-197-plugin-only-release-channel.md:171-173 names an
+# independent gap: `tests/e2e/release-sandbox.sh smoke` is mandatory for
+# plugin changes per AGENTS.md step 6, but ran in NO CI workflow -- only ever
+# by hand, right before a release. This workflow closes that gap on the PR
+# path, without gating the RDR-197 plugin channel or being gated by it (the
+# cut script still runs the gate locally and does not wait on this job).
+#
+# NON-GATING BY DESIGN (bead title, and the RDR calls it out explicitly as
+# its own bead separate from the epic): this is intentionally NOT wired into
+# branch protection as a required check. That sidesteps the "required check
+# + workflow-level `paths:`" trap (a path-filtered required check hangs a PR
+# that never touches the surface, because a job that never runs never posts
+# a status) -- see feedback_required_check_needs_job_level_skip.md. Because
+# it is advisory, workflow-level `paths:` is the right tool here, same as
+# plugin-drift-ledger.yml already uses for the same reason.
+#
+# WHY ITS OWN WORKFLOW, NOT A JOB ELSEWHERE:
+#   * plugin-drift-ledger.yml's own header states its cost budget explicitly:
+#     "One test file. No matrix, no native build, no service, no PG." This
+#     gate is the opposite of that on purpose (it self-provisions a real
+#     local engine + PG + embedder) -- adding it there breaks the sibling
+#     workflow's stated contract instead of extending it.
+#   * plugin-release.yml fires on `plugin-v*` tag push only (the RDR-197
+#     channel's verify-only workflow) -- wrong trigger shape for a per-PR
+#     smoke gate; a plugin cut's own battery already runs this gate locally
+#     via cut_plugin_release.py.
+#
+# COST (CLAUDE.md "CI Cost Discipline" / AGENTS.md):
+#   * Never test the same tree twice: PR-triggered only, no push trigger --
+#     the branches this targets (develop, main) are exactly the ones with
+#     required checks elsewhere; this job adds an advisory signal on the PR,
+#     not a second pass at merge time.
+#   * Expensive job runs only when its inputs changed: workflow-level path
+#     filter on exactly the AGENTS.md "Run sandbox smoke" step-6 surface.
+#   * Never rebuild deterministic artifacts: `nx init` inside the smoke
+#     script downloads the RELEASED native engine binary + PG bundle
+#     (linux-amd64 assets already published per engine-service-release.yml)
+#     rather than compiling anything -- no Maven/JDK/Docker here, unlike
+#     local-service-gate-nightly.yml, which tests unreleased develop-tip
+#     Java and must build a dev jar. The bge-768 ONNX (~416MB) is the one
+#     large download, and it is cached via the existing self-hosted
+#     prime-bge-onnx composite action at the exact path
+#     fetch_service_bge_onnx() checks first, so only a cold cache pays for
+#     the transfer.
+#   * No macOS/premium runner: linux-amd64 assets cover every artifact this
+#     job needs; ubuntu-latest only.
+#   * No secrets: smoke mode forces NX_LOCAL=1 and unsets
+#     CHROMA_*/VOYAGE_API_KEY (release-sandbox.sh itself does this) -- the
+#     local service embeds with bge-768, never Voyage, so nothing here is
+#     credential-gated the way local-service-gate-nightly's CCE subset is.
+#   * Concurrency group with cancel-in-progress: a superseded push to the
+#     same PR ref does not stack a second self-provisioning run.
+
+name: plugin surface smoke
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'conexus/**'
+      - 'sn/**'
+      - '.claude-plugin/**'
+      - 'src/nexus/mcp/**'
+      - 'src/nexus/commands/doctor.py'
+      - 'src/nexus/commands/upgrade.py'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'tests/e2e/release-sandbox.sh'
+      - 'tests/test_plugin_surface_smoke_wiring.py'
+      - '.github/workflows/plugin-surface-smoke.yml'
+
+concurrency:
+  group: plugin-surface-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: release-sandbox.sh smoke (advisory, non-gating)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Prime bge-768 ONNX (cache or self-hosted asset)
+        # Same composite action local-service-gate-nightly.yml uses. Its
+        # cache path is byte-identical to fetch_service_bge_onnx()'s
+        # destination (tests/db/test_service_bge_model.py cross-checks the
+        # two), so a warm cache turns `nx init`'s ~416 MB download inside
+        # the smoke script into a no-op.
+        uses: ./.github/actions/prime-bge-onnx
+
+      - name: Run release-sandbox.sh smoke
+        run: |
+          set -euo pipefail
+          tests/e2e/release-sandbox.sh smoke 2>&1 | tee smoke-output.txt
+
+      - name: Non-vacuity — the script's own verdict line, not just exit code
+        # gap-8 / the nexus-hibpr class this repo keeps re-learning: a step
+        # that exits 0 without checking its own output can green a run that
+        # tested the wrong tree, or checked nothing at all. `pipefail` above
+        # already makes the `smoke | tee` pipeline's exit code trustworthy
+        # (tee, unlike head/less, never closes the pipe early -- this is not
+        # the pipe-to-pager footgun), but release-sandbox.sh's own doctrine
+        # (AGENTS.md non-vacuity rule) is to assert on content, not exit
+        # status alone: its own smoke arm collects failures into SMOKE_FAILED
+        # and only prints the literal "SMOKE PASSED: all steps green." line
+        # on the real all-green path. Require that line explicitly so a
+        # future change to the script's control flow (e.g. a step silently
+        # dropped from SMOKE_FAILED collection) cannot green this job by
+        # exit code alone without also faking the verdict text.
+        run: |
+          if ! grep -qF 'SMOKE PASSED: all steps green.' smoke-output.txt; then
+            echo "::error::release-sandbox.sh smoke did not print its own PASSED verdict line -- treat as a failure even though the pipeline may have exited 0 (tee/pipefail can mask this)." >&2
+            exit 1
+          fi
+          echo "verdict line found: SMOKE PASSED: all steps green."
