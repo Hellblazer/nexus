@@ -328,7 +328,7 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         if project:
             payload["project"] = project
         resp = self._raise_degenerate_query_as_value_error(
-            lambda: self._post("/v1/memory/search", payload), query
+            lambda: self._post("/v1/memory/search", payload, mutates=False), query
         )
         if isinstance(resp, list):
             return [_normalize(r) for r in resp]
@@ -364,7 +364,9 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         resp = self._raise_degenerate_query_as_value_error(
             lambda: self._post(
-                "/v1/memory/search_glob", {"query": query, "project_glob": project_glob}
+                "/v1/memory/search_glob",
+                {"query": query, "project_glob": project_glob},
+                mutates=False,
             ),
             query,
         )
@@ -381,7 +383,9 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 ``ftsQuery``.
         """
         resp = self._raise_degenerate_query_as_value_error(
-            lambda: self._post("/v1/memory/search_by_tag", {"query": query, "tag": tag}),
+            lambda: self._post(
+                "/v1/memory/search_by_tag", {"query": query, "tag": tag}, mutates=False
+            ),
             query,
         )
         if isinstance(resp, list):

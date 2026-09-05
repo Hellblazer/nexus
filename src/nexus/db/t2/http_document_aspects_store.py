@@ -398,7 +398,7 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "field": field,
             "predicate": predicate,
             "source_uris": source_uris,
-        })
+        }, mutates=False)
         result: list[str] = r.get("matched_uris", [])
         _log.debug(
             "http_aspects.operator_filter",
@@ -432,7 +432,7 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "op": "groupby",
             "field": field,
             "source_uris": source_uris,
-        })
+        }, mutates=False)
         groups: list[dict] = r.get("uri_groups", [])
         result: dict[str, str | None] = {}
         for entry in groups:
@@ -471,7 +471,7 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "op": "confidence_aggregate",
             "reducer_kind": reducer_kind,
             "source_uris": source_uris,
-        })
+        }, mutates=False)
         value = r.get("value")
         if value is None:
             return None

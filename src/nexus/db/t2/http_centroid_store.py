@@ -244,7 +244,7 @@ class HttpCentroidStore(RefreshableHttpStoreMixin):
                 "collection": collection,
                 "cross_collection": cross_collection,
                 "n_results": n_results,
-            })
+            }, mutates=False)
         except httpx.HTTPStatusError as e:
             # Swallow to [] ONLY for the dimension-mismatch 400 — the oracle's
             # best-effort "don't assign" when the query vector's space does not

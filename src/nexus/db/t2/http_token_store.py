@@ -254,7 +254,7 @@ class HttpTokenStore:
         body: dict[str, Any] = {}
         if tenant is not None:
             body["tenant"] = tenant
-        return self._post("/v1/service-tokens/list", body).get("tokens", [])
+        return self._post("/v1/service-tokens/list", body, mutates=False).get("tokens", [])
 
     # ── Session tokens (bead nexus-gmiaf.32.4) ────────────────────────────────
 

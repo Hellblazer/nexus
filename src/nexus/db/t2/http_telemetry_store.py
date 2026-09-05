@@ -1195,7 +1195,9 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         present: list[list[Any]] = []
         for start in range(0, len(keys), page):
             batch = keys[start : start + page]
-            resp = self._post("/v1/telemetry/ids/probe", {"table": table, "keys": batch})
+            resp = self._post(
+                "/v1/telemetry/ids/probe", {"table": table, "keys": batch}, mutates=False
+            )
             present.extend(resp.get("present") or [])
         return present
 

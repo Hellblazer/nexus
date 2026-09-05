@@ -682,7 +682,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         result = self._post("/owners/by_type", {
             "owner_type": owner_type,
             "include_deactivated": include_deactivated,
-        })
+        }, mutates=False)
         return result.get("owners", []) if result else []
 
     def chunk_counts_for_docs(self, doc_ids: list[str]) -> dict[str, int]:
@@ -695,7 +695,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         """
         if not doc_ids:
             return {}
-        result = self._post("/docs/chunk-counts", {"doc_ids": doc_ids})
+        result = self._post("/docs/chunk-counts", {"doc_ids": doc_ids}, mutates=False)
         return {k: int(v) for k, v in (result or {}).items() if v is not None}
 
     # RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15: manifest_backfill() and
@@ -995,7 +995,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         """
         if not tumblers:
             return {}
-        result = self._post("/links/from-batch", {"tumblers": tumblers})
+        result = self._post("/links/from-batch", {"tumblers": tumblers}, mutates=False)
         return result if result else {}
 
     def collections_by_owner(self, owner_id: str) -> list[dict]:
@@ -1796,7 +1796,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         entries: dict[str, CatalogEntry] = {}
         for start in range(0, len(doc_ids), _MANIFEST_GET_MANY_PAGE):
             batch = doc_ids[start : start + _MANIFEST_GET_MANY_PAGE]
-            result = self._post("/resolve_many", {"doc_ids": batch})
+            result = self._post("/resolve_many", {"doc_ids": batch}, mutates=False)
             if not result:
                 continue
             for doc_id, raw in result.get("entries", {}).items():
@@ -2422,7 +2422,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         ``commands/catalog_cmds/links.py``'s ``links`` command) silently
         degraded or crashed in service mode.
         """
-        result = self._post("/traverse", payload) or {"nodes": [], "edges": []}
+        result = self._post("/traverse", payload, mutates=False) or {"nodes": [], "edges": []}
         return {
             "nodes": [_to_entry(n) for n in result.get("nodes", [])],
             "edges": [_link_from_dict(e) for e in result.get("edges", [])],
@@ -2957,7 +2957,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         merged: dict[str, list[ManifestRow]] = {}
         for start in range(0, len(doc_ids), _MANIFEST_GET_MANY_PAGE):
             batch = doc_ids[start : start + _MANIFEST_GET_MANY_PAGE]
-            result = self._post("/manifest/get_many", {"doc_ids": batch})
+            result = self._post("/manifest/get_many", {"doc_ids": batch}, mutates=False)
             result = result if isinstance(result, dict) else {}
             manifests = result.get("manifests", {}) if result else {}
             manifests = manifests if isinstance(manifests, dict) else {}
@@ -3066,7 +3066,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         tumblers: set[str] = set()
         for start in range(0, len(unique_chashes), _DOCS_FOR_CHASHES_PAGE):
             batch = unique_chashes[start : start + _DOCS_FOR_CHASHES_PAGE]
-            result = self._post("/manifest/docs_for_chashes", {"chashes": batch})
+            result = self._post(
+                "/manifest/docs_for_chashes", {"chashes": batch}, mutates=False
+            )
             result = result if isinstance(result, dict) else {}
             # Handler returns {"tumblers": [tumbler_string, ...], "count": N}
             # — flat, not per-chash.

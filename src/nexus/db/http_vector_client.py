@@ -1223,6 +1223,25 @@ def _local_voyage_restart_remedy(code: int, err_message: str) -> str | None:
     )
 
 
+#: nexus-a2qhz: T3 sends every operation over POST — reads (search, get,
+#: get-all-metadata, ...) included, since a query body (embeddings,
+#: filters) does not fit a GET query string. So unlike T2/the catalog
+#: client, "is this call a POST" is NOT "is this call a write" for this
+#: module — the write guard below keys on the PATH's suffix instead. This
+#: is the exhaustive write-shaped endpoint set as of RDR-156/195: any
+#: `/v1/vectors/*` route that mutates (as opposed to merely querying)
+#: server-side state.
+_T3_WRITE_PATH_SUFFIXES: tuple[str, ...] = (
+    "/store-put",
+    "/store-delete",
+    "/update-metadata",
+    "/upsert-chunks",
+    "/gc/expire-quarantine",
+    "/gc/quarantine-orphans",
+    "/gc/restore-rereferenced",
+)
+
+
 def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120) -> Any:
     """POST JSON to the service endpoint, return parsed response body.
 
@@ -1233,8 +1252,21 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
     raised (bead nexus-rvfwj, 2026-06-10 — docs__1-16 + docs__1-1 evidence).
     Per dual-review S2 the raise is deliberately NOT global — a slow search
     should still fail fast.
+
+    nexus-a2qhz: a WRITE-shaped *path* (:data:`_T3_WRITE_PATH_SUFFIXES`)
+    routes through :func:`~nexus.db.service_endpoint.guard_production_write`
+    BEFORE this function's first network attempt — a dev-checkout process
+    with no explicit ``NX_SERVICE_*`` override and no opt-in is refused
+    here. Every other path (search/get/metadata reads, also sent over
+    POST) is unaffected.
     """
     import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+
+    if any(path.endswith(suffix) for suffix in _T3_WRITE_PATH_SUFFIXES):
+        from nexus.db.service_endpoint import guard_production_write  # noqa: PLC0415 — deferred to avoid circular import
+
+        base_url, _ = _resolve_endpoint()
+        guard_production_write(base_url)
 
     try:
         return _request("POST", path, tenant=tenant, timeout=timeout, body=body)

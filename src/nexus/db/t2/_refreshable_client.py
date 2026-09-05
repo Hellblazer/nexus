@@ -63,6 +63,7 @@ from nexus.db.http_vector_client import _GATEWAY_RETRY_CODES, _GATEWAY_RETRY_SLE
 from nexus.db.service_endpoint import (
     DEFAULT_LEASE_WAIT_BUDGET_S,
     discover_lease_with_wait,
+    guard_production_write,
     has_ever_resolved_lease,
     resolve_service_endpoint,
 )
@@ -603,8 +604,19 @@ class RefreshableHttpStoreMixin:
         idempotent: bool = True,
         timeout: float | None = None,
         retry_read_timeout: bool = True,
+        mutates: bool = True,
     ) -> Any:
         """POST JSON *payload* to *path*; self-heals once on a retryable error.
+
+        ``mutates`` (nexus-a2qhz) defaults to ``True`` — the safe direction,
+        since most ``_post`` call sites across the adopter stores really are
+        writes. A handful of callers send a READ (a search/query/lookup
+        whose parameters do not fit a GET query string, e.g.
+        ``HttpMemoryStore.search``, ``HttpCatalogClient.traverse``,
+        ``HttpPlanLibrary.search_plans``) over POST; those pass
+        ``mutates=False`` to exempt themselves from
+        :func:`~nexus.db.service_endpoint.guard_production_write` (see
+        :meth:`_send`). Never flip this for a call that writes.
 
         ``idempotent=False`` (nexus-tjvgf) disables BOTH retry axes for
         operations where a lost-response retry double-applies server-side
@@ -644,7 +656,12 @@ class RefreshableHttpStoreMixin:
         starts a second, uncancelled embed on top of one that may still
         be running server-side.
         """
-        kwargs: dict[str, Any] = {"json": payload, "idempotent": idempotent, "retry_read_timeout": retry_read_timeout}
+        kwargs: dict[str, Any] = {
+            "json": payload,
+            "idempotent": idempotent,
+            "retry_read_timeout": retry_read_timeout,
+            "mutates": mutates,
+        }
         if timeout is not None:
             kwargs["timeout"] = timeout
         return self._send("POST", path, **kwargs)
@@ -673,6 +690,7 @@ class RefreshableHttpStoreMixin:
         *,
         idempotent: bool = True,
         retry_read_timeout: bool = True,
+        mutates: bool = True,
         **kwargs: Any,
     ) -> Any:
         """One round-trip, with ONE re-resolve-and-retry on a retryable error.
@@ -749,7 +767,19 @@ class RefreshableHttpStoreMixin:
         - Endpoint axis (outer): a retryable auth/connection error
           invalidates + re-resolves, then retries EXACTLY ONCE. A second
           failure (of ANY kind) propagates untouched — no retry loops.
+
+        nexus-a2qhz: every non-``GET`` verb WITH ``mutates=True`` (the
+        default — ``DELETE`` always, ``POST`` unless the caller passed
+        ``mutates=False`` for a read-shaped POST) routes through
+        :func:`~nexus.db.service_endpoint.guard_production_write` BEFORE
+        this method's first network attempt — a dev-checkout process with
+        no explicit ``NX_SERVICE_*`` override and no opt-in is refused
+        here, before ``_request_once`` ever dials ``self._base_url``.
+        Reads (``GET``, or a POST call site that declared ``mutates=False``)
+        are never guarded.
         """
+        if method != "GET" and mutates:
+            guard_production_write(self._base_url)
         if not idempotent:
             try:
                 return self._request_once(method, path, **kwargs)

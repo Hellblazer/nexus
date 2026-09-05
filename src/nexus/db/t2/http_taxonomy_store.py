@@ -468,7 +468,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         from. Pinned by tests/db/test_onjvy_write_only_surfaces.py: widen this
         projection and that test fails with instructions.
         """
-        result = self._post("/assignments/for_docs", {"doc_ids": doc_ids})
+        result = self._post("/assignments/for_docs", {"doc_ids": doc_ids}, mutates=False)
         return {r["doc_id"]: r["topic_id"] for r in result}
 
     def get_assignment_details(self, doc_ids: list[str]) -> list[dict[str, Any]]:
@@ -494,7 +494,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         if not doc_ids:
             return []
-        rows = self._post("/assignments/details", {"doc_ids": doc_ids})
+        rows = self._post("/assignments/details", {"doc_ids": doc_ids}, mutates=False)
         return list(rows or [])
 
     def purge_assignments_for_doc(self, project: str, title: str) -> int:
@@ -560,7 +560,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         service mode. The wire stays a row list; only the client-side shape
         changed.
         """
-        result = self._post("/links/pairs", {"topic_ids": topic_ids})
+        result = self._post("/links/pairs", {"topic_ids": topic_ids}, mutates=False)
         return {
             (r["from_topic_id"], r["to_topic_id"]): r["link_count"] for r in result
         }
@@ -585,7 +585,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             collection}]}``. ``drift_count`` is exact; ``rows`` is capped at
         *limit* so a large drift does not return a huge payload.
         """
-        return self._post("/links/drift", {"limit": limit}) or {}
+        return self._post("/links/drift", {"limit": limit}, mutates=False) or {}
 
     def upsert_topic_links(
         self,
