@@ -233,6 +233,27 @@ class TestCheckT2DroppedWrites:
         assert "historical" in r.detail.lower()
         assert "retired" in r.detail.lower()
 
+    def test_live_producer_drops_are_soft_warn(self, tmp_path, monkeypatch):
+        """nexus-gjv9b PARTs 1/2: capability_census and routing_events both
+        adopted record_drop() for their own service-down degradation —
+        the meter is no longer historical-only, and a drop from either
+        must restore the soft-WARN posture RDR-129 B4 always intended for
+        a future live producer (record_drop's own docstring names this
+        exact case)."""
+        from nexus import dropped_writes
+
+        monkeypatch.setenv(
+            "NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl")
+        )
+        dropped_writes.record_drop(
+            hook="routing_events", collection="", rows=1, error="connection refused",
+        )
+        results = _check_t2_dropped_writes()
+        r = results[0]
+        assert r.ok is False
+        assert "routing_events" in r.detail
+        assert "historical" not in r.detail.lower()
+
 
 # ── T2 daemon singleton / multiplicity (RDR-129 A3, nexus-exa2p) ────────────
 

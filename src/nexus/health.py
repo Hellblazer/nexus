@@ -2663,18 +2663,35 @@ def _check_t2_schema_applied() -> list[HealthResult]:
     return results
 
 
+#: Hook names for LIVE producers of nexus.dropped_writes.record_drop as of
+#: nexus-gjv9b PARTs 1/2 — a drop from one of these is CURRENT evidence a
+#: best-effort write to the engine is failing, not RDR-187 chash-hook
+#: history. Keep in lockstep with the ``hook=`` value each producer passes
+#: (``_session_end_census._post_capability_census``,
+#: ``routing/_lib.py``'s ``_record_dropped_routing_event``).
+_LIVE_DROP_PRODUCER_HOOKS = frozenset({"capability_census", "routing_events"})
+
+
 def _check_t2_dropped_writes() -> list[HealthResult]:
     """Surface the dropped-best-effort-write meter (RDR-129 B4, nexus-uq8a4).
 
-    RDR-187 (nexus-piwya.4): the meter's only-ever producer — the chash
-    dual-write hook — is retired, so the count can no longer grow. A
-    nonzero count is therefore HISTORICAL evidence (drops that happened
-    before the writer was retired), reported ok=True with the number
-    visible: a frozen soft-WARN whose last_ts can never advance would
-    nag forever about a writer that no longer exists, and a permanently
-    green "no drops" would silently hide the history. If a future
-    best-effort writer adopts record_drop(), restore the soft-WARN
-    posture for its records.
+    RDR-187 (nexus-piwya.4) retired the meter's FOUNDING producer — the
+    chash dual-write hook — but nexus-gjv9b PARTs 1/2 gave it two LIVE
+    ones (see :data:`_LIVE_DROP_PRODUCER_HOOKS`): the capability_census
+    and routing_events writer swaps both degrade here on service-down.
+    Framing keys on :attr:`DropSummary.last_hook` (the docstring
+    previously here claimed the meter could no longer grow at all — see
+    :func:`nexus.dropped_writes.record_drop`'s own docstring for that
+    history):
+
+    - ``last_hook`` in :data:`_LIVE_DROP_PRODUCER_HOOKS`: soft-WARN
+      (``ok=False``) — a live producer dropping now IS current evidence
+      of a best-effort write actually failing (service down, or an old
+      engine missing the route), the exact posture RDR-129 B4 restores
+      for a future adopter.
+    - ``last_hook`` anything else (empty, or the retired chash hook's own
+      historical value): unchanged HISTORICAL framing, ``ok=True``, count
+      frozen.
     """
     from nexus.dropped_writes import count_drops  # noqa: PLC0415 — deferred to avoid circular import
 
@@ -2689,6 +2706,16 @@ def _check_t2_dropped_writes() -> list[HealthResult]:
         return [HealthResult(
             label="T2 best-effort writes", ok=True, detail="no drops recorded",
         )]
+
+    if summary.last_hook in _LIVE_DROP_PRODUCER_HOOKS:
+        detail = (
+            f"{summary.total} drop(s) ({summary.rows} rows), most recently "
+            f"from {summary.last_hook!r} — a best-effort write to the engine "
+            f"is failing (service down, or an old engine missing the route)"
+        )
+        if summary.last_ts:
+            detail += f", last {summary.last_ts}"
+        return [HealthResult(label="T2 best-effort writes", ok=False, detail=detail)]
 
     detail = (
         f"{summary.total} historical drop(s) under lock contention "

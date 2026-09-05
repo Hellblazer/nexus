@@ -10,7 +10,10 @@ before this module its failures were swallowed at debug in
 ``mcp_infra.py``, so the completeness gap was invisible without log
 spelunking (RDR-129 Gap 4). The meter turns each drop into an appended
 record that ``nx doctor`` aggregates into a number; historical records
-naming the retired hook remain readable data.
+naming the retired hook remain readable data. LIVE PRODUCERS as of
+nexus-gjv9b: the ``capability_census``/``routing_events`` engine-table
+writer swaps both degrade to this meter on service-down, so the meter
+is no longer historical-only (see :func:`record_drop`'s docstring).
 
 Design mirrors :mod:`nexus.routing_stats`: a JSONL append log under
 ``~/.config/nexus`` (env-overridable), aggregated for CLI reporting.
@@ -50,16 +53,31 @@ class DropSummary:
     rows: int = 0
     last_ts: str | None = None
     last_collection: str = ""
+    #: The ``hook`` field of the MOST RECENT record (nexus-gjv9b: this
+    #: meter is no longer historical-only — capability_census and
+    #: routing_events both adopted ``record_drop``/the equivalent inline
+    #: format for their own service-down degradation). ``_check_t2_
+    #: dropped_writes`` keys its soft-WARN-vs-historical framing on this
+    #: rather than assuming every drop is from the retired chash
+    #: dual-write hook.
+    last_hook: str = ""
 
 
 def record_drop(*, hook: str, collection: str, rows: int, error: str) -> None:
     """Append one dropped-best-effort-write record. Never raises.
 
-    NO CURRENT PRODUCERS (RDR-187 / nexus-piwya.4): the founding caller —
-    the chash dual-write hook — is retired. Kept as the generic
-    best-effort-write meter (RDR-129 B4): a future best-effort writer
-    that can drop under lock contention should call this and restore the
-    soft-WARN posture in health._check_t2_dropped_writes for its records.
+    RETIRED FOUNDING PRODUCER (RDR-187 / nexus-piwya.4): the chash
+    dual-write hook that originally justified this meter is gone. LIVE
+    PRODUCERS as of nexus-gjv9b PART 1/2: ``capability_census``
+    (``nexus._session_end_census._post_capability_census``, this
+    function called directly) and ``routing_events``
+    (``conexus/hooks/scripts/routing/_lib.py``'s
+    ``_record_dropped_routing_event``, which hand-replicates this
+    function's exact on-disk record shape rather than importing it — that
+    script has no ``nexus`` dependency). ``health._check_t2_dropped_writes``
+    keys its soft-WARN-vs-historical framing on :attr:`DropSummary.last_hook`
+    so a new producer's drops are never misreported as leftover chash-hook
+    history.
 
     *rows* is the number of records in the dropped batch (so the meter can
     report rows lost, not just call sites). *error* is the originating
@@ -102,6 +120,7 @@ def count_drops() -> DropSummary:
     rows = 0
     last_ts: str | None = None
     last_collection = ""
+    last_hook = ""
     try:
         with path.open("r", encoding="utf-8") as f:
             for line in f:
@@ -120,11 +139,14 @@ def count_drops() -> DropSummary:
                 if ts:
                     last_ts = ts
                 last_collection = rec.get("collection", "") or last_collection
+                last_hook = rec.get("hook", "") or last_hook
     except OSError:
         return DropSummary(
-            total=total, rows=rows, last_ts=last_ts, last_collection=last_collection
+            total=total, rows=rows, last_ts=last_ts,
+            last_collection=last_collection, last_hook=last_hook,
         )
 
     return DropSummary(
-        total=total, rows=rows, last_ts=last_ts, last_collection=last_collection
+        total=total, rows=rows, last_ts=last_ts,
+        last_collection=last_collection, last_hook=last_hook,
     )
