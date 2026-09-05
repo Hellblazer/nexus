@@ -1382,10 +1382,20 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         capabilities: dict[str, int] | None = None,
         dispatches: int | None = None,
         total_calls: int | None = None,
+        capabilities_orchestrator: dict[str, int] | None = None,
+        capabilities_subagent: dict[str, int] | None = None,
         timeout: float = 2.0,
     ) -> None:
         """Upsert one session's capability census. Calls
         ``POST /v1/telemetry/capability_census/record``.
+
+        *capabilities_orchestrator* / *capabilities_subagent* (nexus-gjv9b
+        PART 3 prerequisite) carry the orchestrator/subagent-split
+        dimension — same 8-value vocabulary as *capabilities*, whose own
+        value is the MERGED total of the two. Both additive and optional:
+        omitting them (an old caller, or a blindspot record where neither
+        is ever meaningful) leaves the engine's ``capabilities_by_scope``
+        column NULL, never a fabricated all-zero breakdown.
 
         Single-attempt with a hard *timeout* (default 2.0s, matching
         ``_print_service_tier_summary``'s own precedent): this method is
@@ -1422,6 +1432,10 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             payload["capabilities"] = capabilities or {}
             payload["dispatches"] = dispatches
             payload["total_calls"] = total_calls
+            if capabilities_orchestrator is not None:
+                payload["capabilities_orchestrator"] = capabilities_orchestrator
+            if capabilities_subagent is not None:
+                payload["capabilities_subagent"] = capabilities_subagent
         self._post(
             "/v1/telemetry/capability_census/record",
             payload,

@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-gjv9b PART 3 prerequisite (bead note 2026-09-05, critique
+    critique-nexus-gjv9b-16b72394f Significant 5): before PART 3 may
+    attempt full JSON-shape parity between the store-backed capability
+    census reader and the transcript-walk reader, the bead requires
+    EITHER adding the orchestrator/subagent-split dimension to
+    capability_census as a new [additive] column, OR an explicit,
+    recorded acceptance of the loss. This changeset takes the first
+    option.
+
+    ADDITIVE: one new nullable column, existing rows unaffected, no wire
+    break; an old writer that never sends the split simply leaves this
+    column NULL, exactly like a blindspot row already leaves cap_skill
+    etc. NULL. No RLS change needed: the existing tenant_isolation policy
+    on nexus.capability_census (telemetry-010-2) already covers every
+    column on the table, this one included.
+
+    SHAPE: a single JSONB column, `capabilities_by_scope`, holding
+    `{"orchestrator": {cap: count, ...}, "subagent": {cap: count, ...}}`,
+    both inner maps keyed by the same 8-value CAPABILITIES vocabulary
+    the existing cap_* columns already stamp (src/nexus/census.py). A
+    single JSONB column rather than 16 new INTEGER columns (8 capabilities
+    x 2 scopes) for two reasons: (a) the bead's own PART-3 decision note
+    says "a new column" (singular); (b) unlike the original 8 cap_*
+    columns, a small CLOSED vocabulary that earned individual typed
+    columns in telemetry-010-1's own reasoning, this is a second
+    DIMENSION over that same closed vocabulary, and a JSONB blob keeps
+    the DDL bounded (one column) regardless of how many capabilities the
+    vocabulary ever grows to. NULL on a blindspot row (nothing was
+    measured) and on any row written by a pre-nexus-gjv9b-PART-3 client
+    (the split simply was not sent), never a fabricated all-zero
+    breakdown.
+
+    The flat cap_* columns (the merged orchestrator+subagent total) are
+    UNCHANGED and remain the primary read path for every existing
+    consumer; this column is additive detail, not a replacement.
+
+    Placement: changelog TAIL, after telemetry-012-index-failures-kind.xml
+    (current tail) and before the grants-nexus-svc.xml runAlways block,
+    matching the established late-append convention (D0.1).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset telemetry-013-1: capabilities_by_scope column ─────────── -->
+    <changeSet id="telemetry-013-1" author="nexus-gjv9b">
+        <comment>capability_census: add capabilities_by_scope JSONB (orchestrator/subagent split, additive)</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.capability_census
+    ADD COLUMN capabilities_by_scope JSONB;
+        </sql>
+        <rollback>ALTER TABLE nexus.capability_census DROP COLUMN IF EXISTS capabilities_by_scope</rollback>
+    </changeSet>
+
+</databaseChangeLog>

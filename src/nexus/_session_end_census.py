@@ -268,6 +268,13 @@ def _zero_record(session_id: str) -> dict[str, Any]:
         "capabilities": dict.fromkeys(CAPABILITIES, 0),
         "dispatches": 0,
         "total_calls": 0,
+        # nexus-gjv9b PART 3 prerequisite: a measured zero is a real
+        # measurement of BOTH scopes, not merely the merged total -- the
+        # session's own orchestrator/subagent dicts are empty by
+        # construction in this branch, so the split is zero at every
+        # capability too, same as the merged view above.
+        "capabilities_orchestrator": dict.fromkeys(CAPABILITIES, 0),
+        "capabilities_subagent": dict.fromkeys(CAPABILITIES, 0),
     }
 
 
@@ -308,6 +315,17 @@ def build_capability_census_record(
         return _blindspot_record(session_id, reason)
 
     capabilities = {cap: result.total_calls(cap) for cap in CAPABILITIES}
+    # nexus-gjv9b PART 3 prerequisite: the orchestrator/subagent-split
+    # dimension the transcript-walk reader already carries (census.py's
+    # own module docstring calls this split "load-bearing, not
+    # cosmetic"). ``result`` is scoped to exactly this one session
+    # (``census_corpus(project_dir, session=session_id)`` above), so
+    # ``orchestrator_calls``/``subagent_calls`` -- which sum over
+    # ``result.sessions`` -- reduce to this session's own counts, the
+    # same reduction ``total_calls`` above already relies on for the
+    # merged view.
+    capabilities_orchestrator = {cap: result.orchestrator_calls(cap) for cap in CAPABILITIES}
+    capabilities_subagent = {cap: result.subagent_calls(cap) for cap in CAPABILITIES}
 
     # code-review suggestion #2 (fix pass, 2026-08-20): the ``.measurable``
     # guard this used to carry was dead code, not defensive -- provably so.
@@ -329,6 +347,8 @@ def build_capability_census_record(
         "capabilities": capabilities,
         "dispatches": dispatches,
         "total_calls": sum(capabilities.values()),
+        "capabilities_orchestrator": capabilities_orchestrator,
+        "capabilities_subagent": capabilities_subagent,
     }
 
 
@@ -426,6 +446,8 @@ def _post_capability_census(record: dict[str, Any]) -> None:
                 capabilities=record.get("capabilities"),
                 dispatches=record.get("dispatches"),
                 total_calls=record.get("total_calls"),
+                capabilities_orchestrator=record.get("capabilities_orchestrator"),
+                capabilities_subagent=record.get("capabilities_subagent"),
                 timeout=2.0,
             )
         finally:

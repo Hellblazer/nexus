@@ -2236,6 +2236,14 @@ public final class TelemetryRepository {
      * @param capabilities per-capability call counts, keyed by the
      *     8-value vocabulary named above; ignored entirely when
      *     {@code blindspot} is true.
+     * @param capabilitiesByScopeJson nexus-gjv9b PART 3 prerequisite:
+     *     pre-serialized JSON text for the {@code capabilities_by_scope}
+     *     column ({@code {"orchestrator": {...}, "subagent": {...}}}, both
+     *     inner maps keyed by the same 8-value vocabulary as
+     *     {@code capabilities}), or {@code null} to leave the column NULL
+     *     (a blindspot row, or a client that has not yet been upgraded to
+     *     send the split). Additive: every existing caller passing
+     *     {@code null} here reproduces the exact pre-PART-3 write.
      */
     public void recordCapabilityCensus(String tenant,
                                        String sessionId,
@@ -2244,10 +2252,12 @@ public final class TelemetryRepository {
                                        String unmeasurableReason,
                                        Map<String, Integer> capabilities,
                                        Integer dispatches,
-                                       Integer totalCalls) {
+                                       Integer totalCalls,
+                                       String capabilitiesByScopeJson) {
         OffsetDateTime ts = tsIso != null && !tsIso.isBlank()
             ? parseTs(tsIso) : OffsetDateTime.now(ZoneOffset.UTC);
         Map<String, Integer> caps = blindspot || capabilities == null ? Map.of() : capabilities;
+        String scopeJson = blindspot ? null : capabilitiesByScopeJson;
         tenantScope.withTenant(tenant, ctx -> {
             var insert = ctx.insertInto(CAPABILITY_CENSUS)
                 .set(CAPABILITY_CENSUS.TENANT_ID, tenant)
@@ -2264,7 +2274,8 @@ public final class TelemetryRepository {
                 .set(CAPABILITY_CENSUS.CAP_BASELINE, caps.get("baseline"))
                 .set(CAPABILITY_CENSUS.CAP_OTHER, caps.get("other"))
                 .set(CAPABILITY_CENSUS.DISPATCHES, blindspot ? null : dispatches)
-                .set(CAPABILITY_CENSUS.TOTAL_CALLS, blindspot ? null : totalCalls);
+                .set(CAPABILITY_CENSUS.TOTAL_CALLS, blindspot ? null : totalCalls)
+                .set(CAPABILITY_CENSUS.CAPABILITIES_BY_SCOPE, jsonbOrNull(scopeJson));
             insert.onConflict(CAPABILITY_CENSUS.TENANT_ID, CAPABILITY_CENSUS.SESSION_ID)
                 .doUpdate()
                 .set(CAPABILITY_CENSUS.TS, field(name("excluded", "ts"), OffsetDateTime.class))
@@ -2280,6 +2291,7 @@ public final class TelemetryRepository {
                 .set(CAPABILITY_CENSUS.CAP_OTHER, field(name("excluded", "cap_other"), Integer.class))
                 .set(CAPABILITY_CENSUS.DISPATCHES, field(name("excluded", "dispatches"), Integer.class))
                 .set(CAPABILITY_CENSUS.TOTAL_CALLS, field(name("excluded", "total_calls"), Integer.class))
+                .set(CAPABILITY_CENSUS.CAPABILITIES_BY_SCOPE, field(name("excluded", "capabilities_by_scope"), org.jooq.JSONB.class))
                 .execute();
             return null;
         });
@@ -2309,7 +2321,8 @@ public final class TelemetryRepository {
                     CAPABILITY_CENSUS.CAP_SERENA, CAPABILITY_CENSUS.CAP_NX_ANSWER,
                     CAPABILITY_CENSUS.CAP_SEARCH_QUERY, CAPABILITY_CENSUS.CAP_OTHER_NX_MCP,
                     CAPABILITY_CENSUS.CAP_BASELINE, CAPABILITY_CENSUS.CAP_OTHER,
-                    CAPABILITY_CENSUS.DISPATCHES, CAPABILITY_CENSUS.TOTAL_CALLS)
+                    CAPABILITY_CENSUS.DISPATCHES, CAPABILITY_CENSUS.TOTAL_CALLS,
+                    CAPABILITY_CENSUS.CAPABILITIES_BY_SCOPE)
                 .from(CAPABILITY_CENSUS)
                 .where(cond)
                 .orderBy(CAPABILITY_CENSUS.TS.desc())
@@ -2333,10 +2346,44 @@ public final class TelemetryRepository {
                     row.put("capabilities",        caps);
                     row.put("dispatches",          r.value13());
                     row.put("total_calls",         r.value14());
+                    // nexus-gjv9b PART 3 prerequisite: capabilities_by_scope
+                    // parses back to a nested Map ({"orchestrator": {...},
+                    // "subagent": {...}}), the same convention CatalogRepository
+                    // already uses for its own jsonb->object reads (metadata),
+                    // rather than the raw-string `.data()` convention used for a
+                    // JSONB field this table's OWN clients treat as opaque
+                    // pass-through (batch_doc_ids) -- this field's whole point is
+                    // to be read back structurally by `nx census capability
+                    // --from-store`.
+                    row.put("capabilities_by_scope", parseCapabilitiesByScope(r.value15()));
                     return (Map<String, Object>) row;
                 });
         });
     }
+
+    /**
+     * Parse {@code capabilities_by_scope} JSONB back into a nested
+     * {@code Map<String, Object>}, or {@code null} when the column is NULL
+     * (a blindspot row, or a row written before nexus-gjv9b PART 3) or the
+     * stored text is somehow unparseable -- never a thrown exception on a
+     * READ path (nexus-gjv9b PART 3 prerequisite).
+     */
+    private static Map<String, Object> parseCapabilitiesByScope(org.jooq.JSONB raw) {
+        if (raw == null) {
+            return null;
+        }
+        try {
+            return SCOPE_MAPPER.readValue(raw.data(), SCOPE_MAP_TYPE);
+        } catch (Exception e) {
+            log.warn("event=capabilities_by_scope_parse_failed error={}", e.toString());
+            return null;
+        }
+    }
+
+    private static final com.fasterxml.jackson.databind.ObjectMapper SCOPE_MAPPER =
+        new com.fasterxml.jackson.databind.ObjectMapper();
+    private static final com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>> SCOPE_MAP_TYPE =
+        new com.fasterxml.jackson.core.type.TypeReference<>() {};
 
     /**
      * Delete (or, with {@code dryRun=true}, COUNT without deleting)

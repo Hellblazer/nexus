@@ -1095,6 +1095,16 @@
          late-append convention (D0.1). -->
     <include file="db/changelog/telemetry-012-index-failures-kind.xml"/>
 
+    <!-- nexus-gjv9b PART 3 prerequisite (bead note 2026-09-05,
+         critique-nexus-gjv9b-16b72394f Significant 5) — capability_census
+         gains capabilities_by_scope JSONB, the orchestrator/subagent-split
+         dimension the transcript-walk reader already carries. Depends only
+         on telemetry-010-capability-census.xml (the table). Placed after
+         telemetry-012-index-failures-kind.xml (current tail) and before the
+         grants-nexus-svc.xml runAlways block, matching the established
+         late-append convention (D0.1). -->
+    <include file="db/changelog/telemetry-013-capability-census-scope-split.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

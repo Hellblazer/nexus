@@ -710,6 +710,14 @@ public final class TelemetryHandler implements HttpHandler {
      * entirely (or {@code null}) on a {@code blindspot=true} record, which
      * this handler never rejects — a census that could not measure the
      * transcript still records THAT fact.
+     *
+     * <p>nexus-gjv9b PART 3 prerequisite: two OPTIONAL sibling objects,
+     * {@code capabilities_orchestrator} and {@code capabilities_subagent}
+     * (same 8-value vocabulary, same shape as {@code capabilities}), carry
+     * the orchestrator/subagent-split dimension the transcript-walk reader
+     * already has. Additive — a caller sending neither (an old client, or
+     * a blindspot record) leaves {@code capabilities_by_scope} NULL, the
+     * exact pre-PART-3 write.
      */
     private void handleCapabilityCensusRecord(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -718,20 +726,41 @@ public final class TelemetryHandler implements HttpHandler {
         String ts        = optStr(body, "ts");
         boolean blindspot = Boolean.TRUE.equals(body.get("blindspot"));
         String unmeasurableReason = optStrNull(body, "unmeasurable_reason");
-        Map<String, Integer> capabilities = new java.util.LinkedHashMap<>();
-        Object rawCaps = body.get("capabilities");
-        if (rawCaps instanceof Map<?, ?> m) {
-            for (var e : m.entrySet()) {
-                if (e.getKey() instanceof String k && e.getValue() instanceof Number n) {
-                    capabilities.put(k, n.intValue());
-                }
-            }
+        Map<String, Integer> capabilities = extractCapsMap(body.get("capabilities"));
+        Map<String, Integer> capabilitiesOrchestrator = extractCapsMap(body.get("capabilities_orchestrator"));
+        Map<String, Integer> capabilitiesSubagent = extractCapsMap(body.get("capabilities_subagent"));
+        String capabilitiesByScopeJson = null;
+        if (!capabilitiesOrchestrator.isEmpty() || !capabilitiesSubagent.isEmpty()) {
+            var byScope = new java.util.LinkedHashMap<String, Object>();
+            byScope.put("orchestrator", capabilitiesOrchestrator);
+            byScope.put("subagent", capabilitiesSubagent);
+            capabilitiesByScopeJson = json(byScope);
         }
         Integer dispatches = optInt(body, "dispatches");
         Integer totalCalls = optInt(body, "total_calls");
         repo.recordCapabilityCensus(tenant, sessionId, ts, blindspot, unmeasurableReason,
-            capabilities, dispatches, totalCalls);
+            capabilities, dispatches, totalCalls, capabilitiesByScopeJson);
         HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    /**
+     * Coerce a {@code capabilities}-shaped request field (a JSON object of
+     * string keys to numeric values) into {@code Map<String, Integer>}.
+     * Anything else (absent, {@code null}, wrong element types) yields an
+     * empty map rather than a 400 — the three capability_census callers of
+     * this helper (nexus-gjv9b PART 3 prerequisite) all treat "empty" and
+     * "absent" identically (a blindspot record, or a pre-split client).
+     */
+    private Map<String, Integer> extractCapsMap(Object raw) {
+        Map<String, Integer> caps = new java.util.LinkedHashMap<>();
+        if (raw instanceof Map<?, ?> m) {
+            for (var e : m.entrySet()) {
+                if (e.getKey() instanceof String k && e.getValue() instanceof Number n) {
+                    caps.put(k, n.intValue());
+                }
+            }
+        }
+        return caps;
     }
 
     /**

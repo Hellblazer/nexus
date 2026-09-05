@@ -149,6 +149,21 @@ def _capability_from_store(*, session: str | None, since: str | None, as_json: b
             f"{header} total_calls={row.get('total_calls')} "
             f"dispatches={row.get('dispatches')} {cap_str}"
         )
+        # nexus-gjv9b PART 3 prerequisite: capabilities_by_scope carries
+        # the orchestrator/subagent split (present only for a session
+        # censused by a nexus-gjv9b-PART-3-or-later writer; absent for an
+        # older row -- never fabricated). Rendered as a second line per
+        # capability, mirroring the transcript-walk reader's own
+        # "orch calls" / "sub calls" columns (render_text in
+        # nexus.census) rather than a new column vocabulary.
+        by_scope = row.get("capabilities_by_scope")
+        if by_scope:
+            orch = by_scope.get("orchestrator") or {}
+            sub = by_scope.get("subagent") or {}
+            scope_str = " ".join(
+                f"{k}=orch:{orch.get(k, 0)}/sub:{sub.get(k, 0)}" for k in caps
+            )
+            lines.append(f"    by_scope {scope_str}")
     click.echo("\n".join(lines))
 
 
