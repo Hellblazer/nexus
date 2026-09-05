@@ -263,6 +263,21 @@ def test_check_falls_back_to_merge_parent_when_own_evidence_missing_and_parent_g
     assert "nexus-au8zz" in out
     assert "#1456" in out
     assert "verified via merged pull request" in out
+    # nexus-1c7oq: a pass on borrowed evidence is not a bare green.
+    from nexus.gate_advisory import count_passed_by_default
+
+    assert count_passed_by_default(out) == 1
+    assert "GATE PASSED-BY-DEFAULT: check_release_ci_evidence evidence borrowed from merge parent" in out
+
+
+def test_own_sha_evidence_is_a_bare_green_with_no_advisory(capsys):
+    """The path the gate was written for prints no advisory (nexus-1c7oq:
+    a gate with no fallback in play is untouched)."""
+    from nexus.gate_advisory import count_passed_by_default
+
+    api = _fake_dispatcher(check_runs_by_sha={_SHA: [_run("pytest-gate")]}, commits_by_sha={})
+    assert gate.check(_REPO, _SHA, "tok", api=api) == 0
+    assert count_passed_by_default(capsys.readouterr().out) == 0
 
 
 def test_check_reports_both_own_and_parent_problems_when_parent_also_fails(capsys):

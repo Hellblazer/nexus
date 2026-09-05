@@ -69,3 +69,57 @@ def test_emit_rejects_a_bad_stream_value(mutate_choreography_row) -> None:
     with patch.object(_choreo, "choreography_table", return_value=table), \
          pytest.raises(_choreo.TableDefect, match="emit.stream"):
         _choreo.emit_choreography("check_pin_currency", {"newest": "none"})
+
+
+def _with_emit(mutate_choreography_row, row_id: str, exit_code: int, **extra):
+    table = mutate_choreography_row(row_id, exit_code)
+    rows = list(table.rows)
+    for i, row in enumerate(rows):
+        if row.id == row_id:
+            rows[i] = dataclasses.replace(row, outcome={**row.outcome, **extra})
+    return dataclasses.replace(table, rows=tuple(rows))
+
+
+def test_emit_advisory_needs_a_reason_naming_the_default(mutate_choreography_row) -> None:
+    """nexus-1c7oq: the advisory line is a self-contained grep target, so
+    a row marked passed-by-default must say what default carried it
+    (review [24384] Major 1)."""
+    from unittest.mock import patch  # noqa: PLC0415 — test-local
+
+    table = _with_emit(
+        mutate_choreography_row, "check_pin_currency::pin_currency_current_at_floor", 0,
+        advisory="passed-by-default",
+    )
+    with patch.object(_choreo, "choreography_table", return_value=table), \
+         pytest.raises(_choreo.TableDefect, match="advisory_reason"):
+        _choreo.emit_choreography("check_pin_currency", {"newest": "at_floor"})
+
+
+def test_emit_advisory_on_a_refusal_is_a_contradiction(mutate_choreography_row) -> None:
+    from unittest.mock import patch  # noqa: PLC0415 — test-local
+
+    table = _with_emit(
+        mutate_choreography_row, "check_pin_currency::pin_currency_zero_tags", 2,
+        advisory="passed-by-default", advisory_reason="x",
+    )
+    with patch.object(_choreo, "choreography_table", return_value=table), \
+         pytest.raises(_choreo.TableDefect, match="non-zero exit"):
+        _choreo.emit_choreography("check_pin_currency", {"newest": "none"})
+
+
+def test_emit_advisory_prints_the_line_with_the_rows_reason(
+    mutate_choreography_row, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from unittest.mock import patch  # noqa: PLC0415 — test-local
+
+    from nexus.gate_advisory import count_passed_by_default  # noqa: PLC0415 — test-local
+
+    table = _with_emit(
+        mutate_choreography_row, "check_pin_currency::pin_currency_current_at_floor", 0,
+        advisory="passed-by-default", advisory_reason="the floor was read from a cached probe",
+    )
+    with patch.object(_choreo, "choreography_table", return_value=table):
+        rc = _choreo.emit_choreography("check_pin_currency", {"newest": "at_floor"})
+    out = capsys.readouterr().out
+    assert rc == 0 and count_passed_by_default(out) == 1
+    assert "GATE PASSED-BY-DEFAULT: check_pin_currency the floor was read from a cached probe" in out

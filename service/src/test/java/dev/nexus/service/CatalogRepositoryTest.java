@@ -3,11 +3,6 @@ package dev.nexus.service;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.*;
 import org.postgresql.util.PSQLException;
 
@@ -150,60 +145,14 @@ class CatalogRepositoryTest {
     void startAll() throws Exception {
         pg = PgContainerHelper.start();
 
-        // Phase 1: role creation (autoCommit=true; CREATE ROLE cannot run in txn).
+        // Phase 1+2: product schema (creates nexus_svc via role-001-nexus-svc.xml).
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + SVC_ROLE + "') THEN " +
-                "    CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS + "'; " +
-                "  END IF; " +
-                "END $$");
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
-                "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; " +
-                "  END IF; " +
-                "END $$");
+            PgContainerHelper.applyProductSchema(su);
         }
 
-        // Phase 2: apply Liquibase master changelog (separate connection, committed before grants).
+        // Phase 3: bootstrap the test-local svc role (create + grant + search_path).
         try (Connection su = pg.createConnection("")) {
-            var lb = new Liquibase(
-                "db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(),
-                DatabaseFactory.getInstance().findCorrectDatabaseImplementation(
-                    new JdbcConnection(su)));
-            lb.update(new Contexts());
-        }
-
-        // Phase 3: grant svc role access to all catalog tables (separate connection, all Liquibase DDL visible).
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            for (String tbl : new String[]{
-                "catalog_owners", "catalog_documents", "catalog_links",
-                "catalog_document_chunks", "catalog_collections", "catalog_meta"}) {
-                su.createStatement().execute(
-                    "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus." + tbl + " TO " + SVC_ROLE);
-            }
-            // Grant sequence for catalog_links BIGSERIAL
-            su.createStatement().execute(
-                "GRANT USAGE ON SEQUENCE nexus.catalog_links_id_seq TO " + SVC_ROLE);
-            // RDR-159 P-1b GRANTs for manifest_backfill()/manifest_orphans(int) REMOVED
-            // here (RDR-191 Phase 6, nexus-o8dil.33) -- both functions are DROPPED
-            // (catalog-030-retire-manifest-verify.xml); granting EXECUTE on a
-            // nonexistent function fails the fixture outright.
-            // RDR-191 (nexus-o8dil.48): chunks_384/768/1024 unified into ONE
-            // nexus.chunks -- a single GRANT now covers what three did.
-            su.createStatement().execute(
-                "GRANT SELECT ON nexus.chunks TO " + SVC_ROLE);
-            // RDR-164 P3: renameCollection re-homes every denorm-collection table in one txn;
-            // grant write broadly so the coherent rename can move children off the old name.
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
         }
 
         // HikariCP as svc role (bare JDBC URL + setUsername, NOT superuser, to enforce RLS).
@@ -2099,7 +2048,7 @@ class CatalogRepositoryTest {
         // Connect as svc role, set GUC = TENANT_A, try to insert row with tenant_id = TENANT_B
         try (Connection conn = svcDs.getConnection()) {
             conn.setAutoCommit(false);
-            conn.createStatement().execute("SET LOCAL nexus.tenant = '" + TENANT_A + "'");
+            PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, true);
             var ex = assertThrows(PSQLException.class, () ->
                 conn.createStatement().execute(
                     "INSERT INTO nexus.catalog_documents " +
@@ -3281,9 +3230,7 @@ class CatalogRepositoryTest {
         //    The embedding column is vector(768): we cast a text literal.
         try (var su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "SET nexus.tenant = '" + SPAN_TENANT + "'"
-            );
+            PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, SPAN_TENANT, false);
             // Build a zero-vector literal: '[0,0,...,0]' with 768 zeros.
             String zeroVec = "[" + "0,".repeat(767) + "0]";
             // RDR-191 (nexus-o8dil.48): chunks_768 unified into nexus.chunks --

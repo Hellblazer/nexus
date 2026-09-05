@@ -40,6 +40,8 @@ from the table again.
 
 The **only** way to retire an RDR is the `status:` flip. **Never delete an RDR file** — they're the project's permanent decision record.
 
+
+Supersedes edges are part of the lifecycle and of indexing (Sam, 2026-09-04, nexus-y8bkt): `nx rdr set-status <id> superseded` writes the successor's `supersedes` catalog edge itself, and `nx index repo` re-feeds any RDR whose content changed to the dependency link generator, so a `supersedes:` / `superseded_by:` frontmatter edit seeds its edges at the next index rather than only on first registration. The needs-reexamination walk runs successor to predecessor over those edges.
 ## RDR scale and scope
 
 `docs/rdr/` is large (~2.7MB). Most of that is draft and historical content from earlier design cycles. Don't load every RDR you find — the directory's volume can dominate context budgets.
@@ -73,3 +75,23 @@ references:
 ```
 
 Run `nx rdr lint` before committing to catch this hazard.
+
+## Joint decision records (`docs/rdr/joint/`)
+
+A rule that two or more RDRs would each carry a copy of lives once, as
+`docs/rdr/joint/JDR-NNN-<slug>.md` (template: `joint/TEMPLATE.md`), and
+the owning records cite the number. The registry is append-only: never
+merge, split or renumber a JDR, because citations anchor on the number
+and a moved anchor is the duplicate-contract drift this exists to end
+(a rule living in two places until the stale one wins). Amend in place
+with a dated Revision History line; retire with `status: retired` and a
+pointer to what replaced it. `tests/test_docs_reference_rot.py` (lint
+bucket) fails on any `JDR-NNN` cited under `docs/` that has no file here.
+JDRs are not RDRs: `nx rdr` lifecycle verbs, the README index, and the
+standalone `nx index rdr` (non-recursive) do not see them. `nx index repo`
+does walk `docs/rdr/` recursively and registers them under the `rdr`
+corpus, exactly as it does `post-mortem/`; that is fine, they are
+decision records, but nothing in the lifecycle acts on them.
+Seeded 2026-09-04 (nexus-vuiid) with JDR-001, the T1 three-scopes contract
+shared by RDR-105, RDR-149 and RDR-184.
+

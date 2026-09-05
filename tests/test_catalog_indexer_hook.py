@@ -546,16 +546,29 @@ class TestCatalogHookBatchedServiceMode:
         def register(self, *args, **kw):
             from nexus.catalog.tumbler import Tumbler
             # Positional owner/title (per-file fallback path) or all-kw.
+            with_created = kw.pop("with_created", False)
             self.register_calls.append(kw)
-            return Tumbler.parse("1.1.99")
+            if kw.get("file_path") in getattr(self, "reconcile_paths", ()):
+                pair = (Tumbler.parse("1.10.41"), False)
+            else:
+                pair = (Tumbler.parse("1.1.99"), True)
+            return pair if with_created else pair[0]
 
-        def register_many(self, owner, docs):
+        def register_many(self, owner, docs, *, with_created=False):
             from nexus.catalog.tumbler import Tumbler
             out = []
             for d in docs:
                 self.register_calls.append(d)
-                out.append(Tumbler.parse("1.1.99"))
-            return out
+                # ``reconcile_paths``: file_paths the fake server "already
+                # holds" under another owner (nexus-53cae) -- reconciled, not
+                # created, and handed back under that owner's tumbler.
+                if d.get("file_path") in getattr(self, "reconcile_paths", ()):
+                    out.append((Tumbler.parse("1.10.41"), False))
+                else:
+                    out.append((Tumbler.parse("1.1.99"), True))
+            if with_created:
+                return out
+            return [t for t, _ in out]
 
         def update(self, tumbler, **fields):
             self.update_calls.append({"tumbler": str(tumbler), **fields})
@@ -1320,3 +1333,66 @@ def test_indexed_relpaths_skips_outside_repo_without_aborting(tmp_path: Path) ->
         [(repo / "in.py", None, None), (outside, None, None)], repo,
     )
     assert result == {"in.py"}
+
+
+class TestCatalogHookReconciledIsNotNew:
+    """nexus-53cae (2026-09-04): 198 docs/rdr files were absent from owner
+    1.1's snapshot, register_many reconciled each onto a live curator-owner
+    row by source_uri, and the hook counted the returned tumblers as new on
+    every run ("Catalog: 199 new", 113 runs). The count now follows the
+    server's ``created`` flag."""
+
+    def test_a_reconciled_row_is_counted_and_named_not_called_new(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        import structlog.testing
+
+        t = TestCatalogHookBatchedServiceMode()
+        a, b = tmp_path / "a.py", tmp_path / "b.py"
+        a.write_text("a = 1\n")
+        b.write_text("b = 2\n")
+        writer = t._StubWriter()
+        writer.reconcile_paths = {"b.py"}
+        with structlog.testing.capture_logs() as logs:
+            mapping, writer, _ = t._run_hook(
+                tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer, files=[a, b]
+            )
+        err = capsys.readouterr().err
+        assert "Catalog: 1 new, 0 updated, 1 reconciled onto rows outside this owner" in err, err
+        assert "done (1 new," in err
+        assert mapping[b] == "1.10.41", "the reconciled path still maps to its live row"
+        assert mapping[a] == "1.1.99"
+        events = [e for e in logs if e["event"] == "catalog_register_reconciled_onto_existing_row"]
+        assert len(events) == 1 and events[0]["tumbler"] == "1.10.41" and events[0]["rel_path"] == "b.py"
+
+    def test_all_created_keeps_the_plain_line(self, tmp_path, monkeypatch, capsys) -> None:
+        t = TestCatalogHookBatchedServiceMode()
+        a = tmp_path / "a.py"
+        a.write_text("a = 1\n")
+        t._run_hook(tmp_path, monkeypatch, docs=[], head_hash="h1", files=[a])
+        err = capsys.readouterr().err
+        assert "Catalog: 1 new, 0 updated\n" in err, err
+
+    def test_the_per_file_fallback_also_honours_created(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """Review [24413] Major: the hook's OWN fallback (register_many raised
+        past the client's internal fallback) called register() without the
+        flag and counted every doc as new."""
+        t = TestCatalogHookBatchedServiceMode()
+        a, b = tmp_path / "a.py", tmp_path / "b.py"
+        a.write_text("a = 1\n")
+        b.write_text("b = 2\n")
+        writer = t._StubWriter()
+        writer.reconcile_paths = {"b.py"}
+
+        def boom(*a, **k):
+            raise RuntimeError("batch endpoint down")
+
+        writer.register_many = boom
+        mapping, writer, _ = t._run_hook(
+            tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer, files=[a, b]
+        )
+        err = capsys.readouterr().err
+        assert "Catalog: 1 new, 0 updated, 1 reconciled onto rows outside this owner" in err, err
+        assert mapping[b] == "1.10.41" and mapping[a] == "1.1.99"

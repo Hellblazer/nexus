@@ -3,12 +3,6 @@ package dev.nexus.service;
 import dev.nexus.service.db.ScratchRepository;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -61,31 +55,15 @@ class ScratchSchemaLiquibaseTest {
         pg = PgContainerHelper.start();
 
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + SVC_ROLE + "') THEN " +
-                "    CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS + "'; " +
-                "  END IF; " +
-                "END $$");
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
-                "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; " +
-                "  END IF; " +
-                "END $$");
+            PgContainerHelper.applyProductSchema(su);
         }
 
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(), db)
-                .update(new Contexts());
-        }
-
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
+            // t1 is a separate schema bootstrapServiceRole never touches (it covers
+            // nexus/staging only) -- kept as explicit grants (nexus-cbo4a batch 1b).
+            // search_path is re-set here to ADD t1 alongside what the helper already
+            // set (nexus, public).
             su.createStatement().execute("GRANT USAGE ON SCHEMA t1 TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON t1.scratch TO " + SVC_ROLE);
@@ -206,10 +184,7 @@ class ScratchSchemaLiquibaseTest {
         // Tokenisation probe: insert via superuser, verify FTS behavior
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
-            try (var ps = su.prepareStatement("SELECT set_config('nexus.t1_tenant', ?, true)")) {
-                ps.setString(1, "probe-tenant-scratch");
-                ps.execute();
-            }
+            PgContainerHelper.setTenant(su, TenantScope.T1_TENANT_GUC, "probe-tenant-scratch", true);
             su.createStatement().execute(
                 "INSERT INTO t1.scratch " +
                 "(id, tenant_id, session_id, content, tags, flagged, access_count, ts) " +
@@ -335,10 +310,7 @@ class ScratchSchemaLiquibaseTest {
 
     private void insertRow(Connection su, String tenant, String sessionId,
                            String id, String content, String tags) throws Exception {
-        try (var ps = su.prepareStatement("SELECT set_config('nexus.t1_tenant', ?, true)")) {
-            ps.setString(1, tenant);
-            ps.execute();
-        }
+        PgContainerHelper.setTenant(su, TenantScope.T1_TENANT_GUC, tenant, true);
         try (var ps = su.prepareStatement(
                 "INSERT INTO t1.scratch (id, tenant_id, session_id, content, tags, flagged, access_count, ts) " +
                 "VALUES (?, ?, ?, ?, ?, false, 0, now()) ON CONFLICT (id) DO NOTHING")) {

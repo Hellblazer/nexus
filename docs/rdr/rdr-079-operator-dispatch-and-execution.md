@@ -1,5 +1,6 @@
 ---
 title: "RDR-079: Operator Dispatch + Plan Execution End-to-End"
+id: RDR-079
 status: abandoned
 type: feature
 priority: P1

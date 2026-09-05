@@ -1,23 +1,24 @@
 package dev.nexus.service;
 
 import org.testcontainers.containers.PostgreSQLContainer;
-import liquibase.Contexts;
 import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
+import dev.nexus.service.db.ChashHex;
+import org.jooq.Condition;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
+
 import java.sql.Connection;
 import java.sql.ResultSet;
-import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -141,7 +142,7 @@ class VectorsChashIndexLiquibaseTest {
                     }
                 }
             }
-            su.createStatement().execute("ANALYZE nexus.chunks");
+            PgContainerHelper.analyzeTable(su, CHUNKS);
         }
     }
 
@@ -163,11 +164,7 @@ class VectorsChashIndexLiquibaseTest {
 
     private void runLiquibaseUpdate() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(), db)
-                .update(new Contexts());
+            PgContainerHelper.applyProductSchema(su);
         }
     }
 
@@ -234,10 +231,11 @@ class VectorsChashIndexLiquibaseTest {
             su.createStatement().execute("SET enable_seqscan = off");
             String indexName = "idx_chunks_tenant_chash";
             for (int dim : DIMS) {
-                String plan = explain(su,
-                    "SELECT collection FROM nexus.chunks " +
-                    "WHERE tenant_id = '" + TENANT + "' " +
-                    "  AND chash = decode('" + sharedChashForDim(dim) + "', 'hex')");
+                Condition cond = CHUNKS.field("tenant_id", String.class).eq(TENANT)
+                    .and(ChashHex.hex(CHUNKS, "chash").eq(sharedChashForDim(dim)));
+                String plan = explain(su, ctx -> ctx.select(CHUNKS.field("collection"))
+                    .from(CHUNKS)
+                    .where(cond));
                 assertThat(plan)
                     .as("chash-only probe (dim %d row) on nexus.chunks must use %s", dim, indexName)
                     .contains(indexName);
@@ -289,14 +287,14 @@ class VectorsChashIndexLiquibaseTest {
         }
     }
 
-    private static String explain(Connection c, String sql) throws Exception {
-        List<String> lines = new ArrayList<>();
-        try (Statement st = c.createStatement();
-             ResultSet rs = st.executeQuery("EXPLAIN " + sql)) {
-            while (rs.next()) {
-                lines.add(rs.getString(1));
-            }
-        }
-        return String.join("\n", lines);
+    /** EXPLAIN a typed jOOQ query (nexus-cbo4a batch 3): {@code queryBuilder} builds
+     *  the {@code Select} against a {@link DSLContext} bound to {@code c}, then
+     *  {@code ctx.explain(...)} replaces the raw {@code "EXPLAIN " + sql} JDBC text
+     *  this used to build by hand -- a single-table, no-join query over the
+     *  generated {@code Tables.CHUNKS} has a full typed DSL form. */
+    private static String explain(Connection c,
+            java.util.function.Function<DSLContext, ? extends org.jooq.Query> queryBuilder) {
+        DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+        return ctx.explain(queryBuilder.apply(ctx)).plan();
     }
 }

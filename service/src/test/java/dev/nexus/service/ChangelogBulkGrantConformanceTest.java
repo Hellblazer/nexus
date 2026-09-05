@@ -68,19 +68,39 @@ class ChangelogBulkGrantConformanceTest {
      * (filename, changeset id) pairs allowed to keep a bulk
      * GRANT/REVOKE-ON-ALL statement. Each entry must be independently
      * verified — see the per-entry rationale below — not merely present.
+     *
+     * <p><b>db.changelog-test-role.xml</b> (nexus-cbo4a batch 1a review follow-up,
+     * T2 critique-cbo4a-batch1a-2026-09-04 [24371]): carries three bulk grants
+     * — {@code SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus},
+     * {@code USAGE, SELECT ON ALL SEQUENCES IN SCHEMA nexus}, and {@code SELECT,
+     * INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA staging} — to the
+     * per-test throwaway {@code ${svcRole}}. Granting a test role broad DML
+     * across every table it will touch is the entire point of this file
+     * (PgContainerHelper#bootstrapServiceRole's javadoc); the file is NOT a
+     * candidate for grants-nexus-svc.xml's per-relation owner-restricted
+     * iteration pattern, since that pattern exists specifically to survive a
+     * FOREIGN-owned relation (e.g. a superuser-owned diagnostic view) —
+     * something the test schemas (created wholesale, moments earlier in the
+     * SAME @BeforeAll, by the same nexus_admin migration role that runs
+     * db.changelog-master.xml) never have. Every relation under nexus/staging
+     * at test-bootstrap time is owned by nexus_admin, so the GH #1402 /
+     * nexus-46yy3 hazard this allowlist otherwise guards against cannot occur
+     * here — verified, not merely asserted by the file's presence in this set.
      */
-    private static final Set<String> ALLOWLISTED_FILES = Set.of("grants-nexus-diag.xml");
+    private static final Set<String> ALLOWLISTED_FILES =
+        Set.of("grants-nexus-diag.xml", "db.changelog-test-role.xml");
 
     @Test
     void noUnguardedBulkGrantOutsideAllowlist() throws IOException, URISyntaxException {
-        Path changelogDir = changelogResourceDir();
         List<String> violations = new ArrayList<>();
 
-        try (var walk = Files.walk(changelogDir)) {
-            for (Path file : walk.filter(p -> p.toString().endsWith(".xml")).toList()) {
-                String filename = file.getFileName().toString();
-                violations.addAll(
-                    scanForUnguardedBulkGrants(filename, Files.readAllLines(file)));
+        for (Path root : changelogScanRoots()) {
+            try (var walk = Files.walk(root)) {
+                for (Path file : walk.filter(p -> p.toString().endsWith(".xml")).toList()) {
+                    String filename = file.getFileName().toString();
+                    violations.addAll(
+                        scanForUnguardedBulkGrants(filename, Files.readAllLines(file)));
+                }
             }
         }
 
@@ -100,22 +120,22 @@ class ChangelogBulkGrantConformanceTest {
      */
     @Test
     void noSqlFileIncludesPresent_untilScannerReadsThem() throws IOException, URISyntaxException {
-        Path changelogDir = changelogResourceDir();
         List<String> offenders = new ArrayList<>();
 
-        try (var walk = Files.walk(changelogDir)) {
-            for (Path file : walk.filter(p -> p.toString().endsWith(".xml")).toList()) {
-                offenders.addAll(
-                    scanForSqlFileIncludes(file.getFileName().toString(),
-                        Files.readAllLines(file)));
+        for (Path root : changelogScanRoots()) {
+            try (var walk = Files.walk(root)) {
+                for (Path file : walk.filter(p -> p.toString().endsWith(".xml")).toList()) {
+                    offenders.addAll(
+                        scanForSqlFileIncludes(file.getFileName().toString(),
+                            Files.readAllLines(file)));
+                }
             }
         }
 
         assertThat(offenders)
-            .as("a <sqlFile> include appeared under db/changelog/ — extend "
-                + "ChangelogBulkGrantConformanceTest to read sqlFile targets "
-                + "before using them; it is currently blind to SQL hidden "
-                + "behind sqlFile includes")
+            .as("a <sqlFile> include appeared under db/changelog/ or db/changelog-test/ — "
+                + "extend ChangelogBulkGrantConformanceTest to read sqlFile targets before "
+                + "using them; it is currently blind to SQL hidden behind sqlFile includes")
             .isEmpty();
     }
 
@@ -281,6 +301,36 @@ class ChangelogBulkGrantConformanceTest {
         URL url = ChangelogBulkGrantConformanceTest.class.getResource("/db/changelog");
         assertThat(url).as("db/changelog must be on the test classpath").isNotNull();
         return Paths.get(url.toURI());
+    }
+
+    /**
+     * {@code db/changelog-test/} — the test-role bootstrap changelog's own
+     * resource root (nexus-cbo4a batch 1a), deliberately a SIBLING of {@code
+     * db/changelog/} rather than nested inside it (see
+     * db.changelog-test-role.xml's own header comment for why: nesting it
+     * under {@code db/changelog/} risked Maven's test-classpath ordering
+     * shadowing the real changelog directory for {@link #changelogResourceDir}'s
+     * single {@code getResource("/db/changelog")} call). Being a sibling is
+     * exactly why it needs its OWN root here — {@link #changelogResourceDir}'s
+     * walk never reaches it.
+     */
+    private static Path changelogTestResourceDir() throws URISyntaxException {
+        URL url = ChangelogBulkGrantConformanceTest.class.getResource("/db/changelog-test");
+        assertThat(url).as("db/changelog-test must be on the test classpath").isNotNull();
+        return Paths.get(url.toURI());
+    }
+
+    /**
+     * Both changelog resource roots this class's bulk-grant and sqlFile scans
+     * walk (nexus-cbo4a batch 1a review follow-up, T2 critique-cbo4a-batch1a-
+     * 2026-09-04 [24371]): {@code db/changelog/} (the product master changelog
+     * and its includes) and {@code db/changelog-test/} (the test-role bootstrap
+     * changelog). {@link #allowlistedOccurrence_isStillGatedByViewAbsence}
+     * deliberately keeps using {@link #changelogResourceDir} directly — it
+     * targets one named file that lives under {@code db/changelog/} only.
+     */
+    private static List<Path> changelogScanRoots() throws URISyntaxException {
+        return List.of(changelogResourceDir(), changelogTestResourceDir());
     }
 
     /**

@@ -6,11 +6,6 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -21,6 +16,7 @@ import java.sql.Connection;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -72,29 +68,10 @@ class DenseGateScanBudgetIntegrationTest {
     void startAll() throws Exception {
         pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            for (String role : new String[] {SVC_ROLE, "nexus_svc"}) {
-                su.createStatement().execute(
-                    "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '"
-                    + role + "') THEN CREATE ROLE " + role + " LOGIN PASSWORD '"
-                    + (role.equals(SVC_ROLE) ? SVC_PASS : "nexus_svc_pass")
-                    + "'; END IF; END $$");
-            }
+            PgContainerHelper.applyProductSchema(su);
         }
         try (Connection su = pg.createConnection("")) {
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(),
-                DatabaseFactory.getInstance().findCorrectDatabaseImplementation(
-                    new JdbcConnection(su)))
-                .update(new Contexts());
-        }
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
         }
         var config = new HikariConfig();
         config.setJdbcUrl(pg.getJdbcUrl());
@@ -178,7 +155,7 @@ class DenseGateScanBudgetIntegrationTest {
             su.createStatement().execute(
                 "CREATE INDEX idx_chunks_embedding_384 ON " + DimTables.CHUNKS_TABLE_NAME + " "
                 + "USING hnsw (" + DimTables.embeddingColumn(384) + " vector_cosine_ops)");
-            su.createStatement().execute("ANALYZE " + DimTables.CHUNKS_TABLE_NAME);
+            PgContainerHelper.analyzeTable(su, CHUNKS);
         }
     }
 

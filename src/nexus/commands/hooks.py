@@ -169,16 +169,30 @@ _REVIEW_STANZA = """\
 if [ "$NX_COMMIT_REVIEW" != "0" ]; then
   _NX_REVIEW_LOG="$HOME/.config/nexus/index.log"
   # Serialise a burst (release cut = commit + back-merge + fix-forward in
-  # quick succession) rather than firing N concurrent children. Unlike the
-  # indexer's guard below, a hit here is LOGGED: a skipped review that
-  # says nothing is indistinguishable from a review that found nothing.
+  # quick succession) rather than firing N concurrent children. A hit is
+  # QUEUED, not dropped: the sha goes to <git-common-dir>/nx-review-queue
+  # (one queue per repository, shared by every linked worktree, read by
+  # nexus.commit_review.review_queue_path) and the running reviewer,
+  # dispatched with --drain, reviews it before exiting. Until 2026-09-04 a
+  # hit only logged SKIPPED and 6 of 9 commits in one push went unreviewed.
+  # A hit is also LOGGED: a skipped review that says nothing is
+  # indistinguishable from a review that found nothing.
   if pgrep -f "nx review commit .* --repo $REPO_TOP" > /dev/null 2>&1; then
-    echo "=== nx review post-commit SKIPPED (review already running) $REPO_TOP $(date '+%Y-%m-%dT%H:%M:%S%z') ===" \\
-      >> "$_NX_REVIEW_LOG"
+    _NX_REVIEW_COMMON="$(cd "$(git rev-parse --git-common-dir)" 2>/dev/null && pwd -P)"
+    if [ -n "$_NX_REVIEW_COMMON" ] && git rev-parse HEAD >> "$_NX_REVIEW_COMMON/nx-review-queue" 2>/dev/null; then
+      echo "=== nx review post-commit QUEUED (review already running) $REPO_TOP $(date '+%Y-%m-%dT%H:%M:%S%z') ===" \\
+        >> "$_NX_REVIEW_LOG"
+    else
+      # An empty common dir would have written to /nx-review-queue and the
+      # log would still have said QUEUED (review [24406] Major). Say what
+      # happened instead: this commit has no record and the census names it.
+      echo "=== nx review post-commit NOT QUEUED (queue unwritable; nx census reviews will list this commit) $REPO_TOP $(date '+%Y-%m-%dT%H:%M:%S%z') ===" \\
+        >> "$_NX_REVIEW_LOG"
+    fi
   else
     echo "=== nx review post-commit $REPO_TOP $(date '+%Y-%m-%dT%H:%M:%S%z') ===" \\
       >> "$_NX_REVIEW_LOG"
-    nx review commit "$(git rev-parse HEAD)" --repo "$REPO_TOP" \\
+    nx review commit "$(git rev-parse HEAD)" --repo "$REPO_TOP" --drain \\
       >> "$_NX_REVIEW_LOG" 2>&1 &
     disown
   fi

@@ -4,12 +4,6 @@ import dev.nexus.service.db.PlanRepository;
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.*;
 
 import java.sql.Connection;
@@ -65,39 +59,10 @@ class PlanRepositoryTest {
         pg = PgContainerHelper.start();
 
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + SVC_ROLE + "') THEN " +
-                "    CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS + "'; " +
-                "  END IF; " +
-                "END $$");
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
-                "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; " +
-                "  END IF; " +
-                "END $$");
+            PgContainerHelper.applyProductSchema(su);
         }
-
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            Liquibase liquibase = new Liquibase(
-                "db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(), db);
-            liquibase.update(new Contexts());
-        }
-
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.plans TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT USAGE ON SEQUENCE nexus.plans_id_seq TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
         }
 
         svcDs = buildSvcDataSource();
@@ -729,8 +694,7 @@ class PlanRepositoryTest {
             try (var conn = svcDs.getConnection()) {
                 conn.setAutoCommit(true);
                 // Set GUC to TENANT_A but try to insert with TENANT_B — WITH CHECK violation
-                conn.createStatement().execute(
-                    "SET LOCAL nexus.tenant = '" + TENANT_A + "'");
+                PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, true);
                 conn.createStatement().execute(
                     "INSERT INTO nexus.plans (tenant_id, project, query, plan_json) " +
                     "VALUES ('" + TENANT_B + "', 'bad-proj', 'RLS violation test', '{}')");

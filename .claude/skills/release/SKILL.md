@@ -107,6 +107,16 @@ tests/e2e/fresh-install-mvv.sh       # VIRGIN-journey gate (nexus-nolqs) — see
 
 All must pass. Integration is excluded from CI and is the last line of defense before tag-push.
 
+Count the advisories too. A gate that passed on a fallback prints one
+`GATE PASSED-BY-DEFAULT: <gate> <reason>` line and still exits 0
+(nexus-1c7oq; producers: the choreography rows marked `advisory`, which
+include the four paired-acceptance rows where a below-floor cloud passes
+on the paired tag rather than a live engine at floor (Sam, 2026-09-04),
+the evidence gate's borrowed-parent path, `local-service-gate.sh` under
+`NEXUS_GATE_NO_VOYAGE=1`). `grep -c 'GATE PASSED-BY-DEFAULT:'` over the
+battery output; a non-zero count is not a failure, it is the list of greens
+that rest on a default, and each one is named in the ship record.
+
 **`fresh-install-mvv.sh` — the virgin-journey gate (nexus-nolqs, 2026-07-21).**
 Every other E2E gate starts from a POPULATED install and tests the upgrade
 axis; the unit suite pins the SQLite opt-out backend — which is how the

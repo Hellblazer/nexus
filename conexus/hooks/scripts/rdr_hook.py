@@ -204,11 +204,18 @@ def main() -> None:
     if indexed:
         print(f"RDR: {status_info}, indexed in {rdr_collection}")
     else:
+        # nexus-3o4lt: the remedy is the REPO indexer. This line used to
+        # say ``nx index rdr <root>``, which registered every RDR under
+        # the curator owner with an absolute path; on the work box that
+        # produced 198 such rows that no owner-scoped reader could see.
+        # ``nx index repo`` walks docs/rdr under the repo owner. The
+        # single-file ``nx index rdr <file>`` now lands there too, but the
+        # whole-tree remedy is the repo index.
         print(f"RDR: {status_info} in {rdr_dir.relative_to(root)} but NOT indexed.")
         if rdr_collection:
-            print(f"     Run: nx index rdr {root}")
+            print(f"     Run: nx index repo {root}")
         else:
-            print(f"     Run: nx catalog setup && nx index rdr {root}")
+            print(f"     Run: nx catalog setup && nx index repo {root}")
 
     sys.exit(0)
 

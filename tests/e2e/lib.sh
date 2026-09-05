@@ -191,6 +191,7 @@ claude_wait() {
 
 # ─── Assertions ──────────────────────────────────────────────────────────────
 
+source "$(dirname "${BASH_SOURCE[0]}")/lib/gate_advisory.sh"   # passed_by_default (nexus-1c7oq)
 pass() { echo "    ✓ $1"; PASS=$(( PASS + 1 )); }
 fail() { echo "    ✗ $1"; FAIL=$(( FAIL + 1 )); }
 skip() { echo "    ⊘ SKIP: $1"; SKIP=$(( SKIP + 1 )); }
@@ -238,6 +239,9 @@ summary() {
     local skip_suffix=""
     if [[ $SKIP -gt 0 ]]; then
         skip_suffix=", ${SKIP} skipped"
+    fi
+    if [[ ${GATE_PASSED_BY_DEFAULT:-0} -gt 0 ]]; then
+        skip_suffix="${skip_suffix}, ${GATE_PASSED_BY_DEFAULT} passed-by-default"
     fi
     echo " Results: ${PASS} passed, ${FAIL} failed${skip_suffix}"
     echo "══════════════════════════════════"

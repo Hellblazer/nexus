@@ -291,6 +291,7 @@ REAL_HOME="$HOME"
 # reimplementation of it.
 # shellcheck source=tests/e2e/lib/fence_home.sh
 source "$REPO_ROOT/tests/e2e/lib/fence_home.sh"
+source "$REPO_ROOT/tests/e2e/lib/gate_advisory.sh"   # passed_by_default (nexus-1c7oq)
 GATE_HOME="$SCRATCH/home"
 fence_home "$REAL_HOME" "$GATE_HOME" ".config/nexus"
 export HOME="$GATE_HOME"
@@ -341,6 +342,7 @@ fi
 if [ -n "${NEXUS_GATE_NO_VOYAGE:-}" ]; then
   unset VOYAGE_API_KEY NX_VOYAGE_API_KEY
   echo "[gate] NEXUS_GATE_NO_VOYAGE=1 — voyage/CCE subset will SKIP (key masked)"
+  passed_by_default local-service-gate "NEXUS_GATE_NO_VOYAGE=1: the voyage/CCE subset is skipped, a green here does not cover it"
 fi
 
 # nexus-iws18: snapshot release.properties' ACTUAL BYTES now, and restore those
@@ -838,7 +840,7 @@ if [ "$STATUS" -eq 0 ] && { [ "$#" -eq 0 ] || [ "${NX_GATE_FORCE_GUARD:-0}" = "1
 fi
 
 if [ "$STATUS" -eq 0 ]; then
-  echo "[gate] LOCAL-SERVICE GATE PASSED (passed=$PASSED_COUNT skipped=$SKIPPED_COUNT)"
+  echo "[gate] LOCAL-SERVICE GATE PASSED (passed=$PASSED_COUNT skipped=$SKIPPED_COUNT passed-by-default=${GATE_PASSED_BY_DEFAULT:-0})"
 else
   echo "[gate] LOCAL-SERVICE GATE FAILED (pytest exit ${STATUS}; passed=$PASSED_COUNT skipped=$SKIPPED_COUNT)"
 fi

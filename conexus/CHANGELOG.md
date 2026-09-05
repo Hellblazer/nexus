@@ -4,6 +4,16 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.31.0] - 2026-09-05
+
+Advancing `source.ref` to `v7.31.0` is what makes the change below live; it
+was merged on `develop` after the v7.30.0 tag and inert in every session
+until now.
+
+- `hooks/scripts/rdr_hook.py` (nexus-3o4lt): the SessionStart RDR summary
+  recommends `nx index repo <root>` rather than `nx index rdr <root>`, so
+  RDRs register under the repository owner instead of a curator row.
+
 ## [7.30.0] - 2026-09-04
 
 Plugin version aligned with conexus 7.30.0. No plugin-side changes.

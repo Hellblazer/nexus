@@ -2,12 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.*;
 import org.postgresql.util.PSQLException;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -102,58 +98,10 @@ class ManifestFunctionsTest {
 
         // Phase 1: create svc role (autoCommit=true; CREATE ROLE cannot run in a transaction)
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
-                "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' NOSUPERUSER NOBYPASSRLS; " +
-                "  END IF; " +
-                "END $$");
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + SVC_ROLE + "') THEN " +
-                "    CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS + "' NOSUPERUSER NOBYPASSRLS; " +
-                "  END IF; " +
-                "END $$");
+            PgContainerHelper.applyProductSchema(su);
         }
-
-        // Phase 2: apply full master changelog
         try (Connection su = pg.createConnection("")) {
-            var lb = new Liquibase(
-                "db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(),
-                DatabaseFactory.getInstance().findCorrectDatabaseImplementation(
-                    new JdbcConnection(su)));
-            lb.update(new Contexts());
-        }
-
-        // Phase 3: grant svc role access to tables
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            for (String tbl : List.of(
-                    "catalog_collections",
-                    "catalog_documents",
-                    "catalog_links",
-                    "catalog_document_chunks",
-                    "document_aspects",
-                    "document_highlights",
-                    "aspect_extraction_queue")) {
-                su.createStatement().execute(
-                    "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus." + tbl + " TO " + SVC_ROLE);
-            }
-            // RDR-191 Phase 4: chunks_384/768/1024 unified into ONE nexus.chunks --
-            // a single GRANT now covers what three did.
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT USAGE ON SEQUENCE nexus.document_aspects_id_seq TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT USAGE ON SEQUENCE nexus.document_highlights_id_seq TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT USAGE ON SEQUENCE nexus.aspect_extraction_queue_id_seq TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
         }
 
         // HikariCP svc role pool (NOSUPERUSER NOBYPASSRLS — subject to RLS)
@@ -209,8 +157,7 @@ class ManifestFunctionsTest {
 
         // Call document_text via svc role with GUC set — RED trigger: function absent
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT position, chunk_text FROM " + FN_DOC_TEXT + "('" + docId + "') " +
                 "ORDER BY position");
@@ -277,8 +224,7 @@ class ManifestFunctionsTest {
 
         // document_text must return EMPTY SET for the tombstoned doc
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT count(*) FROM " + FN_DOC_TEXT + "('" + docId + "')");
             rs.next();
@@ -330,8 +276,7 @@ class ManifestFunctionsTest {
 
         // document_text must return exactly 1 row (position 0; position 1 gap is skipped)
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT position, chunk_text FROM " + FN_DOC_TEXT + "('" + docId + "') " +
                 "ORDER BY position");
@@ -439,8 +384,7 @@ class ManifestFunctionsTest {
 
         // Call document_text for tenant B's doc via GUC=A — must return empty set (RLS filters)
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT count(*) FROM " + FN_DOC_TEXT + "('" + docB + "')");
             rs.next();
@@ -475,7 +419,7 @@ class ManifestFunctionsTest {
 
         try (Connection su = pg.createConnection("")) {
             // Confirm GUC is NOT set (reset to default)
-            su.createStatement().execute("RESET nexus.tenant");
+            PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, null, false);
 
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT count(*) FROM " + FN_DOC_TEXT + "('" + anyDocId + "')");

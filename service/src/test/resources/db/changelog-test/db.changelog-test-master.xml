@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    CODEGEN-ONLY master for the generate-jooq-test-sources execution in
+    service/pom.xml: the product master first (so nexus_test objects can reference
+    product tables), then the test-only objects. Never applied at test runtime;
+    PgContainerHelper#applyProductSchema applies the two halves itself, in the same
+    order. The plugin's search path is src/main/resources,src/test/resources, which
+    is how both db/changelog/... and db/changelog-test/... resolve here.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+    <include file="db/changelog/db.changelog-master.xml"/>
+    <include file="db/changelog-test/db.changelog-test-objects.xml"/>
+</databaseChangeLog>

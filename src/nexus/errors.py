@@ -190,6 +190,19 @@ class EmbeddingDimensionMismatch(NexusError):
         )
 
 
+class EphemeralPathRefusedError(NexusError):
+    """A named file lives only in an agent worktree or a temp dir and has no
+    durable catalog identity (nexus-3o4lt, critique [24433]).
+
+    Raised by the doc_indexer family's pre-flight registration for a file
+    under ``<primary>/.claude/worktrees/<agent>/`` that the primary checkout
+    does not hold. Returning ``""`` there let the file be chunked anyway and
+    the post-indexing hook then minted a curator-owner row for the worktree
+    path: a permanent orphan reported as plain success. The single-file
+    commands fail loud on this exactly as they do on unchunkable content.
+    """
+
+
 class SourceUriNotFoundError(NexusError):
     """``--source-uri`` was given but resolves to no LIVE catalog document.
 

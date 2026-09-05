@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 1a — test-tenant service-role bootstrap, in Liquibase XML
+    instead of hand-rolled Java SQL strings (Sam's rule, nexus-zrcj7: no SQL
+    strings in Java, tests included).
+
+    WHY THIS FILE EXISTS: 84 test classes under service/src/test each copied
+    the SAME five-statement bootstrap block by hand — a DO-block CREATE ROLE
+    for a per-class throwaway service role (plus a redundant CREATE ROLE for
+    nexus_svc, harmless: role-001-nexus-svc.xml already creates nexus_svc as
+    part of the master changelog itself, so this second creation is always a
+    no-op IF-NOT-EXISTS), GRANT USAGE/DML/sequence access on the nexus and
+    staging schemas, and ALTER ROLE ... SET search_path. This changelog
+    consolidates that block into ONE reusable Liquibase artifact, parameterized
+    by ${svcRole}/${svcPass}, applied via PgContainerHelper#bootstrapServiceRole.
+
+    WHY runAlways="true": mirrors grants-nexus-svc.xml's own choice (see that
+    file's header) — this changeset must re-execute every time a test class
+    calls bootstrapServiceRole, since each class passes a DIFFERENT ${svcRole}
+    value. A once-only changeset (tracked by DATABASECHANGELOG id) would only
+    ever apply for the FIRST role name it ever saw.
+
+    ORDERING CONTRACT: PgContainerHelper#applyProductSchema (the master
+    changelog) MUST run before this changeset — the GRANT ... ON ALL TABLES /
+    ALL SEQUENCES statements below require the nexus/staging schemas and their
+    tables to already exist (PostgreSQL errors "schema does not exist"
+    otherwise, and a bulk ON ALL TABLES with a schema present but zero tables
+    silently grants nothing). bootstrapServiceRole's own javadoc documents this
+    call-order requirement.
+
+    WHY NOT ON ALL TABLES ALONE (ChangelogBulkGrantConformanceTest, nexus-46yy3
+    class): the same GH #1402 hazard grants-nexus-svc.xml guards against —
+    bulk GRANT/REVOKE ON ALL {TABLES,SEQUENCES,FUNCTIONS} hard-errors on any
+    relation the acting role does not own. Every relation nexus_admin (the
+    migration role) creates under nexus/staging is owned by nexus_admin, so
+    this bulk form is safe here for the SAME reason it is safe in
+    grants-nexus-svc.xml's own comment — no foreign-owned relation exists in
+    the schemas this changeset targets at test-bootstrap time. This file is
+    DELIBERATELY not placed under db/changelog/ (the directory
+    ChangelogBulkGrantConformanceTest's noUnguardedBulkGrantOutsideAllowlist
+    scans and gates on an explicit per-file allowlist) — it lives under the
+    sibling db/changelog-test/ so it is invisible to that scan and needs no
+    allowlist entry of its own; the ordering/ownership contract above is this
+    file's own guarantee of safety instead.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-role-1-bootstrap" author="nexus-cbo4a" runAlways="true">
+        <comment>
+            Test-only per-class service-role bootstrap: create ${svcRole} (and,
+            redundantly/idempotently, nexus_svc) if absent, then grant ${svcRole}
+            the same nexus+staging DML/sequence access PgContainerHelper#
+            grantServiceSchemaAccess already gave production-shaped test roles.
+            Parameters set via Liquibase#setChangeLogParameter before update().
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${svcRole}') THEN
+        CREATE ROLE ${svcRole} LOGIN PASSWORD '${svcPass}' NOSUPERUSER NOBYPASSRLS;
+    END IF;
+END
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN
+        CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' NOSUPERUSER NOBYPASSRLS;
+    END IF;
+END
+$$;
+
+GRANT USAGE ON SCHEMA nexus TO ${svcRole};
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO ${svcRole};
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA nexus TO ${svcRole};
+
+-- nexus-cbo4a batch 1b: topics_id_seq additionally needs UPDATE (not just
+-- USAGE/SELECT) -- importTopic-style fidelity paths call
+-- setval(pg_get_serial_sequence(...), GREATEST(last_value, ?)) to keep the
+-- sequence ahead of a client-supplied id, mirroring production's own
+-- taxonomy-005-topics-seq-update-grant.xml (GRANT UPDATE ... TO nexus_svc).
+-- Three test classes previously hand-granted this identical statement; no
+-- test in the repo relies on this sequence's UPDATE being ABSENT, so it is
+-- safe to widen here once instead of per-class.
+GRANT UPDATE ON SEQUENCE nexus.topics_id_seq TO ${svcRole};
+
+GRANT USAGE ON SCHEMA staging TO ${svcRole};
+GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA staging TO ${svcRole};
+
+ALTER ROLE ${svcRole} SET search_path TO nexus, public;
+        </sql>
+        <rollback>
+            <!-- Test-only role/grant bootstrap; not automated, same as
+                 grants-nexus-svc.xml's own rollback stance. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -70,6 +70,8 @@ nx index repo ./my-project
 
 **Unchunkable sources (nexus-rqsh1, Hal directive 2026-08-15):** the indexer never registers a catalog document for a file it will not chunk. `repo` discovery silently skips zero-byte and binary-content files (counted in a `skipped_unchunkable` summary line — expected noise in an unbounded walk); the single-file forms (`md`, `pdf`, `rdr`) instead FAIL LOUD with a clean error naming the file (the operator named that exact file, so plain success with nothing registered would mislead), before any catalog write. In `rdr`'s batch walk an unchunkable file fails that file only, counted, never aborting the batch. `repo` staleness also now treats a doc whose catalog `index_state` is `indexing`/`failed` as stale regardless of content-hash match (nexus-cp46b) — a doc stranded by a failed upload drains on the next normal run, no `--force` needed.
 
+**Repo files register under the repo owner (nexus-3o4lt, 2026-09-04):** a Markdown or RDR file that lies inside a git checkout is a repo document whichever command indexes it. `rdr` and `md` (and `nx collection reindex`) register such a file under the repository's own owner, the identity `repo` mints, with a repo-relative path and content type `rdr` when it lies under one of the repo's configured `indexing.rdr_paths` (default `docs/rdr`); `--corpus` no longer selects the owner for a repo file (an info log names the divergence). Before this, those commands resolved a curator owner by corpus name and stored the absolute path, so an RDR indexed before `repo` had walked it was invisible to every owner-scoped reader (canonical RDR resolution, supersedes and related edges) and re-registered as "new" by every later `repo` run: 198 such rows on one install. PDFs keep the corpus identity: a paper filed in a repo is a curated corpus document. Files outside any git repo, and anything under nexus's own config directory (where `nx dt index` stages DEVONthink content), are unchanged. A file that exists only inside an agent worktree (`<primary>/.claude/worktrees/<agent>/`) has no durable identity and the command FAILS LOUD naming it, before any chunk or catalog write, the same rule as unchunkable content; a worktree file the primary also holds registers as the primary's file.
+
 **Common flags (all subcommands):**
 
 | Flag | Description |
@@ -961,8 +963,10 @@ Per content-type report showing what percentage of catalog entries have at least
 ### nx catalog suggest-links
 
 ```
-nx catalog suggest-links [--limit N]
+nx catalog suggest-links [--limit N] [--threshold X]
 ```
+
+`--threshold` is reserved for a future similarity threshold and is unused today.
 
 Find unlinked code-RDR pairs by module name overlap. Read-only — shows potential links without creating them.
 
@@ -997,13 +1001,19 @@ imports; normal index runs are incremental.
 
 ```
 nx catalog generate-links [--citations/--no-citations] [--filepath/--no-filepath]
-                          [--prose/--no-prose] [--pdf/--no-pdf] [--dry-run]
+                          [--prose/--no-prose] [--pdf/--no-pdf]
+                          [--rdr-dependency/--no-rdr-dependency] [--dry-run] [--sample N]
 ```
 
-Auto-generate typed links from metadata cross-matching. Four generators, all
+`--dry-run` prints what each generator would create, `--sample N` proposed
+links per generator to show under it (default 5).
+
+Auto-generate typed links from metadata cross-matching. Five generators, all
 enabled by default: `--citations` (citation links from bibliographic
 metadata), `--filepath` (RDR-to-code links by file path), `--prose`
-(prose/markdown filepath links) and `--pdf` (PDF corpus links).
+(prose/markdown filepath links), `--pdf` (PDF corpus links) and
+`--rdr-dependency` (RDR-to-RDR links from `supersedes` / `superseded_by` /
+`parent_rdr` / `related_rdrs` frontmatter).
 
 `--prose` and `--pdf` were reachable at index time but not from this command
 until 7.16.4 (nexus-glivh); before that a full pass here understated itself by
@@ -1079,12 +1089,12 @@ Idempotent: re-running on the same `SOURCE_DIR` is a no-op once entries are reso
 ### nx catalog prune-stale
 
 ```
-nx catalog prune-stale [--collection NAME] [--owner PREFIX] [--source-dir DIR] [--no-dry-run --confirm]
+nx catalog prune-stale [--collection NAME] [--owner PREFIX] [--source-dir DIR] [--dry-run/--no-dry-run] [--confirm]
 ```
 
 Drop catalog entries whose `file_path` is missing on disk. This is the supported stale-content sweep: `nx t3 prune-stale` was retired in 7.0.0 (nexus-bm8dd), and this verb followed by `nx t3 gc` replaces it. Pairs naturally with `remediate-paths`: run the remediator first to repair what's recoverable, then prune the rest. Default is report-only; both `--no-dry-run` AND `--confirm` are required to delete. **Not reversible in-product** (the pre-delete snapshots died with the local catalog, 7.0.0/nexus-i711w).
 
-Never deleted: entries with empty `file_path` (MCP-stored), basename-only paths (remediable, not stale), paths that exist, relative-path entries whose owner has no `repo_root` (presence cannot be verified; repair the owner first), and, when `--source-dir` is set with `--rdr-prefix-skip` (the default), RDR entries whose `rdr-NNN-` prefix matches a file under the source dir (a plausible rename; prefer remediation over destructive prune). Relative paths are resolved against the owner's `repo_root`, not the cwd (nexus-6ims).
+Never deleted: entries with empty `file_path` (MCP-stored), basename-only paths (remediable, not stale), paths that exist, relative-path entries whose owner has no `repo_root` (presence cannot be verified; repair the owner first), and, when `--source-dir` is set with `--rdr-prefix-skip` (the default; `--no-rdr-prefix-skip` disables it), RDR entries whose `rdr-NNN-` prefix matches a file under the source dir (a plausible rename; prefer remediation over destructive prune). Relative paths are resolved against the owner's `repo_root`, not the cwd (nexus-6ims).
 
 ### nx catalog link-density
 
@@ -1357,11 +1367,11 @@ Note: this verb reclaims storage; it is not the search-visibility fix for a dele
 ### nx catalog orphan-backfill
 
 ```
-nx catalog orphan-backfill dt-link COLLECTION [--min-score 0.75] [--owner PREFIX] [--no-dry-run]
-nx catalog orphan-backfill synthetic COLLECTION [--owner PREFIX] [--no-dry-run]
+nx catalog orphan-backfill dt-link COLLECTION [--min-score 0.75] [--owner PREFIX] [--dry-run/--no-dry-run]
+nx catalog orphan-backfill synthetic COLLECTION [--owner PREFIX] [--dry-run/--no-dry-run]
 nx catalog orphan-backfill dump-csv COLLECTION [--out-dir DIR] [--min-score 0.75]
 nx catalog orphan-backfill apply-csv COLLECTION CSV_PATH [--owner PREFIX]
-nx catalog orphan-backfill link-existing COLLECTION [--by title|content_hash] [--also-synthetic] [--no-dry-run]
+nx catalog orphan-backfill link-existing COLLECTION [--by title|content_hash] [--also-synthetic/--no-also-synthetic] [--dry-run/--no-dry-run]
 ```
 
 Subgroup that backfills catalog Documents for T3 chunks that have no catalog entry. Complementary to `backfill-collections` (which syncs the collections projection) and to the manifest backfill (which writes manifest rows when Documents already exist). All destructive subcommands default to dry-run.
@@ -1382,7 +1392,7 @@ T3 vector-store maintenance commands. As of 6.0 the live T3 store is Postgres 17
 
 ### nx t3 prune-stale — RETIRED in 7.0.0
 
-Exits with an error explaining what to run instead. It swept chunks by their `source_path` metadata; RDR-102 D2 removed that key from the chunk schema, so the sweep matched nothing and reported a clean "0 stale" on every collection regardless of how many indexed files had been deleted from disk (nexus-bm8dd). It also resolved paths through the local catalog, which has not existed since 7.0.0/nexus-i711w.
+Exits with an error explaining what to run instead, whatever flags are passed (`--dry-run` included; it is kept so old invocations parse). It swept chunks by their `source_path` metadata; RDR-102 D2 removed that key from the chunk schema, so the sweep matched nothing and reported a clean "0 stale" on every collection regardless of how many indexed files had been deleted from disk (nexus-bm8dd). It also resolved paths through the local catalog, which has not existed since 7.0.0/nexus-i711w.
 
 Use the catalog-native pipeline:
 
@@ -1447,7 +1457,7 @@ Carve-outs:
 ### nx t3 backfill-manifest
 
 ```
-nx t3 backfill-manifest [-c COLLECTION] [--no-dry-run] [-n N] [--resume] [--only-gapped]
+nx t3 backfill-manifest [-c COLLECTION] [--no-dry-run] [-n N | --limit N] [--resume/--no-resume] [--only-gapped/--no-only-gapped]
 ```
 
 Backfill the `document_chunks` manifest from T3 chunk metadata (RDR-108 D2). Reads each catalog document's T3 chunk metadata (`doc_id`, `chunk_index`, `chunk_text_hash`, span coordinates) and writes one manifest row per chunk, so the catalog can answer "what chunks compose this Document, in what order?" without consulting T3. Omitting `-c` processes every collection registered in the catalog; `-n` caps documents per collection.
@@ -1623,17 +1633,17 @@ taxonomy:
 
 | Subcommand | Description |
 |------------|-------------|
-| `status` | Collections, topic count, coverage, review state. `-c NAME` filters to one collection, `-n N` caps to the top N collections by doc count (default: all), `--summary` shows only the totals line, `--needs-review` shows only collections with pending topics |
+| `status` | Collections, topic count, coverage, review state. `-c NAME` filters to one collection, `-n N` / `--limit N` caps to the top N collections by doc count (default: all), `--summary` shows only the totals line, `--needs-review` shows only collections with pending topics |
 | `discover` | Discover topics via HDBSCAN. `--all` for all collections, `-c NAME` for one, `--force` to re-cluster |
-| `list` | Topic tree with doc counts. `-c NAME` filters by collection, `-d N` sets tree depth (default: 2) |
+| `list` | Topic tree with doc counts. `-c NAME` filters by collection, `-d N` / `--depth N` sets tree depth (default: 2) |
 | `show ID` | Documents assigned to a topic. `-n N` limits results (default: 20) |
 | `review` | Interactive review: accept, rename, merge, delete, skip. `-c NAME` to filter, `-n N` topics per session (default: 15). `--auto` swaps in batched `claude_dispatch` verdicts (default limit 5000); `--yes` skips the destructive-action confirm, `--dry-run` applies nothing, `--batch-size N` sets topics per dispatch (default: 40) |
 | `label` | Batch-relabel topics with Claude haiku. `--all` relabels accepted topics too |
 | `assign DOC LABEL` | Manually assign a doc to a topic by label. `-c NAME` scopes label lookup |
-| `rename OLD NEW` | Rename a topic. `-c NAME` scopes label lookup |
+| `rename OLD NEW` | Rename a topic. `-c NAME` scopes label lookup; `--no-accept` renames without transitioning `review_status` to `accepted` |
 | `merge SOURCE TARGET` | Merge source into target. `-c NAME` scopes label lookup |
 | `split LABEL --k N` | Split into N sub-topics via KMeans. `-c NAME` scopes label lookup |
-| `links` | Inter-topic link counts from catalog graph. `-c NAME` filters by collection |
+| `links` | Inter-topic link counts from catalog graph. `-c NAME` filters by collection; `--refresh` recomputes catalog-derived links first (requires catalog) |
 | `rebuild` | Full re-cluster (alias for `discover --force`). `-c NAME` required |
 | `project SOURCE` | Cross-collection projection: match chunks against other collections' centroids. `--against TARGETS` for explicit targets (default: sibling collections). `--threshold N` (optional; when omitted uses per-corpus defaults: `code__*` 0.70, `knowledge__*` 0.50, `docs__*`/`rdr__*` 0.55 — see [taxonomy-projection-tuning.md](exploration/taxonomy-projection-tuning.md)). `--top-k N` caps centroids considered per chunk (default: 3). `--use-icf` suppresses hub topics via Inverse Collection Frequency weighting (RDR-077). `--persist` to write assignments. `--backfill` to project all collections against each other |
 | `hubs` | List generic-pattern hub topics (RDR-077 Phase 5). `--min-collections N` (default 2), `--max-icf F` filter, `--warn-stale` flags hubs whose latest assignment post-dates the newest `last_discover_at` across contributing source collections, `--explain` shows DF / ICF / matched stopword tokens per row. |
@@ -2551,7 +2561,7 @@ silently truncating.
 ### nx plan list
 
 ```
-nx plan list [--scope S] [--origin builtin|grown|user] [--name SUBSTR] [-n N] [--json] [--include-disabled]
+nx plan list [--scope S] [--origin builtin|grown|user] [--name SUBSTR] [-n N | --limit N] [--json] [--include-disabled]
 ```
 
 Tabulates plans: id, origin, verb, scope, use count, last used, name. Origin is
@@ -3667,14 +3677,16 @@ output — "SAME QUERIES, SAME BUCKETS, EVERY TIME" (playbook §4.5).
 Automated review of committed work (bead nexus-jh86x). Fired by the `post-commit` git hook, and usable by hand.
 
 ```
-nx review commit [REV] [--repo PATH] [--quiet]
+nx review commit [REV] [--repo PATH] [--quiet] [--drain]
 nx review show [REV] [--repo PATH]
 ```
 
 | Subcommand | Description |
 |------------|-------------|
-| `commit [REV]` | Review REV (default `HEAD`) and record findings in T2. **Always exits 0** — a hook that can fail a commit is a footgun during a tag-push sequence |
+| `commit [REV]` | Review REV (default `HEAD`) and record findings in T2. **Always exits 0** — a hook that can fail a commit is a footgun during a tag-push sequence. `--drain`: after REV, pop and review every sha the post-commit hook queued while a reviewer was running, until the queue is empty (the hook passes this; a hand-run review need not) |
 | `show [REV]` | Print the stored review record for REV |
+
+**Bursts are queued, not dropped** (2026-09-04). The post-commit hook serialises reviews with a `pgrep` guard. When a reviewer is already running, the hook appends `HEAD` to `<git-common-dir>/nx-review-queue` (one queue per repository, shared by every linked worktree) and logs `QUEUED (review already running)`; the running reviewer, dispatched with `--drain`, reviews the queued shas before it exits. Before this the hook logged `SKIPPED` and the commit was never reviewed: 6 of 9 commits in one push. A sha stranded in the queue (the reviewer exited between the hook's guard and its append) is picked up by the next commit's reviewer, and shows up as unreviewed in [`nx census reviews`](#nx-census) until then. A queued sha that cannot be reviewed is reported and dropped, never re-queued.
 
 The reviewer is a **tool-free** `claude -p` dispatch over `git show REV` alone. It cannot read the RDR corpus, the bead board, or prior reviews, and that independence is the point: a reviewer that has read the design record tends to agree with it.
 
@@ -3689,6 +3701,8 @@ Findings carry one of three verdicts:
 Nothing is auto-applied and nothing is auto-filed. Triage is a human act. Expect an instrument that mostly comments on test quality and occasionally catches a design error; if its FIX-NOW rate turns out to be dominated by noise, narrow or retire it rather than learning to ignore it.
 
 Records land in T2 project `nexus`, titled `review-<12-hex>`, with a default 90-day TTL. Count them with [`nx census reviews`](#nx-census).
+
+Each record carries a `Diff-Hash:` line, the sha256 of the first-parent patch with the sha/subject/author header stripped. A commit whose hash already has a record is skipped without a dispatch (`skipped (same diff already reviewed as review-<12-hex>)` on stderr) and gets no record of its own: an amend that rewords a message or a rebase that moves a change is the same review, and re-reviewing them was a quarter of the reviewer's spend when measured (nexus-yh25a). A rebase that changes the patch text, context lines included, hashes differently and is reviewed again.
 
 **Findings are surfaced, not merely stored.** SessionStart reports how many commits in the last 7 days carry `FIX-NOW` findings, because a verdict meaning "fix before this work goes further" that nobody sees is theatre. It counts commits rather than findings (two `FIX-NOW`s on one commit is one thing to look at), and the window is bounded on purpose: there is no "resolved" state on a review record, so an unbounded count would become the line people learn to scroll past.
 
@@ -3715,6 +3729,8 @@ nx census reviews [--as-json]
 ```
 
 `nx census reviews` counts per-commit review findings by verdict across the T2 records [`nx review commit`](#nx-review) writes, and reports **reviewed-and-clean separately from not-reviewed**: a census that could not tell those apart would read an unarmed hook as a clean codebase (the nexus-moht0 vacuous-gate doctrine). The first line reports the current repository's post-commit hook state (`armed`, `stale`, `not installed`, `unmanaged`, `unknown`; `hook_state` under `--as-json`), the same comparison `nx doctor` makes, so the census answers the hook-armed question rather than asking it. Records are selected by title prefix AND their first line `Commit review: `; human review notes sharing the prefix are not counted.
+
+When run inside a git repository the census also **names the gaps**: every commit reachable from `HEAD` since the newest reachable tag (or the last 100 commits when no tag is reachable) that has no review record. A commit is covered when a record carries its sha OR a record's `Diff-Hash` equals its own patch hash (an amend or rebase is reviewed under the sha it first had, and the reviewer deliberately writes nothing for the new sha; a truncated diff is never matched by hash). Patch-less commits (`merge -s ours`, `--allow-empty`) are counted, not listed, since the reviewer skips them by design. The line `Review queue: N waiting` appears when the post-commit hook's burst queue is non-empty (see [`nx review`](#nx-review)). Under `--as-json` these land in `coverage` (`since`, `commits`, `patchless`, `unreviewed[]`) and `queued`.
 
 Counts tool calls per capability across Claude Code session transcripts, split **orchestrator vs subagent** (nexus-h33x8.1). Buckets are `skill`, `agent`, `serena`, `nx_answer`, `search_query`, `other_nx_mcp`, `baseline` (Bash/Read/Edit/Write), `other`.
 
@@ -3760,8 +3776,9 @@ RDR (Research-Design-Review) authoring helpers.
 
 | Subcommand | Description |
 |------------|-------------|
-| `lint` | Lint RDR frontmatter/structure; reports findings per file |
-| `set-status STATUS` | Flip an RDR's `status:` frontmatter field and README row (refused unless the lifecycle table allows the transition); then append `needs-reexamination` to the T2 entry of every RDR joined to it by a `supersedes` edge (RDR-201 P3.3) |
-| `preamble` | Subgroup backing the RDR lifecycle skills (`rdr-list`, `rdr-create`, `rdr-show`, `rdr-gate`, `rdr-accept`, `rdr-close`, `rdr-research`) |
+| `lint [PATHS]` | Lint RDR frontmatter/structure; reports findings per file. `--root DIR` scans a directory other than `docs/rdr/` |
+| `set-status STATUS` | Flip an RDR's `status:` frontmatter field and README row (refused unless the lifecycle table allows the transition); then append `needs-reexamination` to the T2 entry of every RDR joined to it by a `supersedes` edge (RDR-201 P3.3). A flip to `superseded` first writes the `superseded_by` successor's `supersedes` catalog edge itself (idempotent; the walk never waits for an index run), and `nx index repo` re-feeds an RDR whose content changed to the dependency link generator, so a frontmatter edit seeds its edges at the next index. `--date YYYY-MM-DD` sets `accepted_date`/`closed_date` (default today, UTC); `--root DIR` names the repo root (default git toplevel) |
+| `preamble` | Subgroup backing the RDR lifecycle skills (`rdr-list`, `rdr-create`, `rdr-show`, `rdr-gate`, `rdr-accept`, `rdr-close`, `rdr-research`, `rdr-audit`, `phase-review-gate`) |
+| `repeat RDR` | Multi-model repeatability diff (nexus-axwpn): send the RDR's Technical Design (or `Proposed Design` / `Design`) section to two claude -p models (`--models haiku,sonnet`, never the operator tier table), ask each for an implementation plan, and report where the plans diverge in steps, files and decisions. A divergence is a place the text left open, not a verdict on a model. `RDR` is a path or a number resolved under `--root` (default `docs/rdr/`); `--timeout` (seconds per dispatch, default 300) and `--max-budget-usd` (per dispatch, default 0.50) bound each reader; `--json` emits both plans and the diff. Exits 0 with the report, 2 when the RDR has no design section, 1 when a dispatch fails. Writes nothing |
 
 Run `nx rdr --help` / `nx rdr preamble --help` for the full subcommand list. The `preamble` subcommands are primarily invoked by the conexus RDR-lifecycle skills.

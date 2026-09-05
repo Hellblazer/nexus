@@ -4,11 +4,31 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.db.TokenHashing;
+import liquibase.Contexts;
+import liquibase.Liquibase;
+import liquibase.database.Database;
+import liquibase.database.DatabaseFactory;
+import liquibase.database.jvm.JdbcConnection;
+import liquibase.resource.ClassLoaderResourceAccessor;
+import dev.nexus.service.jooq.test.Routines;
+import org.jooq.DSLContext;
+import org.jooq.Name;
+import org.jooq.SQLDialect;
+import org.jooq.Table;
+import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
+
+import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 
 
 /**
@@ -194,48 +214,219 @@ public final class PgContainerHelper {
     }
 
     /**
-     * Grants a test-local service role the SAME schema access production
-     * {@code nexus_svc} gets — {@code nexus} DML/sequences PLUS {@code
-     * staging} DML (nexus-kl2z6 increment 2, nexus-vc6dh). Call AFTER the
-     * master changelog has run (needs both schemas to exist) and BEFORE
-     * building the role's own {@code DataSource}.
+     * Run the PRODUCT master changelog ({@code db/changelog/db.changelog-master.xml})
+     * against {@code su} — the single place every test class's own hand-rolled
+     * {@code new Liquibase("db/changelog/db.changelog-master.xml", ...)} call
+     * used to live (nexus-cbo4a batch 1a). Creates the {@code nexus}/{@code staging}
+     * schemas and every product table, and — via {@code role-001-nexus-svc.xml}, the
+     * FIRST include in the master changelog — creates the {@code nexus_svc} role
+     * itself if it does not already exist, so callers never need to pre-create it by
+     * hand before this call (see {@link SharedCluster}'s template-bootstrap comment
+     * for the same finding, made independently for the shared-cluster path).
      *
-     * <p><b>Why this exists</b>: {@link
-     * dev.nexus.service.db.CatalogRepository#stagingHasRowsForTenant}
-     * reads {@code staging.document_chunks} inside EVERY sweep
-     * transaction now, unconditionally — a test-local role that only
-     * mirrors the OLD (pre-kl2z6) minimal {@code nexus}-only grant set
-     * fails that read with {@code permission denied for schema staging},
-     * which the sweep's fail-open discipline (by design, correctly)
-     * swallows into a silent {@code sweep_skipped}/{@code
-     * reason=sweep_failed} outcome rather than a loud test error —
-     * exactly the kind of masked signal nexus-vc6dh exists to keep
-     * honest. Confirmed NOT a production gap: production's {@code
-     * NX_DB_USER} is {@code nexus_svc} (default, {@code
-     * src/nexus/db/pg_provision.py}), and {@code nexus_svc} already gets
-     * this exact staging grant set from {@code staging-001-landing-
-     * tables.xml}'s {@code staging-4-svc-grants} changeset ({@code
-     * runAlways="true"}, unconditionally in the master changelog) — this
-     * helper exists purely because hand-rolled test-local roles
-     * (predating nexus-kl2z6) never mirrored that changeset. Found
-     * independently by two test classes
-     * ({@code CatalogManifestSweepRepositoryTest},
-     * {@code CatalogHandlerSweepAndChashesManyTest}) before this helper
-     * centralized the fix; a THIRD ({@code CombinedWriteRepositoryTest})
-     * carried the same latent gap without yet tripping over it.
+     * <p><b>Leaves {@code su} with {@code autoCommit(true)} restored</b> (review
+     * finding, nexus-cbo4a batch 1a follow-up): Liquibase manages its own
+     * changeset-boundary commits and disables the connection's autoCommit while
+     * {@code update()} runs, but does NOT restore it afterward. A caller that
+     * issues a further raw statement on this SAME connection after this method
+     * returns (e.g. a hand-kept {@code GRANT}) would otherwise run it inside an
+     * open transaction that is silently rolled back when {@code su} closes —
+     * exactly the bug {@link #bootstrapServiceRole}'s own note below documents.
+     * Restoring it here, once, means every caller gets the fix for free instead
+     * of re-adding {@code su.setAutoCommit(true)} at each call site.
+     *
+     * @param su superuser connection to run the migration under
+     */
+    public static void applyProductSchema(Connection su) throws Exception {
+        Database db = DatabaseFactory.getInstance().findCorrectDatabaseImplementation(new JdbcConnection(su));
+        Liquibase liquibase = new Liquibase(
+            "db/changelog/db.changelog-master.xml", new ClassLoaderResourceAccessor(), db);
+        liquibase.update(new Contexts());
+        // Test-only schema objects (nexus_test.*), never part of the product changelog;
+        // the codegen-time counterpart is db.changelog-test-master.xml (see the pom's
+        // generate-jooq-test-sources execution).
+        new Liquibase("db/changelog-test/db.changelog-test-objects.xml",
+            new ClassLoaderResourceAccessor(), db).update(new Contexts());
+        su.setAutoCommit(true);
+    }
+
+    /**
+     * Bootstrap a test-local service role via the {@code db/changelog-test/
+     * db.changelog-test-role.xml} test changelog (nexus-cbo4a batch 1a) — replaces
+     * the hand-rolled DO-block {@code CREATE ROLE}, schema/table/sequence
+     * {@code GRANT}s, and {@code ALTER ROLE ... SET search_path} that 84 test
+     * classes used to copy by hand. Creates {@code svcRole} (LOGIN, NOSUPERUSER,
+     * NOBYPASSRLS) if absent, redundantly/idempotently ensures {@code nexus_svc}
+     * exists too (see {@link #applyProductSchema}'s javadoc — always a no-op here
+     * in practice), grants {@code svcRole} the same {@code nexus}+{@code staging}
+     * DML/sequence access {@link #grantServiceSchemaAccess} used to hand-grant, and
+     * sets {@code svcRole}'s {@code search_path}.
+     *
+     * <p><b>Call AFTER {@link #applyProductSchema}</b> — the {@code GRANT ... ON ALL
+     * TABLES}/{@code ON ALL SEQUENCES} statements inside the test changelog require
+     * the {@code nexus}/{@code staging} schemas and their tables to already exist.
+     *
+     * <p><b>Leaves {@code su} with {@code autoCommit(true)} restored</b> (real bug
+     * found converting the six classes that also call {@link #seedServiceToken}, then
+     * generalized here, nexus-cbo4a batch 1a follow-up): Liquibase's {@code update()}
+     * manages its own changeset-boundary commits by disabling the connection's
+     * autoCommit, and does NOT turn it back on when it returns. Every caller that then
+     * runs a further raw statement on the SAME {@code su} — a {@code seedServiceToken}
+     * insert, or a hand-kept {@code GRANT EXECUTE ON FUNCTION} the fixed grant set here
+     * does not cover — was silently executing it inside an open transaction that got
+     * rolled back the moment the try-with-resources closed {@code su}, with no
+     * exception raised anywhere. The first version of this batch left the fix as a
+     * copy-pasted {@code su.setAutoCommit(true)} at 11 call sites; restoring it here
+     * once, at the one place every caller already goes through, means the fix cannot
+     * be forgotten by a future caller and cannot rot into 11 independently-maintained
+     * copies.
      *
      * @param su      superuser connection (the role owner / grantor)
-     * @param svcRole the test-local service role name to grant
+     * @param svcRole the test-local service role name to create and grant
+     * @param svcPass the password for {@code svcRole}
      */
-    public static void grantServiceSchemaAccess(Connection su, String svcRole) throws SQLException {
-        su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + svcRole);
-        su.createStatement().execute(
-            "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO " + svcRole);
-        su.createStatement().execute(
-            "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA nexus TO " + svcRole);
-        su.createStatement().execute("GRANT USAGE ON SCHEMA staging TO " + svcRole);
-        su.createStatement().execute(
-            "GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA staging TO " + svcRole);
-        su.createStatement().execute("ALTER ROLE " + svcRole + " SET search_path TO nexus, public");
+    public static void bootstrapServiceRole(Connection su, String svcRole, String svcPass) throws Exception {
+        Database db = DatabaseFactory.getInstance().findCorrectDatabaseImplementation(new JdbcConnection(su));
+        Liquibase liquibase = new Liquibase(
+            "db/changelog-test/db.changelog-test-role.xml", new ClassLoaderResourceAccessor(), db);
+        Map<String, Object> params = new HashMap<>();
+        params.put("svcRole", svcRole);
+        params.put("svcPass", svcPass);
+        for (var entry : params.entrySet()) {
+            liquibase.setChangeLogParameter(entry.getKey(), entry.getValue());
+        }
+        liquibase.update(new Contexts());
+        su.setAutoCommit(true);
+    }
+
+    /**
+     * Seed one {@code nexus.service_tokens} row via generated jOOQ DSL (nexus-cbo4a
+     * batch 1a) — replaces the hand-rolled {@code INSERT INTO nexus.service_tokens
+     * (token_hash, tenant_id, label) VALUES (...) ON CONFLICT (token_hash) DO
+     * NOTHING} six test classes used to build by string concatenation. The raw
+     * token is hashed via {@link TokenHashing#sha256Hex}, matching production's own
+     * issuance path exactly.
+     *
+     * @param dsl    a {@link DSLContext} over the same connection/role the schema
+     *               was migrated under (e.g. {@code DSL.using(su, SQLDialect.POSTGRES)})
+     * @param token  the raw bearer token to hash and store
+     * @param tenant the tenant id to bind the token to
+     * @param label  the token's {@code service_tokens.label} value
+     */
+    public static void seedServiceToken(DSLContext dsl, String token, String tenant, String label) {
+        dsl.insertInto(SERVICE_TOKENS)
+            .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.LABEL)
+            .values(TokenHashing.sha256Hex(token), tenant, label)
+            .onConflictDoNothing()
+            .execute();
+    }
+
+    /**
+     * Allowlist of GUC names {@link #setTenant} may stamp — the same two names {@link
+     * TenantScope#PERMITTED_GUCS} enforces (that field is package-private inside {@code
+     * dev.nexus.service.db}, unreachable from this package, so this is a second copy of
+     * the same guard rather than a shared reference; drift between the two would be a
+     * silent RLS-context miss either way, and both are derived from {@link
+     * TenantScope#DEFAULT_TENANT_GUC}/{@link TenantScope#T1_TENANT_GUC} so a future third
+     * GUC needs a coordinated edit in both places, not a lone one here).
+     */
+    private static final Set<String> TENANT_GUC_ALLOWLIST =
+        Set.of(TenantScope.DEFAULT_TENANT_GUC, TenantScope.T1_TENANT_GUC);
+
+    /**
+     * Stamp {@code gucName} on an existing, test-owned {@link Connection} via jOOQ's typed
+     * {@code set_config(...)} function call (nexus-cbo4a batch 2) — the test-tree counterpart
+     * to {@link TenantScope#withTenant}, for call sites that hold a raw {@link Connection}
+     * they already own (bootstrap superuser connections, multi-connection cross-tenant
+     * isolation probes, {@code RESET}-then-reassert sequences) and need to stamp or clear a
+     * tenant GUC on it directly, with no lambda-scoped connection lifecycle. {@link
+     * TenantScope#withTenant} does not fit that shape at all — it BORROWS its own connection
+     * from a {@link javax.sql.DataSource} and commits/closes it before returning, whereas every
+     * caller here already has the connection open and keeps driving it afterward.
+     *
+     * <p>Replaces the raw {@code SET nexus.tenant = '...'} / {@code SET LOCAL nexus.tenant =
+     * '...'} / {@code SELECT set_config('nexus.tenant', ..., ...)} / {@code RESET nexus.tenant}
+     * string literals these call sites used to build by hand (Sam's no-raw-SQL-strings-in-Java
+     * directive, nexus-zrcj7).
+     *
+     * @param conn    the connection to stamp; its transaction/autocommit state is left exactly
+     *                as the caller set it — this method neither opens nor commits a transaction
+     * @param gucName the GUC name, restricted to {@link #TENANT_GUC_ALLOWLIST} — the same
+     *                defense-in-depth guard {@link TenantScope#withTenant} itself enforces, so
+     *                this helper cannot become a second, unguarded path to an arbitrary session
+     *                GUC
+     * @param tenant  the tenant value to set, or {@code null} to RESET the GUC to its default
+     *                (Postgres: {@code set_config(name, NULL, is_local)} performs exactly the
+     *                {@code RESET name} operation — see the {@code set_config} documentation)
+     * @param isLocal {@code true} for {@code SET LOCAL} (transaction-scoped — {@code conn} must
+     *                have an open, not-yet-committed transaction, i.e. {@code autoCommit=false});
+     *                {@code false} for session-scoped {@code SET}/{@code RESET}
+     */
+    public static void setTenant(Connection conn, String gucName, String tenant, boolean isLocal) {
+        if (!TENANT_GUC_ALLOWLIST.contains(gucName)) {
+            throw new IllegalArgumentException(
+                "gucName not permitted: " + gucName + " (allowed: " + TENANT_GUC_ALLOWLIST + ")");
+        }
+        DSL.using(conn, SQLDialect.POSTGRES)
+            .select(DSL.function("set_config", SQLDataType.VARCHAR,
+                DSL.val(gucName), DSL.val(tenant, SQLDataType.VARCHAR), DSL.val(isLocal)))
+            .fetch();
+    }
+
+    /**
+     * {@code ANALYZE table} on an existing, test-owned {@link Connection} (nexus-cbo4a
+     * batch 3/4) -- the test-tree counterpart to {@link TenantScope#vacuumAnalyze}.
+     *
+     * <p>Batch 4 (nexus-zrcj7): retired the raw {@code stmt.execute("ANALYZE " + ...)}
+     * onto {@code nexus_test.analyze_table(regclass)}, a TEST-SCHEMA function
+     * (db/changelog-test/db.changelog-test-objects.xml, applied by
+     * {@link #applyProductSchema} after the product master; jOOQ codegen for it runs
+     * as a second plugin execution at generate-test-sources into
+     * target/generated-test-sources/jooq, so nothing test-only ever enters the
+     * product schema or the product changelog -- batch 5, Sam's ruling 2026-09-05)
+     * -- ANALYZE is still PostgreSQL maintenance syntax with no typed jOOQ DSL form (same
+     * category {@link TenantScope#vacuumAnalyze}'s own SANCTIONED RAW comment documents
+     * for VACUUM), but that raw statement now lives server-side, inside a plpgsql wrapper
+     * function, rather than being assembled client-side. Table identity comes from a
+     * generated jOOQ {@link Table}, rendered through {@code ctx.render(table)} (properly
+     * quoted/qualified for the dialect) into the function's {@code regclass} argument --
+     * never a hand-typed schema-qualified string literal, so unlike {@code vacuumAnalyze}'s
+     * allowlist (needed there because VACUUM's callers pass a bare string) there is no
+     * caller-controlled name to validate: only a compile-time-checked generated
+     * {@code Table} reaches this method. {@code Routines.analyzeTable}'s generated
+     * {@code target} parameter is typed {@code Object} ({@code @Deprecated}, "Unknown data
+     * type") because {@code regclass} has no jOOQ-recognized Java mapping -- the same
+     * shape {@code CatalogRepository#searchDocuments}'s {@code Routines.catalogFtsMatch}
+     * call already carries for its {@code tsvector} parameter; jOOQ still renders an
+     * explicit {@code CAST(? AS "pg_catalog"."regclass")} around the bind value, so the
+     * rendered table-name string is parsed by PostgreSQL's own regclass input function,
+     * never string-concatenated into the query text.
+     *
+     * @param conn  the connection to run ANALYZE on; unlike {@code vacuumAnalyze}, ANALYZE
+     *              has no autocommit/transaction-block restriction, so this method neither
+     *              inspects nor changes the connection's autocommit state
+     * @param table the generated jOOQ table to analyze (e.g. {@code Tables.CHUNKS})
+     */
+    public static void analyzeTable(Connection conn, Table<?> table) throws SQLException {
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        Routines.analyzeTable(ctx.configuration(), ctx.render(table));
+    }
+
+    /**
+     * Overload for a table outside jOOQ codegen scope -- the {@code staging} schema is not
+     * one of service/pom.xml's jOOQ codegen {@code <schemata>} (only {@code nexus}/{@code t1}
+     * are), so no generated {@link Table} exists for e.g. {@code staging.document_chunks}.
+     * Takes a jOOQ-constructed qualified {@link Name} instead (e.g.
+     * {@code DSL.name("staging", "document_chunks")}) -- still never a hand-typed SQL
+     * string -- rendered via {@code ctx.render(DSL.table(qualifiedName))} exactly like the
+     * generated-{@code Table} overload above before reaching {@code nexus.analyze_table}.
+     *
+     * @param conn          the connection to run ANALYZE on
+     * @param qualifiedName the schema-qualified table identifier (e.g.
+     *                      {@code DSL.name("staging", "document_chunks")})
+     */
+    public static void analyzeTable(Connection conn, Name qualifiedName) throws SQLException {
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        Routines.analyzeTable(ctx.configuration(), ctx.render(DSL.table(qualifiedName)));
     }
 }

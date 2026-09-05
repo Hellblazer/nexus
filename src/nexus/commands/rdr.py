@@ -620,6 +620,49 @@ def _supersedes_neighbours(
     return numbers, unmapped, None
 
 
+#: created_by stamped on the edge set-status writes; the dependency
+#: generator's own edges say ``rdr_dependency_extractor``.
+_SET_STATUS_LINK_AUTHOR = "nx rdr set-status"
+
+
+def _ensure_supersedes_edge(
+    cat: object, repo_root: str, rdr_num: int, successor: str,
+) -> tuple[str | None, str | None]:
+    """Write the ``successor -> predecessor`` supersedes edge for a flip to
+    ``superseded`` (Sam's ruling 2026-09-04: the edge is part of the
+    lifecycle, not only of the next index run). Returns ``(edge text,
+    note)``: the text when the edge exists after this call (created or
+    already there), the note when it could not be written. Never raises;
+    the flip already stands."""
+    from nexus.catalog.link_generator import (  # noqa: PLC0415 — deferred import, see _default_catalog_reader
+        _extract_rdr_ref_numbers,
+        rdr_resolution,
+    )
+
+    # The generator's own anchored RDR-NNN parser, never a bare digit
+    # search: rdr-079 carries superseded_by "nexus.operators.dispatch
+    # (PR #168)" (an RDR subsumed by code), and a digit search would
+    # write "RDR-168 supersedes RDR-79" for real (review [24399]).
+    numbers = _extract_rdr_ref_numbers(successor or "")
+    if len(numbers) != 1:
+        return None, f"superseded_by {successor!r} does not name exactly one RDR-NNN; no edge written"
+    succ_num = numbers[0]
+    try:
+        owner, prefix = _rdr_repo_scope(cat, repo_root)
+        if owner is None:
+            return None, "no catalog owner registered for this repo (never indexed); no edge written"
+        resolved, number_index = rdr_resolution(cat, owner, repo_source_prefix=prefix)
+        tumblers = {n: resolved[k] for n, k in number_index.items() if resolved.get(k) is not None}
+        me, succ = tumblers.get(rdr_num), tumblers.get(succ_num)
+        if me is None or succ is None:
+            missing = [f"RDR-{n}" for n, t in ((rdr_num, me), (succ_num, succ)) if t is None]
+            return None, f"{', '.join(missing)} has no canonical catalog tumbler; no edge written"
+        cat.link_if_absent(succ, me, _MARKER_LINK_TYPE, _SET_STATUS_LINK_AUTHOR)  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001 — report-only leg
+        return None, f"{type(exc).__name__}: {exc}"
+    return f"RDR-{succ_num} supersedes RDR-{rdr_num}", None
+
+
 def _t2_rdr_titles(number: int) -> tuple[str, ...]:
     """The title shapes a record's T2 entry is found under, in lookup
     order: bare (``"42"``), zero-padded (``"042"`` -- the early records,
@@ -825,6 +868,161 @@ def _gate_repo_name(repo_root: str) -> str:
     return _resolve_main_repo(Path(repo_root)).name
 
 
+#: Injectable dispatch seam for ``nx rdr repeat``, same shape as
+#: ``_t2_client_factory``: production resolves ``claude_dispatch`` lazily,
+#: tests set this to an async fake and never spawn a child.
+_repeat_dispatch = None
+
+
+def _resolve_repeat_dispatch():
+    if _repeat_dispatch is not None:
+        return _repeat_dispatch
+    from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — heavy operator dep deferred to call time
+
+    return claude_dispatch
+
+
+@rdr.command("repeat")
+@click.argument("rdr", type=str)
+@click.option(
+    "--root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="RDR directory used to resolve a numeric id (default: docs/rdr/).",
+)
+@click.option(
+    "--models",
+    default="haiku,sonnet",
+    show_default=True,
+    help="Two claude -p model aliases to dispatch, comma-separated; they must differ.",
+)
+@click.option("--timeout", type=float, default=300.0, show_default=True, help="Seconds per dispatch.")
+@click.option(
+    "--max-budget-usd",
+    type=float,
+    default=0.50,
+    show_default=True,
+    help="Budget cap per dispatch.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit the two plans and the divergence as JSON.")
+def repeat(
+    rdr: str,
+    root: Path | None,
+    models: str,
+    timeout: float,
+    max_budget_usd: float,
+    as_json: bool,
+) -> None:
+    """Multi-model repeatability diff of RDR's design text (nexus-axwpn).
+
+    Sends the Technical Design section to two models, asks each for an
+    implementation plan, and reports where the plans diverge: steps,
+    files, decisions. A divergence is a place the text left open. Exits
+    0 with a report; exits 2 when there is nothing to repeat.
+
+    Models are named as claude -p aliases, never resolved through the
+    operator tier table: that table's consumers are the two dispatch
+    sites RDR-196 allowlists, and this verb is an explicit, hand-run
+    comparison outside them.
+    """
+    import asyncio  # noqa: PLC0415 — only this verb runs an event loop
+    import json as _json  # noqa: PLC0415
+
+    from nexus.rdr_repeat import (  # noqa: PLC0415
+        PLAN_SCHEMA,
+        RepeatError,
+        build_prompt,
+        diff_plans,
+        extract_design_section,
+        parse_plan,
+        render_report,
+    )
+
+    path = Path(rdr)
+    if not path.is_file():
+        scan_root = root or Path("docs/rdr")
+        found = _preamble_find_rdr_file(scan_root, rdr) if scan_root.exists() else None
+        if found is None:
+            click.echo(f"nx rdr repeat: no RDR file for {rdr!r} under {scan_root}", err=True)
+            sys.exit(2)
+        path = found
+    rdr_id = path.stem
+
+    design = extract_design_section(path.read_text())
+    if not design:
+        click.echo(
+            f"nx rdr repeat: {path} has no Technical Design / Proposed Design / Design section; "
+            "nothing to repeat",
+            err=True,
+        )
+        sys.exit(2)
+
+    model_names = [m.strip() for m in models.split(",") if m.strip()]
+    if len(model_names) != 2:
+        click.echo("nx rdr repeat: --models needs exactly two model aliases", err=True)
+        sys.exit(2)
+    if model_names[0] == model_names[1]:
+        click.echo(
+            f"nx rdr repeat: both models are {model_names[0]!r}; a repeatability diff needs two readers",
+            err=True,
+        )
+        sys.exit(2)
+    models_resolved = model_names
+
+    dispatch = _resolve_repeat_dispatch()
+    prompt = build_prompt(rdr_id, design)
+
+    async def _run():
+        return await asyncio.gather(
+            *(
+                dispatch(
+                    prompt,
+                    PLAN_SCHEMA,
+                    timeout=timeout,
+                    model=m,
+                    max_budget_usd=max_budget_usd,
+                    operator="rdr_repeat",
+                    isolated=True,
+                )
+                for m in models_resolved
+            )
+        )
+
+    try:
+        payloads = asyncio.run(_run())
+        plans = [parse_plan(m, p) for m, p in zip(models_resolved, payloads, strict=True)]
+    except (RepeatError, Exception) as exc:  # noqa: BLE001 - report, never traceback
+        click.echo(f"nx rdr repeat: dispatch failed ({exc})", err=True)
+        sys.exit(1)
+
+    divergence = diff_plans(plans[0], plans[1])
+    if as_json:
+        click.echo(
+            _json.dumps(
+                {
+                    "rdr": rdr_id,
+                    "plans": [
+                        {
+                            "model": pl.model,
+                            "steps": [
+                                {"title": st.title, "files": list(st.files), "decisions": list(st.decisions)}
+                                for st in pl.steps
+                            ],
+                        }
+                        for pl in plans
+                    ],
+                    "divergence": {
+                        k: v for k, v in divergence.__dict__.items()
+                    }
+                    | {"count": divergence.count},
+                },
+                indent=2,
+            )
+        )
+        return
+    click.echo(render_report(rdr_id, plans[0], plans[1], divergence))
+
+
 @rdr.command("set-status")
 @click.argument("rdr_id")
 @click.argument("new_status")
@@ -1026,6 +1224,14 @@ def set_status(
             click.echo(f"updated T2 {repo_name}_rdr/{t2_title} status -> {new_status}")
         if t2_note:
             click.echo(t2_note, err=True)
+        if new_status == "superseded":
+            edge, edge_note = _ensure_supersedes_edge(
+                _catalog_reader_factory(), repo_root, int(flipped_num_match.group(0)), superseded_by,
+            )
+            if edge:
+                click.echo(f"catalog edge ensured: {edge}")
+            if edge_note:
+                click.echo(f"catalog edge not written: {edge_note}", err=True)
         marked, missing, notes = _mark_dependents_needs_reexamination(
             int(flipped_num_match.group(0)), current_status, new_status, repo_root, repo_name,
         )

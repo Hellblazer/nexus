@@ -315,3 +315,50 @@ class TestRdrDependencyGeneratorRegistration:
 
         assert not any("rdr-dependency" in m for m in _linking_lines(phases))
         assert calls == ["rdr", "prose", "pdf"]
+
+
+class TestChangedRdrIsRelinked:
+    """Sam's ruling 2026-09-04 (nexus-y8bkt): supersedes edges are part of
+    indexing. Link generation is incremental over NEW registrations, so an
+    RDR whose frontmatter gained ``supersedes`` after registration never
+    reached the dependency generator (measured: zero extractor edges on
+    the live tenant). A content change on an existing RDR now re-feeds
+    it; a head-hash-only bump does not."""
+
+    @staticmethod
+    def _capture_dependency_seed(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+        seeds: list[list[str]] = []
+
+        def bind(cat, repo_root):  # noqa: ANN001
+            def _gen(cat, *, writer=None, new_tumblers=None, new_content_types=None):  # noqa: ANN001
+                seeds.append([str(t) for t in (new_tumblers or [])])
+                return 0
+            return ("rdr-dependency", _gen)
+
+        monkeypatch.setattr(link_generator, "bind_rdr_dependency_generator", bind)
+        return seeds
+
+    def test_content_change_refeeds_the_rdr_and_a_head_bump_does_not(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clock: _Clock,
+    ) -> None:
+        _stub_generators(monkeypatch, clock, {"rdr": 0.1, "prose": 0.1, "pdf": 0.1})
+        seeds = self._capture_dependency_seed(monkeypatch)
+        rdr = _write(tmp_path, "docs/rdr/rdr-159-x.md", "---\nid: RDR-159\nstatus: closed\n---\n")
+        files = [(rdr, "rdr", "rdr__nexus")]
+
+        _run_hook(tmp_path, files)
+        first = seeds[-1]
+        assert len(first) == 1, "first run: the new RDR is the seed"
+
+        # frontmatter gains a successor: content hash changes
+        _write(tmp_path, "docs/rdr/rdr-159-x.md", "---\nid: RDR-159\nstatus: superseded\nsuperseded_by: RDR-185\n---\n")
+        _run_hook(tmp_path, files)
+        assert seeds[-1] == first, "the SAME tumbler is re-fed on a content change"
+
+        # unchanged content, new HEAD: nothing to relink
+        ActiveCatalog()
+        indexer_mod._catalog_hook(
+            repo=tmp_path, repo_name="nexus", repo_hash="571b8edd", head_hash="def",
+            indexed_files=files, on_phase=lambda _m: None,
+        )
+        assert seeds[-1] == [], "a head-hash-only bump does not re-feed the generator"

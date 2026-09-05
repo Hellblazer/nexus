@@ -497,3 +497,44 @@ def test_packaged_overrides_are_handed_to_uv_pip_install(tmp_path: Path) -> None
     overrides = _INSTALLER.parent / "overrides.txt"
     assert f"--overrides {overrides}" in install_lines[0]
     assert overrides.is_file()
+
+
+# nexus-mt1tj: CPU-only torch on Linux by default, opt-in override, nothing on macOS.
+
+
+def _run_builder_as(tmp_path: Path, kernel: str, env_extra: dict[str, str] | None = None) -> tuple:
+    """Like _run_builder, with a fake `uname` on PATH reporting *kernel*."""
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    uv_bin = tmp_path / "bin"
+    uv_bin.mkdir(exist_ok=True)
+    argv_log = tmp_path / "uv-argv.log"
+    _stub_uv(uv_bin, argv_log=argv_log)
+    _make_executable(uv_bin / "uname", f"#!/bin/bash\necho {kernel}\n")
+    env = {**os.environ, "PATH": f"{uv_bin}:{os.environ['PATH']}", "NX_TOOLS_DIR": str(tools), **(env_extra or {})}
+    env.pop("NX_TORCH_BACKEND", None) if not (env_extra and "NX_TORCH_BACKEND" in env_extra) else None
+    proc = subprocess.run(
+        ["bash", str(_INSTALLER), "--source", "conexus"],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    return proc, argv_log
+
+
+def test_linux_installs_cpu_torch_by_default(tmp_path: Path) -> None:
+    proc, argv_log = _run_builder_as(tmp_path, "Linux")
+    assert proc.returncode == 0, proc.stderr
+    line = [ln for ln in argv_log.read_text().splitlines() if "pip install" in ln][0]
+    assert "--torch-backend cpu" in line
+
+
+def test_linux_torch_backend_is_overridable(tmp_path: Path) -> None:
+    proc, argv_log = _run_builder_as(tmp_path, "Linux", {"NX_TORCH_BACKEND": "auto"})
+    assert proc.returncode == 0, proc.stderr
+    line = [ln for ln in argv_log.read_text().splitlines() if "pip install" in ln][0]
+    assert "--torch-backend auto" in line
+
+
+def test_macos_passes_no_torch_backend(tmp_path: Path) -> None:
+    proc, argv_log = _run_builder_as(tmp_path, "Darwin")
+    assert proc.returncode == 0, proc.stderr
+    assert "--torch-backend" not in argv_log.read_text()

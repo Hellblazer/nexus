@@ -659,6 +659,13 @@ if LC_ALL=C grep -q '[^[:print:][:space:]]' "$STAGE/requirements.txt"; then
   echo "FATAL: requirements.txt contains control bytes (ANSI colour leaked into a parsed file); check NO_COLOR/FORCE_COLOR" >&2
   exit 2
 fi
+# nexus-mt1tj: the lock resolves Linux torch/torchvision from the PyTorch CPU
+# index (torch==2.8.0+cpu), and `uv export` writes the pinned versions but not
+# the index they live on, so the image's `uv pip install -r` would look for a
+# +cpu build on PyPI and fail. Name the index at the top of the file; PyPI
+# stays the default index for everything else.
+{ printf -- '--extra-index-url https://download.pytorch.org/whl/cpu\n'; cat "$STAGE/requirements.txt"; } > "$STAGE/requirements.txt.tmp" \
+  && mv "$STAGE/requirements.txt.tmp" "$STAGE/requirements.txt"
 if [ "$ERA_HOP" = 1 ]; then
   # nexus-n7u38.30: same posture as --package-upgrade (working-tree wheel in its
   # own subdirectory, real PEP 427 name preserved, no engine artifact staged at

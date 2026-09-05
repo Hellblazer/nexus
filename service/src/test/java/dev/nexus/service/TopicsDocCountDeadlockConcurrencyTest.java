@@ -5,12 +5,6 @@ package dev.nexus.service;
 import dev.nexus.service.db.DeadlockRetry;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
@@ -152,25 +146,13 @@ class TopicsDocCountDeadlockConcurrencyTest {
         pg = PgContainerHelper.start();
 
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + SVC_ROLE + "') THEN "
-                + "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS + "'; END IF; END $$");
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN "
-                + "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; END IF; END $$");
+            PgContainerHelper.applyProductSchema(su);
         }
 
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(), db).update(new Contexts());
-        }
-
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            PgContainerHelper.grantServiceSchemaAccess(su, SVC_ROLE);
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
+            // EXECUTE ON FUNCTION is not part of bootstrapServiceRole's fixed grant
+            // set -- kept as an explicit grant (nexus-cbo4a batch 1b).
             su.createStatement().execute(
                 "GRANT EXECUTE ON FUNCTION nexus.assign_from_chashes_" + DIM + "(text, text[], boolean) TO " + SVC_ROLE);
         }
@@ -425,11 +407,7 @@ class TopicsDocCountDeadlockConcurrencyTest {
             barrier.await(BARRIER_AWAIT_S, TimeUnit.SECONDS);
             try (Connection conn = svcDs.getConnection()) {
                 conn.setAutoCommit(false);
-                try (PreparedStatement setTenant = conn.prepareStatement(
-                        "SELECT set_config('nexus.tenant', ?, true)")) {
-                    setTenant.setString(1, TENANT);
-                    setTenant.execute();
-                }
+                PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT, true);
                 StringBuilder sql = new StringBuilder(
                     "INSERT INTO nexus.topic_assignments"
                     + " (tenant_id, doc_id, topic_id, assigned_by, source_collection) VALUES ");

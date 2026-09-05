@@ -2,11 +2,11 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
+import dev.nexus.service.jooq.nexus.Routines;
+import org.jooq.Condition;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -14,11 +14,11 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -67,12 +67,7 @@ class CatalogFtsFilenameSearchTest {
                 + "END $$");
         }
         try (Connection su = pg.createConnection("")) {
-            var lb = new Liquibase(
-                "db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(),
-                DatabaseFactory.getInstance().findCorrectDatabaseImplementation(
-                    new JdbcConnection(su)));
-            lb.update(new Contexts());
+            PgContainerHelper.applyProductSchema(su);
         }
         ds = PgContainerHelper.superuserDataSource(pg);
         repo = new CatalogRepository(new TenantScope(ds));
@@ -171,14 +166,15 @@ class CatalogFtsFilenameSearchTest {
     // the inlining + GIN-index-selected claim.
     //
     // Seeded via repo.registerDocumentMany/registerDocument — the repository, not
-    // raw SQL — per the review instruction. The EXPLAIN invocation itself follows
-    // CombinedQueryParityTest's own established, already-reviewed pattern (a raw
-    // JDBC "EXPLAIN " + <call the function/table by name>): there is no jOOQ API
-    // that hands back a real PostgreSQL EXPLAIN plan for an arbitrary query, and
-    // the point of this test is to inspect the SQL FUNCTION's inlining, a Postgres
-    // planner property independent of how Java invokes it — the same function
-    // definition underlies both this diagnostic call and CatalogRepository's own
-    // (Routines-mediated) call.
+    // raw SQL — per the review instruction. UPDATED (nexus-cbo4a batch 3): the
+    // EXPLAIN invocation now builds a typed jOOQ Query (ctx.select(...).from(
+    // CATALOG_DOCUMENTS).where(DSL.condition(Routines.catalogFtsMatch(...)))) and
+    // runs it through DSLContext#explain -- the "no jOOQ API hands back a real
+    // PostgreSQL EXPLAIN plan" premise this comment used to state was superseded
+    // the same day by PlainSearchTextGatedSearchExplainTest's ctx.explain(Query)
+    // discovery; the same function definition still underlies both this
+    // diagnostic call and CatalogRepository's own (Routines-mediated,
+    // fts_vector.coerce(Object.class) idiom) call.
     // ══════════════════════════════════════════════════════════════════════════
 
     private static final String TENANT_EXPLAIN = "fts-fname-explain-tenant";
@@ -253,16 +249,25 @@ class CatalogFtsFilenameSearchTest {
             // GROUP-3 fixture comment verbatim: without this the planner
             // under-estimates the bulk-loaded table to rows=1 (default-selectivity
             // guesswork, no ANALYZE ever run).
-            su.createStatement().execute("ANALYZE nexus.catalog_documents");
+            PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENTS);
             su.createStatement().execute("SET enable_seqscan = off");
             su.createStatement().execute("SET enable_indexscan = off");
-            ResultSet rs = su.createStatement().executeQuery(
-                "EXPLAIN SELECT tumbler FROM nexus.catalog_documents "
-                + "WHERE nexus.catalog_fts_match(fts_vector, '" + RARE_TERM + "', false) "
-                + "ORDER BY tumbler LIMIT 50");
-            StringBuilder sb = new StringBuilder();
-            while (rs.next()) sb.append(rs.getString(1)).append('\n');
-            return sb.toString();
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            // Same idiom CatalogRepository#searchDocuments uses: fts_vector's
+            // tsvector type has no jOOQ-recognized mapping, so codegen types the
+            // generated catalogFtsMatch overload's parameter Field<Object> and
+            // marks it @Deprecated ("Unknown data type") -- expected and harmless,
+            // not a defect to work around.
+            Condition ftsMatch = DSL.condition(
+                Routines.catalogFtsMatch(
+                    CATALOG_DOCUMENTS.field("fts_vector").coerce(Object.class),
+                    DSL.val(RARE_TERM), DSL.val(false)));
+            return ctx.explain(ctx.select(CATALOG_DOCUMENTS.TUMBLER)
+                    .from(CATALOG_DOCUMENTS)
+                    .where(ftsMatch)
+                    .orderBy(CATALOG_DOCUMENTS.TUMBLER)
+                    .limit(50))
+                .plan();
         }
     }
 

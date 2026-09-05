@@ -2,12 +2,13 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.DimTables;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.Table;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 
@@ -16,6 +17,21 @@ import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_1024;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_384;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_768;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_METADATA_SCOPED_1024;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_METADATA_SCOPED_384;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_METADATA_SCOPED_768;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_1024;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_384;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_768;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -144,48 +160,10 @@ class CombinedQueryParityTest {
 
         // Phase 1: roles (CREATE ROLE cannot run inside a transaction).
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
-                "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' NOSUPERUSER NOBYPASSRLS; " +
-                "  END IF; " +
-                "END $$");
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + SVC_ROLE + "') THEN " +
-                "    CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS + "' NOSUPERUSER NOBYPASSRLS; " +
-                "  END IF; " +
-                "END $$");
+            PgContainerHelper.applyProductSchema(su);
         }
-
-        // Phase 2: full master changelog.
         try (Connection su = pg.createConnection("")) {
-            var lb = new Liquibase(
-                "db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(),
-                DatabaseFactory.getInstance().findCorrectDatabaseImplementation(
-                    new JdbcConnection(su)));
-            lb.update(new Contexts());
-        }
-
-        // Phase 3: grants for the svc role (RLS group reads through it).
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            for (String tbl : List.of(
-                    "catalog_collections", "catalog_documents", "catalog_document_chunks",
-                    "topics", "topic_assignments")) {
-                su.createStatement().execute(
-                    "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus." + tbl + " TO " + SVC_ROLE);
-            }
-            // RDR-191 Phase 4: chunks_384/768/1024 unified into ONE nexus.chunks --
-            // a single GRANT now covers what three did.
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);
-            su.createStatement().execute("GRANT USAGE ON ALL SEQUENCES IN SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
         }
 
         var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -304,10 +282,10 @@ class CombinedQueryParityTest {
             // Real row-count statistics so the planner does not under-estimate the
             // bulk-loaded tables to rows=1 and wrongly prefer a filter-first sort over
             // the HNSW index in GROUP 3.
-            for (String tbl : List.of("chunks", "catalog_documents",
-                    "catalog_document_chunks", "topic_assignments", "topics",
-                    "document_aspects")) {
-                su.createStatement().execute("ANALYZE nexus." + tbl);
+            for (Table<?> tbl : List.of(CHUNKS, CATALOG_DOCUMENTS,
+                    CATALOG_DOCUMENT_CHUNKS, TOPIC_ASSIGNMENTS, TOPICS,
+                    DOCUMENT_ASPECTS)) {
+                PgContainerHelper.analyzeTable(su, tbl);
             }
         }
     }
@@ -809,8 +787,7 @@ class CombinedQueryParityTest {
         }
         // svc + GUC=A: cannot see tenant-B's collection at all.
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             assertThat(callMeta(svc, 1024, COLL_B, "paper", null, null, null, 10))
                 .as("svc GUC=A must see ZERO tenant-B rows (function is SECURITY "
                     + "INVOKER — caller RLS on nexus.chunks/catalog applies)").isEmpty();
@@ -820,7 +797,7 @@ class CombinedQueryParityTest {
         }
         // svc + no GUC: nothing.
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute("RESET nexus.tenant");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, null, false);
             assertThat(callMeta(svc, 1024, COLL_M, "paper", null, null, null, 10))
                 .as("svc with no nexus.tenant GUC sees nothing (RLS matches NULL)")
                 .isEmpty();
@@ -837,8 +814,7 @@ class CombinedQueryParityTest {
                 .containsExactly(chashOf("b2"));
         }
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             assertThat(callTopic(svc, 1024, COLL_B, TOPIC_VEC, 10))
                 .as("svc GUC=A must see ZERO tenant-B topic rows (SECURITY INVOKER — "
                     + "caller RLS on nexus.chunks applies)").isEmpty();
@@ -1170,11 +1146,18 @@ class CombinedQueryParityTest {
     /** EXPLAIN (no ANALYZE) the metadata function with seqscan disabled. */
     private String explainMetaPlan(int dim, String collection, String contentType)
             throws Exception {
-        String inner =
-            "SELECT id FROM nexus.search_metadata_scoped_" + dim + "(" +
-            queryVecLiteral(dim) + ", ARRAY['" + collection + "']::text[], " +
-            sqlText(contentType) + ", NULL, NULL::int, NULL, NULL::text, NULL::jsonb, 10)";
-        return explain(inner);
+        Vector vec = queryVec(dim);
+        String[] colls = {collection};
+        Table<?> fn = switch (dim) {
+            case 384  -> SEARCH_METADATA_SCOPED_384.call(
+                vec, colls, contentType, null, null, null, null, null, 10);
+            case 768  -> SEARCH_METADATA_SCOPED_768.call(
+                vec, colls, contentType, null, null, null, null, null, 10);
+            case 1024 -> SEARCH_METADATA_SCOPED_1024.call(
+                vec, colls, contentType, null, null, null, null, null, 10);
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
+        return explain(fn);
     }
 
     /** Invoke search_aspect_scoped_&lt;dim&gt;; returns ids in returned order. */
@@ -1196,24 +1179,50 @@ class CombinedQueryParityTest {
     /** EXPLAIN (no ANALYZE) the aspect-scoped function with seqscan disabled. */
     private String explainAspectPlan(int dim, String collection, String field, String pattern)
             throws Exception {
-        String inner =
-            "SELECT id FROM nexus.search_aspect_scoped_" + dim + "(" +
-            queryVecLiteral(dim) + ", ARRAY['" + collection + "']::text[], " +
-            sqlText(field) + ", " + sqlText(pattern) + ", NULL::float8, NULL::jsonb, 10)";
-        return explain(inner);
+        Vector vec = queryVec(dim);
+        String[] colls = {collection};
+        Table<?> fn = switch (dim) {
+            case 384  -> SEARCH_ASPECT_SCOPED_384.call(
+                vec, colls, field, pattern, null, null, 10);
+            case 768  -> SEARCH_ASPECT_SCOPED_768.call(
+                vec, colls, field, pattern, null, null, 10);
+            case 1024 -> SEARCH_ASPECT_SCOPED_1024.call(
+                vec, colls, field, pattern, null, null, 10);
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
+        return explain(fn);
     }
 
     /** EXPLAIN (no ANALYZE) the topic function with seqscan disabled. */
     private String explainTopicPlan(int dim, String collection, String topicLabel)
             throws Exception {
-        String inner =
-            "SELECT id FROM nexus.search_topic_scoped_" + dim + "(" +
-            queryVecLiteral(dim) + ", " + sqlText(topicLabel) + ", " +
-            sqlText(collection) + ", 10)";
-        return explain(inner);
+        Vector vec = queryVec(dim);
+        Table<?> fn = switch (dim) {
+            case 384  -> SEARCH_TOPIC_SCOPED_384.call(vec, topicLabel, collection, 10);
+            case 768  -> SEARCH_TOPIC_SCOPED_768.call(vec, topicLabel, collection, 10);
+            case 1024 -> SEARCH_TOPIC_SCOPED_1024.call(vec, topicLabel, collection, 10);
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
+        return explain(fn);
     }
 
-    private String explain(String inner) throws Exception {
+    /** A length-{@code dim} typed pgvector value with the SAME first-two-components
+     *  (x=1.0, y=0.0, rest zero) shape as {@link #queryVecLiteral} -- for EXPLAIN
+     *  call sites converted onto typed jOOQ {@code Table<?>.call(...)} (nexus-cbo4a
+     *  batch 3), which need an actual {@link Vector}, not a literal-text pgvector
+     *  cast. */
+    private static Vector queryVec(int dim) {
+        float[] v = new float[dim];
+        v[0] = 1.0f;
+        return Vector.of(v);
+    }
+
+    /** EXPLAIN a typed jOOQ table-function call (nexus-cbo4a batch 3: no jOOQ typed
+     *  DSL form for maintenance-adjacent statements EXPLAINed to plain text existed
+     *  in this test before, but the QUERY itself, being a single generated
+     *  table-function call, does -- see {@code PlainSearchTextGatedSearchExplainTest}'s
+     *  identical {@code ctx.explain(...)} pattern). */
+    private String explain(Table<?> fn) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // Penalize every NON-index way to satisfy ORDER BY embedding <=> <const>
@@ -1230,10 +1239,8 @@ class CombinedQueryParityTest {
                     "enable_sort", "enable_hashjoin")) {
                 su.createStatement().execute("SET " + guc + " = off");
             }
-            ResultSet rs = su.createStatement().executeQuery("EXPLAIN " + inner);
-            StringBuilder sb = new StringBuilder();
-            while (rs.next()) sb.append(rs.getString(1)).append('\n');
-            return sb.toString();
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            return ctx.explain(ctx.select(fn.field("id")).from(fn)).plan();
         }
     }
 

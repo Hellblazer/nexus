@@ -4,20 +4,34 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
+import dev.nexus.service.jooq.binding.Vector;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
+import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
+import static dev.nexus.service.jooq.nexus.Tables.GC_AUDIT;
+import static dev.nexus.service.jooq.nexus.Tables.HOOK_FAILURES;
+import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TELEMETRY;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_META;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -52,28 +66,10 @@ class CatalogRenameCollectionTest {
     void startAll() throws Exception {
         pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='nexus_svc') THEN "
-                + "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='" + SVC_ROLE + "') THEN "
-                + "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS + "' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
+            PgContainerHelper.applyProductSchema(su);
         }
         try (Connection su = pg.createConnection("")) {
-            var lb = new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(),
-                DatabaseFactory.getInstance().findCorrectDatabaseImplementation(new JdbcConnection(su)));
-            lb.update(new Contexts());
-        }
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute("ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
         }
         var cfg = new com.zaxxer.hikari.HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
@@ -241,8 +237,10 @@ class CatalogRenameCollectionTest {
         final String b = "knowledge__ren-belt-ok__minilm-l6-v2-384__v2";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + a + "')");
+            DSL.using(su, SQLDialect.POSTGRES)
+               .insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(TENANT_A, a)
+               .execute();
         }
         repo.renameCollection(TENANT_A, a, b); // A -> B; A is now a tombstone, superseded_by=B.
         // Rename back B -> A, threading the belt with the OBSERVED value at A: "b" — the
@@ -270,10 +268,13 @@ class CatalogRenameCollectionTest {
         final String c2 = "knowledge__ren-belt-bad__minilm-l6-v2-384__v3";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + a + "')");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + c2 + "')");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(TENANT_A, a)
+               .execute();
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(TENANT_A, c2)
+               .execute();
         }
         repo.renameCollection(TENANT_A, a, b); // A -> B; A is now an EMPTY tombstone, superseded_by=B.
 
@@ -305,12 +306,19 @@ class CatalogRenameCollectionTest {
         final String tgt = "code__ren-xm__bge-768__v1";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // source registry + a document pointing at it
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + src + "')");
-            su.createStatement().execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-                + "VALUES ('" + TENANT_A + "', 'xm-doc-1', 'XM Doc', '" + src + "')");
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(TENANT_A, src)
+               .execute();
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .values(TENANT_A, "xm-doc-1", "XM Doc", src)
+               .execute();
             // target registry already exists (cross-model copy registered it)
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + tgt + "')");
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(TENANT_A, tgt)
+               .execute();
             // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires
             // a matching nexus.chunks row for the manifest insert below, at BOTH
             // ends: the pre-rename manifest row needs a chunk under src, and
@@ -320,19 +328,16 @@ class CatalogRenameCollectionTest {
             // post-rename manifest row (now pointing at tgt) needs its OWN
             // same-chash chunk under tgt too, matching what the REAL cross-model
             // copy this branch models would already have written there.
-            su.createStatement().execute("INSERT INTO nexus.chunks "
-                + "(tenant_id, collection, chash, chunk_text, embedding_384) VALUES "
-                + "('" + TENANT_A + "', '" + src + "', '" + "e".repeat(32) + "', 'text', "
-                + "('[" + "0.1,".repeat(383) + "0.1]')::vector)");
-            su.createStatement().execute("INSERT INTO nexus.chunks "
-                + "(tenant_id, collection, chash, chunk_text, embedding_768) VALUES "
-                + "('" + TENANT_A + "', '" + tgt + "', '" + "e".repeat(32) + "', 'text', "
-                + "('[" + "0.1,".repeat(767) + "0.1]')::vector)");
+            byte[] xmChash = "e".repeat(32).getBytes(StandardCharsets.US_ASCII);
+            insertChunk384(ctx, TENANT_A, src, xmChash, vector(384));
+            insertChunk768(ctx, TENANT_A, tgt, xmChash, vector(768));
             // a manifest row still homed at the SOURCE (the pre-rename state)
             su.createStatement().execute("ALTER TABLE nexus.catalog_document_chunks NO FORCE ROW LEVEL SECURITY");
-            su.createStatement().execute("INSERT INTO nexus.catalog_document_chunks "
-                + "(tenant_id, doc_id, position, chash, collection) "
-                + "VALUES ('" + TENANT_A + "', 'xm-doc-1', 0, '" + "e".repeat(32) + "', '" + src + "')");
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                           CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                           CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+               .values(TENANT_A, "xm-doc-1", 0, xmChash, src)
+               .execute();
             su.createStatement().execute("ALTER TABLE nexus.catalog_document_chunks FORCE ROW LEVEL SECURITY");
         }
         Map<String, Integer> c = repo.renameCollection(TENANT_A, src, tgt);
@@ -367,17 +372,26 @@ class CatalogRenameCollectionTest {
         // row needs no NEW registry and does not trip the targetExists cross-model branch.
         final String old = "knowledge__ren-rb__minilm-l6-v2-384__v1";
         final String neu = "knowledge__ren-rb__minilm-l6-v2-384__v2";
-        final String ts = "2026-01-01 00:00:00+00";
+        final OffsetDateTime ts = OffsetDateTime.of(2026, 1, 1, 0, 0, 0, 0, java.time.ZoneOffset.UTC);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_C + "', '" + old + "')");
-            su.createStatement().execute(chunkInsert(TENANT_C, old, 384, "rbchunk"));
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(TENANT_C, old)
+               .execute();
+            insertChunk384(ctx, TENANT_C, old, chashBytes("rbchunk"), vector(384));
             // OLD telemetry row that will try to move to (ts,'collide',NEW)...
-            su.createStatement().execute("INSERT INTO nexus.search_telemetry (tenant_id, ts, query_hash, collection, raw_count, kept_count) "
-                + "VALUES ('" + TENANT_C + "', '" + ts + "', 'collide', '" + old + "', 1, 1)");
+            ctx.insertInto(SEARCH_TELEMETRY, SEARCH_TELEMETRY.TENANT_ID, SEARCH_TELEMETRY.TS,
+                           SEARCH_TELEMETRY.QUERY_HASH, SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.RAW_COUNT,
+                           SEARCH_TELEMETRY.KEPT_COUNT)
+               .values(TENANT_C, ts, "collide", old, 1, 1)
+               .execute();
             // ...but that PK already exists under NEW -> UPDATE collision mid-transaction.
-            su.createStatement().execute("INSERT INTO nexus.search_telemetry (tenant_id, ts, query_hash, collection, raw_count, kept_count) "
-                + "VALUES ('" + TENANT_C + "', '" + ts + "', 'collide', '" + neu + "', 9, 9)");
+            ctx.insertInto(SEARCH_TELEMETRY, SEARCH_TELEMETRY.TENANT_ID, SEARCH_TELEMETRY.TS,
+                           SEARCH_TELEMETRY.QUERY_HASH, SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.RAW_COUNT,
+                           SEARCH_TELEMETRY.KEPT_COUNT)
+               .values(TENANT_C, ts, "collide", neu, 9, 9)
+               .execute();
         }
 
         assertThatThrownBy(() -> repo.renameCollection(TENANT_C, old, neu))
@@ -410,10 +424,16 @@ class CatalogRenameCollectionTest {
         final String tgt = "knowledge__nrg-audit-tgt__minilm-l6-v2-384__v1";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + src + "')");
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + tgt + "')");
-            su.createStatement().execute("INSERT INTO nexus.gc_audit (tenant_id, operation, collection) VALUES ('"
-                + TENANT_A + "', 'purge', '" + tgt + "')");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(TENANT_A, src)
+               .execute();
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(TENANT_A, tgt)
+               .execute();
+            ctx.insertInto(GC_AUDIT, GC_AUDIT.TENANT_ID, GC_AUDIT.OPERATION, GC_AUDIT.COLLECTION)
+               .values(TENANT_A, "purge", tgt)
+               .execute();
         }
         assertThat(repo.supersedeCollection(TENANT_A, tgt, "knowledge__nrg-audit-successor__minilm-l6-v2-384__v1", ""))
             .as("precondition: target retired").isEqualTo(1);
@@ -434,10 +454,17 @@ class CatalogRenameCollectionTest {
         final String tgt = "knowledge__nrg-data-tgt__minilm-l6-v2-384__v1";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + src + "')");
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + tgt + "')");
-            su.createStatement().execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-                + "VALUES ('" + TENANT_A + "', 'nrg-data-doc', 'Doc', '" + tgt + "')");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(TENANT_A, src)
+               .execute();
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(TENANT_A, tgt)
+               .execute();
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .values(TENANT_A, "nrg-data-doc", "Doc", tgt)
+               .execute();
         }
         assertThat(repo.supersedeCollection(TENANT_A, tgt, "knowledge__nrg-data-successor__minilm-l6-v2-384__v1", ""))
             .as("precondition: target retired").isEqualTo(1);
@@ -456,8 +483,13 @@ class CatalogRenameCollectionTest {
         final String tgt = "knowledge__nrg-empty-tgt__minilm-l6-v2-384__v1";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + src + "')");
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + tgt + "')");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(TENANT_A, src)
+               .execute();
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(TENANT_A, tgt)
+               .execute();
         }
         assertThat(repo.supersedeCollection(TENANT_A, tgt, src, ""))
             .as("precondition: target retired").isEqualTo(1);
@@ -470,28 +502,31 @@ class CatalogRenameCollectionTest {
 
     /** Seed one full collection (all re-homed lifecycle tables) for {@code tenant}. Superuser; bypasses RLS. */
     private static void seedFullCollection(Connection su, String tenant, String coll) throws Exception {
-        var st = su.createStatement();
-        st.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenant + "', '" + coll + "')");
-        st.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-            + "VALUES ('" + tenant + "', 'rn-doc-1', 'Doc 1', '" + coll + "')");
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+           .values(tenant, coll)
+           .execute();
+        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                       CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+           .values(tenant, "rn-doc-1", "Doc 1", coll)
+           .execute();
         // chunks: 2/1/1 across three dims, one unified nexus.chunks table (RDR-191).
-        st.execute(chunkInsert(tenant, coll, 384, "rn384a"));
+        insertChunk384(ctx, tenant, coll, chashBytes("rn384a"), vector(384));
         // RDR-194 P3d (nexus-tk070.p3d): rn384b and rn768a below are REPURPOSED
-        // (decode(hexChash(...),'hex') identity, not the file's own chash(seed)
-        // escape-format shape) to ALSO back the two topic_assignments rows
-        // further down via topic_assignments_chunk_fk -- reusing two of the four
-        // already-seeded chunks rather than minting two more, so the "chunks
-        // (unified, 2+1+1)" count assertion elsewhere stays exactly 4. The two
-        // encodings are NOT interchangeable (chash(seed) stores raw ASCII bytes
-        // of a hex-digit-shaped string via bytea "escape format"; decode(...,
-        // 'hex') stores the genuine hex-decoded bytes), so this chunk's chash is
-        // no longer chash("rn384b") -- nothing else in this file references it
-        // by that name (unlike rn384a, reused by the manifest INSERT below).
-        st.execute("INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-            + "VALUES ('" + tenant + "', '" + coll + "', decode('" + hexChash("rn-doc-1") + "', 'hex'), 'text', " + vec(384) + "::vector)");
-        st.execute("INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768) "
-            + "VALUES ('" + tenant + "', '" + coll + "', decode('" + hexChash("rn-doc-2") + "', 'hex'), 'text', " + vec(768) + "::vector)");
-        st.execute(chunkInsert(tenant, coll, 1024, "rn1024a"));
+        // (HexFormat.parseHex(hexChash(...)) identity, not the file's own
+        // chashBytes(seed) escape-format shape) to ALSO back the two
+        // topic_assignments rows further down via topic_assignments_chunk_fk --
+        // reusing two of the four already-seeded chunks rather than minting two
+        // more, so the "chunks (unified, 2+1+1)" count assertion elsewhere stays
+        // exactly 4. The two encodings are NOT interchangeable (chashBytes(seed)
+        // stores raw ASCII bytes of a hex-digit-shaped string via bytea "escape
+        // format"; HexFormat.parseHex(...) stores the genuine hex-decoded bytes),
+        // so this chunk's chash is no longer chashBytes("rn384b") -- nothing else
+        // in this file references it by that name (unlike rn384a, reused by the
+        // manifest INSERT below).
+        insertChunk384(ctx, tenant, coll, hexChashBytes("rn-doc-1"), vector(384));
+        insertChunk768(ctx, tenant, coll, hexChashBytes("rn-doc-2"), vector(768));
+        insertChunk1024(ctx, tenant, coll, chashBytes("rn1024a"), vector(1024));
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
         // matching nexus.chunks row for the manifest insert below -- reuse rn384a's
         // chash (rather than minting a fifth, distinct chunk) so the "chunks
@@ -499,38 +534,57 @@ class CatalogRenameCollectionTest {
         // nexus-7nrvr: catalog_document_chunks.collection is NOT NULL
         // (catalog-025-collection-not-null.xml) — the document above is
         // already registered under coll, so stamp the manifest row the same.
-        st.execute("INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-            + "VALUES ('" + tenant + "', 'rn-doc-1', 0, '" + chash("rn384a") + "', '" + coll + "')");
+        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                       CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                       CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+           .values(tenant, "rn-doc-1", 0, chashBytes("rn384a"), coll)
+           .execute();
         // (chash_index seeds removed — RDR-187/nexus-piwya.9: router dropped)
         // topics: 1 (explicit id)
         long topicId = Math.abs((long) (tenant + coll).hashCode());
-        st.execute("INSERT INTO nexus.topics (id, tenant_id, label, collection, doc_count, created_at, review_status) "
-            + "VALUES (" + topicId + ", '" + tenant + "', 'topic-rn', '" + coll + "', 0, NOW(), 'pending')");
+        ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
+                       TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+           .values(topicId, tenant, "topic-rn", coll, 0, OffsetDateTime.now(), "pending")
+           .execute();
         // taxonomy_meta: 1 (fk-003-4 RESTRICT)
-        st.execute("INSERT INTO nexus.taxonomy_meta (tenant_id, collection) VALUES ('" + tenant + "', '" + coll + "')");
+        ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+           .values(tenant, coll)
+           .execute();
         // topic_assignments: 2 (source_collection=coll). doc_id is bytea now
         // (nexus-tk070.p3c) — a genuine 64-hex chash, independent of the catalog
         // tumbler string (topic_assignments.doc_id has no FK to catalog_documents).
-        // RDR-194 P3d (nexus-tk070.p3d): decode(...,'hex') here (NOT a bare string
+        // RDR-194 P3d (nexus-tk070.p3d): HexFormat.parseHex here (NOT a bare string
         // literal, which would store the ASCII bytes of the hex STRING via bytea
-        // "escape format", never matching a real decode()'d chunks row) so both
-        // rows resolve against the two REPURPOSED chunks seeded above.
-        st.execute("INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
-            + "VALUES ('" + tenant + "', decode('" + hexChash("rn-doc-1") + "', 'hex'), " + topicId + ", 'projection', '" + coll + "', NOW())");
-        st.execute("INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
-            + "VALUES ('" + tenant + "', decode('" + hexChash("rn-doc-2") + "', 'hex'), " + topicId + ", 'projection', '" + coll + "', NOW())");
+        // "escape format", never matching a real decoded row) so both rows resolve
+        // against the two REPURPOSED chunks seeded above.
+        ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                       TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                       TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+           .values(tenant, hexChashBytes("rn-doc-1"), topicId, "projection", coll, OffsetDateTime.now())
+           .execute();
+        ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                       TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                       TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+           .values(tenant, hexChashBytes("rn-doc-2"), topicId, "projection", coll, OffsetDateTime.now())
+           .execute();
         // centroids: one per dim, one unified nexus.taxonomy_centroids table (RDR-191).
         // PK is (tenant_id, collection, topic_id) -- three DIFFERENT topic_ids, not
         // the shared `topicId` above (would collide on the unified PK; pre-unification
         // these lived in three separate physical tables and could share one topic_id).
         // hygiene-001 step 9b (nexus-tk070.p6a follow-on): label is NOT NULL now,
         // no default -- supply it explicitly.
-        st.execute("INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, label, embedding_384) "
-            + "VALUES ('" + tenant + "', '" + coll + "', " + topicId + ", '', " + vec(384) + "::vector)");
-        st.execute("INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, label, embedding_768) "
-            + "VALUES ('" + tenant + "', '" + coll + "', " + (topicId + 1) + ", '', " + vec(768) + "::vector)");
-        st.execute("INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, label, embedding_1024) "
-            + "VALUES ('" + tenant + "', '" + coll + "', " + (topicId + 2) + ", '', " + vec(1024) + "::vector)");
+        ctx.insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                       TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.EMBEDDING_384)
+           .values(tenant, coll, topicId, "", vector(384))
+           .execute();
+        ctx.insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                       TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.EMBEDDING_768)
+           .values(tenant, coll, topicId + 1, "", vector(768))
+           .execute();
+        ctx.insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                       TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.EMBEDDING_1024)
+           .values(tenant, coll, topicId + 2, "", vector(1024))
+           .execute();
         // document_aspects: 2, both doc-rooted at rn-doc-1 (the collection's only
         // registered catalog_documents row -- catalog_documents count elsewhere in
         // this fixture is asserted ==1, so a second row cannot be introduced here).
@@ -538,61 +592,115 @@ class CatalogRenameCollectionTest {
         // NOT NULL now, reversing fk-001-2's nullable conversion -- the second row
         // used to be DOC-LESS (doc_id=NULL); that state is no longer representable,
         // so it is now a second row against the same doc, distinguished by source_path.
-        st.execute("INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) "
-            + "VALUES ('" + tenant + "', '" + coll + "', '/p/a1.md', NOW(), 'v1', 'docling', 'rn-doc-1', 'file:///p/a1.md')");
-        st.execute("INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) "
-            + "VALUES ('" + tenant + "', '" + coll + "', '/p/a2.md', NOW(), 'v1', 'docling', 'rn-doc-1', 'file:///p/a2.md')");
+        ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                       DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                       DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+           .values(tenant, coll, "/p/a1.md", OffsetDateTime.now(), "v1", "docling", "rn-doc-1", "file:///p/a1.md")
+           .execute();
+        ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                       DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                       DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+           .values(tenant, coll, "/p/a2.md", OffsetDateTime.now(), "v1", "docling", "rn-doc-1", "file:///p/a2.md")
+           .execute();
         // document_highlights: 1. hygiene-001 step 3: source_uri is NOT NULL now too.
-        st.execute("INSERT INTO nexus.document_highlights (tenant_id, doc_id, collection, source_uri, highlights_md, ingested_at) "
-            + "VALUES ('" + tenant + "', 'rn-doc-1', '" + coll + "', 'file:///rn-doc-1-hl', 'hi', NOW())");
+        ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
+                       DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.SOURCE_URI,
+                       DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+           .values(tenant, "rn-doc-1", coll, "file:///rn-doc-1-hl", "hi", OffsetDateTime.now())
+           .execute();
         // aspect_extraction_queue: 2, both doc-rooted at rn-doc-1 (hygiene-001 step 2:
         // doc_id is NOT NULL now -- see the document_aspects comment above for why
         // the second row is no longer DOC-LESS).
-        st.execute("INSERT INTO nexus.aspect_extraction_queue (tenant_id, collection, source_path, status, enqueued_at, doc_id) "
-            + "VALUES ('" + tenant + "', '" + coll + "', '/p/q1.md', 'pending', NOW(), 'rn-doc-1')");
-        st.execute("INSERT INTO nexus.aspect_extraction_queue (tenant_id, collection, source_path, status, enqueued_at, doc_id) "
-            + "VALUES ('" + tenant + "', '" + coll + "', '/p/q2.md', 'pending', NOW(), 'rn-doc-1')");
+        ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID, ASPECT_EXTRACTION_QUEUE.COLLECTION,
+                       ASPECT_EXTRACTION_QUEUE.SOURCE_PATH, ASPECT_EXTRACTION_QUEUE.STATUS,
+                       ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT, ASPECT_EXTRACTION_QUEUE.DOC_ID)
+           .values(tenant, coll, "/p/q1.md", "pending", OffsetDateTime.now(), "rn-doc-1")
+           .execute();
+        ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID, ASPECT_EXTRACTION_QUEUE.COLLECTION,
+                       ASPECT_EXTRACTION_QUEUE.SOURCE_PATH, ASPECT_EXTRACTION_QUEUE.STATUS,
+                       ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT, ASPECT_EXTRACTION_QUEUE.DOC_ID)
+           .values(tenant, coll, "/p/q2.md", "pending", OffsetDateTime.now(), "rn-doc-1")
+           .execute();
         // search_telemetry: 2 (no FK, but re-homed)
-        st.execute("INSERT INTO nexus.search_telemetry (tenant_id, ts, query_hash, collection, raw_count, kept_count) "
-            + "VALUES ('" + tenant + "', NOW(), 'qh1', '" + coll + "', 10, 5)");
-        st.execute("INSERT INTO nexus.search_telemetry (tenant_id, ts, query_hash, collection, raw_count, kept_count) "
-            + "VALUES ('" + tenant + "', NOW(), 'qh2', '" + coll + "', 8, 4)");
+        ctx.insertInto(SEARCH_TELEMETRY, SEARCH_TELEMETRY.TENANT_ID, SEARCH_TELEMETRY.TS, SEARCH_TELEMETRY.QUERY_HASH,
+                       SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.RAW_COUNT, SEARCH_TELEMETRY.KEPT_COUNT)
+           .values(tenant, OffsetDateTime.now(), "qh1", coll, 10, 5)
+           .execute();
+        ctx.insertInto(SEARCH_TELEMETRY, SEARCH_TELEMETRY.TENANT_ID, SEARCH_TELEMETRY.TS, SEARCH_TELEMETRY.QUERY_HASH,
+                       SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.RAW_COUNT, SEARCH_TELEMETRY.KEPT_COUNT)
+           .values(tenant, OffsetDateTime.now(), "qh2", coll, 8, 4)
+           .execute();
         // hook_failures: 1 (no FK, but re-homed)
-        st.execute("INSERT INTO nexus.hook_failures (tenant_id, doc_id, collection, hook_name, error, occurred_at) "
-            + "VALUES ('" + tenant + "', 'rn-doc-1', '" + coll + "', 'post_store', 'boom', NOW())");
+        ctx.insertInto(HOOK_FAILURES, HOOK_FAILURES.TENANT_ID, HOOK_FAILURES.DOC_ID, HOOK_FAILURES.COLLECTION,
+                       HOOK_FAILURES.HOOK_NAME, HOOK_FAILURES.ERROR, HOOK_FAILURES.OCCURRED_AT)
+           .values(tenant, "rn-doc-1", coll, "post_store", "boom", OffsetDateTime.now())
+           .execute();
         // relevance_log: 2 (no FK, but re-homed — RDR-164 §Approach Phase 3 third audit table)
         // nexus-lgdel.l1: chunk_id must be canonical 64-hex TEXT now
         // (relevance_log_chunk_id_canonical_check, legacy-001-drop-chash-
-        // alias.xml) — 'ch1'/'ch2' no longer pass. NOT the chash(seed) helper
-        // below: that produces a 32-ASCII-char string relying on Postgres's
-        // bytea escape-literal cast (32 chars -> 32 bytes) for the chunks.chash
-        // BYTEA column; chunk_id here is TEXT and needs a real 64-hex STRING.
-        st.execute("INSERT INTO nexus.relevance_log (tenant_id, query, chunk_id, collection, action, session_id, timestamp) "
-            + "VALUES ('" + tenant + "', 'q1', '0b2ace5def2ecf1234ae0db2a062b83fe40dd330121844b37bc8bdfb6b2f3ea5', "
-            + "'" + coll + "', 'click', 's1', NOW())");
-        st.execute("INSERT INTO nexus.relevance_log (tenant_id, query, chunk_id, collection, action, session_id, timestamp) "
-            + "VALUES ('" + tenant + "', 'q2', 'f7088d7f354fadfc6fe69df2f0a9f2057a715e9a62672258a88ee200e72f1c22', "
-            + "'" + coll + "', 'skip', 's1', NOW())");
+        // alias.xml) — 'ch1'/'ch2' no longer pass. NOT the chashBytes(seed) helper
+        // below: that produces a 32-ASCII-char bytea value for the chunks.chash
+        // column; chunk_id here is TEXT and needs a real 64-hex STRING.
+        ctx.insertInto(RELEVANCE_LOG, RELEVANCE_LOG.TENANT_ID, RELEVANCE_LOG.QUERY, RELEVANCE_LOG.CHUNK_ID,
+                       RELEVANCE_LOG.COLLECTION, RELEVANCE_LOG.ACTION, RELEVANCE_LOG.SESSION_ID,
+                       RELEVANCE_LOG.TIMESTAMP)
+           .values(tenant, "q1", "0b2ace5def2ecf1234ae0db2a062b83fe40dd330121844b37bc8bdfb6b2f3ea5", coll, "click",
+                   "s1", OffsetDateTime.now())
+           .execute();
+        ctx.insertInto(RELEVANCE_LOG, RELEVANCE_LOG.TENANT_ID, RELEVANCE_LOG.QUERY, RELEVANCE_LOG.CHUNK_ID,
+                       RELEVANCE_LOG.COLLECTION, RELEVANCE_LOG.ACTION, RELEVANCE_LOG.SESSION_ID,
+                       RELEVANCE_LOG.TIMESTAMP)
+           .values(tenant, "q2", "f7088d7f354fadfc6fe69df2f0a9f2057a715e9a62672258a88ee200e72f1c22", coll, "skip",
+                   "s1", OffsetDateTime.now())
+           .execute();
     }
 
-    /** RDR-191 (nexus-o8dil.48): chunks_384/768/1024 unified into nexus.chunks --
-     *  {@code dim} now selects the target embedding_&lt;dim&gt; column, not a table. */
-    private static String chunkInsert(String tenant, String coll, int dim, String seed) {
-        return "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_" + dim + ") "
-            + "VALUES ('" + tenant + "', '" + coll + "', '" + chash(seed) + "', 'text', " + vec(dim) + "::vector)";
+    /** RDR-191 (nexus-o8dil.48): chunks_384/768/1024 unified into nexus.chunks -- one
+     *  insert helper per dim since jOOQ's typed column list is fixed at compile time. */
+    private static void insertChunk384(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                       CHUNKS.EMBEDDING_384)
+           .values(tenant, collection, chashBytes, "text", v)
+           .execute();
     }
 
-    private static String vec(int dim) {
-        return IntStream.range(0, dim).mapToObj(i -> "0.1").collect(Collectors.joining(",", "'[", "]'"));
+    private static void insertChunk768(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                       CHUNKS.EMBEDDING_768)
+           .values(tenant, collection, chashBytes, "text", v)
+           .execute();
     }
 
-    private static String chash(String seed) {
-        return (seed.replaceAll("[^0-9a-f]", "a") + "0".repeat(32)).substring(0, 32);
+    private static void insertChunk1024(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                       CHUNKS.EMBEDDING_1024)
+           .values(tenant, collection, chashBytes, "text", v)
+           .execute();
+    }
+
+    /** A pgvector value with every one of {@code dim} components equal to {@code 0.1}. */
+    private static Vector vector(int dim) {
+        float[] v = new float[dim];
+        java.util.Arrays.fill(v, 0.1f);
+        return Vector.of(v);
+    }
+
+    /** 32-char hex-alphabet label, stored as its own ASCII bytes (no real hash semantics --
+     *  matches the pre-conversion raw-SQL behavior of a bare string literal into a
+     *  {@code bytea} column via PostgreSQL's escape-format input, {@link #hexChash} below is
+     *  the genuine-hash counterpart). */
+    private static byte[] chashBytes(String seed) {
+        String label = (seed.replaceAll("[^0-9a-f]", "a") + "0".repeat(32)).substring(0, 32);
+        return label.getBytes(StandardCharsets.US_ASCII);
+    }
+
+    private static byte[] hexChashBytes(String seed) {
+        return java.util.HexFormat.of().parseHex(hexChash(seed));
     }
 
     /** Genuine 64-lowercase-hex sha256 chash — required for topic_assignments.doc_id
-     *  (bytea since nexus-tk070.p3c), unlike {@link #chash} above which is a 32-char
-     *  synthetic id used only for the chunks/manifest {@code chash} column. */
+     *  (bytea since nexus-tk070.p3c), unlike {@link #chashBytes} above which is a
+     *  32-char synthetic id used only for the chunks/manifest {@code chash} column. */
     private static String hexChash(String seed) {
         try {
             byte[] digest = java.security.MessageDigest.getInstance("SHA-256")

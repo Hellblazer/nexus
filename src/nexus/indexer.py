@@ -1154,6 +1154,7 @@ def _catalog_hook(
         # for every subsequent file in this run. Found via Hal's
         # ghost-chunk class on 2026-05-02.
         skipped_files: list[tuple[Path, str]] = []
+        reconciled: list[tuple[Path, str]] = []  # nexus-53cae: registered onto a live row outside this owner
         fairness_yielded = 0  # RDR-146 P2: files deferred to the next pass.
         ephemeral_skipped = 0  # nexus-u8n4r: worktree/tempdir registrations refused.
         import hashlib as _hl  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
@@ -1183,6 +1184,14 @@ def _catalog_hook(
         # nexus-xedhp: changed-but-existing docs, batched via update_many
         # (Pass 1b, below) instead of an inline per-file writer.update().
         changed_batch: list[tuple[Path, dict]] = []
+        # Sam's ruling 2026-09-04 (nexus-y8bkt): supersedes edges are part
+        # of indexing. Link generation below is incremental over NEW
+        # registrations, so an RDR whose frontmatter gained supersedes /
+        # superseded_by after it was first registered never got its edge
+        # (measured: zero extractor edges on a tenant with 189 RDRs). An
+        # existing RDR whose CONTENT hash changed is re-fed to the
+        # dependency generator as if new; head-hash-only bumps are not.
+        relink_rdr_tumblers: list = []
         for abs_path, content_type, collection_name in indexed_files:
             if _batch_producer and await_fair_window(
                 writer.is_interactive_write_pending, on_locked,
@@ -1336,6 +1345,12 @@ def _catalog_hook(
                             and existing.meta.get("content_hash", "") != file_hash
                         )
                     )
+                    if (
+                        content_type == "rdr"
+                        and file_hash
+                        and existing.meta.get("content_hash", "") != file_hash
+                    ):
+                        relink_rdr_tumblers.append(existing.tumbler)
                     if changed:
                         # nexus-xedhp: accumulate for the batched update_many
                         # below instead of an inline per-file writer.update()
@@ -1486,20 +1501,34 @@ def _catalog_hook(
             _page_t0 = time.monotonic()
             _page_ok = False
             try:
-                tumblers = writer.register_many(owner, page_docs)
+                pairs = writer.register_many(owner, page_docs, with_created=True)
                 _page_ok = True
                 # register_many is 1:1-or-raise; guard the invariant explicitly so
                 # a short return can never SILENTLY truncate via zip() (the ghost-
                 # doc class). A mismatch routes to the per-file fallback below.
-                if len(tumblers) != len(page):
+                if len(pairs) != len(page):
                     raise ValueError(
-                        f"register_many returned {len(tumblers)} tumblers for "
+                        f"register_many returned {len(pairs)} tumblers for "
                         f"{len(page)} docs"
                     )
-                for (path, doc), tum in zip(page, tumblers):
-                    new_tumblers.append(tum)
+                for (path, doc), (tum, created) in zip(page, pairs):
                     file_to_doc_id[path] = str(tum)
-                    new_content_types.add(doc.get("content_type", ""))
+                    if created:
+                        new_tumblers.append(tum)
+                        new_content_types.add(doc.get("content_type", ""))
+                        continue
+                    # The owner-scoped snapshot had no row for this path,
+                    # yet the server reconciled onto a live row by
+                    # source_uri: a row under ANOTHER owner (nexus-53cae:
+                    # 198 RDRs under the curator owner with absolute paths,
+                    # reported as "199 new" on every run for weeks). Not new,
+                    # not linked, and named, so the count cannot lie again.
+                    reconciled.append((path, str(tum)))
+                    _log.warning(
+                        "catalog_register_reconciled_onto_existing_row",
+                        repo=repo_name, rel_path=doc.get("file_path", ""),
+                        tumbler=str(tum), owner=str(owner),
+                    )
             except Exception:  # noqa: BLE001 — batch unrecoverable; per-file isolation fallback
                 _log.warning(
                     "catalog_register_many_failed_falling_back_per_file",
@@ -1507,13 +1536,24 @@ def _catalog_hook(
                 )
                 for path, doc in page:
                     try:
-                        tum = writer.register(
-                            owner, doc["title"],
+                        # with_created here too, or this fallback re-opens the
+                        # nexus-53cae miscount for every doc it handles
+                        # (review [24413] Major).
+                        tum, created = writer.register(
+                            owner, doc["title"], with_created=True,
                             **{k: v for k, v in doc.items() if k != "title"},
                         )
-                        new_tumblers.append(tum)
                         file_to_doc_id[path] = str(tum)
-                        new_content_types.add(doc.get("content_type", ""))
+                        if created:
+                            new_tumblers.append(tum)
+                            new_content_types.add(doc.get("content_type", ""))
+                        else:
+                            reconciled.append((path, str(tum)))
+                            _log.warning(
+                                "catalog_register_reconciled_onto_existing_row",
+                                repo=repo_name, rel_path=doc.get("file_path", ""),
+                                tumbler=str(tum), owner=str(owner),
+                            )
                     except Exception as exc:  # noqa: BLE001 — ghost-class per-file isolation
                         skipped_files.append((path, str(exc)))
                         _log.warning(
@@ -1531,12 +1571,17 @@ def _catalog_hook(
                     ok=_page_ok,
                 )
 
-        if skipped_files or ephemeral_skipped:
+        if skipped_files or ephemeral_skipped or reconciled:
             _updated = (
-                len(indexed_files) - len(new_tumblers)
+                len(indexed_files) - len(new_tumblers) - len(reconciled)
                 - len(skipped_files) - ephemeral_skipped
             )
             _skip_bits = []
+            if reconciled:
+                _skip_bits.append(
+                    f"{len(reconciled)} reconciled onto rows outside this owner "
+                    f"(nexus-53cae; see structlog warnings)"
+                )
             if skipped_files:
                 _skip_bits.append(f"{len(skipped_files)} skipped (see structlog warnings)")
             if ephemeral_skipped:
@@ -1602,16 +1647,21 @@ def _catalog_hook(
             else:
                 _log.debug("rdr_dependency_links_skipped_no_owner", repo=repo_name)
             for _kind, _gen in _generators:
+                _seed_tumblers = new_tumblers
+                _seed_types = new_content_types
+                if _kind == "rdr-dependency" and relink_rdr_tumblers:
+                    _seed_tumblers = [*new_tumblers, *relink_rdr_tumblers]
+                    _seed_types = {*new_content_types, "rdr"}
                 _announce = on_phase is not None and incremental_generator_applies(
-                    _kind, new_tumblers, new_content_types,
+                    _kind, _seed_tumblers, _seed_types,
                 )
                 if _announce:
                     on_phase(f"Catalog linking: {_kind}…")
                 _lg_t = time.monotonic()
                 try:
                     _link_counts[_kind] = _gen(
-                        cat, writer=writer, new_tumblers=new_tumblers,
-                        new_content_types=new_content_types,
+                        cat, writer=writer, new_tumblers=_seed_tumblers,
+                        new_content_types=_seed_types,
                     )
                 except Exception:
                     # Close the phase before the outer handler logs and

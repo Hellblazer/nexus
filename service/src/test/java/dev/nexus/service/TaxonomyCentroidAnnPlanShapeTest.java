@@ -5,15 +5,11 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.TaxonomyCentroidRepository;
 import dev.nexus.service.vectors.TaxonomyCentroidRepository.AnnHit;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.Table;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -24,6 +20,10 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_1024;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_384;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_768;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.within;
 
@@ -92,31 +92,10 @@ class TaxonomyCentroidAnnPlanShapeTest {
         pg = PgContainerHelper.start();
 
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + SVC_ROLE
-                + "') THEN CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
-                + "' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') "
-                + "THEN CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' NOSUPERUSER NOBYPASSRLS; "
-                + "END IF; END $$");
+            PgContainerHelper.applyProductSchema(su);
         }
-
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                          new ClassLoaderResourceAccessor(), db).update(new Contexts());
-        }
-
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.taxonomy_centroids TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
         }
 
         // Second role + pool, DEDICATED to the real-call companions (found during Step G
@@ -227,7 +206,7 @@ class TaxonomyCentroidAnnPlanShapeTest {
                     + embCol + ", label, doc_count) VALUES ('"
                     + TENANT + "', '" + coll + "', " + (CENTROIDS_PER_DIM + dim) + ", "
                     + "('[1' || repeat(',0', " + (dim - 1) + ") || ']')::vector, 'nearest', 1)");
-                st.execute("ANALYZE nexus.taxonomy_centroids");
+                PgContainerHelper.analyzeTable(su, TAXONOMY_CENTROIDS);
             }
 
             // Mixed-dim collection: topic 1 at 384-dim (near), topic 2 at 768-dim (near
@@ -241,19 +220,28 @@ class TaxonomyCentroidAnnPlanShapeTest {
                 "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, embedding_768, label, doc_count) "
                 + "VALUES ('" + TENANT + "', '" + COL_MIXED + "', 2, "
                 + "('[1' || repeat(',0', 767) || ']')::vector, 'mixed-768', 1)");
-            st.execute("ANALYZE nexus.taxonomy_centroids");
+            PgContainerHelper.analyzeTable(su, TAXONOMY_CENTROIDS);
         }
     }
 
-    private String explain(String sql) {
+    /** EXPLAIN a typed jOOQ table-function call over {@code taxonomy_ann_query_<dim>}
+     *  (nexus-cbo4a batch 3) -- a single generated table-function call has a typed
+     *  DSL form, so {@code ctx.explain(Query)} replaces the raw {@code "EXPLAIN " +
+     *  sql} JDBC text this used to build by hand. */
+    private String explain(Table<?> fn) {
         return tenantScope.withTenant(TENANT, ctx -> {
             dev.nexus.service.db.PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
-            StringBuilder sb = new StringBuilder();
-            for (var r : ctx.resultQuery("EXPLAIN " + sql).fetch()) {
-                sb.append(r.get(0, String.class)).append('\n');
-            }
-            return sb.toString();
+            return ctx.explain(ctx.selectFrom(fn)).plan();
         });
+    }
+
+    /** A length-{@code dim} typed pgvector value: first component 1.0, rest zero --
+     *  the SAME shape as the retired {@code "[1" + ",0".repeat(dim - 1) + "]"} literal,
+     *  for the {@code taxonomy_ann_query_<dim>.call(...)} conversions above. */
+    private static Vector queryVec(int dim) {
+        float[] v = new float[dim];
+        v[0] = 1.0f;
+        return Vector.of(v);
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -269,10 +257,8 @@ class TaxonomyCentroidAnnPlanShapeTest {
 
     @Test
     void annQuery_shape_usesFullHnswIndex_1024() {
-        String vec = "[1" + ",0".repeat(1023) + "]";
-        String sql = "SELECT * FROM nexus.taxonomy_ann_query_1024("
-            + "'" + vec + "'::vector, '" + COL_1024 + "', false, 10)";
-        String plan = explain(sql);
+        Table<?> fn = TAXONOMY_ANN_QUERY_1024.call(queryVec(1024), COL_1024, false, 10);
+        String plan = explain(fn);
         assertThat(plan)
             .as("annQuery's distance projection (1024-dim) must bind to the FULL"
                 + " idx_taxonomy_centroids_embedding_1024 HNSW index. Plan was:%n%s", plan)
@@ -290,10 +276,8 @@ class TaxonomyCentroidAnnPlanShapeTest {
 
     @Test
     void annQuery_shape_usesFullHnswIndex_768() {
-        String vec = "[1" + ",0".repeat(767) + "]";
-        String sql = "SELECT * FROM nexus.taxonomy_ann_query_768("
-            + "'" + vec + "'::vector, '" + COL_768 + "', false, 10)";
-        String plan = explain(sql);
+        Table<?> fn = TAXONOMY_ANN_QUERY_768.call(queryVec(768), COL_768, false, 10);
+        String plan = explain(fn);
         assertThat(plan)
             .as("annQuery's distance projection (768-dim) must bind to the FULL"
                 + " idx_taxonomy_centroids_embedding_768 HNSW index. Plan was:%n%s", plan)
@@ -306,10 +290,8 @@ class TaxonomyCentroidAnnPlanShapeTest {
 
     @Test
     void annQuery_shape_usesFullHnswIndex_384() {
-        String vec = "[1" + ",0".repeat(383) + "]";
-        String sql = "SELECT * FROM nexus.taxonomy_ann_query_384("
-            + "'" + vec + "'::vector, '" + COL_384 + "', false, 10)";
-        String plan = explain(sql);
+        Table<?> fn = TAXONOMY_ANN_QUERY_384.call(queryVec(384), COL_384, false, 10);
+        String plan = explain(fn);
         assertThat(plan)
             .as("annQuery's distance projection (384-dim) must bind to the FULL"
                 + " idx_taxonomy_centroids_embedding_384 HNSW index. Plan was:%n%s", plan)

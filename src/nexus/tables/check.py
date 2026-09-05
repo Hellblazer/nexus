@@ -60,6 +60,11 @@ UNPROVABLE_COVERAGE = "unprovable-coverage"
 UNMATCHED_ASSIGNMENT = "unmatched-assignment"
 #: Advisory: a declared dimension no row names (see ``_check_unused_dimensions``).
 UNUSED_DIMENSION = "unused-dimension"
+
+#: Advisory (nexus-q9u2n): an ordinary row whose every accepted cell is
+#: declared impossible by the table's ``[[impossible]]`` blocks. It can
+#: never fire; either the row or the impossible block is wrong.
+DEAD_ROW = "dead-row"
 # unknown-literal is a LOAD-time refusal (nexus.tables.load.UnknownLiteralError),
 # never a check()-time finding: by the time a Table exists, every match/guard
 # literal has already been proven to lie within its declared domain. The
@@ -149,23 +154,43 @@ def dimension_reason(table: Table, key: str) -> str | None:
 Assignment = tuple[str, ...]
 
 
-def full_product(dims: list[str], dimensions: dict[str, Dimension]) -> set[Assignment]:
-    """Every assignment over ``dims``, the universe coverage is proved against.
+def impossible_assignments(
+    dims: list[str], dimensions: dict[str, Dimension], impossible: tuple[FrozenMapping, ...]
+) -> set[Assignment]:
+    """Every assignment over ``dims`` that matches an ``[[impossible]]``
+    pair whose two dimensions are both in ``dims``. A pair naming a
+    dimension outside ``dims`` is not this group's business and is
+    ignored here (nexus-q9u2n)."""
+    out: set[Assignment] = set()
+    for pair in impossible:
+        if not all(d in dims for d in pair):
+            continue
+        ranges = [(pair[d],) if d in pair else dimensions[d].domain for d in dims]
+        out |= set(itertools.product(*ranges))
+    return out
 
-    KNOWN LIMIT: guard dimensions are assumed INDEPENDENT. The product is
-    the full cross-product of the declared domains, so a combination that
+
+def full_product(
+    dims: list[str],
+    dimensions: dict[str, Dimension],
+    impossible: tuple[FrozenMapping, ...] = (),
+) -> set[Assignment]:
+    """Every assignment over ``dims`` the coverage proof is run against:
+    the cross-product of the declared domains minus the cells the table's
+    ``[[impossible]]`` blocks rule out.
+
+    Guard dimensions are otherwise assumed INDEPENDENT. A combination that
     cannot occur in reality (an invariant enforced somewhere the table
     cannot see, such as "probe is never examined when pin_currency
-    blocks") is still a cell the checker demands a row for. This produces
-    false-positive coverage gaps, never false negatives, so the safety
-    direction holds; the cost is that authors must either write a row for
-    an impossible cell or keep the impossible value out of the domain.
-    docs/tables/release-choreography.toml does the second (its header calls
-    it short-circuit-by-omission and explains the dropped "n/a" value).
-    The limit was inherited from the design this borrows from and went
-    undocumented on both sides until the 2026-09-04 reanalysis; a table
-    author who hits a phantom gap should read this paragraph before
-    inventing a row.
+    blocks") is a cell the checker demands a row for, which is a
+    false-positive gap, never a false negative, so the safety direction
+    holds. Before nexus-q9u2n an author's only outs were a row for the
+    impossible cell or keeping the value out of the domain
+    (docs/tables/release-choreography.toml did the second; its header
+    called it short-circuit-by-omission). ``[[impossible]]`` is the third:
+    name the dependence, keep the value, and the checker subtracts the
+    cell. The limit was inherited from the design this borrows from and
+    went undocumented on both sides until the 2026-09-04 reanalysis.
     """
     ranges = [dimensions[d].domain for d in dims]
     size = 1
@@ -175,7 +200,7 @@ def full_product(dims: list[str], dimensions: dict[str, Dimension]) -> set[Assig
         raise ProductTooLargeError(
             f"scoped product over {dims} is {size} assignments, above the published bound of {PRODUCT_BOUND}"
         )
-    return set(itertools.product(*ranges))
+    return set(itertools.product(*ranges)) - impossible_assignments(dims, dimensions, impossible)
 
 
 def accepted_assignments(row: Row, dims: list[str], dimensions: dict[str, Dimension]) -> set[Assignment]:
@@ -372,11 +397,11 @@ def _check_group(table: Table, group: Group) -> list[Finding]:
         # overlap is still decidable on the dims that ARE provable.
         decidable = [d for d in dims if d not in unprovable]
         if decidable:
-            findings.extend(_check_overlap(group, decidable, table.dimensions))
+            findings.extend(_check_overlap(group, decidable, table.dimensions, table.impossible))
         return findings
 
-    findings.extend(_check_overlap(group, dims, table.dimensions))
-    findings.extend(_check_coverage(group, dims, table.dimensions))
+    findings.extend(_check_overlap(group, dims, table.dimensions, table.impossible))
+    findings.extend(_check_coverage(group, dims, table.dimensions, table.impossible))
     return findings
 
 
@@ -398,7 +423,12 @@ def _overlap_participants(group: Group) -> list[Row]:
     return [r for r in group.rows if not (r.escape and not r.guard)]
 
 
-def _check_overlap(group: Group, dims: list[str], dimensions: dict[str, Dimension]) -> list[Finding]:
+def _check_overlap(
+    group: Group,
+    dims: list[str],
+    dimensions: dict[str, Dimension],
+    impossible: tuple[FrozenMapping, ...] = (),
+) -> list[Finding]:
     """Flag ANY non-empty intersection among participants' accepted sets.
 
     RDR-201 sec Background is explicit: there is no hit policy, so an
@@ -419,7 +449,8 @@ def _check_overlap(group: Group, dims: list[str], dimensions: dict[str, Dimensio
     """
     findings: list[Finding] = []
     participants = _overlap_participants(group)
-    accepted = {r.id: accepted_assignments(r, dims, dimensions) for r in participants}
+    ruled_out = impossible_assignments(dims, dimensions, impossible)
+    accepted = {r.id: accepted_assignments(r, dims, dimensions) - ruled_out for r in participants}
     for a, b in itertools.combinations(sorted(accepted), 2):
         left, right = accepted[a], accepted[b]
         inter = left & right
@@ -443,27 +474,51 @@ def _check_overlap(group: Group, dims: list[str], dimensions: dict[str, Dimensio
     return findings
 
 
-def _check_coverage(group: Group, dims: list[str], dimensions: dict[str, Dimension]) -> list[Finding]:
-    product = full_product(dims, dimensions)
+def _check_coverage(
+    group: Group,
+    dims: list[str],
+    dimensions: dict[str, Dimension],
+    impossible: tuple[FrozenMapping, ...] = (),
+) -> list[Finding]:
+    product = full_product(dims, dimensions, impossible)
 
     ordinary = [r for r in group.rows if not r.escape]
     escapes = [r for r in group.rows if r.escape]
 
+    findings: list[Finding] = []
     union_ordinary: set[Assignment] = set()
     for r in ordinary:
-        union_ordinary |= accepted_assignments(r, dims, dimensions)
+        accepted = accepted_assignments(r, dims, dimensions)
+        if accepted and not (accepted & product):
+            # Every cell this row accepts is declared impossible: it can
+            # never fire (nexus-q9u2n). Advisory, not blocking -- the
+            # table still proves, but one of the two declarations is wrong.
+            findings.append(
+                Finding(
+                    code=DEAD_ROW,
+                    group=group.match,
+                    detail={
+                        "row": r.id,
+                        "message": (
+                            f"row {r.id!r} in group {group.match!r} accepts only cells the "
+                            "table's [[impossible]] blocks rule out; it can never fire"
+                        ),
+                    },
+                )
+            )
+        union_ordinary |= accepted & product
 
     if union_ordinary == product:
-        return []  # proved by the ordinary rows alone; escape rows (if any) closed nothing
+        return findings  # proved by the ordinary rows alone; escape rows (if any) closed nothing
 
     union_all = set(union_ordinary)
     for r in escapes:
-        union_all |= accepted_assignments(r, dims, dimensions)
+        union_all |= accepted_assignments(r, dims, dimensions) & product
 
     if union_all != product:
         missing = sorted(product - union_all)
         sample = [dict(zip(dims, a)) for a in missing[:10]]
-        return [
+        return findings + [
             Finding(
                 code=COVERAGE_GAP,
                 group=group.match,
@@ -483,7 +538,7 @@ def _check_coverage(group: Group, dims: list[str], dimensions: dict[str, Dimensi
 
     bare_escapes = sorted(r.id for r in escapes if not r.guard)
     if bare_escapes:
-        return [
+        return findings + [
             Finding(
                 code=CLOSED_BY_ESCAPE,
                 group=group.match,
@@ -497,4 +552,4 @@ def _check_coverage(group: Group, dims: list[str], dimensions: dict[str, Dimensi
                 },
             )
         ]
-    return []  # closed by ordinary rows + a non-bare escape row: proved, no advisory
+    return findings  # closed by ordinary rows + a non-bare escape row: proved, no advisory

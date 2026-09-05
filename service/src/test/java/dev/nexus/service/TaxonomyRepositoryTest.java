@@ -4,12 +4,6 @@ import dev.nexus.service.db.CatalogIdentityConflictException;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.*;
 import org.postgresql.util.PSQLException;
 
@@ -122,56 +116,18 @@ class TaxonomyRepositoryTest {
         pg = PgContainerHelper.start();
 
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + SVC_ROLE + "') THEN " +
-                "    CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS + "'; " +
-                "  END IF; " +
-                "END $$");
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
-                "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; " +
-                "  END IF; " +
-                "END $$");
+            PgContainerHelper.applyProductSchema(su);
         }
-
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            Liquibase liquibase = new Liquibase(
-                "db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(), db);
-            liquibase.update(new Contexts());
+            // topics_id_seq UPDATE (g37fr FINDING 2, mirrors production's
+            // taxonomy-005-topics-seq-update-grant.xml so the fidelity import can
+            // setval past imported ids) is granted by db.changelog-test-role.xml
+            // itself (nexus-cbo4a batch 1b: widened rather than repeated per-class).
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
         }
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            String schema = "nexus";
-            for (String table : List.of("topics", "taxonomy_meta", "topic_assignments", "topic_links")) {
-                su.createStatement().execute(
-                    "GRANT SELECT, INSERT, UPDATE, DELETE ON " + schema + "." + table + " TO " + SVC_ROLE);
-            }
-            su.createStatement().execute(
-                // UPDATE mirrors taxonomy-005 (production grants nexus_svc UPDATE on
-                // this one sequence so the fidelity import can setval past imported
-                // ids — g37fr FINDING 2); SELECT for the GREATEST(last_value, ...).
-                "GRANT USAGE, SELECT, UPDATE ON SEQUENCE " + schema + ".topics_id_seq TO " + SVC_ROLE);
-            // Grant SELECT on catalog_documents to the DML role for general catalog
-            // query coverage in mixed tests. (nexus-sa14p: importAssignment no longer
-            // reads catalog_documents — fk_ta_catalog_doc was removed — so this is not
-            // strictly required for assignment imports, but is harmless and mirrors the
-            // prod nexus_svc grant set.)
-            su.createStatement().execute(
-                "GRANT SELECT ON " + schema + ".catalog_documents TO " + SVC_ROLE);
-            // RDR-156 P0.2: assignTopic/importAssignment now auto-stub catalog_collections;
-            // the svc role needs INSERT (and SELECT for the ON CONFLICT check).
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT ON " + schema + ".catalog_collections TO " + SVC_ROLE);
-            su.createStatement().execute("GRANT USAGE ON SCHEMA " + schema + " TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "ALTER ROLE " + SVC_ROLE + " SET search_path TO " + schema + ", public");
 
             // nexus-b7v6i: topic_assignments.doc_id now enforces a FK to catalog_documents(tenant_id, tumbler).
             // Seed all doc_ids used as tumblers in this test class so FK checks pass.
@@ -870,19 +826,15 @@ class TaxonomyRepositoryTest {
     void rls_withCheck_rejectsWrongTenant() throws Exception {
         // Direct INSERT with tenant_id != GUC → WITH CHECK violation
         // The GUC is 'injector-tenant' but the row has tenant_id='other-tenant' → rejected
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            // Grant INSERT so the svc role can attempt the INSERT (it will be rejected by RLS)
-            su.createStatement().execute(
-                "GRANT INSERT ON nexus.topics TO " + SVC_ROLE);
-        }
+        // (INSERT on nexus.topics is already granted to SVC_ROLE by bootstrapServiceRole's
+        // ALL TABLES IN SCHEMA nexus grant -- no per-test grant needed, nexus-cbo4a batch 1b.)
 
         com.zaxxer.hikari.HikariDataSource svcDsForCheck = buildSvcDataSource();
         try {
             try (Connection c = svcDsForCheck.getConnection()) {
                 c.setAutoCommit(false);
                 // Stamp GUC as 'injector-tenant'
-                c.createStatement().execute("SELECT set_config('nexus.tenant', 'injector-tenant', true)");
+                PgContainerHelper.setTenant(c, TenantScope.DEFAULT_TENANT_GUC, "injector-tenant", true);
                 // Attempt INSERT with a different tenant_id → WITH CHECK rejects
                 var e = assertThrows(PSQLException.class,
                     () -> c.createStatement().execute(

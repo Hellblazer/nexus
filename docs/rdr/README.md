@@ -174,7 +174,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-156](rdr-156-vector-store-capability-leverage.md) | Vector-Store Capability Leverage — Unify the Retrieval Substrate: Combined Queries, Schema-Enforced Integrity, and Specialized Functions over the RDR-155 pgvector Chunk Tables | Architecture | Closed | 2026-06-10 |
 | [RDR-157](rdr-157-end-user-distribution-and-installation.md) | End-User Distribution and Installation: Native-Image Binaries, Embedded PG16+pgvector, Two-Distribution Model | Architecture | Closed | 2026-06-11 |
 | [RDR-158](rdr-158-retire-sqlite-t2-backend.md) | Retire the SQLite T2 Backend: Make the PG Service the Only T2 Path | Architecture | Closed | 2026-06-12 |
-| [RDR-159](rdr-159-guided-upgrade-migration.md) | Guided Chroma-to-Service Upgrade Migration: One Survivable Command over the Proven ETL Primitives | Architecture | Closed | 2026-06-13 |
+| [RDR-159](rdr-159-guided-upgrade-migration.md) | Guided Chroma-to-Service Upgrade Migration: One Survivable Command over the Proven ETL Primitives | Architecture | Superseded by RDR-185 | 2026-06-13 |
 | [RDR-160](rdr-160-bge-768-local-service-embedder.md) | bge-768 as the Local-Mode T3 Embedder in the Java Service: Replace MiniLM-384 ONNX, Parity-Gated Against fastembed | Architecture | Closed | 2026-06-15 |
 | [RDR-161](rdr-161-native-only-local-install.md) | Native-Only Local Install: Expunge the JAR Launch Path, Acquire the Signed Native Binary and PG Bundle | Architecture | Closed | 2026-06-18 |
 | [RDR-162](rdr-162-truthful-post-rdr160-upgrade-path.md) | Truthful Post-RDR-160 Upgrade Path: Fix the Migration Model Classifier and Make the Legacy 384→768 Re-Index→Migrate Chain a Rehearsal-Proven Primitive | Architecture | Closed | 2026-06-18 |

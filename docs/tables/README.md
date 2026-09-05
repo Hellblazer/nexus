@@ -17,3 +17,25 @@ scripts to each other cell by cell.
 `src/nexus/tables/`) and lints every table it finds. This file exists so
 the directory has something to hold before the first repo-only table
 lands.
+
+## `[[impossible]]` blocks (nexus-q9u2n)
+
+The checker proves coverage and overlap over the full cross-product of a
+group's guard domains, which assumes the dimensions are independent. When
+two values cannot co-occur (a probe result is never examined on the branch
+where the pin check blocks), an author used to have two outs: write a row
+for the phantom cell, or keep the value out of the domain (the release
+table's short-circuit-by-omission). The third is to name the dependence:
+
+```toml
+[[impossible]]
+"check_floor_bare.pin_currency" = "passes"
+"check_floor_bare.probe" = "n/a"
+```
+
+Exactly two enum guard dimensions, one value each; both are validated
+against their declared domains at load, like any other literal. Every cell
+matching a pair is subtracted from the product before coverage and overlap
+are judged, in every group whose dimensions include both. A row whose every
+accepted cell is impossible earns the non-blocking `dead-row` advisory: it
+can never fire, so either the row or the block is wrong.

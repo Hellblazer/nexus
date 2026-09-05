@@ -4,16 +4,26 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
+import dev.nexus.service.jooq.binding.Vector;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 
+import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -67,28 +77,10 @@ class CatalogDocumentCascadeTest {
     void startAll() throws Exception {
         pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='nexus_svc') THEN "
-                + "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='" + SVC_ROLE + "') THEN "
-                + "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS + "' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
+            PgContainerHelper.applyProductSchema(su);
         }
         try (Connection su = pg.createConnection("")) {
-            var lb = new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(),
-                DatabaseFactory.getInstance().findCorrectDatabaseImplementation(new JdbcConnection(su)));
-            lb.update(new Contexts());
-        }
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute("ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
         }
         var cfg = new com.zaxxer.hikari.HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
@@ -240,31 +232,53 @@ class CatalogDocumentCascadeTest {
 
     /** Seed one document + its four fk-001 child rows (aspects/highlights/queue/manifest) for {@code tenant}. */
     private static void seedDocument(Connection su, String tenant, String tumbler) throws Exception {
-        var st = su.createStatement();
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
         // Register the collection first (document_aspects/queue carry an fk-003 collection FK).
-        st.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenant + "', '" + COLL + "') "
-            + "ON CONFLICT DO NOTHING");
-        st.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-            + "VALUES ('" + tenant + "', '" + tumbler + "', 'Doc', '" + COLL + "')");
+        ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+           .values(tenant, COLL)
+           .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+           .doNothing()
+           .execute();
+        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                       CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+           .values(tenant, tumbler, "Doc", COLL)
+           .execute();
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
         // matching nexus.chunks row for the manifest insert below.
-        st.execute("INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) VALUES "
-            + "('" + tenant + "', '" + COLL + "', '" + chash("man" + tenant + tumbler) + "', 'text', "
-            + "('[" + "0.1,".repeat(383) + "0.1]')::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+        byte[] manifestChash = chashBytes("man" + tenant + tumbler);
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                       CHUNKS.EMBEDDING_384)
+           .values(tenant, COLL, manifestChash, "text", vector384())
+           .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH)
+           .doNothing()
+           .execute();
         // nexus-7nrvr: catalog_document_chunks.collection is NOT NULL
         // (catalog-025-collection-not-null.xml) — the document above is
         // already registered under COLL, so stamp the manifest row the same.
-        st.execute("INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-            + "VALUES ('" + tenant + "', '" + tumbler + "', 0, '" + chash("man" + tenant + tumbler) + "', '" + COLL + "')");
+        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                       CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                       CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+           .values(tenant, tumbler, 0, manifestChash, COLL)
+           .execute();
         // hygiene-001 steps 1/3 (nexus-tk070.p6a follow-on): document_aspects.source_uri
         // and document_highlights.source_uri are both NOT NULL now.
-        st.execute("INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) "
-            + "VALUES ('" + tenant + "', '" + COLL + "', '/p/a-" + tenant + "-" + tumbler + ".md', NOW(), 'v1', 'docling', '" + tumbler + "', "
-            + "'file:///p/a-" + tenant + "-" + tumbler + ".md')");
-        st.execute("INSERT INTO nexus.document_highlights (tenant_id, doc_id, collection, source_uri, highlights_md, ingested_at) "
-            + "VALUES ('" + tenant + "', '" + tumbler + "', '" + COLL + "', 'file:///hl-" + tenant + "-" + tumbler + "', 'hi', NOW())");
-        st.execute("INSERT INTO nexus.aspect_extraction_queue (tenant_id, collection, source_path, status, enqueued_at, doc_id) "
-            + "VALUES ('" + tenant + "', '" + COLL + "', '/p/q-" + tenant + "-" + tumbler + ".md', 'pending', NOW(), '" + tumbler + "')");
+        ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                       DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                       DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+           .values(tenant, COLL, "/p/a-" + tenant + "-" + tumbler + ".md", java.time.OffsetDateTime.now(), "v1",
+                   "docling", tumbler, "file:///p/a-" + tenant + "-" + tumbler + ".md")
+           .execute();
+        ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
+                       DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.SOURCE_URI,
+                       DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+           .values(tenant, tumbler, COLL, "file:///hl-" + tenant + "-" + tumbler, "hi", java.time.OffsetDateTime.now())
+           .execute();
+        ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID, ASPECT_EXTRACTION_QUEUE.COLLECTION,
+                       ASPECT_EXTRACTION_QUEUE.SOURCE_PATH, ASPECT_EXTRACTION_QUEUE.STATUS,
+                       ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT, ASPECT_EXTRACTION_QUEUE.DOC_ID)
+           .values(tenant, COLL, "/p/q-" + tenant + "-" + tumbler + ".md", "pending", java.time.OffsetDateTime.now(),
+                   tumbler)
+           .execute();
     }
 
     /** Seed a topic + a topic_assignment keyed to {@code docId} for {@code tenant}. doc_id is
@@ -272,31 +286,46 @@ class CatalogDocumentCascadeTest {
      *  64-hex chash, independent of the catalog tumbler string (topic_assignments.doc_id has
      *  no FK to catalog_documents — see the class javadoc / nexus-sa14p). */
     private static void seedTopicAssignment(Connection su, String tenant, String docId) throws Exception {
-        var st = su.createStatement();
-        st.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenant + "', '" + COLL + "') "
-            + "ON CONFLICT DO NOTHING");
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+           .values(tenant, COLL)
+           .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+           .doNothing()
+           .execute();
         // Mask to 32 bits before widening so Math.abs cannot overflow on Integer.MIN_VALUE.
         long topicId = (tenant + docId).hashCode() & 0xFFFFFFFFL;
-        st.execute("INSERT INTO nexus.topics (id, tenant_id, label, collection, doc_count, created_at, review_status) "
-            + "VALUES (" + topicId + ", '" + tenant + "', 'topic-dc', '" + COLL + "', 0, NOW(), 'pending')");
+        ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
+                       TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+           .values(topicId, tenant, "topic-dc", COLL, 0, java.time.OffsetDateTime.now(), "pending")
+           .execute();
         // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk now requires a
-        // matching nexus.chunks row for this INSERT to succeed at all -- decode(...,
-        // 'hex') on BOTH the chunk and the assignment (a bare string literal into a
-        // bytea column stores the ASCII bytes of the hex STRING via "escape format",
-        // never matching a real decode()'d row).
-        st.execute("INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-            + "VALUES ('" + tenant + "', '" + COLL + "', decode('" + hexChash(docId) + "', 'hex'), 'text', "
-            + vec(384) + "::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
-        st.execute("INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
-            + "VALUES ('" + tenant + "', decode('" + hexChash(docId) + "', 'hex'), " + topicId + ", 'projection', '" + COLL + "', NOW())");
+        // matching nexus.chunks row for this INSERT to succeed at all -- HexFormat.parseHex
+        // on BOTH the chunk and the assignment produces the SAME genuine binary bytes
+        // decode(..., 'hex') used to (a bare string literal into a bytea column stores the
+        // ASCII bytes of the hex STRING via "escape format", never matching a real
+        // decode()'d row).
+        byte[] realChash = java.util.HexFormat.of().parseHex(hexChash(docId));
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                       CHUNKS.EMBEDDING_384)
+           .values(tenant, COLL, realChash, "text", vector384())
+           .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH)
+           .doNothing()
+           .execute();
+        ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                       TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                       TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+           .values(tenant, realChash, topicId, "projection", COLL, java.time.OffsetDateTime.now())
+           .execute();
     }
 
     /** Seed one catalog_links row directly (raw SQL, bypassing the repository's
      *  requireLiveEndpoints guard — both endpoints already exist via seedDocument). */
     private static void seedLink(Connection su, String tenant, String fromTumbler, String toTumbler) throws Exception {
-        var st = su.createStatement();
-        st.execute("INSERT INTO nexus.catalog_links (tenant_id, from_tumbler, to_tumbler, link_type, created_by, created_at) "
-            + "VALUES ('" + tenant + "', '" + fromTumbler + "', '" + toTumbler + "', 'relates', 'test', NOW())");
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        ctx.insertInto(CATALOG_LINKS, CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER,
+                       CATALOG_LINKS.LINK_TYPE, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT)
+           .values(tenant, fromTumbler, toTumbler, "relates", "test", java.time.OffsetDateTime.now())
+           .execute();
     }
 
     /** Count catalog_links rows naming {@code tumbler} on EITHER side for {@code tenant}. */
@@ -305,13 +334,20 @@ class CatalogDocumentCascadeTest {
             + "' AND (from_tumbler='" + tumbler + "' OR to_tumbler='" + tumbler + "')");
     }
 
-    private static String chash(String seed) {
-        return (seed.replaceAll("[^0-9a-f]", "a") + "0".repeat(32)).substring(0, 32);
+    /** 32-char hex-alphabet label, stored as its own ASCII bytes (no real hash semantics --
+     *  matches the pre-conversion raw-SQL behavior of a bare string literal into a
+     *  {@code bytea} column via PostgreSQL's escape-format input, {@link #hexChash} below is
+     *  the genuine-hash counterpart). */
+    private static byte[] chashBytes(String seed) {
+        String label = (seed.replaceAll("[^0-9a-f]", "a") + "0".repeat(32)).substring(0, 32);
+        return label.getBytes(StandardCharsets.US_ASCII);
     }
 
-    /** {@code '[v,v,...]'} pgvector literal of {@code dim} identical components. */
-    private static String vec(int dim) {
-        return ("0.1,".repeat(dim - 1) + "0.1").transform(s -> "'[" + s + "]'");
+    /** A 384-dim pgvector value with every component {@code 0.1}. */
+    private static Vector vector384() {
+        float[] v = new float[384];
+        java.util.Arrays.fill(v, 0.1f);
+        return Vector.of(v);
     }
 
     /** Genuine 64-lowercase-hex sha256 chash — required for topic_assignments.doc_id

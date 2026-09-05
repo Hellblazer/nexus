@@ -1,5 +1,6 @@
 ---
 title: "RDR-152 FTS5 to tsvector Parity Contract"
+id: companion-note
 relates: [RDR-152]
 status: closed
 closed_date: 2026-08-18

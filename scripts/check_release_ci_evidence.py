@@ -172,6 +172,8 @@ import urllib.error
 import urllib.request
 from typing import Callable
 
+from nexus.gate_advisory import passed_by_default
+
 #: This repo's LIVE required status-check contexts for `main` (the branch
 #: every release tag's merge commit lands on). See the module docstring for
 #: how this was verified and why it is a constant, not a live API query.
@@ -518,6 +520,13 @@ def check(repo: str, sha: str, token: str, api: Callable[[str], dict] | None = N
                 f"see nexus-au8zz. Every required context "
                 f"({', '.join(REQUIRED_CHECK_CONTEXTS)}) is green on the "
                 f"PR head."
+            )
+            print(
+                passed_by_default(
+                    "check_release_ci_evidence",
+                    f"evidence borrowed from merge parent {parent_sha} (PR head); "
+                    f"{sha} itself carried none (nexus-1c7oq)",
+                )
             )
             return 0
 

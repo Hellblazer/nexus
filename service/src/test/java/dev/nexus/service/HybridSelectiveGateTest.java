@@ -4,15 +4,14 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.DimTables;
+import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.PgVectorRepository;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.Table;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -20,11 +19,13 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_1024;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_1024;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -89,36 +90,10 @@ class HybridSelectiveGateTest {
     void startAll() throws Exception {
         pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + SVC_ROLE
-                + "') THEN CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
-                + "' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') "
-                + "THEN CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' NOSUPERUSER NOBYPASSRLS; "
-                + "END IF; END $$");
+            PgContainerHelper.applyProductSchema(su);
         }
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                          new ClassLoaderResourceAccessor(), db).update(new Contexts());
-        }
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT ON nexus.catalog_collections TO " + SVC_ROLE);
-            // nexus-3ck2g: hybridSearch's inline live_chunks predicate (RDR-156 Decision 6)
-            // joins catalog_document_chunks/catalog_documents for the first time from this
-            // role — grant SELECT so the tombstone-filter EXISTS subqueries can resolve.
-            su.createStatement().execute(
-                "GRANT SELECT ON nexus.catalog_document_chunks, nexus.catalog_documents TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
         }
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
@@ -171,7 +146,7 @@ class HybridSelectiveGateTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("ANALYZE " + DimTables.CHUNKS_TABLE_NAME);
+            PgContainerHelper.analyzeTable(su, CHUNKS);
         }
     }
 
@@ -190,37 +165,34 @@ class HybridSelectiveGateTest {
 
     @Test
     void explain_textFirstPlan_gatesViaGin_neverRanksViaHnsw() throws Exception {
-        // The two-query shape PgVectorRepository.hybridSearch now builds for a selective gate
-        // (single-gate-eval, nexus-x7z7l): (1) a bounded fetch of the gate's chashes via the
-        // GIN text indexes, then (2) a rank of those exact chashes by cosine distance via a
-        // chash IN (...) filter — the text gate (<% trigram recheck) is evaluated ONCE, in
-        // query 1, not re-run at rank time.
+        // The two-query shape PgVectorRepository.hybridSearch builds for a selective gate
+        // (single-gate-eval, nexus-x7z7l): (1) a bounded fetch of the gate's chashes via
+        // TEXT_GATE_PROBE_1024 (the GIN/trigram probe), then (2) a rank of those exact
+        // chashes by cosine distance via TEXT_GATED_SEARCH_BY_CHASH_1024 — the text gate
+        // (<% trigram recheck) is evaluated ONCE, in query 1, not re-run at rank time.
         //
-        // MAINTENANCE: these two SQL strings are a hand TRANSCRIPTION of what hybridSearch()
-        // builds for the selective branch. They are not extracted from the production method,
-        // so if you change that SQL (column list, predicates, LIMIT) you MUST update these or
-        // the structural proof goes stale. The behavioral tests below anchor that production
-        // actually returns the right rows at fixture scale; production-scale recall is the
-        // conexus xr7.8.9 gate's.
-        String gateFetch =
-            "SELECT chash FROM " + DimTables.CHUNKS_TABLE_NAME +
-            " WHERE collection = '" + COLL + "'" +
-            "   AND (chunk_tsv @@ plainto_tsquery('english', '" + TOKEN + "') OR '" + TOKEN + "' <% chunk_text)" +
-            " LIMIT " + (TARGETS + 1);
-        String gatePlan = explain(gateFetch);
+        // UPDATED (nexus-cbo4a batch 3, critic follow-up T2 critique-cbo4a-batch3):
+        // these two queries now call the SAME generated function tables hybridSearch()'s
+        // selective branch actually dispatches to (vectors-011, nexus-zrcj7) — the
+        // former hand-transcribed raw SQL mirrored a two-query Java-built shape that was
+        // retired the day before this suite's raw-SQL cleanup ran, so the "MAINTENANCE:
+        // hand TRANSCRIPTION" comment this replaces was already testing a query shape
+        // production no longer executes. The behavioral tests below anchor that
+        // production actually returns the right rows at fixture scale; production-scale
+        // recall is the conexus xr7.8.9 gate's.
+        Table<?> gateFn = TEXT_GATE_PROBE_1024.call(TOKEN, new String[] {COLL}, null, null, TARGETS + 1);
+        String gatePlan = explain(gateFn);
         assertThat(gatePlan)
             .as("the gate MUST be evaluated via the GIN text indexes (tsv/trgm), once. "
                 + "Plan was:%n%s", gatePlan)
             .containsAnyOf("idx_chunks_tsv", "idx_chunks_trgm", "Bitmap Index Scan");
 
-        String inList = targetChashes.stream().map(c -> "'" + c + "'")
-            .collect(java.util.stream.Collectors.joining(","));
-        String rank =
-            "SELECT chash, (" + DimTables.embeddingColumn(1024) + " <=> '" + vec(1.0, 0.0) + "'::vector) AS distance" +
-            " FROM " + DimTables.CHUNKS_TABLE_NAME +
-            " WHERE collection = '" + COLL + "' AND chash IN (" + inList + ")" +
-            " ORDER BY distance ASC, chash ASC LIMIT 50";
-        String rankPlan = explain(rank);
+        byte[][] chashes = targetChashes.stream()
+            .map(c -> Chash.fromHex(c).toBytes())
+            .toArray(byte[][]::new);
+        Table<?> rankFn = TEXT_GATED_SEARCH_BY_CHASH_1024.call(
+            queryVector(), chashes, new String[] {COLL}, null, null, 50);
+        String rankPlan = explain(rankFn);
         // The rank filters by chash (PK) and sorts by exact distance — the ORDER BY embedding
         // can never be pushed into an HNSW index scan (which is what hnsw.max_scan_tuples
         // starves). Scale-independent structural core of the lcogi fix; the production-scale
@@ -235,17 +207,38 @@ class HybridSelectiveGateTest {
             .contains("Sort");
     }
 
-    /** EXPLAIN with seqscan disabled so index access paths are chosen at fixture scale. */
-    private String explain(String inner) throws Exception {
+    /** 1024-dim typed pgvector value: first component 1.0, rest zero — the query vector
+     *  the FakeEmbedder points at the filler cluster (same shape as the retired {@code
+     *  vec(1.0, 0.0)} literal helper). */
+    private static Vector queryVector() {
+        float[] v = new float[1024];
+        v[0] = 1.0f;
+        return Vector.of(v);
+    }
+
+    /** EXPLAIN a typed jOOQ table-function call, seqscan disabled so index access paths
+     *  are chosen at fixture scale (nexus-cbo4a batch 3). */
+    private String explain(Table<?> fn) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
             su.createStatement().execute("SET LOCAL enable_seqscan = off");
-            StringBuilder sb = new StringBuilder();
-            try (ResultSet rs = su.createStatement().executeQuery("EXPLAIN " + inner)) {
-                while (rs.next()) sb.append(rs.getString(1)).append('\n');
-            }
+            // nexus-cbo4a batch 3 critic follow-up: TEXT_GATE_PROBE_1024's own gate
+            // predicate now also carries the SAME live-chunks (tombstone dead-set)
+            // anti-join every sibling combined-query function does (vectors-011's own
+            // header: "byte-for-byte the same gate predicate the retired Java gate/
+            // scope builders used"), which the retired hand-transcribed raw SQL this
+            // helper replaced did not include. At this fixture's tiny scale (255 rows,
+            // near-empty manifest tables) the added anti-join makes a plain Index Scan
+            // on idx_chunks_tenant_chash cheaper than a Bitmap Index Scan via the GIN
+            // text indexes, so enable_indexscan must ALSO be forced off -- matching
+            // CatalogFtsFilenameSearchTest's own established technique for the same
+            // "prove the GIN index, not a btree, serves the text gate" claim -- or the
+            // gate assertion below stops being a meaningful proof at this scale.
+            su.createStatement().execute("SET LOCAL enable_indexscan = off");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            String plan = ctx.explain(ctx.selectFrom(fn)).plan();
             su.rollback();
-            return sb.toString();
+            return plan;
         }
     }
 
@@ -310,16 +303,5 @@ class HybridSelectiveGateTest {
      *  chunks_&lt;dim&gt;.chash is bytea(32) — the full sha256 digest). */
     private static String chash(String prefix, int i) {
         return dev.nexus.service.db.Chash.ofText(prefix + i).toHex();
-    }
-
-    /** 1024-dim pgvector literal with first two components (x, y), rest 0. */
-    private static String vec(double x, double y) {
-        StringBuilder sb = new StringBuilder("[").append(fmt(x)).append(',').append(fmt(y));
-        for (int i = 2; i < 1024; i++) sb.append(",0");
-        return sb.append("]").toString();
-    }
-
-    private static String fmt(double v) {
-        return v == Math.rint(v) ? Integer.toString((int) v) : Double.toString(v);
     }
 }

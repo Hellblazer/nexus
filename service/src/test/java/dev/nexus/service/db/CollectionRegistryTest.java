@@ -148,10 +148,7 @@ class CollectionRegistryTest {
         HeldLock(String collection, boolean rowExists) throws Exception {
             conn = svcDs.getConnection();
             conn.setAutoCommit(false);
-            try (var ps = conn.prepareStatement("SELECT set_config('nexus.tenant', ?, true)")) {
-                ps.setString(1, TENANT);
-                ps.execute();
-            }
+            PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT, true);
             if (rowExists) {
                 try (var ps = conn.prepareStatement(
                         "UPDATE nexus.catalog_collections SET name = name "
