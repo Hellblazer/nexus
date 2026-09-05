@@ -73,18 +73,48 @@ public final class AuthFilter extends Filter {
     private final TokenStore tokenStore;
 
     /**
-     * Write-path deadline budget (nexus-8hdg9 phase 2), resolved ONCE at
+     * Request embed-deadline budget (nexus-8hdg9 phase 2), resolved ONCE at
      * construction -- mirrors {@code LocalOnnxAdmission.fromEnv()}'s resolve-
      * once-at-boot shape rather than re-parsing the env on every request.
      * {@link RequestDeadline#newDeadlineNanos(long)} mints a fresh deadline
-     * from this budget per request in {@link #doFilter}.
+     * from this budget per request, for EVERY route, in {@link #doFilter}
+     * (see {@code RequestDeadlineExceededException}'s javadoc for why this
+     * is not upsert-specific).
      */
     private final long deadlineBudgetMs;
 
     public AuthFilter(TokenCache tokenCache, TokenStore tokenStore) {
+        this(tokenCache, tokenStore, RequestDeadline.deadlineMsFromEnv());
+    }
+
+    /**
+     * Test-support constructor (nexus-8hdg9 phase 2 review remediation, T2
+     * {@code code-review-nexus-8hdg9-p2-5ce59b36d} [24650]): bypasses {@link
+     * RequestDeadline#deadlineMsFromEnv()}'s real-process-env read so a test
+     * can assert the WIRING -- that {@link RequestContext#deadlineNanos()}
+     * carries the budget this constructor was given -- without mutating the
+     * JVM's actual environment. Java offers no supported, non-reflective way
+     * to set an env var for a running process, so this constructor is the
+     * injectable-resolver seam {@code deadlineMsFromEnv(Function)} already
+     * gives {@link AuthFilter} itself; a same-package test would call that
+     * resolver directly, but {@code AuthFilterTest} lives in {@code
+     * dev.nexus.service}, one package up, where a package-private overload
+     * is not visible -- hence public, unlike {@code LocalOnnxAdmission}'s
+     * same-package-private injection points. The public two-arg constructor
+     * above delegates here with the real env-resolved budget; production
+     * code has exactly one construction path
+     * ({@code NexusService} → the two-arg form), this constructor exists
+     * for tests only.
+     *
+     * @param deadlineBudgetMs the embed-deadline budget in milliseconds --
+     *                         what {@link RequestDeadline#deadlineMsFromEnv()}
+     *                         would have returned for some {@code
+     *                         NX_EMBED_DEADLINE_MS} value
+     */
+    public AuthFilter(TokenCache tokenCache, TokenStore tokenStore, long deadlineBudgetMs) {
         this.tokenCache = Objects.requireNonNull(tokenCache, "tokenCache");
         this.tokenStore = Objects.requireNonNull(tokenStore, "tokenStore");
-        this.deadlineBudgetMs = RequestDeadline.deadlineMsFromEnv();
+        this.deadlineBudgetMs = deadlineBudgetMs;
     }
 
     @Override
@@ -194,9 +224,9 @@ public final class AuthFilter extends Filter {
         // 4. Publish the principal thread-confined; clear after dispatch.
         RequestContext.set(new RequestContext.Principal(
             tenant, sessionId, mintedSession, isOperator, scope, credentialHash));
-        // nexus-8hdg9 phase 2: mint the request's write-path deadline alongside the
-        // principal, from the budget resolved once at construction. Cleared together
-        // with the principal in the finally below.
+        // nexus-8hdg9 phase 2: mint the request's embed deadline alongside the
+        // principal, for EVERY route, from the budget resolved once at construction.
+        // Cleared together with the principal in the finally below.
         RequestContext.setDeadlineNanos(RequestDeadline.newDeadlineNanos(deadlineBudgetMs));
         try {
             chain.doFilter(exchange);

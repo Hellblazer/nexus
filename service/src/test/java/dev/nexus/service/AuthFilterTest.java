@@ -62,6 +62,15 @@ class AuthFilterTest {
 
     private static final Instant T0 = Instant.parse("2026-06-09T00:00:00Z");
 
+    /**
+     * Explicit embed-deadline budget for {@code /v1/echo-deadline} (nexus-8hdg9
+     * phase 2 review remediation, T2 {@code code-review-nexus-8hdg9-p2-5ce59b36d}
+     * [24650]): fed to {@code AuthFilter}'s test-support 3-arg constructor so the
+     * wiring can be asserted deterministically, without mutating the real
+     * {@code NX_EMBED_DEADLINE_MS} process env.
+     */
+    private static final long EXPLICIT_DEADLINE_BUDGET_MS = 12_345L;
+
     // Raw tokens (hashed before storage; AuthFilter hashes the presented token).
     private static final String TOK_A       = "raw-token-tenant-a";
     private static final String TOK_B       = "raw-token-tenant-b";
@@ -79,6 +88,7 @@ class AuthFilterTest {
     TokenStore store;
     TokenCache cache;
     HttpServer server;
+    java.util.concurrent.ExecutorService serverExecutor;
     int port;
     final HttpClient http = HttpClient.newHttpClient();
 
@@ -139,6 +149,30 @@ class AuthFilterTest {
         mintCtx.getFilters().add(new AuthFilter(cache, store));
         var evilCtx = server.createContext("/v1/data-tokens-evil", new EchoHandler());
         evilCtx.getFilters().add(new AuthFilter(cache, store));
+
+        // nexus-8hdg9 phase 2 review remediation (T2 code-review-nexus-8hdg9-p2-5ce59b36d
+        // [24650]): three contexts proving RequestContext.deadlineNanos()'s wiring end to
+        // end. A SINGLE-THREAD executor is set explicitly (rather than relying on
+        // com.sun.net.httpserver's unspecified default) so the "cleared after the request"
+        // test below can assert on THREAD-LOCAL non-leakage deterministically: every request
+        // this server ever handles, across every context, runs on the exact same one thread,
+        // sequentially. Transparent to the 21 existing tests above -- they already drive the
+        // server with synchronous, sequential http.send() calls from one JUnit test thread.
+        serverExecutor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        server.setExecutor(serverExecutor);
+
+        var deadlineExplicitCtx = server.createContext("/v1/echo-deadline", new DeadlineEchoHandler());
+        deadlineExplicitCtx.getFilters().add(
+            new AuthFilter(cache, store, EXPLICIT_DEADLINE_BUDGET_MS));
+        var deadlineDefaultCtx = server.createContext("/v1/echo-deadline-default", new DeadlineEchoHandler());
+        // Plain two-arg (production) constructor: real env, no NX_EMBED_DEADLINE_MS
+        // override in this test process, so RequestDeadline.DEFAULT_DEADLINE_MS applies.
+        deadlineDefaultCtx.getFilters().add(new AuthFilter(cache, store));
+        // No AuthFilter at all -- proves clearing: a request here right after a
+        // deadline-echoing request must see deadlineNanos() as null, not a leaked
+        // value from the prior request's ThreadLocal.
+        server.createContext("/v1/echo-deadline-noauth", new DeadlineEchoHandler());
+
         server.start();
         port = server.getAddress().getPort();
     }
@@ -146,6 +180,7 @@ class AuthFilterTest {
     @AfterAll
     void stopAll() {
         if (server != null) server.stop(0);
+        if (serverExecutor != null) serverExecutor.shutdownNow();
         if (ds != null) ds.close();
         if (pg != null) pg.stop();
     }
@@ -297,6 +332,77 @@ class AuthFilterTest {
         // data under an unregistered tenant. Defense in depth → 401.
         HttpResponse<String> r = call(TOK_WILDCARD, "tenant-zzz", null);
         assertThat(r.statusCode()).isEqualTo(401);
+    }
+
+    // ── nexus-8hdg9 phase 2: RequestContext.deadlineNanos() wiring ────────────
+
+    @Test
+    void deadline_explicitBudget_visibleInsideHandler_matchesConfiguredBudget() throws Exception {
+        long before = System.nanoTime();
+        HttpResponse<String> r = deadlineCall("/v1/echo-deadline", TOK_A);
+        long after = System.nanoTime();
+        assertThat(r.statusCode()).isEqualTo(200);
+
+        long deadlineNanos = Long.parseLong(r.body());
+        long budgetNanos = java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(EXPLICIT_DEADLINE_BUDGET_MS);
+        // Deadline = AuthFilter's own System.nanoTime() call (between `before` and `after`)
+        // plus the configured budget -- not the default, not a hardcoded value. A generous
+        // tolerance (the full before..after bracket) absorbs the real gap between this test's
+        // nanoTime() reads and AuthFilter's, with no risk of a false pass against the wrong
+        // budget: EXPLICIT_DEADLINE_BUDGET_MS (12.345s) and DEFAULT_DEADLINE_MS (300s) differ
+        // by orders of magnitude.
+        assertThat(deadlineNanos)
+            .as("deadline must reflect the EXPLICIT constructor budget, not the default")
+            .isBetween(before + budgetNanos, after + budgetNanos);
+    }
+
+    @Test
+    void deadline_defaultBudget_visibleInsideHandler_isPositiveAndFarInTheFuture() throws Exception {
+        // The plain two-arg (production) AuthFilter constructor, real env, no
+        // NX_EMBED_DEADLINE_MS override in this test process -- RequestDeadline
+        // .DEFAULT_DEADLINE_MS (300s) applies. Assert order-of-magnitude correctness
+        // (comfortably beyond EXPLICIT_DEADLINE_BUDGET_MS's 12.345s, comfortably under a
+        // generous outer bound) rather than pinning the literal default here, so this test
+        // does not silently rot into a second hand-copy of RequestDeadlineTest's own
+        // default-value assertion.
+        long now = System.nanoTime();
+        HttpResponse<String> r = deadlineCall("/v1/echo-deadline-default", TOK_A);
+        assertThat(r.statusCode()).isEqualTo(200);
+
+        long deadlineNanos = Long.parseLong(r.body());
+        long minExpectedNanos = now + java.util.concurrent.TimeUnit.SECONDS.toNanos(60);
+        long maxExpectedNanos = now + java.util.concurrent.TimeUnit.SECONDS.toNanos(600);
+        assertThat(deadlineNanos)
+            .as("default-budget deadline must be well beyond the explicit-budget test's"
+                + " 12.345s and well under this generous 600s outer bound")
+            .isBetween(minExpectedNanos, maxExpectedNanos);
+    }
+
+    @Test
+    void deadline_isCleared_afterRequestCompletes_doesNotLeakIntoNextRequest() throws Exception {
+        // A deadline-setting request, immediately followed (same single-thread server
+        // executor, see startAll()) by a request through a context with NO AuthFilter at
+        // all. If AuthFilter's finally block ever stopped clearing the ThreadLocal, this
+        // second request would observe the FIRST request's leftover deadline instead of
+        // null -- exactly the cross-request leak RequestContext's own class javadoc warns
+        // an unscoped ThreadLocal would risk.
+        HttpResponse<String> first = deadlineCall("/v1/echo-deadline", TOK_A);
+        assertThat(first.statusCode()).isEqualTo(200);
+
+        HttpRequest req = HttpRequest.newBuilder(URI.create(base() + "/v1/echo-deadline-noauth"))
+            .GET().build();
+        HttpResponse<String> second = http.send(req, HttpResponse.BodyHandlers.ofString());
+        assertThat(second.statusCode()).isEqualTo(200);
+        assertThat(second.body())
+            .as("no AuthFilter ran on this context -- deadlineNanos() must be null, not a"
+                + " value leaked from the PRIOR request's ThreadLocal")
+            .isEqualTo("null");
+    }
+
+    private HttpResponse<String> deadlineCall(String path, String bearer) throws Exception {
+        HttpRequest req = HttpRequest.newBuilder(URI.create(base() + path))
+            .header("Authorization", "Bearer " + bearer).GET().build();
+        return http.send(req, HttpResponse.BodyHandlers.ofString());
     }
 
     // ── Cache-level seam (fresh cache per test, mutable clock) ────────────────
@@ -469,6 +575,23 @@ class AuthFilterTest {
                 + ";session=" + (session == null ? "" : session)
                 + ";scope=" + (scope == null ? "" : scope);
             byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+            ex.sendResponseHeaders(200, bytes.length);
+            try (OutputStream os = ex.getResponseBody()) {
+                os.write(bytes);
+            }
+        }
+    }
+
+    /**
+     * Echoes {@link RequestContext#deadlineNanos()} as a bare long, or the literal
+     * string {@code "null"} when unset -- e.g. on a context with no {@link AuthFilter}
+     * attached (nexus-8hdg9 phase 2 review remediation).
+     */
+    static final class DeadlineEchoHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange ex) throws IOException {
+            Long deadlineNanos = RequestContext.deadlineNanos();
+            byte[] bytes = String.valueOf(deadlineNanos).getBytes(StandardCharsets.UTF_8);
             ex.sendResponseHeaders(200, bytes.length);
             try (OutputStream os = ex.getResponseBody()) {
                 os.write(bytes);

@@ -37,7 +37,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * gateway-retry ladder) -- 503 IS one of the client's {@code
  * _GATEWAY_RETRY_CODES} {502,503,504}, since a request that ran out of its
  * own deadline is an honest slow-server signal the client should retry, not
- * a guaranteed-to-fail-again oversize body.
+ * a guaranteed-to-fail-again oversize body. A {@code Retry-After} header +
+ * {@code retry_after_seconds} body field (critique remediation, T2 {@code
+ * critique-nexus-8hdg9-p2-5ce59b36d} [24651] finding 1) mirror {@code
+ * VectorHandlerUpstreamRateLimitedTest}'s 429 arm exactly, so the client's
+ * gateway retry paces itself instead of firing three more full-cost embeds.
  *
  * <p>Mirrors {@code CatalogHandlerCollectionCountsTest}'s converted bootstrap
  * (Testcontainers PG, {@link PgContainerHelper#applyProductSchema} +
@@ -115,6 +119,8 @@ class VectorHandlerDeadlineMappingTest {
         return http.send(req, HttpResponse.BodyHandlers.ofString());
     }
 
+    private static final long SIMULATED_RETRY_AFTER_SECONDS = 5L;
+
     @Test
     void upsertChunks_requestDeadlineExceeded_maps503_neverOpaque500() throws Exception {
         var resp = post("/v1/vectors/upsert-chunks", Map.of(
@@ -128,12 +134,18 @@ class VectorHandlerDeadlineMappingTest {
                 + " _GATEWAY_RETRY_CODES) -- never the generic 500 arm (got body: %s)",
                 resp.body())
             .isEqualTo(503);
+        assertThat(resp.headers().firstValue("Retry-After"))
+            .as("Retry-After paces the client's gateway retry instead of letting it fire"
+                + " three more full-cost embeds against an already-loaded server")
+            .contains(Long.toString(SIMULATED_RETRY_AFTER_SECONDS));
 
         @SuppressWarnings("unchecked")
         Map<String, Object> body = MAPPER.readValue(resp.body(), Map.class);
         assertThat((String) body.get("error"))
             .as("the typed detail must reach the caller, not just the engine log")
             .contains("rdln-simulated-deadline-exceeded");
+        assertThat(((Number) body.get("retry_after_seconds")).longValue())
+            .isEqualTo(SIMULATED_RETRY_AFTER_SECONDS);
     }
 
     /** Always throws the typed exception, simulating an expired write-path deadline. */
@@ -155,7 +167,8 @@ class VectorHandlerDeadlineMappingTest {
 
         private static RequestDeadlineExceededException simulated() {
             return new RequestDeadlineExceededException(
-                "rdln-simulated-deadline-exceeded: write-path deadline elapsed mid-embed");
+                "rdln-simulated-deadline-exceeded: write-path deadline elapsed mid-embed",
+                SIMULATED_RETRY_AFTER_SECONDS);
         }
     }
 }

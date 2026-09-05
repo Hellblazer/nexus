@@ -231,16 +231,27 @@ public final class VectorHandler implements HttpHandler {
                     "batch_size", e.batchSize(),
                     "model", e.model())));
         } catch (dev.nexus.service.vectors.RequestDeadlineExceededException e) {
-            // nexus-8hdg9 phase 2: the request's write-path deadline (RequestContext,
-            // minted by AuthFilter from RequestDeadline.deadlineMsFromEnv()) had
-            // already elapsed at a check point. 503, deliberately INSIDE the client's
-            // _GATEWAY_RETRY_CODES {502,503,504}: an honest slow-server signal, so the
-            // client's gateway retry + backoff (http_vector_client.py) is the correct
-            // response -- not a silent hang, and not the opaque 500 arm below. No
-            // embed-loop check point raises this yet (phases 3/4, nexus-8hdg9.3/.4);
-            // this arm is exercised directly by VectorHandlerDeadlineMappingTest.
-            log.warn("event=vector_request_deadline_exceeded op={} error={}", op, e.getMessage());
-            HttpUtil.send(exchange, 503, json(Map.of("error", e.getMessage())));
+            // nexus-8hdg9 phase 2: the request's embed deadline (RequestContext,
+            // minted by AuthFilter from RequestDeadline.deadlineMsFromEnv() for
+            // EVERY route, not just upsert -- see RequestDeadlineExceededException's
+            // javadoc) had already elapsed at a check point. 503, deliberately
+            // INSIDE the client's _GATEWAY_RETRY_CODES {502,503,504}: an honest
+            // slow-server signal, so the client's gateway retry + backoff
+            // (http_vector_client.py) is the correct response -- not a silent
+            // hang, and not the opaque 500 arm below. Retry-After + retry_after_seconds
+            // mirror UpstreamRateLimitedException's arm exactly (critique remediation,
+            // T2 critique-nexus-8hdg9-p2-5ce59b36d [24651] finding 1): without it the
+            // gateway retry's fixed 2/5/10s schedule would fire three more full-cost
+            // embeds against an already-loaded server once phases 3/4 make this
+            // reachable in production. No embed-loop check point raises this yet
+            // (phases 3/4, nexus-8hdg9.3/.4); this arm is exercised directly by
+            // VectorHandlerDeadlineMappingTest.
+            log.warn("event=vector_request_deadline_exceeded op={} retry_after_s={} error={}",
+                     op, e.retryAfterSeconds(), e.getMessage());
+            exchange.getResponseHeaders().set("Retry-After", Long.toString(e.retryAfterSeconds()));
+            HttpUtil.send(exchange, 503, json(Map.of(
+                    "error", e.getMessage(),
+                    "retry_after_seconds", e.retryAfterSeconds())));
         } catch (IllegalArgumentException e) {
             log.debug("event=vector_bad_request op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 400, json(Map.of("error", e.getMessage())));

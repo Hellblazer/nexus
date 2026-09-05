@@ -5,22 +5,34 @@ package dev.nexus.service.http;
 import java.util.function.Function;
 
 /**
- * Request-scoped write-path deadline resolution (nexus-8hdg9 phase 2, write-
- * path cancellation on client disconnect).
+ * Request-scoped embed-deadline resolution (nexus-8hdg9 phase 2, write-path
+ * cancellation on client disconnect).
  *
  * <p>Generalizes {@code VoyageRetryLoop}'s existing request-scoped-deadline
  * idiom (nexus-99r7y): {@code newDeadlineNanos()} there mints one {@code
  * System.nanoTime()}-based deadline per logical request for a single
  * embedder's 429 budget; {@link #newDeadlineNanos(long)} here is the same
  * arithmetic, parameterized so {@link AuthFilter} can mint one deadline per
- * HTTP request covering the whole write path, not just one embedder's retry
- * loop.
+ * HTTP request covering every route's embed call, not just one embedder's
+ * retry loop.
  *
  * <p>{@link AuthFilter} resolves {@link #deadlineMsFromEnv()} ONCE at
  * construction (mirrors {@code LocalOnnxAdmission.fromEnv()}'s resolve-once-
  * at-boot shape) and mints a fresh {@link #newDeadlineNanos(long)} per
  * request, parked in {@link RequestContext} alongside the resolved {@code
  * Principal} and cleared with it.
+ *
+ * <p><b>Not upsert-specific</b> (critique remediation, T2 {@code
+ * critique-nexus-8hdg9-p2-5ce59b36d} [24651] finding 2): {@link
+ * dev.nexus.service.vectors.RequestDeadlineExceededException}'s javadoc
+ * carries the full rationale -- in short, {@code AuthFilter} mints this
+ * deadline for EVERY request regardless of route, and the same synchronous
+ * embed call serves upsert-chunks AND search/query, so {@link
+ * #DEADLINE_MS_ENV}'s name is a general "how long may this request's embed
+ * work run" knob, not an upsert-only one. Scoping the mint to write-shaped
+ * routes only was rejected: it would make {@code AuthFilter} parse route
+ * semantics for no real benefit, since the search path's own client-side
+ * timeout (120s) is already tighter than this deadline's default.
  *
  * <p>This class is plumbing only (phase 2): nothing yet reads {@link
  * RequestContext#deadlineNanos()} inside an embed loop. The check points
@@ -30,20 +42,24 @@ import java.util.function.Function;
  */
 final class RequestDeadline {
 
-    /** Spawn-env override for the write-path request deadline, in milliseconds. */
-    static final String DEADLINE_MS_ENV = "NX_UPSERT_EMBED_DEADLINE_MS";
+    /** Spawn-env override for the request embed deadline, in milliseconds. */
+    static final String DEADLINE_MS_ENV = "NX_EMBED_DEADLINE_MS";
 
     /**
      * Default budget when the env override is absent, in milliseconds.
      *
      * <p>Sized deliberately BELOW the Python client's upsert socket timeout
-     * ({@code timeout=600} at {@code http_vector_client.py}'s {@code
-     * /v1/vectors/upsert-chunks} call site) so a genuinely stuck request
-     * gets an honest, actionable 503 from the server before the client's own
-     * socket read simply times out with no detail. Not yet measured against
-     * a real indexing run (that is phases 3/4's job, per the design
-     * record's throughput-risk section) -- generous on purpose so a healthy
-     * request never trips it before that measurement exists.
+     * ({@code _UPSERT_CHUNKS_TIMEOUT_S = 600} at {@code http_vector_client.py}'s
+     * two {@code /v1/vectors/upsert-chunks} call sites) so a genuinely stuck
+     * request gets an honest, actionable 503 from the server before the
+     * client's own socket read simply times out with no detail. That
+     * ordering is a cross-language invariant, not just a comment: {@code
+     * tests/test_embed_deadline_default_ordering.py} reads this constant's
+     * declaration out of THIS source file (no shared Java/Python constant
+     * file exists) and fails if a future edit here loses the margin. Not yet
+     * measured against a real indexing run (that is phases 3/4's job, per
+     * the design record's throughput-risk section) -- generous on purpose so
+     * a healthy request never trips it before that measurement exists.
      */
     static final long DEFAULT_DEADLINE_MS = 300_000L;
 
@@ -81,9 +97,9 @@ final class RequestDeadline {
     }
 
     /**
-     * Mint the write-path deadline for ONE request, generalizing {@code
+     * Mint the embed deadline for ONE request, generalizing {@code
      * VoyageRetryLoop.newDeadlineNanos()}'s idiom (nexus-99r7y) from a
-     * single embedder's 429 budget to the whole write path.
+     * single embedder's 429 budget to every route's embed call.
      */
     static long newDeadlineNanos(long budgetMs) {
         return System.nanoTime() + budgetMs * 1_000_000L;

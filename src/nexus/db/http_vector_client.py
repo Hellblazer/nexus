@@ -1242,16 +1242,31 @@ _T3_WRITE_PATH_SUFFIXES: tuple[str, ...] = (
 )
 
 
+#: Socket timeout (seconds) for the two ``/v1/vectors/upsert-chunks`` call
+#: sites below. nexus-8hdg9 phase 2 critique remediation (T2
+#: ``critique-nexus-8hdg9-p2-5ce59b36d`` [24651] finding 3): this value MUST
+#: stay strictly ABOVE the Java engine's ``RequestDeadline.DEFAULT_DEADLINE_MS``
+#: (``service/src/main/java/dev/nexus/service/http/RequestDeadline.java``,
+#: currently 300_000ms) — otherwise this client's own socket read would time
+#: out BEFORE the server's deadline ever fires, and the honest 503 the server
+#: sends instead of a silent hang would never be reachable. No shared Java/
+#: Python constant file exists, so the ordering is enforced by
+#: ``tests/test_embed_deadline_default_ordering.py``, which reads the Java
+#: constant out of its source file and asserts against this one — update
+#: BOTH sides' comments (and rerun that test) if either value ever moves.
+_UPSERT_CHUNKS_TIMEOUT_S = 600
+
+
 def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120) -> Any:
     """POST JSON to the service endpoint, return parsed response body.
 
     ``timeout`` defaults to 120s for read/search/delete paths. The upsert-chunks
-    call site passes 600s: a 300-chunk CCE (voyage-context-3) upsert batch
-    routinely exceeds 120s server-side (embed is synchronous in the request);
-    the RDR-155 production migration false-timed-out on exactly this until
-    raised (bead nexus-rvfwj, 2026-06-10 — docs__1-16 + docs__1-1 evidence).
-    Per dual-review S2 the raise is deliberately NOT global — a slow search
-    should still fail fast.
+    call site passes :data:`_UPSERT_CHUNKS_TIMEOUT_S` (600s): a 300-chunk CCE
+    (voyage-context-3) upsert batch routinely exceeds 120s server-side (embed
+    is synchronous in the request); the RDR-155 production migration
+    false-timed-out on exactly this until raised (bead nexus-rvfwj,
+    2026-06-10 — docs__1-16 + docs__1-1 evidence). Per dual-review S2 the
+    raise is deliberately NOT global — a slow search should still fail fast.
 
     nexus-a2qhz: a WRITE-shaped *path* (:data:`_T3_WRITE_PATH_SUFFIXES`)
     routes through :func:`~nexus.db.service_endpoint.guard_production_write`
@@ -1986,7 +2001,8 @@ class HttpVectorClient:
                 from nexus.retry import _vector_with_retry  # noqa: PLC0415 — deferred import: avoids a module-load-time httpx dependency for this otherwise-urllib-only module (matches the deferred-import convention every other _vector_with_retry caller uses)
 
                 result = _vector_with_retry(
-                    _post, "/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600,
+                    _post, "/v1/vectors/upsert-chunks", body, tenant=self._tenant,
+                    timeout=_UPSERT_CHUNKS_TIMEOUT_S,
                     # nexus-8hdg9 phase 1: a bare TimeoutError on an upsert is
                     # refused rather than retried. _request_once uses ONE
                     # socket timeout for connect AND read, so this fires for
@@ -2005,7 +2021,8 @@ class HttpVectorClient:
                 )
             else:
                 result = _post(
-                    "/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600,
+                    "/v1/vectors/upsert-chunks", body, tenant=self._tenant,
+                    timeout=_UPSERT_CHUNKS_TIMEOUT_S,
                 )
             # nexus-znwc2 / nexus-ir6eh: the engine echoes ids.length as
             # `upserted` unconditionally (VectorHandler), so any deviation —
