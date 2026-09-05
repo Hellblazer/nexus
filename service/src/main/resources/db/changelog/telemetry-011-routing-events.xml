@@ -2,7 +2,7 @@
 <!--
     nexus-gjv9b PART 2 — routing_events: PG home for the RDR-121 routing-hook
     telemetry log, replacing ``~/.config/nexus/routing_log.jsonl`` (same Sam
-    directive as telemetry-009-capability-census.xml).
+    directive as telemetry-010-capability-census.xml).
 
     Append-only event log — mirrors relevance_log's shape (telemetry-001-
     baseline.xml): a BIGSERIAL id, no natural upsert key (a routing-hook
@@ -45,9 +45,12 @@
     grant here.
 
     Placement: changelog TAIL, immediately after
-    telemetry-009-capability-census.xml (the current tail) and before the
+    telemetry-010-capability-census.xml (the current tail) and before the
     grants-nexus-svc.xml runAlways block, matching the established
-    late-append convention (D0.1).
+    late-append convention (D0.1). Renumbered from telemetry-010 to
+    telemetry-011 on rebase over develop (nexus-nukn3's telemetry-009-
+    index-failures.xml pushed capability_census from telemetry-009 to
+    telemetry-010, which in turn pushed this file to telemetry-011).
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
@@ -55,8 +58,8 @@
     xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
-    <!-- ── Changeset telemetry-010-1: routing_events table ─────────────────── -->
-    <changeSet id="telemetry-010-1" author="nexus-gjv9b">
+    <!-- ── Changeset telemetry-011-1: routing_events table ─────────────────── -->
+    <changeSet id="telemetry-011-1" author="nexus-gjv9b">
         <comment>Create routing_events table (event log; append-only, RDR-121 routing-hook telemetry)</comment>
         <sql splitStatements="true" stripComments="false">
 CREATE TABLE nexus.routing_events (
@@ -80,8 +83,8 @@ CREATE INDEX idx_routing_events_rule ON nexus.routing_events (tenant_id, rule);
         <rollback>DROP TABLE IF EXISTS nexus.routing_events CASCADE</rollback>
     </changeSet>
 
-    <!-- ── Changeset telemetry-010-2: routing_events RLS ───────────────────── -->
-    <changeSet id="telemetry-010-2" author="nexus-gjv9b">
+    <!-- ── Changeset telemetry-011-2: routing_events RLS ───────────────────── -->
+    <changeSet id="telemetry-011-2" author="nexus-gjv9b">
         <comment>RLS: ENABLE + FORCE + tenant_isolation policy on routing_events</comment>
         <sql splitStatements="true" stripComments="false">
 ALTER TABLE nexus.routing_events ENABLE ROW LEVEL SECURITY;
