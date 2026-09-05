@@ -129,3 +129,20 @@ class TestT2RealClientProbe:
             extra_env={"NATIVE_SMOKE_CLEANUP_ROWS": "1"},
         )
         _assert_probe_ok(result)
+
+
+def test_native_smoke_script_opts_into_the_prod_write_guard() -> None:
+    """service/native-smoke.sh runs its real-client probes from the CI
+    checkout, which the nexus-a2qhz guard classifies as a dev checkout; without
+    the reason-bearing opt-in every probe write is refused. engine-service-
+    v0.1.101 burned all three native legs this way (2026-09-05) while the
+    wheel-driven --shakeout stayed green, so the export is pinned here."""
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[1] / "service" / "native-smoke.sh"
+    text = script.read_text(encoding="utf-8")
+    export_at = text.find('export NX_ALLOW_PROD_WRITE="native-smoke:')
+    first_probe_at = text.find("t1_real_client.py")
+    assert export_at != -1, "native-smoke.sh must export NX_ALLOW_PROD_WRITE with a reason"
+    assert first_probe_at != -1
+    assert export_at < first_probe_at, "the opt-in must precede the first real-client probe"
