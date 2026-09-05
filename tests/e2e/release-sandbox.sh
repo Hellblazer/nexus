@@ -114,18 +114,33 @@ _index_floor_check() {
 # UNTESTED end-to-end at authoring time (no Docker / live shakedown run
 # available in the authoring sandbox) -- rehearse this step live before
 # relying on it for a real release shakedown.
+# The live tail's PID is also tracked globally so an interrupted run (Ctrl-C
+# on a stall, a CI timeout) kills it from the EXIT/INT/TERM traps instead
+# of orphaning a `tail -f` that holds the log open forever (s71lr review).
+_LIVE_TAIL_PID=""
+
 _start_live_log_tail() {
     local log_file="$1"
     : > "$log_file"
     tail -n +1 -f "$log_file" &
-    echo $!
+    _LIVE_TAIL_PID=$!
+    echo "$_LIVE_TAIL_PID"
 }
 
 _stop_live_log_tail() {
     local tail_pid="$1"
     kill "$tail_pid" 2>/dev/null || true
     wait "$tail_pid" 2>/dev/null || true
+    [[ "$_LIVE_TAIL_PID" == "$tail_pid" ]] && _LIVE_TAIL_PID=""
 }
+
+_kill_live_tail() {
+    [[ -n "$_LIVE_TAIL_PID" ]] || return 0
+    kill "$_LIVE_TAIL_PID" 2>/dev/null || true
+    _LIVE_TAIL_PID=""
+}
+trap '_kill_live_tail; exit 130' INT
+trap '_kill_live_tail; exit 143' TERM
 
 # nexus-98zsp: indexing wall-clock floor. engine-service-v0.1.99 shipped an
 # 8x embed slowdown through every gate because none of them timed an index
@@ -505,7 +520,7 @@ _svc_teardown() {
 # service stop --with-pg` is a no-op-safe call even when nothing came up.
 _provision_local_service() {
     echo "  ── self-provisioning local service (nexus-596jm) ──"
-    trap '_svc_teardown; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+    trap '_kill_live_tail; _svc_teardown; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
     if ! nx init -y --no-autostart 2>&1 | sed 's/^/    /'; then
         _die "nx init did not reach serving inside the sandbox (self-provisioning failed — see remedy above)"
     fi
@@ -630,7 +645,7 @@ source "$SCRIPT_DIR/lib/lock.sh"
 LOCKDIR="/tmp/nexus-e2e-locks/release-sandbox.lock"
 mkdir -p "$(dirname "$LOCKDIR")"
 lock_acquire "$LOCKDIR" || exit 1
-trap 'lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+trap '_kill_live_tail; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
 echo "[rdr-184] lock acquired: $LOCKDIR (pid $$)" >&2
 # Test seam (RDR-184 P0.2, nexus-ccs9v.2): tests/e2e/lib/harness_lock_test.sh
 # sets this to prove a concurrent invocation gets PAST the lock without ever
@@ -1487,7 +1502,7 @@ case "$MODE" in
         # this mode's own teardown trap — this assignment REPLACES the
         # top-level trap set earlier, so the lock release must be re-added
         # here or a crash in this window would leak the lock.
-        trap '_svc_teardown; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+        trap '_kill_live_tail; _svc_teardown; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
 
         # ── serving proof: /health == ok (NOT merely "a lease exists"). ──
         echo
