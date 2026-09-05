@@ -72,9 +72,19 @@ public final class AuthFilter extends Filter {
     private final TokenCache tokenCache;
     private final TokenStore tokenStore;
 
+    /**
+     * Write-path deadline budget (nexus-8hdg9 phase 2), resolved ONCE at
+     * construction -- mirrors {@code LocalOnnxAdmission.fromEnv()}'s resolve-
+     * once-at-boot shape rather than re-parsing the env on every request.
+     * {@link RequestDeadline#newDeadlineNanos(long)} mints a fresh deadline
+     * from this budget per request in {@link #doFilter}.
+     */
+    private final long deadlineBudgetMs;
+
     public AuthFilter(TokenCache tokenCache, TokenStore tokenStore) {
         this.tokenCache = Objects.requireNonNull(tokenCache, "tokenCache");
         this.tokenStore = Objects.requireNonNull(tokenStore, "tokenStore");
+        this.deadlineBudgetMs = RequestDeadline.deadlineMsFromEnv();
     }
 
     @Override
@@ -184,10 +194,15 @@ public final class AuthFilter extends Filter {
         // 4. Publish the principal thread-confined; clear after dispatch.
         RequestContext.set(new RequestContext.Principal(
             tenant, sessionId, mintedSession, isOperator, scope, credentialHash));
+        // nexus-8hdg9 phase 2: mint the request's write-path deadline alongside the
+        // principal, from the budget resolved once at construction. Cleared together
+        // with the principal in the finally below.
+        RequestContext.setDeadlineNanos(RequestDeadline.newDeadlineNanos(deadlineBudgetMs));
         try {
             chain.doFilter(exchange);
         } finally {
             RequestContext.clear();
+            RequestContext.clearDeadline();
         }
     }
 

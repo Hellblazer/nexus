@@ -230,6 +230,17 @@ public final class VectorHandler implements HttpHandler {
                     "sub_requests", e.subRequests(),
                     "batch_size", e.batchSize(),
                     "model", e.model())));
+        } catch (dev.nexus.service.vectors.RequestDeadlineExceededException e) {
+            // nexus-8hdg9 phase 2: the request's write-path deadline (RequestContext,
+            // minted by AuthFilter from RequestDeadline.deadlineMsFromEnv()) had
+            // already elapsed at a check point. 503, deliberately INSIDE the client's
+            // _GATEWAY_RETRY_CODES {502,503,504}: an honest slow-server signal, so the
+            // client's gateway retry + backoff (http_vector_client.py) is the correct
+            // response -- not a silent hang, and not the opaque 500 arm below. No
+            // embed-loop check point raises this yet (phases 3/4, nexus-8hdg9.3/.4);
+            // this arm is exercised directly by VectorHandlerDeadlineMappingTest.
+            log.warn("event=vector_request_deadline_exceeded op={} error={}", op, e.getMessage());
+            HttpUtil.send(exchange, 503, json(Map.of("error", e.getMessage())));
         } catch (IllegalArgumentException e) {
             log.debug("event=vector_bad_request op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 400, json(Map.of("error", e.getMessage())));

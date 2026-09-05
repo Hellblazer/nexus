@@ -14,6 +14,17 @@ package dev.nexus.service.http;
  * per request, so a {@link ThreadLocal} set at the top of the filter and CLEARED in a
  * {@code finally} after {@code chain.doFilter} is exactly request-scoped and race-free.
  * Handlers read {@link #tenant()} / {@link #session()} instead of exchange attributes.
+ *
+ * <p><b>Write-path deadline (nexus-8hdg9 phase 2).</b> {@link #deadlineNanos()} carries
+ * a second, independent thread-confined value alongside {@link Principal}: a {@code
+ * System.nanoTime()}-based deadline minted per request by {@link AuthFilter} from
+ * {@link RequestDeadline#deadlineMsFromEnv()}, generalizing {@code VoyageRetryLoop}'s
+ * request-scoped-deadline idiom (nexus-99r7y) from a single embedder's 429 budget to
+ * the whole write path. It is a separate {@link ThreadLocal}, not a {@link Principal}
+ * field, because it is not part of the auth outcome -- every request gets one
+ * regardless of who the bearer is. Set and cleared together with {@link Principal} by
+ * {@link AuthFilter}. This phase is plumbing only: nothing yet reads it inside an embed
+ * loop (phases 3/4, nexus-8hdg9.3/.4).
  */
 public final class RequestContext {
 
@@ -46,6 +57,9 @@ public final class RequestContext {
 
     private static final ThreadLocal<Principal> CURRENT = new ThreadLocal<>();
 
+    /** See the class javadoc's "Write-path deadline" section. */
+    private static final ThreadLocal<Long> DEADLINE_NANOS = new ThreadLocal<>();
+
     private RequestContext() {
     }
 
@@ -55,6 +69,14 @@ public final class RequestContext {
 
     static void clear() {
         CURRENT.remove();
+    }
+
+    static void setDeadlineNanos(long deadlineNanos) {
+        DEADLINE_NANOS.set(deadlineNanos);
+    }
+
+    static void clearDeadline() {
+        DEADLINE_NANOS.remove();
     }
 
     /** @return the current request's principal, or null outside a filtered request. */
@@ -105,5 +127,16 @@ public final class RequestContext {
     public static String credentialHash() {
         Principal p = CURRENT.get();
         return p == null ? null : p.credentialHash();
+    }
+
+    /**
+     * @return the current request's write-path deadline (nexus-8hdg9 phase 2) as a
+     *         {@link System#nanoTime()} value, or null outside a filtered request.
+     *         Minted by {@link AuthFilter} from {@link RequestDeadline#deadlineMsFromEnv()}
+     *         -- see the class javadoc's "Write-path deadline" section. No embed-loop
+     *         check point reads this yet (phases 3/4, nexus-8hdg9.3/.4).
+     */
+    public static Long deadlineNanos() {
+        return DEADLINE_NANOS.get();
     }
 }
