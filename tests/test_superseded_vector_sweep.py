@@ -422,6 +422,55 @@ def test_batch_full_delete_records_requested_count_and_logs_no_partial_warning()
     reset_superseded_sweep_stats()
 
 
+def test_batch_chunk_shared_with_a_document_in_a_DIFFERENT_physical_collection_IS_deleted() -> None:
+    """nexus-flkdc, batch sibling of the per-doc test above:
+    ``_sweep_superseded_vectors_many`` threads ``collection`` through to
+    ``orphaned_chashes`` too. A document in a DIFFERENT physical_collection
+    must not pin a row in the collection this batch delete() targets."""
+    from types import SimpleNamespace
+
+    from nexus.mcp_infra import _sweep_superseded_vectors_many
+
+    cat = _cat({"cross-collection": ["doc-other"]})
+    cat.resolve_many.return_value = {
+        "doc-other": SimpleNamespace(physical_collection="other-coll"),
+    }
+    col = MagicMock()
+    with patch("nexus.db.make_t3", return_value=MagicMock(
+            get_collection=MagicMock(return_value=col))):
+        _sweep_superseded_vectors_many(
+            cat, {"doc-A": {"cross-collection"}}, "coll",
+            reader=cat, notes_provider=_notes(),
+        )
+    col.delete.assert_called_once()
+    assert col.delete.call_args.kwargs["ids"] == ["cross-collection"], (
+        "a reference from a document in a DIFFERENT physical collection "
+        "must not pin this row"
+    )
+
+
+def test_batch_chunk_shared_with_a_document_in_the_SAME_physical_collection_is_NOT_deleted() -> None:
+    """Companion negative case: a live reference from a document actually
+    IN the collection being swept must still protect the row — collection
+    scoping narrows the guard, it must not disable it."""
+    from types import SimpleNamespace
+
+    from nexus.mcp_infra import _sweep_superseded_vectors_many
+
+    cat = _cat({"shared": ["doc-other-live"]})
+    cat.resolve_many.return_value = {
+        "doc-other-live": SimpleNamespace(physical_collection="coll"),
+    }
+    col = MagicMock()
+    with patch("nexus.db.make_t3", return_value=MagicMock(
+            get_collection=MagicMock(return_value=col))):
+        _sweep_superseded_vectors_many(
+            cat, {"doc-A": {"shared"}}, "coll",
+            reader=cat, notes_provider=_notes(),
+        )
+    col.delete.assert_not_called()
+
+
 # ── nexus-kgos1: the CALL SITE, not the function ────────────────────────────
 #
 # Every test above drives _sweep_superseded_vectors DIRECTLY with a MagicMock
