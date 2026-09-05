@@ -66,8 +66,25 @@ def _run_probe(probe: Path, *, extra_env: dict[str, str]) -> subprocess.Complete
     importable, so the probe's ``from nexus.db... import ...`` lines work
     unconditionally, unlike native-smoke.sh's ``uv run python`` invocation
     (which must ``cd`` to the repo root for ``uv`` to find ``pyproject.toml``).
+
+    nexus-a2qhz: both probes perform real T1/T2 HTTP writes through
+    ``guard_production_write``. This test's own process is exempted via
+    the autouse ``_exempt_pytest_from_production_write_guard`` fixture's
+    IN-PROCESS override (``service_endpoint._test_only_opt_in_reason``),
+    which is deliberately never an env var so it cannot leak into a
+    subprocess spawned via ``env=os.environ.copy()`` — this probe
+    subprocess is exactly such a spawn, so it needs the REAL
+    ``NX_ALLOW_PROD_WRITE`` set explicitly here, same as
+    ``tests/hooks/test_pre_close_verification_hook.py``'s write-subprocess
+    round-trip and ``tests/test_mcp_concurrency.py``'s spawned T2 writer.
     """
     env = os.environ.copy()
+    env["NX_ALLOW_PROD_WRITE"] = (
+        "nexus-a2qhz native-smoke client probe subprocess — targets only "
+        "the ephemeral engine test substrate this test's autouse "
+        "_pin_t2_substrate/_isolate_t1_sessions fixtures provisioned, "
+        "never production"
+    )
     env.update(extra_env)
     return subprocess.run(  # noqa: S603 — fixed argv, no shell
         [sys.executable, str(probe)],
