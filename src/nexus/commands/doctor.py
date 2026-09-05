@@ -1181,6 +1181,36 @@ def _report_index_failures_service() -> None:
 
     total_all_time = all_time["total"]
     click.echo(f"index_failures: {total_all_time} recorded failure(s) all-time (service backend)")
+
+    # Informational footnote only (round-4 fold-in, critique [24621] item
+    # 1; round-5 fold-in, code-review [24635] item 3): name the ACTIVE
+    # acknowledgment count and that it can be listed. Deliberately
+    # UNCONDITIONAL -- run regardless of whether the tenant currently has
+    # any recorded failure at all, and regardless of whether any CURRENT
+    # failure happens to be covered by one. A pre-emptive acknowledgment
+    # (no failure has ever been recorded for that file/class -- an
+    # operator acknowledging ahead of a known-bad corpus) has
+    # total_all_time == 0 and would never reach the old placement inside
+    # the post-return branch below; a surviving acknowledgment (the
+    # failure it once covered has since aged out or been cleared, but the
+    # ack row itself is still live) has total_all_time == total_unacknowledged
+    # (nothing CURRENT counts as "some are acknowledged") and would also
+    # have been skipped. Both must still be named here. A failure in this
+    # lookup must never turn the ALL-TIME summary above into a hard
+    # failure — same non-fatal posture as the outer store-construction
+    # try/except.
+    try:
+        acks = store.list_index_failure_acknowledgments()
+    except (httpx.HTTPError, RuntimeError):
+        pass
+    else:
+        ack_total = acks["total"]
+        if ack_total:
+            click.echo(
+                f"{ack_total} active acknowledgment(s) — see: "
+                "nx index failures --acks"
+            )
+
     if not total_all_time:
         return
 
@@ -1194,22 +1224,6 @@ def _report_index_failures_service() -> None:
             f"({total_all_time - total_unacknowledged} of those are "
             "acknowledged — see: nx index failures)"
         )
-        # Informational footnote only (round-4 fold-in, critique
-        # [24621] item 1): name the ACTIVE acknowledgment count and that
-        # it can be listed. A failure here must never turn the ALL-TIME
-        # summary above into a hard failure — same non-fatal posture as
-        # the outer store-construction try/except.
-        try:
-            acks = store.list_index_failure_acknowledgments()
-        except (httpx.HTTPError, RuntimeError):
-            pass
-        else:
-            ack_total = acks["total"]
-            if ack_total:
-                click.echo(
-                    f"{ack_total} active acknowledgment(s) — see: "
-                    "nx index failures --acks"
-                )
     rows = newest_unacked["rows"]
     if not rows:
         return

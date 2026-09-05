@@ -1152,6 +1152,32 @@ class TelemetryRepositoryTest {
         assertThat(unfiltered.get("total")).isEqualTo(2);
     }
 
+    @Test @Order(81)
+    @SuppressWarnings("unchecked")
+    void indexFailures_listAcknowledgments_filePathFilter_narrowsToExactFile() {
+        // Round-5 fold-in, code-review [24635] item 2: nx index failures
+        // --unacknowledge --file's error_class auto-resolve was paging
+        // every acknowledgment tenant-wide and filtering client-side --
+        // the same class of gap as order-80's fix for --acknowledge --file,
+        // now closed on the acknowledgments list too.
+        final String tenant = "tel-idxfail-acks-filepath-" + System.nanoTime();
+        repo.recordIndexFailureAcknowledgment(tenant, "/repo/a.pdf",
+            "UnextractableContentError", "known");
+        repo.recordIndexFailureAcknowledgment(tenant, "/repo/b.pdf",
+            "SomeOtherClass", "known");
+
+        var scoped = repo.listIndexFailureAcknowledgments(tenant, "/repo/a.pdf");
+
+        assertThat(scoped.get("total")).isEqualTo(1);
+        var rows = (List<Map<String, Object>>) scoped.get("rows");
+        assertThat(rows).extracting(r -> r.get("error_class"))
+            .containsExactly("UnextractableContentError");
+
+        // Blank file_path stays unfiltered -- equivalent to the 1-arg overload.
+        var unfiltered = repo.listIndexFailureAcknowledgments(tenant, "");
+        assertThat(unfiltered.get("total")).isEqualTo(2);
+    }
+
     // ── frecency ───────────────────────────────────────────────────────────────
 
     @Test @Order(12)

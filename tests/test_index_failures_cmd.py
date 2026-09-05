@@ -386,6 +386,12 @@ def test_unacknowledge_by_file_resolves_error_class_from_the_acks_list() -> None
         ])
 
     assert result.exit_code == 0, result.output
+    # Round-5 fold-in (code-review [24635] item 2): the auto-resolve lookup
+    # must be a server-side exact file_path filter, never a wide
+    # tenant-wide page filtered client-side.
+    store.return_value.list_index_failure_acknowledgments.assert_called_once_with(
+        file_path="/repo/broken.pdf",
+    )
     store.return_value.unacknowledge_index_failure.assert_called_once_with(
         error_class="UnextractableContentError", file_path="/repo/broken.pdf",
     )
@@ -468,6 +474,27 @@ def test_all_four_modes_are_pairwise_mutually_exclusive() -> None:
 
 
 # ── nx index failures --clear --dry-run (code review [24624] item 2) ────────
+
+
+def test_dry_run_without_clear_is_a_usage_error() -> None:
+    with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore"):
+        result = CliRunner().invoke(main, [
+            "index", "failures", "--dry-run", "--run-id", "run-xyz",
+        ])
+
+    assert result.exit_code != 0
+    assert "--dry-run" in result.output and "--clear" in result.output
+
+
+def test_dry_run_with_acknowledge_is_a_usage_error() -> None:
+    with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore"):
+        result = CliRunner().invoke(main, [
+            "index", "failures", "--dry-run", "--acknowledge",
+            "--error-class", "X",
+        ])
+
+    assert result.exit_code != 0
+    assert "--dry-run" in result.output and "--clear" in result.output
 
 
 def test_clear_dry_run_previews_without_deleting() -> None:

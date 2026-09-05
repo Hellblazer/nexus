@@ -1629,8 +1629,29 @@ public final class TelemetryRepository {
      *         acknowledgment.
      */
     public Map<String, Object> listIndexFailureAcknowledgments(String tenant) {
+        return listIndexFailureAcknowledgments(tenant, "");
+    }
+
+    /**
+     * {@link #listIndexFailureAcknowledgments(String)}, scoped to an EXACT
+     * {@code file_path} (round-5 fold-in, code-review [24635] item 2: the
+     * {@code --unacknowledge --file} auto-resolve previously paged every
+     * acknowledgment tenant-wide and filtered client-side -- the same
+     * class of gap the {@code --acknowledge --file} auto-resolve was
+     * already fixed for via {@link #getIndexFailures(String, String, int,
+     * int, boolean, String)}'s {@code filePath} filter). A blank
+     * {@code filePath} is equivalent to the no-arg overload (every
+     * acknowledgment, no filter) -- it does NOT mean "error-class-scoped
+     * only"; that scope has no dedicated accessor here since the CLI
+     * caller already knows when it wants the class-wide row (it passes
+     * {@code --error-class} directly and skips the lookup entirely).
+     */
+    public Map<String, Object> listIndexFailureAcknowledgments(String tenant, String filePath) {
         return tenantScope.withTenant(tenant, ctx -> {
             var cond = INDEX_FAILURES.KIND.eq("acknowledgment");
+            if (filePath != null && !filePath.isBlank()) {
+                cond = cond.and(INDEX_FAILURES.FILE_PATH.eq(filePath));
+            }
             List<Map<String, Object>> rows = ctx.select(
                 INDEX_FAILURES.ID,
                 INDEX_FAILURES.FILE_PATH,

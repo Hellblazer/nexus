@@ -749,6 +749,25 @@ class TestIndexFailuresRoundTrip:
         assert gated_after_revoke["total"] == 1
         assert gated_after_revoke["rows"][0]["file_path"] == file_path
 
+    def test_list_acknowledgments_file_path_filter_narrows_to_exact_file(self, tel_store):
+        """Round-5 fold-in (code-review [24635] item 2): the
+        --unacknowledge --file auto-resolve's server-side filter, against
+        the real engine -- must match exactly, not as a substring/prefix."""
+        target = f"/repo/ack-target-{time.time_ns()}.pdf"
+        other = f"/repo/ack-other-{time.time_ns()}.pdf"
+        tel_store.acknowledge_index_failure(
+            error_class="UnextractableContentError", file_path=target,
+        )
+        tel_store.acknowledge_index_failure(
+            error_class="SomeOtherClass", file_path=other,
+        )
+
+        scoped = tel_store.list_index_failure_acknowledgments(file_path=target)
+
+        assert scoped["total"] == 1
+        assert scoped["rows"][0]["file_path"] == target
+        assert scoped["rows"][0]["error_class"] == "UnextractableContentError"
+
     def test_unacknowledge_requires_non_blank_error_class(self, tel_store):
         with pytest.raises(ValueError):
             tel_store.unacknowledge_index_failure(error_class="")

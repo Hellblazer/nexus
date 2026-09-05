@@ -838,3 +838,88 @@ class TestIndexFailuresCheckRoutes:
         assert exit_code is None, printed
         assert "FAIL" not in printed
         assert "acknowledged" in printed
+
+    def test_pre_emptive_acknowledgment_is_named_with_zero_failures(
+        self, service_mode: None,
+    ) -> None:
+        """Round-5 fold-in (code-review [24635] item 3): an acknowledgment
+        created AHEAD of any failure ever being recorded for that file/class
+        (an operator pre-emptively exempting a known-bad corpus) must still
+        be named -- the old placement inside the post-return branch never
+        reached this, since total_all_time == 0 returns before the ack
+        lookup ran at all."""
+        import click
+
+        from nexus.commands import doctor as doctor_mod
+
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+            store.return_value.list_index_failures.side_effect = self._scoped_mock(
+                {"rows": [], "total": 0, "oldest_occurred_at": ""},
+            )
+            store.return_value.list_index_failure_acknowledgments.return_value = {
+                "rows": [{
+                    "file_path": "", "error_class": "ScannedPdfNoOcrError",
+                    "reason": "known systemic issue",
+                    "created_at": "2026-09-05T00:00:00Z",
+                }],
+                "total": 1,
+            }
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                exit_code = None
+                try:
+                    doctor_mod._run_check_index_failures()
+                except click.exceptions.Exit as exc:
+                    exit_code = exc.exit_code
+                printed = out.getvalue().decode() + err.getvalue().decode()
+
+        assert exit_code is None, printed
+        assert "0 recorded failure" in printed, printed
+        assert "1 active acknowledgment(s)" in printed, printed
+        assert "nx index failures --acks" in printed, printed
+
+    def test_surviving_acknowledgment_is_named_when_no_current_failure_is_covered(
+        self, service_mode: None,
+    ) -> None:
+        """Round-5 fold-in (code-review [24635] item 3): an acknowledgment
+        whose own failure has aged out or been cleared, while an UNRELATED
+        fresh failure exists, must still be named -- total_all_time equals
+        total_unacknowledged here (nothing CURRENT is covered), so the old
+        placement inside `if total_all_time > total_unacknowledged` never
+        reached the ack lookup in this shape either."""
+        import click
+
+        from nexus.commands import doctor as doctor_mod
+
+        now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        unrelated_row = {
+            "run_id": "run-1", "file_path": "/repo/unrelated.pdf",
+            "error_class": "UnextractableContentError",
+            "error": "boom", "occurred_at": now_iso,
+        }
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+            store.return_value.list_index_failures.side_effect = self._scoped_mock(
+                all_time={"rows": [unrelated_row], "total": 1, "oldest_occurred_at": now_iso},
+                by_run_id_unacked={"rows": [unrelated_row], "total": 1, "oldest_occurred_at": now_iso},
+            )
+            store.return_value.list_index_failure_acknowledgments.return_value = {
+                "rows": [{
+                    "file_path": "/repo/long-since-fixed.pdf",
+                    "error_class": "UnextractableContentError",
+                    "reason": "fixed upstream", "created_at": now_iso,
+                }],
+                "total": 1,
+            }
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                exit_code = None
+                try:
+                    doctor_mod._run_check_index_failures()
+                except click.exceptions.Exit as exc:
+                    exit_code = exc.exit_code
+                printed = out.getvalue().decode() + err.getvalue().decode()
+
+        # The unrelated failure still gates (it is genuinely unacknowledged).
+        assert exit_code == 1, printed
+        assert "1 active acknowledgment(s)" in printed, printed
+        assert "nx index failures --acks" in printed, printed

@@ -319,7 +319,7 @@ nx index failures --unacknowledge (--file PATH | --error-class CLASS)
 
 Lists, clears, acknowledges, unacknowledges, or lists acknowledgments of durable per-file index-failure records (nexus-nukn3, Sam's design: "when a file fails, ENQUEUE the failure and move on"). A `repo` run that skips a file it cannot extract (`nexus.errors.UnextractableContentError`) now writes a durable row — file path, error class, reason, run id — to `nexus.index_failures` (engine-side PG table, event-log shape, mirrors `hook_failures`) instead of only a log line and an in-memory counter that die with the process. `nx index repo`'s systemic-skip floor (nexus-deyd5) reads this same durable count rather than the in-memory list — see the note on `--acknowledge` below for why that floor deliberately does NOT honor acknowledgments.
 
-`--clear`, `--acknowledge`, `--unacknowledge`, and `--acks` are pairwise mutually exclusive.
+`--clear`, `--acknowledge`, `--unacknowledge`, and `--acks` are pairwise mutually exclusive. `--dry-run` only means anything paired with `--clear`; used with any other mode (or alone) it is a usage error rather than a silent no-op.
 
 | Flag | Description |
 |------|-------------|

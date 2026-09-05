@@ -967,8 +967,8 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "oldest_occurred_at": str(resp.get("oldest_occurred_at") or ""),
         }
 
-    def list_index_failure_acknowledgments(self) -> dict[str, Any]:
-        """List every durable acknowledgment for the tenant, newest first
+    def list_index_failure_acknowledgments(self, *, file_path: str = "") -> dict[str, Any]:
+        """List durable acknowledgments for the tenant, newest first
         (nexus-nukn3 third fold-in, critic Critical finding T2
         critique-nexus-nukn3-4d5520bf4 [24621]: the ack mechanism was
         write-only -- created via :meth:`acknowledge_index_failure` but
@@ -976,11 +976,22 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
         Calls ``GET /v1/telemetry/index_failures/acks``.
 
+        Args:
+            file_path: optional server-side EXACT filter (round-5 fold-in,
+                code-review [24635] item 2), narrowing to just that file's
+                acknowledgment(s) instead of paging every acknowledgment
+                tenant-wide and filtering client-side -- the same class of
+                fix as :meth:`list_index_failures`'s ``file_path`` param.
+                Omitted (default ``""``): every acknowledgment, unfiltered.
+
         Returns ``{"rows": [{"id", "file_path", "error_class", "reason",
         "created_at"}, ...], "total": int}``. ``file_path`` is ``""`` for
         an error-class-scoped (corpus-wide) acknowledgment.
         """
-        resp = self._get("/v1/telemetry/index_failures/acks", {})
+        params: dict[str, Any] = {}
+        if file_path:
+            params["file_path"] = file_path
+        resp = self._get("/v1/telemetry/index_failures/acks", params)
         if not isinstance(resp, dict):  # defensive: a stripped proxy response
             return {"rows": [], "total": 0}
         return {

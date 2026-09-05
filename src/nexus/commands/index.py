@@ -352,6 +352,12 @@ def index_failures_cmd(
             "--clear, --acknowledge, --unacknowledge, and --acks are "
             "mutually exclusive."
         )
+    if dry_run and not clear:
+        # Round-5 fold-in (code-review [24635] item 1): --dry-run only
+        # means anything paired with --clear -- silently ignoring it on
+        # every other mode would let an operator believe a preview ran
+        # when nothing did.
+        raise click.UsageError("--dry-run only applies to --clear.")
 
     try:
         store = HttpTelemetryStore()
@@ -427,8 +433,14 @@ def index_failures_cmd(
                         "error_class -- pass --error-class explicitly."
                     )
             else:
+                # Round-5 fold-in (code-review [24635] item 2): a
+                # server-side exact file_path filter, mirroring the
+                # --acknowledge --file fix above, instead of paging every
+                # acknowledgment tenant-wide and filtering client-side.
                 try:
-                    acks_result = store.list_index_failure_acknowledgments()
+                    acks_result = store.list_index_failure_acknowledgments(
+                        file_path=file_path,
+                    )
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code == 404:
                         raise click.ClickException(
@@ -441,10 +453,7 @@ def index_failures_cmd(
                     raise click.ClickException(
                         f"index_failures: service backend unreachable ({exc})."
                     ) from exc
-                matching = [
-                    row for row in acks_result["rows"]
-                    if row.get("file_path") == file_path
-                ]
+                matching = acks_result["rows"]
                 if not matching:
                     raise click.ClickException(
                         f"no acknowledgment found for {file_path!r} -- pass "

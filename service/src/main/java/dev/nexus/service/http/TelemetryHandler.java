@@ -642,11 +642,18 @@ public final class TelemetryHandler implements HttpHandler {
     /**
      * GET /v1/telemetry/index_failures/acks — list durable acknowledgments
      * (third fold-in, critic Critical finding [24621]: a write-only ack
-     * mechanism). {@code nx index failures --acks}.
+     * mechanism). {@code nx index failures --acks}. Optional {@code
+     * ?file_path=} query param (round-5 fold-in, code-review [24635] item
+     * 2) narrows to that exact file server-side — the {@code
+     * --unacknowledge --file} auto-resolve's lookup, mirroring the
+     * server-side {@code file_path} filter already on {@code
+     * /index_failures/list}.
      */
     private void handleIndexFailureAcksList(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "GET");
-        HttpUtil.send(ex, 200, json(repo.listIndexFailureAcknowledgments(tenant)));
+        var params = queryParams(ex);
+        String filePath = params.getOrDefault("file_path", "");
+        HttpUtil.send(ex, 200, json(repo.listIndexFailureAcknowledgments(tenant, filePath)));
     }
 
     /**
