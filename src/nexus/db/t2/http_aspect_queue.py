@@ -28,6 +28,7 @@ from __future__ import annotations
 import threading
 from typing import Any
 
+import httpx
 import structlog
 
 from nexus.db.t2.records import QueueRow
@@ -93,6 +94,11 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         rename_lock: Accepted for constructor parity with AspectExtractionQueue;
                      NOT used (no-op).
         timeout:     HTTP client timeout in seconds (default: 30.0).
+        client:      Optional pre-constructed ``httpx.Client`` (nexus-m20mf
+                     P3, additive) -- when supplied, this store shares that
+                     pool instead of opening its own, and ``close()`` on
+                     this store becomes a no-op for the client (the
+                     injecting caller owns closing it).
     """
 
     def __init__(
@@ -103,8 +109,9 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         rename_lock: "threading.RLock | None" = None,
         _token: str | None = None,
         timeout: float = 30.0,
+        client: httpx.Client | None = None,
     ) -> None:
-        super().__init__(base_url, tenant, _token=_token, timeout=timeout)
+        super().__init__(base_url, tenant, _token=_token, timeout=timeout, client=client)
         # rename_lock accepted for constructor parity but ignored over HTTP
         # (verbatim behavior preserved from the pre-mixin constructor).
         self.rename_lock: threading.RLock = (
