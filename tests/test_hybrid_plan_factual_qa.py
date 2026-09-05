@@ -40,11 +40,110 @@ from __future__ import annotations
 import json
 import os
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 pytestmark = [pytest.mark.integration, pytest.mark.lived_in]
+
+
+# ── Structural regression: $question is not a rank candidate ───────────────
+# nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review round 2). The
+# template's rank step used to list ``$question`` as a THIRD entry in
+# ``inputs``, alongside the two real evidence streams -- fed to
+# operator_rank as a candidate to rank, not as criterion context. That is
+# precisely the bead's defect (the question text entering a rank step's
+# own candidate list), reproduced in a real shipped template. Fixed by
+# removing it from ``inputs``; the criterion's existing "relevance to the
+# question" prose is the closest a static template can get to naming that
+# framing for a human reader, since the runner's ``$var`` resolution has
+# no inline interpolation (``nexus.plans.runner._resolve_value``:
+# whole-token substitution only -- a criterion string cannot embed the
+# literal resolved question text via YAML alone).
+#
+# Needs NO substrate (no API keys, no T3, no engine) -- pure YAML-parse
+# and plan_run-with-a-fake-dispatcher checks. Still carries this module's
+# ``pytestmark`` (pytest applies module-level marks to every test
+# collected here regardless); run directly with e.g.
+#   uv run pytest tests/test_hybrid_plan_factual_qa.py \
+#       -k TestQuestionNotARankCandidate -o addopts=""
+# to exercise it outside the default (integration-excluding) loop.
+
+
+class TestQuestionNotARankCandidate:
+    @staticmethod
+    def _load_plan_json() -> dict:
+        import yaml
+
+        path = (
+            Path(__file__).resolve().parents[1]
+            / "conexus" / "plans" / "builtin" / "hybrid-factual-lookup.yml"
+        )
+        template = yaml.safe_load(path.read_text())
+        return template["plan_json"]
+
+    def test_question_not_in_rank_step_inputs(self) -> None:
+        plan_json = self._load_plan_json()
+        rank_step = next(s for s in plan_json["steps"] if s["tool"] == "rank")
+        assert "$question" not in rank_step["args"]["inputs"]
+
+    def test_criterion_names_the_question(self) -> None:
+        """A human reader must still see relevance-to-the-question
+        framing in the criterion, even though the literal question text
+        cannot be embedded there (no inline interpolation)."""
+        plan_json = self._load_plan_json()
+        rank_step = next(s for s in plan_json["steps"] if s["tool"] == "rank")
+        assert "question" in rank_step["args"]["criterion"].lower()
+
+    @pytest.mark.asyncio
+    async def test_question_dropped_from_rank_candidates_end_to_end(self) -> None:
+        """Runs the REAL template through plan_run with a fake
+        dispatcher (no substrate, no API keys) -- proves the runner
+        strips $question before the rank step ever dispatches, as
+        defense in depth independent of the template fix above."""
+        from nexus.plans.match import Match
+        from nexus.plans.runner import plan_run
+
+        plan_json = self._load_plan_json()
+        match = Match(
+            plan_id=0, name="hybrid-factual-lookup", description="test",
+            confidence=1.0, dimensions={},
+            tags="", plan_json=json.dumps(plan_json),
+            required_bindings=["question"],
+            optional_bindings=[
+                "corpus", "limit", "depth",
+                "vector_budget_chunks", "graph_budget_chunks",
+            ],
+            default_bindings={
+                "corpus": "all", "limit": 40, "depth": 2,
+                "vector_budget_chunks": 6, "graph_budget_chunks": 4,
+            },
+            parent_dims=None,
+        )
+
+        calls: list[tuple[str, dict]] = []
+
+        async def fake_dispatch(tool: str, args: dict) -> dict:
+            calls.append((tool, args))
+            if tool == "search":
+                return {"ids": [], "tumblers": [], "distances": [], "collections": []}
+            if tool == "traverse":
+                return {"ids": [], "tumblers": [], "collections": []}
+            if tool == "store_get_many":
+                return {"contents": ["real evidence chunk"], "missing": []}
+            if tool == "rank":
+                return {"ranked": ["real evidence chunk"]}
+            return {"text": "ok"}
+
+        await plan_run(
+            match, {"question": "what is the specific value reported"},
+            dispatcher=fake_dispatch,
+        )
+
+        rank_calls = [args for tool, args in calls if tool == "rank"]
+        assert rank_calls, "rank step must have dispatched"
+        assert "what is the specific value reported" not in rank_calls[0]["inputs"]
 
 
 # ── API-key gate ───────────────────────────────────────────────────────────

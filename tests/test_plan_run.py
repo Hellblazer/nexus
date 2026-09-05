@@ -2251,14 +2251,22 @@ class TestZeroEvidenceShortCircuit:
 
 class TestEvidenceHygiene:
     """RDR-200 Phase 1c evidence hygiene (nexus-4jj40): the question text
-    entered a rank step's own candidate list on 5 of 15 composed runs
-    (a literal ``$intent`` reference resolving into an items/inputs list
-    alongside real evidence), and nexus's own operator eval fixtures
-    (category "code") were retrieved as evidence for knowledge__ paper
-    questions (category "paper") on others (T2 [24082]).
+    entered a rank step's own candidate list on 5 of 15 composed runs (a
+    literal ``$intent``/``$question`` reference resolving into an
+    items/inputs list alongside real evidence), and nexus's own operator
+    eval fixtures + the RDR-200 Phase 1 gate/question docs were retrieved
+    as evidence for knowledge__ paper questions (T2 [24082]).
+
+    Review round 2 removed a category-based ("paper" vs "code") rule that
+    stood here first: it dropped EVERY code-category candidate whenever a
+    paper candidate shared the batch (breaking a legitimate "paper's
+    algorithm plus its implementation" plan) and never touched the
+    bead's own cited RDR-200 gate-doc leak (category "prose",
+    indistinguishable from any other legitimate RDR/docs markdown file).
+    See ``TestSourceUriExclusion`` below for its replacement.
     """
 
-    # ── $intent dropped from candidate lists ────────────────────────────
+    # ── $intent/$question dropped from candidate lists ──────────────────
 
     def test_drop_intent_removes_exact_match_from_items(self) -> None:
         from nexus.plans.runner import _drop_intent_from_list_args
@@ -2268,12 +2276,31 @@ class TestEvidenceHygiene:
         assert out["items"] == ["real evidence"]
         assert out["criterion"] == "x"  # non-list args untouched
 
-    def test_drop_intent_is_noop_when_intent_missing_or_empty(self) -> None:
+    def test_drop_intent_guard_clause_is_load_bearing_empty_string(self) -> None:
+        """Reviewer follow-up: the ORIGINAL version of this test used a
+        list with no empty-string/None element at all, so it passed
+        identically whether or not the ``if not intent: return args``
+        guard existed -- deleting the guard could not fail it. This
+        version puts a literal empty string INTO the list: with the
+        guard, intent="" is falsy and the function is a no-op (the list
+        survives with its empty string intact); without the guard,
+        ``"" in value`` is True and the empty-string candidate gets
+        stripped -- so removing the guard now flips this assertion."""
         from nexus.plans.runner import _drop_intent_from_list_args
 
-        args = {"items": ["a", "b"]}
-        assert _drop_intent_from_list_args(args, intent=None) == args
-        assert _drop_intent_from_list_args(args, intent="") == args
+        args = {"items": ["a", "", "b"]}
+        out = _drop_intent_from_list_args(args, intent="")
+        assert out["items"] == ["a", "", "b"]
+
+    def test_drop_intent_guard_clause_is_load_bearing_none(self) -> None:
+        """Same load-bearing-guard shape as above, for intent=None: a
+        list literally containing ``None`` survives intact only because
+        the ``not isinstance(intent, str)`` guard short-circuits first."""
+        from nexus.plans.runner import _drop_intent_from_list_args
+
+        args = {"items": ["a", None, "b"]}
+        out = _drop_intent_from_list_args(args, intent=None)
+        assert out["items"] == ["a", None, "b"]
 
     def test_drop_intent_is_noop_when_intent_not_present_in_any_list(self) -> None:
         from nexus.plans.runner import _drop_intent_from_list_args
@@ -2290,10 +2317,12 @@ class TestEvidenceHygiene:
         assert out["items"] == ["paper passage one", "paper passage two"]
 
     @pytest.mark.asyncio
-    async def test_intent_dropped_from_rank_items_end_to_end(self) -> None:
+    async def test_intent_dropped_from_rank_items_end_to_end_isolated(self) -> None:
         """A composed rank step referencing ``$intent`` inside its
         ``items`` list -- the actual reported shape -- must never
-        dispatch with the question text still in the candidate list."""
+        dispatch with the question text still in the candidate list.
+        Single operator step: exercises the ISOLATED dispatch call
+        site only (see the bundle-path test below for the other two)."""
         from nexus.plans.runner import plan_run
 
         plan = {
@@ -2320,78 +2349,187 @@ class TestEvidenceHygiene:
         assert "what does the paper claim" not in args["items"]
         assert args["items"] == ["real evidence one", "real evidence two"]
 
-    # ── Fixture-category candidates dropped alongside paper evidence ───
+    @pytest.mark.asyncio
+    async def test_intent_dropped_from_rank_items_through_bundle_path(
+        self, monkeypatch,
+    ) -> None:
+        """Reviewer follow-up: the isolated-dispatch test above never
+        exercises the BUNDLE composition call site -- a rank step
+        followed by another bundleable operator step (both isolated
+        AND the bundle path independently call ``_resolve_args`` in
+        ``plan_run``'s loop, per its own module docstring). Two
+        contiguous bundleable operators ("rank" then "summarize")
+        force ``plan_run`` through ``dispatch_bundle`` /
+        ``compose_bundle_prompt`` instead of the isolated dispatcher."""
+        import nexus.operators.dispatch as _dispatch_mod
+        from nexus.plans.runner import plan_run
 
-    def test_filter_hydrated_contents_drops_code_fixture_alongside_paper(self) -> None:
-        from nexus.plans.runner import _filter_hydrated_contents
+        captured_prompts: list[str] = []
 
-        contents = ["a real paper passage", "operator_check test fixture JSON"]
-        categories = ["paper", "code"]
-        assert _filter_hydrated_contents(contents, categories) == [
-            "a real paper passage",
-        ]
+        async def fake_dispatch(prompt, schema, timeout=300.0, **kwargs):
+            captured_prompts.append(prompt)
+            return {"ranked": ["real evidence one", "real evidence two"]}
 
-    def test_filter_hydrated_contents_keeps_code_when_no_paper_present(self) -> None:
-        """A deliberate code-only retrieval (no paper evidence at all,
-        e.g. a code-analysis question) is untouched -- the exclusion is
-        scoped to co-mingling, never a blanket "drop all code"."""
-        from nexus.plans.runner import _filter_hydrated_contents
+        monkeypatch.setattr(_dispatch_mod, "claude_dispatch", fake_dispatch)
 
-        contents = ["some code", "more code"]
-        categories = ["code", "code"]
-        assert _filter_hydrated_contents(contents, categories) == contents
+        plan = {
+            "steps": [
+                {
+                    "tool": "rank",
+                    "args": {
+                        "items": [
+                            "$intent", "real evidence one", "real evidence two",
+                        ],
+                        "criterion": "best match",
+                    },
+                },
+                {
+                    "tool": "summarize",
+                    "args": {"content": "$step1.ranked"},
+                },
+            ],
+            "required_bindings": ["intent"],
+        }
+        await plan_run(
+            _match(plan), {"intent": "what does the paper claim"}, dispatcher=None,
+        )
 
-    def test_filter_hydrated_contents_ordinary_candidates_untouched(self) -> None:
-        from nexus.plans.runner import _filter_hydrated_contents
+        assert captured_prompts, "bundle dispatch must have fired"
+        composed_prompt = captured_prompts[0]
+        assert "what does the paper claim" not in composed_prompt
+        assert "real evidence one" in composed_prompt
 
-        contents = ["paper passage one", "paper passage two"]
-        categories = ["paper", "paper"]
-        assert _filter_hydrated_contents(contents, categories) == contents
 
-    def test_filter_hydrated_contents_degrades_when_categories_misaligned(self) -> None:
-        """The tumbler-hydration path returns no per-id categories at
-        all -- length mismatch must degrade to the pre-existing empty-
-        only filter, never raise or misclassify."""
-        from nexus.plans.runner import _filter_hydrated_contents
+class TestSourceUriExclusion:
+    """RDR-200 Phase 1c evidence hygiene (nexus-4jj40), review round 2:
+    replaces the removed category-based rule with a source-path
+    exclusion keyed on the catalog's ``Document.source_uri`` (the two
+    concrete leaks the bead cites: ``tests/`` fixtures and
+    ``docs/rdr/rdr-200-phase1*`` gate/question docs).
+    """
 
-        contents = ["a", "", "b"]
-        assert _filter_hydrated_contents(contents, []) == ["a", "b"]
+    def test_matches_tests_directory(self) -> None:
+        from nexus.plans.runner import _source_uri_is_non_evidentiary
 
-    def test_hydrate_operator_args_ids_branch_drops_fixture_category(self) -> None:
+        assert _source_uri_is_non_evidentiary(
+            "file:///Users/x/nexus/tests/test_operator_dispatch.py"
+        )
+
+    def test_matches_rdr_200_phase1_gate_docs(self) -> None:
+        from nexus.plans.runner import _source_uri_is_non_evidentiary
+
+        assert _source_uri_is_non_evidentiary(
+            "file:///Users/x/nexus/docs/rdr/rdr-200-phase1-questions.md"
+        )
+        assert _source_uri_is_non_evidentiary(
+            "file:///Users/x/nexus/docs/rdr/rdr-200-phase1c-prereg.md"
+        )
+
+    def test_real_code_is_not_excluded(self) -> None:
+        from nexus.plans.runner import _source_uri_is_non_evidentiary
+
+        assert not _source_uri_is_non_evidentiary(
+            "file:///Users/x/nexus/src/nexus/plans/runner.py"
+        )
+
+    def test_real_rdr_doc_is_not_excluded(self) -> None:
+        from nexus.plans.runner import _source_uri_is_non_evidentiary
+
+        assert not _source_uri_is_non_evidentiary(
+            "file:///Users/x/nexus/docs/rdr/rdr-201-catalog-canonical.md"
+        )
+
+    def test_segment_anchored_no_false_positive_on_similar_dirname(self) -> None:
+        """"mytests/" must not match the "/tests/" marker."""
+        from nexus.plans.runner import _source_uri_is_non_evidentiary
+
+        assert not _source_uri_is_non_evidentiary(
+            "file:///Users/x/nexus/mytests/foo.py"
+        )
+
+    def test_empty_source_uri_is_never_excluded(self) -> None:
+        from nexus.plans.runner import _source_uri_is_non_evidentiary
+
+        assert not _source_uri_is_non_evidentiary("")
+
+    def test_tumbler_hydration_drops_fixture_keeps_real_code(self) -> None:
+        """A genuine code candidate (source_uri under src/) survives
+        alongside an excluded test-fixture candidate (source_uri under
+        tests/) in the SAME hydration batch -- the reviewer's "a
+        genuine code candidate survives alongside a paper candidate"
+        case, adapted to the source_uri mechanism that replaced the
+        category rule."""
+        from types import SimpleNamespace
         from unittest.mock import patch
 
+        from nexus.catalog.types import ManifestRow
         from nexus.plans.runner import _hydrate_operator_args
 
+        manifests = {
+            "1.1.5": [ManifestRow(
+                position=0, chash="a" * 64,
+                collection="code__x__voyage-code-3__v1",
+            )],
+            "1.1.6": [ManifestRow(
+                position=0, chash="b" * 64,
+                collection="code__x__voyage-code-3__v1",
+            )],
+        }
+        entries = {
+            "1.1.5": SimpleNamespace(source_uri="file:///repo/tests/test_foo.py"),
+            "1.1.6": SimpleNamespace(source_uri="file:///repo/src/nexus/plans/runner.py"),
+        }
+        fake_catalog = SimpleNamespace(
+            get_manifests=lambda ids: manifests,
+            resolve_many=lambda ids: entries,
+        )
+        fake_hydrated = {"contents": ["def real_function(): pass"], "missing": []}
         with patch(
-            "nexus.mcp.core.store_get_many",
-            return_value={
-                "contents": ["a real paper passage", "operator test fixture JSON"],
-                "categories": ["paper", "code"],
-            },
-        ):
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ) as mock_hydrate:
             _, args = _hydrate_operator_args(
-                "rank",
-                {"ids": ["p1", "f1"], "collections": ["knowledge__x", "code__x"]},
+                "rank", {"ids": ["1.1.5", "1.1.6"]},
             )
-        assert json.loads(args["items"]) == ["a real paper passage"]
+        # Only the non-excluded tumbler's chash ("1.1.6" -> b*64) ever
+        # reaches store_get_many -- the fixture tumbler ("1.1.5") was
+        # dropped before its chash was even collected.
+        call_kwargs = mock_hydrate.call_args.kwargs
+        assert call_kwargs["ids"] == ["b" * 64]
+        assert json.loads(args["items"]) == ["def real_function(): pass"]
 
-    def test_hydrate_operator_args_ids_branch_keeps_ordinary_candidates(self) -> None:
+    def test_resolve_many_failure_degrades_to_leave_every_candidate_in(self) -> None:
+        """A resolve_many failure must never crash the hydration or
+        exclude a document it couldn't classify -- degrade to "no
+        source_uri for anything", same as the pre-existing
+        get_manifests-catalog-None guard."""
+        from types import SimpleNamespace
         from unittest.mock import patch
 
+        from nexus.catalog.types import ManifestRow
         from nexus.plans.runner import _hydrate_operator_args
 
+        manifests = {
+            "1.1.5": [ManifestRow(
+                position=0, chash="a" * 64,
+                collection="code__x__voyage-code-3__v1",
+            )],
+        }
+
+        def _boom(ids):
+            raise RuntimeError("catalog unreachable")
+
+        fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests, resolve_many=_boom)
+        fake_hydrated = {"contents": ["some content"], "missing": []}
         with patch(
-            "nexus.mcp.core.store_get_many",
-            return_value={
-                "contents": ["paper passage one", "paper passage two"],
-                "categories": ["paper", "paper"],
-            },
-        ):
-            _, args = _hydrate_operator_args(
-                "rank",
-                {"ids": ["p1", "p2"], "collections": ["knowledge__x", "knowledge__x"]},
-            )
-        assert json.loads(args["items"]) == ["paper passage one", "paper passage two"]
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ) as mock_hydrate:
+            _, args = _hydrate_operator_args("rank", {"ids": ["1.1.5"]})
+        mock_hydrate.assert_called_once()
+        assert json.loads(args["items"]) == ["some content"]
 
 
 @pytest.mark.asyncio

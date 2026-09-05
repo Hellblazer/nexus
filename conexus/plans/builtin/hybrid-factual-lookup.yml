@@ -103,8 +103,21 @@ plan_json:
         limit_per_source: $graph_budget_chunks
     - tool: rank
       args:
+        # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene): $question used
+        # to be a THIRD entry in `inputs` below, alongside the two real
+        # evidence streams — fed to operator_rank as a candidate to rank,
+        # not as criterion context. The runner's $var resolution has no
+        # inline interpolation (whole-token substitution only — see
+        # nexus.plans.runner._resolve_value's docstring), so the actual
+        # question text cannot be embedded into this criterion string;
+        # "relevance to the question" below is the closest a static
+        # template can get to naming that framing for a human reader.
+        # $question is deliberately NOT in `inputs` any more — the runner
+        # now strips any $intent/$question-bound value found in an
+        # items/inputs list before dispatch regardless, but this template
+        # should not have relied on that safety net in the first place.
         criterion: >-
-          Relevance to the question included alongside the candidates.
+          Relevance to the question the candidates were retrieved for.
           Prefer factual evidence — concrete claims, named entities,
           numeric values, dates — over topical mentions. The candidates
           are fused from vector recall and citation/relation-graph
@@ -112,7 +125,6 @@ plan_json:
         inputs:
           - $step3.contents
           - $step4.contents
-          - $question
     - tool: generate
       args:
         template: factual-answer

@@ -1428,10 +1428,43 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
         return {"contents": ["" for _ in tumbler_ids], "missing": list(tumbler_ids)}
     manifests = cat.get_manifests(tumbler_ids)
 
+    # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review round 2):
+    # best-effort source_uri exclusion — one extra batched round trip
+    # (``resolve_many``, the same batched primitive ``search_engine.py``'s
+    # ``_attach_display_paths`` uses) alongside the ``get_manifests`` call
+    # this function already makes. A ``resolve_many`` failure, or a
+    # tumbler it cannot resolve, degrades to "no source_uri for this id"
+    # — never raises, never excludes a document it cannot classify (see
+    # ``_source_uri_is_non_evidentiary``). This path only covers TUMBLER-
+    # shaped ids (document-level results from search_metadata_scoped /
+    # search_graph_hop / search_aspect_scoped / query()); the far more
+    # common chash-shaped path (plain ``search()`` results, below in
+    # ``_hydrate_operator_args``) is NOT covered — a pinned test
+    # (``test_chash_shaped_ids_bypass_tumbler_route``) asserts that path
+    # never calls the catalog at all, and there is no batched chash ->
+    # source_uri primitive that would not violate it.
+    try:
+        catalog_entries = cat.resolve_many(tumbler_ids)
+    except Exception:  # noqa: BLE001 — best-effort exclusion; a lookup failure must degrade to "leave every candidate in", never crash the hydration
+        _log.warning(
+            "hydrate_tumbler_ids_resolve_many_failed",
+            tumbler_count=len(tumbler_ids),
+        )
+        catalog_entries = {}
+    excluded_doc_ids = {
+        doc_id for doc_id, entry in catalog_entries.items()
+        if _source_uri_is_non_evidentiary(getattr(entry, "source_uri", "") or "")
+    }
+
     flat_ids: list[str] = []
     flat_collections: list[str] = []
     owner: list[str] = []
     for doc_id in tumbler_ids:
+        if doc_id in excluded_doc_ids:
+            # Contributes no chunks -- per_doc[doc_id] stays empty, so
+            # the existing contents/missing construction below already
+            # reports it exactly like any other unusable document.
+            continue
         rows = manifests.get(doc_id) or []
         for row in sorted(rows, key=lambda r: r.position):
             if not row.collection:
@@ -1468,40 +1501,47 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
     return {"contents": contents, "missing": missing}
 
 
-#: RDR-200 Phase 1c evidence hygiene (nexus-4jj40). "category" values the
-#: indexers stamp at write time (code_indexer.py, doc_indexer.py,
-#: pipeline_stages.py): "paper" only for genuine PDF-extracted academic
-#: papers, "code" for every code file (tests included -- there is no
-#: separate test/fixture category), "prose" for markdown/RDR docs. In the
-#: Phase 1c gate every "code"-category hit co-mingled with "paper"-category
-#: hits was nexus's own operator_check/groupby test fixture JSON, never
-#: genuine paper evidence (q04/q05, T2 [24082]). Scoped narrowly -- fires
-#: ONLY when "paper" is present in the SAME hydration batch, so a plan
-#: that deliberately retrieves code (a code-analysis question with no
-#: paper evidence at all) is untouched.
-_PAPER_CATEGORY: str = "paper"
-_CODE_CATEGORY: str = "code"
+#: RDR-200 Phase 1c evidence hygiene (nexus-4jj40). Source-path markers
+#: matched against the catalog's ``Document.source_uri`` (a
+#: ``file://<abspath>`` URI — see
+#: :func:`nexus.catalog.types._normalize_source_uri`), identifying the
+#: bead's own two cited leaks: nexus's operator_check/groupby test
+#: fixtures (indexed under this repo's ``tests/`` directory) and the
+#: RDR-200 Phase 1 gate/question docs themselves
+#: (``docs/rdr/rdr-200-phase1*`` — Phase 1's frozen question set quotes
+#: near-verbatim paper-question text and so retrieves as false-positive
+#: "evidence" for the very questions it describes). Anchored with a
+#: leading ``/`` so a path-segment boundary is required — ``"/tests/"``
+#: matches ``".../nexus/tests/test_foo.py"`` but not
+#: ``".../mytests/foo.py"``. A candidate with NO resolvable source_uri is
+#: left in untouched (see :func:`_hydrate_tumbler_ids`) — best-effort
+#: exclusion, never a silent drop of evidence this cannot classify.
+#:
+#: A CATEGORY-based rule (drop "code" whenever "paper" shared the batch)
+#: stood here before this review round. Removed entirely: it dropped
+#: EVERY code-category candidate whenever a paper candidate shared the
+#: batch — breaking a legitimate "paper's algorithm plus its
+#: implementation" plan — and never touched the bead's own cited RDR-200
+#: gate-doc leak in the first place (category "prose", indistinguishable
+#: from any other legitimate RDR/docs markdown file).
+_NON_EVIDENTIARY_SOURCE_PATH_MARKERS: tuple[str, ...] = (
+    "/tests/",
+    "/docs/rdr/rdr-200-phase1",
+)
 
 
-def _filter_hydrated_contents(
-    contents: list[str], categories: list[str],
-) -> list[str]:
-    """Non-empty hydrated contents, minus co-mingled code-fixture noise.
+def _source_uri_is_non_evidentiary(source_uri: str) -> bool:
+    """True when *source_uri* sits under a known non-evidentiary path.
 
-    Drops empty strings always (the pre-existing ``non_empty`` filter).
-    Additionally drops a "code"-category entry once the SAME batch also
-    carries a "paper"-category entry -- see :data:`_CODE_CATEGORY` /
-    :data:`_PAPER_CATEGORY`. ``categories`` misaligned with ``contents``
-    (wrong length -- e.g. the tumbler-hydration path, which returns no
-    per-id categories) degrades to the pre-existing empty-only filter:
-    never raises, never drops evidence it cannot classify.
+    See :data:`_NON_EVIDENTIARY_SOURCE_PATH_MARKERS`. An empty
+    *source_uri* is never non-evidentiary — a caller with no resolvable
+    source_uri must leave the candidate in, never exclude it.
     """
-    if len(categories) != len(contents) or _PAPER_CATEGORY not in categories:
-        return [c for c in contents if c]
-    return [
-        c for c, cat in zip(contents, categories)
-        if c and cat != _CODE_CATEGORY
-    ]
+    if not source_uri:
+        return False
+    return any(
+        marker in source_uri for marker in _NON_EVIDENTIARY_SOURCE_PATH_MARKERS
+    )
 
 
 def _drop_intent_from_list_args(
@@ -1612,8 +1652,7 @@ def _hydrate_operator_args(
                 ids=ids, collections=collections, structured=True,
             )
         contents = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
-        categories = hydrated.get("categories", []) if isinstance(hydrated, dict) else []
-        non_empty = _filter_hydrated_contents(contents, categories)
+        non_empty = [c for c in contents if c]
         original_count = len(non_empty)
         truncation_metadata: dict[str, Any] | None = None
         if original_count > _OPERATOR_MAX_INPUTS:
