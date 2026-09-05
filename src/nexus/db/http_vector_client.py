@@ -2282,6 +2282,14 @@ class HttpVectorClient:
             body["rerank"] = True
             if rerank_top_k is not None:
                 body["rerank_top_k"] = rerank_top_k
+            # Pace rerank requests on the shared brake (n75jg critique):
+            # the reranker is the same upstream the brake trips on, and a
+            # per-collection fan-out (search_cross_corpus) would otherwise
+            # keep hitting a rate-limited reranker while the brake was
+            # tripped. wait() is a no-op unless a trip is in force, so an
+            # untripped process pays nothing here.
+            from nexus.rate_brake import get_brake  # noqa: PLC0415 — deferred import: leaf module, keeps this otherwise-urllib-only module's load-time graph unchanged
+            get_brake().wait()
 
         results = _post("/v1/vectors/search", body, tenant=self._tenant)
         # results is a list of {id, content, distance, collection, ...} — or,

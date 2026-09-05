@@ -145,6 +145,31 @@ def test_non_numeric_retry_after_warns_and_does_not_trip_the_brake(client, monke
     rate_brake.reset_brake()
 
 
+def test_rerank_request_waits_on_a_tripped_brake(client, monkeypatch):
+    """A fan-out's next rerank call must pace on the brake the previous
+    degrade tripped (n75jg critique), and pay nothing when untripped."""
+    from nexus import rate_brake
+
+    _patch_post(monkeypatch, {
+        "results": [{"id": "a", "content": "x", "distance": 0.2,
+                     "collection": "knowledge__t"}],
+        "rerank_degraded": False,
+        "rerank_model": "rerank-2",
+    }, [])
+    rate_brake.reset_brake()
+    brake = rate_brake.get_brake()
+    waits: list[float] = []
+    monkeypatch.setattr(brake, "wait", lambda: waits.append(1.0) or 1.0)
+
+    client.search("q", ["knowledge__t"], rerank=True)
+    assert waits == [1.0], "rerank search must consult the brake before posting"
+
+    waits.clear()
+    client.search("q", ["knowledge__t"], rerank=False)
+    assert waits == [], "a plain search never touches the brake"
+    rate_brake.reset_brake()
+
+
 def test_non_rate_limited_degrade_reports_no_retry_after_and_does_not_engage_brake(
     client, monkeypatch,
 ):
