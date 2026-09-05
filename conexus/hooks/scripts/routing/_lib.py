@@ -447,32 +447,216 @@ def _rotate_log_if_oversized(log_path: pathlib.Path) -> None:
         lock_file_obj.close()
 
 
-def _engine_endpoint() -> "tuple[str, str] | tuple[None, None]":
-    """``(base_url, token)`` from ``NX_SERVICE_HOST``/``PORT``/``TOKEN``
-    ONLY, or ``(None, None)``.
+#: Matches ServiceRegistry's tier name for the shared nexus-service engine
+#: (src/nexus/daemon/service_registry.py TIER_TTLS) -- the lease file is
+#: ``<config_dir>/storage_service_addr.<uid>``. Mirrors
+#: ``conexus/hooks/scripts/t2_prefix_scan.py``'s identical constant.
+_STORAGE_SERVICE_TIER = "storage_service"
 
-    DELIBERATE SIMPLIFICATION (nexus-gjv9b PART 2): a real
-    ``resolve_service_endpoint`` also reads the ServiceRegistry lease
-    file when the env halves are absent, but that resolution is
-    non-trivial file-lock/scope-key machinery this standalone,
-    no-``nexus``-import script (RDR-121 § Contract) has no business
-    vendoring for a fire-and-forget telemetry POST. When the env halves
-    are absent, this returns ``(None, None)`` and the caller goes
-    straight to the metered drop with NO network attempt at all -- which
-    is also the CHEAP, common case for a plain interactive session that
-    never exported these. A future bead that wants lease-file discovery
-    here is free to add it; it is not required for this one.
+#: nexus-znvjd: the client's cross-process DATA-token lease, written by
+#: ``nexus.db.data_token.DataTokenManager._write_lease`` at
+#: ``<config_dir>/data_token_lease.<sha256(host[:port]\x00tenant)>``.
+#: Mirrors ``t2_prefix_scan.py``'s identical constants.
+_DATA_TOKEN_LEASE_PREFIX = "data_token_lease."
+_DATA_TOKEN_LEASE_FORMAT_VERSION = 1
+
+
+def _default_config_dir() -> pathlib.Path:
+    """Stdlib-only mirror of ``nexus.config.nexus_config_dir`` (same
+    resolution ``conexus/hooks/scripts/t2_prefix_scan.py``'s identically-
+    named function uses)."""
+    config_dir = os.environ.get("NEXUS_CONFIG_DIR") or os.environ.get("NX_CONFIG_DIR")
+    if config_dir:
+        return pathlib.Path(config_dir)
+    return pathlib.Path.home() / ".config" / "nexus"
+
+
+def _read_service_lease(config_dir: pathlib.Path) -> dict | None:
+    """Best-effort read of the local supervisor's ServiceRegistry lease.
+
+    Ported verbatim (nexus-gjv9b PART 2 CRITICAL review fix) from
+    ``conexus/hooks/scripts/t2_prefix_scan.py``'s ``_read_lease`` --
+    see that function's own docstring for the full design rationale
+    (this hook cannot import ``nexus.daemon.service_registry`` either,
+    RDR-121 § Contract mirroring nexus-vg6d4's identical constraint for
+    the T2 prefix scan). ``tests/test_routing_hooks.py``'s parity suite
+    keeps this in lockstep with the original -- edit both, or edit one
+    and let the parity test catch the drift.
     """
-    port_str = os.environ.get("NX_SERVICE_PORT", "").strip()
-    token = os.environ.get("NX_SERVICE_TOKEN", "").strip()
-    if not port_str or not token:
-        return None, None
+    path = config_dir / f"{_STORAGE_SERVICE_TIER}_addr.{os.getuid()}"
     try:
-        port = int(port_str)
-    except ValueError:
-        return None, None
-    host = os.environ.get("NX_SERVICE_HOST", "").strip() or "127.0.0.1"
-    return f"http://{host}:{port}", token
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    try:
+        if str(data.get("status", "live")) != "live":
+            return None
+        heartbeat_epoch = float(data["heartbeat_epoch"])
+        ttl = float(data["ttl"])
+        endpoint = data["endpoint"]
+        host = str(endpoint.get("host", "127.0.0.1"))
+        port = int(endpoint.get("port", 0))
+        token = str(endpoint.get("token", ""))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if port <= 0 or not token:
+        return None
+    if (time.time() - heartbeat_epoch) >= ttl:
+        return None
+    return {"host": host, "port": port, "token": token}
+
+
+def _read_data_token_lease(config_dir: pathlib.Path, base_url: str) -> str | None:
+    """Best-effort read of the client's cached DATA token for *base_url*.
+
+    Ported verbatim (nexus-gjv9b PART 2 CRITICAL review fix) from
+    ``t2_prefix_scan.py``'s identically-named function -- same
+    format-version check, same digest rule, same fail-safe stance.
+    """
+    import hashlib  # noqa: PLC0415 — stdlib, only needed on this path
+    import urllib.parse  # noqa: PLC0415 — stdlib, only needed on this path
+
+    host = urllib.parse.urlsplit(base_url).netloc or base_url
+    now = time.time()
+    best_token, best_expiry = "", 0.0
+    try:
+        candidates = sorted(config_dir.glob(f"{_DATA_TOKEN_LEASE_PREFIX}*"))
+    except OSError:
+        return None
+    for path in candidates:
+        try:
+            data = json.loads(path.read_text())
+            if data.get("format_version") != _DATA_TOKEN_LEASE_FORMAT_VERSION:
+                continue
+            tenant = str(data["tenant"])
+            digest = hashlib.sha256(f"{host}\x00{tenant}".encode("utf-8")).hexdigest()
+            if data.get("base_url_digest") != digest:
+                continue
+            token = str(data["token"])
+            expires_at = float(data["expires_at"])
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            continue
+        if token and expires_at > now and expires_at > best_expiry:
+            best_token, best_expiry = token, expires_at
+    return best_token or None
+
+
+def _read_config_yml_credentials(config_dir: pathlib.Path) -> dict:
+    """Bounded, stdlib-only extraction of ``service_url``/``service_token``
+    from the persisted ``config.yml``.
+
+    Ported verbatim (nexus-gjv9b PART 2 CRITICAL review fix) from
+    ``t2_prefix_scan.py``'s identically-named function -- see that
+    docstring for the full "why a line-oriented scan, not a YAML parser"
+    rationale. Returns ``{}`` when the file is absent, unreadable, or has
+    no ``credentials:`` block.
+    """
+    path = config_dir / "config.yml"
+    try:
+        text = path.read_text()
+    except OSError:
+        return {}
+
+    result: dict = {}
+    in_credentials = False
+    cred_indent = 0
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        stripped = line.strip()
+        if not in_credentials:
+            if stripped == "credentials:":
+                in_credentials = True
+                cred_indent = indent
+            continue
+        if indent <= cred_indent:
+            break
+        for key in ("service_url", "service_token"):
+            prefix = f"{key}:"
+            if not stripped.startswith(prefix):
+                continue
+            value = stripped[len(prefix):].strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                value = value[1:-1]
+            if value:
+                result[key] = value
+    return result
+
+
+def _engine_endpoint() -> "tuple[str, str] | tuple[None, None]":
+    """``(base_url, token)`` for the nexus-service engine, or
+    ``(None, None)`` when nothing is resolvable. Never raises.
+
+    FULL RESOLUTION (nexus-gjv9b PART 2 CRITICAL review fix, replacing
+    an env-only leg that left the routing hooks write-never on any
+    normal interactive install -- nothing exports ``NX_SERVICE_HOST``/
+    ``PORT``/``TOKEN`` into a Claude Code process by default). Reuses
+    ``t2_prefix_scan.py``'s stdlib-only discovery: a fresh
+    ``ServiceRegistry`` lease file, then ``config.yml`` credentials, then
+    the ``NX_SERVICE_*`` env vars, with a data-token lease (nexus-znvjd)
+    preferred over any static token once a base URL is known. Mirrors
+    ``nexus.db.service_endpoint.resolve_service_endpoint``'s precedence
+    exactly, minus the raise-on-failure (this caller wants a quiet
+    ``(None, None)`` to fall through to the metered drop, never an
+    exception to handle).
+
+    Precedence, matching ``t2_prefix_scan._resolve_endpoint``:
+      1. ``service_url`` -- ``NX_SERVICE_URL`` env, else ``config.yml``'s
+         ``service_url``. Token: ``NX_SERVICE_TOKEN`` env, else
+         ``config.yml``'s ``service_token``, else the lease's token.
+      2. ``NX_SERVICE_HOST``/``PORT`` env (+ ``NX_SERVICE_TOKEN``, else
+         the lease's token).
+      3. The bare local-supervisor lease alone.
+    On every leg, a fresh data-token lease for the resolved host wins
+    over whatever static token was found.
+    """
+    config_dir = _default_config_dir()
+    lease = _read_service_lease(config_dir)
+    yaml_creds = _read_config_yml_credentials(config_dir)
+
+    url = os.environ.get("NX_SERVICE_URL", "").strip().rstrip("/")
+    if not url:
+        url = yaml_creds.get("service_url", "").strip().rstrip("/")
+    if url:
+        data_token = _read_data_token_lease(config_dir, url)
+        if data_token:
+            return url, data_token
+        token = os.environ.get("NX_SERVICE_TOKEN", "").strip()
+        if not token:
+            token = yaml_creds.get("service_token", "").strip()
+        if not token:
+            token = lease["token"] if lease else ""
+        if not token:
+            return None, None
+        return url, token
+
+    port_str = os.environ.get("NX_SERVICE_PORT", "").strip()
+    if port_str:
+        try:
+            port = int(port_str)
+        except ValueError:
+            return None, None
+        host = os.environ.get("NX_SERVICE_HOST", "").strip() or "127.0.0.1"
+        url = f"http://{host}:{port}"
+        data_token = _read_data_token_lease(config_dir, url)
+        if data_token:
+            return url, data_token
+        token = os.environ.get("NX_SERVICE_TOKEN", "").strip() or (
+            lease["token"] if lease else ""
+        )
+        if not token:
+            return None, None
+        return url, token
+
+    if lease is not None:
+        url = f"http://{lease['host']}:{lease['port']}"
+        data_token = _read_data_token_lease(config_dir, url)
+        if data_token:
+            return url, data_token
+        return url, lease["token"]
+
+    return None, None
 
 
 #: Mirrors ``nexus.db.t2.http_telemetry_store.DEFAULT_TENANT`` verbatim --
@@ -563,9 +747,10 @@ def log_routing_event(
 
     Best-effort, fire-and-forget: POSTs to the engine with a SHORT
     (~250ms) timeout via :func:`_post_routing_event_http`; on ANY
-    failure (unresolvable endpoint -- the common case when
-    ``NX_SERVICE_HOST``/``PORT``/``TOKEN`` are not exported --,
-    timeout, non-2xx), degrades to :func:`_record_dropped_routing_event`
+    failure (unresolvable endpoint -- no live supervisor lease, no
+    config.yml credentials, no NX_SERVICE_* env, per
+    :func:`_engine_endpoint` -- timeout, non-2xx), degrades to
+    :func:`_record_dropped_routing_event`
     rather than a JSONL fallback (same design decision as
     ``nexus._session_end_census.write_session_capability_census`` for
     PART 1 — the routing hooks' own timeout budget has no room for a

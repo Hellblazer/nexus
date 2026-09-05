@@ -75,6 +75,18 @@ _ISOLATED_ROUTING_LOG_PATH = _ROUTING_LOG_ISOLATED_DIR / "routing_log.jsonl"
 _DROPPED_WRITES_ISOLATED_DIR = Path(tempfile.mkdtemp(prefix="nx-hook-test-dropped-writes-"))
 _ISOLATED_DROPPED_WRITES_LOG_PATH = _DROPPED_WRITES_ISOLATED_DIR / "dropped_writes.jsonl"
 
+# nexus-gjv9b PART 2 CRITICAL review fix: `_lib._engine_endpoint` now also
+# discovers a live ServiceRegistry lease file and `config.yml` credentials
+# under `NEXUS_CONFIG_DIR` (t2_prefix_scan.py-style discovery), not just
+# env vars -- so a call that reaches `log_routing_event` (the inline-
+# override escape-audit path) can ACTUALLY POST to whatever real engine
+# this box has configured unless NEXUS_CONFIG_DIR is isolated too. Every
+# `_run_hook` call gets its own isolated (and therefore lease/config.yml
+# -less) config dir by default; TestF5RemedyRoundTripReal explicitly
+# overrides it via env_overrides for its own real-engine T1 lookup (that
+# override wins -- env_overrides is applied last).
+_ROUTING_ENGINE_ISOLATED_CONFIG_DIR = Path(tempfile.mkdtemp(prefix="nx-hook-test-engine-config-"))
+
 
 def _make_payload(
     tool_name: str = "Bash",
@@ -207,6 +219,7 @@ def _run_hook(
         "PATH": path,
         "NX_ROUTING_LOG_PATH": str(_ISOLATED_ROUTING_LOG_PATH),
         "NX_DROPPED_WRITES_LOG_PATH": str(_ISOLATED_DROPPED_WRITES_LOG_PATH),
+        "NEXUS_CONFIG_DIR": str(_ROUTING_ENGINE_ISOLATED_CONFIG_DIR),
         **(env_overrides or {}),
     }
     # Never let a real NX_SERVICE_HOST/PORT/URL/TOKEN leak in from the outer
