@@ -676,6 +676,73 @@ class TelemetryRepositoryTest {
         assertThat(blankRow.get("batch_doc_ids")).isEqualTo("");
     }
 
+    // ── index_failures (nexus-nukn3) ─────────────────────────────────────────
+
+    @Test @Order(57)
+    @SuppressWarnings("unchecked")
+    void indexFailures_recordAndBatch_readBackByRun() {
+        final String tenant = "tel-idxfail-" + System.nanoTime();
+        final String runA = "run-a-" + System.nanoTime();
+        final String runB = "run-b-" + System.nanoTime();
+
+        repo.recordIndexFailure(tenant, runA, "/repo/broken.pdf",
+            "UnextractableContentError", "produced empty output", null);
+        int inserted = repo.recordIndexFailuresBatch(tenant, List.of(
+            new Object[]{runA, "/repo/other.pdf", "UnextractableContentError", "scanned image", null},
+            new Object[]{runB, "/repo/unrelated.pdf", "UnextractableContentError", "boom", null}
+        ));
+        assertThat(inserted).isEqualTo(2);
+
+        var runAOnly = repo.getIndexFailures(tenant, runA, 0, 100);
+        var runARows = (List<Map<String, Object>>) runAOnly.get("rows");
+        assertThat(runAOnly.get("total")).as("run-scoped count excludes the other run").isEqualTo(2);
+        assertThat(runARows).extracting(r -> r.get("file_path"))
+            .containsExactlyInAnyOrder("/repo/broken.pdf", "/repo/other.pdf");
+        assertThat(runARows).extracting(r -> r.get("error_class"))
+            .allMatch("UnextractableContentError"::equals);
+
+        var everything = repo.getIndexFailures(tenant, "", 0, 100);
+        assertThat(everything.get("total")).as("blank run_id returns every run").isEqualTo(3);
+    }
+
+    @Test @Order(58)
+    @SuppressWarnings("unchecked")
+    void indexFailures_read_aggregatesIgnoreThePageLimit() {
+        // Same non-vacuity shape as hookFailures_read_aggregatesIgnoreThePageLimit:
+        // the deyd5 systemic-skip floor and `nx doctor --check-index-failures` both
+        // read `total`, which must reflect the WHOLE backlog, not one page of it.
+        final String tenant = "tel-idxfail-cap-" + System.nanoTime();
+        final String runId = "run-cap-" + System.nanoTime();
+        List<Object[]> rows = new java.util.ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            rows.add(new Object[]{runId, "/repo/f" + i + ".pdf", "UnextractableContentError", "boom", null});
+        }
+        repo.recordIndexFailuresBatch(tenant, rows);
+
+        var capped = repo.getIndexFailures(tenant, runId, 0, 1);
+
+        assertThat((List<Map<String, Object>>) capped.get("rows"))
+            .as("the page honours limit").hasSize(1);
+        assertThat(capped.get("total"))
+            .as("total counts every matching row, not the page").isEqualTo(5);
+    }
+
+    @Test @Order(59)
+    @SuppressWarnings("unchecked")
+    void indexFailures_read_isTenantScoped() {
+        final String mine = "tel-idxfail-mine-" + System.nanoTime();
+        final String theirs = "tel-idxfail-theirs-" + System.nanoTime();
+        final String runId = "run-shared-" + System.nanoTime();
+        repo.recordIndexFailure(mine, runId, "/repo/mine.pdf", "UnextractableContentError", "boom", null);
+        repo.recordIndexFailure(theirs, runId, "/repo/theirs.pdf", "UnextractableContentError", "boom", null);
+
+        var out = repo.getIndexFailures(mine, runId, 0, 100);
+
+        assertThat(out.get("total")).isEqualTo(1);
+        assertThat((List<Map<String, Object>>) out.get("rows"))
+            .extracting(r -> r.get("file_path")).containsExactly("/repo/mine.pdf");
+    }
+
     // ── frecency ───────────────────────────────────────────────────────────────
 
     @Test @Order(12)

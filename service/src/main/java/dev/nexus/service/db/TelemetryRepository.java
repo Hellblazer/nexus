@@ -1359,6 +1359,134 @@ public final class TelemetryRepository {
         });
     }
 
+    // ── index_failures ─────────────────────────────────────────────────────────
+    //
+    // nexus-nukn3: durable per-file index-failure record for the repo-index
+    // path (Sam's design — enqueue the failure and move on, rather than a log
+    // line + an in-memory counter that die with the process). Event-log shape
+    // (mirrors hook_failures), not aspect_extraction_queue's work-queue shape
+    // — nothing ever claims or retries a row here (no retry worker in scope).
+
+    /**
+     * Append one index failure (live write path — {@code nexus.indexer._run_index}'s
+     * end-of-run batch write, one row per skipped file).
+     */
+    public void recordIndexFailure(String tenant,
+                                   String runId,
+                                   String filePath,
+                                   String errorClass,
+                                   String error,
+                                   String occurredAtIso) {
+        tenantScope.withTenant(tenant, ctx -> {
+            OffsetDateTime occurredAt = occurredAtIso != null && !occurredAtIso.isBlank()
+                ? parseTs(occurredAtIso) : OffsetDateTime.now(ZoneOffset.UTC);
+            ctx.insertInto(INDEX_FAILURES)
+                .set(INDEX_FAILURES.TENANT_ID, tenant)
+                .set(INDEX_FAILURES.RUN_ID, str(runId))
+                .set(INDEX_FAILURES.FILE_PATH, filePath)
+                .set(INDEX_FAILURES.ERROR_CLASS, str(errorClass))
+                .set(INDEX_FAILURES.ERROR, str(error))
+                .set(INDEX_FAILURES.OCCURRED_AT, occurredAt)
+                .execute();
+            return null;
+        });
+    }
+
+    /**
+     * Append N index failures in ONE transaction (mirrors {@link #logSearchBatch}'s
+     * shape) — the client's end-of-run write for every file skipped this run.
+     *
+     * <p>Row tuple layout: {@code (run_id, file_path, error_class, error, occurred_at_iso)}.
+     * Returns the number of rows inserted.
+     */
+    public int recordIndexFailuresBatch(String tenant, List<Object[]> rows) {
+        if (rows.isEmpty()) return 0;
+        return tenantScope.withTenant(tenant, ctx -> {
+            int count = 0;
+            for (var r : rows) {
+                String runId       = (String) r[0];
+                String filePath    = (String) r[1];
+                String errorClass  = (String) r[2];
+                String error       = (String) r[3];
+                String occurredAtIso = (String) r[4];
+                OffsetDateTime occurredAt = occurredAtIso != null && !occurredAtIso.isBlank()
+                    ? parseTs(occurredAtIso) : OffsetDateTime.now(ZoneOffset.UTC);
+                count += ctx.insertInto(INDEX_FAILURES)
+                    .set(INDEX_FAILURES.TENANT_ID, tenant)
+                    .set(INDEX_FAILURES.RUN_ID, str(runId))
+                    .set(INDEX_FAILURES.FILE_PATH, filePath)
+                    .set(INDEX_FAILURES.ERROR_CLASS, str(errorClass))
+                    .set(INDEX_FAILURES.ERROR, str(error))
+                    .set(INDEX_FAILURES.OCCURRED_AT, occurredAt)
+                    .execute();
+            }
+            return count;
+        });
+    }
+
+    /**
+     * List index failures, newest first (read surface — {@code nx index failures},
+     * {@code nx doctor --check-index-failures}).
+     *
+     * <p>{@code runId} (blank = all runs) and {@code days} (0 = unbounded) narrow
+     * the predicate; {@code limit} caps the returned page. {@code total} is
+     * computed over the WHOLE predicate, independent of {@code limit} — same
+     * non-vacuity shape as {@link #getHookFailures}: a caller reading a count
+     * (the deyd5 systemic-skip floor, doctor's backlog check) must never
+     * under-report because the backlog exceeded one page.
+     */
+    public Map<String, Object> getIndexFailures(String tenant,
+                                                String runId,
+                                                int days,
+                                                int limit) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var cond = noCondition();
+            if (runId != null && !runId.isBlank()) {
+                cond = cond.and(INDEX_FAILURES.RUN_ID.eq(runId));
+            }
+            if (days > 0) {
+                OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusDays(days);
+                cond = cond.and(INDEX_FAILURES.OCCURRED_AT.ge(cutoff));
+            }
+
+            var agg = ctx.select(count(), min(INDEX_FAILURES.OCCURRED_AT))
+                .from(INDEX_FAILURES)
+                .where(cond)
+                .fetchOne();
+            int total = agg != null && agg.value1() != null ? agg.value1() : 0;
+            OffsetDateTime oldest = agg != null ? agg.value2() : null;
+
+            List<Map<String, Object>> resultRows = ctx.select(
+                INDEX_FAILURES.ID,
+                INDEX_FAILURES.RUN_ID,
+                INDEX_FAILURES.FILE_PATH,
+                INDEX_FAILURES.ERROR_CLASS,
+                INDEX_FAILURES.ERROR,
+                INDEX_FAILURES.OCCURRED_AT)
+                .from(INDEX_FAILURES)
+                .where(cond)
+                .orderBy(INDEX_FAILURES.OCCURRED_AT.desc(), INDEX_FAILURES.ID.desc())
+                .limit(Math.max(limit, 0))
+                .fetch()
+                .map(r -> {
+                    Map<String, Object> m = new java.util.LinkedHashMap<>();
+                    m.put("id",          r.value1());
+                    m.put("run_id",      str(r.value2()));
+                    m.put("file_path",   str(r.value3()));
+                    m.put("error_class", str(r.value4()));
+                    m.put("error",       str(r.value5()));
+                    m.put("occurred_at", utcIso(r.value6()));
+                    return m;
+                });
+
+            Map<String, Object> out = new java.util.LinkedHashMap<>();
+            out.put("rows", resultRows);
+            out.put("total", total);
+            out.put("oldest_occurred_at", oldest != null ? utcIso(oldest) : "");
+            return out;
+        });
+    }
+
     // ── frecency ───────────────────────────────────────────────────────────────
 
     /**

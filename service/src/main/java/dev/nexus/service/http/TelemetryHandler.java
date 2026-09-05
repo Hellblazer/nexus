@@ -47,6 +47,11 @@ import java.util.Map;
  *   GET  /v1/telemetry/hook_failures/list      list hook failures + exact totals (nexus-onjvy)
  *   POST /v1/telemetry/hook_failures/trim      trim old hook-failure entries; same dry_run=true
  *                                              preview contract as search/trim
+ *   POST /v1/telemetry/index_failures/record   record one durable index failure (nexus-nukn3)
+ *   POST /v1/telemetry/index_failures/record_batch  batch-record (one txn); nx index repo's
+ *                                              end-of-run write of every file skipped this run
+ *   GET  /v1/telemetry/index_failures/list     list index failures + exact totals, optionally
+ *                                              scoped to one run_id (nexus-nukn3)
  *   POST /v1/telemetry/frecency/upsert         upsert frecency record
  *   GET  /v1/telemetry/frecency/get            get frecency by chunk_id
  *   POST /v1/telemetry/import                  fidelity ETL for all 6 tables
@@ -124,6 +129,9 @@ public final class TelemetryHandler implements HttpHandler {
                 case "/hook_failures/record"   -> handleHookFailureRecord(exchange, tenant, method);
                 case "/hook_failures/list"     -> handleHookFailureList(exchange, tenant, method);
                 case "/hook_failures/trim"     -> handleHookFailureTrim(exchange, tenant, method);
+                case "/index_failures/record"       -> handleIndexFailureRecord(exchange, tenant, method);
+                case "/index_failures/record_batch"  -> handleIndexFailureRecordBatch(exchange, tenant, method);
+                case "/index_failures/list"         -> handleIndexFailureList(exchange, tenant, method);
                 case "/frecency/upsert"        -> handleFrecencyUpsert(exchange, tenant, method);
                 case "/frecency/get"           -> handleFrecencyGet(exchange, tenant, method);
                 case "/import"                 -> handleImport(exchange, tenant, method);
@@ -511,6 +519,52 @@ public final class TelemetryHandler implements HttpHandler {
         boolean dryRun = Boolean.TRUE.equals(body.get("dry_run"));
         int deleted = repo.trimHookFailures(tenant, days, dryRun);
         HttpUtil.send(ex, 200, json(Map.of("deleted", deleted, "dry_run", dryRun)));
+    }
+
+    // ── index_failures (nexus-nukn3) ─────────────────────────────────────────────
+
+    private void handleIndexFailureRecord(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        String runId      = optStr(body, "run_id");
+        String filePath   = requireString(body, "file_path");
+        String errorClass = optStr(body, "error_class");
+        String error      = optStr(body, "error");
+        String occurredAt = optStr(body, "occurred_at");
+        repo.recordIndexFailure(tenant, runId, filePath, errorClass, error, occurredAt);
+        HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    /**
+     * POST /v1/telemetry/index_failures/record_batch — one transaction for every
+     * file skipped this run (mirrors {@link #handleSearchBatch}'s row-tuple shape).
+     * Row layout: {@code [run_id, file_path, error_class, error, occurred_at]}.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleIndexFailureRecordBatch(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        var rows = (List<List<Object>>) body.getOrDefault("rows", List.of());
+        List<Object[]> tuples = rows.stream()
+            .map(r -> r.toArray(Object[]::new))
+            .toList();
+        int count = repo.recordIndexFailuresBatch(tenant, tuples);
+        HttpUtil.send(ex, 200, json(Map.of("inserted", count)));
+    }
+
+    /**
+     * List index failures, newest first (nexus-nukn3). {@code ?run_id=} scopes to
+     * one run (blank/absent = all runs), {@code ?days=N} bounds the window (0 =
+     * unbounded), {@code ?limit=N} caps the returned page. {@code total} is
+     * computed over the WHOLE predicate — see {@link TelemetryRepository#getIndexFailures}.
+     */
+    private void handleIndexFailureList(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        var params = queryParams(ex);
+        String runId = params.getOrDefault("run_id", "");
+        int days  = parseIntParam(params, "days", 0);
+        int limit = parseIntParam(params, "limit", 100);
+        HttpUtil.send(ex, 200, json(repo.getIndexFailures(tenant, runId, days, limit)));
     }
 
     // ── frecency ───────────────────────────────────────────────────────────────

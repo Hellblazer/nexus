@@ -1056,6 +1056,15 @@
          <include> comment for the identical reasoning). -->
     <include file="db/changelog/vectors-013-taxonomy-ann-query.xml"/>
 
+    <!-- nexus-nukn3 — nexus.index_failures, a durable per-file failure
+         record for the repo-index path (event-log shape, mirrors
+         hook_failures). No dependency on any other changeset. Placed after
+         vectors-013-taxonomy-ann-query.xml (current tail) and before the
+         grants-nexus-svc.xml runAlways block, matching the established
+         late-append convention (D0.1; see backend-reaper-001's / vectors-013's
+         own <include> comments for the identical reasoning). -->
+    <include file="db/changelog/telemetry-009-index-failures.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
