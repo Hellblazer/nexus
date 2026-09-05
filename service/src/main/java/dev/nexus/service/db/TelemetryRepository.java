@@ -1472,8 +1472,8 @@ public final class TelemetryRepository {
      * the predicate; {@code limit} caps the returned page. {@code total} is
      * computed over the WHOLE predicate, independent of {@code limit} — same
      * non-vacuity shape as {@link #getHookFailures}: a caller reading a count
-     * (the deyd5 systemic-skip floor, doctor's backlog check) must never
-     * under-report because the backlog exceeded one page.
+     * (doctor's backlog check) must never under-report because the backlog
+     * exceeded one page.
      *
      * <p>Only {@code kind='failure'} rows are ever returned here (an
      * acknowledgment row is a durable marker, not a failure to list); each
@@ -1481,14 +1481,43 @@ public final class TelemetryRepository {
      * {@link #indexFailureIsAcknowledged}) — the fold-in's "ack shown in the
      * list" requirement. {@code unacknowledgedOnly=true} additionally
      * excludes covered rows from both {@code rows} and {@code total} — the
-     * doctor gate's and the deyd5 floor's input, so a permanently
-     * acknowledged file never re-triggers either once adjudicated.
+     * DOCTOR GATE's input only, so a permanently acknowledged file never
+     * re-triggers it once adjudicated.
+     *
+     * <p><b>Deliberately NOT the deyd5 systemic-skip floor's input</b>
+     * (code-review finding, T2 code-review-nexus-nukn3-4d5520bf4 [24624]:
+     * an earlier version of this javadoc claimed otherwise). {@code
+     * nexus.indexer._run_index} calls {@code list_index_failures} for that
+     * floor WITHOUT {@code unacknowledged_only} (see its own call site) —
+     * correctly: acknowledging a failure records that an operator has
+     * adjudicated it, not that the file actually indexed. The
+     * systemic-skip floor measures "how much of THIS run's corpus failed
+     * to index", which an acknowledgment does not change; only the doctor
+     * GATE's fail/pass verdict should treat an acknowledged recurrence as
+     * "known", never the underlying skip-ratio math.
      */
     public Map<String, Object> getIndexFailures(String tenant,
                                                 String runId,
                                                 int days,
                                                 int limit,
                                                 boolean unacknowledgedOnly) {
+        return getIndexFailures(tenant, runId, days, limit, unacknowledgedOnly, "");
+    }
+
+    /**
+     * As above, plus an exact {@code filePath} filter (code-review finding,
+     * T2 code-review-nexus-nukn3-4d5520bf4 [24624]: {@code nx index
+     * failures --acknowledge --file}'s error_class auto-resolve was paging
+     * 1000 rows tenant-wide and filtering client-side; a server-side exact
+     * filter is the direct fix). Blank {@code filePath} means unfiltered
+     * (matches the 5-arg overload above exactly).
+     */
+    public Map<String, Object> getIndexFailures(String tenant,
+                                                String runId,
+                                                int days,
+                                                int limit,
+                                                boolean unacknowledgedOnly,
+                                                String filePath) {
         return tenantScope.withTenant(tenant, ctx -> {
             var cond = INDEX_FAILURES.KIND.eq("failure");
             if (runId != null && !runId.isBlank()) {
@@ -1497,6 +1526,9 @@ public final class TelemetryRepository {
             if (days > 0) {
                 OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusDays(days);
                 cond = cond.and(INDEX_FAILURES.OCCURRED_AT.ge(cutoff));
+            }
+            if (filePath != null && !filePath.isBlank()) {
+                cond = cond.and(INDEX_FAILURES.FILE_PATH.eq(filePath));
             }
             if (unacknowledgedOnly) {
                 cond = cond.and(indexFailureIsAcknowledged().not());
@@ -1579,6 +1611,83 @@ public final class TelemetryRepository {
                 .set(INDEX_FAILURES.KIND, "acknowledgment")
                 .execute();
             return null;
+        });
+    }
+
+    /**
+     * List durable acknowledgments (nexus-nukn3 third fold-in, critic
+     * Critical finding T2 critique-nexus-nukn3-4d5520bf4 [24621]: an ack
+     * row was write-only -- created via {@link #recordIndexFailureAcknowledgment}
+     * but never listable or revocable). Every {@code kind='acknowledgment'}
+     * row for the tenant, newest first. No {@code who} field: no per-request
+     * user identity is captured at this layer (RLS is tenant-scoped only),
+     * so this is stated rather than fabricated.
+     *
+     * @return {@code {"rows": [{id, file_path, error_class, reason,
+     *         created_at}, ...], "total": int}}. {@code file_path} is
+     *         {@code ""} for an error-class-scoped (corpus-wide)
+     *         acknowledgment.
+     */
+    public Map<String, Object> listIndexFailureAcknowledgments(String tenant) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var cond = INDEX_FAILURES.KIND.eq("acknowledgment");
+            List<Map<String, Object>> rows = ctx.select(
+                INDEX_FAILURES.ID,
+                INDEX_FAILURES.FILE_PATH,
+                INDEX_FAILURES.ERROR_CLASS,
+                INDEX_FAILURES.ERROR,
+                INDEX_FAILURES.OCCURRED_AT)
+                .from(INDEX_FAILURES)
+                .where(cond)
+                .orderBy(INDEX_FAILURES.OCCURRED_AT.desc(), INDEX_FAILURES.ID.desc())
+                .fetch()
+                .map(r -> {
+                    Map<String, Object> m = new java.util.LinkedHashMap<>();
+                    m.put("id",          r.value1());
+                    m.put("file_path",   str(r.value2()));
+                    m.put("error_class", str(r.value3()));
+                    m.put("reason",      str(r.value4()));
+                    m.put("created_at",  utcIso(r.value5()));
+                    return m;
+                });
+            Map<String, Object> out = new java.util.LinkedHashMap<>();
+            out.put("rows", rows);
+            out.put("total", rows.size());
+            return out;
+        });
+    }
+
+    /**
+     * Revoke a durable acknowledgment (nexus-nukn3 third fold-in, critic
+     * Critical finding [24621]: an ack that could be created but never
+     * undone). Deletes ONLY the row(s) matching the EXACT scope it was
+     * created under -- {@code kind='acknowledgment'} AND {@code error_class}
+     * AND {@code file_path} (blank {@code filePath} targets the
+     * error-class-scoped acknowledgment, never every file-scoped one for
+     * that class too; mirrors how {@link #recordIndexFailureAcknowledgment}
+     * distinguishes the two scopes on write). Never touches a
+     * {@code kind='failure'} row -- a disjoint predicate from
+     * {@link #trimIndexFailures}, not a shared code path with it.
+     *
+     * @param errorClass REQUIRED, non-blank -- mirrors the same requirement
+     *                   on creation; revoking "every acknowledgment for a
+     *                   file regardless of class" is never the intended
+     *                   scope.
+     * @return the number of acknowledgment rows deleted (0 or 1 in
+     *         practice -- {@code (tenant_id, file_path, error_class)}
+     *         is not a DB-enforced unique key, but the CLI never creates
+     *         a duplicate).
+     */
+    public int revokeIndexFailureAcknowledgment(String tenant, String filePath, String errorClass) {
+        if (errorClass == null || errorClass.isBlank()) {
+            throw new IllegalArgumentException(
+                "index_failures unacknowledge requires a non-blank error_class");
+        }
+        return tenantScope.withTenant(tenant, ctx -> {
+            var cond = INDEX_FAILURES.KIND.eq("acknowledgment")
+                .and(INDEX_FAILURES.ERROR_CLASS.eq(errorClass))
+                .and(INDEX_FAILURES.FILE_PATH.eq(str(filePath)));
+            return ctx.deleteFrom(INDEX_FAILURES).where(cond).execute();
         });
     }
 

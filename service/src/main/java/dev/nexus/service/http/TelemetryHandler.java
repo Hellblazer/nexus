@@ -60,6 +60,12 @@ import java.util.Map;
  *                                              --acknowledge) that survives a fresh run_id
  *                                              on the next index run (nexus-nukn3 second
  *                                              fold-in, critic Critical finding)
+ *   GET  /v1/telemetry/index_failures/acks     list durable acknowledgments (nx index
+ *                                              failures --acks; third fold-in, critic
+ *                                              Critical finding [24621]: the ack
+ *                                              mechanism was write-only)
+ *   POST /v1/telemetry/index_failures/unacknowledge  revoke an acknowledgment (nx index
+ *                                              failures --unacknowledge; same fold-in)
  *   POST /v1/telemetry/frecency/upsert         upsert frecency record
  *   GET  /v1/telemetry/frecency/get            get frecency by chunk_id
  *   POST /v1/telemetry/import                  fidelity ETL for all 6 tables
@@ -161,6 +167,8 @@ public final class TelemetryHandler implements HttpHandler {
                 case "/index_failures/list"         -> handleIndexFailureList(exchange, tenant, method);
                 case "/index_failures/trim"          -> handleIndexFailureTrim(exchange, tenant, method);
                 case "/index_failures/acknowledge"    -> handleIndexFailureAcknowledge(exchange, tenant, method);
+                case "/index_failures/acks"           -> handleIndexFailureAcksList(exchange, tenant, method);
+                case "/index_failures/unacknowledge"  -> handleIndexFailureUnacknowledge(exchange, tenant, method);
                 case "/frecency/upsert"        -> handleFrecencyUpsert(exchange, tenant, method);
                 case "/frecency/get"           -> handleFrecencyGet(exchange, tenant, method);
                 case "/import"                 -> handleImport(exchange, tenant, method);
@@ -595,8 +603,11 @@ public final class TelemetryHandler implements HttpHandler {
      * computed over the WHOLE predicate — see {@link TelemetryRepository#getIndexFailures}.
      * {@code ?unacknowledged_only=true} (fold-in, critic Critical finding)
      * excludes any row covered by a durable acknowledgment from both
-     * {@code rows} and {@code total} — the doctor gate's and the deyd5
-     * floor's input.
+     * {@code rows} and {@code total} — the DOCTOR GATE's input only (never
+     * the deyd5 systemic-skip floor's — see {@link TelemetryRepository#getIndexFailures}'s
+     * own javadoc). {@code ?file_path=} (third fold-in, code-review finding
+     * [24624]) narrows to an exact file — the server-side alternative to
+     * paging the whole tenant backlog client-side for a single-file lookup.
      */
     private void handleIndexFailureList(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "GET");
@@ -605,7 +616,9 @@ public final class TelemetryHandler implements HttpHandler {
         int days  = parseIntParam(params, "days", 0);
         int limit = parseIntParam(params, "limit", 100);
         boolean unacknowledgedOnly = "true".equalsIgnoreCase(params.get("unacknowledged_only"));
-        HttpUtil.send(ex, 200, json(repo.getIndexFailures(tenant, runId, days, limit, unacknowledgedOnly)));
+        String filePath = params.getOrDefault("file_path", "");
+        HttpUtil.send(ex, 200, json(
+            repo.getIndexFailures(tenant, runId, days, limit, unacknowledgedOnly, filePath)));
     }
 
     /**
@@ -624,6 +637,34 @@ public final class TelemetryHandler implements HttpHandler {
         String reason     = optStr(body, "reason");
         repo.recordIndexFailureAcknowledgment(tenant, filePath, errorClass, reason);
         HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    /**
+     * GET /v1/telemetry/index_failures/acks — list durable acknowledgments
+     * (third fold-in, critic Critical finding [24621]: a write-only ack
+     * mechanism). {@code nx index failures --acks}.
+     */
+    private void handleIndexFailureAcksList(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        HttpUtil.send(ex, 200, json(repo.listIndexFailureAcknowledgments(tenant)));
+    }
+
+    /**
+     * POST /v1/telemetry/index_failures/unacknowledge — revoke a durable
+     * acknowledgment (third fold-in, critic Critical finding [24621]).
+     * Body: {@code file_path} (optional; blank = revoke the error-class-scoped
+     * acknowledgment) and {@code error_class} (REQUIRED, non-blank —
+     * mirrors the creation-side requirement, see
+     * {@link TelemetryRepository#revokeIndexFailureAcknowledgment}).
+     * {@code nx index failures --unacknowledge}.
+     */
+    private void handleIndexFailureUnacknowledge(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        String filePath   = optStr(body, "file_path");
+        String errorClass = optStr(body, "error_class");
+        int deleted = repo.revokeIndexFailureAcknowledgment(tenant, filePath, errorClass);
+        HttpUtil.send(ex, 200, json(Map.of("deleted", deleted)));
     }
 
     /**
