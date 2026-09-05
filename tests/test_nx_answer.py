@@ -1079,11 +1079,20 @@ class TestPlanRunTelemetry:
              patch("nexus.plans.runner.plan_run",
                    AsyncMock(return_value=plan_run_result)), \
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
             t2_ctx.return_value.__enter__.return_value = db_stub
             await nx_answer(question="something the library can't match")
 
+        # nexus-m20mf P2 round 2 (code review [24602]): patching
+        # _t2_index_write to the SAME db_stub means these two asserts are
+        # now proven by the plan_id==0 guard itself, not merely left
+        # unfalsifiable by an unpatched real singleton -- a future
+        # weakening of that guard (e.g. run_start moved outside the
+        # `if best.plan_id:` check) would make library.increment_run_
+        # started fire against THIS mock and fail the test, instead of
+        # silently landing on the real substrate and passing regardless.
         library.increment_run_started.assert_not_called()
         library.increment_run_outcome.assert_not_called()
 

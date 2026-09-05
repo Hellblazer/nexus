@@ -8502,17 +8502,18 @@ async def nx_answer(
             # classifier BEFORE this real HTTP work even started, so
             # neither a genuine failure here nor a concurrent sibling's
             # eviction were ever correctly attributed to this call.
-            # Residual, documented rather than silently accepted:
-            # PlanSessionCache (the `cache` argument) is ALSO HTTP-backed
-            # (a T1 ChromaDB collection, per its own module docstring) and
-            # `plan_match()` calls `cache.query()`/`cache.remove()`
-            # internally -- those T1 calls now share this closure's
-            # eviction window too, so a T1 query failure here can evict a
-            # healthy T2 singleton, a narrower version of the exact hazard
-            # the hoist rule exists to prevent. Splitting T1 ranking from
-            # T2 hydration inside matcher.plan_match() would close this
-            # fully; out of scope for this fix (fans out into matcher.py,
-            # not a mechanical closure-boundary correction).
+            # NOT a residual: PlanSessionCache (the `cache` argument) is
+            # ALSO HTTP-backed (a T1 ChromaDB collection), but its
+            # `query()`/`remove()` (session_cache.py) each wrap their own
+            # call in a broad `except Exception: ...` that swallows
+            # EVERY failure (including a genuine connectivity error) and
+            # returns a safe default (`[]` / `False`) — nothing from
+            # those calls can ever propagate into this closure, so they
+            # cannot trigger eviction here regardless of T1's health.
+            # (code review [24602] correction: an earlier version of
+            # this comment claimed the opposite -- see T2
+            # nexus/dev-nexus-m20mf-p1-p2-critique-fold-round2 for the
+            # correction record.)
             matches = _t2_index_write(
                 lambda db: _plan_match(
                     question,
