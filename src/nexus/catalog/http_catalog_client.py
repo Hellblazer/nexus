@@ -1501,7 +1501,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                         pass
         return out
 
-    def purge_trash(self, older_than_days: int = 30, *, dry_run: bool = True) -> dict:
+    def purge_trash(self, older_than_days: int = 1, *, dry_run: bool = True) -> dict:
         """POST /v1/catalog/purge-trash — reclaim tombstoned catalog rows and
         their manifest-orphaned ``chunks_<dim>`` rows via the engine's
         ``nexus.purge_trash(interval)`` sweep (nexus-3ck2g).

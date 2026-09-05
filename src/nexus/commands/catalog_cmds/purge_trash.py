@@ -18,7 +18,7 @@ docs still hold.
 AGE SEMANTICS ARE SYMMETRIC since catalog-026 (nexus-5da44, RDR-191
 GATE-2) — and this section previously documented the OPPOSITE, the
 original catalog-003 behaviour, for two weeks after the engine retired it
-(nexus-kcm6c: the 2026-08-27 shakedown read 0 stranded at the default 30d
+(nexus-kcm6c: the 2026-08-27 shakedown read 0 stranded at the then-default 30d
 gate vs 1,041 at 1d and concluded the COUNTER was lying; it was this
 prose). Current contract, verified against catalog-026/catalog-033's
 function body: the chunk sweep (Steps 1-3) PROTECTS any chunk whose
@@ -30,7 +30,7 @@ the window passes, then loses all three together on the next execute.
 ``nx catalog delete``'s "a manual restore stays possible" note
 (nexus-xavu7) is therefore genuinely true for the whole grace window.
 Consequence for the counts: the stranded-chunk preview IS scoped by
-``--older-than-days`` — a small number at the default 30d alongside a
+``--older-than-days`` — a small number at the then-default 30d alongside a
 large one at 1d means recent tombstones are being protected, exactly as
 designed, not that either number is wrong.
 
@@ -169,8 +169,8 @@ def _raise_engine_floor(exc: httpx.HTTPStatusError) -> None:
 
 @click.command("purge-trash")
 @click.option(
-    "--older-than-days", type=int, default=30,
-    help="Tombstone age threshold in days (default 30). Must be >= 1.",
+    "--older-than-days", type=int, default=1,
+    help="Tombstone age threshold in days (default 1). Must be >= 1.",
 )
 @click.option(
     "--dry-run/--no-dry-run", default=True,
@@ -192,14 +192,16 @@ def purge_trash_cmd(older_than_days: int, dry_run: bool, confirm: bool, json_out
     --older-than-days (catalog-026: tombstones inside the grace window
     keep row, manifest, and chunks together), computed engine-side via
     ``nexus.purge_trash(older_than_days, dry_run=true)``. Nothing is
-    deleted in this mode. A near-zero count at the default 30 days next
-    to a large count at ``--older-than-days 1`` means recent tombstones
-    are being protected — by design, not a counter defect (nexus-kcm6c).
+    deleted in this mode. The default window is ONE day (Sam, 2026-09-05: the 30-day
+    default held 880 documents and 1,503 stranded chunks for months while
+    the request was to delete them; a day is the reversible period, and
+    git already holds the source). Pass ``--older-than-days 30`` for the
+    old behaviour.
 
     \\b
     To actually reclaim:
       nx catalog purge-trash --no-dry-run --confirm
-      nx catalog purge-trash --older-than-days 90 --no-dry-run --confirm
+      nx catalog purge-trash --older-than-days 30 --no-dry-run --confirm
 
     ``--no-dry-run`` alone (without ``--confirm``) is still treated as
     report-only — both flags are required to mutate, same gate as

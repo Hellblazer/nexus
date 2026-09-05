@@ -83,7 +83,7 @@ class TestDryRunDefault:
         result = runner.invoke(main, ["catalog", "purge-trash"])
 
         assert result.exit_code == 0, result.output
-        assert writer.calls == [{"older_than_days": 30, "dry_run": True}]
+        assert writer.calls == [{"older_than_days": 1, "dry_run": True}]
         assert writer.closed
 
     def test_default_invocation_prints_counts_and_dry_run_notice(self, monkeypatch):
@@ -174,7 +174,7 @@ class TestConfirmGate:
         assert result.exit_code == 0, result.output
         assert "--confirm" in result.output
         # Still previews (dry_run=True on the wire) — never mutates.
-        assert writer.calls == [{"older_than_days": 30, "dry_run": True}]
+        assert writer.calls == [{"older_than_days": 1, "dry_run": True}]
         assert "dry-run" in result.output.lower()
 
     def test_no_dry_run_with_confirm_mutates(self, monkeypatch):
@@ -190,7 +190,7 @@ class TestConfirmGate:
         )
 
         assert result.exit_code == 0, result.output
-        assert writer.calls == [{"older_than_days": 30, "dry_run": False}]
+        assert writer.calls == [{"older_than_days": 1, "dry_run": False}]
         assert "purge-trash executed" in result.output.lower()
         assert "dry-run" not in result.output.lower()
         assert writer.closed
@@ -204,7 +204,7 @@ class TestConfirmGate:
         result = runner.invoke(main, ["catalog", "purge-trash", "--confirm"])
 
         assert result.exit_code == 0, result.output
-        assert writer.calls == [{"older_than_days": 30, "dry_run": True}]
+        assert writer.calls == [{"older_than_days": 1, "dry_run": True}]
 
 
 # ── CLI: gc_purge_marker wiring (nexus-sybbh, client half) ─────────────────
@@ -554,7 +554,7 @@ class TestWhitelistAdmission:
 
     def test_service_catalog_writer_admits_purge_trash(self):
         class _FakeClient:
-            def purge_trash(self, older_than_days=30, dry_run=True):
+            def purge_trash(self, older_than_days=1, dry_run=True):
                 return {"dry_run": dry_run, "older_than_days": older_than_days}
 
             def close(self):
