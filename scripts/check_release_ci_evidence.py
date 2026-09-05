@@ -170,9 +170,18 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Callable
 
-from nexus.gate_advisory import passed_by_default
+try:
+    from nexus.gate_advisory import passed_by_default
+except ModuleNotFoundError:
+    # release.yml runs this before `uv sync`, under the runner's bare python3.
+    # nexus.gate_advisory is stdlib-only, so the in-repo source tree is enough;
+    # tests/scripts/test_check_release_ci_evidence.py runs this file under
+    # `python3 -I -S` to keep it that way (v7.31.0's first publish run red'd here).
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    from nexus.gate_advisory import passed_by_default
 
 #: This repo's LIVE required status-check contexts for `main` (the branch
 #: every release tag's merge commit lands on). See the module docstring for

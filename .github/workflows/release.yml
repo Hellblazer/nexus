@@ -87,10 +87,17 @@ jobs:
         # because on workflow_dispatch $GITHUB_SHA is the default branch's
         # tip, not the named tag's commit -- checkout above already resolved
         # the right commit into the working tree regardless of trigger type.
-        # Stdlib-only script (no uv sync needed yet) so this runs first and
-        # fails fast before any build work.
+        # No uv sync yet, so this runs first and fails fast before any build
+        # work. The script is stdlib plus one in-repo module
+        # (nexus.gate_advisory, itself stdlib-only), reached through
+        # PYTHONPATH=src: v7.31.0's first publish run died here with
+        # ModuleNotFoundError because nexus-1c7oq added that import and
+        # nothing exercised the script outside a uv venv. The script also
+        # bootstraps src/ itself; PYTHONPATH here is the workflow-side half,
+        # which is what a workflow_dispatch retry of an already-cut tag runs.
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          PYTHONPATH: src
         run: |
           python3 scripts/check_release_ci_evidence.py \
             --repo "${GITHUB_REPOSITORY}" \
