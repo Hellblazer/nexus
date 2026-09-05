@@ -2104,11 +2104,11 @@ def _check_garbage() -> list[HealthResult]:
     command; an unreachable engine is a warning too, never a clean row
     (nexus-moht0: a sweep that could not look is not a pass).
     """
-    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus import config as _config  # noqa: PLC0415 — deferred to avoid circular import; module import so the by-value ratchet stays at its census
     from nexus.garbage import catalog_garbage, sweep_local_garbage  # noqa: PLC0415 — deferred to avoid circular import
 
     results: list[HealthResult] = []
-    report = sweep_local_garbage(nexus_config_dir())
+    report = sweep_local_garbage(_config.nexus_config_dir())
     if report.failed_count:
         results.append(HealthResult(
             label="Local garbage",

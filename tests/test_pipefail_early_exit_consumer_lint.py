@@ -931,16 +931,16 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # truncate a producer still doing work. This list is line-pinned, so
         # ANY edit to run.sh restale-izes it; that fragility is the lint's
         # own known shape, not a defect introduced here.
-        "tests/e2e/migration-rehearsal/run.sh:168",
-        "tests/e2e/migration-rehearsal/run.sh:186",
-        "tests/e2e/migration-rehearsal/run.sh:187",
-        "tests/e2e/migration-rehearsal/run.sh:200",
-        "tests/e2e/migration-rehearsal/run.sh:211",
-        "tests/e2e/migration-rehearsal/run.sh:638",
-        "tests/e2e/migration-rehearsal/run.sh:676",
-        "tests/e2e/migration-rehearsal/run.sh:731",
-        "tests/e2e/migration-rehearsal/run.sh:748",
-        "tests/e2e/migration-rehearsal/run.sh:796",
+        "tests/e2e/migration-rehearsal/run.sh:180",
+        "tests/e2e/migration-rehearsal/run.sh:198",
+        "tests/e2e/migration-rehearsal/run.sh:199",
+        "tests/e2e/migration-rehearsal/run.sh:212",
+        "tests/e2e/migration-rehearsal/run.sh:223",
+        "tests/e2e/migration-rehearsal/run.sh:650",
+        "tests/e2e/migration-rehearsal/run.sh:688",
+        "tests/e2e/migration-rehearsal/run.sh:743",
+        "tests/e2e/migration-rehearsal/run.sh:760",
+        "tests/e2e/migration-rehearsal/run.sh:808",
         # --- tests/e2e/mac-signed-binary-gate.sh (7 entries): needs an
         # actually-signed macOS binary + `spctl`/`codesign` on real macOS
         # to safely verify a rewrite of the signature-inspection logic.
