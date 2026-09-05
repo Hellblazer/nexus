@@ -141,10 +141,15 @@ def test_real_index_repo_command_shares_one_t2_httpx_client(
 
     assert result.exit_code == 0, result.output
 
-    assert len(t2_snapshots) == 2, (
-        f"expected exactly 2 T2Database constructions for `nx index repo` "
-        f"(_collections_without_topics + run_collection_postprocessing); "
-        f"got {len(t2_snapshots)}"
+    # _collections_without_topics always constructs one; run_collection_
+    # postprocessing constructs a second ONLY when the substrate collection has
+    # no topics yet, which depends on what earlier tests in the session did.
+    # Pin the range and the sharing invariant, not a state-dependent exact
+    # count (it read 1 on a warm substrate and 2 on a cold one).
+    assert 1 <= len(t2_snapshots) <= 2, (
+        f"expected 1 or 2 T2Database constructions for `nx index repo` "
+        f"(_collections_without_topics, plus run_collection_postprocessing "
+        f"when the collection still needs topics); got {len(t2_snapshots)}"
     )
     assert len(shared_client_tally) == 1, (
         f"expected build_shared_t2_client() to be called exactly ONCE per "
@@ -152,7 +157,7 @@ def test_real_index_repo_command_shares_one_t2_httpx_client(
         f"{len(shared_client_tally)} calls"
     )
 
-    all_client_ids = set(t2_snapshots[0].values()) | set(t2_snapshots[1].values())
+    all_client_ids = set().union(*(set(snap.values()) for snap in t2_snapshots))
     assert len(all_client_ids) == 1, (
         f"expected BOTH T2Database constructions' 8 domain stores each to "
         f"share the SAME single client across the whole `nx index repo` "
