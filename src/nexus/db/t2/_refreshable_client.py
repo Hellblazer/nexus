@@ -148,6 +148,69 @@ def _get_shared_ssl_context() -> ssl.SSLContext:
     return _shared_ssl_context
 
 
+# ── Shared client injection (nexus-m20mf P3) ────────────────────────────────
+#
+# Explicit, PINNED pool limits for a shared client (design doc T2
+# nexus/design-nexus-m20mf-single-t2-transport [24553], "risks" section):
+# ``httpx.PoolTimeout`` is deliberately excluded from the retryable set
+# above (re-resolving the endpoint cannot fix local pool exhaustion, and an
+# immediate retry would pile onto the exhausted pool), so a shared client
+# MUST be given generous-but-bounded limits rather than inherit httpx's
+# defaults silently -- an unbounded pool defers the failure mode to a
+# surprising place, and a too-small one turns routine concurrency into a
+# loud (but avoidable) PoolTimeout.
+#
+# Sizing: T2Database composes 8 domain stores; a caller sharing ONE client
+# across a facade wants at least 8 concurrent slots so no two stores ever
+# contend for the same connection under ordinary sequential use. Doubled
+# to 16 for headroom against a second facade instance in the same process
+# (e.g. the aspect-worker background thread constructing its own T2Database
+# concurrently with a foreground CLI command) or a batch caller running
+# with ``serialize=False`` (the taxonomy batch hook, per the design doc's
+# risk note). ``max_keepalive_connections`` is kept at half of
+# ``max_connections`` (httpx's own default ratio) so idle connections don't
+# starve the pool of room for new ones. ``keepalive_expiry`` matches the
+# per-request timeout scale already used elsewhere in this module.
+_SHARED_CLIENT_MAX_CONNECTIONS = 16
+_SHARED_CLIENT_MAX_KEEPALIVE_CONNECTIONS = 8
+_SHARED_CLIENT_KEEPALIVE_EXPIRY_S = 30.0
+
+_SHARED_CLIENT_LIMITS = httpx.Limits(
+    max_connections=_SHARED_CLIENT_MAX_CONNECTIONS,
+    max_keepalive_connections=_SHARED_CLIENT_MAX_KEEPALIVE_CONNECTIONS,
+    keepalive_expiry=_SHARED_CLIENT_KEEPALIVE_EXPIRY_S,
+)
+
+
+def build_shared_t2_client(
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_S,
+    limits: httpx.Limits | None = None,
+) -> httpx.Client:
+    """Build ONE ``httpx.Client`` a caller can inject into every T2 domain
+    store it constructs (via ``client=`` on ``RefreshableHttpStoreMixin``
+    or ``T2Database``), replacing 8 independent pools with 1.
+
+    NOT constructed with ``base_url=`` or ``headers=`` -- same reasoning as
+    ``RefreshableHttpStoreMixin.__init__`` (a supervisor restart can hand
+    back a different port, and auth/tenant headers are per-request, never
+    baked into the client). Uses the same process-wide shared SSL context
+    as every other T2 client.
+
+    The CALLER owns this client and is responsible for closing it exactly
+    once, after every store it was injected into is done with it --
+    ``RefreshableHttpStoreMixin.close()`` is a no-op on an injected client
+    (see ``_owns_client``), by design: closing it from inside one store's
+    ``close()`` would break every sibling store still holding a reference
+    to the same pool.
+    """
+    return httpx.Client(
+        timeout=timeout,
+        verify=_get_shared_ssl_context(),
+        limits=limits if limits is not None else _SHARED_CLIENT_LIMITS,
+    )
+
+
 def _is_retryable_endpoint_error(exc: Exception) -> bool:
     """httpx-flavored analog of ``http_vector_client._is_retryable_endpoint_error``.
 
@@ -387,6 +450,7 @@ class RefreshableHttpStoreMixin:
         *,
         _token: str | None = None,
         timeout: float = _DEFAULT_TIMEOUT_S,
+        client: httpx.Client | None = None,
     ) -> None:
         # Track which halves were EXPLICITLY pinned by the caller (e.g. a
         # test constructing this store against a fake server) BEFORE the
@@ -458,11 +522,39 @@ class RefreshableHttpStoreMixin:
         # handshake ever happens) and behaviorally identical to the default
         # verify=True for an https:// base_url (same trust store, same
         # verification).
-        self._client = httpx.Client(timeout=timeout, verify=_get_shared_ssl_context())
+        #
+        # client= (nexus-m20mf P3, additive): a caller that already holds a
+        # transport built via build_shared_t2_client() (or any other
+        # pre-constructed httpx.Client) can inject it here so this store
+        # shares that pool instead of opening its own. Nothing changes for
+        # the 100% of existing callers that pass nothing -- construction is
+        # byte-identical to before this kwarg existed. NOT a naive shared
+        # httpx.BaseTransport: httpx.Client.close() closes its OWN
+        # transport, so sharing a bare transport across independently-
+        # closed Client instances would break every sibling the moment the
+        # first one closes. Sharing the whole Client (and tracking
+        # ownership below) is what makes close() safe to call from any one
+        # store without affecting the others.
+        if client is not None:
+            self._client = client
+            self._owns_client = False
+        else:
+            self._client = httpx.Client(timeout=timeout, verify=_get_shared_ssl_context())
+            self._owns_client = True
 
     def close(self) -> None:
-        """Close the keep-alive connection pool (idempotent)."""
-        self._client.close()
+        """Close the keep-alive connection pool (idempotent).
+
+        A no-op when this store did not construct its own ``httpx.Client``
+        (``client=`` was injected at construction, nexus-m20mf P3) -- the
+        OWNER of an injected client is whoever built and passed it in, and
+        that caller is responsible for closing it exactly once, after
+        every store sharing it is done. Closing it here would tear down
+        the pool out from under every sibling store still holding the same
+        reference.
+        """
+        if self._owns_client:
+            self._client.close()
 
     # ── Credential / endpoint refresh ───────────────────────────────────────
 

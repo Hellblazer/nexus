@@ -72,6 +72,23 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
+#: nexus-m20mf P3 (shared-client injection) test seam: when set, ``do_POST``
+#: signals it via ``_ECHO_ENTERED_EVENT`` (so a test can be sure the
+#: request has actually reached the server and checked out its httpx
+#: connection-pool slot) then blocks on this event before responding --
+#: lets ``TestSharedClient`` hold a shared client's one pool slot open
+#: from a background thread long enough for a concurrent request on the
+#: SAME client to observe pool exhaustion deterministically. ``None``
+#: (the reset-per-test default) is a complete no-op for every other test
+#: in this file.
+_HOLD_ECHO_EVENT: threading.Event | None = None
+_ECHO_ENTERED_EVENT: threading.Event | None = None
+#: nexus-m20mf P3: X-Nexus-Tenant header value received on each /v1/echo
+#: request, in arrival order -- lets a test prove auth/tenant headers are
+#: still built PER REQUEST even when multiple stores share one headerless
+#: httpx.Client.
+_RECEIVED_TENANTS: list[str] = []
+
 import httpx
 import pytest
 
@@ -109,6 +126,7 @@ _MINT_FORCE_STATUS: int | None = None
 
 def _reset_fake_service_state() -> None:
     global _VALID_BEARER, _ALWAYS_401, _MINTED_DATA_TOKEN, _MINT_CALLS, _MINT_FORCE_STATUS
+    global _HOLD_ECHO_EVENT, _ECHO_ENTERED_EVENT
     _VALID_BEARER = _INITIAL_BEARER
     _ALWAYS_401 = False
     _REQUEST_COUNT.clear()
@@ -116,6 +134,9 @@ def _reset_fake_service_state() -> None:
     _MINTED_DATA_TOKEN = None
     _MINT_CALLS = 0
     _MINT_FORCE_STATUS = None
+    _HOLD_ECHO_EVENT = None
+    _ECHO_ENTERED_EVENT = None
+    _RECEIVED_TENANTS.clear()
 
 
 class _FakeHandler(BaseHTTPRequestHandler):
@@ -166,6 +187,14 @@ class _FakeHandler(BaseHTTPRequestHandler):
         _MINTED_DATA_TOKEN = f"minted-data-token-{_MINT_CALLS}"
         self._send(200, {"data_token": _MINTED_DATA_TOKEN, "expires_in_seconds": 300})
 
+    def _maybe_hold(self) -> None:
+        """nexus-m20mf P3 test seam -- see ``_HOLD_ECHO_EVENT``'s module
+        comment. No-op unless a test has armed both events."""
+        if _ECHO_ENTERED_EVENT is not None:
+            _ECHO_ENTERED_EVENT.set()
+        if _HOLD_ECHO_EVENT is not None:
+            _HOLD_ECHO_EVENT.wait(timeout=5.0)
+
     def do_POST(self):  # noqa: N802
         path = self.path.split("?")[0]
         self._record("POST", path)
@@ -181,6 +210,8 @@ class _FakeHandler(BaseHTTPRequestHandler):
             return
         if not self._check_bearer():
             return
+        _RECEIVED_TENANTS.append(self.headers.get("X-Nexus-Tenant", ""))
+        self._maybe_hold()
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length)) if length else {}
         self._send(200, {"echo": body})
@@ -197,6 +228,7 @@ class _FakeHandler(BaseHTTPRequestHandler):
             return
         if not self._check_bearer():
             return
+        _RECEIVED_TENANTS.append(self.headers.get("X-Nexus-Tenant", ""))
         self._send(200, {"echo": "get-ok"})
 
 
@@ -1472,3 +1504,203 @@ class TestSharedSSLContext:
             "ssl.SSLContext object; found "
             f"{len(contexts)} distinct objects across {len(stores)} stores"
         )
+
+
+class TestSharedClient:
+    """nexus-m20mf P3: additive shared-client injection through
+    ``RefreshableHttpStoreMixin`` (design record T2
+    nexus/design-nexus-m20mf-single-t2-transport [24553], option A).
+
+    A caller holding a pre-built ``httpx.Client`` (via
+    ``nexus.db.t2._refreshable_client.build_shared_t2_client()``) can pass
+    it as ``client=`` to any mixin-backed store's constructor and get one
+    shared connection pool instead of one-per-store. NOT a naive shared
+    ``httpx.BaseTransport`` -- ``httpx.Client.close()`` closes its own
+    transport, so sharing a bare transport across independently-closed
+    ``Client`` instances would break every sibling the moment the first
+    one closes (the design record's "risks" section, and the reason this
+    mixin shares the whole ``Client`` and tracks ownership via
+    ``_owns_client`` instead).
+    """
+
+    def test_default_construction_unchanged(self) -> None:
+        """``client=None`` (the default -- every pre-existing caller) is
+        byte-identical to construction before this kwarg existed: the
+        store builds and OWNS its own ``httpx.Client``, and ``close()``
+        actually closes it."""
+        store = _make_echo_store(base_url="http://127.0.0.1:1", _token="tok")
+
+        assert store._owns_client is True
+        assert isinstance(store._client, httpx.Client)
+        assert not store._client.is_closed
+
+        store.close()
+
+        assert store._client.is_closed, (
+            "a default-constructed store's close() must still close its "
+            "own httpx.Client -- this is the pre-existing contract and "
+            "must not regress under the additive client= kwarg"
+        )
+
+    def test_injected_client_is_not_closed_by_store_close(self) -> None:
+        """The OWNER of an injected client is whoever built and passed it
+        in, never the store it was injected into. Falsify by removing the
+        ``_owns_client`` guard from ``close()``: this test then fails
+        because the second store's request after the first ``close()``
+        would hit a closed client."""
+        from nexus.db.t2._refreshable_client import build_shared_t2_client
+
+        shared = build_shared_t2_client()
+        store = _make_echo_store(base_url="http://127.0.0.1:1", _token="tok", client=shared)
+
+        assert store._owns_client is False
+
+        store.close()
+
+        assert not shared.is_closed, (
+            "close() on a store constructed with an injected client must "
+            "be a no-op for that client -- only the injecting caller owns "
+            "closing it"
+        )
+
+        # The shared client is still fully usable after the store's close()
+        # -- proof this is not just "is_closed lies", but the pool itself
+        # survived.
+        shared.close()
+        assert shared.is_closed
+
+    def test_stores_share_one_pool_when_injected(self) -> None:
+        """Multiple stores constructed with the SAME injected client must
+        reference the IDENTICAL ``httpx.Client`` object (``is``, not just
+        equal config) -- this is what actually collapses N pools to 1,
+        the property ``test_shared_context_is_the_same_object_across_stores``
+        already pins for the SSL context this mechanism builds on."""
+        from nexus.db.t2._refreshable_client import build_shared_t2_client
+
+        shared = build_shared_t2_client()
+        stores = [
+            _make_echo_store(base_url="http://127.0.0.1:1", _token="tok", client=shared)
+            for _ in range(3)
+        ]
+
+        try:
+            client_ids = {id(s._client) for s in stores}
+            assert client_ids == {id(shared)}, (
+                f"expected all 3 stores to share the identical injected "
+                f"httpx.Client; found {len(client_ids)} distinct client "
+                f"objects across {len(stores)} stores"
+            )
+            assert all(s._owns_client is False for s in stores)
+        finally:
+            shared.close()
+
+    def test_auth_headers_still_per_request_under_a_shared_client(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A shared client is deliberately headerless (no ``headers=`` at
+        construction, same reasoning as the mixin's own per-store client)
+        -- ``_auth_headers()`` must still build the tenant/auth headers
+        FRESH per request from each STORE's own state, never from anything
+        baked into the shared transport. Two stores, two different
+        tenants, one shared client: each request must carry ITS OWN
+        store's tenant, in call order -- proof headers never leak or get
+        pinned to whichever store happened to construct the client."""
+        from nexus.db.t2._refreshable_client import build_shared_t2_client
+
+        base_url = f"http://127.0.0.1:{fake_service.port}"
+        shared = build_shared_t2_client()
+        store_a = _make_echo_store(base_url=base_url, tenant="tenant-a", _token=_VALID_BEARER, client=shared)
+        store_b = _make_echo_store(base_url=base_url, tenant="tenant-b", _token=_VALID_BEARER, client=shared)
+
+        try:
+            store_a.echo_post("from-a")
+            store_b.echo_post("from-b")
+            store_a.echo_get()
+
+            assert _RECEIVED_TENANTS == ["tenant-a", "tenant-b", "tenant-a"], (
+                f"expected each request to carry its OWN store's tenant "
+                f"header under a shared client; server recorded "
+                f"{_RECEIVED_TENANTS}"
+            )
+        finally:
+            shared.close()
+
+    def test_pool_limits_are_pinned_not_httpx_defaults(self) -> None:
+        """``build_shared_t2_client()`` must set EXPLICIT ``httpx.Limits``
+        rather than inherit httpx's own defaults (100 connections / 20
+        keepalive) -- the design record's risk note: an unbounded shared
+        pool defers connection-pool exhaustion to a surprising place
+        instead of a deliberately chosen, tested bound."""
+        from nexus.db.t2._refreshable_client import (
+            _SHARED_CLIENT_KEEPALIVE_EXPIRY_S,
+            _SHARED_CLIENT_MAX_CONNECTIONS,
+            _SHARED_CLIENT_MAX_KEEPALIVE_CONNECTIONS,
+            build_shared_t2_client,
+        )
+
+        default_limits = httpx.Client()._transport._pool
+        shared = build_shared_t2_client()
+        try:
+            pool = shared._transport._pool
+            assert pool._max_connections == _SHARED_CLIENT_MAX_CONNECTIONS == 16
+            assert pool._max_keepalive_connections == _SHARED_CLIENT_MAX_KEEPALIVE_CONNECTIONS == 8
+            assert pool._keepalive_expiry == _SHARED_CLIENT_KEEPALIVE_EXPIRY_S == 30.0
+            # The whole point: pinned, not whatever httpx ships as default.
+            assert pool._max_connections != default_limits._max_connections
+        finally:
+            shared.close()
+
+    def test_shared_client_pool_exhaustion_raises_pool_timeout_not_hang(
+        self, fake_service
+    ) -> None:
+        """Local connection-pool exhaustion on a SHARED client must
+        surface as a loud, immediate ``httpx.PoolTimeout`` -- never a
+        hang, and never a silent retry (``PoolTimeout`` is deliberately
+        excluded from ``_is_retryable_endpoint_error``, pinned separately
+        by ``test_pool_timeout_is_not_retryable`` above; this test proves
+        the end-to-end behavior through two stores actually sharing one
+        exhausted pool, not just the classifier function in isolation).
+
+        Mechanism: a client with ``max_connections=1`` shared by two
+        stores. Store A's request is held open server-side (via the
+        ``_HOLD_ECHO_EVENT`` seam) so it never releases its one pool slot;
+        store B's request on the SAME client must then fail fast once the
+        client's own (short, test-only) pool timeout elapses -- bounded
+        well below this test's own timeout, so a regression that turns
+        this into a hang fails LOUD (a stuck join, not silence)."""
+        global _HOLD_ECHO_EVENT, _ECHO_ENTERED_EVENT
+
+        entered = threading.Event()
+        hold = threading.Event()
+        _ECHO_ENTERED_EVENT = entered
+        _HOLD_ECHO_EVENT = hold
+
+        base_url = f"http://127.0.0.1:{fake_service.port}"
+        shared = httpx.Client(
+            limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
+            timeout=httpx.Timeout(5.0, pool=0.3),
+        )
+        store_a = _make_echo_store(base_url=base_url, _token=_VALID_BEARER, client=shared)
+        store_b = _make_echo_store(base_url=base_url, _token=_VALID_BEARER, client=shared)
+
+        holder_thread = threading.Thread(target=lambda: store_a.echo_post("hold-me"), daemon=True)
+        try:
+            holder_thread.start()
+            # Wait for store A's request to actually reach the server and
+            # check out the pool's ONLY connection slot -- deterministic
+            # handshake, not a sleep-and-hope.
+            assert entered.wait(timeout=5.0), (
+                "store A's held request never reached the fake server -- "
+                "test setup is broken, not the property under test"
+            )
+
+            with pytest.raises(httpx.PoolTimeout):
+                store_b.echo_get()
+        finally:
+            hold.set()  # release store A's held request
+            holder_thread.join(timeout=5.0)
+            assert not holder_thread.is_alive(), (
+                "holder thread did not finish after releasing the hold -- "
+                "would otherwise leak a background thread across tests"
+            )
+            shared.close()

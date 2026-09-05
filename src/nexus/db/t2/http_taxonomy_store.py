@@ -144,8 +144,9 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         *,
         _token: str | None = None,
         centroid_store: Any | None = None,
+        client: httpx.Client | None = None,
     ) -> None:
-        super().__init__(base_url, tenant, _token=_token)
+        super().__init__(base_url, tenant, _token=_token, client=client)
         # Centroid R/W routes through the pgvector centroid-port (nexus-t1hnc),
         # NOT chroma. Constructed lazily from the SAME resolved service config so
         # both stores share one base_url/token/tenant; injectable for tests.
