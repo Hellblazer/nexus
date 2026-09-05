@@ -1468,6 +1468,73 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
     return {"contents": contents, "missing": missing}
 
 
+#: RDR-200 Phase 1c evidence hygiene (nexus-4jj40). "category" values the
+#: indexers stamp at write time (code_indexer.py, doc_indexer.py,
+#: pipeline_stages.py): "paper" only for genuine PDF-extracted academic
+#: papers, "code" for every code file (tests included -- there is no
+#: separate test/fixture category), "prose" for markdown/RDR docs. In the
+#: Phase 1c gate every "code"-category hit co-mingled with "paper"-category
+#: hits was nexus's own operator_check/groupby test fixture JSON, never
+#: genuine paper evidence (q04/q05, T2 [24082]). Scoped narrowly -- fires
+#: ONLY when "paper" is present in the SAME hydration batch, so a plan
+#: that deliberately retrieves code (a code-analysis question with no
+#: paper evidence at all) is untouched.
+_PAPER_CATEGORY: str = "paper"
+_CODE_CATEGORY: str = "code"
+
+
+def _filter_hydrated_contents(
+    contents: list[str], categories: list[str],
+) -> list[str]:
+    """Non-empty hydrated contents, minus co-mingled code-fixture noise.
+
+    Drops empty strings always (the pre-existing ``non_empty`` filter).
+    Additionally drops a "code"-category entry once the SAME batch also
+    carries a "paper"-category entry -- see :data:`_CODE_CATEGORY` /
+    :data:`_PAPER_CATEGORY`. ``categories`` misaligned with ``contents``
+    (wrong length -- e.g. the tumbler-hydration path, which returns no
+    per-id categories) degrades to the pre-existing empty-only filter:
+    never raises, never drops evidence it cannot classify.
+    """
+    if len(categories) != len(contents) or _PAPER_CATEGORY not in categories:
+        return [c for c in contents if c]
+    return [
+        c for c, cat in zip(contents, categories)
+        if c and cat != _CODE_CATEGORY
+    ]
+
+
+def _drop_intent_from_list_args(
+    args: dict[str, Any], *, intent: Any,
+) -> dict[str, Any]:
+    """Drop any list-arg element equal to the caller's raw *intent* text.
+
+    RDR-200 Phase 1c evidence hygiene (nexus-4jj40): a composed or
+    ad-hoc-grown plan step can reference ``$intent`` inside an
+    items/inputs-shaped list arg to give an operator step (rank,
+    compare, ...) context -- e.g.
+    ``{"items": ["$intent", "$step2.contents"]}``. Once ``$intent``
+    resolves (``plan_run``'s ``_resolve_args``), that list contains the
+    literal question STRING sitting beside real retrieved evidence, and
+    an items-consuming operator has no way to tell "this is context" from
+    "this is a candidate" -- it ranks/compares the question against
+    itself. Measured: the question string appeared as a rank candidate in
+    5 of 15 composed Phase 1c runs (T2 [24082]).
+
+    A flat membership check against every list-valued arg in *args* -- no
+    tool-name special-casing, no additional round trip. A non-string or
+    empty *intent* is a no-op (``$intent`` unbound, or bound to something
+    that could never collide with real evidence).
+    """
+    if not isinstance(intent, str) or not intent:
+        return args
+    out = dict(args)
+    for key, value in args.items():
+        if isinstance(value, list) and intent in value:
+            out[key] = [v for v in value if v != intent]
+    return out
+
+
 def _hydrate_operator_args(
     tool: str, args: dict[str, Any],
 ) -> tuple[str, dict[str, Any]]:
@@ -1545,7 +1612,8 @@ def _hydrate_operator_args(
                 ids=ids, collections=collections, structured=True,
             )
         contents = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
-        non_empty = [c for c in contents if c]
+        categories = hydrated.get("categories", []) if isinstance(hydrated, dict) else []
+        non_empty = _filter_hydrated_contents(contents, categories)
         original_count = len(non_empty)
         truncation_metadata: dict[str, Any] | None = None
         if original_count > _OPERATOR_MAX_INPUTS:
@@ -2372,6 +2440,12 @@ async def plan_run(
                         b_raw_args, bindings=merged, step_outputs=step_outputs,
                         deferred_step_indices=deferred_indices,
                     )
+                    # nexus-4jj40: strip a literal $intent from any
+                    # items/inputs-shaped list arg before it reaches the
+                    # bundle composer -- see _drop_intent_from_list_args.
+                    b_resolved = _drop_intent_from_list_args(
+                        b_resolved, intent=merged.get("intent"),
+                    )
                     # Capture source collection(s) BEFORE hydration strips
                     # them from args, so the composer can attach a "source:"
                     # line to the prompt for parallel-branch attribution.
@@ -2434,6 +2508,12 @@ async def plan_run(
                         b_resolved = _resolve_args(
                             b_raw_args, bindings=merged,
                             step_outputs=step_outputs,
+                        )
+                        # nexus-4jj40: see the main bundle path's identical
+                        # call above -- this is the oversized-bundle,
+                        # per-step-dispatch fallback of the same segment.
+                        b_resolved = _drop_intent_from_list_args(
+                            b_resolved, intent=merged.get("intent"),
                         )
                         # RDR-196 .p1b: per-bi timing, NOT the segment-aggregate
                         # timer below — this loop dispatches N separate
@@ -2656,6 +2736,12 @@ async def plan_run(
 
             resolved = _resolve_args(
                 raw_args, bindings=merged, step_outputs=step_outputs,
+            )
+            # nexus-4jj40: strip a literal $intent from any items/inputs-
+            # shaped list arg before this step dispatches -- see
+            # _drop_intent_from_list_args.
+            resolved = _drop_intent_from_list_args(
+                resolved, intent=merged.get("intent"),
             )
             _check_embedding_domain(index, tool, scope, resolved)
             # SC-3: forward scope.taxonomy_domain → corpus and scope.topic

@@ -4245,8 +4245,10 @@ def store_get_many(
         max_chars_per_doc: Per-document truncation cap (default 4 KB). A cut
             body ends in an ellipsis plus ``display_truncation_marker(cap)``
             so a reader never mistakes the cut for a defect (nexus-lugwx).
-        structured: Return ``{contents, missing}`` dict when True;
-            human-readable string when False.
+        structured: Return ``{contents, missing, categories}`` dict when
+            True (``categories`` is the per-id ``category`` metadata,
+            aligned 1:1 with ``contents``, empty string for a missing
+            id -- nexus-4jj40); human-readable string when False.
         limit_per_source: Cap input IDs before hydration (RDR-097 P1.0).
             - ``None`` (default): no truncation; preserves prior behavior.
             - ``int``: truncate ``ids`` to first N entries. With
@@ -4361,6 +4363,15 @@ def store_get_many(
         t3 = _get_t3()
         contents: list[str] = []
         missing: list[str] = []
+        # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene): the per-id
+        # "category" metadata (stamped at write time by code_indexer.py /
+        # doc_indexer.py / pipeline_stages.py -- "paper" / "code" / "prose")
+        # is already fetched into ``entry`` on the SAME batch call as
+        # ``content`` below; surfacing it here costs nothing extra and
+        # lets a caller (the plan runner's rank/candidate hydration) tell
+        # a genuine paper hit from a co-mingled code-fixture hit without
+        # a second round trip. Aligned 1:1 with ``contents``.
+        categories: list[str] = []
 
         # nexus fan-out fix: batch the per-collection lookups instead of one
         # HTTP round trip per (id, candidate-collection) pair — the prior
@@ -4433,6 +4444,7 @@ def store_get_many(
             if entry is None:
                 missing.append(doc_id)
                 contents.append("")
+                categories.append("")
                 continue
 
             body = str(entry.get("content") or "")
@@ -4446,9 +4458,10 @@ def store_get_many(
                     + display_truncation_marker(max_chars_per_doc)
                 )
             contents.append(body)
+            categories.append(str(entry.get("category") or ""))
 
         if structured:
-            return {"contents": contents, "missing": missing}
+            return {"contents": contents, "missing": missing, "categories": categories}
         lines = [f"Hydrated {len(contents) - len(missing)}/{len(id_list)} docs"]
         if missing:
             lines.append(f"Missing: {', '.join(missing[:10])}")
@@ -4459,7 +4472,10 @@ def store_get_many(
             # but the failure must still be logged server-side (nexus-yttqr): a silent
             # swallow here is exactly the diagnostic hole this bead closes.
             _log.error("mcp_store_get_many_failed", error=str(e), exc_info=True)
-            return {"contents": [], "missing": [], "error": f"store_get_many failed: {e}"}
+            return {
+                "contents": [], "missing": [], "categories": [],
+                "error": f"store_get_many failed: {e}",
+            }
         return _mcp_tool_error("store_get_many", e)
 
 

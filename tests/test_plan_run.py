@@ -2249,6 +2249,151 @@ class TestZeroEvidenceShortCircuit:
         assert result == {"text": "real comparison"}
 
 
+class TestEvidenceHygiene:
+    """RDR-200 Phase 1c evidence hygiene (nexus-4jj40): the question text
+    entered a rank step's own candidate list on 5 of 15 composed runs
+    (a literal ``$intent`` reference resolving into an items/inputs list
+    alongside real evidence), and nexus's own operator eval fixtures
+    (category "code") were retrieved as evidence for knowledge__ paper
+    questions (category "paper") on others (T2 [24082]).
+    """
+
+    # ── $intent dropped from candidate lists ────────────────────────────
+
+    def test_drop_intent_removes_exact_match_from_items(self) -> None:
+        from nexus.plans.runner import _drop_intent_from_list_args
+
+        args = {"items": ["what does the paper claim", "real evidence"], "criterion": "x"}
+        out = _drop_intent_from_list_args(args, intent="what does the paper claim")
+        assert out["items"] == ["real evidence"]
+        assert out["criterion"] == "x"  # non-list args untouched
+
+    def test_drop_intent_is_noop_when_intent_missing_or_empty(self) -> None:
+        from nexus.plans.runner import _drop_intent_from_list_args
+
+        args = {"items": ["a", "b"]}
+        assert _drop_intent_from_list_args(args, intent=None) == args
+        assert _drop_intent_from_list_args(args, intent="") == args
+
+    def test_drop_intent_is_noop_when_intent_not_present_in_any_list(self) -> None:
+        from nexus.plans.runner import _drop_intent_from_list_args
+
+        args = {"items": ["a", "b"], "limit": 5}
+        out = _drop_intent_from_list_args(args, intent="not present anywhere")
+        assert out == args
+
+    def test_drop_intent_ordinary_candidates_untouched(self) -> None:
+        from nexus.plans.runner import _drop_intent_from_list_args
+
+        args = {"items": ["paper passage one", "paper passage two"]}
+        out = _drop_intent_from_list_args(args, intent="an unrelated question")
+        assert out["items"] == ["paper passage one", "paper passage two"]
+
+    @pytest.mark.asyncio
+    async def test_intent_dropped_from_rank_items_end_to_end(self) -> None:
+        """A composed rank step referencing ``$intent`` inside its
+        ``items`` list -- the actual reported shape -- must never
+        dispatch with the question text still in the candidate list."""
+        from nexus.plans.runner import plan_run
+
+        plan = {
+            "steps": [
+                {
+                    "tool": "rank",
+                    "args": {
+                        "items": [
+                            "$intent", "real evidence one", "real evidence two",
+                        ],
+                        "criterion": "best match",
+                    },
+                },
+            ],
+            "required_bindings": ["intent"],
+        }
+        disp = _FakeDispatcher([{"text": "ok"}])
+        await plan_run(
+            _match(plan), {"intent": "what does the paper claim"}, dispatcher=disp,
+        )
+
+        tool, args = disp.calls[0]
+        assert tool == "rank"
+        assert "what does the paper claim" not in args["items"]
+        assert args["items"] == ["real evidence one", "real evidence two"]
+
+    # ── Fixture-category candidates dropped alongside paper evidence ───
+
+    def test_filter_hydrated_contents_drops_code_fixture_alongside_paper(self) -> None:
+        from nexus.plans.runner import _filter_hydrated_contents
+
+        contents = ["a real paper passage", "operator_check test fixture JSON"]
+        categories = ["paper", "code"]
+        assert _filter_hydrated_contents(contents, categories) == [
+            "a real paper passage",
+        ]
+
+    def test_filter_hydrated_contents_keeps_code_when_no_paper_present(self) -> None:
+        """A deliberate code-only retrieval (no paper evidence at all,
+        e.g. a code-analysis question) is untouched -- the exclusion is
+        scoped to co-mingling, never a blanket "drop all code"."""
+        from nexus.plans.runner import _filter_hydrated_contents
+
+        contents = ["some code", "more code"]
+        categories = ["code", "code"]
+        assert _filter_hydrated_contents(contents, categories) == contents
+
+    def test_filter_hydrated_contents_ordinary_candidates_untouched(self) -> None:
+        from nexus.plans.runner import _filter_hydrated_contents
+
+        contents = ["paper passage one", "paper passage two"]
+        categories = ["paper", "paper"]
+        assert _filter_hydrated_contents(contents, categories) == contents
+
+    def test_filter_hydrated_contents_degrades_when_categories_misaligned(self) -> None:
+        """The tumbler-hydration path returns no per-id categories at
+        all -- length mismatch must degrade to the pre-existing empty-
+        only filter, never raise or misclassify."""
+        from nexus.plans.runner import _filter_hydrated_contents
+
+        contents = ["a", "", "b"]
+        assert _filter_hydrated_contents(contents, []) == ["a", "b"]
+
+    def test_hydrate_operator_args_ids_branch_drops_fixture_category(self) -> None:
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        with patch(
+            "nexus.mcp.core.store_get_many",
+            return_value={
+                "contents": ["a real paper passage", "operator test fixture JSON"],
+                "categories": ["paper", "code"],
+            },
+        ):
+            _, args = _hydrate_operator_args(
+                "rank",
+                {"ids": ["p1", "f1"], "collections": ["knowledge__x", "code__x"]},
+            )
+        assert json.loads(args["items"]) == ["a real paper passage"]
+
+    def test_hydrate_operator_args_ids_branch_keeps_ordinary_candidates(self) -> None:
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        with patch(
+            "nexus.mcp.core.store_get_many",
+            return_value={
+                "contents": ["paper passage one", "paper passage two"],
+                "categories": ["paper", "paper"],
+            },
+        ):
+            _, args = _hydrate_operator_args(
+                "rank",
+                {"ids": ["p1", "p2"], "collections": ["knowledge__x", "knowledge__x"]},
+            )
+        assert json.loads(args["items"]) == ["paper passage one", "paper passage two"]
+
+
 @pytest.mark.asyncio
 async def test_bundle_path_strips_truncation_marker_before_composition(monkeypatch) -> None:
     """RDR-093 Phase 1+2 review observation: the bundle-path strip
