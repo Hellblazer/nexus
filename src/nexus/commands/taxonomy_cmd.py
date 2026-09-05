@@ -1646,16 +1646,32 @@ def _review_cache_title(collection: str) -> str:
     return f"dry-run-verdicts:{collection or '(all)'}"
 
 
-def _topic_content_hash(topic_id: int, label: str, terms: list[str]) -> str:
-    """Deterministic short hash of a topic's reviewable content (nexus-afnht).
+def _topic_content_hash(
+    topic_id: int, label: str, terms: list[str], doc_ids: list[str], doc_count: int,
+) -> str:
+    """Deterministic short hash of exactly what the verdict prompt shows (nexus-afnht).
 
-    Covers id + label + terms (terms sorted, so reordering the same set does
-    not change the hash). Used to detect whether a topic changed between a
-    ``--dry-run`` preview and a later ``--auto`` apply, so a cached verdict
-    is only reused when the taxonomy it was computed against is unchanged.
+    Covers id + label + terms + the doc sample + doc_count — every input
+    ``_generate_review_verdicts_batch`` builds its prompt line from (terms
+    and doc_ids sorted, so reordering either does not change the hash).
+    Label/terms alone under-covers: incremental indexing can change which
+    docs are assigned to a topic (and therefore the doc sample and
+    doc_count the model actually saw) without touching the topic's label or
+    terms at all, which would otherwise replay a stale cached verdict
+    within the TTL window against a taxonomy the model never actually
+    reviewed. Used to detect whether a topic changed between a ``--dry-run``
+    preview and a later ``--auto`` apply, so a cached verdict is only
+    reused when the taxonomy it was computed against is unchanged.
     """
     payload = json.dumps(
-        {"id": topic_id, "label": label, "terms": sorted(terms)}, sort_keys=True,
+        {
+            "id": topic_id,
+            "label": label,
+            "terms": sorted(terms),
+            "doc_ids": sorted(doc_ids),
+            "doc_count": doc_count,
+        },
+        sort_keys=True,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
@@ -1664,23 +1680,47 @@ def _load_review_cache(db: Any, collection: str) -> dict[int, dict[str, Any]]:
     """Load persisted ``--dry-run`` verdicts for *collection*, keyed by topic id.
 
     Each value is ``{"hash": <topic content hash>, "verdict": <verdict dict>}``.
-    Returns ``{}`` on a cache miss or any malformed/legacy content — a
-    corrupt or absent cache degrades to "nothing cached, re-sample
-    everything", never a crash.
+
+    An ABSENT entry (no ``--dry-run`` has ever run for this collection, or
+    it has expired past its 7-day TTL) is the ordinary case and stays
+    silent — ``{}`` with nothing logged or printed. A PRESENT entry that is
+    malformed or wrong-shaped (empty content, invalid JSON, or a parsed
+    body with no ``topics`` dict) is a real anomaly — a corrupted T2 row, a
+    schema change, hand-edited content — and must not degrade silently
+    (nexus-afnht stacked-review finding 2): it is logged via
+    ``structlog.warning`` and echoed to the operator as a discard notice,
+    then treated as empty so every topic simply re-samples. A per-topic
+    sub-entry that is individually malformed inside an otherwise
+    well-formed cache is dropped without a notice — that topic alone
+    re-samples, which is the existing graceful per-topic degradation this
+    function already provided.
     """
     entry = db.memory.get(project=_REVIEW_CACHE_PROJECT, title=_review_cache_title(collection))
     if not entry:
         return {}
+
+    def _discard(reason: str) -> dict[int, dict[str, Any]]:
+        _log.warning(
+            "taxonomy_review_cache_discarded", collection=collection, reason=reason,
+        )
+        click.echo(
+            f"NOTE: the cached --dry-run preview for collection "
+            f"{collection or '(all)'} was discarded ({reason}); "
+            "re-sampling every topic.",
+            err=True,
+        )
+        return {}
+
     content = entry.get("content") if isinstance(entry, dict) else None
     if not content:
-        return {}
+        return _discard("cached entry has no content")
     try:
         raw = json.loads(content)
     except (json.JSONDecodeError, TypeError):
-        return {}
+        return _discard("cached content is not valid JSON")
     topics = raw.get("topics") if isinstance(raw, dict) else None
     if not isinstance(topics, dict):
-        return {}
+        return _discard("cached content has an unexpected shape (no 'topics' object)")
     out: dict[int, dict[str, Any]] = {}
     for key, value in topics.items():
         try:
@@ -1784,6 +1824,7 @@ def _review_auto(
     cache = _load_review_cache(db, collection)
 
     parsed_terms: dict[int, list[str]] = {}
+    doc_ids_by_topic: dict[int, list[str]] = {}
     current_hash: dict[int, str] = {}
     verdict_by_topic: dict[int, dict[str, Any] | None] = {}
     to_dispatch: list[dict[str, Any]] = []
@@ -1795,7 +1836,17 @@ def _review_auto(
         except (json.JSONDecodeError, TypeError):
             terms = []
         parsed_terms[t["id"]] = terms
-        current_hash[t["id"]] = _topic_content_hash(t["id"], t["label"], terms)
+        # Fetched up front for EVERY topic (not only dispatched ones) so the
+        # hash below covers exactly what the prompt would show, even for a
+        # topic served from cache — a cache-hit decision must see the same
+        # doc sample the model would have (nexus-afnht stacked-review
+        # finding: label/terms alone missed doc-set drift from incremental
+        # indexing).
+        doc_ids = db.taxonomy.get_topic_doc_ids(t["id"], limit=3)
+        doc_ids_by_topic[t["id"]] = doc_ids
+        current_hash[t["id"]] = _topic_content_hash(
+            t["id"], t["label"], terms, doc_ids, t["doc_count"],
+        )
         cached = cache.get(t["id"])
         if cached is not None and cached["hash"] == current_hash[t["id"]]:
             verdict_by_topic[t["id"]] = cached["verdict"]
@@ -1829,8 +1880,9 @@ def _review_auto(
             batch = to_dispatch[start : start + batch_size]
             items: list[tuple[int, str, list[str], list[str], str]] = []
             for t in batch:
-                doc_ids = db.taxonomy.get_topic_doc_ids(t["id"], limit=3)
-                items.append((t["id"], t["label"], parsed_terms[t["id"]], doc_ids, t["collection"]))
+                items.append(
+                    (t["id"], t["label"], parsed_terms[t["id"]], doc_ids_by_topic[t["id"]], t["collection"])
+                )
 
             verdicts = asyncio.run(
                 _generate_review_verdicts_batch(items, failures=dispatch_failures)

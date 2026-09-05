@@ -1588,16 +1588,22 @@ independent batched `claude_dispatch` passes are two independent, unseeded
 stochastic draws — before this fix, a `--dry-run` preview predicted nothing
 about the destructive set a following `--auto` apply actually deleted or
 merged. `--dry-run` now persists every verdict it computes, per topic, keyed
-by collection plus a content hash of that topic's (id, label, terms). A
-later `--auto` on the same collection reuses a cached verdict for any topic
-whose hash still matches — so reviewing a preview and then applying it
-produces EXACTLY the verdicts shown, never an independent re-sample. A topic
-with no cached verdict, or whose hash no longer matches (a discover/rebuild
-pass or a manual edit changed its label/terms in between), is re-dispatched
-fresh, with a loud `NOTE:` line naming which topic ids were invalidated.
-Running `--dry-run` twice in a row with nothing changed dispatches only
-once — the second preview is served entirely from the cache and reports the
-identical verdict set. The cached entry expires after 7 days.
+by collection plus a content hash covering exactly what the verdict prompt
+was built from — id, label, terms, the doc sample, and doc_count. A later
+`--auto` on the same collection reuses a cached verdict for any topic whose
+hash still matches — so reviewing a preview and then applying it produces
+EXACTLY the verdicts shown, never an independent re-sample. A topic with no
+cached verdict, or whose hash no longer matches — a discover/rebuild pass or
+a manual edit changed its label/terms, or incremental indexing changed which
+docs are assigned to it (doc sample/doc_count alone, with label and terms
+completely untouched) — is re-dispatched fresh, with a loud `NOTE:` line
+naming which topic ids were invalidated. Running `--dry-run` twice in a row
+with nothing changed dispatches only once — the second preview is served
+entirely from the cache and reports the identical verdict set. The cached
+entry expires after 7 days. A cached entry that exists but is malformed or
+wrong-shaped (a corrupted row, not simply absent) is never silently
+discarded: it is logged and echoed as a `NOTE: ... was discarded (...)`
+notice, then treated as empty so every topic in that collection re-samples.
 
 Fail-open throughout: a `claude_dispatch` exception, a malformed response, or
 an invalid verdict entry leaves that topic pending rather than raising.

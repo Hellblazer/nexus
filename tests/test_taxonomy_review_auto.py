@@ -1050,6 +1050,147 @@ class TestReviewAutoCLI:
         assert topic is not None
         assert topic["review_status"] == "accepted"
 
+    def test_new_doc_assignment_invalidates_cache_without_label_or_terms_change(
+        self, tmp_path: Path,
+    ) -> None:
+        """nexus-afnht stacked-review finding 1: a topic's doc SAMPLE can
+
+        drift via incremental indexing (a new doc gets assigned) with its
+        label, terms, and even its stamped ``doc_count`` all untouched
+        (``import_assignment`` is a raw fidelity insert with no doc_count
+        side effect — the topic's stamped count stays exactly as seeded).
+        The cached verdict must still invalidate: hashing only id/label/
+        terms would have missed this and replayed a stale delete verdict
+        against a taxonomy the model never actually reviewed.
+        """
+        db_path = tmp_path / "memory.db"
+        tid = _seed_topic(db_path, "junk", doc_count=1, n_docs=1)
+
+        runner = CliRunner()
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", _t2_router(db_path)),
+            patch(
+                "nexus.operators.dispatch.claude_dispatch",
+                AsyncMock(
+                    side_effect=_dispatch_by_topic_id(
+                        {tid: {"action": "delete", "reason": "pollution"}}
+                    )
+                ),
+            ),
+        ):
+            dry_result = runner.invoke(
+                taxonomy, ["review", "--auto", "--collection", "proj", "--dry-run"],
+            )
+        assert dry_result.exit_code == 0, dry_result.output
+
+        # Incremental indexing assigns a NEW doc to this topic. Label,
+        # terms, and doc_count (a separately-stamped fidelity field) are
+        # completely untouched — only the live assignment set drifts.
+        _seed_chunks_for_tenant(
+            _current_tenant, "proj", [canonical_chunk_id("junk-doc-extra.py")],
+        )
+        with T2Database(db_path) as db:
+            db.taxonomy.import_assignment(
+                doc_id=canonical_chunk_id("junk-doc-extra.py"),
+                topic_id=tid,
+                assigned_by="test-drift",
+                similarity=None,
+                assigned_at=None,
+                source_collection="proj",
+            )
+            topic_before = db.taxonomy.get_topic_by_id(tid)
+        assert topic_before["label"] == "junk"
+        assert topic_before["doc_count"] == 1  # unchanged: proves label/terms/doc_count alone hide this drift
+
+        fresh_dispatch = AsyncMock(
+            side_effect=_dispatch_by_topic_id({tid: {"action": "accept"}})
+        )
+        runner2 = CliRunner()
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", _t2_router(db_path)),
+            patch("nexus.operators.dispatch.claude_dispatch", fresh_dispatch),
+        ):
+            apply_result = runner2.invoke(
+                taxonomy, ["review", "--auto", "--collection", "proj"],
+            )
+
+        assert apply_result.exit_code == 0, apply_result.output
+        assert fresh_dispatch.call_count == 1
+        assert "invalidated" in apply_result.output.lower()
+        with T2Database(db_path) as db:
+            topic = db.taxonomy.get_topic_by_id(tid)
+        # The fresh verdict (accept) applied, not the stale cached delete.
+        assert topic["review_status"] == "accepted"
+
+    def test_malformed_cache_entry_is_discarded_with_loud_notice(
+        self, tmp_path: Path,
+    ) -> None:
+        """nexus-afnht stacked-review finding 2: a malformed/wrong-shape
+
+        cached entry must not degrade silently — it is logged and echoed
+        as a discard notice, then treated as empty (every topic re-samples
+        fresh) rather than either crashing or silently vanishing.
+        """
+        from nexus.commands import taxonomy_cmd as _taxonomy_cmd
+
+        db_path = tmp_path / "memory.db"
+        tid = _seed_topic(db_path, "junk", doc_count=1)
+
+        with T2Database(db_path) as db:
+            db.memory.put(
+                project=_taxonomy_cmd._REVIEW_CACHE_PROJECT,
+                title=_taxonomy_cmd._review_cache_title("proj"),
+                content="not valid json at all",
+                ttl=7,
+            )
+
+        dispatch = AsyncMock(
+            side_effect=_dispatch_by_topic_id({tid: {"action": "accept"}})
+        )
+        runner = CliRunner()
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", _t2_router(db_path)),
+            patch("nexus.operators.dispatch.claude_dispatch", dispatch),
+        ):
+            result = runner.invoke(
+                taxonomy, ["review", "--auto", "--collection", "proj"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert dispatch.call_count == 1, "a discarded cache must still re-sample"
+        assert "discarded" in result.output.lower()
+        with T2Database(db_path) as db:
+            topic = db.taxonomy.get_topic_by_id(tid)
+        assert topic["review_status"] == "accepted"
+
+    def test_absent_cache_prints_no_discard_notice(self, tmp_path: Path) -> None:
+        """The ordinary first-run case (no prior --dry-run) must stay
+
+        silent — no discard notice, no invalidation notice — since there
+        is nothing anomalous about a cache that was never populated.
+        """
+        db_path = tmp_path / "memory.db"
+        tid = _seed_topic(db_path, "junk", doc_count=1)
+        dispatch = AsyncMock(
+            side_effect=_dispatch_by_topic_id({tid: {"action": "accept"}})
+        )
+        runner = CliRunner()
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", _t2_router(db_path)),
+            patch("nexus.operators.dispatch.claude_dispatch", dispatch),
+        ):
+            result = runner.invoke(
+                taxonomy, ["review", "--auto", "--collection", "proj"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "discarded" not in result.output.lower()
+        assert "invalidated" not in result.output.lower()
+
     def test_dispatch_raises_all_stay_pending_exit_zero(self, tmp_path: Path) -> None:
         db_path = tmp_path / "memory.db"
         t1 = _seed_topic(db_path, "topic-1", doc_count=1)
