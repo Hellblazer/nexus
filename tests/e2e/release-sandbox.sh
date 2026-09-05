@@ -119,12 +119,14 @@ _index_floor_check() {
 # of orphaning a `tail -f` that holds the log open forever (s71lr review).
 _LIVE_TAIL_PID=""
 
+# Sets _LIVE_TAIL_PID; never call this through `$(...)` (the backgrounded
+# tail inherits the substitution's stdout pipe, so the substitution never
+# sees EOF and the caller hangs; pass-2 critique, reproduced standalone).
 _start_live_log_tail() {
     local log_file="$1"
     : > "$log_file"
     tail -n +1 -f "$log_file" &
     _LIVE_TAIL_PID=$!
-    echo "$_LIVE_TAIL_PID"
 }
 
 _stop_live_log_tail() {
@@ -976,7 +978,7 @@ case "$MODE" in
         # nexus-s71lr: live-tail this step's own log so a stall (the eta
         # ticker / heartbeat lines nx index now prints by default) is visible
         # in THIS transcript, not only in the post-hoc tail -5 below.
-        _REPO_TAIL_PID=$(_start_live_log_tail "$INDEX_REPO_LOG")
+        _start_live_log_tail "$INDEX_REPO_LOG"; _REPO_TAIL_PID="$_LIVE_TAIL_PID"
         if ! nx index repo "$FIXTURE_DIR" >"$INDEX_REPO_LOG" 2>&1; then
             _stop_live_log_tail "$_REPO_TAIL_PID"
             tail -5 "$INDEX_REPO_LOG" | sed 's/^/  /'
@@ -1100,7 +1102,7 @@ case "$MODE" in
         # nexus-s71lr: this is the EXACT command the bead's own reproduction
         # used (212 RDR files, 13 minutes, no output) -- live-tail so its
         # heartbeat lines are visible in THIS transcript while it runs.
-        _RDR_TAIL_PID=$(_start_live_log_tail "$INDEX_RDR_LOG")
+        _start_live_log_tail "$INDEX_RDR_LOG"; _RDR_TAIL_PID="$_LIVE_TAIL_PID"
         if ! nx index rdr "$REPO_ROOT" >"$INDEX_RDR_LOG" 2>&1; then
             _stop_live_log_tail "$_RDR_TAIL_PID"
             tail -5 "$INDEX_RDR_LOG" | sed 's/^/  /'
