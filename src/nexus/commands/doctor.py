@@ -1062,6 +1062,43 @@ def _run_check_aspect_queue() -> None:
 
 # ── --check-index-failures (nexus-nukn3) ─────────────────────────────────────
 
+#: A recorded failure older than this many days no longer gates the default
+#: sweep (nexus-nukn3 fold-in, critic Critical finding T2
+#: critique-nexus-nukn3-410720f6a [24569]). The ORIGINAL cut gated on the
+#: ALL-TIME cumulative total: the first permanent extraction failure in a
+#: tenant's history (an encrypted PDF, a corrupt fixture kept on purpose)
+#: turned the default `nx doctor` sweep into an unfixable FAIL forever --
+#: the mirror image of the nexus-fylxo trap this check exists to avoid (a
+#: check that can never return to green is operationally the same failure
+#: as one nobody reads). Scoping the gate to the LATEST run, and further
+#: exempting it once it is this stale, means the check self-heals over time
+#: even with no operator action; `nx index failures --clear` is the
+#: immediate remedy for an operator who has already adjudicated a row.
+#: Matches the trim family's existing --days=30 default (trim_hook_failures
+#: / trim_search_telemetry) rather than inventing a new retention constant.
+_INDEX_FAILURES_LATEST_RUN_STALENESS_DAYS: int = 30
+
+
+def _index_failure_is_stale(occurred_at_iso: str, staleness_days: int) -> bool:
+    """True when *occurred_at_iso* is more than *staleness_days* days old.
+
+    Unparseable or blank input is treated as NOT stale (never exempts a
+    real failure from gating because of a parsing surprise -- the check's
+    fail-first posture takes priority over a graceful degrade here).
+    """
+    if not occurred_at_iso:
+        return False
+    from datetime import datetime, timedelta, timezone  # noqa: PLC0415 — deferred, this branch only
+
+    try:
+        ts = datetime.fromisoformat(occurred_at_iso.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=staleness_days)
+    return ts < cutoff
+
 
 def _report_index_failures_service() -> None:
     """Report the durable index-failures backlog (nexus-nukn3).
@@ -1072,11 +1109,12 @@ def _report_index_failures_service() -> None:
     a reader, that queue accumulates silently, exactly the trap named on
     this bead: nexus-fylxo found ``--check-aspect-queue`` printing a
     failed-row backlog without ever raising or emitting a ✗/FAIL: marker.
-    This check is written FAIL-FIRST to avoid repeating that: any nonzero
-    backlog raises ``click.exceptions.Exit(1)`` with a ✗ FAIL: marker from
-    the start, matching the 4 original supplementary-check siblings
-    (resources / plan-library / taxonomy / t1).
 
+    FAIL-FIRST, but scoped (fold-in, critic Critical finding — see
+    :data:`_INDEX_FAILURES_LATEST_RUN_STALENESS_DAYS`'s own docstring for
+    the full rationale): the gate fires on the LATEST run that recorded any
+    failure, provided that run is itself recent; the all-time count across
+    every run is always shown as information, never as the gating number.
     A transport error is reported as UNKNOWN (never a false "0 failures")
     and does not raise — matching ``_report_aspect_queue_service``'s own
     posture for the identical failure mode.
@@ -1087,7 +1125,7 @@ def _report_index_failures_service() -> None:
 
     try:
         store = HttpTelemetryStore()
-        result = store.list_index_failures(limit=20)
+        newest = store.list_index_failures(limit=1)
     except (httpx.HTTPError, RuntimeError) as exc:
         # RuntimeError: store construction resolves the service endpoint and
         # raises ServiceEndpointUnresolvableError (a RuntimeError, not an
@@ -1100,21 +1138,56 @@ def _report_index_failures_service() -> None:
         )
         return
 
-    total = result["total"]
-    rows = result["rows"]
-    click.echo(f"index_failures: {total} recorded failure(s) (service backend)")
-    if not total:
+    total_all_time = newest["total"]
+    click.echo(f"index_failures: {total_all_time} recorded failure(s) all-time (service backend)")
+    rows = newest["rows"]
+    if not rows:
         return
 
-    click.echo(f"\nFailed rows (showing top {min(len(rows), 20)}):")
-    for row in rows[:20]:
+    latest_row = rows[0]
+    latest_run_id = str(latest_row.get("run_id") or "")
+    latest_occurred_at = str(latest_row.get("occurred_at") or "")
+    if not latest_run_id or _index_failure_is_stale(
+        latest_occurred_at, _INDEX_FAILURES_LATEST_RUN_STALENESS_DAYS,
+    ):
         click.echo(
-            f"  {row.get('file_path', '?')} :: {row.get('error_class', '?')} "
-            f"(run {row.get('run_id', '?')})"
+            f"\nThe most recent recorded failure is from "
+            f"{latest_occurred_at or 'an unknown time'} — older than "
+            f"{_INDEX_FAILURES_LATEST_RUN_STALENESS_DAYS} days, so it no "
+            "longer gates the sweep. See it (or the rest of the backlog) "
+            "with: nx index failures — or clear adjudicated rows with: "
+            "nx index failures --clear"
         )
-    click.echo("\nSee them all with: nx index failures")
+        return
+
+    # Re-query scoped to exactly the latest run — `newest["total"]` above is
+    # the ALL-TIME count, not this run's; using it here would resurrect the
+    # original bug under a different variable name.
+    latest = store.list_index_failures(run_id=latest_run_id, limit=20)
+    latest_total = latest["total"]
+    if not latest_total:
+        # Defensive only — latest_row itself proves at least 1 row exists
+        # for latest_run_id; a mismatch here would mean the two queries
+        # disagree, not that the backlog is actually empty.
+        return
+
+    click.echo(f"\n{latest_total} failure(s) in the latest run ({latest_run_id}):")
+    for row in latest["rows"][:20]:
+        click.echo(
+            f"  {row.get('file_path', '?')} :: {row.get('error_class', '?')}"
+        )
+    if total_all_time > latest_total:
+        click.echo(
+            f"\n({total_all_time - latest_total} more from older run(s) -- "
+            "see: nx index failures)"
+        )
+    click.echo(f"\nSee them all with: nx index failures --run-id {latest_run_id}")
     click.echo(
-        f"\n✗ FAIL: {total} durable index-failure row(s) recorded.",
+        f"Clear adjudicated rows with: nx index failures --clear "
+        f"--run-id {latest_run_id}"
+    )
+    click.echo(
+        f"\n✗ FAIL: {latest_total} failed index-file(s) in the latest run.",
         err=True,
     )
     raise click.exceptions.Exit(1)

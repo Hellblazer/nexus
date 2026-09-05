@@ -332,6 +332,42 @@ def test_index_repo_upsert_timeout_exits_nonzero_with_clean_message(runner, repo
     assert "Upsert timed out" in result.output
 
 
+def test_index_repo_durable_write_failure_surfaces_a_loud_warning(runner, repo_dir, mock_reg):
+    """nexus-nukn3 fold-in (critic Significant finding): a durable-WRITE
+    failure (nothing recorded in nexus.index_failures for this run's
+    skips) must be surfaced loudly in the run summary, not just a
+    structlog line nobody watching stdout/stderr sees -- exit stays 0
+    since the exit-code decision already used the in-memory fallback."""
+    result, mock_idx = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={
+            "files_changed": 3159,
+            "skipped_unextractable_files": 1,
+            "index_failures_write_failed": True,
+        },
+    )
+    assert result.exit_code == 0, result.output
+    assert "could not be durably recorded" in result.stderr
+    assert "1 failure(s)" in result.stderr
+
+
+def test_index_repo_read_back_failure_alone_stays_quiet(runner, repo_dir, mock_reg):
+    """The write itself succeeded (index_failures_write_failed absent/False)
+    -- only the read-back confirmation query failed, which does not lose
+    any durable data (the in-memory count already matches what was
+    written), so no loud warning is warranted."""
+    result, mock_idx = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={
+            "files_changed": 3159,
+            "skipped_unextractable_files": 1,
+            "index_failures_write_failed": False,
+        },
+    )
+    assert result.exit_code == 0, result.output
+    assert "not durably recorded" not in result.stderr
+
+
 def test_index_repo_idempotent_when_already_registered(runner, repo_dir, mock_reg):
     result, mock_idx = _invoke_repo(runner, [str(repo_dir)], mock_reg)
     assert result.exit_code == 0

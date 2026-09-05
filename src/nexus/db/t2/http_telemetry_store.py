@@ -50,6 +50,7 @@ Route mapping (matches TelemetryHandler Java):
     POST /v1/telemetry/index_failures/record        — record_index_failure (nexus-nukn3)
     POST /v1/telemetry/index_failures/record_batch  — record_index_failures_batch
     GET  /v1/telemetry/index_failures/list          — list_index_failures
+    POST /v1/telemetry/index_failures/trim          — trim_index_failures
     POST /v1/telemetry/capability_census/record — record_capability_census (nexus-gjv9b
                                            PART 1: upsert on (tenant_id, session_id))
     GET  /v1/telemetry/capability_census/query  — query_capability_census
@@ -938,6 +939,32 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "total": int(resp.get("total") or 0),
             "oldest_occurred_at": str(resp.get("oldest_occurred_at") or ""),
         }
+
+    def trim_index_failures(self, *, run_id: str = "", days: int = 0) -> int:
+        """Delete index_failures rows by ``run_id`` and/or age (nexus-nukn3
+        fold-in, the critic's Critical finding on the original cut: an
+        all-time, fail-first doctor check with no remedy is unfixable
+        forever once a permanent extraction failure exists. This is the
+        remedy -- ``nx index failures --clear``.
+
+        Calls ``POST /v1/telemetry/index_failures/trim``. At least one of
+        ``run_id``/``days`` is required -- refusing here (before the wire
+        call) mirrors the engine's own 400 boundary, so a caller gets the
+        same clear refusal message regardless of which side would have
+        caught it first.
+        """
+        if not run_id and days < 1:
+            raise ValueError(
+                "trim_index_failures requires run_id and/or days >= 1 "
+                "(refusing an unscoped delete of the entire tenant history)"
+            )
+        payload: dict[str, Any] = {}
+        if run_id:
+            payload["run_id"] = run_id
+        if days > 0:
+            payload["days"] = days
+        resp = self._post("/v1/telemetry/index_failures/trim", payload)
+        return int(resp.get("deleted", 0))
 
     def rename_collection(self, *, old: str, new: str) -> dict[str, int]:
         """Re-point collection columns from ``old`` to ``new`` in all telemetry tables.

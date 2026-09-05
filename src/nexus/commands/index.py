@@ -196,14 +196,16 @@ def index() -> None:
 @click.option(
     "--run-id",
     default=None,
-    help="Only show failures from this run (default: every run).",
+    help="Only show (or, with --clear, only clear) failures from this run "
+    "(default: every run).",
 )
 @click.option(
     "--days",
     type=int,
     default=0,
     show_default=True,
-    help="Only show failures within the last N days (0 = unbounded).",
+    help="Only show failures within the last N days (0 = unbounded). "
+    "Ignored with --clear -- see --older-than-days.",
 )
 @click.option(
     "--limit",
@@ -211,10 +213,34 @@ def index() -> None:
     default=100,
     show_default=True,
     help="Max rows to print. The printed count is always the exact total, "
-    "regardless of this cap.",
+    "regardless of this cap. Ignored with --clear.",
 )
-def index_failures_cmd(run_id: str | None, days: int, limit: int) -> None:
-    """List durable per-file index-failure records (nexus-nukn3).
+@click.option(
+    "--clear",
+    "clear",
+    is_flag=True,
+    default=False,
+    help="Delete rows instead of listing them, scoped by --run-id and/or "
+    "--older-than-days (at least one is required). The remedy for "
+    "`nx doctor --check-index-failures`: an operator who has adjudicated "
+    "a failure (accepted it, or fixed and re-indexed the file) retires "
+    "its row(s) immediately rather than waiting out the 30-day staleness "
+    "window doctor's own check applies.",
+)
+@click.option(
+    "--older-than-days",
+    "older_than_days",
+    type=int,
+    default=0,
+    show_default=True,
+    help="With --clear: also delete rows older than N days (0 = no age "
+    "bound; combine with --run-id, or use alone to age-sweep every run).",
+)
+def index_failures_cmd(
+    run_id: str | None, days: int, limit: int,
+    clear: bool, older_than_days: int,
+) -> None:
+    """List, or clear, durable per-file index-failure records (nexus-nukn3).
 
     A repo-index run that skips a file it could not extract writes a
     durable row here (file path, error class, reason, run id) instead of
@@ -225,14 +251,67 @@ def index_failures_cmd(run_id: str | None, days: int, limit: int) -> None:
 
     \b
     Examples:
-      nx index failures                  # every recorded failure
-      nx index failures --run-id abc123  # one run only
-      nx index failures --days 7         # last week
+      nx index failures                              # every recorded failure
+      nx index failures --run-id abc123               # one run only
+      nx index failures --days 7                      # last week
+      nx index failures --clear --run-id abc123        # retire one run
+      nx index failures --clear --older-than-days 90   # age-sweep
     """
+    import httpx  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
     from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-    store = HttpTelemetryStore()
-    result = store.list_index_failures(run_id=run_id or "", days=days, limit=limit)
+    try:
+        store = HttpTelemetryStore()
+    except RuntimeError as exc:
+        raise click.ClickException(
+            f"index_failures: service backend unreachable ({exc})."
+        ) from exc
+
+    if clear:
+        # CLI-side guard, ahead of the client/engine's own (redundant on
+        # purpose, defense in depth): fail fast with a UsageError before
+        # even attempting the wire call, and give the same message
+        # regardless of which layer would have refused first.
+        if not run_id and older_than_days <= 0:
+            raise click.UsageError(
+                "--clear requires --run-id and/or --older-than-days "
+                "(refusing to clear the entire backlog unscoped)."
+            )
+        try:
+            deleted = store.trim_index_failures(run_id=run_id or "", days=older_than_days)
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise click.ClickException(
+                    "index_failures/trim route not found on this engine -- "
+                    "the engine predates nexus-nukn3's --clear support. "
+                    "Upgrade the engine (nx upgrade / redeploy)."
+                ) from exc
+            raise click.ClickException(f"index_failures --clear failed: {exc}.") from exc
+        except (httpx.HTTPError, RuntimeError) as exc:
+            raise click.ClickException(
+                f"index_failures: service backend unreachable ({exc})."
+            ) from exc
+        click.echo(f"Cleared {deleted} index-failure row(s).")
+        return
+
+    try:
+        result = store.list_index_failures(run_id=run_id or "", days=days, limit=limit)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise click.ClickException(
+                "index_failures/list route not found on this engine -- the "
+                "engine predates nexus-nukn3. Upgrade the engine (nx upgrade "
+                "/ redeploy) to use this verb."
+            ) from exc
+        raise click.ClickException(f"index_failures: request failed ({exc}).") from exc
+    except (httpx.HTTPError, RuntimeError) as exc:
+        raise click.ClickException(
+            f"index_failures: service backend unreachable ({exc})."
+        ) from exc
+
     rows = result["rows"]
     total = result["total"]
 
@@ -1109,6 +1188,21 @@ def index_repo_cmd(
                 f"extracted and were skipped (nexus-deyd5) — every other "
                 f"file indexed normally. See the WARNING/ERROR log line(s) "
                 f"above for the affected path(s) and reason(s).",
+                err=True,
+            )
+        # nexus-nukn3 fold-in (critic Significant finding): the durable
+        # write and its read-back are two separate advisory steps in
+        # indexer._run_index -- a write failure means no row exists in
+        # nexus.index_failures for this run's skips at all, which `nx index
+        # failures` / `nx doctor --check-index-failures` cannot see or
+        # report on. Surfaced loudly here since it is the one case where
+        # this run's own summary is the only place that knows.
+        if (stats or {}).get("index_failures_write_failed", False):
+            click.echo(
+                f"WARNING: {skipped_unextractable_files} failure(s) could "
+                f"not be durably recorded (nx index failures write failed) "
+                f"-- see the WARNING log line above. The exit-code decision "
+                f"above used the in-memory count instead.",
                 err=True,
             )
         if manifest_problems_detected:

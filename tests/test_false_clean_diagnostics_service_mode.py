@@ -32,6 +32,7 @@ that the frozen-file read path stays dead.
 """
 from __future__ import annotations
 
+import datetime as _dt
 from pathlib import Path
 from unittest.mock import patch
 
@@ -550,7 +551,25 @@ class TestIndexFailuresCheckRoutes:
     """Non-vacuity: this check must fire loudly on a seeded failure row --
     the exact nexus-fylxo trap named on this bead (a durable failure queue
     whose reader never raises reproduces the aspect-queue check's original
-    defect for a second queue). Written FAIL-FIRST rather than retrofitted."""
+    defect for a second queue). Written FAIL-FIRST rather than retrofitted.
+
+    Fold-in (T2 critique-nexus-nukn3-410720f6a [24569], Critical finding):
+    the check now scopes its gate to the LATEST run and exempts a stale
+    one, rather than gating on the all-time total -- these tests assert
+    the two-query shape that scoping requires (an unscoped call to find
+    the newest row's run_id, then a run_id-scoped call for the exact
+    latest-run count)."""
+
+    @staticmethod
+    def _scoped_mock(all_time: dict, by_run_id: dict | None = None):
+        """A list_index_failures side_effect: the unscoped call (run_id="")
+        returns *all_time*; a run_id-scoped call returns *by_run_id*."""
+        def _side_effect(*, run_id: str = "", days: int = 0, limit: int = 100):
+            if run_id:
+                assert by_run_id is not None, f"unexpected scoped call with run_id={run_id}"
+                return by_run_id
+            return all_time
+        return _side_effect
 
     def test_zero_failures_does_not_signal_failure(
         self, service_mode: None,
@@ -560,9 +579,9 @@ class TestIndexFailuresCheckRoutes:
         from nexus.commands import doctor as doctor_mod
 
         with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
-            store.return_value.list_index_failures.return_value = {
-                "rows": [], "total": 0, "oldest_occurred_at": "",
-            }
+            store.return_value.list_index_failures.side_effect = self._scoped_mock(
+                {"rows": [], "total": 0, "oldest_occurred_at": ""},
+            )
             runner = CliRunner()
             with runner.isolation() as (out, err, _):
                 exit_code = None
@@ -576,26 +595,27 @@ class TestIndexFailuresCheckRoutes:
         assert "0 recorded failure" in printed
         assert "FAIL" not in printed
 
-    def test_seeded_failure_row_signals_failure_loudly(
+    def test_fresh_latest_run_failure_signals_failure_loudly(
         self, service_mode: None,
     ) -> None:
-        """THE motivating case: a genuine backlog must raise Exit(1) with a
-        ✗/FAIL: marker, never read as healthy (nexus-fylxo class)."""
+        """THE motivating case: a genuine, RECENT backlog must raise Exit(1)
+        with a ✗/FAIL: marker, never read as healthy (nexus-fylxo class)."""
         import click
 
         from nexus.commands import doctor as doctor_mod
 
+        now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        row = {
+            "run_id": "run-1", "file_path": "/repo/broken.pdf",
+            "error_class": "UnextractableContentError",
+            "error": "produced empty output",
+            "occurred_at": now_iso,
+        }
         with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
-            store.return_value.list_index_failures.return_value = {
-                "rows": [{
-                    "run_id": "run-1", "file_path": "/repo/broken.pdf",
-                    "error_class": "UnextractableContentError",
-                    "error": "produced empty output",
-                    "occurred_at": "2026-09-05T00:00:00Z",
-                }],
-                "total": 1,
-                "oldest_occurred_at": "2026-09-05T00:00:00Z",
-            }
+            store.return_value.list_index_failures.side_effect = self._scoped_mock(
+                all_time={"rows": [row], "total": 1, "oldest_occurred_at": now_iso},
+                by_run_id={"rows": [row], "total": 1, "oldest_occurred_at": now_iso},
+            )
             runner = CliRunner()
             with runner.isolation() as (out, err, _):
                 exit_code = None
@@ -609,6 +629,44 @@ class TestIndexFailuresCheckRoutes:
         assert "✗" in printed or "FAIL:" in printed, printed
         assert "/repo/broken.pdf" in printed
         assert "UnextractableContentError" in printed
+
+    def test_stale_older_run_failure_alone_does_not_signal_failure(
+        self, service_mode: None,
+    ) -> None:
+        """THE Critical fix's non-vacuity proof: a backlog whose only
+        failure is older than the staleness window must NOT gate the
+        sweep -- only a fresh one does. Before this fold-in, this exact
+        scenario (one permanent failure, however old) failed the default
+        sweep forever."""
+        import click
+
+        from nexus.commands import doctor as doctor_mod
+
+        old_iso = (
+            _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=60)
+        ).isoformat()
+        row = {
+            "run_id": "run-old", "file_path": "/repo/ancient.pdf",
+            "error_class": "UnextractableContentError",
+            "error": "encrypted PDF", "occurred_at": old_iso,
+        }
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+            store.return_value.list_index_failures.side_effect = self._scoped_mock(
+                {"rows": [row], "total": 1, "oldest_occurred_at": old_iso},
+            )
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                exit_code = None
+                try:
+                    doctor_mod._run_check_index_failures()
+                except click.exceptions.Exit as exc:
+                    exit_code = exc.exit_code
+                printed = out.getvalue().decode() + err.getvalue().decode()
+
+        assert exit_code is None, printed
+        assert "FAIL" not in printed
+        assert "1 recorded failure" in printed, printed
+        assert "no longer gates" in printed
 
     def test_unreachable_service_reports_UNKNOWN_not_zero(
         self, service_mode: None,

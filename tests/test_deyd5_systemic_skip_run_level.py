@@ -278,6 +278,7 @@ def test_skip_count_is_read_back_from_the_durable_store_not_the_in_memory_list(
     assert stats["skipped_unextractable_files"] == 7, (
         "must read the durable store's total, not len(_skipped_files) (== 1)"
     )
+    assert stats["index_failures_write_failed"] is False
 
     # The batch write itself carries the right shape: one row, the real
     # file path, the UnextractableContentError class name, and a non-empty
@@ -331,4 +332,57 @@ def test_durable_write_failure_falls_back_to_the_in_memory_count(
         stats = _run_index(repo, reg)  # must not raise
 
     assert stats["skipped_unextractable_files"] == 1
+    assert stats["systemic_extraction_failure"] is False
+    # Fold-in (critic Significant finding): store CONSTRUCTION failing means
+    # no durable row exists at all for this run's skip -- the WRITE class,
+    # which index_repo_cmd must surface loudly (see
+    # tests/test_index_cmd.py::test_index_repo_durable_write_failure_surfaces_a_loud_warning).
+    assert stats["index_failures_write_failed"] is True
+
+
+def test_write_succeeds_read_back_fails_stays_silent_and_accurate(
+    tmp_path, monkeypatch,
+):
+    """Fold-in (critic Significant finding): the WRITE and the READ-BACK
+    are now two separate try/except blocks. When the write itself
+    SUCCEEDS but the confirmation read-back fails, the durable row DOES
+    exist (nothing lost) and the in-memory count is still accurate to
+    what was written -- so index_failures_write_failed must stay False
+    (no loud warning warranted) even though the read-back raised."""
+    from nexus.db.http_vector_client import HttpVectorClient
+    from nexus.errors import UnextractableContentError
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for i in range(24):
+        (repo / f"ok{i}.py").write_text("x = 1\n")
+    (repo / "blank.pdf").write_bytes(b"%PDF-1.4 fake content")
+    reg = _reg()
+
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
+    monkeypatch.setenv("NX_LOCAL", "0")
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
+    monkeypatch.setenv("CHROMA_API_KEY", "fake")
+
+    db = MagicMock(spec=HttpVectorClient)
+
+    def _pdf_side_effect(file, *_a, **_kw):
+        raise UnextractableContentError(f"{file.name}: no text extracted")
+
+    telemetry_store = MagicMock()
+    telemetry_store.record_index_failures_batch.return_value = 1
+    telemetry_store.list_index_failures.side_effect = RuntimeError("read-back blip")
+
+    with _service_mode_patches(db, extra={
+        "nexus.indexer._index_pdf_file": {"side_effect": _pdf_side_effect},
+        "nexus.db.t2.http_telemetry_store.HttpTelemetryStore": {
+            "return_value": telemetry_store,
+        },
+    }), patch("nexus.chunk_batcher.ChunkBatcher", _DrainTrackingBatcher):
+        stats = _run_index(repo, reg)  # must not raise
+
+    telemetry_store.record_index_failures_batch.assert_called_once()
+    assert stats["skipped_unextractable_files"] == 1  # in-memory count, still accurate
+    assert stats["index_failures_write_failed"] is False
     assert stats["systemic_extraction_failure"] is False

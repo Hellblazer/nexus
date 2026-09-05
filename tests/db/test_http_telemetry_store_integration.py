@@ -586,6 +586,29 @@ class TestIndexFailuresRoundTrip:
         unscoped = tel_store.list_index_failures(limit=1000)
         assert unscoped["total"] >= 2
 
+    def test_trim_requires_scoping(self, tel_store):
+        with pytest.raises(ValueError):
+            tel_store.trim_index_failures()
+
+    def test_trim_by_run_id_deletes_only_that_run(self, tel_store):
+        run_a = f"itest-trim-a-{time.time_ns()}"
+        run_b = f"itest-trim-b-{time.time_ns()}"
+        tel_store.record_index_failures_batch(
+            [("/repo/a1.pdf", "UnextractableContentError", "boom", ""),
+             ("/repo/a2.pdf", "UnextractableContentError", "boom", "")],
+            run_id=run_a,
+        )
+        tel_store.record_index_failure(
+            run_id=run_b, file_path="/repo/b1.pdf",
+            error_class="UnextractableContentError", error="boom",
+        )
+
+        deleted = tel_store.trim_index_failures(run_id=run_a)
+
+        assert deleted == 2
+        assert tel_store.list_index_failures(run_id=run_a, limit=100)["total"] == 0
+        assert tel_store.list_index_failures(run_id=run_b, limit=100)["total"] == 1
+
 
 class TestNxAnswerStepsRoundTrip:
     """RDR-196 .p1d (nexus-nyry9.10): direct-store-read proof that

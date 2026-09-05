@@ -5719,9 +5719,23 @@ def _run_index(
     # RECORD, not the VERDICT" (bead nexus-nukn3). On any failure the
     # in-memory count is the fallback, so telemetry downtime degrades
     # observability, never correctness of the exit-code decision.
+    #
+    # Fold-in (critic Significant finding, T2
+    # critique-nexus-nukn3-410720f6a [24569]): the WRITE and the READ-BACK
+    # are now two SEPARATE try/except blocks, not one. The original single
+    # block silently dropped the durable row on a write-side transport
+    # failure with only a structlog line -- exactly the pre-bead problem
+    # (a failure record that dies with the process), just narrowed to the
+    # telemetry-down case. `_index_failures_write_failed` distinguishes
+    # that class (nothing durable exists; index_repo_cmd surfaces it loudly
+    # in the run summary) from a write-SUCCESS/read-back-FAILURE (the
+    # durable row exists; only the re-confirmation query failed, so the
+    # in-memory count is still accurate and no loud warning is warranted).
     _durable_skipped_count = len(_skipped_files)
+    _index_failures_write_failed = False
     if _skipped_files:
         _index_run_id = uuid.uuid4().hex
+        _tel_store = None
         try:
             from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred to avoid import-time cost / circular deps
 
@@ -5733,14 +5747,22 @@ def _run_index(
                 ],
                 run_id=_index_run_id,
             )
-            _durable_skipped_count = _tel_store.list_index_failures(
-                run_id=_index_run_id, limit=1,
-            )["total"]
         except Exception as exc:  # noqa: BLE001 — advisory write; never fail an otherwise-successful run over telemetry downtime
+            _index_failures_write_failed = True
             _log.warning(
                 "index_failures_durable_write_failed",
                 error=str(exc), skipped=len(_skipped_files),
             )
+        if _tel_store is not None and not _index_failures_write_failed:
+            try:
+                _durable_skipped_count = _tel_store.list_index_failures(
+                    run_id=_index_run_id, limit=1,
+                )["total"]
+            except Exception as exc:  # noqa: BLE001 — the write succeeded; a read-back blip does not undercount (in-memory count still matches what was durably written), so this stays a quiet degrade
+                _log.warning(
+                    "index_failures_read_back_failed",
+                    error=str(exc), skipped=len(_skipped_files),
+                )
 
     _systemic_extraction_failure = skip_floor_breached(
         _durable_skipped_count, _files_attempted_total,
@@ -5790,6 +5812,14 @@ def _run_index(
         # write's success path; the in-memory value is only the fallback
         # on a telemetry-write failure — see that block's own comment).
         "skipped_unextractable_files": _durable_skipped_count,
+        # nexus-nukn3 fold-in: True iff the durable WRITE (not merely the
+        # read-back) failed this run -- no row exists in nexus.index_failures
+        # for any of this run's skips. index_repo_cmd surfaces this loudly
+        # ("N failures not durably recorded") since it is the one case where
+        # `nx index failures` / `nx doctor --check-index-failures` cannot see
+        # what actually happened; the exit-code verdict above already used
+        # the in-memory fallback count regardless.
+        "index_failures_write_failed": _index_failures_write_failed,
         # nexus-deyd5 round 3: the denominator for the ratio above, and
         # for index_repo_cmd's "attempted N, skipped M" message.
         "files_attempted_total": _files_attempted_total,

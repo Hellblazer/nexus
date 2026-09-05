@@ -263,6 +263,11 @@ T2_STORE_CONTRACT: dict[str, dict[str, list[str]]] = {
 #   telemetry.list_index_failures          index_cmd.py's `nx index failures`
 #                                            verb; doctor.py's
 #                                            --check-index-failures
+#   telemetry.trim_index_failures          index_cmd.py's `nx index failures
+#                                            --clear` remedy verb (fold-in,
+#                                            critic finding: an all-time
+#                                            fail-first check needs a clear
+#                                            path)
 #
 # DELIBERATELY EXCLUDED: the ~20 uncovered `import_*` ETL methods across
 # memory/plans/telemetry/chash_index/document_aspects/document_highlights/
@@ -346,6 +351,7 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         'record_index_failure': ['run_id', 'file_path', 'error_class', 'error', 'occurred_at'],
         'record_index_failures_batch': ['rows', 'run_id'],
         'list_index_failures': ['run_id', 'days', 'limit'],
+        'trim_index_failures': ['run_id', 'days'],
         # nexus-gjv9b PART 1: capability_census replaces
         # ~/.config/nexus/capability_census.jsonl (Sam directive
         # 2026-08-20) — service-only by construction, no SQLite twin ever
