@@ -226,6 +226,65 @@ def test_resolve_calibration_factors_activates_for_genuine_multi_model_set(cloud
     assert factors["rdr__proj"] == pytest.approx(0.45 / 0.65)
 
 
+def test_resolve_calibration_factors_is_noop_for_legacy_names_in_local_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-mc1l1: the cloud-mode legacy-name split above (voyage-code-3
+    vs voyage-context-3 from the prefix guess) is correct for cloud/
+    service-mode installs, but it fired UNCONDITIONALLY -- including for
+    a LOCAL-MODE install with grandfathered pre-RDR-103 legacy
+    collections (``code__myrepo``, ``knowledge__myrepo``; RDR-103 is only
+    ~4 months old and existing collections are never auto-renamed on
+    reindex). Every collection in a local-mode install shares ONE local
+    embedder regardless of content_type, so a legacy name's model MUST
+    come from what the install actually embeds with, not a prefix guess
+    -- reproducing the FULL original tox2m bug (one code__ one
+    knowledge__ result at an IDENTICAL raw distance, scored 1.0 vs 0.0
+    purely from the collection name) for the grandfathered-legacy
+    population despite the conformant-name population already being
+    fixed. ``is_local_mode`` pinned explicitly (not relying on the
+    ambient test-default mode)."""
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+    monkeypatch.setattr("nexus.config.local_embed_model_is_voyage", lambda: False)
+    factors = _resolve_calibration_factors([
+        _r("code__myrepo", 0.30), _r("knowledge__myrepo", 0.30),
+    ])
+    assert factors == {"code__myrepo": 1.0, "knowledge__myrepo": 1.0}
+
+
+def test_identical_distance_stays_identical_score_legacy_names_local_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end counterpart to the no-op pin above, through the real
+    scoring path: two results at an IDENTICAL raw distance under legacy
+    (pre-RDR-103) collection names in a local-mode install MUST score
+    identically -- not 1.0 vs 0.0 from a name-only prefix guess."""
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+    monkeypatch.setattr("nexus.config.local_embed_model_is_voyage", lambda: False)
+    code_r = _r("code__myrepo", 0.30, chunks=1)
+    know_r = _r("knowledge__myrepo", 0.30, chunks=1)
+    scored = apply_hybrid_scoring([code_r, know_r], hybrid=False)
+    assert scored[0].hybrid_score == pytest.approx(scored[1].hybrid_score, abs=1e-9)
+
+
+def test_resolve_calibration_factors_still_activates_for_legacy_names_local_mode_voyage_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Counterpart: a local-mode install that has explicitly opted
+    ``local.embed_model`` into Voyage (nexus-35ok4 / GH #1461) really
+    does write code__ under voyage-code-3 and knowledge__/docs__/rdr__
+    under voyage-context-3, per-content-type, exactly like cloud mode --
+    so calibration for THAT install's legacy names must still activate,
+    not collapse to a spurious single-model no-op."""
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+    monkeypatch.setattr("nexus.config.local_embed_model_is_voyage", lambda: True)
+    factors = _resolve_calibration_factors([
+        _r("code__myrepo", 0.30), _r("knowledge__myrepo", 0.30),
+    ])
+    assert factors["code__myrepo"] == pytest.approx(1.0)
+    assert factors["knowledge__myrepo"] == pytest.approx(0.45 / 0.65)
+
+
 def test_calibration_thresholds_match_config_defaults(cloud_mode) -> None:  # RDR-109: names voyage-* collections
     """DRIFT GUARD (code review Significant-1): _CALIBRATION_THRESHOLDS_BY_MODEL
     is a hardcoded literal copy of config.py's search.distance_threshold
@@ -252,7 +311,7 @@ def test_calibration_thresholds_match_config_defaults(cloud_mode) -> None:  # RD
     assert _CALIBRATION_DEFAULT_THRESHOLD == cfg_thresholds["default"]
 
 
-def test_apply_hybrid_scoring_calibrates_before_pooling():
+def test_apply_hybrid_scoring_calibrates_before_pooling(cloud_mode) -> None:  # nexus-mc1l1: legacy names only split by model in cloud/service mode
     """A genuinely GOOD rdr__ match (well inside its own 0.65 threshold)
     must be able to win the merge against code__ results that are, in raw-
     distance terms, closer -- because raw distance alone is a model-scale
@@ -275,7 +334,7 @@ def test_apply_hybrid_scoring_calibrates_before_pooling():
     )
 
 
-def test_calibration_does_not_mint_fake_winners():
+def test_calibration_does_not_mint_fake_winners(cloud_mode) -> None:  # nexus-mc1l1: legacy names only split by model in cloud/service mode
     """Code review Critical 2 counter-test: a corpus with NOTHING
     relevant -- every candidate sitting near its own threshold, i.e. a
     weak match -- must NOT beat a genuinely strong match from a
