@@ -525,6 +525,58 @@ class TestDoctorGitHooksScope:
             f"{[(r.label, r.detail) for r in results]}"
         )
 
+    def test_stale_stanza_reds_in_scope_but_not_out_of_scope(self, monkeypatch, tmp_path_factory):
+        """Critic follow-up (nexus-jds59): the scope filter must not just
+        include/exclude an empty-hooks repo -- it must still surface a
+        REAL stanza-drift red for a repo that is in scope, while the
+        identical stale stanza in an out-of-scope repo (the ambient
+        dev-checkout class of repo) is excluded from the walk entirely,
+        never silently rendered as passing."""
+        scope_root = tmp_path_factory.mktemp("scope_root")
+        in_scope_repo = self._make_repo(scope_root, "sandbox-fixture")
+        outside_repo = self._make_repo(tmp_path_factory.mktemp("outside_root"), "dev-checkout")
+
+        # Same legacy (pre-pgrep-guard) stanza as TestDoctorStanzaDrift's
+        # fixture, installed into BOTH repos' post-commit hook.
+        legacy_stanza = (
+            f"#!/bin/sh\n{SENTINEL_BEGIN}\n"
+            'nx index repo "$(git rev-parse --show-toplevel)" --on-locked=skip \\\n'
+            '  >> "$HOME/.config/nexus/index.log" 2>&1 &\n'
+            "disown\n"
+            f"{SENTINEL_END}\n"
+        )
+        for repo in (in_scope_repo, outside_repo):
+            (_hooks_dir(repo) / "post-commit").write_text(legacy_stanza)
+
+        self._seed_registry(
+            monkeypatch, tmp_path_factory.mktemp("nx_config"),
+            in_scope_repo, outside_repo,
+        )
+        # Route each repo to its OWN hooks dir (no real git repo backs
+        # either fixture) -- a single-valued mock (as `_mock_git` gives)
+        # cannot distinguish the two repos, so patch the resolver directly.
+        monkeypatch.setattr(
+            "nexus._git_hooks_meta.effective_hooks_dir",
+            lambda repo: _hooks_dir(Path(repo)),
+        )
+
+        from nexus.health import _check_git_hooks
+        results = _check_git_hooks(repo_scope=scope_root)
+
+        drift = [r for r in results if "stanza drift" in r.label.lower()]
+        assert drift, (
+            f"expected a stanza-drift warning for the in-scope repo, got: "
+            f"{[(r.label, r.detail) for r in results]}"
+        )
+        assert any(str(in_scope_repo) in (r.detail or "") for r in drift), (
+            f"drift result did not name the in-scope repo: "
+            f"{[(r.label, r.detail) for r in drift]}"
+        )
+        assert not any(str(outside_repo) in (r.detail or "") for r in results), (
+            f"out-of-scope repo leaked into results despite being stale "
+            f"too: {[(r.label, r.detail) for r in results]}"
+        )
+
 
 # ── doctor dead-owner rendering (nexus-7kl32 / nexus-9t86i) ────────────────
 
