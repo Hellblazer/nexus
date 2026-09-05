@@ -2209,7 +2209,10 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
     # alone (no text) is unchanged: it falls through to the context-printing
     # path below, exactly as before (nexus-zu1q0 scope).
     if len(args) >= 3 and args[0].lower() == "add" and re.match(r"^\d+$", args[1]):
-        t2_key = str(int(args[1]))
+        # Zero-padded to three digits: that is the shape every live
+        # ``<id>-research-N`` title carries (``097-research-9``), so an
+        # unpadded ``97`` must find them, not fork a second namespace.
+        t2_key = f"{int(args[1]):03d}"
         finding_text = " ".join(args[2:]).strip()
         title = _rdr_research_add(t2_key, finding_text, repo_name)
         print(f"Recorded T2 research finding: `{repo_name}_rdr/{title}`")

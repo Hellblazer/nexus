@@ -828,6 +828,23 @@ class TestRdrResearchAdd:
         assert fake.put_calls == [("201-research-1", fake._store["201-research-1"])]
         assert "first finding" in fake._store["201-research-1"]
 
+    def test_add_with_unpadded_id_finds_zero_padded_legacy_titles(self, monkeypatch):
+        """Live titles for RDRs below 100 are zero-padded (``097-research-9``).
+        An unpadded ``97`` must join that sequence, never fork a bare
+        ``97-research-1`` namespace beside it (critique of nexus-zu1q0)."""
+        import nexus.commands.rdr as rdr_mod
+
+        fake = _FakeT2ResearchClient(entries={"097-research-9": "finding: ninth\n"})
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+
+        result = _runner().invoke(
+            rdr, ["preamble", "rdr-research", "--", "add", "97", "tenth", "finding"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "097-research-10" in result.output
+        assert "97-research-1" not in fake._store
+        assert "tenth finding" in fake._store["097-research-10"]
+
     def test_add_advances_past_existing_seq(self, monkeypatch):
         """A prior 201-research-1 entry means the next add lands on seq 2 —
         the second finding's content is never lost by upserting seq 1 again."""
