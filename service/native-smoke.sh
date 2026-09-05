@@ -35,6 +35,13 @@ fi
 
 SVCPORT=$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")
 export NX_SERVICE_PORT=$SVCPORT NX_SERVICE_TOKEN=smoketoken NX_EMBED_MODE=onnx
+# The real-client probes below run `uv run python` from THIS checkout, which the
+# nexus-a2qhz production-write guard classifies as a dev checkout: every HTTP
+# write it makes needs the reason-bearing opt-in or it is refused (burned
+# engine-service-v0.1.101: all three native legs FAILed the smoke this way while
+# --shakeout, which drives this script from an installed wheel, stayed green).
+# The target is the throwaway pgvector this script provisioned, never production.
+export NX_ALLOW_PROD_WRITE="native-smoke: throwaway pgvector provisioned by this script (nexus-a2qhz)"
 
 # nexus-rxqqd review follow-up (substantive-critic): when OWN_PG=1 (default),
 # the whole throwaway docker container is torn down at exit, so the rows the
