@@ -825,14 +825,24 @@ class TestUpsertChunksWithEmbeddingsKwarg:
 
 
 class TestUpsertChunksOversizedDropAndWarn:
-    """nexus-xzyr3 follow-up (code-review-nexus-xzyr3-26edb6662 [24586]):
-    upsert_chunks / upsert_chunks_with_embeddings — the path every indexer
-    (code/prose/PDF/DT) writes through — had NO per-document byte-length
-    enforcement at all, not even T3Database._write_batch's non-raising
-    drop-and-warn. Parity twin of test_t3.py's
-    test_write_batch_indexer_path_still_drops_oversized: the pipeline must
-    keep running on one oversized chunk, never raise, exactly like the
-    indexer contract T3Database already documents.
+    """nexus-xzyr3 fold-in round 2 (dev-suite-reds-2026-09-05-wave-fold):
+    a document over ``QUOTAS.MAX_DOCUMENT_BYTES`` (16384) must NOT be
+    silently dropped by ``upsert_chunks``/``upsert_chunks_with_embeddings``
+    — that was the wrong fix. MAX_DOCUMENT_BYTES is a ChromaDB-era STORAGE
+    quota; the paging path (RDR-195, nexus-nf3n7/nexus-kmtlp,
+    ``tests/db/test_http_vector_client.py::TestUpsertChunksPaging``, the
+    pre-existing spec) already handles arbitrarily large chunks correctly —
+    a chunk over any page's byte budget ships alone in its own page — and a
+    chunk genuinely too large for Voyage surfaces as the engine's typed 422
+    (``cda82c8a5``), never a silent client-side drop. A prior fold-in
+    (f668f9b02) mirrored T3Database._write_batch's drop-and-warn onto this
+    method anyway, which emptied every batch in TestUpsertChunksPaging
+    (18,000-300,000-byte synthetic chunks, all legitimately shippable) —
+    reverted. These tests now pin the CORRECTED contract: no drop, ever,
+    regardless of document size. ``put()``'s own
+    ``fail_on_oversized=True`` check (the single-chunk, non-paginated
+    sibling — the path the original 9-row evidence pointed at) is
+    untouched and out of scope here.
     """
 
     @staticmethod
@@ -842,7 +852,7 @@ class TestUpsertChunksOversizedDropAndWarn:
             return {"upserted": len(body.get("ids", []))}
         return fake
 
-    def test_upsert_chunks_drops_oversized_document_never_raises(self, monkeypatch):
+    def test_upsert_chunks_ships_oversized_document_never_drops(self, monkeypatch):
         from nexus.db.limits import QUOTAS
 
         client = HttpVectorClient()
@@ -854,7 +864,7 @@ class TestUpsertChunksOversizedDropAndWarn:
         oversized = "x" * (QUOTAS.MAX_DOCUMENT_BYTES + 1)
         good = "y" * 32
 
-        # Must not raise.
+        # Must not raise, must not drop either document.
         client.upsert_chunks(
             "knowledge__nexus__minilm-l6-v2-384__v1",
             ids=["a", "b"],
@@ -863,15 +873,15 @@ class TestUpsertChunksOversizedDropAndWarn:
         )
 
         assert len(calls) == 1, f"expected exactly one HTTP call; got {calls}"
-        assert calls[0]["ids"] == ["b"], (
-            f"only the under-cap document must be sent; got ids={calls[0]['ids']}"
+        assert calls[0]["ids"] == ["a", "b"], (
+            f"both documents must ship, oversized included; got ids={calls[0]['ids']}"
         )
-        assert calls[0]["documents"] == [good]
+        assert calls[0]["documents"] == [oversized, good]
 
-    def test_upsert_chunks_with_embeddings_drops_oversized_document(self, monkeypatch):
+    def test_upsert_chunks_with_embeddings_ships_oversized_document(self, monkeypatch):
         """upsert_chunks_with_embeddings is a thin forward to upsert_chunks
         (it discards its own embeddings and delegates); this pins that the
-        drop-and-warn protection is inherited, not bypassed."""
+        corrected no-drop contract is inherited, not diverged."""
         from nexus.db.limits import QUOTAS
 
         client = HttpVectorClient()
@@ -892,11 +902,12 @@ class TestUpsertChunksOversizedDropAndWarn:
         )
 
         assert len(calls) == 1
-        assert calls[0]["ids"] == ["b"]
+        assert calls[0]["ids"] == ["a", "b"]
 
-    def test_upsert_chunks_all_oversized_sends_nothing(self, monkeypatch):
-        """Every document dropped -> no HTTP call at all (mirrors
-        T3Database._write_batch's ``if not valid: return``)."""
+    def test_upsert_chunks_single_oversized_document_still_sends(self, monkeypatch):
+        """A batch of exactly one oversized document ships — mirrors
+        TestUpsertChunksPaging::test_single_oversize_chunk_ships_alone at
+        the collection-quota boundary rather than the paging byte budget."""
         from nexus.db.limits import QUOTAS
 
         client = HttpVectorClient()
@@ -912,7 +923,8 @@ class TestUpsertChunksOversizedDropAndWarn:
             documents=[oversized],
             metadatas=[{"title": "a"}],
         )
-        assert calls == []
+        assert len(calls) == 1
+        assert calls[0]["ids"] == ["a"]
 
     def test_upsert_chunks_under_cap_unaffected(self, monkeypatch):
         """Regression guard: ordinary batches are not touched by the new check."""
