@@ -1,0 +1,72 @@
+name: Prime docling artifacts
+description: >-
+  Provision the extracted docling layout + TableFormer + CodeFormula model
+  artifacts into ~/.cache/nexus/docling-artifacts for CI. Restores from the
+  Actions cache; on a miss, downloads and extracts OUR self-hosted GitHub
+  release asset (no HuggingFace dependency) — same pattern as
+  prime-bge-onnx / prime-crossencoder-onnx.
+
+  History (nexus-cxsbs / nexus-c7gnx): docling loads layout + TableFormer +
+  CodeFormula LAZILY at convert() time, so an anonymous HF fetch happened
+  mid-suite; when it failed it fell back to PyMuPDF and produced ~21
+  baffling extraction_method=='docling' assertion failures. The fix was one
+  deterministic download of our own release asset
+  (NEXUS_DOCLING_ARTIFACTS_PATH points docling at the extracted dir so it
+  never resolves through the hub at all).
+
+  Until nexus-tl7bu, that download had no actions/cache in front of it and
+  re-fetched the ~1GB tarball on EVERY job — measured 2026-09-03: 20 minutes
+  on a single shard, cancelling it under the job timeout. This action puts
+  the extracted directory behind actions/cache keyed on the asset tag, same
+  shape as the ONNX assets: download once per cache key, restore
+  thereafter.
+
+inputs:
+  cache-key:
+    description: >-
+      actions/cache key. Use an arch-qualified key for multi-arch matrix
+      jobs so each runner architecture caches independently.
+    required: false
+    default: docling-artifacts-${{ runner.os }}-v1
+  asset-tag:
+    description: >-
+      GitHub release tag that hosts docling-artifacts-v1.tar.gz. Regenerate
+      with:
+        docling-tools models download -o <dir> layout tableformer code_formula
+        tar -czf docling-artifacts-v1.tar.gz -C <dir> .
+      then cut a -v2 tag if a docling bump changes the model set.
+    required: false
+    default: ci-assets-docling-v1
+
+runs:
+  using: composite
+  steps:
+    - name: Restore docling artifacts cache
+      id: cache
+      # STABLE key — the extracted models are an immutable upstream export,
+      # so they download ONCE on a cold cache and restore thereafter; bump
+      # the -v suffix in the key only if the model SOURCE changes.
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+      with:
+        path: ~/.cache/nexus/docling-artifacts
+        key: ${{ inputs.cache-key }}
+
+    - name: Fetch docling models from our own mirror on cache miss
+      # WE HOST THESE. Nothing here may reach HuggingFace.
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        ASSET_TAG: ${{ inputs.asset-tag }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$HOME/.cache/nexus/docling-artifacts"
+        echo "docling artifacts cache miss; fetching from self-hosted release ${ASSET_TAG}."
+        curl --fail --silent --show-error --location --retry 3 --retry-delay 5 \
+          -o /tmp/docling-artifacts.tar.gz \
+          "https://github.com/${GITHUB_REPOSITORY}/releases/download/${ASSET_TAG}/docling-artifacts-v1.tar.gz"
+        tar -xzf /tmp/docling-artifacts.tar.gz -C "$HOME/.cache/nexus/docling-artifacts"
+        rm -f /tmp/docling-artifacts.tar.gz
+
+    - name: Export NEXUS_DOCLING_ARTIFACTS_PATH
+      shell: bash
+      run: echo "NEXUS_DOCLING_ARTIFACTS_PATH=$HOME/.cache/nexus/docling-artifacts" >> "$GITHUB_ENV"
