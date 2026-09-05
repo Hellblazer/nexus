@@ -230,8 +230,11 @@ class TestTrimTelemetryRoutes:
             days=30, dry_run=False)
         http_store.return_value.trim_capability_census.assert_called_once_with(
             days=30, dry_run=False)
+        # routing_events falls back to its own shorter 7d default when the
+        # caller leaves `days` at the shared default (nexus-gjv9b review
+        # fold-in round 3, critique Significant 3).
         http_store.return_value.trim_routing_events.assert_called_once_with(
-            days=30, dry_run=False)
+            days=7, dry_run=False)
         sqlite_connect.assert_not_called(), "must not open the frozen SQLite"
 
     def test_dry_run_previews_both_tables_without_deleting(
@@ -261,7 +264,7 @@ class TestTrimTelemetryRoutes:
         http_store.return_value.trim_capability_census.assert_called_once_with(
             days=30, dry_run=True)
         http_store.return_value.trim_routing_events.assert_called_once_with(
-            days=30, dry_run=True)
+            days=7, dry_run=True)
         assert "Would trim 2 search_telemetry" in printed, printed
         assert "Would trim 1 hook_failures" in printed, printed
         assert "Would trim 4 capability_census" in printed, printed

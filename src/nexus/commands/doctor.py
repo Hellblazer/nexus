@@ -877,6 +877,19 @@ def _run_trim_telemetry(days: int, dry_run: bool = False) -> None:
     :meth:`trim_capability_census`, and :meth:`trim_routing_events` all grew
     the identical ``dry_run`` contract :meth:`trim_search_telemetry`
     established, rather than leaving any of them a partial preview.
+
+    *days* is the ``--days`` CLI value verbatim. When it is left at the
+    flag's own default (:data:`_DEFAULT_TELEMETRY_RETENTION_DAYS`),
+    ``capability_census`` and ``routing_events`` each fall back to their
+    OWN named default instead (nexus-gjv9b review fold-in round 3,
+    critique Significant 3) —
+    :data:`_CAPABILITY_CENSUS_RETENTION_DAYS` (currently identical to the
+    shared default: session-scoped, same audit shape/volume as
+    search_telemetry/hook_failures) and
+    :data:`_ROUTING_EVENTS_RETENTION_DAYS` (shorter: a per-permission-
+    decision event log, far higher volume, shorter useful life). An
+    EXPLICIT ``--days N`` always applies literally to all four tables —
+    the split only changes what happens with no override at all.
     """
     # nexus-ingey: this used to construct Telemetry(db_path) unconditionally.
     # On a migrated box that is the FROZEN SQLite — the verb trimmed a file
@@ -938,10 +951,19 @@ def _run_trim_telemetry(days: int, dry_run: bool = False) -> None:
 
     try:
         store = HttpTelemetryStore()
+        # nexus-gjv9b review fold-in round 3, critique Significant 3: an
+        # UNCHANGED caller-supplied `days` (still at the CLI flag's own
+        # default) lets routing_events fall back to its own shorter
+        # default; an EXPLICIT --days override applies literally to every
+        # table, with no per-table magic to second-guess an operator who
+        # named a number.
+        using_default_days = days == _DEFAULT_TELEMETRY_RETENTION_DAYS
+        census_days = _CAPABILITY_CENSUS_RETENTION_DAYS if using_default_days else days
+        routing_events_days = _ROUTING_EVENTS_RETENTION_DAYS if using_default_days else days
         deleted_search = store.trim_search_telemetry(days=days, dry_run=dry_run)
         deleted_hooks = store.trim_hook_failures(days=days, dry_run=dry_run)
-        deleted_census = store.trim_capability_census(days=days, dry_run=dry_run)
-        deleted_routing = store.trim_routing_events(days=days, dry_run=dry_run)
+        deleted_census = store.trim_capability_census(days=census_days, dry_run=dry_run)
+        deleted_routing = store.trim_routing_events(days=routing_events_days, dry_run=dry_run)
     except (httpx.HTTPError, RuntimeError) as exc:
         # Same class as _report_aspect_queue_service above (review
         # 2026-07-25): store CONSTRUCTION resolves the endpoint and raises
@@ -961,14 +983,14 @@ def _run_trim_telemetry(days: int, dry_run: bool = False) -> None:
         )
         raise click.exceptions.Exit(2)
     verb = "Would trim" if dry_run else "Trimmed"
-    for table, deleted in (
-        ("search_telemetry", deleted_search),
-        ("hook_failures", deleted_hooks),
-        ("capability_census", deleted_census),
-        ("routing_events", deleted_routing),
+    for table, deleted, table_days in (
+        ("search_telemetry", deleted_search, days),
+        ("hook_failures", deleted_hooks, days),
+        ("capability_census", deleted_census, census_days),
+        ("routing_events", deleted_routing, routing_events_days),
     ):
         noun = "row" if deleted == 1 else "rows"
-        click.echo(f"{verb} {deleted} {table} {noun} older than {days} days.")
+        click.echo(f"{verb} {deleted} {table} {noun} older than {table_days} days.")
 
 
 # ── --check-aspect-queue (nexus-1pfq) ────────────────────────────────────────
@@ -1077,6 +1099,28 @@ def _run_check_aspect_queue() -> None:
 #: :data:`_INDEX_FAILURES_LATEST_RUN_STALENESS_DAYS` below and the
 #: ``--days`` click option on ``doctor_cmd`` derive from this ONE source.
 _DEFAULT_TELEMETRY_RETENTION_DAYS: int = 30
+
+#: capability_census's OWN default retention (nexus-gjv9b review fold-in
+#: round 3, critique Significant 3), named separately from
+#: :data:`_DEFAULT_TELEMETRY_RETENTION_DAYS` even though it currently
+#: carries the identical value: one row per SESSION (upsert, not
+#: append-only), the same audit-relevant shape and volume as
+#: search_telemetry/hook_failures, so it keeps their shared 30-day
+#: window rather than routing_events' shorter one below.
+_CAPABILITY_CENSUS_RETENTION_DAYS: int = _DEFAULT_TELEMETRY_RETENTION_DAYS
+
+#: routing_events' OWN default retention (nexus-gjv9b review fold-in
+#: round 3, critique Significant 3): a per-permission-decision EVENT LOG
+#: (one row per routing-hook fire, not per session) is far higher volume
+#: than the other three audit tables and has a much shorter useful life
+#: -- the 30-day soak-review window this hook framework was built for
+#: (RDR-121 Phase 3) reads recent history, not a month-old trickle.
+#: ``--trim-telemetry``'s single ``--days`` flag still applies this value
+#: literally when the caller passes it EXPLICITLY (an explicit override
+#: always wins, on every table, with no per-table magic); this shorter
+#: default only takes effect when the caller leaves ``--days`` at its own
+#: default (see :func:`_run_trim_telemetry`).
+_ROUTING_EVENTS_RETENTION_DAYS: int = 7
 
 #: A recorded failure older than this many days no longer gates the default
 #: sweep (nexus-nukn3 fold-in, critic Critical finding T2

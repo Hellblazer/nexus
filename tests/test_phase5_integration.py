@@ -453,13 +453,17 @@ class TestDoctorTrimTelemetry:
     def test_trims_rows_older_than_default_30d(
         self, runner: CliRunner,
     ) -> None:
-        """Default 30d retention reaches the store as days=30; count rendered."""
+        """Default 30d retention reaches the store as days=30 for
+        search_telemetry/hook_failures/capability_census; routing_events
+        falls back to its own shorter 7d default (nexus-gjv9b review
+        fold-in round 3, critique Significant 3 — a per-fire event log
+        has a shorter useful life than a per-session upsert table)."""
         result, spy = self._spy_and_trim(runner, trim_days=None)
         assert result.exit_code == 0, result.output
         spy.trim_search_telemetry.assert_called_once_with(days=30, dry_run=False)
         spy.trim_hook_failures.assert_called_once_with(days=30, dry_run=False)
         spy.trim_capability_census.assert_called_once_with(days=30, dry_run=False)
-        spy.trim_routing_events.assert_called_once_with(days=30, dry_run=False)
+        spy.trim_routing_events.assert_called_once_with(days=7, dry_run=False)
         assert "Trimmed 1 search_telemetry" in result.output
         assert "Trimmed 3 capability_census" in result.output
         assert "Trimmed 5 routing_events" in result.output
@@ -474,6 +478,23 @@ class TestDoctorTrimTelemetry:
         spy.trim_hook_failures.assert_called_once_with(days=7, dry_run=False)
         spy.trim_capability_census.assert_called_once_with(days=7, dry_run=False)
         spy.trim_routing_events.assert_called_once_with(days=7, dry_run=False)
+
+    def test_explicit_days_override_beats_routing_events_own_shorter_default(
+        self, runner: CliRunner,
+    ) -> None:
+        """nexus-gjv9b review fold-in round 3, critique Significant 3: an
+        EXPLICIT ``--days`` applies literally to every table, including
+        routing_events -- ``test_aggressive_retention_days_7`` above uses
+        7, which coincides with routing_events' own fallback default and
+        so cannot distinguish "explicit override" from "fell back to the
+        per-table default"; 14 matches neither default, so this is the
+        real proof an override is never silently downgraded."""
+        result, spy = self._spy_and_trim(runner, trim_days=14)
+        assert result.exit_code == 0, result.output
+        spy.trim_search_telemetry.assert_called_once_with(days=14, dry_run=False)
+        spy.trim_hook_failures.assert_called_once_with(days=14, dry_run=False)
+        spy.trim_capability_census.assert_called_once_with(days=14, dry_run=False)
+        spy.trim_routing_events.assert_called_once_with(days=14, dry_run=False)
 
     def test_dry_run_previews_the_count_and_says_would_trim(
         self, runner: CliRunner,
@@ -507,7 +528,7 @@ class TestDoctorTrimTelemetry:
         spy.trim_search_telemetry.assert_called_once_with(days=30, dry_run=True)
         spy.trim_hook_failures.assert_called_once_with(days=30, dry_run=True)
         spy.trim_capability_census.assert_called_once_with(days=30, dry_run=True)
-        spy.trim_routing_events.assert_called_once_with(days=30, dry_run=True)
+        spy.trim_routing_events.assert_called_once_with(days=7, dry_run=True)
         assert "Would trim 4 search_telemetry" in result.output
         assert "Would trim 2 hook_failures" in result.output
         assert "Would trim 6 capability_census" in result.output
