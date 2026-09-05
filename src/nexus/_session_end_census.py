@@ -314,18 +314,33 @@ def build_capability_census_record(
             return _zero_record(session_id)
         return _blindspot_record(session_id, reason)
 
-    capabilities = {cap: result.total_calls(cap) for cap in CAPABILITIES}
     # nexus-gjv9b PART 3 prerequisite: the orchestrator/subagent-split
     # dimension the transcript-walk reader already carries (census.py's
     # own module docstring calls this split "load-bearing, not
     # cosmetic"). ``result`` is scoped to exactly this one session
     # (``census_corpus(project_dir, session=session_id)`` above), so
     # ``orchestrator_calls``/``subagent_calls`` -- which sum over
-    # ``result.sessions`` -- reduce to this session's own counts, the
-    # same reduction ``total_calls`` above already relies on for the
-    # merged view.
+    # ``result.sessions`` -- reduce to this session's own counts.
+    #
+    # SINGLE SOURCE OF TRUTH (critique-nexus-gjv9b-part3-9695b260f
+    # Significant 4): the flat ``capabilities`` total is DERIVED from the
+    # split below (``orchestrator[cap] + subagent[cap]``), one reduction
+    # per capability instead of the two independent ones a prior version
+    # ran (``result.total_calls(cap)`` is itself defined as exactly this
+    # sum internally -- computing it a second, separate way here bought
+    # nothing but a redundant walk over the same in-memory counts, and a
+    # second call site that could silently drift out of sync with the
+    # split it is supposed to describe). The engine's own
+    # ``TelemetryHandler.handleCapabilityCensusRecord`` re-validates this
+    # same invariant server-side (400 on a caller that sends a flat total
+    # inconsistent with its own split) -- this derivation is what keeps
+    # THIS writer's requests from ever tripping that check, not merely an
+    # optimization.
     capabilities_orchestrator = {cap: result.orchestrator_calls(cap) for cap in CAPABILITIES}
     capabilities_subagent = {cap: result.subagent_calls(cap) for cap in CAPABILITIES}
+    capabilities = {
+        cap: capabilities_orchestrator[cap] + capabilities_subagent[cap] for cap in CAPABILITIES
+    }
 
     # code-review suggestion #2 (fix pass, 2026-08-20): the ``.measurable``
     # guard this used to carry was dead code, not defensive -- provably so.

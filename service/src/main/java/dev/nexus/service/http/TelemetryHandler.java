@@ -718,6 +718,25 @@ public final class TelemetryHandler implements HttpHandler {
      * already has. Additive — a caller sending neither (an old client, or
      * a blindspot record) leaves {@code capabilities_by_scope} NULL, the
      * exact pre-PART-3 write.
+     *
+     * <p>SINGLE SOURCE OF TRUTH (critique-nexus-gjv9b-part3-9695b260f
+     * Significant 4): when a caller sends the split, this handler rejects
+     * (400) any capability whose flat {@code capabilities} count does not
+     * equal the sum of its {@code capabilities_orchestrator} +
+     * {@code capabilities_subagent} counts — two disagreeing views of one
+     * measurement must never both land. The client (this bead's own
+     * writer, {@code _session_end_census.build_capability_census_record})
+     * DERIVES the flat total from the split rather than computing it
+     * independently, so this check should never fire against the shipped
+     * writer; it exists for any OTHER caller (a manual API write, a
+     * different SDK, a partial migration) that could otherwise write
+     * inconsistent values with no defined "which wins". Readers: the flat
+     * {@code cap_*} columns / {@code capabilities} field remain the
+     * authoritative source for total counts (unchanged consumers keep
+     * working untouched); {@code capabilities_by_scope} is authoritative
+     * ONLY for the orchestrator/subagent split dimension, never a second
+     * source for the total — this validation is what keeps that promise
+     * true rather than merely documented.
      */
     private void handleCapabilityCensusRecord(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -731,6 +750,9 @@ public final class TelemetryHandler implements HttpHandler {
         Map<String, Integer> capabilitiesSubagent = extractCapsMap(body.get("capabilities_subagent"));
         String capabilitiesByScopeJson = null;
         if (!capabilitiesOrchestrator.isEmpty() || !capabilitiesSubagent.isEmpty()) {
+            if (!blindspot) {
+                requireFlatMatchesScopeSum(capabilities, capabilitiesOrchestrator, capabilitiesSubagent);
+            }
             var byScope = new java.util.LinkedHashMap<String, Object>();
             byScope.put("orchestrator", capabilitiesOrchestrator);
             byScope.put("subagent", capabilitiesSubagent);
@@ -741,6 +763,32 @@ public final class TelemetryHandler implements HttpHandler {
         repo.recordCapabilityCensus(tenant, sessionId, ts, blindspot, unmeasurableReason,
             capabilities, dispatches, totalCalls, capabilitiesByScopeJson);
         HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    /**
+     * Reject (400) any capability where {@code flat[cap] != orchestrator
+     * .getOrDefault(cap,0) + subagent.getOrDefault(cap,0)} — the union of
+     * keys across all three maps, so a capability present ONLY in the
+     * split (never in the flat map) is checked against an implicit flat
+     * zero, and vice versa.
+     */
+    private void requireFlatMatchesScopeSum(Map<String, Integer> flat,
+                                            Map<String, Integer> orchestrator,
+                                            Map<String, Integer> subagent) {
+        var keys = new java.util.LinkedHashSet<String>();
+        keys.addAll(flat.keySet());
+        keys.addAll(orchestrator.keySet());
+        keys.addAll(subagent.keySet());
+        for (String k : keys) {
+            int flatCount = flat.getOrDefault(k, 0);
+            int scopeSum = orchestrator.getOrDefault(k, 0) + subagent.getOrDefault(k, 0);
+            if (flatCount != scopeSum) {
+                throw new IllegalArgumentException(
+                    "capabilities['" + k + "']=" + flatCount + " does not equal "
+                    + "capabilities_orchestrator+capabilities_subagent=" + scopeSum
+                    + " for that capability -- the flat total must be the sum over scopes");
+            }
+        }
     }
 
     /**

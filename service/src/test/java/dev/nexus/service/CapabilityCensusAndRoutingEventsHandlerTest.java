@@ -180,6 +180,55 @@ class CapabilityCensusAndRoutingEventsHandlerTest {
     }
 
     @Test
+    void census_record_flatDisagreesWithScopeSum_rejected400() throws Exception {
+        // critique-nexus-gjv9b-part3-9695b260f Significant 4: two
+        // disagreeing views of one measurement must never both land.
+        // flat skill=5 but orchestrator(2)+subagent(1)=3 -- rejected.
+        var resp = post("/v1/telemetry/capability_census/record", TOKEN, TENANT,
+            "{\"session_id\":\"sess-scope-mismatch\",\"blindspot\":false,"
+            + "\"capabilities\":{\"skill\":5},"
+            + "\"capabilities_orchestrator\":{\"skill\":2},"
+            + "\"capabilities_subagent\":{\"skill\":1},"
+            + "\"dispatches\":0,\"total_calls\":5}");
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("skill");
+
+        assertThat(censusRows(TOKEN, TENANT, "sess-scope-mismatch"))
+            .as("a rejected write must not partially land")
+            .isEmpty();
+    }
+
+    @Test
+    void census_record_scopeSumMatchesFlat_accepted200() throws Exception {
+        // The positive counterpart: a caller whose flat total already
+        // equals the sum over scopes must NOT be rejected -- this is the
+        // shape every shipped writer produces.
+        var resp = post("/v1/telemetry/capability_census/record", TOKEN, TENANT,
+            "{\"session_id\":\"sess-scope-consistent\",\"blindspot\":false,"
+            + "\"capabilities\":{\"skill\":3},"
+            + "\"capabilities_orchestrator\":{\"skill\":2},"
+            + "\"capabilities_subagent\":{\"skill\":1},"
+            + "\"dispatches\":0,\"total_calls\":3}");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(censusRows(TOKEN, TENANT, "sess-scope-consistent")).hasSize(1);
+    }
+
+    @Test
+    void census_record_flatOmitsACapabilityTheSplitCarries_rejected400() throws Exception {
+        // A capability present ONLY in the split (implicit flat zero) must
+        // be checked too -- the union-of-keys rule, not just the flat
+        // map's own keys.
+        var resp = post("/v1/telemetry/capability_census/record", TOKEN, TENANT,
+            "{\"session_id\":\"sess-scope-implicit-mismatch\",\"blindspot\":false,"
+            + "\"capabilities\":{},"
+            + "\"capabilities_orchestrator\":{\"agent\":1},"
+            + "\"capabilities_subagent\":{},"
+            + "\"dispatches\":0,\"total_calls\":0}");
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("agent");
+    }
+
+    @Test
     void census_reRecordingSameSession_upsertsNotDuplicates() throws Exception {
         post("/v1/telemetry/capability_census/record", TOKEN, TENANT,
             "{\"session_id\":\"sess-up\",\"blindspot\":false,"
