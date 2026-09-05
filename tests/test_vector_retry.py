@@ -612,39 +612,53 @@ def test_connectivity_error_trips_shared_brake(monkeypatch) -> None:
     test_brake.trip.assert_called_once_with(None, source="vector")
 
 
-# ── nexus-8hdg9 phase 1: upsert-path retry narrowing on read timeout ───────
+# ── nexus-8hdg9 phase 1: upsert-path retry narrowing on timeout ────────────
 #
 # retry.py:281-283 treats a bare TimeoutError as retryable for every vector
-# call, including upsert (write). For an upsert a read timeout means the
-# request body was already sent and the engine may still be embedding it
+# call, including upsert (write). For an upsert this is risky because the
+# request may already be sent and the engine may still be embedding it
 # server-side (the nexus-8hdg9 diagnosis) -- re-POSTing the identical body
 # stacks a second embed pass on top of the first attempt. The narrowing is
-# opt-in via ``retry_read_timeout=False`` at the upsert call site only; the
+# opt-in via ``retry_on_timeout=False`` at the upsert call site only; the
 # global classifier and every other caller (search/read) are unchanged.
+#
+# NOT a connect-vs-read distinction (code-review finding, nexus-8hdg9
+# critique round 2): ``http_vector_client._request_once`` opens the
+# connection and reads the response under ONE socket timeout
+# (``_keepalive_opener().open(req, timeout=timeout)``), so a genuine
+# connect-phase stall raises the identical bare ``TimeoutError`` a
+# read-phase stall does -- this codebase cannot tell them apart, and
+# ``retry_on_timeout=False`` refuses BOTH. The tests below exercise that
+# honestly: "connection-level failure" (ConnectionResetError/
+# ConnectionRefusedError/URLError) is a REAL, different exception family
+# that keeps retrying; there is no separate "connect timeout" exception
+# shape to test against.
 
 
-def test_upsert_read_timeout_is_not_retried_at_the_ordinary_schedule() -> None:
-    """A bare TimeoutError with retry_read_timeout=False fails loud on the
+def test_upsert_timeout_is_not_retried_at_the_ordinary_schedule() -> None:
+    """A bare TimeoutError with retry_on_timeout=False fails loud on the
     FIRST attempt (no retry schedule, no sleep) with a message naming the
     engine's possible in-flight work and GET /v1/status -- not a silent
-    drop."""
+    drop. This TimeoutError stands for either a connect-phase or a
+    read-phase stall; the transport raises the same exception for both
+    (see the module comment above), so one test covers both phases."""
     fn = MagicMock(side_effect=TimeoutError("timed out"))
     with patch("nexus.retry.time.sleep") as mock_sleep, pytest.raises(
         VectorUpsertTimeoutError, match="GET /v1/status",
     ):
-        _vector_with_retry(fn, max_attempts=5, retry_read_timeout=False)
+        _vector_with_retry(fn, max_attempts=5, retry_on_timeout=False)
     fn.assert_called_once()
     mock_sleep.assert_not_called()
 
 
-def test_upsert_read_timeout_wrapped_in_vector_service_error_is_not_retried() -> None:
+def test_upsert_timeout_wrapped_in_vector_service_error_is_not_retried() -> None:
     """The managed-endpoint shape (VectorServiceError(code=None) chained
     from a bare TimeoutError -- see _make_connectivity_vector_service_error)
     must be narrowed identically to the unwrapped local/lease shape."""
     wrapped = _make_connectivity_vector_service_error(TimeoutError("timed out"))
     fn = MagicMock(side_effect=wrapped)
     with patch("nexus.retry.time.sleep"), pytest.raises(VectorUpsertTimeoutError):
-        _vector_with_retry(fn, retry_read_timeout=False)
+        _vector_with_retry(fn, retry_on_timeout=False)
     fn.assert_called_once()
 
 
@@ -653,25 +667,37 @@ def test_upsert_read_timeout_wrapped_in_vector_service_error_is_not_retried() ->
     ConnectionRefusedError("refused"),
     urllib.error.URLError("Connection refused"),
 ], ids=["connection-reset", "connection-refused", "url-error"])
-def test_upsert_connect_timeout_still_retried(exc: BaseException) -> None:
-    """A connection-level failure (dead/refused peer, or a connect that
-    never reached the engine) is a DIFFERENT exception family from a bare
-    read TimeoutError -- it stays retryable even with
-    retry_read_timeout=False, per the ordinary schedule."""
+def test_upsert_connection_level_failure_still_retried(exc: BaseException) -> None:
+    """A connection-level failure (confirmably dead/refused peer) is a
+    DIFFERENT exception family from a bare TimeoutError -- it stays
+    retryable even with retry_on_timeout=False, per the ordinary schedule.
+    This is NOT a stand-in for "connect timeout": a connect-phase TIMEOUT
+    raises the same bare TimeoutError a read-phase one does (see the
+    module comment above) and IS narrowed by test_upsert_timeout_is_not_
+    retried_at_the_ordinary_schedule above; only a refusal/reset is a
+    genuinely different signature."""
     fn = MagicMock(side_effect=[exc, "ok"])
     with patch("nexus.retry.time.sleep"):
-        assert _vector_with_retry(fn, max_attempts=3, retry_read_timeout=False) == "ok"
+        assert _vector_with_retry(fn, max_attempts=3, retry_on_timeout=False) == "ok"
     assert fn.call_count == 2
 
 
-def test_search_read_timeout_retry_is_unchanged() -> None:
-    """Anti-regression: a caller that does NOT pass retry_read_timeout (the
-    search/read path, e.g. t3.py's query/get/count callers) keeps retrying
-    a bare TimeoutError exactly as before the narrowing landed."""
+def test_search_timeout_retry_is_unchanged() -> None:
+    """Anti-regression AND mutation guard: retry_on_timeout=True, passed
+    EXPLICITLY here (the search/read path in t3.py never passes this kwarg
+    at all and gets the same default), must not engage the nexus-8hdg9
+    narrowing. Patches _is_bare_timeout to unconditionally return True and
+    asserts it is never even CALLED -- proving the guard's short-circuit
+    (`not retry_on_timeout and _is_bare_timeout(exc)`) is gated on the flag
+    itself, not on some parallel path that happens to also retry 3 times
+    when the classifier is not being exercised at all."""
     fn = MagicMock(side_effect=[TimeoutError("timed out"), TimeoutError("timed out"), "ok"])
-    with patch("nexus.retry.time.sleep"):
-        assert _vector_with_retry(fn, max_attempts=3) == "ok"
+    with patch("nexus.retry.time.sleep"), patch(
+        "nexus.retry._is_bare_timeout", return_value=True,
+    ) as mock_classifier:
+        assert _vector_with_retry(fn, max_attempts=3, retry_on_timeout=True) == "ok"
     assert fn.call_count == 3
+    mock_classifier.assert_not_called()
 
 
 # ── nexus-cy9u7 CRITICAL-1: end-to-end through the REAL HttpVectorClient ────

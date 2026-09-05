@@ -1968,13 +1968,21 @@ class HttpVectorClient:
 
                 result = _vector_with_retry(
                     _post, "/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600,
-                    # nexus-8hdg9 phase 1: a read timeout on an upsert means
-                    # the request was already sent -- the engine may still be
-                    # embedding this exact batch server-side, so re-POSTing it
-                    # would stack a second embed pass. A connection-level
-                    # error (dead/refused peer) is a different signature and
-                    # still retries normally.
-                    retry_read_timeout=False,
+                    # nexus-8hdg9 phase 1: a bare TimeoutError on an upsert is
+                    # refused rather than retried. _request_once uses ONE
+                    # socket timeout for connect AND read, so this fires for
+                    # either phase -- most often read (the request was
+                    # already sent and the engine may still be embedding
+                    # this exact batch server-side, where re-POSTing it
+                    # would stack a second embed pass), but a genuine
+                    # connect-phase stall is refused the same way; the
+                    # transport cannot tell them apart (see
+                    # VectorUpsertTimeoutError's docstring). Contained per
+                    # file by the indexer (_contain_transient_upsert), not a
+                    # whole-run abort. A connection-level error (dead/
+                    # refused peer -- ConnectionError/URLError) is a
+                    # different exception family and still retries normally.
+                    retry_on_timeout=False,
                 )
             else:
                 result = _post(

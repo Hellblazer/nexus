@@ -2329,11 +2329,30 @@ def _contain_transient_upsert(fn: "Callable[[], int]", file: "Path") -> int:
     """Run per-file index ``fn``; on a TRANSIENT upsert 5xx (gateway/pool), log
     and return 0 (file deferred to staleness) instead of propagating. Permanent
     errors (4xx, transport, non-transient 5xx) still raise (nexus-7yfe6).
+
+    nexus-8hdg9 phase 1 critique (ship-blocker fix): ``VectorUpsertTimeoutError``
+    (retry.py -- raised when an upsert times out and ``retry_on_timeout=False``
+    refuses to retry it) is a SIBLING ``RuntimeError``, not a ``VectorServiceError``
+    subclass, so it must be caught here explicitly or it bypasses this containment
+    entirely and aborts the whole ``nx index repo`` run on the first slow response
+    -- exactly the failure class this function exists to prevent for the 5xx
+    codes below. Deferred to staleness identically: a different boundary from
+    nexus-deyd5's ``UnextractableContentError`` skip counter (a PERMANENT,
+    per-document extraction failure), this is a TRANSIENT upsert condition that
+    self-heals via the next run's RDR-181 existence-partition retry, same as any
+    other entry in ``_TRANSIENT_UPSERT_CODES``.
     """
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance: nexus.db.http_vector_client
+    from nexus.retry import VectorUpsertTimeoutError  # noqa: PLC0415 -- circular-dep avoidance: nexus.retry
 
     try:
         return fn()
+    except VectorUpsertTimeoutError as exc:
+        _log.warning(
+            "index_file_transient_upsert_deferred",
+            file=str(file), code="upsert-timeout", error=str(exc),
+        )
+        return 0
     except VectorServiceError as exc:
         if exc.code in _TRANSIENT_UPSERT_CODES:
             _log.warning(

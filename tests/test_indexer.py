@@ -1567,6 +1567,51 @@ def test_run_index_code_transient_5xx_deferred_not_aborted(tmp_path):
     assert stats["files_changed_by_kind"]["code"] == 1
 
 
+def test_run_index_code_upsert_timeout_deferred_not_aborted(tmp_path):
+    """nexus-8hdg9 phase 1 critique (ship-blocker fix): a
+    ``VectorUpsertTimeoutError`` (retry.py -- raised when an upsert times
+    out and the client refuses to retry it, nexus-8hdg9 phase 1) on the
+    direct-upload path for one file (``boom.py``) must be DEFERRED to
+    staleness exactly like a transient 502/503/504, NOT propagate through
+    ``run_file_loop``'s first-exception-cancels-all contract. Before the
+    fix, this exception was a sibling ``RuntimeError`` that
+    ``_contain_transient_upsert`` never caught -- it aborted the whole run,
+    cancelling every not-yet-started file including ``ok.py`` below.
+
+    This is a DIFFERENT boundary from nexus-deyd5's
+    ``UnextractableContentError`` skip counter (a permanent, per-document
+    extraction failure) -- the deferred file here is retried next run via
+    RDR-181's existence partition, same as any other entry in
+    ``_TRANSIENT_UPSERT_CODES``, so it does not appear in
+    ``stats``'s deyd5 skip population; the run's verdict is simply that
+    ``ok.py`` (file N+1) was indexed and ``boom.py`` (file N) was not
+    counted as written this run.
+    """
+    from nexus.indexer import _run_index
+    from nexus.retry import VectorUpsertTimeoutError
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "boom.py").write_text("x = 1\n")
+    (repo / "ok.py").write_text("y = 2\n")
+    db, _ = _mock_db()
+
+    def _code_side_effect(file, *_a, **_kw):
+        if file.name == "boom.py":
+            raise VectorUpsertTimeoutError(
+                "Upsert timed out; check GET /v1/status. (simulated)"
+            )
+        return 1
+
+    with _patches(db, extra={
+        "nexus.indexer._index_code_file": {"side_effect": _code_side_effect},
+    }):
+        stats = _run_index(repo, _reg())
+
+    # The run must complete without raising (file N's timeout does not
+    # cancel file N+1 or abort the run), and only ok.py counts as written.
+    assert stats["files_changed_by_kind"]["code"] == 1
+
+
 # ── _index_*_file return type ───────────────────────────────────────────────
 
 def _run_code(tmp_path, chunks=None, col_meta=None):

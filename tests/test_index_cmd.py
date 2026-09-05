@@ -302,6 +302,36 @@ def test_index_repo_no_skipped_unextractable_files_no_note(runner, repo_dir, moc
     assert "could not be extracted and were skipped" not in result.output
 
 
+def test_index_repo_upsert_timeout_exits_nonzero_with_clean_message(runner, repo_dir, mock_reg):
+    """nexus-8hdg9 phase 1 critique (Significant-2): defense in depth. The
+    common case is that indexer.py's _contain_transient_upsert already
+    defers a per-file VectorUpsertTimeoutError to staleness (see
+    tests/test_index_transient_containment.py and
+    tests/test_indexer.py::test_run_index_code_upsert_timeout_deferred_not_
+    aborted) so index_repository never raises it -- but if one DOES escape
+    containment (a phase this run does not wrap), the operator must see the
+    exception's own message (which names GET /v1/status), not a raw
+    traceback, matching the nexus-2fyb ClickException convention `nx index
+    pdf` already applies via its own local wrapper."""
+    from nexus.retry import VectorUpsertTimeoutError
+
+    def _raise(*args, **kwargs):
+        raise VectorUpsertTimeoutError(
+            "Upsert timed out (connect or read -- this transport cannot "
+            "tell which); the request may already have been sent and the "
+            "engine may still be embedding this batch server-side. Check "
+            "GET /v1/status for in-flight embed/admission activity before "
+            "retrying manually. (timed out)"
+        )
+
+    result, mock_idx = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg, index_side_effect=_raise,
+    )
+    assert result.exit_code != 0, result.output
+    assert "GET /v1/status" in result.output
+    assert "Upsert timed out" in result.output
+
+
 def test_index_repo_idempotent_when_already_registered(runner, repo_dir, mock_reg):
     result, mock_idx = _invoke_repo(runner, [str(repo_dir)], mock_reg)
     assert result.exit_code == 0

@@ -574,6 +574,7 @@ def index_repo_cmd(
     into rdr__.
     """
     from nexus.indexer import index_repository  # noqa: PLC0415 — deliberate function-local import (heavy indexer dep deferred; startup-cost)
+    from nexus.retry import VectorUpsertTimeoutError  # noqa: PLC0415 -- deliberate function-local import (per-run retry accumulator reset convention)
 
     if force and frecency_only:
         raise click.UsageError("--force and --frecency-only are mutually exclusive.")
@@ -953,6 +954,17 @@ def index_repo_cmd(
                                      on_phase=on_phase,
                                      on_flush=on_flush_progress if monitor else None,
                                      on_stage_timers=on_stage_timers) or {}
+        except VectorUpsertTimeoutError as e:
+            # nexus-8hdg9 phase 1 critique (Significant-2): defense in depth.
+            # indexer.py's _contain_transient_upsert now defers a per-file
+            # VectorUpsertTimeoutError to staleness instead of raising it, so
+            # this should be rare -- it can only reach here from a phase this
+            # run does not wrap in that containment. When it does, the
+            # nexus-2fyb convention (index_pdf's ClickException translation)
+            # applies here too: a clean message, not a raw traceback. The
+            # exception's own str(e) already names GET /v1/status; a re-run
+            # of `nx index repo` picks up any file this run did not reach.
+            raise click.ClickException(str(e)) from e
         finally:
             eta_ticker.stop()
             phase_heartbeat.disarm()
