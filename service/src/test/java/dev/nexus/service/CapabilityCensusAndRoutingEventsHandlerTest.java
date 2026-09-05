@@ -148,17 +148,34 @@ class CapabilityCensusAndRoutingEventsHandlerTest {
     }
 
     @Test
-    void census_record_withoutScopeSplit_capabilitiesByScopeIsNull() throws Exception {
-        // Additive: a caller that never sends the split (an old client,
-        // this bead's own PART-1/PART-2 writer prior to PART 3) leaves
-        // the new column NULL, never a fabricated all-zero breakdown.
+    void census_record_old731ClientShape_acceptedWithNullScope() throws Exception {
+        // Confirmed BY TEST, not by reading the guard (coordinator
+        // directive after critique-nexus-gjv9b-part3-9695b260f): the
+        // EXACT wire shape every conexus 7.31.0-and-earlier client sends
+        // -- a full 8-key flat capabilities map with several non-zero
+        // values, no capabilities_orchestrator/capabilities_subagent
+        // fields at all -- must be accepted 200 with capabilities_by_scope
+        // left NULL, never a 400 and never a fabricated all-zero
+        // breakdown. This is a real falsifier: if
+        // requireFlatMatchesScopeSum ever ran unconditionally (treating
+        // an ABSENT split as an implicit all-zero split, rather than
+        // skipping the invariant entirely when neither side is present),
+        // skill=3/agent=1/nx_answer=2 here would each disagree with a
+        // sum of 0 and this request would 400 -- exactly the regression
+        // this test exists to catch.
         var resp = post("/v1/telemetry/capability_census/record", TOKEN, TENANT,
-            "{\"session_id\":\"sess-no-scope\",\"blindspot\":false,"
-            + "\"capabilities\":{\"skill\":1},\"dispatches\":0,\"total_calls\":1}");
+            "{\"session_id\":\"sess-old-client-shape\",\"blindspot\":false,"
+            + "\"capabilities\":{\"skill\":3,\"agent\":1,\"serena\":0,"
+            + "\"nx_answer\":2,\"search_query\":0,\"other_nx_mcp\":0,\"baseline\":4,\"other\":0},"
+            + "\"dispatches\":1,\"total_calls\":10}");
         assertThat(resp.statusCode()).isEqualTo(200);
 
-        var row = censusRows(TOKEN, TENANT, "sess-no-scope").get(0);
+        var row = censusRows(TOKEN, TENANT, "sess-old-client-shape").get(0);
         assertThat(row.get("capabilities_by_scope")).isNull();
+        @SuppressWarnings("unchecked")
+        var caps = (Map<String, Object>) row.get("capabilities");
+        assertThat(caps.get("skill")).isEqualTo(3);
+        assertThat(caps.get("baseline")).isEqualTo(4);
     }
 
     @Test

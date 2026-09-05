@@ -1756,6 +1756,78 @@ class TestRecordCapabilityCensus:
         assert rows[0]["capabilities"]["skill"] == 3
         assert rows[0]["total_calls"] == 4
 
+    def test_old_client_shape_omits_scope_split_keys_entirely(self, monkeypatch):
+        """Coordinator directive after critique-nexus-gjv9b-part3-9695b260f:
+        confirmed BY TEST, not by reading, that the exact wire body a
+        conexus 7.31.0-and-earlier client sends (no
+        capabilities_orchestrator/capabilities_subagent kwargs at all --
+        every call site that predates this bead's PART 3 prerequisite)
+        omits those two keys from the POST body ENTIRELY, not as
+        present-but-empty objects. This is what makes the engine's
+        ``!capabilitiesOrchestrator.isEmpty() ||
+        !capabilitiesSubagent.isEmpty()`` guard evaluate false and skip
+        the flat/scope invariant check -- see
+        CapabilityCensusAndRoutingEventsHandlerTest
+        .census_record_old731ClientShape_acceptedWithNullScope for the
+        matching real-engine confirmation. A pure unit test: no network,
+        no engine, just the payload this client method actually builds.
+        """
+        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
+
+        captured: dict = {}
+
+        def _fake_post(self, path, body, **kwargs):
+            captured["path"] = path
+            captured["body"] = body
+            return {}
+
+        monkeypatch.setattr(HttpTelemetryStore, "_post", _fake_post)
+
+        store = HttpTelemetryStore(base_url="http://engine.invalid", _token="t")
+        try:
+            store.record_capability_census(
+                session_id="sess-old-shape", ts="2026-09-01T00:00:00Z",
+                blindspot=False, capabilities={"skill": 3, "agent": 1},
+                dispatches=1, total_calls=4,
+            )
+        finally:
+            store.close()
+
+        body = captured["body"]
+        assert "capabilities_orchestrator" not in body
+        assert "capabilities_subagent" not in body
+        assert body["capabilities"] == {"skill": 3, "agent": 1}
+
+    def test_new_client_shape_includes_scope_split_keys_when_given(self, monkeypatch):
+        """The counterpart: passing the split kwargs DOES put both keys on
+        the wire -- the omission above is default-driven, not a code path
+        that silently drops explicit values too."""
+        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
+
+        captured: dict = {}
+
+        def _fake_post(self, path, body, **kwargs):
+            captured["body"] = body
+            return {}
+
+        monkeypatch.setattr(HttpTelemetryStore, "_post", _fake_post)
+
+        store = HttpTelemetryStore(base_url="http://engine.invalid", _token="t")
+        try:
+            store.record_capability_census(
+                session_id="sess-new-shape", ts="2026-09-01T00:00:00Z",
+                blindspot=False, capabilities={"skill": 3},
+                dispatches=1, total_calls=3,
+                capabilities_orchestrator={"skill": 2},
+                capabilities_subagent={"skill": 1},
+            )
+        finally:
+            store.close()
+
+        body = captured["body"]
+        assert body["capabilities_orchestrator"] == {"skill": 2}
+        assert body["capabilities_subagent"] == {"skill": 1}
+
     def test_blindspot_record_omits_capabilities(self, client):
         client.record_capability_census(
             session_id="sess-blind", ts="2026-09-01T00:00:00Z", blindspot=True,
