@@ -94,6 +94,7 @@ from nexus import pdeathsig as _pdeathsig
 from nexus.aspect_readers import ReadFail, ReadOk, read_source, uri_for
 from nexus.db.t2.records import AspectRecord
 from nexus.mcp_infra import get_t3
+from nexus.operators.dispatch import _write_prompt_file
 
 # Re-exported for ergonomic ``from nexus.aspect_extractor import
 # AspectRecord``. Phase 2 hook authors land here first; the
@@ -853,6 +854,16 @@ _TRANSIENT_STDERR_PATTERNS = (
     "network",
     "timeout",
     "timed out",
+    # nexus-0bkjm: the Claude Code CLI's stdin-race signals -- the same
+    # race nexus-vzy2v fixed structurally in claude_dispatch by writing
+    # the prompt to disk BEFORE spawn. _run_claude_isolated now does the
+    # same (see its docstring), which should make these unreachable in
+    # practice; kept here as a belt-and-suspenders retry in case a
+    # residual race slips through (e.g. a future regression reintroduces
+    # a pipe-fed stdin), so a hit degrades to a retry instead of an
+    # unrecognized, unretried _HardFailure.
+    "no stdin data received",
+    "input must be provided",
 )
 
 
@@ -1572,6 +1583,24 @@ def _run_claude_isolated(
 
     Behavioral parity with the old ``subprocess.run`` (stdin-fed prompt,
     captured text output, raises ``subprocess.TimeoutExpired``).
+
+    **Stdin delivery (nexus-0bkjm)**: the prompt is written to a temp file
+    BEFORE ``Popen`` is called, and the child's stdin is redirected from
+    that file -- never a live PIPE fed via a ``communicate(input=...)``
+    call made AFTER spawn. The prior shape (``Popen(stdin=PIPE)`` +
+    ``communicate(input=prompt)``) is the same race nexus-vzy2v fixed in
+    ``operators.dispatch.claude_dispatch``: under event-loop/system load
+    the parent's write can land after the Claude Code CLI's 3s stdin-wait
+    gives up, so the child proceeds without input ("Warning: no stdin
+    data received in 3s, proceeding without it" / "Error: Input must be
+    provided either through stdin or as a prompt argument when using
+    --print", exit 1) -- a silently lost extraction, since (pre-fix) that
+    stderr text was not in ``_TRANSIENT_STDERR_PATTERNS`` either. Writing
+    the data to disk before ``Popen`` removes the writer entirely: it is
+    already there the instant the child execs, regardless of parent
+    scheduling delay. Reuses ``operators.dispatch._write_prompt_file``
+    rather than duplicating it -- that helper is already pure-sync (no
+    asyncio), so it drops in here unchanged.
     """
     argv = _argv or [
         "claude", "-p", "--output-format", "json",
@@ -1583,23 +1612,38 @@ def _run_claude_isolated(
         # site did not, until now.
         "--strict-mcp-config",
     ]
-    proc = subprocess.Popen(
-        argv,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-        preexec_fn=(_pdeathsig.set_pdeathsig_preexec if _pdeathsig.LIBC is not None else None),
-    )
+    prompt_path = _write_prompt_file(prompt)
     try:
-        out, err = proc.communicate(input=prompt, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _kill_process_group(proc)
-        with contextlib.suppress(Exception):
-            proc.communicate(timeout=5)  # reap the killed group
-        raise
-    return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
+        # The file object is only needed to hand Popen a real fd to
+        # redirect the child's stdin from; the child gets its own
+        # duplicated fd at fork/exec time (inside the Popen() call
+        # itself, which is synchronous), so closing our handle the
+        # moment Popen() returns is safe -- mirrors
+        # _spawn_with_prompt_file's identical close-immediately shape.
+        with open(prompt_path, "rb") as prompt_file:
+            proc = subprocess.Popen(
+                argv,
+                stdin=prompt_file,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+                preexec_fn=(_pdeathsig.set_pdeathsig_preexec if _pdeathsig.LIBC is not None else None),
+            )
+        try:
+            # No `input=` -- stdin is no longer a PIPE, so there is
+            # nothing left to feed; the data is already on disk and was
+            # redirected in at spawn time above.
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc)
+            with contextlib.suppress(Exception):
+                proc.communicate(timeout=5)  # reap the killed group
+            raise
+        return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
+    finally:
+        with contextlib.suppress(OSError):
+            prompt_path.unlink(missing_ok=True)
 
 
 def _kill_process_group(proc: subprocess.Popen) -> None:
