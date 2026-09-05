@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# This gate self-provisions a THROWAWAY PG + service and drives it from this
+# checkout, including subprocess tests the pytest in-process exemption cannot
+# reach; the nexus-a2qhz production-write guard needs the reason-bearing opt-in
+# (33 setup errors on the 7.32.0 battery without it). Never production.
+export NX_ALLOW_PROD_WRITE="local-service-gate: self-provisioned throwaway service in a scratch NEXUS_CONFIG_DIR (nexus-a2qhz)"
 # Local-service functional gate (2026-07-06, born from the v6.3.6 release).
 #
 # WHY THIS EXISTS: the integration suite's local-service round-trip family
