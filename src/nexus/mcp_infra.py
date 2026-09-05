@@ -515,10 +515,11 @@ def invalidate_collections_cache() -> None:
     _collections_cache = ([], {}, 0.0)
 
 
-#: nexus-m20mf P3 fold-in (critic finding 1/1b): the CURRENT `nx index
-#: repo` run's shared httpx.Client, or None outside one. Process-global by
-#: DESIGN, not a mistake -- unlike the CLI-layer Click-context lookup the
-#: critic ruled out for the DATA layer (taxonomy_cmd._T2Database, index.py's
+#: nexus-m20mf P3 fold-in (critic finding 1/1b, hardened per round-2
+#: critique finding 1): the CURRENT `nx index repo` run's shared
+#: httpx.Client, or None outside one. Process-global by DESIGN, not a
+#: mistake -- unlike the CLI-layer Click-context lookup the critic ruled
+#: out for the DATA layer (taxonomy_cmd._T2Database, index.py's
 #: run_collection_postprocessing/_collections_without_topics, which now take
 #: an explicit `client` parameter instead), this value is set and torn down
 #: by ONE owner (index_repository, via use_shared_t2_client_for_index_run
@@ -539,29 +540,89 @@ def invalidate_collections_cache() -> None:
 #: extends its OWN resolution rule (explicit client argument wins; otherwise
 #: the current run's shared client; otherwise build fresh, exactly as
 #: before) rather than inventing a second mechanism.
-_current_index_run_t2_client: "httpx.Client | None" = None
+#:
+#: REENTRANCY (round-2 critique, Significant finding 1): a bare save/restore
+#: global is a silent-corruption shape under overlap -- two index_repository()
+#: calls racing in one process (thread A sets clientA, thread B enters before
+#: A exits and sets clientB, whichever `finally` runs LAST restores whatever
+#: IT captured as "previous", silently substituting the wrong client into
+#: the run still in flight, no exception, no log). Nothing calls
+#: index_repository() concurrently today (exactly one production call site,
+#: commands/index.py's index_repo_cmd, one `nx index repo` process per
+#: invocation) -- this hazard is currently DORMANT, not live -- but this
+#: codebase's own hot rule is "no silent fallbacks for data-correctness
+#: problems; fail loud", and a plain global with unconditional save/restore
+#: is a silent-corruption shape by construction. Fixed via a small
+#: depth-counted scope guarded by a lock: a REENTRANT call passing the
+#: IDENTICAL client (or both None) stacks cleanly (depth+1, single reset to
+#: None only when the outermost scope exits -- no leak between sequential
+#: runs); a call passing a DIFFERENT client while one is already active
+#: raises loud immediately rather than silently clobbering. This does not
+#: attempt true per-caller ISOLATION of overlapping runs (that would need a
+#: contextvar propagated explicitly into every ChunkBatcher worker thread,
+#: since plain contextvars do not cross thread boundaries on their own, and
+#: today's cross-thread VISIBILITY requirement -- workers of the SAME run
+#: sharing the SAME pool -- is what a global buys for free); it makes the
+#: genuinely hazardous case (two DIFFERENT clients live at once) impossible
+#: to enter silently.
+_current_index_run_client: "httpx.Client | None" = None
+_current_index_run_depth: int = 0
+_current_index_run_lock = threading.Lock()
 
 
 @contextlib.contextmanager
 def use_shared_t2_client_for_index_run(client: "httpx.Client | None"):
-    """Scope ``_current_index_run_t2_client`` to one ``index_repository()``
-    call. Save/restore (not a bare set), so a caller nested inside another
-    (not a realistic shape today, but cheap to make safe) unwinds to the
-    OUTER value rather than clobbering it to ``None``. ``client=None`` is a
-    harmless no-op scope -- every ``t2_ctx()`` call inside still falls back
-    to building its own client, byte-identical to pre-P3 behavior."""
-    global _current_index_run_t2_client
-    previous = _current_index_run_t2_client
-    _current_index_run_t2_client = client
+    """Scope the process-wide "current index run" client to one
+    ``index_repository()`` call (reentrant-safe, see the module comment
+    above for the full rationale).
+
+    - First entry (depth 0 -> 1): activates *client* process-wide.
+    - Reentrant entry with the IDENTICAL client (``is``, including both
+      ``None``) while already active: stacks (depth N -> N+1); the value
+      resets to ``None`` only when the OUTERMOST scope exits (depth back
+      to 0) -- no leak between sequential runs, and a legitimately nested
+      call (or a second thread of the SAME run) sees the same client the
+      whole time.
+    - Reentrant entry with a DIFFERENT, non-identical client while one is
+      already active: raises ``RuntimeError`` immediately -- this is the
+      two-overlapping-runs hazard; refusing loud beats silently
+      cross-wiring which run's hook failures land against which pool.
+
+    ``client=None`` is a harmless no-op scope either way -- every
+    ``t2_ctx()`` call inside still falls back to building its own client,
+    byte-identical to pre-P3 behavior.
+    """
+    global _current_index_run_client, _current_index_run_depth
+    with _current_index_run_lock:
+        if _current_index_run_depth == 0:
+            _current_index_run_client = client
+            _current_index_run_depth = 1
+        elif _current_index_run_client is client:
+            _current_index_run_depth += 1
+        else:
+            raise RuntimeError(
+                "use_shared_t2_client_for_index_run re-entered with a "
+                "DIFFERENT shared client while another index_repository() "
+                "run is still active in this process -- overlapping "
+                "index_repository() calls with distinct clients are not "
+                "supported by this process-global scope (it would silently "
+                "cross-wire the per-file hook-failure chain between the two "
+                "runs). If this is a genuinely new concurrent caller, it "
+                "needs a design that isolates run state per caller, not "
+                "this scope."
+            )
     try:
         yield
     finally:
-        _current_index_run_t2_client = previous
+        with _current_index_run_lock:
+            _current_index_run_depth -= 1
+            if _current_index_run_depth == 0:
+                _current_index_run_client = None
 
 
 def current_index_run_t2_client() -> "httpx.Client | None":
     """The active index run's shared client, or ``None`` outside one."""
-    return _current_index_run_t2_client
+    return _current_index_run_client
 
 
 def t2_ctx(client: "httpx.Client | None" = None):
@@ -604,7 +665,7 @@ def t2_ctx(client: "httpx.Client | None" = None):
     behavior to before this parameter existed.
     """
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import (db.t2)
-    resolved = client if client is not None else _current_index_run_t2_client
+    resolved = client if client is not None else current_index_run_t2_client()
     return T2Database(default_db_path(), client=resolved)  # boundary-allow: aspect_worker persist (document_aspects.upsert AspectRecord arg cannot round-trip the daemon RPC); not the every-poll hot path (RDR-128 P3)
 
 
