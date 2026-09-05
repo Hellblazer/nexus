@@ -1759,19 +1759,27 @@ class TestCapabilityCensusAndRoutingEventProductionWriteGuard:
     the class of incident nexus-a2qhz exists to prevent.
 
     ``tests/conftest.py``'s autouse ``_exempt_pytest_from_production_write_
-    guard`` fixture exports ``NX_ALLOW_PROD_WRITE`` for every OTHER test
-    in this suite; these tests explicitly delete it (the documented
-    "later monkeypatch call wins" contract) so the guard's real refusal
-    path actually runs. This process genuinely IS a dev checkout (this
-    repo), so no ``_dev_checkout_root`` mock is needed.
+    guard`` fixture sets the suite-wide exemption via an IN-PROCESS
+    override now (``service_endpoint._test_only_opt_in_reason``,
+    nexus-a2qhz round-3 -- an env var was rejected because it could leak
+    into a real dev-checkout subprocess's inherited ``os.environ``,
+    exactly the class of incident this guard exists to prevent). These
+    tests reset that module attribute to ``None`` directly (the
+    documented last-monkeypatch-wins contract, same pattern
+    ``tests/db/test_production_write_guard.py`` uses) so the guard's real
+    refusal path actually runs, rather than deleting
+    ``NX_ALLOW_PROD_WRITE`` -- which the guard no longer consults at all.
+    This process genuinely IS a dev checkout (this repo), so no
+    ``_dev_checkout_root`` mock is needed.
     """
 
     def test_record_capability_census_refused_without_opt_in(
         self, client, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        from nexus.db import service_endpoint
         from nexus.db.service_endpoint import ProductionWriteGuardError
 
-        monkeypatch.delenv("NX_ALLOW_PROD_WRITE", raising=False)
+        monkeypatch.setattr(service_endpoint, "_test_only_opt_in_reason", None)
         with pytest.raises(ProductionWriteGuardError):
             client.record_capability_census(
                 session_id="sess-guarded", ts="2026-09-01T00:00:00Z",
@@ -1785,9 +1793,10 @@ class TestCapabilityCensusAndRoutingEventProductionWriteGuard:
     def test_record_routing_event_refused_without_opt_in(
         self, client, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        from nexus.db import service_endpoint
         from nexus.db.service_endpoint import ProductionWriteGuardError
 
-        monkeypatch.delenv("NX_ALLOW_PROD_WRITE", raising=False)
+        monkeypatch.setattr(service_endpoint, "_test_only_opt_in_reason", None)
         with pytest.raises(ProductionWriteGuardError):
             client.record_routing_event(rule="r1", outcome="allow")
         assert _REQUEST_COUNT["n"] == 0
