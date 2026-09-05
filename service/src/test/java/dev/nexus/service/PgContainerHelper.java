@@ -12,7 +12,7 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
-import dev.nexus.service.jooq.nexus.Routines;
+import dev.nexus.service.jooq.test.Routines;
 import org.jooq.DSLContext;
 import org.jooq.Name;
 import org.jooq.SQLDialect;
@@ -242,6 +242,11 @@ public final class PgContainerHelper {
         Liquibase liquibase = new Liquibase(
             "db/changelog/db.changelog-master.xml", new ClassLoaderResourceAccessor(), db);
         liquibase.update(new Contexts());
+        // Test-only schema objects (nexus_test.*), never part of the product changelog;
+        // the codegen-time counterpart is db.changelog-test-master.xml (see the pom's
+        // generate-jooq-test-sources execution).
+        new Liquibase("db/changelog-test/db.changelog-test-objects.xml",
+            new ClassLoaderResourceAccessor(), db).update(new Contexts());
         su.setAutoCommit(true);
     }
 
@@ -373,7 +378,12 @@ public final class PgContainerHelper {
      * batch 3/4) -- the test-tree counterpart to {@link TenantScope#vacuumAnalyze}.
      *
      * <p>Batch 4 (nexus-zrcj7): retired the raw {@code stmt.execute("ANALYZE " + ...)}
-     * onto {@code nexus.analyze_table(regclass)} (analyze-003-analyze-table-function.xml)
+     * onto {@code nexus_test.analyze_table(regclass)}, a TEST-SCHEMA function
+     * (db/changelog-test/db.changelog-test-objects.xml, applied by
+     * {@link #applyProductSchema} after the product master; jOOQ codegen for it runs
+     * as a second plugin execution at generate-test-sources into
+     * target/generated-test-sources/jooq, so nothing test-only ever enters the
+     * product schema or the product changelog -- batch 5, Sam's ruling 2026-09-05)
      * -- ANALYZE is still PostgreSQL maintenance syntax with no typed jOOQ DSL form (same
      * category {@link TenantScope#vacuumAnalyze}'s own SANCTIONED RAW comment documents
      * for VACUUM), but that raw statement now lives server-side, inside a plpgsql wrapper

@@ -3,11 +3,6 @@ package dev.nexus.service;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.nexus.Routines;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
@@ -72,12 +67,7 @@ class CatalogFtsFilenameSearchTest {
                 + "END $$");
         }
         try (Connection su = pg.createConnection("")) {
-            var lb = new Liquibase(
-                "db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(),
-                DatabaseFactory.getInstance().findCorrectDatabaseImplementation(
-                    new JdbcConnection(su)));
-            lb.update(new Contexts());
+            PgContainerHelper.applyProductSchema(su);
         }
         ds = PgContainerHelper.superuserDataSource(pg);
         repo = new CatalogRepository(new TenantScope(ds));

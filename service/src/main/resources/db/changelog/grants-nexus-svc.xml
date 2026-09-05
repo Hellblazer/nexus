@@ -389,39 +389,5 @@ $$;
         <rollback><!-- Revoke is a DBA operation; not automated. --></rollback>
     </changeSet>
 
-    <changeSet id="grants-006-analyze-table-execute" author="nexus-cbo4a" runAlways="true">
-        <comment>
-            GRANT EXECUTE on nexus.analyze_table(regclass) to nexus_svc (nexus-cbo4a
-            batch 4, nexus-zrcj7 no-SQL-strings-in-Java directive). analyze_table is
-            SECURITY INVOKER (analyze-003-analyze-table-function.xml, changeset
-            analyze-003-1) -- ANALYZE itself still runs under nexus_svc's OWN MAINTAIN grant on the target table
-            (grants-003-purge-vacuum-maintain / grants-005-chunks-unify-maintain above);
-            this changeset only grants CALLING the wrapper function. Explicit grant,
-            not the PUBLIC-default convention the read-only combined-query search
-            functions use (vectors-007/009/011/vectors-013-taxonomy-ann-query.xml) --
-            analyze_table is maintenance-shaped, matching the explicit-grant precedent
-            for purge_trash/document_trash/document_restore (catalog-003-soft-delete.xml)
-            and manifest_orphans/manifest_backfill/document_text (catalog-004-manifest-
-            functions.xml). Kept in grants-nexus-svc.xml, not analyze-003's own file, so
-            this file stays the single place nexus_svc's function-level grants are read
-            together for maintenance-shaped functions -- runAlways self-heals a nexus_svc
-            role created after analyze-003 first executes, same as every other changeset
-            in this file.
-        </comment>
-        <sql splitStatements="false" stripComments="false">
-GRANT EXECUTE ON FUNCTION nexus.analyze_table(regclass) TO nexus_svc;
-        </sql>
-        <rollback>
-            <sql splitStatements="false">
-DO $$
-BEGIN
-    IF to_regprocedure('nexus.analyze_table(regclass)') IS NOT NULL THEN
-        REVOKE EXECUTE ON FUNCTION nexus.analyze_table(regclass) FROM nexus_svc;
-    END IF;
-END
-$$;
-            </sql>
-        </rollback>
-    </changeSet>
 
 </databaseChangeLog>

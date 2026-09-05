@@ -54,6 +54,8 @@
         -->
         <jooq.generated.dir>${project.build.directory}/generated-sources/jooq</jooq.generated.dir>
         <jooq.generated.pkg>dev.nexus.service.jooq</jooq.generated.pkg>
+        <jooq.generated.test.dir>${project.build.directory}/generated-test-sources/jooq</jooq.generated.test.dir>
+        <jooq.generated.test.pkg>dev.nexus.service.jooq.test</jooq.generated.test.pkg>
 
         <!-- Seam B — local ONNX embedding (S0.2 proven stack) -->
         <onnxruntime.version>1.20.0</onnxruntime.version>
@@ -382,6 +384,51 @@
                             </jooq>
                         </configuration>
                     </execution>
+                    <!-- nexus-cbo4a batch 5 (Sam's ruling 2026-09-05): test-only schema
+                         objects get their own codegen in the TEST lifecycle. Same
+                         container recipe, product master + test changelog applied, only
+                         the nexus_test schema generated, into a test source root. A
+                         second container boot per build (~15s) is the whole cost; the
+                         product schema and changelog stay free of test tooling. -->
+                    <execution>
+                        <id>generate-jooq-test-sources</id>
+                        <goals>
+                            <goal>generate</goal>
+                        </goals>
+                        <phase>generate-test-sources</phase>
+                        <configuration>
+                            <database>
+                                <type>POSTGRES</type>
+                                <containerImage>pgvector/pgvector:pg17</containerImage>
+                            </database>
+                            <liquibase>
+                                <changeLogDirectory>${project.basedir}/src/main/resources,${project.basedir}/src/test/resources</changeLogDirectory>
+                                <changeLogPath>db/changelog-test/db.changelog-test-master.xml</changeLogPath>
+                            </liquibase>
+                            <jooq>
+                                <generator>
+                                    <database>
+                                        <name>org.jooq.meta.postgres.PostgresDatabase</name>
+                                        <includes>.*</includes>
+                                        <schemata>
+                                            <schema>
+                                                <inputSchema>nexus_test</inputSchema>
+                                            </schema>
+                                        </schemata>
+                                    </database>
+                                    <generate>
+                                        <pojos>false</pojos>
+                                        <daos>false</daos>
+                                        <javaTimeTypes>true</javaTimeTypes>
+                                    </generate>
+                                    <target>
+                                        <packageName>${jooq.generated.test.pkg}</packageName>
+                                        <directory>${jooq.generated.test.dir}</directory>
+                                    </target>
+                                </generator>
+                            </jooq>
+                        </configuration>
+                    </execution>
                 </executions>
             </plugin>
 
@@ -404,6 +451,18 @@
                         <configuration>
                             <sources>
                                 <source>${jooq.generated.dir}</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>add-jooq-test-sources</id>
+                        <phase>generate-test-sources</phase>
+                        <goals>
+                            <goal>add-test-source</goal>
+                        </goals>
+                        <configuration>
+                            <sources>
+                                <source>${jooq.generated.test.dir}</source>
                             </sources>
                         </configuration>
                     </execution>

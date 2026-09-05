@@ -197,11 +197,7 @@ class SchemaRollbackRoundTripIntegrationTest {
 
 
     /**
-     * The TWELVE {@code runAlways} changesets, in master order. Formerly eleven
-     * after nexus-cbo4a batch 4 added {@code grants-006-analyze-table-execute}
-     * (EXECUTE on {@code nexus.analyze_table(regclass)} for nexus_svc; the
-     * function has no production caller today, its callers are test seeding
-     * helpers). Formerly ten after
+     * The ELEVEN {@code runAlways} changesets, in master order. Formerly ten after
      * RDR-194's critical fix round (2026-08-17) added {@code taxonomy-011-8} —
      * Liquibase-owned {@code nexus.diag_chash_conformance} view creation +
      * conditional nexus_diag grant, self-healing every boot exactly like
@@ -235,7 +231,6 @@ class SchemaRollbackRoundTripIntegrationTest {
         "grants-003-purge-vacuum-maintain",
         "grants-004-monitor-wal-visibility",
         "grants-005-chunks-unify-maintain",
-        "grants-006-analyze-table-execute",
         "grants-nexus-diag-1",
         "grants-nexus-diag-2",
         "grants-nexus-diag-3",
