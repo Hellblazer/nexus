@@ -731,3 +731,51 @@ class TestStoreGetManyHumanReadableRendersContent:
         # truncation with no signal.
         assert "…" in result
         assert "x" * 100 not in result
+
+    def test_missing_ids_past_ten_get_a_count_marker(self):
+        """nexus-z4j8d review finding 4: ``missing[:10]`` silently drops
+        ids past the first 10 -- name the count of ids elided."""
+        from nexus.mcp.core import store_get_many
+
+        ids = [f"missing-{i}" for i in range(15)]
+        mock_t3, _ = _make_stub_t3({"*": {}})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(ids=ids, collections="knowledge", structured=False)
+
+        assert "Hydrated 0/15 docs" in result
+        assert "(+5 more)" in result
+
+    def test_oversized_human_mode_result_is_capped(self, monkeypatch):
+        """nexus-z4j8d review finding 1 (CRITICAL): the human-mode render
+        must go through ``_cap_text_result`` like every other text-
+        returning tool in this file (nexus-2xjge doctrine) -- pre-fix this
+        branch returned the assembled string unbounded, so a hydration of
+        real document bodies could produce a multi-MB response silently
+        truncated by the MCP host with no marker."""
+        from nexus.mcp import core as mcp_core
+        from nexus.mcp.core import store_get_many
+
+        monkeypatch.setattr(mcp_core, "_TEXT_RESULT_CAP_CHARS", 100)
+        ids = [f"doc-{i}" for i in range(20)]
+        found = {doc_id: {"content": f"padding content for {doc_id} " * 10} for doc_id in ids}
+        mock_t3, _ = _make_stub_t3({"*": found})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(ids=ids, collections="knowledge", structured=False)
+
+        assert "[store_get_many: result capped at 100 chars" in result
+        assert result.endswith("narrow the query, lower limit, or page with offset=...]")
+
+    def test_under_cap_human_mode_result_is_unaffected(self):
+        """The cap must not touch an ordinary, far-under-cap result."""
+        from nexus.mcp.core import store_get_many
+
+        found = {"doc-1": {"content": "small body"}}
+        mock_t3, _ = _make_stub_t3({"*": found})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(ids=["doc-1"], collections="knowledge", structured=False)
+
+        assert "small body" in result
+        assert "result capped at" not in result

@@ -870,7 +870,17 @@ def test_query_corpus_routing_matches_search(corpus_arg, available, expected_in,
     """``query()`` must resolve a corpus argument identically to
     ``search()`` -- via the shared ``_resolve_corpus_target`` helper, not
     a hand-rolled copy that skips the ``t3_collection_name`` promotion."""
-    _mock_t3(available)
+    mock = _mock_t3(available)
+    # nexus-z4j8d review finding 3: an unconfigured MagicMock's
+    # ``collection_exists`` is truthy by default, which for the
+    # legacy-2-segment case took the "promoted already exists" shortcut
+    # in ``t3_collection_name`` instead of exercising the real
+    # "genuinely absent, synthesize promoted" branch the test means to
+    # cover. Forcing it False here is a no-op for the other three cases
+    # (bare-prefix corpus never calls collection_exists at all;
+    # is_conformant_collection_name's early return for the fully-
+    # qualified case fires before collection_exists is ever reached).
+    mock.collection_exists.return_value = False
     captured, fake = _capture_search()
     with patch("nexus.search_engine.search_cross_corpus", fake):
         query(question="test query", corpus=corpus_arg)

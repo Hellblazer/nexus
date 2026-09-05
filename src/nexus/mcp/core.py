@@ -1912,38 +1912,13 @@ def _search_render(
             query = sanitize_query(query)
 
         t3 = _get_t3()
-        all_names = _get_collection_names()
-
-        if corpus == "all":
-            # True "all": every unique prefix that appears in the live
-            # collection list. Fixes the gap where the old constant
-            # ("knowledge,code,docs,rdr") missed projects whose only
-            # collection is e.g. rdr__* or a custom prefix.
-            seen_prefixes: list[str] = []
-            for n in all_names:
-                prefix = n.split("__", 1)[0]
-                if prefix and prefix not in seen_prefixes:
-                    seen_prefixes.append(prefix)
-            corpus = ",".join(seen_prefixes) if seen_prefixes else "knowledge,code,docs,rdr"
-
-        target: list[str] = []
-        for part in corpus.split(","):
-            part = part.strip()
-            if not part:
-                continue
-            if "__" in part:
-                # nexus-hmxi: route the qualified-with-__ form through
-                # ``t3_collection_name`` (with t3) so 2-segment legacy
-                # input is grandfathered to an existing legacy
-                # collection or auto-promoted to the conformant target,
-                # matching ``store_list`` / ``store_put`` resolution.
-                # Pre-fix this branch always used the user input as-is,
-                # so a 2-segment ``--corpus knowledge__art`` could hit
-                # a legacy collection that ``store_list --collection
-                # knowledge__art`` was missing.
-                target.append(t3_collection_name(part, t3=t3))
-            else:
-                target.extend(resolve_corpus(part, all_names))
+        # nexus-z4j8d review finding 2: route through the shared
+        # _resolve_corpus_target helper instead of carrying this file's
+        # own inline copy of the same "all"-expansion + t3_collection_name
+        # (nexus-hmxi) + resolve_corpus logic -- one implementation
+        # instead of two that can drift (query()'s plain-corpus branch was
+        # exactly that drift: nexus-z4j8d fix 1).
+        target = _resolve_corpus_target(corpus, t3)
 
         if not target:
             return f"No collections match corpus {corpus!r}"
@@ -4463,8 +4438,18 @@ def store_get_many(
             lines.append("")
             lines.append("\n\n".join(blocks))
         if missing:
-            lines.append(f"Missing: {', '.join(missing[:10])}")
-        return "\n".join(lines)
+            missing_line = f"Missing: {', '.join(missing[:10])}"
+            if len(missing) > 10:
+                # nexus-2xjge doctrine: never a silent drop -- name the
+                # count of ids elided past the first 10.
+                missing_line += f" (+{len(missing) - 10} more)"
+            lines.append(missing_line)
+        # nexus-z4j8d review finding 1 (CRITICAL): this branch can now
+        # return real document bodies (max_chars_per_doc has no upper
+        # bound, limit_per_source defaults to no cap) -- cap it like every
+        # other text-returning tool in this file instead of relying on the
+        # MCP host's silent truncation.
+        return _cap_text_result("\n".join(lines), "store_get_many")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         if structured:
             # Structured callers (plan-runner hydration) get a dict, not a string —
