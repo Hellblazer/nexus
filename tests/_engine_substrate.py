@@ -573,6 +573,15 @@ def throwaway_pg_cluster(
                             f"{proc.stderr}\n--- pg.log tail ---\n{log_tail}"
                         )
                 except BaseException:
+                    # A postmaster can be half up when pg_ctl's wait gives
+                    # up; stop it before the rmtree, or it outlives its
+                    # pgdata holding the SysV segment this helper exists
+                    # to conserve (rbc7k review). A no-op when nothing
+                    # started.
+                    subprocess.run(
+                        [str(bin_dir / "pg_ctl"), "-D", str(pgdata), "stop", "-m", "immediate"],
+                        capture_output=True, text=True, check=False,
+                    )
                     shutil.rmtree(pgdata, ignore_errors=True)
                     pgdata = None
                     raise
