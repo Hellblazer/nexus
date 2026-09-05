@@ -75,10 +75,17 @@ mechanize, it matters enough to ship.
   The endpoint resolves via a live ServiceRegistry lease file,
   `config.yml` credentials, or `NX_SERVICE_*` env vars (same
   t2_prefix_scan.py-style stdlib-only discovery every other T2 client
-  uses, review fix pass) — MEASURED against a real engine substrate:
-  100 calls, p50=1.19ms p95=1.86ms max=20.42ms, well under the 250ms
+  uses, including a fresh data-token lease winning over any static
+  token once the base URL is known — review fold-in round 3, critique
+  CRITICAL 1) — MEASURED against a real engine substrate on the
+  LEASE-DISCOVERY path specifically (no `NX_SERVICE_*` env at all, the
+  normal-interactive-install case this fold-in exists for, not the
+  env-var leg a prior measurement covered): 100 calls,
+  p50=1.33ms p95=2.26ms max=21.48ms mean=1.57ms, well under the 250ms
   budget, zero drops. A write that cannot reach the engine (service
-  genuinely down, or nothing resolvable at all) is counted in `nx
+  genuinely down, an old engine missing the route, or an auth/timeout/
+  connect failure — each now metered with a distinguishing `cause`,
+  review fold-in round 3, critique CRITICAL 2) is counted in `nx
   doctor`'s drop meter (`nexus.dropped_writes`, `hook="routing_events"`),
   never appended to the JSONL log — there is no JSONL fallback on this
   path any more, on any install, once this ships. Requires an engine
