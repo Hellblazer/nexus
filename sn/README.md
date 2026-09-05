@@ -52,25 +52,6 @@ The plugin handles this in two places, both keyed on the `cwd` field of the hook
 
 For the read side to work in worktrees, install the native LSP plugins for your languages (`claude plugin install pyright-lsp@claude-plugins-official`, likewise `jdtls-lsp`, `kotlin-lsp`, `typescript-lsp`) and their binaries.
 
-### Symbol editing inside worktrees (opt-in agent)
-
-The guard above takes Serena's write tools away from worktree subagents. To have them back, a subagent needs a Serena of its own, rooted at the worktree. `examples/worktree-developer.md` is that agent: its frontmatter declares a private Serena MCP server (tool prefix `mcp__serena-wt__`), pinned to the same revision as `.mcp.json`.
-
-Two measured facts shape it (nexus cc-validation scenario 30, 2026-09-05):
-
-- Claude Code spawns an agent's inline MCP server in the **parent's** directory, not the worktree. A server started with `--project-from-cwd` therefore roots itself at the primary checkout and writes there. The example starts Serena with **no project** and the agent's first action is `activate_project` on its own `pwd`; under the `claude-code` context, `activate_project` stays available exactly when no project was given at startup.
-- Plugin-shipped agents cannot declare `mcpServers` (Claude Code blocks it), so this file cannot ship as part of the plugin. It is a template to copy.
-
-Install:
-
-```bash
-cp ~/.claude/plugins/cache/nexus-plugins/sn/<version>/examples/worktree-developer.md ~/.claude/agents/
-```
-
-(or copy it from this repo). Then add `mcp__serena-wt__*` to `permissions.allow` in `~/.claude/settings.json`; the sn auto-approve covers only the plugin's own server. Dispatch with `subagent_type: "worktree-developer"` and `isolation: "worktree"`. The sn guard still applies to the shared `mcp__plugin_sn_serena__*` tools in that agent, which is what you want.
-
-Cost: one Serena process plus its language servers per dispatched agent, so a 10 to 60 second startup depending on the language, and a cold `uvx` cache on first use.
-
 ### Context7 Guidance
 
 - **Workflow**: `resolve-library-id` then `query-docs`
