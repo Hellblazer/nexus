@@ -1901,6 +1901,49 @@ class HttpVectorClient:
         # materialized boundary list, not a precomputed formula.
         cap = per_collection_chunk_cap(collection)
         metas = metadatas or [{}] * len(ids)
+
+        # nexus-xzyr3 (code-review-nexus-xzyr3-26edb6662 [24586]): drop-and-warn
+        # parity with T3Database._write_batch's defense-in-depth (t3.py
+        # ~line 502-530). Before this fix, upsert_chunks/upsert_chunks_with_
+        # embeddings — the path EVERY indexer (code/prose/PDF/DT) writes
+        # through — had ZERO per-document byte-length check, not even the
+        # non-raising drop T3Database's own pipeline path applies; only
+        # put()'s fail_on_oversized=True twin got fixed first, because that
+        # was the path the 9-row evidence pointed at. A chunker regression
+        # emitting an over-quota chunk here would previously ride straight
+        # through to a Java-side embed+store with no signal at all. Same
+        # structlog event name and fields as T3Database's, so log
+        # consumers/dashboards built against write_batch_oversized_document_
+        # dropped see this path too. Never raises: an indexer run should keep
+        # going on one bad chunk, exactly like the pipeline contract T3Database
+        # already documents.
+        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits), matches this module's other call sites
+
+        max_doc_bytes = QUOTAS.MAX_DOCUMENT_BYTES
+
+        def _doc_bytes(d: str | None) -> int:
+            return 0 if d is None else len(d.encode())
+
+        valid = [i for i, doc in enumerate(documents) if _doc_bytes(doc) <= max_doc_bytes]
+        if len(valid) < len(documents):
+            for i, doc in enumerate(documents):
+                if _doc_bytes(doc) > max_doc_bytes:
+                    source = metas[i].get("source_path", "<unknown>") if i < len(metas) else "<unknown>"
+                    _log.warning(
+                        "write_batch_oversized_document_dropped",
+                        source_path=source,
+                        doc_bytes=_doc_bytes(doc),
+                        max_bytes=max_doc_bytes,
+                        collection=collection,
+                    )
+            if not valid:
+                return
+            ids = [ids[i] for i in valid]
+            documents = [documents[i] for i in valid]
+            metas = [metas[i] for i in valid]
+            if embeddings is not None:
+                embeddings = [embeddings[i] for i in valid]
+
         n = len(ids)
         byte_budget = None if embeddings is not None else _upsert_byte_budget(collection)
         chunk_bytes = (

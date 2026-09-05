@@ -10,6 +10,7 @@ _log = structlog.get_logger(__name__)
 from nexus.corpus import t3_collection_name
 from nexus.db import make_t3
 from nexus.db.t3 import T3Database
+from nexus.errors import PutOversizedError
 from nexus.ttl import parse_ttl
 
 
@@ -107,6 +108,16 @@ def put_cmd(
     # The hook returns the catalog tumbler string (or "" when the
     # catalog is absent).
     chunk_chroma_id, manifest_metadatas = _single_chunk_manifest_metadata(content)
+    # nexus-xzyr3 fold-in: refuse an over-quota document BEFORE minting a
+    # catalog row for it (db.put() already refuses it too, but only after
+    # paying for a wasted mint + rollback round trip), and surface a clean
+    # click.ClickException instead of a raw traceback (code-review-nexus-
+    # xzyr3-26edb6662 [24586] Significant finding: this CLI path had no
+    # PutOversizedError -> ClickException translation).
+    try:
+        _raise_if_oversized(content, doc_id=chunk_chroma_id, collection=col_name)
+    except PutOversizedError as exc:
+        raise click.ClickException(str(exc)) from exc
     catalog_doc_id, catalog_row_minted = _catalog_store_hook_tracked(
         title=title, doc_id=chunk_chroma_id, collection_name=col_name,
     )
@@ -159,6 +170,21 @@ def put_cmd(
                 ttl_days=ttl_days,
                 catalog_doc_id=catalog_doc_id,
             )
+        except PutOversizedError as put_exc:
+            # nexus-xzyr3 fold-in: the pre-check above catches this for
+            # every normal call, but db.put() keeps its own check as the
+            # defense-in-depth backstop — translate here too so THAT path
+            # never regresses to a raw traceback either. Same compensation
+            # as the generic branch below, just a clean ClickException at
+            # the end instead of a bare re-raise.
+            if catalog_doc_id:
+                from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+                _fence_fail(catalog_doc_id, str(put_exc))
+            if catalog_doc_id and catalog_row_minted:
+                _rollback_minted_catalog_entry(
+                    catalog_doc_id, original_error=str(put_exc),
+                )
+            raise click.ClickException(str(put_exc)) from put_exc
         except Exception as put_exc:
             # nexus-cotmr: mirrors MCP F2's dedup-hit-then-put-failure fix —
             # stamp 'failed' unconditionally so the fence does not wedge at
@@ -269,6 +295,9 @@ from nexus.catalog.store_hook import store_put_manifest_direct as _store_put_man
 # GH #1370 Defect 4b: shared with MCP store_put — see store_hook.py's
 # docstring for why real metadatas (not None) must reach fire_store_chains.
 from nexus.catalog.store_hook import single_chunk_manifest_metadata as _single_chunk_manifest_metadata  # noqa: E402
+# nexus-xzyr3 fold-in: fail fast on an over-quota document before any
+# catalog work — see store_hook.raise_if_oversized's docstring.
+from nexus.catalog.store_hook import raise_if_oversized as _raise_if_oversized  # noqa: E402
 
 
 @store.command("list")

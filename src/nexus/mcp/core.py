@@ -3733,7 +3733,14 @@ def store_put(
     """Store content in the T3 permanent knowledge store.
 
     Args:
-        content: Text content to store
+        content: Text content to store. This tool is single-chunk by
+            construction (no multi-chunk write path exists), so content is
+            capped at ``QUOTAS.MAX_DOCUMENT_BYTES`` (16,384 UTF-8 bytes,
+            roughly 3,000-4,000 words) — an over-quota call raises
+            ``PutOversizedError`` before any write. If a note runs over
+            that, split it into titled parts and call store_put once per
+            part with the same tags (e.g. title "my-note (1/2)",
+            "my-note (2/2)") rather than one oversized call.
         collection: Collection name or prefix (default: knowledge)
         title: Document title (recommended for deduplication). A non-empty
             title makes catalog identity stable: re-putting the same
@@ -3815,11 +3822,16 @@ def store_put(
         # fire_batch below needs real metadatas regardless of catalog_doc_id.
         from nexus.catalog.store_hook import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
             catalog_store_hook_tracked,
+            raise_if_oversized,
             rollback_minted_catalog_entry,
             single_chunk_manifest_metadata,
             store_put_manifest_direct,
         )
         chunk_chroma_id, manifest_metadatas = single_chunk_manifest_metadata(content)
+        # nexus-xzyr3 fold-in: refuse an over-quota document BEFORE minting
+        # a catalog row for it — put() already refuses it too, but only
+        # after paying for a wasted mint + rollback round trip.
+        raise_if_oversized(content, doc_id=chunk_chroma_id, collection=col_name)
         catalog_doc_id = ""
         catalog_row_minted = False
         try:

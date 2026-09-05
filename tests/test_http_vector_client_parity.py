@@ -583,6 +583,80 @@ class TestPutBehavior:
         assert isinstance(doc_id, str) and len(doc_id) == 64
         assert len(calls) == 1
 
+    def test_put_exactly_at_cap_succeeds(self, monkeypatch):
+        """critique-nexus-xzyr3-26edb6662 [24589]: exact-boundary case.
+        Content of EXACTLY QUOTAS.MAX_DOCUMENT_BYTES bytes is the allowed
+        edge (the check is strict '>', matching T3Database._write_batch's
+        own '<=' valid predicate) and must NOT raise."""
+        from nexus.db.limits import QUOTAS
+
+        client = HttpVectorClient()
+        calls: list = []
+        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
+
+        at_cap = "x" * QUOTAS.MAX_DOCUMENT_BYTES
+        assert len(at_cap.encode()) == QUOTAS.MAX_DOCUMENT_BYTES
+
+        doc_id = client.put(
+            collection="knowledge__nexus__minilm-l6-v2-384__v1",
+            content=at_cap,
+            title="exactly-at-cap.md",
+        )
+        assert isinstance(doc_id, str) and len(doc_id) == 64
+        assert len(calls) == 1, "content at exactly the cap must still write"
+
+    def test_put_one_byte_over_cap_refused(self, monkeypatch):
+        """critique-nexus-xzyr3-26edb6662 [24589]: the other half of the
+        exact-boundary pair — cap+1 is the first refused value."""
+        from nexus.db.limits import QUOTAS
+        from nexus.errors import PutOversizedError
+
+        client = HttpVectorClient()
+        calls: list = []
+        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
+
+        one_over = "x" * (QUOTAS.MAX_DOCUMENT_BYTES + 1)
+        with pytest.raises(PutOversizedError) as exc_info:
+            client.put(
+                collection="knowledge__nexus__minilm-l6-v2-384__v1",
+                content=one_over,
+                title="one-byte-over.md",
+            )
+        assert exc_info.value.doc_bytes == QUOTAS.MAX_DOCUMENT_BYTES + 1
+        assert calls == []
+
+    def test_put_measures_utf8_bytes_not_characters(self, monkeypatch):
+        """critique-nexus-xzyr3-26edb6662 [24589]: 'UTF-8 measured' —
+        construct content whose CHARACTER count is under the cap but whose
+        UTF-8 BYTE count is over it (multi-byte characters), proving the
+        check measures encoded bytes, matching T3Database._doc_bytes'
+        ``len(d.encode())`` exactly, not ``len(d)``."""
+        from nexus.db.limits import QUOTAS
+        from nexus.errors import PutOversizedError
+
+        client = HttpVectorClient()
+        calls: list = []
+        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
+
+        # "é" (e-acute) is 1 char / 2 UTF-8 bytes. Half the cap in
+        # character count still exceeds the cap in byte count.
+        multibyte = "é" * (QUOTAS.MAX_DOCUMENT_BYTES // 2 + 10)
+        assert len(multibyte) < QUOTAS.MAX_DOCUMENT_BYTES, (
+            "fixture must be under the cap in CHARACTER count"
+        )
+        assert len(multibyte.encode()) > QUOTAS.MAX_DOCUMENT_BYTES, (
+            "fixture must be over the cap in UTF-8 BYTE count"
+        )
+
+        with pytest.raises(PutOversizedError) as exc_info:
+            client.put(
+                collection="knowledge__nexus__minilm-l6-v2-384__v1",
+                content=multibyte,
+                title="multibyte.md",
+            )
+        assert exc_info.value.doc_bytes == len(multibyte.encode())
+        assert calls == []
+
     def test_put_accepts_all_t3_kwargs_without_typeerror(self, monkeypatch):
         """All T3Database.put() parameters must be accepted without TypeError."""
         client = HttpVectorClient()
@@ -748,6 +822,114 @@ class TestUpsertChunksWithEmbeddingsKwarg:
             [[0.1]],
         )
         assert calls[0]["collection"] == "code__nexus__minilm-l6-v2-384__v1"
+
+
+class TestUpsertChunksOversizedDropAndWarn:
+    """nexus-xzyr3 follow-up (code-review-nexus-xzyr3-26edb6662 [24586]):
+    upsert_chunks / upsert_chunks_with_embeddings — the path every indexer
+    (code/prose/PDF/DT) writes through — had NO per-document byte-length
+    enforcement at all, not even T3Database._write_batch's non-raising
+    drop-and-warn. Parity twin of test_t3.py's
+    test_write_batch_indexer_path_still_drops_oversized: the pipeline must
+    keep running on one oversized chunk, never raise, exactly like the
+    indexer contract T3Database already documents.
+    """
+
+    @staticmethod
+    def _fake_post_ack_matching(calls: list) -> Any:
+        def fake(path: str, body: dict, *, tenant: str = "default", timeout: int = 120):
+            calls.append(body)
+            return {"upserted": len(body.get("ids", []))}
+        return fake
+
+    def test_upsert_chunks_drops_oversized_document_never_raises(self, monkeypatch):
+        from nexus.db.limits import QUOTAS
+
+        client = HttpVectorClient()
+        calls: list = []
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post", self._fake_post_ack_matching(calls)
+        )
+
+        oversized = "x" * (QUOTAS.MAX_DOCUMENT_BYTES + 1)
+        good = "y" * 32
+
+        # Must not raise.
+        client.upsert_chunks(
+            "knowledge__nexus__minilm-l6-v2-384__v1",
+            ids=["a", "b"],
+            documents=[oversized, good],
+            metadatas=[{"title": "a"}, {"title": "b"}],
+        )
+
+        assert len(calls) == 1, f"expected exactly one HTTP call; got {calls}"
+        assert calls[0]["ids"] == ["b"], (
+            f"only the under-cap document must be sent; got ids={calls[0]['ids']}"
+        )
+        assert calls[0]["documents"] == [good]
+
+    def test_upsert_chunks_with_embeddings_drops_oversized_document(self, monkeypatch):
+        """upsert_chunks_with_embeddings is a thin forward to upsert_chunks
+        (it discards its own embeddings and delegates); this pins that the
+        drop-and-warn protection is inherited, not bypassed."""
+        from nexus.db.limits import QUOTAS
+
+        client = HttpVectorClient()
+        calls: list = []
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post", self._fake_post_ack_matching(calls)
+        )
+
+        oversized = "x" * (QUOTAS.MAX_DOCUMENT_BYTES + 1)
+        good = "y" * 32
+
+        client.upsert_chunks_with_embeddings(
+            collection_name="knowledge__nexus__minilm-l6-v2-384__v1",
+            ids=["a", "b"],
+            documents=[oversized, good],
+            embeddings=[[0.1], [0.2]],
+            metadatas=[{"title": "a"}, {"title": "b"}],
+        )
+
+        assert len(calls) == 1
+        assert calls[0]["ids"] == ["b"]
+
+    def test_upsert_chunks_all_oversized_sends_nothing(self, monkeypatch):
+        """Every document dropped -> no HTTP call at all (mirrors
+        T3Database._write_batch's ``if not valid: return``)."""
+        from nexus.db.limits import QUOTAS
+
+        client = HttpVectorClient()
+        calls: list = []
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post", self._fake_post_ack_matching(calls)
+        )
+
+        oversized = "x" * (QUOTAS.MAX_DOCUMENT_BYTES + 1)
+        client.upsert_chunks(
+            "knowledge__nexus__minilm-l6-v2-384__v1",
+            ids=["a"],
+            documents=[oversized],
+            metadatas=[{"title": "a"}],
+        )
+        assert calls == []
+
+    def test_upsert_chunks_under_cap_unaffected(self, monkeypatch):
+        """Regression guard: ordinary batches are not touched by the new check."""
+        client = HttpVectorClient()
+        calls: list = []
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post", self._fake_post_ack_matching(calls)
+        )
+
+        client.upsert_chunks(
+            "knowledge__nexus__minilm-l6-v2-384__v1",
+            ids=["a", "b"],
+            documents=["small one", "small two"],
+            metadatas=[{"title": "a"}, {"title": "b"}],
+        )
+        assert len(calls) == 1
+        assert calls[0]["ids"] == ["a", "b"]
 
 
 # ── Behavior: search collection_names kwarg ───────────────────────────────────

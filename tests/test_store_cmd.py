@@ -158,6 +158,62 @@ def test_store_put_invalid_ttl_shows_error(runner, mock_store, tmp_path):
     assert "5z" in result.output
 
 
+# ── nx store put oversized content (nexus-xzyr3 fold-in) ────────────────────
+#
+# code-review-nexus-xzyr3-26edb6662 [24586] Significant finding: before
+# this fold-in, PutOversizedError had no ClickException translation on
+# this CLI path — an oversized file surfaced a raw Python traceback
+# instead of a clean, actionable message. critique-nexus-xzyr3-26edb6662
+# [24589]: the catalog row was also minted BEFORE the byte check fired,
+# paying for a wasted mint + rollback on every refusal.
+
+
+def test_store_put_oversized_content_shows_clean_error(runner, mock_store, tmp_path):
+    from nexus.db.limits import QUOTAS
+
+    src = tmp_path / "big.md"
+    src.write_text("x" * (QUOTAS.MAX_DOCUMENT_BYTES + 1))
+    result = runner.invoke(main, ["store", "put", str(src), "--title", "big.md"])
+
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output, (
+        f"must be a clean click.ClickException, not a raw traceback: {result.output}"
+    )
+    assert str(QUOTAS.MAX_DOCUMENT_BYTES) in result.output
+    assert "put()" in result.output
+    # db.put() must never even be reached — the pre-check refuses first.
+    mock_store.put.assert_not_called()
+
+
+def test_store_put_oversized_content_never_mints_catalog_row(runner, mock_store, tmp_path, monkeypatch):
+    """The refusal must fire BEFORE catalog_store_hook_tracked -- no
+    wasted mint + rollback round trip for an oversized attempt."""
+    from nexus.db.limits import QUOTAS
+
+    mint_calls: list = []
+    import nexus.catalog.store_hook as store_hook_module
+
+    def _spy(*args, **kwargs):
+        mint_calls.append((args, kwargs))
+        return ("", False)
+
+    monkeypatch.setattr(store_hook_module, "catalog_store_hook_tracked", _spy)
+    # commands/store.py imported the symbol under a private alias at
+    # module load time, so the module-level patch above alone would miss
+    # it -- patch the alias too.
+    monkeypatch.setattr("nexus.commands.store._catalog_store_hook_tracked", _spy)
+
+    src = tmp_path / "big.md"
+    src.write_text("x" * (QUOTAS.MAX_DOCUMENT_BYTES + 1))
+    result = runner.invoke(main, ["store", "put", str(src), "--title", "big.md"])
+
+    assert result.exit_code != 0
+    assert mint_calls == [], (
+        f"catalog_store_hook_tracked must not be called for an oversized "
+        f"put; got {mint_calls}"
+    )
+
+
 # ── nx store put in-loop heartbeat, always on (nexus-s71lr pass 3) ──────────
 #
 # Deliverable 3 names `nx store put` literally: a single document is still

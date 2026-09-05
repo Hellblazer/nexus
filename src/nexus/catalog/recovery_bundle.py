@@ -392,6 +392,7 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
     sibling modules with heavy import graphs."""
     from nexus.catalog.store_hook import (  # noqa: PLC0415 — deferred, sibling with heavy import graph
         catalog_store_hook_tracked,
+        raise_if_oversized,
         single_chunk_manifest_metadata,
         store_put_manifest_direct,
     )
@@ -400,6 +401,13 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
     col_name = target_collection_for(rec["collection"], t3)
     content = rec["content"]
     chunk_id, manifest_metadatas = single_chunk_manifest_metadata(content)
+    # nexus-xzyr3 fold-in: refuse an over-quota record BEFORE minting a
+    # catalog row for it — see store_hook.raise_if_oversized's docstring.
+    # A recovery-bundle restore that hits this fails loud on the offending
+    # record rather than leaving a ghost catalog row; the bundle format has
+    # no per-record catch-and-continue today, so this propagates like any
+    # other _default_import_doc failure.
+    raise_if_oversized(content, doc_id=chunk_id, collection=col_name)
     catalog_doc_id, minted = catalog_store_hook_tracked(
         title=rec["title"], doc_id=chunk_id, collection_name=col_name,
     )

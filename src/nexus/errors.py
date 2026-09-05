@@ -267,20 +267,23 @@ class UnchunkableContentError(NexusError):
 
 class PutOversizedError(NexusError):
     """A ``put``-path write was refused because the document exceeds the
-    ChromaDB Cloud per-document byte cap.
+    T3 per-document byte quota (``QUOTAS.MAX_DOCUMENT_BYTES``, the
+    PG-era write-side write discipline documented in
+    ``src/nexus/db/limits.py`` — ChromaDB provenance historical only
+    since RDR-155's Chroma retirement).
 
     The indexer pipeline tolerates oversized inputs via defense-in-depth
     drop-and-warn (a chunker that produced an oversized record is the
     real bug; the pipeline keeps running). The ``put`` path has no
     chunker upstream, so dropping silently would leave the caller
     believing the write succeeded while producing a catalog ghost
-    (no row in ChromaDB despite a registered ``doc_id``). See
-    GitHub #244 and bead ``nexus-akof``.
+    (no row in T3 despite a registered ``doc_id``). See GitHub #244 and
+    bead ``nexus-akof``.
 
     Attributes:
-        doc_id: The computed doc_id that did not make it to ChromaDB.
+        doc_id: The computed doc_id that did not make it to T3.
         doc_bytes: Actual size of the serialized document in bytes.
-        max_bytes: The ChromaDB Cloud cap (``QUOTAS.MAX_DOCUMENT_BYTES``).
+        max_bytes: The T3 write-side quota (``QUOTAS.MAX_DOCUMENT_BYTES``).
         collection: Target collection name for clearer diagnostics.
     """
 
@@ -298,8 +301,11 @@ class PutOversizedError(NexusError):
         self.collection = collection
         super().__init__(
             f"document {doc_id!r} is {doc_bytes} bytes, exceeds "
-            f"{max_bytes}-byte ChromaDB cap for collection {collection!r}. "
-            f"Shrink the content or chunk it before calling put()."
+            f"the {max_bytes}-byte T3 document quota for collection "
+            f"{collection!r}. put() is single-chunk by construction — "
+            f"there is no multi-chunk write tool. Split the content into "
+            f"titled parts and store each with its own put() call under "
+            f"the same tags (e.g. \"my-note (1/2)\", \"my-note (2/2)\")."
         )
 
 
