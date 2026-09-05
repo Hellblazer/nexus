@@ -7,6 +7,14 @@ per-rule fire / allow / deny / escape counts. Surfaced to the user
 by the ``nx hook routing-stats`` CLI subcommand. Used at the 30-day
 soak review (mzvwa.7) to decide whether matchers need refinement,
 downgrade to warn, or have shipped without ever firing.
+
+WRITER SWAP (nexus-gjv9b PART 2, Sam directive 2026-08-20):
+``log_routing_event`` records to the engine's ``routing_events`` table
+now, not the JSONL log this module's ``aggregate``/``escape_events``
+still read. :func:`aggregate_from_store`/:func:`escape_events_from_store`
+are the store-backed twins (``nx hook routing-stats --from-store``) — the
+JSONL-reading functions are UNCHANGED and stay useful for the historical
+log and any pre-swap install, deferred to this bead's PART 3 for removal.
 """
 from __future__ import annotations
 
@@ -173,21 +181,17 @@ def _is_selftest_record(rule: str, outcome: str, record: dict[str, Any]) -> bool
     )
 
 
-def aggregate_detailed(
-    path: pathlib.Path | None = None,
+def _aggregate_from_records(
+    records: Iterable[dict[str, Any]],
 ) -> tuple[dict[str, RuleStats], int]:
-    """Aggregate the routing log; returns ``(per-rule stats, excluded)``.
-
-    ``excluded`` counts fail-ladder self-test records dropped from the
-    stats (see :func:`_is_selftest_record`) so the CLI can footnote the
-    exclusion instead of silently reporting phantom rules. Returns an
-    empty dict when the log is absent or unreadable; never raises.
-    Records missing ``rule`` or ``outcome`` are dropped uncounted.
+    """Shared roll-up for :func:`aggregate_detailed` (JSONL) and
+    :func:`aggregate_from_store` (nexus-gjv9b PART 2 engine table) — one
+    place to fix a bug in the self-test exclusion / bucketing logic
+    rather than two.
     """
-    log_path = path if path is not None else default_log_path()
     stats: dict[str, RuleStats] = {}
     excluded = 0
-    for record in _iter_records(log_path):
+    for record in records:
         rule = record.get("rule")
         outcome = record.get("outcome")
         if not isinstance(rule, str) or not isinstance(outcome, str):
@@ -200,9 +204,47 @@ def aggregate_detailed(
     return stats, excluded
 
 
+def aggregate_detailed(
+    path: pathlib.Path | None = None,
+) -> tuple[dict[str, RuleStats], int]:
+    """Aggregate the routing log; returns ``(per-rule stats, excluded)``.
+
+    ``excluded`` counts fail-ladder self-test records dropped from the
+    stats (see :func:`_is_selftest_record`) so the CLI can footnote the
+    exclusion instead of silently reporting phantom rules. Returns an
+    empty dict when the log is absent or unreadable; never raises.
+    Records missing ``rule`` or ``outcome`` are dropped uncounted.
+    """
+    log_path = path if path is not None else default_log_path()
+    return _aggregate_from_records(_iter_records(log_path))
+
+
 def aggregate(path: pathlib.Path | None = None) -> dict[str, RuleStats]:
     """Aggregate the routing log into per-rule stats (self-test rows excluded)."""
     return aggregate_detailed(path)[0]
+
+
+def aggregate_from_store(
+    since: str | None = None, *, limit: int = 1000,
+) -> tuple[dict[str, RuleStats], int]:
+    """Aggregate the ``routing_events`` engine table (nexus-gjv9b PART 2,
+    S11 doctrine: the read half of the writer swap in
+    ``conexus/hooks/scripts/routing/_lib.py``). Same
+    ``(per-rule stats, excluded)`` contract as :func:`aggregate_detailed`
+    for a successful read; a read failure (service down, old engine)
+    RAISES here rather than degrading silently to an empty result — the
+    caller (``nx hook routing-stats --from-store``) is expected to catch
+    it and report the honest reason, the same discipline
+    ``nx census capability --from-store`` uses.
+    """
+    from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred; only needed here
+
+    store = HttpTelemetryStore()
+    try:
+        rows = store.list_routing_events(since=since, limit=limit)
+    finally:
+        store.close()
+    return _aggregate_from_records(rows)
 
 
 def registered_rules(hooks_json: pathlib.Path | None = None) -> set[str] | None:
@@ -277,6 +319,35 @@ def escape_events(path: pathlib.Path | None = None) -> list[dict[str, Any]]:
     log_path = path if path is not None else default_log_path()
     out: list[dict[str, Any]] = []
     for record in _iter_records(log_path):
+        if record.get("outcome") != "escape":
+            continue
+        rule = record.get("rule")
+        if not isinstance(rule, str):
+            continue
+        out.append({
+            "ts": record.get("ts", ""),
+            "rule": rule,
+            "reason": record.get("escape_reason", "") or "",
+        })
+    return out
+
+
+def escape_events_from_store(
+    since: str | None = None, *, limit: int = 1000,
+) -> list[dict[str, Any]]:
+    """Escape events from the ``routing_events`` engine table (nexus-
+    gjv9b PART 2), same shape as :func:`escape_events`. A read failure
+    RAISES — same contract as :func:`aggregate_from_store`.
+    """
+    from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred; only needed here
+
+    store = HttpTelemetryStore()
+    try:
+        rows = store.list_routing_events(since=since, limit=limit)
+    finally:
+        store.close()
+    out: list[dict[str, Any]] = []
+    for record in rows:
         if record.get("outcome") != "escape":
             continue
         rule = record.get("rule")

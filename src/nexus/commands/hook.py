@@ -212,7 +212,26 @@ def session_end_detach_cmd() -> None:
     help="List the escape events with their # routing-allow: reasons "
     "instead of aggregate stats (the audit surface for escape over-use).",
 )
-def routing_stats_cmd(log_path: str | None, as_json: bool, show_escapes: bool) -> None:
+@click.option(
+    "--from-store",
+    is_flag=True,
+    default=False,
+    help="Read the durable routing_events engine table (written by every "
+    "routing hook now, nexus-gjv9b PART 2) instead of the JSONL log. "
+    "--log-path is ignored.",
+)
+@click.option(
+    "--since",
+    default=None,
+    help="With --from-store: only events at or after this ISO date/datetime.",
+)
+def routing_stats_cmd(
+    log_path: str | None,
+    as_json: bool,
+    show_escapes: bool,
+    from_store: bool,
+    since: str | None,
+) -> None:
     """Aggregate the routing-hook log into per-rule fire / deny / escape stats.
 
     RDR-121 Phase 3. Reads JSONL records produced by the routing hook
@@ -220,35 +239,54 @@ def routing_stats_cmd(log_path: str | None, as_json: bool, show_escapes: bool) -
     reports per-rule outcomes. Used at the 30-day soak review to spot
     false positives (high escape rate), inert matchers (zero fires), or
     overly broad blocks (high block rate).
+
+    ``--from-store`` (nexus-gjv9b PART 2) reads the ``routing_events``
+    engine table that writer swap targets now, instead of the JSONL log
+    this command otherwise reads.
     """
     import pathlib as _pathlib  # noqa: PLC0415 — stdlib pathlib deferred to subcommand scope
 
     from nexus.routing_stats import (  # noqa: PLC0415 — deferred import; routing_stats only needed in this subcommand
         aggregate_detailed,
+        aggregate_from_store,
         default_log_path,
         escape_events,
+        escape_events_from_store,
         registered_rules,
         stats_to_json,
     )
 
     path = _pathlib.Path(log_path) if log_path else default_log_path()
+    source_label = str(path)
+
+    if from_store:
+        source_label = "routing_events (engine table)"
+        try:
+            if show_escapes:
+                events = escape_events_from_store(since=since)
+            else:
+                stats, selftest_excluded = aggregate_from_store(since=since)
+        except Exception as exc:  # noqa: BLE001 — boundary catch; degrade to an honest, non-zero-exit message
+            click.echo(f"UNAVAILABLE: routing_events read failed: {exc}")
+            raise SystemExit(1) from exc
+    elif show_escapes:
+        events = escape_events(path)
+    else:
+        stats, selftest_excluded = aggregate_detailed(path)
 
     if show_escapes:
-        events = escape_events(path)
         if as_json:
             click.echo(json.dumps(events, indent=2))
             return
         if not events:
-            click.echo(f"No escape events recorded at {path}.")
+            click.echo(f"No escape events recorded at {source_label}.")
             return
         for ev in events:
             reason = ev["reason"] or "(reason not captured — pre-mzvwa.9 event)"
             click.echo(f"{ev['ts']}  {ev['rule']}: {reason}")
         click.echo()
-        click.echo(f"{len(events)} escape event(s). Source: {path}")
+        click.echo(f"{len(events)} escape event(s). Source: {source_label}")
         return
-
-    stats, selftest_excluded = aggregate_detailed(path)
 
     if as_json:
         payload = {
@@ -262,7 +300,7 @@ def routing_stats_cmd(log_path: str | None, as_json: bool, show_escapes: bool) -
         return
 
     if not stats:
-        click.echo(f"No routing-hook events recorded at {path}.")
+        click.echo(f"No routing-hook events recorded at {source_label}.")
         return
 
     # nexus-mzvwa.9: the log is append-only history — rules whose hooks.json
@@ -292,4 +330,4 @@ def routing_stats_cmd(log_path: str | None, as_json: bool, show_escapes: bool) -
         )
     if active is None:
         click.echo("Note: no hooks.json found — registration cross-check skipped.")
-    click.echo(f"Source: {path}")
+    click.echo(f"Source: {source_label}")

@@ -35,6 +35,15 @@ rule entry to decide.
 Escape token: a command may include ``# routing-allow: <reason>``
 (reason >= 8 characters) to bypass any routing hook. The token is
 audited in the telemetry log so over-use is visible.
+
+WRITER SWAP (nexus-gjv9b PART 2, Sam directive 2026-08-20):
+``log_routing_event`` records to the engine's ``routing_events`` table
+now (best-effort POST via ``urllib``, ~250ms timeout), not the JSONL
+log below -- see that function's own docstring for the full design
+decision (metered drop on service-down, never a JSONL fallback). The
+JSONL machinery (``_log_path``, ``_rotate_log_if_oversized``) stays in
+place with no caller from this module any more, deferred to this
+bead's PART 3 (protects any install still running pre-swap code).
 """
 from __future__ import annotations
 
@@ -438,6 +447,107 @@ def _rotate_log_if_oversized(log_path: pathlib.Path) -> None:
         lock_file_obj.close()
 
 
+def _engine_endpoint() -> "tuple[str, str] | tuple[None, None]":
+    """``(base_url, token)`` from ``NX_SERVICE_HOST``/``PORT``/``TOKEN``
+    ONLY, or ``(None, None)``.
+
+    DELIBERATE SIMPLIFICATION (nexus-gjv9b PART 2): a real
+    ``resolve_service_endpoint`` also reads the ServiceRegistry lease
+    file when the env halves are absent, but that resolution is
+    non-trivial file-lock/scope-key machinery this standalone,
+    no-``nexus``-import script (RDR-121 § Contract) has no business
+    vendoring for a fire-and-forget telemetry POST. When the env halves
+    are absent, this returns ``(None, None)`` and the caller goes
+    straight to the metered drop with NO network attempt at all -- which
+    is also the CHEAP, common case for a plain interactive session that
+    never exported these. A future bead that wants lease-file discovery
+    here is free to add it; it is not required for this one.
+    """
+    port_str = os.environ.get("NX_SERVICE_PORT", "").strip()
+    token = os.environ.get("NX_SERVICE_TOKEN", "").strip()
+    if not port_str or not token:
+        return None, None
+    try:
+        port = int(port_str)
+    except ValueError:
+        return None, None
+    host = os.environ.get("NX_SERVICE_HOST", "").strip() or "127.0.0.1"
+    return f"http://{host}:{port}", token
+
+
+#: Mirrors ``nexus.db.t2.http_telemetry_store.DEFAULT_TENANT`` verbatim --
+#: hardcoded, not imported, because this script has no ``nexus`` import.
+_DEFAULT_TENANT = "default"
+
+
+def _post_routing_event_http(record: dict, *, timeout: float = 0.25) -> bool:
+    """Best-effort ``POST /v1/telemetry/routing_events/record`` via
+    ``urllib`` (no ``httpx``/``requests`` dependency — this script runs
+    under the system interpreter, RDR-121 § Contract). Returns ``True``
+    on a 2xx response, ``False`` on ANY failure (unresolvable endpoint,
+    connect/read timeout, non-2xx, malformed response) — never raises.
+    """
+    base_url, token = _engine_endpoint()
+    if base_url is None:
+        return False
+    try:
+        import urllib.request  # noqa: PLC0415 — stdlib, only needed on this path
+
+        body = json.dumps(record).encode("utf-8")
+        req = urllib.request.Request(
+            base_url + "/v1/telemetry/routing_events/record",
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Nexus-Tenant": _DEFAULT_TENANT,
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — fixed internal engine URL, not user input
+            return 200 <= resp.status < 300
+    except Exception:
+        return False
+
+
+def _record_dropped_routing_event(error: str) -> None:
+    """Metered-drop fallback (nexus-gjv9b PART 2 design decision): a
+    routing event that could not reach the engine is counted, not
+    silently discarded and not appended to ``routing_log.jsonl`` either
+    (that JSONL machinery stays in place for PART 3's deferred deletion
+    only -- see this module's docstring). Hand-replicates
+    ``nexus.dropped_writes.record_drop``'s exact on-disk record shape
+    (never imported -- no ``nexus`` dependency here) so ``nx doctor``'s
+    existing drop-meter aggregation picks these up with no changes of
+    its own.
+    """
+    try:
+        override = os.environ.get("NX_DROPPED_WRITES_LOG_PATH", "").strip()
+        if override:
+            path = pathlib.Path(override)
+        else:
+            cfg_override = os.environ.get("NEXUS_CONFIG_DIR", "").strip()
+            base = pathlib.Path(cfg_override) if cfg_override else pathlib.Path.home() / ".config" / "nexus"
+            path = base / "dropped_writes.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "hook": "routing_events",
+            "collection": "",
+            "rows": 1,
+            "error": str(error)[:200],
+        }
+        line = json.dumps(record, separators=(",", ":")) + "\n"
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        try:
+            os.write(fd, line.encode("utf-8"))
+        finally:
+            os.close(fd)
+    except Exception:
+        # The meter is itself best-effort; must never raise.
+        pass
+
+
 def log_routing_event(
     rule: str,
     outcome: str,
@@ -445,34 +555,46 @@ def log_routing_event(
     tool_name: str = "",
     command_fragment: str = "",
     escape_reason: str = "",
+    session_id: str = "",
 ) -> None:
-    """Append one JSON line to the routing log. Never raises."""
+    """Record one routing-hook event (nexus-gjv9b PART 2 writer swap: the
+    engine's ``routing_events`` table, replacing the JSONL append below).
+    Never raises; the hook's own exit code NEVER depends on this call.
+
+    Best-effort, fire-and-forget: POSTs to the engine with a SHORT
+    (~250ms) timeout via :func:`_post_routing_event_http`; on ANY
+    failure (unresolvable endpoint -- the common case when
+    ``NX_SERVICE_HOST``/``PORT``/``TOKEN`` are not exported --,
+    timeout, non-2xx), degrades to :func:`_record_dropped_routing_event`
+    rather than a JSONL fallback (same design decision as
+    ``nexus._session_end_census.write_session_capability_census`` for
+    PART 1 — the routing hooks' own timeout budget has no room for a
+    filesystem retry story either). The JSONL append machinery below
+    (:func:`_log_path`, :func:`_rotate_log_if_oversized`) is UNCHANGED
+    and has no caller from this function any more -- kept in place per
+    this bead's PART 3, deferred until the plugin pin advances (a
+    pre-swap install is a legacy JSONL writer this machinery still
+    protects in the interim).
+    """
     try:
-        path = _log_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            _rotate_log_if_oversized(path)
-        except Exception:
-            # Rotation is best-effort; the append below must still happen
-            # even if rotation itself hit an unexpected error (e.g. a
-            # permission error on the rename).
-            pass
-        record = {
+        record: dict = {
             "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
             "rule": rule,
             "outcome": outcome,
         }
+        if session_id:
+            record["session_id"] = session_id
         if tool_name:
             record["tool_name"] = tool_name
         if command_fragment:
-            # Cap fragment length so the log stays small.
+            # Cap fragment length so the wire payload stays small.
             record["command_fragment"] = command_fragment[:200]
         if escape_reason:
             # Dedicated field (nexus-mzvwa.9): the reason trails the command,
             # so the fragment cap above routinely truncated it away.
             record["escape_reason"] = escape_reason[:300]
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record) + "\n")
+        if not _post_routing_event_http(record):
+            _record_dropped_routing_event("routing_events POST failed or endpoint unresolvable")
     except Exception:
         # Telemetry must never crash a hook. Swallow.
         pass
@@ -516,6 +638,7 @@ def run_hook(
                 rule=rule_name or "unknown",
                 outcome="deny_fail_closed",
                 tool_name=payload.get("tool_name", "") or "",
+                session_id=payload.get("session_id", "") or "",
             )
             deny(f"cannot verify, fail-closed: {exc}")
         else:
@@ -523,6 +646,7 @@ def run_hook(
                 rule=rule_name or "unknown",
                 outcome="allow_fail_open",
                 tool_name=payload.get("tool_name", "") or "",
+                session_id=payload.get("session_id", "") or "",
             )
             allow()
 

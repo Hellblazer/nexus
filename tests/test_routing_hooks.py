@@ -257,28 +257,115 @@ def test_log_path_fallback_resolves_home_at_call_time_not_import_time(tmp_path, 
     assert resolved == new_home / ".config" / "nexus" / "routing_log.jsonl"
 
 
-def test_log_routing_event_appends_jsonl(tmp_path, monkeypatch):
+# ---------------------------------------------------------------------------
+# log_routing_event writer swap (nexus-gjv9b PART 2): best-effort HTTP POST
+# to the engine's routing_events table, metered-drop fallback -- never a
+# JSONL append any more (that machinery stays in place, unused from this
+# function, for PART 3's deferred deletion; see the rotation tests below).
+# ---------------------------------------------------------------------------
+
+
+def _drop_records(path: pathlib.Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
+
+
+def test_log_routing_event_no_engine_env_drops_to_meter(tmp_path, monkeypatch):
+    """The common case: NX_SERVICE_HOST/PORT/TOKEN unset -- no network
+    attempt at all, straight to the metered drop, and the JSONL log is
+    never touched."""
     log_path = tmp_path / "routing_log.jsonl"
+    drop_path = tmp_path / "dropped_writes.jsonl"
     monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(log_path))
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
+    monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
+    monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
     lib = _load_lib()
+
     lib.log_routing_event(rule="rule_a", outcome="allow")
-    lib.log_routing_event(rule="rule_b", outcome="deny", tool_name="Bash")
-    lines = log_path.read_text().splitlines()
-    assert len(lines) == 2
-    first = json.loads(lines[0])
-    assert first["rule"] == "rule_a"
-    assert first["outcome"] == "allow"
-    assert "ts" in first
-    second = json.loads(lines[1])
-    assert second["rule"] == "rule_b"
-    assert second["outcome"] == "deny"
-    assert second["tool_name"] == "Bash"
+
+    assert not log_path.exists(), "log_routing_event must never fall back to the JSONL log"
+    drops = _drop_records(drop_path)
+    assert len(drops) == 1
+    assert drops[0]["hook"] == "routing_events"
+    assert drops[0]["rows"] == 1
+
+
+def test_log_routing_event_http_success_no_drop(tmp_path, monkeypatch):
+    log_path = tmp_path / "routing_log.jsonl"
+    drop_path = tmp_path / "dropped_writes.jsonl"
+    monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(log_path))
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
+    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+    monkeypatch.setenv("NX_SERVICE_PORT", "9999")
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")
+    lib = _load_lib()
+
+    sent: list[dict] = []
+
+    class _FakeResponse:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def _fake_urlopen(req, timeout=None):  # noqa: ARG001
+        sent.append({
+            "url": req.full_url,
+            "body": json.loads(req.data.decode("utf-8")),
+            "headers": dict(req.header_items()),
+        })
+        return _FakeResponse()
+
+    # _lib._post_routing_event_http imports urllib.request lazily, inside
+    # the function body -- it fetches the same process-wide sys.modules
+    # entry patched here.
+    import urllib.request as _ur
+    monkeypatch.setattr(_ur, "urlopen", _fake_urlopen)
+
+    lib.log_routing_event(rule="rule_b", outcome="deny", tool_name="Bash", session_id="sess-1")
+
+    assert len(sent) == 1
+    assert sent[0]["url"] == "http://127.0.0.1:9999/v1/telemetry/routing_events/record"
+    assert sent[0]["body"]["rule"] == "rule_b"
+    assert sent[0]["body"]["outcome"] == "deny"
+    assert sent[0]["body"]["session_id"] == "sess-1"
+    assert sent[0]["headers"]["Authorization"] == "Bearer test-token"
+    assert not log_path.exists()
+    assert _drop_records(drop_path) == []
+
+
+def test_log_routing_event_http_failure_drops_to_meter(tmp_path, monkeypatch):
+    drop_path = tmp_path / "dropped_writes.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
+    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+    monkeypatch.setenv("NX_SERVICE_PORT", "9999")
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")
+    lib = _load_lib()
+
+    import urllib.request as _ur
+
+    def _boom(req, timeout=None):  # noqa: ARG001
+        raise TimeoutError("simulated: engine unreachable")
+
+    monkeypatch.setattr(_ur, "urlopen", _boom)
+
+    lib.log_routing_event(rule="rule_c", outcome="allow")  # must not raise
+
+    drops = _drop_records(drop_path)
+    assert len(drops) == 1
+    assert drops[0]["hook"] == "routing_events"
 
 
 def test_log_routing_event_swallows_errors(tmp_path, monkeypatch):
-    """Telemetry must never crash the hook. Unwritable path = silent no-op."""
-    unwritable = tmp_path / "does-not-exist" / "log.jsonl"
-    monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(unwritable))
+    """Telemetry must never crash the hook, even when the metered-drop
+    fallback's own log path is unwritable."""
+    unwritable = tmp_path / "does-not-exist" / "dropped.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(unwritable))
+    monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
+    monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
     lib = _load_lib()
     # If this raises, the test fails — log helper must be defensive.
     lib.log_routing_event(rule="x", outcome="allow")
@@ -354,50 +441,14 @@ def test_rotate_log_if_oversized_tolerates_concurrent_rotation_race(tmp_path, mo
     lib._rotate_log_if_oversized(log_path)  # must not raise
 
 
-def test_log_routing_event_rotates_before_append(tmp_path, monkeypatch):
-    """Integration: an oversize routing_log.jsonl rotates, and the new
-    event lands in the fresh (post-rotation) file."""
-    log_path = tmp_path / "routing_log.jsonl"
-    monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(log_path))
-    lib = _load_lib()
-    monkeypatch.setattr(lib, "_ROUTING_LOG_ROTATION_MAX_BYTES", 10)
-    log_path.write_text("x" * 100)
-
-    lib.log_routing_event(rule="rule_a", outcome="allow")
-
-    rotated = tmp_path / "routing_log.jsonl.1"
-    assert rotated.read_text() == "x" * 100
-    lines = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
-    assert len(lines) == 1
-    assert lines[0]["rule"] == "rule_a"
-
-
-def test_log_routing_event_rotation_failure_never_breaks_the_append(tmp_path, monkeypatch):
-    """A non-ENOENT rotation failure (e.g. a permission error on the
-    rename) must still let the append proceed."""
-    log_path = tmp_path / "routing_log.jsonl"
-    monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(log_path))
-    lib = _load_lib()
-    monkeypatch.setattr(lib, "_ROUTING_LOG_ROTATION_MAX_BYTES", 10)
-    # Trailing newline: real log content is always line-terminated (every
-    # log_routing_event write ends in "\n") -- this keeps the pre-existing
-    # oversize content and the new append parseable as separate JSONL
-    # lines even though rotation is simulated to fail.
-    log_path.write_text("x" * 100 + "\n")
-
-    def _boom(_src, _dst):
-        raise PermissionError("simulated rotation failure")
-
-    monkeypatch.setattr(lib.os, "replace", _boom)
-
-    lib.log_routing_event(rule="rule_b", outcome="allow")  # must not raise
-
-    assert log_path.exists()
-    # The pre-existing "x" * 100 filler line is deliberately not valid
-    # JSON (synthetic oversize content); only the newly appended LAST
-    # line is asserted on, since that is the actual write under test.
-    last_line = log_path.read_text().splitlines()[-1]
-    assert json.loads(last_line)["rule"] == "rule_b"
+# nexus-gjv9b PART 2 writer swap: the two integration tests formerly
+# here (rotation-before-append, rotation-failure-never-breaks-append)
+# exercised _rotate_log_if_oversized through log_routing_event -- a call
+# chain that no longer exists (see that function's own docstring:
+# rotation has no caller from this module any more, kept in place only
+# for PART 3's deferred deletion). _rotate_log_if_oversized itself is
+# still fully covered, directly, by the tests above and by the TOCTOU
+# suite below.
 
 
 # ---------------------------------------------------------------------------

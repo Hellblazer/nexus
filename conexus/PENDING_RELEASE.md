@@ -46,3 +46,16 @@ mechanize, it matters enough to ship.
   inside `expectations_expect`), now names itself on stderr; stdout is
   unchanged (still empty on every path — no risk to the dispatch). Until this
   ships, the installed hook stays fully silent on every skip.
+- `conexus/hooks/scripts/routing/_lib.py` (nexus-gjv9b PART 2): `log_routing_event`
+  now records to the engine's `routing_events` table (best-effort POST via
+  `urllib`, ~250ms timeout) instead of appending to `routing_log.jsonl`; a
+  write that cannot reach the engine (service down, or no
+  `NX_SERVICE_HOST`/`PORT`/`TOKEN` exported — the common interactive-session
+  case) is counted in `nx doctor`'s drop meter (`nexus.dropped_writes`,
+  `hook="routing_events"`), never appended to the JSONL log. Requires an
+  engine carrying the `routing_events` table + `POST /v1/telemetry/
+  routing_events/record` route (engine tag TBD, see
+  `docs/wire-contract-pending.md`'s nexus-gjv9b entries) — until both the
+  plugin cut and the engine tag ship, the installed hook keeps writing
+  `routing_log.jsonl` exactly as before, and `nx hook routing-stats`
+  without `--from-store` keeps reading it.

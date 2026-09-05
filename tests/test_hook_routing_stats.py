@@ -329,3 +329,101 @@ def test_cli_escapes_lists_reasons(tmp_path, monkeypatch):
     assert "reason not captured" in result.output
     assert "2 escape event(s)" in result.output
     assert "deny" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# --from-store (nexus-gjv9b PART 2): the store-backed twin of the JSONL
+# read path above, exercised against a fake store so these tests need no
+# live engine (the real HTTP round trip is covered by
+# CapabilityCensusAndRoutingEventsHandlerTest.java + test_http_t2_store_
+# parity.py, same division of labor as the census --from-store tests).
+# ---------------------------------------------------------------------------
+
+
+class _FakeRoutingEventsStore:
+    def __init__(self, rows: list[dict], *, raises: Exception | None = None) -> None:
+        self._rows = rows
+        self._raises = raises
+        self.closed = False
+
+    def list_routing_events(self, *, since, limit):
+        if self._raises is not None:
+            raise self._raises
+        return self._rows
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_cli_from_store_reports_per_rule(monkeypatch):
+    from nexus.cli import main
+
+    fake = _FakeRoutingEventsStore([
+        {"ts": "t1", "rule": "grep_for_symbols_redirects_to_serena", "outcome": "deny"},
+        {"ts": "t2", "rule": "grep_for_symbols_redirects_to_serena", "outcome": "escape"},
+    ])
+    monkeypatch.setattr(
+        "nexus.db.t2.http_telemetry_store.HttpTelemetryStore", lambda: fake,
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["hook", "routing-stats", "--from-store"])
+
+    assert result.exit_code == 0, result.output
+    assert "grep_for_symbols_redirects_to_serena" in result.output
+    assert "routing_events (engine table)" in result.output
+    assert fake.closed is True
+
+
+def test_cli_from_store_escapes(monkeypatch):
+    from nexus.cli import main
+
+    fake = _FakeRoutingEventsStore([
+        {"ts": "t1", "rule": "r1", "outcome": "escape", "escape_reason": "deliberate override"},
+    ])
+    monkeypatch.setattr(
+        "nexus.db.t2.http_telemetry_store.HttpTelemetryStore", lambda: fake,
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["hook", "routing-stats", "--from-store", "--escapes"])
+
+    assert result.exit_code == 0, result.output
+    assert "deliberate override" in result.output
+
+
+def test_cli_from_store_service_failure_exits_nonzero(monkeypatch):
+    from nexus.cli import main
+
+    monkeypatch.setattr(
+        "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+        lambda: _FakeRoutingEventsStore([], raises=RuntimeError("service down")),
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["hook", "routing-stats", "--from-store"])
+
+    assert result.exit_code != 0
+    assert "UNAVAILABLE" in result.output
+
+
+def test_aggregate_from_store_and_escape_events_from_store(monkeypatch):
+    import nexus.routing_stats as rs
+
+    fake = _FakeRoutingEventsStore([
+        {"ts": "t1", "rule": "rule_a", "outcome": "allow"},
+        {"ts": "t2", "rule": "rule_a", "outcome": "deny"},
+        {"ts": "t3", "rule": "rule_a", "outcome": "escape", "escape_reason": "why"},
+    ])
+    monkeypatch.setattr(
+        "nexus.db.t2.http_telemetry_store.HttpTelemetryStore", lambda: fake,
+    )
+
+    stats, excluded = rs.aggregate_from_store()
+    assert excluded == 0
+    assert stats["rule_a"].allow == 1
+    assert stats["rule_a"].deny == 1
+    assert stats["rule_a"].escape == 1
+
+    events = rs.escape_events_from_store()
+    assert events == [{"ts": "t3", "rule": "rule_a", "reason": "why"}]
