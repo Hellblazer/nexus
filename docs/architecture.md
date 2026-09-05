@@ -962,33 +962,65 @@ prompt: it states the target is presumed to be the operator's real, live
 store, that the write must be deliberate and reviewed, and that the
 reason must be named in the opt-in itself.
 
-pytest's own suite is exempt via the SAME mechanism every other caller
-uses, not a silent heuristic: `tests/conftest.py`'s autouse
-`_exempt_pytest_from_production_write_guard` fixture sets
-`NX_ALLOW_PROD_WRITE` to a real, reviewable reason ("every store this
-suite constructs targets a throwaway test substrate, never production")
-for every test, unconditionally — covering the engine-backed
+pytest's own suite is exempt via an IN-PROCESS override, never an env
+var: `tests/conftest.py`'s autouse `_exempt_pytest_from_production_write_guard`
+fixture calls `monkeypatch.setattr(service_endpoint,
+"_test_only_opt_in_reason", "<reason>")` — `service_endpoint._opt_in_reason()`
+checks this module attribute FIRST, before ever reading the real
+`NX_ALLOW_PROD_WRITE` env var. An earlier revision used
+`monkeypatch.setenv("NX_ALLOW_PROD_WRITE", ...)` instead, which DOES
+mutate the real process `os.environ` for the test's duration — any
+subprocess a test spawns via `env=os.environ.copy()` silently inherited
+the exemption regardless of whether that subprocess's OWN substrate was
+correctly pinned (`tests/hooks/test_pre_close_verification_hook.py
+::TestF5RemedyRoundTripReal` is exactly this shape: it spawns the real
+dev-checkout `nx` as a subprocess to perform a genuine T1 write). The
+in-process override cannot leak into a subprocess's environment at all,
+so a test spawning a real dev-checkout subprocess that needs the guard's
+actual accept path must now forward the REAL `NX_ALLOW_PROD_WRITE` env
+var into that subprocess explicitly, exactly like it already does for
+`NX_SESSION_ID` / `NX_T1_ALLOW_SHARED_FALLBACK`. Covers the engine-backed
 `t2_service_env` fixture, a fake local `HTTPServer`
 (`tests/db/test_refreshable_client.py`), and an explicitly pinned
 `base_url` alike, since all three would otherwise be refused. A test that
 wants to exercise the guard's OWN refusal logic
-(`tests/db/test_production_write_guard*.py`) `monkeypatch.delenv`s the
-var back out for its own duration.
+(`tests/db/test_production_write_guard*.py`) resets the override
+(`monkeypatch.setattr(..., None)`) for its own duration — the same
+"a later call on the same fixture instance wins" contract as
+`_isolate_config_dir`.
+
+Every ACCEPTED opt-in is logged at WARNING
+(`guard_production_write.opt_in_accepted`, naming the endpoint, the
+checkout root, and the reason) — "auditable after the fact" was
+previously just a docstring claim with nothing persisted past the
+process's own environment. Logged only when the guard actually ENGAGES
+(a dev-checkout process); an installed `nx` never pays for a log line
+the guard never needed to consult.
 
 Because many T2 domain stores (and the catalog client, and T1's
 `HttpScratchStore`) send a READ over POST when the query does not fit a
 GET query string (search/lookup bodies, batch resolves,
 `HttpCatalogClient.traverse`, `operator-query`, `plan_search`,
-`HttpScratchStore.search`/`list_entries`/`flagged_entries`), each
-bespoke/mixin `_post` carries a `mutates: bool = True` kwarg — the safe
-default, since most `_post` call sites really are writes. The identified
-read-shaped POST call sites pass `mutates=False` to exempt themselves
-from the guard; `_get` and `_delete` need no such parameter (GET is
-always a read, and no DELETE endpoint in this codebase is a query). T3's
-`_post` is a single funnel for both reads and writes for a different
-reason (there is no `_get`/`_post` split at all — everything goes over
-POST), so it keys on the endpoint PATH's suffix instead
-(`_T3_WRITE_PATH_SUFFIXES`) rather than a per-call flag.
+`HttpScratchStore.search`/`list_entries`/`flagged_entries`/
+`resolve_prefix_candidates` — the last one is the MCP `scratch` tool's
+`get`/`delete` disambiguation fallback on an ambiguous or missing id, a
+pure lookup that was misclassified as a write for one review round and
+turned an ordinary "not found" UX into an uncaught guard error from a
+dev checkout), each bespoke/mixin `_post` carries a `mutates: bool =
+True` kwarg — the safe default, since most `_post` call sites really are
+writes. The identified read-shaped POST call sites pass `mutates=False`
+to exempt themselves from the guard; `_get` and `_delete` need no such
+parameter (GET is always a read, and no DELETE endpoint in this codebase
+is a query). T3's `_post` is a single funnel for both reads and writes
+for a different reason (there is no `_get`/`_post` split at all —
+everything goes over POST), so it keys on the endpoint PATH's suffix
+instead (`_T3_WRITE_PATH_SUFFIXES`) rather than a per-call flag.
+
+**Residual, not in this guard's scope**: `HttpTelemetryStore.record_capability_census`/
+`record_routing_event` bypass the guarded transport entirely (a raw
+`self._client.request(...)` call, modeled on the single-attempt shape
+`query_tier_writes_once` — a GET — uses for an unrelated reason). Tracked
+and being fixed under nexus-gjv9b, not this bead.
 
 ### Concurrency Model ([RDR-063](rdr/rdr-063-t2-domain-split.md) Phase 2) — HISTORICAL
 

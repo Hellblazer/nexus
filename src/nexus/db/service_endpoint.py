@@ -591,19 +591,57 @@ def reset_dev_checkout_cache_for_tests() -> None:
     _dev_checkout_root_cache = _DEV_CHECKOUT_ROOT_UNSET
 
 
+#: Test-only in-process override for the accepted opt-in reason — NEVER an
+#: env var, precisely so it cannot leak into a subprocess's inherited
+#: ``os.environ`` the way a real ``NX_ALLOW_PROD_WRITE`` would (nexus-a2qhz
+#: round-2 review: the blanket pytest exemption previously used
+#: ``monkeypatch.setenv``, which DOES mutate the real process
+#: ``os.environ`` for the test's duration — any subprocess a test spawns
+#: via ``env=os.environ.copy()`` silently inherited the reason regardless
+#: of whether that subprocess's OWN substrate was correctly pinned).
+#: ``None`` (the default) means "no override" — the real env var still
+#: resolves normally. Set only via :func:`set_test_only_opt_in_reason_for_tests`.
+_test_only_opt_in_reason: str | None = None
+
+
+def set_test_only_opt_in_reason_for_tests(reason: str | None) -> None:
+    """Test-only in-process override for :func:`guard_production_write`'s
+    opt-in check — see :data:`_test_only_opt_in_reason`'s docstring.
+
+    ``tests/conftest.py``'s blanket pytest exemption calls this via
+    ``monkeypatch.setattr(service_endpoint, "_test_only_opt_in_reason",
+    "<reason>")`` (still undone per test, same as any other monkeypatch)
+    instead of setting the real env var — the exemption then never
+    appears in ``os.environ`` and cannot leak into a subprocess a test
+    spawns. A test that spawns a subprocess needing the REAL guard
+    behavior (e.g. a genuine dev-checkout write against the test
+    substrate) must set the real ``NX_ALLOW_PROD_WRITE`` env var
+    explicitly for that subprocess's own environment — this override
+    covers only THIS process's in-process store constructions.
+    """
+    global _test_only_opt_in_reason
+    _test_only_opt_in_reason = reason
+
+
 def _opt_in_reason() -> str | None:
     """The caller's stated reason for bypassing the guard, or ``None`` when
     no valid opt-in is present.
 
-    A valid opt-in is a non-empty :data:`PROD_WRITE_OPT_IN_ENV` value that
-    is not a boolean lookalike (:data:`_OPT_IN_BOOLEAN_LOOKALIKES`, checked
-    case-insensitively) — a bare ``"1"`` (the RETIRED spelling) or a
-    leftover ``"0"``/``"true"``/``"false"``/``"yes"``/``"no"`` all fail
-    this check exactly like an unset var. Anything else is treated as a
-    reason and returned verbatim (for logging/messages) — this function
-    does not, and cannot, judge whether the text is a GOOD reason, only
-    that it is not a rebadged boolean flag.
+    Checks :data:`_test_only_opt_in_reason` FIRST (test-only, never an env
+    var) — when set, it wins outright, matching the "later call wins"
+    contract every other autouse-fixture override in this codebase
+    follows. Otherwise: a valid opt-in is a non-empty
+    :data:`PROD_WRITE_OPT_IN_ENV` value that is not a boolean lookalike
+    (:data:`_OPT_IN_BOOLEAN_LOOKALIKES`, checked case-insensitively) — a
+    bare ``"1"`` (the RETIRED spelling) or a leftover
+    ``"0"``/``"true"``/``"false"``/``"yes"``/``"no"`` all fail this check
+    exactly like an unset var. Anything else is treated as a reason and
+    returned verbatim (for logging/messages) — this function does not,
+    and cannot, judge whether the text is a GOOD reason, only that it is
+    not a rebadged boolean flag.
     """
+    if _test_only_opt_in_reason is not None:
+        return _test_only_opt_in_reason
     raw = (os.environ.get(PROD_WRITE_OPT_IN_ENV, "") or "").strip()
     if not raw or raw.lower() in _OPT_IN_BOOLEAN_LOOKALIKES:
         return None
@@ -641,11 +679,35 @@ def guard_production_write(base_url: str) -> None:
     operator's real store, states that the write must be deliberate and
     reviewed, and requires a reason rather than inviting a reflexive
     export.
+
+    Every ACCEPTED opt-in is logged at WARNING (nexus-a2qhz round-2
+    review: "auditable after the fact" was previously just a docstring
+    claim — nothing persisted past the process's own environment; INFO
+    would be filtered by default in most real deployments and by this
+    suite's own ``pytest_configure``, which defaults ``--log-level`` to
+    WARNING). Logged only when the guard actually ENGAGES (a dev-checkout
+    process) — an installed ``nx`` with a stray ``NX_ALLOW_PROD_WRITE``
+    lingering in its environment never reaches this branch at all, so
+    ordinary production traffic never pays for a log line the guard never
+    needed to consult.
     """
-    if _opt_in_reason() is not None:
-        return
     checkout_root = _dev_checkout_root()
     if checkout_root is None:
+        return
+    reason = _opt_in_reason()
+    if reason is not None:
+        # WARNING, not INFO: a dev-checkout process about to write past
+        # this guard is a genuinely unusual, audit-worthy event even when
+        # correctly exempted -- INFO is filtered by default in most
+        # real-world deployments and by this suite's own pytest_configure
+        # (WARNING is the default --log-level), which would make the
+        # "auditable after the fact" claim false again by construction.
+        _log.warning(
+            "guard_production_write.opt_in_accepted",
+            base_url=base_url,
+            checkout_root=str(checkout_root),
+            reason=reason,
+        )
         return
     raise ProductionWriteGuardError(
         f"STOP: refusing a WRITE to {base_url!r}. This process's nexus "

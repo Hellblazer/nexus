@@ -150,7 +150,10 @@ class TestGuardProductionWrite:
         class (overriding the suite-wide autouse exemption in
         tests/conftest.py — a later monkeypatch call on the same fixture
         instance wins, same contract as _isolate_config_dir); individual
-        tests opt back in explicitly."""
+        tests opt back in explicitly. Resets BOTH the real env var (never
+        actually set by the suite-wide fixture any more, but harmless to
+        clear) and the in-process test-only override the suite-wide
+        fixture DOES set (service_endpoint._test_only_opt_in_reason)."""
         for var in (
             service_endpoint.PROD_WRITE_OPT_IN_ENV,
             "NX_SERVICE_URL",
@@ -159,6 +162,7 @@ class TestGuardProductionWrite:
             "NX_SERVICE_TOKEN",
         ):
             monkeypatch.delenv(var, raising=False)
+        monkeypatch.setattr(service_endpoint, "_test_only_opt_in_reason", None)
 
     def test_dev_checkout_no_opt_in_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -229,6 +233,84 @@ class TestGuardProductionWrite:
 
         with pytest.raises(service_endpoint.ProductionWriteGuardError):
             service_endpoint.guard_production_write("http://127.0.0.1:9")
+
+    def test_test_only_override_exempts_without_touching_os_environ(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The in-process test-only override (what the suite-wide autouse
+        fixture in tests/conftest.py actually uses) exempts a write exactly
+        like a real reason-bearing env var would -- but leaves os.environ
+        completely untouched, so it can never leak into a subprocess a test
+        spawns via env=os.environ.copy() (nexus-a2qhz round-2 review)."""
+        import os as _os
+
+        fake_root = tmp_path / "checkout"
+        monkeypatch.setattr(service_endpoint, "_dev_checkout_root", lambda start=None: fake_root)
+        assert service_endpoint.PROD_WRITE_OPT_IN_ENV not in _os.environ
+
+        monkeypatch.setattr(
+            service_endpoint, "_test_only_opt_in_reason", "in-process test exemption"
+        )
+        service_endpoint.guard_production_write("http://127.0.0.1:9")  # must not raise
+
+        assert service_endpoint.PROD_WRITE_OPT_IN_ENV not in _os.environ
+
+    def test_test_only_override_wins_over_a_conflicting_real_env_var(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Matches the documented "later call wins" contract: when both are
+        set, the in-process override decides -- a real env var carrying a
+        boolean lookalike must not defeat the suite-wide exemption, and
+        (the reverse direction, exercised by _clean_guard_env resetting the
+        override to None in every other test in this class) a per-test env
+        var must not be silently shadowed by a stale suite-wide override."""
+        fake_root = tmp_path / "checkout"
+        monkeypatch.setattr(service_endpoint, "_dev_checkout_root", lambda start=None: fake_root)
+        monkeypatch.setenv(service_endpoint.PROD_WRITE_OPT_IN_ENV, "1")  # would refuse alone
+        monkeypatch.setattr(
+            service_endpoint, "_test_only_opt_in_reason", "override wins"
+        )
+
+        service_endpoint.guard_production_write("http://127.0.0.1:9")  # must not raise
+
+    def test_accepted_opt_in_is_logged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-a2qhz round-2 review: "auditable after the fact" was
+        previously just a docstring claim -- nothing persisted past the
+        process's own environment. Every ACCEPTED opt-in must now emit a
+        structlog event naming the endpoint and the reason."""
+        from structlog.testing import capture_logs
+
+        fake_root = tmp_path / "checkout"
+        monkeypatch.setattr(service_endpoint, "_dev_checkout_root", lambda start=None: fake_root)
+        monkeypatch.setenv(
+            service_endpoint.PROD_WRITE_OPT_IN_ENV, "arc-end MVV, nexus-a2qhz, reviewed"
+        )
+
+        with capture_logs() as logs:
+            service_endpoint.guard_production_write("http://127.0.0.1:9")
+
+        matches = [log for log in logs if log.get("event") == "guard_production_write.opt_in_accepted"]
+        assert len(matches) == 1, logs
+        assert matches[0]["base_url"] == "http://127.0.0.1:9"
+        assert matches[0]["reason"] == "arc-end MVV, nexus-a2qhz, reviewed"
+
+    def test_non_dev_checkout_write_is_not_logged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No log line for ordinary production traffic (an installed nx)
+        even if a stray opt-in var happens to be set -- the guard never
+        engages, so there is nothing to audit."""
+        from structlog.testing import capture_logs
+
+        monkeypatch.setattr(service_endpoint, "_dev_checkout_root", lambda start=None: None)
+        monkeypatch.setenv(service_endpoint.PROD_WRITE_OPT_IN_ENV, "some reason")
+
+        with capture_logs() as logs:
+            service_endpoint.guard_production_write("http://127.0.0.1:9")
+
+        assert logs == []
 
     def test_non_dev_checkout_never_raises_regardless_of_env(
         self, monkeypatch: pytest.MonkeyPatch
@@ -531,9 +613,23 @@ class TestHttpScratchStoreGuardWiring:
 
         assert calls == ["http://127.0.0.1:1"]
 
-    @pytest.mark.parametrize("method_name", ["list_entries", "flagged_entries"])
+    @pytest.mark.parametrize(
+        ("method_name", "args"),
+        [
+            ("list_entries", ()),
+            ("flagged_entries", ()),
+            # nexus-a2qhz round-2 review: resolve_prefix_candidates is a pure
+            # disambiguation lookup (mcp/core.py's scratch get/delete fall
+            # back to it on an ambiguous or missing exact id) -- it was
+            # missing mutates=False when this class was first wired, which
+            # turned an ordinary "not found" UX into an uncaught
+            # ProductionWriteGuardError from a dev checkout. This is the
+            # regression test for that fix.
+            ("resolve_prefix_candidates", ("some-id",)),
+        ],
+    )
     def test_read_shaped_method_never_calls_guard(
-        self, method_name: str, monkeypatch: pytest.MonkeyPatch
+        self, method_name: str, args: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from nexus.db import service_endpoint as se
 
@@ -542,7 +638,7 @@ class TestHttpScratchStoreGuardWiring:
         store = _bare_scratch_store()
 
         with pytest.raises(Exception):  # noqa: B017 — unreachable transport past the guard-skip; not this test's subject
-            getattr(store, method_name)()
+            getattr(store, method_name)(*args)
 
         assert calls == []
 

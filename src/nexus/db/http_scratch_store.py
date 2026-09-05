@@ -677,6 +677,7 @@ class HttpScratchStore:
         resp = self._post(
             "/v1/t1/resolve_prefix",
             {"prefix": id, "session_id": self._session_id},
+            mutates=False,
         )
         return resp.get("ids", [])
 
@@ -690,16 +691,21 @@ class HttpScratchStore:
         ``mutates`` (nexus-a2qhz) defaults to ``True`` — most callers here
         (``put``, ``flag``, ``unflag``, ``delete``, ``clear``,
         ``close_session``) really are writes against T1. ``search``,
-        ``list_entries``, and ``flagged_entries`` send a query over POST
-        (the filter body doesn't fit a GET query string) and pass
-        ``mutates=False``. ``_post_raw`` (``get``) never guards at all —
-        it is read-only. This class is not a ``RefreshableHttpStoreMixin``
-        adopter (bespoke bearer-header-baked transport, same family as
-        ``HttpTokenStore``), so it calls
+        ``list_entries``, ``flagged_entries``, and
+        ``resolve_prefix_candidates`` (round-2 review fix — a pure
+        disambiguation LOOKUP the MCP ``scratch`` tool's ``get``/``delete``
+        fall back to on an ambiguous or missing exact id; misclassifying
+        it as a write turned an ordinary "not found" UX into an uncaught
+        ``ProductionWriteGuardError`` from a dev checkout) send a query
+        over POST (the filter body doesn't fit a GET query string) and
+        pass ``mutates=False``. ``_post_raw`` (``get``) never guards at
+        all — it is read-only. This class is not a
+        ``RefreshableHttpStoreMixin`` adopter (bespoke bearer-header-baked
+        transport, same family as ``HttpTokenStore``), so it calls
         :func:`~nexus.db.service_endpoint.guard_production_write` directly.
         """
         if mutates:
-            from nexus.db.service_endpoint import guard_production_write  # noqa: PLC0415 — deferred to avoid circular import
+            from nexus.db.service_endpoint import guard_production_write  # noqa: PLC0415 — deferred: only on the mutates=True branch, no circular import (service_endpoint imports no nexus.* modules)
 
             guard_production_write(self._base_url)
         sent_token = getattr(self, "_session_token", "")

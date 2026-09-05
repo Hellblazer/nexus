@@ -208,11 +208,21 @@ def _run_hook(
         "NX_DROPPED_WRITES_LOG_PATH": str(_ISOLATED_DROPPED_WRITES_LOG_PATH),
         **(env_overrides or {}),
     }
-    # Never let a real NX_SERVICE_HOST/PORT/TOKEN leak in from the outer
+    # Never let a real NX_SERVICE_HOST/PORT/URL/TOKEN leak in from the outer
     # shell and cause the routing hook to actually attempt a network call
     # in a test that didn't ask for one (nexus-gjv9b PART 2's endpoint
-    # resolution reads these three verbatim).
-    for _service_var in ("NX_SERVICE_HOST", "NX_SERVICE_PORT", "NX_SERVICE_TOKEN"):
+    # resolution reads these verbatim). NX_SERVICE_URL joined the strip
+    # list here (nexus-a2qhz round-2 fold-in): stripping HOST/PORT/TOKEN
+    # while leaving a test's own NX_SERVICE_URL (t2_service_env sets it,
+    # not HOST/PORT) ambiently inherited produced a HALF-resolved
+    # credential -- service_url present, no token -- which fails loudly
+    # with a confusing "service_url is set but no service_token is
+    # resolvable" rather than either fully resolving or failing the clean
+    # "not configured" way. Callers that want the real test substrate
+    # (TestF5RemedyRoundTripReal) now forward NX_SERVICE_URL/TOKEN
+    # explicitly via env_overrides, same as every other credential this
+    # helper strips.
+    for _service_var in ("NX_SERVICE_HOST", "NX_SERVICE_PORT", "NX_SERVICE_URL", "NX_SERVICE_TOKEN"):
         if _service_var not in (env_overrides or {}):
             env.pop(_service_var, None)
     # Never let a real NX_REVIEW_GATE_OVERRIDE leak in from the outer shell
@@ -1263,6 +1273,33 @@ class TestF5RemedyRoundTripReal:
         write_env = os.environ.copy()
         write_env["NX_SESSION_ID"] = session_id
         write_env["NX_T1_ALLOW_SHARED_FALLBACK"] = "1"
+        # nexus-a2qhz round-2 review: the suite-wide production-write-guard
+        # exemption is an IN-PROCESS override now (service_endpoint.
+        # _test_only_opt_in_reason), never an env var, precisely so it
+        # cannot leak into a subprocess's inherited os.environ the way
+        # NX_ALLOW_PROD_WRITE used to. This subprocess IS a real
+        # dev-checkout `nx` (this checkout's editable install, confirmed by
+        # _real_nx_dir()) performing a real T1 write, so it must carry the
+        # opt-in explicitly -- exactly like NX_SESSION_ID/
+        # NX_T1_ALLOW_SHARED_FALLBACK above -- rather than inherit it.
+        write_env["NX_ALLOW_PROD_WRITE"] = (
+            "nexus-cr4lp F5 remedy round-trip test: writes to the "
+            "hermetic t2_service_env test engine only, never production"
+        )
+
+        # nexus-a2qhz round-2 fold-in: _run_hook now strips NX_SERVICE_URL
+        # (alongside HOST/PORT/TOKEN) unconditionally unless a caller
+        # forwards it explicitly -- the hook probes below need the REAL
+        # test substrate's credentials (t2_service_env set these on THIS
+        # process's os.environ), so pull them forward by hand rather than
+        # relying on ambient inheritance.
+        _service_url = os.environ.get("NX_SERVICE_URL", "")
+        _service_token = os.environ.get("NX_SERVICE_TOKEN", "")
+        assert _service_url and _service_token, (
+            "t2_service_env did not set NX_SERVICE_URL/NX_SERVICE_TOKEN on "
+            "this process -- the hook probes below would silently resolve "
+            "nothing"
+        )
 
         # nexus-e3mak: EXTRACT the command from what the hook actually
         # PRINTS, rather than keeping a hand-copied duplicate of it here.
@@ -1275,7 +1312,23 @@ class TestF5RemedyRoundTripReal:
         probe = _run_hook(
             _make_payload(command=f"bd close {bead_id}", session_id=session_id),
             path_prefix=str(real_nx_dir),
-            env_overrides={**env0, "NX_T1_ALLOW_SHARED_FALLBACK": "1"},
+            env_overrides={
+                **env0,
+                "NX_T1_ALLOW_SHARED_FALLBACK": "1",
+                "NX_SERVICE_URL": _service_url,
+                "NX_SERVICE_TOKEN": _service_token,
+                # nexus-a2qhz round-2: this "nx scratch list" probe is ALSO
+                # a real dev-checkout `nx` invocation, and its own T1
+                # session resolution may mint a session token (a guarded
+                # WRITE) as a bootstrap step even though the visible
+                # operation is a read. Without this, the mint is refused,
+                # `nx scratch list` exits nonzero, and the hook's own
+                # fail-open T1-unreachable path silently turns the expected
+                # "deny" into "allow" -- this env var is what keeps this
+                # precondition probe hitting the real T1 codepath instead
+                # of failing open.
+                "NX_ALLOW_PROD_WRITE": write_env["NX_ALLOW_PROD_WRITE"],
+            },
         )
         reason = _get_reason(json.loads(probe.stdout))
         assert _get_decision(json.loads(probe.stdout)) == "deny", (
@@ -1307,7 +1360,13 @@ class TestF5RemedyRoundTripReal:
         result = _run_hook(
             _make_payload(command=f"bd close {bead_id}", session_id=session_id),
             path_prefix=str(real_nx_dir),
-            env_overrides={**env, "NX_T1_ALLOW_SHARED_FALLBACK": "1"},
+            env_overrides={
+                **env,
+                "NX_T1_ALLOW_SHARED_FALLBACK": "1",
+                "NX_SERVICE_URL": _service_url,
+                "NX_SERVICE_TOKEN": _service_token,
+                "NX_ALLOW_PROD_WRITE": write_env["NX_ALLOW_PROD_WRITE"],
+            },
         )
         parsed = json.loads(result.stdout)
         assert _get_decision(parsed) == "allow", parsed

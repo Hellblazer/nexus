@@ -1671,11 +1671,30 @@ def _exempt_pytest_from_production_write_guard(monkeypatch: pytest.MonkeyPatch) 
     substrate may still construct a store against its own fake server and
     perform a real write. A test that wants to exercise the guard's OWN
     refusal logic (tests/db/test_production_write_guard*.py) explicitly
-    ``monkeypatch.delenv``s this var — the same "a later call on the same
-    fixture instance wins" contract as ``_isolate_config_dir``.
+    resets the override — the same "a later call on the same fixture
+    instance wins" contract as ``_isolate_config_dir``.
+
+    Uses ``service_endpoint.set_test_only_opt_in_reason_for_tests`` (an
+    IN-PROCESS override, never an env var) rather than
+    ``monkeypatch.setenv("NX_ALLOW_PROD_WRITE", ...)`` — nexus-a2qhz
+    round-2 review: the env-var form DOES mutate the real process
+    ``os.environ`` for the test's duration, so any subprocess a test
+    spawns via ``env=os.environ.copy()`` (e.g.
+    ``tests/hooks/test_pre_close_verification_hook.py::TestF5RemedyRoundTripReal``)
+    would silently inherit the exemption regardless of whether that
+    subprocess's OWN substrate was correctly pinned. The in-process
+    override cannot leak into a subprocess's environment at all — a test
+    that spawns a real dev-checkout subprocess needing the guard's actual
+    accept path (that hook test included) must set the REAL
+    ``NX_ALLOW_PROD_WRITE`` explicitly in that subprocess's own env,
+    exactly as it already does for ``NX_SESSION_ID`` /
+    ``NX_T1_ALLOW_SHARED_FALLBACK``.
     """
-    monkeypatch.setenv(
-        "NX_ALLOW_PROD_WRITE",
+    from nexus.db import service_endpoint
+
+    monkeypatch.setattr(
+        service_endpoint,
+        "_test_only_opt_in_reason",
         "pytest test suite (tests/conftest.py autouse) — every store this "
         "suite constructs targets a throwaway test substrate, never "
         "production; see nexus-a2qhz.",

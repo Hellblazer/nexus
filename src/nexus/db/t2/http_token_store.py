@@ -190,7 +190,7 @@ class HttpTokenStore:
         rather than inheriting the mixin's wiring.
         """
         if mutates:
-            from nexus.db.service_endpoint import guard_production_write  # noqa: PLC0415 — deferred to avoid circular import
+            from nexus.db.service_endpoint import guard_production_write  # noqa: PLC0415 — deferred: only on the mutates=True branch, no circular import (service_endpoint imports no nexus.* modules)
 
             guard_production_write(self._base_url)
         try:
