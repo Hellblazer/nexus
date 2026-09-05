@@ -305,6 +305,59 @@ class TestCheckT2DroppedWrites:
         assert "capability_census" in r.detail
         assert "2" in r.detail  # lifetime total = 2 (old + fresh)
 
+    def test_window_of_only_guard_refused_drops_is_ok_not_soft_warn(
+        self, tmp_path, monkeypatch,
+    ):
+        """nexus-gjv9b review fold-in round 3, code-review item 1: a
+        window made ENTIRELY of guard_refused drops is an un-opted-in dev
+        checkout's production-write guard correctly protecting itself
+        (nexus-a2qhz) on every SessionEnd -- not evidence the engine is
+        failing. Must report ok=True and must NOT use the "engine is
+        failing" wording the real-failure branch uses."""
+        from nexus import dropped_writes
+
+        monkeypatch.setenv(
+            "NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl")
+        )
+        for _ in range(3):
+            dropped_writes.record_drop(
+                hook="capability_census", collection="", rows=1,
+                error="STOP: refusing a WRITE to 'https://x'.",
+            )
+
+        results = _check_t2_dropped_writes()
+        r = results[0]
+        assert r.ok is True, r.detail
+        assert "guard" in r.detail.lower()
+        assert "engine is failing" not in r.detail.lower()
+
+    def test_one_non_guard_drop_mixed_in_still_soft_warns(
+        self, tmp_path, monkeypatch,
+    ):
+        """A SINGLE non-guard-refused drop in the window must keep the
+        real-failure WARN path live -- the guard-refused exemption is
+        deliberately all-or-nothing, never "mostly benign"."""
+        from nexus import dropped_writes
+
+        monkeypatch.setenv(
+            "NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl")
+        )
+        dropped_writes.record_drop(
+            hook="capability_census", collection="", rows=1,
+            error="STOP: refusing a WRITE to 'https://x'.",
+        )
+        dropped_writes.record_drop(
+            hook="routing_events", collection="", rows=1,
+            error="HTTP 401: unauthorized",
+        )
+
+        results = _check_t2_dropped_writes()
+        r = results[0]
+        assert r.ok is False, (
+            "a single non-guard-refused drop mixed into the window must "
+            f"keep the real-failure WARN path live -- got: {r}"
+        )
+
 
 # ── T2 daemon singleton / multiplicity (RDR-129 A3, nexus-exa2p) ────────────
 

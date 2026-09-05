@@ -327,6 +327,13 @@ class TestWriteSessionCapabilityCensus:
         assert record is not None
         events = [entry["event"] for entry in cap]
         assert "capability_census_write_dropped" in events, events
+        dropped_entry = next(e for e in cap if e["event"] == "capability_census_write_dropped")
+        # nexus-gjv9b review fold-in round 3, code-review item 3: a
+        # dropped BLINDSPOT row is a materially different diagnosis than
+        # a dropped measured row -- must be readable from the same log
+        # line, not just cross-referenced from the record separately.
+        assert "blindspot" in dropped_entry, dropped_entry
+        assert dropped_entry["blindspot"] is record.get("blindspot")
 
     def test_no_session_id_resolvable_is_a_silent_noop(
         self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,

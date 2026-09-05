@@ -2714,12 +2714,45 @@ def _check_t2_dropped_writes() -> list[HealthResult]:
         )]
 
     if summary.recent_last_hook in _LIVE_DROP_PRODUCER_HOOKS:
+        # nexus-gjv9b review fold-in round 3, code-review item 1: a window
+        # made ENTIRELY of guard_refused drops is an un-opted-in dev
+        # checkout's production-write guard correctly protecting itself
+        # (nexus-a2qhz) on every SessionEnd — not evidence the engine or a
+        # live producer is failing. This must never render as the same
+        # "the engine is failing" WARN a real service-down/auth/timeout
+        # episode gets; a SINGLE non-guard-refused drop in the window still
+        # takes the WARN path below (recent_all_guard_refused is
+        # deliberately all-or-nothing, not "mostly").
+        if summary.recent_all_guard_refused:
+            detail = (
+                f"{summary.recent_total} drop(s) in the last 24h, all refused by "
+                "the production-write guard (this process is an un-opted-in dev "
+                "checkout — nexus-a2qhz; expected, not evidence of a failing "
+                f"engine) ({summary.total} lifetime, {summary.rows} rows)"
+            )
+            if summary.last_ts:
+                detail += f", last {summary.last_ts}"
+            return [HealthResult(label="T2 best-effort writes", ok=True, detail=detail)]
+
         detail = (
             f"{summary.recent_total} drop(s) in the last 24h "
             f"({summary.total} lifetime, {summary.rows} rows), most recently "
             f"from {summary.recent_last_hook!r} — a best-effort write to the "
             f"engine is failing (service down, or an old engine missing the route)"
         )
+        # nexus-gjv9b review fold-in round 3, critique CRITICAL 2: name the
+        # DOMINANT cause and its share of the window, not just a bare count
+        # -- "3 drops in the last 24h" reads identically whether that is
+        # three unrelated connection blips (self-resolving, likely nothing
+        # to do) or three consecutive 401s on the same broken credential
+        # (structural, will keep recurring after this window ages out too).
+        # An auth cause (401/403) never gets a softer word than "cause";
+        # this is deliberately the same sentence shape as any other cause.
+        if summary.recent_dominant_cause:
+            detail += (
+                f" — dominant cause: {summary.recent_dominant_cause!r} "
+                f"({summary.recent_dominant_cause_count}/{summary.recent_total} in window)"
+            )
         if summary.last_ts:
             detail += f", last {summary.last_ts}"
         return [HealthResult(label="T2 best-effort writes", ok=False, detail=detail)]

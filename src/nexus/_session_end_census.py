@@ -440,6 +440,13 @@ def _post_capability_census(record: dict[str, Any]) -> None:
             structlog.get_logger(__name__).warning(
                 "capability_census_write_dropped",
                 session_id=record.get("session_id", ""),
+                # nexus-gjv9b review fold-in round 3, code-review item 3:
+                # a dropped BLINDSPOT row (the transcript was itself
+                # unmeasurable) is a materially different diagnosis than
+                # a dropped measured row -- surface it in the same log
+                # line rather than making a reader cross-reference the
+                # record separately.
+                blindspot=record.get("blindspot", False),
                 error=str(exc),
             )
         except Exception:  # noqa: BLE001 — even the warning log is best-effort

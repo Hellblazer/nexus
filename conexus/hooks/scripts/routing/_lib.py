@@ -479,9 +479,17 @@ def _read_service_lease(config_dir: pathlib.Path) -> dict | None:
     see that function's own docstring for the full design rationale
     (this hook cannot import ``nexus.daemon.service_registry`` either,
     RDR-121 § Contract mirroring nexus-vg6d4's identical constraint for
-    the T2 prefix scan). ``tests/test_routing_hooks.py``'s parity suite
-    keeps this in lockstep with the original -- edit both, or edit one
-    and let the parity test catch the drift.
+    the T2 prefix scan). ``tests/test_routing_hooks.py``'s
+    ``test_parity_read_service_lease_*`` suite (nexus-gjv9b review
+    fold-in round 3, code-review item 2 -- this docstring claimed the
+    suite before it existed) runs BOTH implementations against the SAME
+    on-disk lease fixture and asserts identical return values across
+    fresh/expired/malformed/missing -- edit both functions, or edit one
+    and let the parity test catch the drift. A source-level byte-diff
+    would false-positive: this file uses ``import pathlib`` /
+    ``pathlib.Path``, ``t2_prefix_scan.py`` uses ``from pathlib import
+    Path`` -- behavioral parity is the actual contract, not textual
+    identity.
     """
     path = config_dir / f"{_STORAGE_SERVICE_TIER}_addr.{os.getuid()}"
     try:
@@ -512,6 +520,10 @@ def _read_data_token_lease(config_dir: pathlib.Path, base_url: str) -> str | Non
     Ported verbatim (nexus-gjv9b PART 2 CRITICAL review fix) from
     ``t2_prefix_scan.py``'s identically-named function -- same
     format-version check, same digest rule, same fail-safe stance.
+    ``tests/test_routing_hooks.py``'s ``test_parity_read_data_token_
+    lease_*`` suite runs both against the same on-disk lease fixture
+    (fresh match, wrong digest, expired, missing) and asserts identical
+    return values.
     """
     import hashlib  # noqa: PLC0415 — stdlib, only needed on this path
     import urllib.parse  # noqa: PLC0415 — stdlib, only needed on this path
@@ -549,7 +561,10 @@ def _read_config_yml_credentials(config_dir: pathlib.Path) -> dict:
     ``t2_prefix_scan.py``'s identically-named function -- see that
     docstring for the full "why a line-oriented scan, not a YAML parser"
     rationale. Returns ``{}`` when the file is absent, unreadable, or has
-    no ``credentials:`` block.
+    no ``credentials:`` block. ``tests/test_routing_hooks.py``'s
+    ``test_parity_read_config_yml_credentials_*`` suite runs both
+    against the same on-disk ``config.yml`` fixture and asserts
+    identical return values.
     """
     path = config_dir / "config.yml"
     try:
@@ -664,17 +679,35 @@ def _engine_endpoint() -> "tuple[str, str] | tuple[None, None]":
 _DEFAULT_TENANT = "default"
 
 
-def _post_routing_event_http(record: dict, *, timeout: float = 0.25) -> bool:
+def _post_routing_event_http(record: dict, *, timeout: float = 0.25) -> str:
     """Best-effort ``POST /v1/telemetry/routing_events/record`` via
     ``urllib`` (no ``httpx``/``requests`` dependency — this script runs
-    under the system interpreter, RDR-121 § Contract). Returns ``True``
-    on a 2xx response, ``False`` on ANY failure (unresolvable endpoint,
-    connect/read timeout, non-2xx, malformed response) — never raises.
+    under the system interpreter, RDR-121 § Contract). Returns ``""`` on
+    a 2xx response, else a short CAUSE string classifying the failure —
+    never raises.
+
+    Cause vocabulary (nexus-gjv9b review fold-in round 3, critique
+    CRITICAL 1/2 and code-review item 1): ``"unresolvable"`` (no
+    endpoint/credential at all — :func:`_engine_endpoint` returned
+    ``(None, None)``), ``"401"``/``"403"``/``"5xx"``/``"http_<code>"``
+    (a non-2xx response, read straight from the raised
+    ``urllib.error.HTTPError.code`` — never guessed from response text),
+    ``"timeout"`` (a connect/read timeout), ``"connect"`` (any other
+    transport-level failure — DNS, connection refused, TLS), ``"other"``
+    for anything unrecognized. Classifying HERE, at the transport layer
+    that actually knows the failure mode, is strictly more reliable than
+    :func:`nexus.dropped_writes.classify_drop_cause`'s text-matching
+    fallback (which exists for producers, like
+    ``_session_end_census._post_capability_census``, that only have an
+    exception's ``str()`` to work with) — this is why the cause travels
+    through to :func:`_record_dropped_routing_event` explicitly rather
+    than being re-derived from the error string on the far side.
     """
     base_url, token = _engine_endpoint()
     if base_url is None:
-        return False
+        return "unresolvable"
     try:
+        import urllib.error  # noqa: PLC0415 — stdlib, only needed on this path
         import urllib.request  # noqa: PLC0415 — stdlib, only needed on this path
 
         body = json.dumps(record).encode("utf-8")
@@ -689,21 +722,40 @@ def _post_routing_event_http(record: dict, *, timeout: float = 0.25) -> bool:
             },
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — fixed internal engine URL, not user input
-            return 200 <= resp.status < 300
-    except Exception:
-        return False
+            if 200 <= resp.status < 300:
+                return ""
+            return f"http_{resp.status}"
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            return str(exc.code)
+        if 500 <= exc.code < 600:
+            return "5xx"
+        return f"http_{exc.code}"
+    except TimeoutError:
+        # Raw socket.timeout (an alias of TimeoutError since Python 3.10),
+        # raised directly by urlopen on a connect-phase timeout.
+        return "timeout"
+    except urllib.error.URLError as exc:
+        # A read-phase (post-connect) timeout arrives wrapped here, with
+        # .reason carrying the underlying TimeoutError -- everything else
+        # (connection refused, DNS failure, TLS) is a genuine "connect".
+        if isinstance(exc.reason, TimeoutError):
+            return "timeout"
+        return "connect"
+    except Exception:  # noqa: BLE001 — boundary: anything else recognized as failed but not classifiable further
+        return "other"
 
 
-def _record_dropped_routing_event(error: str) -> None:
+def _record_dropped_routing_event(error: str, *, cause: str = "") -> None:
     """Metered-drop fallback (nexus-gjv9b PART 2 design decision): a
     routing event that could not reach the engine is counted, not
     silently discarded and not appended to ``routing_log.jsonl`` either
     (that JSONL machinery stays in place for PART 3's deferred deletion
     only -- see this module's docstring). Hand-replicates
-    ``nexus.dropped_writes.record_drop``'s exact on-disk record shape
-    (never imported -- no ``nexus`` dependency here) so ``nx doctor``'s
-    existing drop-meter aggregation picks these up with no changes of
-    its own.
+    ``nexus.dropped_writes.record_drop``'s exact on-disk record shape,
+    ``cause`` field included (never imported -- no ``nexus`` dependency
+    here) so ``nx doctor``'s existing drop-meter aggregation (including
+    its dominant-cause tally) picks these up with no changes of its own.
     """
     try:
         override = os.environ.get("NX_DROPPED_WRITES_LOG_PATH", "").strip()
@@ -720,6 +772,7 @@ def _record_dropped_routing_event(error: str) -> None:
             "collection": "",
             "rows": 1,
             "error": str(error)[:200],
+            "cause": str(cause)[:32],
         }
         line = json.dumps(record, separators=(",", ":")) + "\n"
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
@@ -778,8 +831,11 @@ def log_routing_event(
             # Dedicated field (nexus-mzvwa.9): the reason trails the command,
             # so the fragment cap above routinely truncated it away.
             record["escape_reason"] = escape_reason[:300]
-        if not _post_routing_event_http(record):
-            _record_dropped_routing_event("routing_events POST failed or endpoint unresolvable")
+        cause = _post_routing_event_http(record)
+        if cause:
+            _record_dropped_routing_event(
+                f"routing_events POST failed: {cause}", cause=cause,
+            )
     except Exception:
         # Telemetry must never crash a hook. Swallow.
         pass
