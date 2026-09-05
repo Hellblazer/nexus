@@ -1361,6 +1361,14 @@ async def claude_dispatch(
         argv += ["--mcp-config", json.dumps({"mcpServers": mcp_servers})]
     if allowed_tools:
         argv += ["--allowedTools", ",".join(allowed_tools)]
+    else:
+        # Tool-free means TOOL-FREE. Without this the child still gets the
+        # CLI's built-in Read/Grep/Bash set and wanders the repo instead of
+        # answering: measured 2026-09-04, 22 commit-review dispatches hit
+        # the $0.25 cap mid-grep and recorded nothing. ``--tools ""`` is the
+        # CLI's documented "disable all tools" form; --allowedTools is a
+        # permission allowlist and never removes a tool from the set.
+        argv += ["--tools", ""]
     # nexus-bjltu (round 2, code-reviewer + critic independently): the
     # minted-session close (below) must run regardless of how the dispatch
     # finishes -- successful subprocess completion, harness failure,
