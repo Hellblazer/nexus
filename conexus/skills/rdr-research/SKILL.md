@@ -30,10 +30,20 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 
 **Behavior:**
 
-1. **Determine next sequence number**: mcp__plugin_conexus_nexus__memory_get(project="{repo}_rdr", title=""
-   Filter entries where title matches `NNN-research-*`. Parse sequence numbers. Next seq = max + 1. If none exist, start at 1.
-
-2. **Write T2 record**: mcp__plugin_conexus_nexus__memory_put(content="rdr_id: NNN\nseq: {seq}\nfinding: Finding text here\nclassification: verified\nverification_method: source_search\nsource: Source description here\nacknowledged: false", project="{repo}_rdr", title="NNN-research-{seq}", ttl="permanent", tags="rdr,research,{classification}"
+1. **Record the finding via the Bash tool** (nexus-zu1q0 — this used to be
+   computed here as prose: list T2 titles, parse the max sequence, upsert
+   the result. That computation raced: two adds in the same session could
+   both compute seq 1, and the second `memory_put` silently overwrote the
+   first finding. The sequence is now computed and guarded server-side):
+   `nx rdr preamble rdr-research -- add <id> <finding text tokens...>`
+   (literal argv tokens, per the apostrophe-crash rule above). It derives
+   the next sequence from existing `<id>-research-*` T2 titles, writes the
+   record, and never overwrites an existing title — it advances to the next
+   free sequence instead. It prints the recorded title
+   (`{repo}_rdr/NNN-research-{seq}`); read that back to fill in step 3 below.
+   Classification / verification method / source are not yet parameters of
+   this command — append them to the finding text tokens if needed, or
+   `memory_put`-amend the record after using its printed title.
 
 3. **Append to RDR markdown**: Add a formatted entry to the Research Findings > Key Discoveries section:
    Prose register (`$RDR_DIR/REGISTER.md`, fallback `$CLAUDE_PLUGIN_ROOT/resources/rdr/REGISTER.md`): findings in plain terms a non-native-speaker expert can follow; say what is known and what is not; a dead end recorded plainly is a finding.

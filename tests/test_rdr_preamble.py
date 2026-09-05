@@ -755,6 +755,171 @@ class TestRdrResearch:
         assert "RDR 1" in result.output
 
 
+class _FakeT2ResearchClient:
+    """In-memory T2 double for ``rdr-research add`` — matches the
+    ``get_all(project=...)`` / ``get(project=, title=)`` / ``put(project=,
+    title=, content=, ...)`` contract ``T2Database`` exposes (RDR-201 P1.4
+    convention, see ``_FakeT2CensusClient`` in test_rdr_audit_vocabulary.py).
+
+    ``hidden_from_get_all`` lets a test simulate a stale scan: a title
+    present in ``get()`` (so a collision check still finds it) but absent
+    from ``get_all()`` (so the seq-scan doesn't see it) — the exact race
+    window nexus-zu1q0 exploited.
+    """
+
+    def __init__(
+        self,
+        entries: dict[str, str] | None = None,
+        hidden_from_get_all: frozenset[str] = frozenset(),
+    ) -> None:
+        self._store: dict[str, str] = dict(entries or {})
+        self._hidden = hidden_from_get_all
+        self.put_calls: list[tuple[str, str]] = []
+
+    def __enter__(self) -> "_FakeT2ResearchClient":
+        return self
+
+    def __exit__(self, *exc_info: object) -> bool:
+        return False
+
+    def get_all(self, project: str | None = None) -> list[dict]:
+        return [
+            {"title": t, "content": c}
+            for t, c in self._store.items()
+            if t not in self._hidden
+        ]
+
+    def get(self, project: str | None = None, title: str | None = None, id: int | None = None):
+        content = self._store.get(title)
+        return None if content is None else {"title": title, "content": content}
+
+    def put(
+        self,
+        project: str,
+        title: str,
+        content: str,
+        tags: str = "",
+        ttl: int | None = 30,
+        agent: str | None = None,
+        session: str | None = None,
+    ) -> int:
+        self.put_calls.append((title, content))
+        self._store[title] = content
+        return len(self._store)
+
+
+class TestRdrResearchAdd:
+    """Tests for ``nx rdr preamble rdr-research -- add <id> <text>``
+    (nexus-zu1q0): the next sequence number must be derived from existing
+    ``<id>-research-*`` titles, and an add must never silently upsert over
+    an existing title."""
+
+    def test_add_writes_seq_1_when_no_prior_findings(self, monkeypatch):
+        import nexus.commands.rdr as rdr_mod
+
+        fake = _FakeT2ResearchClient()
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+
+        result = _runner().invoke(
+            rdr, ["preamble", "rdr-research", "--", "add", "201", "first", "finding"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "201-research-1" in result.output
+        assert fake.put_calls == [("201-research-1", fake._store["201-research-1"])]
+        assert "first finding" in fake._store["201-research-1"]
+
+    def test_add_advances_past_existing_seq(self, monkeypatch):
+        """A prior 201-research-1 entry means the next add lands on seq 2 —
+        the second finding's content is never lost by upserting seq 1 again."""
+        import nexus.commands.rdr as rdr_mod
+
+        fake = _FakeT2ResearchClient(entries={"201-research-1": "finding: first\n"})
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+
+        result = _runner().invoke(
+            rdr, ["preamble", "rdr-research", "--", "add", "201", "second", "finding"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "201-research-2" in result.output
+        assert "first" in fake._store["201-research-1"]
+        assert "second finding" in fake._store["201-research-2"]
+
+    def test_two_consecutive_invocations_never_collide(self, monkeypatch):
+        """The exact repro shape from nexus-zu1q0: two back-to-back `add`
+        calls against the same RDR each claim a distinct sequence number,
+        sharing one client across both invocations (as two consecutive
+        real CLI calls would)."""
+        import nexus.commands.rdr as rdr_mod
+
+        fake = _FakeT2ResearchClient()
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+
+        r1 = _runner().invoke(
+            rdr, ["preamble", "rdr-research", "--", "add", "201", "finding", "one"]
+        )
+        r2 = _runner().invoke(
+            rdr, ["preamble", "rdr-research", "--", "add", "201", "finding", "two"]
+        )
+        assert r1.exit_code == 0, r1.output
+        assert r2.exit_code == 0, r2.output
+        assert "201-research-1" in r1.output
+        assert "201-research-2" in r2.output
+        assert "finding one" in fake._store["201-research-1"]
+        assert "finding two" in fake._store["201-research-2"]
+
+    def test_never_overwrites_when_computed_title_already_exists(self, monkeypatch):
+        """A stale seq-scan that misses a concurrently-created seq-2 must not
+        cause the write to upsert over it — the command advances to seq 3."""
+        import nexus.commands.rdr as rdr_mod
+
+        fake = _FakeT2ResearchClient(
+            entries={
+                "201-research-1": "finding: first\n",
+                "201-research-2": "finding: concurrent\n",
+            },
+            hidden_from_get_all=frozenset({"201-research-2"}),
+        )
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+
+        result = _runner().invoke(
+            rdr, ["preamble", "rdr-research", "--", "add", "201", "third", "finding"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "201-research-3" in result.output
+        assert "concurrent" in fake._store["201-research-2"], (
+            "existing seq-2 entry must not be overwritten"
+        )
+        assert "third finding" in fake._store["201-research-3"]
+
+    def test_add_with_only_id_falls_through_to_context(
+        self, tmp_path, monkeypatch, _rdr_git_template,
+    ):
+        """`add <id>` with no finding text is unchanged: still prints RDR
+        context rather than attempting a T2 write (regression guard for
+        test_rdr_research_double_dash_passthrough_with_subcommand_word).
+
+        Deliberately avoids ``rdr_env``: this path never constructs a T2
+        client in-process (only shells out to ``nx memory list``, caught
+        and reported on failure), so it needs no engine substrate — same
+        no-T2-construction shape as ``test_rdr_list_no_rdr_dir`` above.
+        """
+        shutil.copytree(_rdr_git_template / ".git", tmp_path / ".git")
+        monkeypatch.chdir(tmp_path)
+        rdr_dir = tmp_path / "docs" / "rdr"
+        rdr_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(
+            "nexus.commands._helpers.default_db_path", lambda: tmp_path / "t2.db"
+        )
+        _write_rdr(
+            rdr_dir,
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "draft", "type": "decision", "priority": "P1"},
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-research", "--", "add", "1"])
+        assert result.exit_code == 0, result.output
+        assert "RDR 1" in result.output
+
+
 # ---------------------------------------------------------------------------
 # rdr-audit  (default mode + management subcommand)
 # ---------------------------------------------------------------------------

@@ -2132,14 +2132,88 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
 # preamble rdr-research
 # ---------------------------------------------------------------------------
 
+#: Matches a T2 research-finding title, e.g. "201-research-3".
+_RDR_RESEARCH_TITLE_RE = re.compile(r"^(\d+)-research-(\d+)$")
+
+#: Bound on the "advance past a collision" retry loop in
+#: :func:`_rdr_research_add` — a defensive ceiling against looping forever
+#: under sustained contention, never expected to be hit in practice.
+_RDR_RESEARCH_MAX_SEQ_ATTEMPTS = 50
+
+
+def _rdr_research_next_seq(entries: list[dict], t2_key: str) -> int:
+    """Return the next free research sequence number for *t2_key*.
+
+    ``max(existing seq for "<t2_key>-research-*" titles) + 1``, or ``1``
+    when none exist. *entries* is whatever ``T2Database.get_all`` /
+    a T2 client double returns — a list of ``{"title": ..., ...}`` dicts.
+    """
+    seqs = [
+        int(m.group(2))
+        for entry in entries
+        if (m := _RDR_RESEARCH_TITLE_RE.match(entry.get("title", "") if isinstance(entry, dict) else ""))
+        and m.group(1) == t2_key
+    ]
+    return max(seqs) + 1 if seqs else 1
+
+
+def _rdr_research_add(t2_key: str, finding_text: str, repo_name: str) -> str:
+    """Record a research finding for RDR *t2_key* in T2, returning the title.
+
+    Bug this closes (nexus-zu1q0): the previous scheme (list existing
+    ``<id>-research-*`` titles, take max+1, then ``memory_put`` the result)
+    was computed by the calling agent as prose, not derived deterministically
+    here — two consecutive adds could both compute seq 1, and the second
+    ``memory_put`` (an upsert by ``(project, title)``) silently overwrote the
+    first finding rather than creating seq 2.
+
+    This still cannot fully rule out a genuine two-writer race (this process
+    lists, then writes, with no cross-process lock in between), so the write
+    is additionally guarded: immediately before writing, the target title is
+    checked for existence, and a collision advances to the next sequence
+    number rather than ever upserting over it. Giving up after
+    :data:`_RDR_RESEARCH_MAX_SEQ_ATTEMPTS` collisions fails loud instead of
+    looping forever under sustained contention.
+    """
+    project = f"{repo_name}_rdr"
+    with _t2_client_factory() as client:
+        entries = client.get_all(project=project)
+        seq = _rdr_research_next_seq(entries, t2_key)
+        for _ in range(_RDR_RESEARCH_MAX_SEQ_ATTEMPTS):
+            title = f"{t2_key}-research-{seq}"
+            if client.get(project=project, title=title) is None:
+                content = f"rdr_id: {t2_key}\nseq: {seq}\nfinding: {finding_text}\n"
+                client.put(project=project, title=title, content=content, tags="rdr,research", ttl=None)
+                return title
+            seq += 1
+    raise click.ClickException(
+        f"rdr-research add: could not claim a free sequence number for RDR "
+        f"{t2_key} after {_RDR_RESEARCH_MAX_SEQ_ATTEMPTS} attempts — titles "
+        "are being created faster than this command can claim one; "
+        "investigate concurrent writers before retrying."
+    )
+
+
 @preamble.command("rdr-research")
 @click.argument("args", nargs=-1)
 def preamble_rdr_research(args: tuple[str, ...]) -> None:
-    """Print RDR research context (file Research Findings + T2 entries)."""
+    """Print RDR research context (file Research Findings + T2 entries), or
+    record a new finding when invoked as ``add <id> <finding text...>``."""
     repo_root, repo_name = _preamble_resolve_repo()
     rdr_dir = _preamble_rdr_dir(repo_root)
     rdr_path = Path(repo_root) / rdr_dir
     args_str = " ".join(args).strip()
+
+    # ``add <id> <finding text>`` (at least one text token) performs the T2
+    # write here, deterministically — see _rdr_research_add. ``add <id>``
+    # alone (no text) is unchanged: it falls through to the context-printing
+    # path below, exactly as before (nexus-zu1q0 scope).
+    if len(args) >= 3 and args[0].lower() == "add" and re.match(r"^\d+$", args[1]):
+        t2_key = str(int(args[1]))
+        finding_text = " ".join(args[2:]).strip()
+        title = _rdr_research_add(t2_key, finding_text, repo_name)
+        print(f"Recorded T2 research finding: `{repo_name}_rdr/{title}`")
+        return
 
     print(f"**Repo:** `{repo_name}`  **RDR directory:** `{rdr_dir}`")
     print()
