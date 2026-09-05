@@ -1578,6 +1578,24 @@ def _holder_evidence(config_dir: Path) -> str:
     return "[holder] " + "; ".join(bits)
 
 
+# nexus-1kqj8: a failed engine-acquisition attempt, memoized for the rest
+# of THIS process. `check_version_transition` (the root CLI group) and
+# `nx upgrade`'s `_converge_preconditions` each call `converge_engine` once
+# per invocation, on a version transition — one process, two callers. When
+# the box cannot converge (the install/verify keeps failing), the on-disk
+# state the second call re-derives from never changed, so it re-entered the
+# same acquisition branch and re-attempted the ~190 MB download+verify a
+# second time for one command. Keyed on (config_dir, tag): a SUCCESSFUL
+# install is never cached here — it is not needed, since the next call's
+# `detect_engine_convergence` sees the real on-disk state install_binary
+# just wrote and takes the (unrelated, already-cheap) converged fast path
+# above. Process-scoped by construction (a plain module dict): the NEXT
+# `nx` invocation starts a fresh process and gets a fresh attempt, exactly
+# as intended — this only suppresses the redundant retry WITHIN one
+# invocation, never across them.
+_ENGINE_INSTALL_FAILURES: dict[tuple[str, str], str] = {}
+
+
 def converge_engine(
     config_dir: Path, *, dry_run: bool = False, unattended: bool = False,
 ) -> list[str]:
@@ -1841,6 +1859,18 @@ def converge_engine(
             "NEXUS_SERVICE_TAG or reinstall conexus."
         ]
 
+    # nexus-1kqj8: trust a just-failed attempt's NEEDS HUMAN instead of
+    # retrying the download within this process — see the module-level
+    # docstring on `_ENGINE_INSTALL_FAILURES` above.
+    cache_key = (str(config_dir), tag)
+    cached_failure = _ENGINE_INSTALL_FAILURES.get(cache_key)
+    if cached_failure is not None:
+        return [
+            f"NEEDS HUMAN: engine convergence failed installing {tag}: "
+            f"{cached_failure} (already attempted earlier in this "
+            "invocation; not retrying)"
+        ]
+
     try:
         install_binary(tag, config_dir, installed_by="upgrade-finish engine convergence")
     except Exception as exc:  # noqa: BLE001 — code-review HIGH: install_binary
@@ -1854,6 +1884,7 @@ def converge_engine(
         # also skipped the heal leg entirely. "Never raises" (this
         # function's own docstring contract) means EVERY exception here,
         # not just the expected one.
+        _ENGINE_INSTALL_FAILURES[cache_key] = str(exc)
         return [f"NEEDS HUMAN: engine convergence failed installing {tag}: {exc}"]
 
     # nexus-4yf4u: the install is a fact (it either raised or it did not);
