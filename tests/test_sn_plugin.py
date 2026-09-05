@@ -429,3 +429,38 @@ class TestWorktreeInjection:
         named = set(re.findall(r"`((?:jet_brains_)?[a-z_]+)`", text)) & {n for n in available}
         assert named <= set(available)
         assert "replace_in_files" in named and "replace_symbol_body" in named
+
+
+class TestWorktreeDeveloperExample:
+    """sn/examples/worktree-developer.md: the opt-in per-worktree Serena agent (nexus-ftpk3)."""
+
+    EXAMPLE = SN_DIR / "examples" / "worktree-developer.md"
+
+    def _frontmatter(self) -> str:
+        text = self.EXAMPLE.read_text()
+        assert text.startswith("---\n")
+        return text.split("---\n")[1]
+
+    def test_pinned_to_the_same_serena_revision(self) -> None:
+        url, rev = serena_pin()
+        assert f"{url}@{rev}" in self._frontmatter(), "bump the example when bumping sn/.mcp.json"
+
+    def test_server_starts_with_no_project(self) -> None:
+        """Measured (cc-validation scenario 30): the inline server spawns in the parent's cwd, so
+        --project-from-cwd would root it at the primary. The agent activates its own pwd instead."""
+        fm = self._frontmatter()
+        assert "--project-from-cwd" not in fm
+        assert "--context" in fm and "claude-code" in fm
+        body = self.EXAMPLE.read_text().split("---\n", 2)[2]
+        assert "activate_project" in body and "pwd" in body
+
+    def test_tool_prefix_is_not_the_plugin_prefix(self) -> None:
+        """The sn guard keys on mcp__plugin_sn_serena__; the private server must not collide with it."""
+        fm = self._frontmatter()
+        assert "serena-wt:" in fm
+        assert "plugin_sn_serena" not in fm
+
+    def test_readme_documents_the_example(self) -> None:
+        readme = (SN_DIR / "README.md").read_text()
+        assert "examples/worktree-developer.md" in readme
+        assert "mcp__serena-wt__*" in readme
