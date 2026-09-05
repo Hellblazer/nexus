@@ -2,7 +2,8 @@
 title: "Catalog Inode Flip: Spaces Replace Name-Encoded Collections, Sets Replace Corpus Routing"
 id: RDR-203
 type: Architecture
-status: draft
+status: accepted
+accepted_date: 2026-09-05
 priority: high
 author: Sam
 created: 2026-09-05
