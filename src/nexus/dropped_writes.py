@@ -93,6 +93,33 @@ _CAUSE_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
 #: see :attr:`DropSummary.recent_all_benign`.
 _BENIGN_DROP_CAUSES = frozenset({"guard_refused", "route_absent"})
 
+#: THE canonical, single-source-of-truth registry of every NAMED
+#: (non-dynamic, non-empty) cause this module's classifier can produce
+#: (nexus-gjv9b review fold-in round 5, code-review non-blocking item 1)
+#: -- derived from :data:`_CAUSE_PATTERNS`'s own keys plus ``"other"``
+#: (:func:`classify_drop_cause`'s fallback for a non-empty, unmatched
+#: error -- not itself a ``_CAUSE_PATTERNS`` entry, but still a cause
+#: the meter can record). Deliberately excludes the empty string
+#: (unclassified: no cause was determinable at all) and a caller's own
+#: dynamic escape valve (the routing hook's ``f"http_{code}"`` for an
+#: unrecognized HTTP status is passed as an EXPLICIT cause, bypassing
+#: this module's classifier entirely -- see :func:`record_drop`'s
+#: ``cause`` parameter).
+#:
+#: Before this constant existed, the drop-cause vocabulary was two
+#: hand-maintained string-literal sets: this module's own classifier,
+#: and ``conexus/hooks/scripts/routing/_lib.py``'s independent
+#: transport-layer classification (that hook is stdlib-only, RDR-121 §
+#: Contract, and cannot import this module to share the literals
+#: directly). ``tests/test_routing_hooks.py::
+#: test_parity_cause_vocabulary_matches_dropped_writes`` reads this
+#: constant and the hook's own mirror constant
+#: (``_lib._STATIC_CAUSE_NAMES``) and asserts them equal -- the same
+#: "two independent implementations, one parity test" discipline this
+#: bead's discovery-function porting (``_read_service_lease`` et al.)
+#: already established, applied to a vocabulary instead of a behavior.
+NAMED_DROP_CAUSES: frozenset[str] = frozenset(name for name, _ in _CAUSE_PATTERNS) | {"other"}
+
 
 def classify_drop_cause(error: str) -> str:
     """Best-effort ``cause`` classification of *error* — never raises,

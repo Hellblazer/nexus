@@ -678,6 +678,33 @@ def _engine_endpoint() -> "tuple[str, str] | tuple[None, None]":
 #: hardcoded, not imported, because this script has no ``nexus`` import.
 _DEFAULT_TENANT = "default"
 
+#: Mirrors ``nexus.dropped_writes.NAMED_DROP_CAUSES`` verbatim (nexus-gjv9b
+#: review fold-in round 5, code-review non-blocking item 1) -- the FULL
+#: shared cause vocabulary every drop-meter producer and reader (this
+#: hook, ``_session_end_census.py``'s capability_census producer,
+#: ``health._check_t2_dropped_writes``) recognizes as one closed set,
+#: not merely the subset :func:`_post_routing_event_http` itself can
+#: literally return -- this function alone never produces
+#: ``"guard_refused"`` (that is specific to the production-write-guard
+#: refusal path, which only ``_session_end_census.py`` can hit), but the
+#: VOCABULARY is shared across both producers, so it belongs here too.
+#: Hardcoded, not imported (this script has no ``nexus`` import,
+#: RDR-121 § Contract), so ``tests/test_routing_hooks.py::
+#: test_parity_cause_vocabulary_matches_dropped_writes`` is what keeps
+#: this mirror honest -- edit both sets, or edit one and let the parity
+#: test catch the drift, exactly like the discovery-function parity
+#: suite below. Excludes ``""`` (the 2xx/success return, and
+#: :func:`classify_drop_cause`'s "nothing to classify" case) and the
+#: dynamic ``f"http_{code}"`` escape valve for a status this function
+#: does not recognize by name -- that string is passed to
+#: :func:`nexus.dropped_writes.record_drop` as an EXPLICIT ``cause``,
+#: bypassing that module's classifier (and this closed vocabulary)
+#: entirely.
+_STATIC_CAUSE_NAMES = frozenset({
+    "guard_refused", "unresolvable", "401", "403", "route_absent",
+    "5xx", "timeout", "connect", "other",
+})
+
 
 def _post_routing_event_http(record: dict, *, timeout: float = 0.25) -> str:
     """Best-effort ``POST /v1/telemetry/routing_events/record`` via
@@ -757,7 +784,9 @@ def _post_routing_event_http(record: dict, *, timeout: float = 0.25) -> str:
         return "other"
 
 
-def _record_dropped_routing_event(error: str, *, cause: str = "") -> None:
+def _record_dropped_routing_event(
+    error: str, *, cause: str = "", event: dict | None = None,
+) -> None:
     """Metered-drop fallback (nexus-gjv9b PART 2 design decision): a
     routing event that could not reach the engine is counted, not
     silently discarded and not appended to ``routing_log.jsonl`` either
@@ -767,6 +796,23 @@ def _record_dropped_routing_event(error: str, *, cause: str = "") -> None:
     ``cause`` field included (never imported -- no ``nexus`` dependency
     here) so ``nx doctor``'s existing drop-meter aggregation (including
     its dominant-cause tally) picks these up with no changes of its own.
+
+    *event* (nexus-gjv9b review fold-in round 6, found via a full-suite
+    red on ``test_routing_subagent_git_write.py::TestAllow::
+    test_escape_token_allows_and_logs`): the ORIGINAL ``rule``/
+    ``outcome``/``escape_reason`` fields from :func:`log_routing_event`'s
+    own record, when given. The canonical ``nexus.dropped_writes.
+    record_drop`` shape has no room for them (shared across every
+    producer, capability_census included), but THIS hook's own
+    independent on-disk record is schemaless JSON -- adding them here
+    costs nothing to any reader (``count_drops`` only ever ``.get()``s
+    the fields it knows about) and closes a real audit-fidelity gap the
+    original PART 2 writer swap introduced silently: an escape-token
+    fire (nexus-mzvwa.9's over-use-visibility concern) that hits an
+    engine-down window used to still land in ``routing_log.jsonl`` with
+    its ``rule``/``outcome``/``escape_reason`` intact; the drop-meter
+    record before this fix carried only a generic ``error``/``cause``,
+    losing exactly the fields an audit review needs.
     """
     try:
         override = os.environ.get("NX_DROPPED_WRITES_LOG_PATH", "").strip()
@@ -785,6 +831,13 @@ def _record_dropped_routing_event(error: str, *, cause: str = "") -> None:
             "error": str(error)[:200],
             "cause": str(cause)[:32],
         }
+        if event:
+            if event.get("rule"):
+                record["rule"] = str(event["rule"])[:200]
+            if event.get("outcome"):
+                record["outcome"] = str(event["outcome"])[:64]
+            if event.get("escape_reason"):
+                record["escape_reason"] = str(event["escape_reason"])[:300]
         line = json.dumps(record, separators=(",", ":")) + "\n"
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
         try:
@@ -845,7 +898,7 @@ def log_routing_event(
         cause = _post_routing_event_http(record)
         if cause:
             _record_dropped_routing_event(
-                f"routing_events POST failed: {cause}", cause=cause,
+                f"routing_events POST failed: {cause}", cause=cause, event=record,
             )
     except Exception:
         # Telemetry must never crash a hook. Swallow.

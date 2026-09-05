@@ -98,3 +98,19 @@ mechanize, it matters enough to ship.
   `routing_log.jsonl` exactly as before (the OLD code is what is
   installed; this description is of the NEW code once the cut lands),
   and `nx hook routing-stats` without `--from-store` keeps reading it.
+  **This plugin cut itself can land ahead of the paired engine tag**
+  (review fold-in round 4): if it does, the cloud engine has no
+  `routing_events` route yet and every hook decision 404s until the
+  engine catches up. That is BENIGN by design, not a failure to chase:
+  HTTP 404/405 classify as cause `route_absent` (same treatment for
+  `capability_census`'s writer in `_session_end_census.py`), and `nx
+  doctor`'s drop-meter check reports `ok=True` with an informational
+  "engine behind the client; `<hook>` not yet served" line for a window
+  made entirely of `route_absent` (alone or mixed with the pre-existing
+  `guard_refused` exemption) — never the "the engine is failing" WARN a
+  real service-down/auth/timeout episode gets. Both static cause
+  vocabularies (this hook's transport-layer classification and
+  `nexus.dropped_writes`'s pattern-based classifier) are kept in parity
+  by `tests/test_routing_hooks.py::test_parity_cause_vocabulary_
+  matches_dropped_writes`, the same discipline as the discovery-function
+  parity suite above.

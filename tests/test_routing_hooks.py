@@ -315,6 +315,57 @@ def test_log_routing_event_no_engine_env_drops_to_meter(tmp_path, monkeypatch):
     assert drops[0]["rows"] == 1
 
 
+def test_log_routing_event_drop_record_preserves_rule_outcome_and_escape_reason(
+    tmp_path, monkeypatch,
+):
+    """nexus-gjv9b review fold-in round 6, found via a full-suite red on
+    tests/test_routing_subagent_git_write.py: the drop-meter record must
+    carry the ORIGINAL event's rule/outcome/escape_reason, not just a
+    generic error/cause -- an escape-token fire (nexus-mzvwa.9's
+    over-use-visibility concern) that hits an engine-down window must
+    stay auditable, exactly as it was when routing_log.jsonl carried it
+    directly (before the PART 2 writer swap)."""
+    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    drop_path = tmp_path / "dropped_writes.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
+    monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
+    monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+    lib = _load_lib()
+
+    lib.log_routing_event(
+        rule="phase_review_close_requires_gate",
+        outcome="escape",
+        escape_reason="orchestrator sanctioned",
+    )
+
+    drops = _drop_records(drop_path)
+    assert len(drops) == 1
+    assert drops[0]["rule"] == "phase_review_close_requires_gate"
+    assert drops[0]["outcome"] == "escape"
+    assert drops[0]["escape_reason"] == "orchestrator sanctioned"
+
+
+def test_log_routing_event_drop_record_omits_absent_optional_fields(tmp_path, monkeypatch):
+    """No tool_name/command_fragment/escape_reason given -> none of those
+    keys appear in the drop record (never empty-string padding)."""
+    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    drop_path = tmp_path / "dropped_writes.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
+    monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
+    monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+    lib = _load_lib()
+
+    lib.log_routing_event(rule="rule_bare", outcome="allow")
+
+    drops = _drop_records(drop_path)
+    assert len(drops) == 1
+    assert drops[0]["rule"] == "rule_bare"
+    assert drops[0]["outcome"] == "allow"
+    assert "escape_reason" not in drops[0]
+
+
 def test_log_routing_event_http_success_no_drop(tmp_path, monkeypatch):
     _isolate_endpoint_discovery(tmp_path, monkeypatch)
     log_path = tmp_path / "routing_log.jsonl"
@@ -1198,3 +1249,28 @@ def test_parity_read_config_yml_credentials_no_credentials_block(tmp_path):
     (tmp_path / "config.yml").write_text("install:\n  mode: managed\n")
     assert lib._read_config_yml_credentials(tmp_path) == {}
     assert scan._read_config_yml_credentials(tmp_path) == {}
+
+
+# ---------------------------------------------------------------------------
+# Cause-vocabulary parity with nexus.dropped_writes (nexus-gjv9b review
+# fold-in round 5, code-review non-blocking item 1): the drop-cause
+# vocabulary was two hand-maintained string-literal sets -- this hook's
+# own transport-layer classification, and dropped_writes.classify_drop_
+# cause's pattern table. The hook is stdlib-only (no `nexus` import) and
+# cannot share the literals via a common import, so this is the "honest
+# tool" the code review asked for: read both files' literal sets and
+# assert equality, the same discipline as the discovery-function parity
+# suite above.
+# ---------------------------------------------------------------------------
+
+
+def test_parity_cause_vocabulary_matches_dropped_writes():
+    from nexus import dropped_writes
+
+    lib = _load_lib()
+    assert lib._STATIC_CAUSE_NAMES == dropped_writes.NAMED_DROP_CAUSES, (
+        "the routing hook's mirror of the drop-cause vocabulary "
+        "(_lib._STATIC_CAUSE_NAMES) has drifted from the canonical "
+        "registry (nexus.dropped_writes.NAMED_DROP_CAUSES) -- update "
+        "whichever side is missing the other's causes"
+    )
