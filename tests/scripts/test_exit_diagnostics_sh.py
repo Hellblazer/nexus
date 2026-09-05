@@ -57,7 +57,10 @@ def _harness(tmp_path: Path, *, wire_it: bool) -> Path:
     if wire_it:
         lines += [
             "diag_arm_err_trap",
-            "trap 'diag_exit_guard' EXIT",
+            # Chained exactly as run.sh chains it: the guard first, then
+            # cleanup commands that MUST still run on a failing exit.
+            "cleanup_marker() { echo CLEANUP_RAN; }",
+            "trap 'diag_exit_guard; cleanup_marker' EXIT",
         ]
     else:
         # Deliberately the "trap removed" mutant: the lib is sourced (so a
@@ -114,6 +117,17 @@ class TestMechanismFiresOnFailure:
         assert f"line {expected_line}:" in result.stderr, result.stderr
         assert "false" in result.stderr, result.stderr
         assert result.stderr.strip().startswith("FATAL:") or "FATAL:" in result.stderr
+
+    def test_chained_cleanup_still_runs_after_the_guard_on_failure(self, tmp_path) -> None:
+        # The guard is chained FIRST in every run.sh EXIT trap under set -e.
+        # If it returned non-zero, bash would abort the rest of the trap and
+        # skip lock release, lease release, and STAGE removal on exactly the
+        # failing exits it diagnoses (batch-2 review, 2026-09-05).
+        script = _harness(tmp_path, wire_it=True)
+        result = _run(script)
+        assert result.returncode == 1
+        assert "FATAL:" in result.stderr
+        assert "CLEANUP_RAN" in result.stdout, result.stdout
 
     def test_exit_code_is_preserved_through_the_trap(self, tmp_path) -> None:
         # diag_exit_guard must never itself call `exit` -- if it did, the

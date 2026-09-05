@@ -75,5 +75,12 @@ diag_exit_guard() {
       echo "FATAL: run.sh exiting $rc with no failing command recorded (a direct \`exit $rc\` with nothing tracked since the last recorded failure, if any)" >&2
     fi
   fi
-  return "$rc"
+  # Return 0, never "$rc": this guard is chained FIRST in multi-command
+  # EXIT traps (`trap 'diag_exit_guard; cleanup_a; cleanup_b' EXIT`)
+  # under `set -e`, and a non-zero return here would abort the rest of
+  # the trap, skipping every cleanup on exactly the failing exits it
+  # exists to diagnose (batch-2 review, 2026-09-05). bash keeps the
+  # script's original exit status through an EXIT trap regardless of
+  # the trap body's status, as long as the trap never calls `exit`.
+  return 0
 }

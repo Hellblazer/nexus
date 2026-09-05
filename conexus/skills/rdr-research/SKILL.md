@@ -38,8 +38,9 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
    `nx rdr preamble rdr-research -- add <id> <finding text tokens...>`
    (literal argv tokens, per the apostrophe-crash rule above). It derives
    the next sequence from existing `<id>-research-*` T2 titles, writes the
-   record, and never overwrites an existing title — it advances to the next
-   free sequence instead. It prints the recorded title
+   record, and re-checks the computed title immediately before writing,
+   advancing past a collision instead of upserting over it (two adds in
+   the same instant can still race; consecutive adds cannot). It prints the recorded title
    (`{repo}_rdr/NNN-research-{seq}`); read that back to fill in step 3 below.
    Classification / verification method / source are not yet parameters of
    this command — append them to the finding text tokens if needed, or
