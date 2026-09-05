@@ -1312,16 +1312,29 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         ``POST /v1/telemetry/capability_census/record``.
 
         Single-attempt with a hard *timeout* (default 2.0s, matching
-        ``_print_service_tier_summary``'s own precedent) — this method is
+        ``_print_service_tier_summary``'s own precedent): this method is
         called from the SessionEnd grandchild path
         (``_session_end_census.write_session_capability_census``), which
-        has no retry budget to spend: any failure is the caller's cue to
-        fall back to a metered drop, never to retry. Bypasses the mixin's
-        gateway-retry/re-resolve composition the same way
-        :meth:`query_tier_writes_once` does for the identical reason.
-        """
-        import httpx  # noqa: PLC0415 — deferred import — only needed on this path
+        has no retry budget to spend, so ``idempotent=False`` issues the
+        request EXACTLY ONCE per credential — no gateway 502/503/504
+        backoff loop — with the sole carve-out :meth:`_send` documents (a
+        definitive 401 re-mints and retries once; a genuinely dead
+        credential cannot silently wedge this path forever). ANY failure
+        is the caller's (``_post_capability_census``'s) cue to degrade to
+        a metered drop, never to retry itself on top of this.
 
+        Routed through :meth:`_post` (nexus-a2qhz / nexus-onq1a review
+        fix pass — a prior version bypassed the mixin's ``_client``
+        entirely via a raw ``httpx`` call, which ALSO bypassed the
+        production-write guard silently): this fires on every SessionEnd,
+        so a dev checkout running as the operator's live ``nx`` must
+        refuse it the same way every other T2 write does. ``mutates=True``
+        (the default) means :meth:`_send` calls
+        :func:`~nexus.db.service_endpoint.guard_production_write` BEFORE
+        the first network attempt; an unopted-in dev checkout gets
+        :class:`~nexus.db.service_endpoint.ProductionWriteGuardError`,
+        which the caller counts as a metered drop, never silently loses.
+        """
         payload: dict[str, Any] = {
             "session_id": session_id,
             "ts":         ts,
@@ -1333,14 +1346,12 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             payload["capabilities"] = capabilities or {}
             payload["dispatches"] = dispatches
             payload["total_calls"] = total_calls
-        resp = self._client.request(
-            "POST",
-            self._base_url + "/v1/telemetry/capability_census/record",
-            headers=self._auth_headers(),
-            json=payload,
-            timeout=httpx.Timeout(timeout),
+        self._post(
+            "/v1/telemetry/capability_census/record",
+            payload,
+            idempotent=False,
+            timeout=timeout,
         )
-        resp.raise_for_status()
 
     def query_capability_census(
         self,
@@ -1386,13 +1397,23 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         THEMSELVES (``conexus/hooks/scripts/routing/_lib.py``) are
         standalone scripts with no ``nexus`` import (RDR-121 § Contract)
         and POST to the same route directly via ``urllib`` — they cannot
-        call this method. Single-attempt with a hard *timeout* (default
-        0.25s — the routing-hook latency budget); any failure is the
-        caller's cue to drop, never to retry, same discipline as
-        :meth:`record_capability_census`.
-        """
-        import httpx  # noqa: PLC0415 — deferred import — only needed on this path
+        call this method, so the endpoint-discovery/guard fix here does
+        not reach them (see that module's own ``_engine_endpoint``).
 
+        Single-attempt with a hard *timeout* (default 0.25s — the
+        routing-hook latency budget): ``idempotent=False`` issues the
+        request EXACTLY ONCE per credential (the sole carve-out is
+        :meth:`_send`'s documented 401 re-mint-and-retry). ANY failure is
+        the caller's cue to drop, never to retry itself on top of this —
+        same discipline as :meth:`record_capability_census`.
+
+        Routed through :meth:`_post` (nexus-a2qhz / nexus-onq1a review
+        fix pass — a prior version bypassed the mixin's ``_client`` and
+        its production-write guard via a raw ``httpx`` call); ``mutates=
+        True`` (the default) means an unopted-in dev checkout is refused
+        via :func:`~nexus.db.service_endpoint.guard_production_write`
+        before any network attempt, same as every other T2 write.
+        """
         payload: dict[str, Any] = {
             "rule":             rule,
             "outcome":          outcome,
@@ -1402,14 +1423,12 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "command_fragment": command_fragment,
             "escape_reason":    escape_reason,
         }
-        resp = self._client.request(
-            "POST",
-            self._base_url + "/v1/telemetry/routing_events/record",
-            headers=self._auth_headers(),
-            json=payload,
-            timeout=httpx.Timeout(timeout),
+        self._post(
+            "/v1/telemetry/routing_events/record",
+            payload,
+            idempotent=False,
+            timeout=timeout,
         )
-        resp.raise_for_status()
 
     def list_routing_events(
         self,

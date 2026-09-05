@@ -43,8 +43,15 @@ _retention_markers: dict[str, int] = {}
 _nx_answer_runs: list[dict[str, Any]] = []
 _hook_failures: list[dict[str, Any]] = []
 _frecency: dict[str, dict[str, Any]] = {}  # keyed by chunk_id
+_capability_census: dict[str, dict[str, Any]] = {}  # keyed by session_id (upsert)
+_routing_events: list[dict[str, Any]] = []
 _STORE_LOCK = threading.Lock()
 _ID_SEQ: dict[str, int] = defaultdict(int)
+#: Counts every request that reaches this fake server, regardless of path —
+#: the production-write-guard tests assert this stays at 0 (nexus-a2qhz /
+#: nexus-onq1a review fix pass: the guard must fire BEFORE any network
+#: attempt, not merely before this fake server accepts the write).
+_REQUEST_COUNT: dict[str, int] = {"n": 0}
 
 IMPORT_LOG: list[dict[str, Any]] = []  # captures /import payloads for assertion
 
@@ -67,10 +74,13 @@ def _clear_all() -> None:
         _nx_answer_runs.clear()
         _hook_failures.clear()
         _frecency.clear()
+        _capability_census.clear()
+        _routing_events.clear()
         _ID_SEQ.clear()
         IMPORT_LOG.clear()
         _VERSION_RESPONSE.clear()
         _VERSION_RESPONSE.update({"nx_answer_steps_supported": True})
+        _REQUEST_COUNT["n"] = 0
         _VERSION_REQUEST_COUNT["n"] = 0
 
 
@@ -80,12 +90,40 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
     TOKEN = TOKEN
 
     def do_POST(self):
+        with _STORE_LOCK:
+            _REQUEST_COUNT["n"] += 1
         if not self._check_auth():
             return
         pp = urlparse(self.path).path
         body = self._body()
 
-        if pp == "/v1/telemetry/relevance/log":
+        if pp == "/v1/telemetry/capability_census/record":
+            with _STORE_LOCK:
+                _capability_census[body["session_id"]] = {
+                    "session_id":          body.get("session_id", ""),
+                    "ts":                  body.get("ts", ""),
+                    "blindspot":           bool(body.get("blindspot", False)),
+                    "unmeasurable_reason": body.get("unmeasurable_reason"),
+                    "capabilities":        body.get("capabilities") or {},
+                    "dispatches":          body.get("dispatches"),
+                    "total_calls":         body.get("total_calls"),
+                }
+            self._send(200, {"ok": True})
+
+        elif pp == "/v1/telemetry/routing_events/record":
+            with _STORE_LOCK:
+                _routing_events.append({
+                    "ts":               body.get("ts", ""),
+                    "session_id":       body.get("session_id", ""),
+                    "rule":             body.get("rule", ""),
+                    "outcome":          body.get("outcome", ""),
+                    "tool_name":        body.get("tool_name", ""),
+                    "command_fragment": body.get("command_fragment", ""),
+                    "escape_reason":    body.get("escape_reason", ""),
+                })
+            self._send(200, {"ok": True})
+
+        elif pp == "/v1/telemetry/relevance/log":
             with _STORE_LOCK:
                 _ID_SEQ["rel"] += 1
                 row = {
@@ -351,11 +389,36 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
                 body = dict(_VERSION_RESPONSE)
             self._send(200, body)
             return
+        with _STORE_LOCK:
+            _REQUEST_COUNT["n"] += 1
         if not self._check_auth():
             return
         qs = self._qs()
 
-        if pp == "/v1/telemetry/relevance/query":
+        if pp == "/v1/telemetry/capability_census/query":
+            session_id = qs.get("session_id", "")
+            since      = qs.get("since", "")
+            limit      = int(qs.get("limit", "100"))
+            with _STORE_LOCK:
+                rows = list(_capability_census.values())
+            if session_id:
+                rows = [r for r in rows if r["session_id"] == session_id]
+            elif since:
+                rows = [r for r in rows if r["ts"] >= since]
+            rows = sorted(rows, key=lambda r: r["ts"], reverse=True)[:limit]
+            self._send(200, {"rows": rows})
+
+        elif pp == "/v1/telemetry/routing_events/list":
+            since = qs.get("since", "")
+            limit = int(qs.get("limit", "1000"))
+            with _STORE_LOCK:
+                rows = list(_routing_events)
+            if since:
+                rows = [r for r in rows if r["ts"] >= since]
+            rows = sorted(rows, key=lambda r: r["ts"], reverse=True)[:limit]
+            self._send(200, {"rows": rows})
+
+        elif pp == "/v1/telemetry/relevance/query":
             q         = qs.get("query", "")
             chunk_id  = qs.get("chunk_id", "")
             action    = qs.get("action", "")
@@ -1633,3 +1696,145 @@ class TestGetRelevanceStatsAgainstRealEngine:
             assert after["newest"] >= after["oldest"]
         finally:
             db.close()
+
+
+# ── capability_census / routing_events (nexus-gjv9b) ────────────────────────
+
+class TestRecordCapabilityCensus:
+    def test_record_then_query_roundtrip(self, client):
+        client.record_capability_census(
+            session_id="sess-1", ts="2026-09-01T00:00:00Z", blindspot=False,
+            capabilities={"skill": 3, "agent": 1}, dispatches=1, total_calls=4,
+        )
+        rows = client.query_capability_census(session_id="sess-1")
+        assert len(rows) == 1
+        assert rows[0]["capabilities"]["skill"] == 3
+        assert rows[0]["total_calls"] == 4
+
+    def test_blindspot_record_omits_capabilities(self, client):
+        client.record_capability_census(
+            session_id="sess-blind", ts="2026-09-01T00:00:00Z", blindspot=True,
+            unmeasurable_reason="no-transcript-found",
+        )
+        rows = client.query_capability_census(session_id="sess-blind")
+        assert rows[0]["blindspot"] is True
+        assert rows[0]["unmeasurable_reason"] == "no-transcript-found"
+
+    def test_reupserting_same_session_replaces_not_duplicates(self, client):
+        client.record_capability_census(
+            session_id="sess-up", ts="2026-09-01T00:00:00Z", blindspot=False,
+            capabilities={"skill": 1}, dispatches=0, total_calls=1,
+        )
+        client.record_capability_census(
+            session_id="sess-up", ts="2026-09-01T00:05:00Z", blindspot=False,
+            capabilities={"skill": 5}, dispatches=2, total_calls=5,
+        )
+        rows = client.query_capability_census(session_id="sess-up")
+        assert len(rows) == 1
+        assert rows[0]["total_calls"] == 5
+
+
+class TestRecordRoutingEvent:
+    def test_record_then_list_roundtrip(self, client):
+        client.record_routing_event(rule="r1", outcome="deny", tool_name="Bash")
+        rows = client.list_routing_events()
+        assert len(rows) == 1
+        assert rows[0]["rule"] == "r1"
+        assert rows[0]["outcome"] == "deny"
+
+    def test_repeated_fires_append_distinct_rows(self, client):
+        client.record_routing_event(rule="r1", outcome="allow")
+        client.record_routing_event(rule="r1", outcome="allow")
+        rows = client.list_routing_events()
+        assert len(rows) == 2
+
+
+class TestCapabilityCensusAndRoutingEventProductionWriteGuard:
+    """nexus-a2qhz / nexus-onq1a review fix pass: both methods used to
+    bypass ``RefreshableHttpStoreMixin``'s ``_send`` (and therefore the
+    dev-checkout production-write guard) via a raw ``httpx`` call.
+    ``capability_census`` fires on every SessionEnd, so an un-opted-in
+    dev checkout running as the operator's live ``nx`` would otherwise
+    write straight through to production with no guard at all -- exactly
+    the class of incident nexus-a2qhz exists to prevent.
+
+    ``tests/conftest.py``'s autouse ``_exempt_pytest_from_production_write_
+    guard`` fixture exports ``NX_ALLOW_PROD_WRITE`` for every OTHER test
+    in this suite; these tests explicitly delete it (the documented
+    "later monkeypatch call wins" contract) so the guard's real refusal
+    path actually runs. This process genuinely IS a dev checkout (this
+    repo), so no ``_dev_checkout_root`` mock is needed.
+    """
+
+    def test_record_capability_census_refused_without_opt_in(
+        self, client, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus.db.service_endpoint import ProductionWriteGuardError
+
+        monkeypatch.delenv("NX_ALLOW_PROD_WRITE", raising=False)
+        with pytest.raises(ProductionWriteGuardError):
+            client.record_capability_census(
+                session_id="sess-guarded", ts="2026-09-01T00:00:00Z",
+                blindspot=False, capabilities={}, dispatches=0, total_calls=0,
+            )
+        assert _REQUEST_COUNT["n"] == 0, (
+            "the guard must refuse BEFORE any network attempt -- the fake "
+            "server must never see this request"
+        )
+
+    def test_record_routing_event_refused_without_opt_in(
+        self, client, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus.db.service_endpoint import ProductionWriteGuardError
+
+        monkeypatch.delenv("NX_ALLOW_PROD_WRITE", raising=False)
+        with pytest.raises(ProductionWriteGuardError):
+            client.record_routing_event(rule="r1", outcome="allow")
+        assert _REQUEST_COUNT["n"] == 0
+
+    def test_dev_checkout_census_write_is_metered_as_a_drop_not_lost(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """End-to-end: the SessionEnd writer swap
+        (``_session_end_census._post_capability_census``) treats a
+        refused write exactly like any other failure -- a metered drop,
+        never a crash and never a silent loss."""
+        import nexus._session_end_census as mod
+        from nexus.db.service_endpoint import ProductionWriteGuardError
+
+        monkeypatch.delenv("NX_ALLOW_PROD_WRITE", raising=False)
+
+        def _boom(*a, **k):
+            raise ProductionWriteGuardError("refused: dev checkout, no opt-in")
+
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore.record_capability_census",
+            _boom,
+        )
+        monkeypatch.setattr(
+            "nexus.db.service_endpoint.resolve_service_endpoint",
+            lambda: ("http://127.0.0.1:1", "fake-token"),
+        )
+        # No real mint attempt: this must reach the (mocked) guard refusal,
+        # not fail earlier on an unrelated connection error to the fake
+        # base_url above.
+        class _NoMintManager:
+            def bearer_for(self, base_url, tenant):
+                return None
+        monkeypatch.setattr(
+            "nexus.db.data_token.get_data_token_manager",
+            lambda: _NoMintManager(),
+        )
+        drops: list[dict] = []
+        monkeypatch.setattr(
+            "nexus.dropped_writes.record_drop",
+            lambda **kw: drops.append(kw),
+        )
+
+        mod._post_capability_census({
+            "session_id": "sess-guard-e2e", "timestamp": "2026-09-01T00:00:00Z",
+            "blindspot": False, "capabilities": {}, "dispatches": 0, "total_calls": 0,
+        })  # must not raise
+
+        assert len(drops) == 1
+        assert drops[0]["hook"] == "capability_census"
