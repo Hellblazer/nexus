@@ -6,6 +6,63 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.31.0] - 2026-09-05
+
+Engine identity unchanged: `engine-service-v0.1.100`.
+
+### Added
+
+- Post-commit review bursts are queued and drained instead of dropped
+  (nexus-jh86x follow-up). When a reviewer is already running, the hook
+  appends `HEAD` to one queue per repository and the running reviewer,
+  dispatched with `nx review commit --drain`, reviews the queued shas
+  before it exits. Measured before: 6 of 9 commits in one push were never
+  reviewed. `nx census reviews` now names every commit since the newest
+  reachable tag with no review record, by sha or by patch hash, and
+  reports the queue depth.
+- `nx rdr repeat RDR` (nexus-axwpn): sends an RDR's design section to two
+  `claude -p` models, asks each for an implementation plan, and reports
+  where the plans diverge in steps, files and decisions. Two aliases that
+  resolve to one model are refused.
+- RDR supersedes edges are indexed and part of the lifecycle
+  (nexus-y8bkt): `nx rdr set-status superseded` seeds the edge the
+  dependency walk needs, and the `superseded_by` value is parsed with the
+  anchored `RDR-NNN` extractor, never a digit search.
+- Gates that passed on a fallback say so (nexus-1c7oq): a
+  `GATE PASSED-BY-DEFAULT: <gate> <reason>` line names the default the
+  green rests on, including the four paired-acceptance rows where a
+  below-floor cloud passes on the paired tag.
+- Checked tables carry `[[impossible]]` guard pairs instead of dropping
+  values from a domain (nexus-q9u2n).
+
+### Changed
+
+- Linux installs resolve CPU-only torch by default (nexus-mt1tj); the
+  CUDA wheels are no longer pulled onto a box that never uses them.
+- A Markdown or RDR file inside a git checkout registers under that
+  repository's catalog owner whichever command indexes it (nexus-3o4lt).
+  `nx index md` and `nx index rdr` on a repo file no longer mint a
+  curator-owner row carrying an absolute path; a file that exists only
+  in a nested worktree is refused before any chunk or catalog write, and
+  the CLI fails loud. PDFs, files outside any repository and the nexus
+  config directory keep the corpus identity.
+
+### Fixed
+
+- The indexer counts a registration as new only when the engine says it
+  created the row (nexus-53cae). Reconciled registrations were reported
+  as "199 new" on every post-commit index run for weeks.
+- A review of an amended or rebased commit whose patch is unchanged is
+  skipped, and the subject is taken from the diff header (nexus-yh25a).
+
+### Documentation
+
+- JDR-001 is the only full text of the T1 three-scopes contract;
+  AGENTS.md and `docs/architecture.md` keep a summary and the pointer.
+- RDR-079 self-declares its id and the calibration artifact declares
+  itself a companion note, so the dependency link generator resolves the
+  shared number to one file.
+
 ## [7.30.0] - 2026-09-04
 
 Engine identity unchanged: `engine-service-v0.1.100`.
