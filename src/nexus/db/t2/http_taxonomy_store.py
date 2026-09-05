@@ -185,6 +185,13 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 base_url=self._base_url if self._base_url_pinned else None,
                 tenant=self._tenant,
                 _token=self._token if self._token_pinned else None,
+                # nexus-m20mf P3 fold-in (code-review Important finding):
+                # share THIS store's client (injected or self-owned; None
+                # when this HttpTaxonomyStore itself owns its own client)
+                # rather than always opening an unshared 9th pool -- fixes
+                # the highest-traffic taxonomy commands (discover/rebuild/
+                # split) that this property exists to serve.
+                client=self._client,
             )
         return self._centroid_store
 

@@ -173,26 +173,6 @@ def _open_catalog_or_none() -> Any:
         return None
 
 
-#: nexus-m20mf P3: mirrors taxonomy_cmd.py's identical mechanism -- the key
-#: the ``index`` group callback stashes its one-per-invocation shared
-#: httpx.Client under, inside Click's existing ``ctx.obj`` dict (a NEW key,
-#: never a replacement of it).
-_T2_SHARED_CLIENT_CTX_KEY = "_t2_shared_client"
-
-
-def _current_index_command_shared_client():
-    """Return the current ``nx index`` invocation's shared ``httpx.Client``,
-    or ``None`` outside a live Click context -- callers building their own
-    ``T2Database`` fall back to the pre-existing per-instance-client
-    behavior in that case (nexus-m20mf P3, additive; see
-    ``taxonomy_cmd._current_command_shared_client`` for the identical
-    mechanism)."""
-    ctx = click.get_current_context(silent=True)
-    if ctx is None or not isinstance(ctx.obj, dict):
-        return None
-    return ctx.obj.get(_T2_SHARED_CLIENT_CTX_KEY)
-
-
 @click.group()
 @click.pass_context
 def index(ctx: click.Context) -> None:
@@ -219,11 +199,15 @@ def index(ctx: click.Context) -> None:
     # ctx.call_on_close firing on both the success and exception paths).
     # Built AFTER the migration-quiesce guard above so a suspended-index
     # invocation never bothers constructing a client it will not use.
+    # nexus-m20mf P3 fold-in: T2_SHARED_CLIENT_CTX_KEY now lives in
+    # commands._helpers (the unified helper both taxonomy_cmd.py and
+    # index.py use — code-review Suggestion, no more near-duplicate copy).
+    from nexus.commands._helpers import T2_SHARED_CLIENT_CTX_KEY  # noqa: PLC0415 — deferred to avoid circular import at module load
     from nexus.db.t2._refreshable_client import build_shared_t2_client  # noqa: PLC0415 — deferred to avoid circular import at module load
 
     ctx.ensure_object(dict)
     shared_client = build_shared_t2_client()
-    ctx.obj[_T2_SHARED_CLIENT_CTX_KEY] = shared_client
+    ctx.obj[T2_SHARED_CLIENT_CTX_KEY] = shared_client
     ctx.call_on_close(shared_client.close)
 
 
@@ -1343,6 +1327,14 @@ def index_repo_cmd(
                 err=True,
             )
 
+        # nexus-m20mf P3 fold-in (critic finding 2 -- share the SAME
+        # command's client with index_repository's per-file hook-failure
+        # chain, not just the taxonomy-postprocessing step below): fetched
+        # ONCE, at the CLI layer (this command's own body), and passed on
+        # explicitly to every T2-touching call this command makes.
+        from nexus.commands._helpers import t2_shared_client_from_context  # noqa: PLC0415 — deferred to avoid circular import at module load
+        _t2_client = t2_shared_client_from_context()
+
         stats: dict = {}
         try:
             stats = index_repository(path, reg, frecency_only=frecency_only, force=force,
@@ -1351,7 +1343,8 @@ def index_repo_cmd(
                                      on_locked=on_locked, on_start=on_start, on_file=on_file,
                                      on_phase=on_phase,
                                      on_flush=on_flush_progress if monitor else None,
-                                     on_stage_timers=on_stage_timers) or {}
+                                     on_stage_timers=on_stage_timers,
+                                     client=_t2_client) or {}
         except VectorUpsertTimeoutError as e:
             # nexus-8hdg9 phase 1 critique (Significant-2): defense in depth.
             # indexer.py's _contain_transient_upsert now defers a per-file
@@ -1418,12 +1411,15 @@ def index_repo_cmd(
         # fails AFTER a prior success while file churn has stopped (nexus-du6d0) —
         # the latter needs a signal independent of index runs, not just this gate.
         if not frecency_only and not no_taxonomy and stats:
+            # _t2_client was already fetched above (same command
+            # invocation, same shared client backs BOTH index_repository's
+            # per-file hook-failure chain and this taxonomy step).
             info = reg.get(path) or {}
             collections = _collections_from_registry_info(info)
             files_changed = stats.get("files_changed", 0)
             # One topic-existence probe serves both the qgc4b self-heal gate
             # and the tevzq subset (review Medium-2: was two T2 opens).
-            no_topics = _collections_without_topics(collections)
+            no_topics = _collections_without_topics(collections, client=_t2_client)
             if files_changed > 0 or no_topics:
                 # nexus-tevzq: collection-grain refinement of the qgc4b gate.
                 # Only collections whose own kind wrote files this run (plus
@@ -1432,10 +1428,11 @@ def index_repo_cmd(
                 # taxonomy. Projection/links/L1 still see the full list.
                 discover = _discover_subset(
                     collections, stats.get("files_changed_by_kind"),
-                    no_topics=no_topics,
+                    no_topics=no_topics, client=_t2_client,
                 )
                 run_collection_postprocessing(
                     collections, repo_path=path, discover_collections=discover,
+                    client=_t2_client,
                 )
             else:
                 click.echo("  Taxonomy: no files changed — skipping discovery")
@@ -1640,7 +1637,7 @@ def index_repo_cmd(
             )
 
 
-def _taxonomy_incomplete(collections: list[str]) -> bool:
+def _taxonomy_incomplete(collections: list[str], *, client=None) -> bool:
     """Return True if ANY collection has no discovered topics yet.
 
     nexus-qgc4b self-heal guard: gates whether a no-change ``nx index repo``
@@ -1651,16 +1648,37 @@ def _taxonomy_incomplete(collections: list[str]) -> bool:
     Read-only; runs only on the cheap no-change path (short-circuited after
     ``files_changed > 0``). Fails safe: on any error, returns True (run
     discovery) rather than risk stranding a collection.
+
+    nexus-m20mf P3 fold-in: *client* is a plain, explicit, optional
+    parameter (default ``None`` — pre-existing per-instance-client
+    behavior, unchanged) threaded straight to
+    :func:`_collections_without_topics`. This function does NOT itself
+    reach into Click's ambient context (critic finding 3) — a caller in
+    an active ``nx index`` invocation passes its own shared client in.
     """
-    return bool(_collections_without_topics(collections))
+    return bool(_collections_without_topics(collections, client=client))
 
 
-def _collections_without_topics(collections: list[str]) -> set[str]:
+def _collections_without_topics(collections: list[str], *, client=None) -> set[str]:
     """Return the subset of *collections* with zero discovered topics.
 
     The per-collection form of the qgc4b self-heal probe (nexus-tevzq).
     Fails safe: on any probe error, returns ALL of *collections* — err
     toward running discovery, never toward stranding a collection.
+
+    nexus-m20mf P3 fold-in (critic finding 3): *client* is a plain,
+    explicit, optional ``httpx.Client`` (default ``None`` — pre-existing
+    per-instance-client behavior, unchanged for every caller that passes
+    nothing). This function does NOT read Click's ambient context itself
+    — the prior shape did, via ``_current_index_command_shared_client()``
+    called from inside this data-layer helper, which is exactly the
+    pattern that produced finding 2 (the identical helper silently
+    behaving differently depending on which Click group happened to be
+    active — ``run_collection_postprocessing``'s two callers, ``nx index
+    repo`` and ``nx collection reindex``, are a different Click group
+    each). The CLI-layer command function is now responsible for fetching
+    its own shared client (``nexus.commands._helpers.t2_shared_client_from_context``)
+    and passing it in explicitly.
     """
     if not collections:
         return set()
@@ -1668,7 +1686,7 @@ def _collections_without_topics(collections: list[str]) -> set[str]:
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
 
     try:
-        with T2Database(default_db_path(), client=_current_index_command_shared_client()) as db:  # boundary-allow: read-only topic-existence probe; no WAL writer contention (RDR-128 P3)
+        with T2Database(default_db_path(), client=client) as db:  # boundary-allow: read-only topic-existence probe; no WAL writer contention (RDR-128 P3)
             return {
                 col for col in collections
                 if not db.taxonomy.get_topics_for_collection(col)
@@ -1683,6 +1701,7 @@ def _discover_subset(
     files_changed_by_kind: dict | None,
     *,
     no_topics: set[str] | None = None,
+    client=None,
 ) -> list[str]:
     """Collections that should run taxonomy DISCOVERY this run (nexus-tevzq).
 
@@ -1713,7 +1732,7 @@ def _discover_subset(
         # Caller pre-computed the probe (gate path) — don't re-open T2.
         keep = changed | (no_topics & set(unchanged))
     else:
-        keep = changed | _collections_without_topics(unchanged)
+        keep = changed | _collections_without_topics(unchanged, client=client)
     return [col for col in collections if col in keep]
 
 
@@ -1907,6 +1926,7 @@ def run_collection_postprocessing(
     repo_path: Path | None = None,
     quiet: bool = False,
     discover_collections: list[str] | None = None,
+    client=None,
 ) -> None:
     """Run the post-index taxonomy + projection + topic-link chain
     against *collections* and refresh the L1 context cache.
@@ -1924,6 +1944,18 @@ def run_collection_postprocessing(
 
     *quiet* suppresses the human-facing ``click.echo`` lines so
     callers can drive the chain without operator output.
+
+    *client* (nexus-m20mf P3 fold-in, critic findings 2/3): a plain,
+    explicit, optional ``httpx.Client``. This function is called from TWO
+    different Click groups — ``nx index repo`` (``index``) and ``nx
+    collection reindex`` (``collection``) — so it must not resolve its own
+    collaborator via Click's ambient context (that was the prior shape,
+    and it produced finding 2's inconsistency bug: ``nx collection
+    reindex`` silently got NO shared client because ``index``'s ambient
+    lookup naturally finds nothing when a different group is active).
+    Each caller now fetches ITS OWN command's shared client and passes it
+    in explicitly. ``None`` (the default) is byte-identical to pre-P3
+    per-instance-client construction.
     """
     if not collections:
         return
@@ -1961,7 +1993,7 @@ def run_collection_postprocessing(
                     f"  Taxonomy: {_n_skipped} unchanged collection(s) skipped "
                     f"(no files written this run)"
                 )
-        with T2Database(default_db_path(), client=_current_index_command_shared_client()) as db:  # boundary-allow: read-only: discover/project compute use a local chroma client; all pure-T2 writes routed via t2_index_write (RDR-151 Phase 3, nexus-uzay8)
+        with T2Database(default_db_path(), client=client) as db:  # boundary-allow: read-only: discover/project compute use a local chroma client; all pure-T2 writes routed via t2_index_write (RDR-151 Phase 3, nexus-uzay8)
             for _tax_i, col_name in enumerate(_discover_targets, start=1):
                 _say(f"  [{_tax_i}/{len(_discover_targets)}] Taxonomy: discovering {col_name}...")
                 try:

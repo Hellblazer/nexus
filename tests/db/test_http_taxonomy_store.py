@@ -2053,3 +2053,63 @@ class TestOrchestrators:
         fake_client = _FakeChromaClient({"src": _FakeChromaColl(embeddings={})})
         out = store.project_against("src", ["tgt"], fake_client)
         assert out["total_chunks"] == 0 and out["matched_topics"] == []
+
+
+class TestSharedClientCentroidFanout:
+    """nexus-m20mf P3 fold-in (code-review Important finding): the lazily-
+    constructed ``HttpCentroidStore`` behind ``HttpTaxonomyStore._centroid``
+    must share whatever client the taxonomy store itself holds -- every
+    taxonomy subcommand that touches centroid ops (discover/rebuild/split,
+    named explicitly in ``taxonomy_cmd.py``'s own ``_T2Database`` boundary-
+    allow comment) was silently opening an UNSHARED 9th ``httpx.Client``
+    for exactly the highest-traffic taxonomy commands, missing the P3
+    pool-collapse benefit entirely. The prior fanout tests
+    (``tests/test_taxonomy_cmd_shared_client_fanout.py``) only exercise
+    ``status``, which never accesses ``.centroid`` at all -- this test
+    targets the property directly, real HTTP transport (fake taxonomy
+    server), no mocks on the store under test.
+
+    CAN FAIL: reverting ``_centroid``'s ``client=self._client`` kwarg
+    (http_taxonomy_store.py) makes the ``is`` identity assertion below
+    fail -- the centroid store would build its own independent client.
+    """
+
+    def test_centroid_store_shares_taxonomy_stores_injected_client(
+        self, fake_server: str
+    ) -> None:
+        from nexus.db.t2._refreshable_client import build_shared_t2_client
+
+        shared = build_shared_t2_client()
+        try:
+            store = HttpTaxonomyStore(base_url=fake_server, _token=TOKEN, client=shared)
+
+            centroid = store._centroid  # lazy construction fires here
+
+            assert centroid._client is shared, (
+                "HttpTaxonomyStore's lazily-constructed centroid port must "
+                "share the SAME injected client, not build its own"
+            )
+            assert centroid._owns_client is False
+        finally:
+            store.close()
+            assert not shared.is_closed, (
+                "closing the taxonomy store (which also closes its "
+                "centroid child) must not close an INJECTED shared client"
+            )
+            shared.close()
+
+    def test_centroid_store_shares_taxonomy_stores_own_client_when_unshared(
+        self, fake_server: str
+    ) -> None:
+        """Even with NO external injection, HttpTaxonomyStore's own
+        (self-owned) client should back its centroid child too -- one
+        taxonomy store, one pool, not two, regardless of whether an
+        external caller ever injects anything."""
+        store = HttpTaxonomyStore(base_url=fake_server, _token=TOKEN)
+
+        centroid = store._centroid
+
+        assert centroid._client is store._client
+        assert centroid._owns_client is False
+        store.close()
+        assert store._client.is_closed

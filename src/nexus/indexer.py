@@ -55,6 +55,8 @@ from nexus.code_indexer import (  # noqa: F401
 _log = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
+    import httpx
+
     from nexus.catalog.catalog_protocol import CatalogReader
     from nexus.catalog.tumbler import Tumbler
     from nexus.hook_registry import HookRegistry
@@ -2122,6 +2124,7 @@ def index_repository(
     on_flush: "Callable[[int, int, str, float, str | None], None] | None" = None,
     on_stage_timers: Callable[[Path, "StageTimers"], None] | None = None,
     hooks: "HookRegistry | None" = None,
+    client: "httpx.Client | None" = None,
 ) -> dict[str, int]:
     """Index all files in *repo* into T3 code__ and docs__ collections.
 
@@ -2200,37 +2203,51 @@ def index_repository(
     # the reconciliation call below is the ONLY new step, added at the end
     # so it never interferes with the pre-existing lock cleanup.
     _fence_run_state: dict = {"needs_fence": None, "owner": None}
-    try:
-        # RDR-137 Phase 3.8 (nexus-tts0d.13): registry.update(status=...)
-        # writes dropped per A2 verdict — status is write-only with no
-        # consumers. head_hash now writes to owners.head_hash on the
-        # catalog (Phase 1.5b column) via _set_owner_head_hash.
-        # RDR-137 followup IMP-21 (nexus-43qgm.21): inner try/except
-        # removed — both handlers unconditionally re-raised and added
-        # zero behaviour; the outer try/finally is the only meaningful
-        # guard. Vestige of the dropped status-write path.
-        if frecency_only:
-            _run_index_frecency_only(repo, registry)
-            stats: dict[str, int] = {}
-        else:
-            stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_re_embed=force_re_embed, force_stale=force_stale, since_head=since_head, on_locked=on_locked, on_start=on_start, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks, fence_run_state=_fence_run_state)
-            _set_owner_head_hash(repo, _current_head(repo))
-        return stats
-    finally:
-        if lock_fd is not None:
-            unlock_file(lock_fd)
-            lock_fd.close()
-        if lock_path is not None:
-            try:
-                lock_path.unlink()
-            except FileNotFoundError:
-                pass  # already gone — harmless
-        # nexus-hg2dw point (2): runs on EVERY exit — normal return, an
-        # exception propagating out of `_run_index`, or a KeyboardInterrupt
-        # (SIGINT) — fail-stamping anything Pass 1 registered as needing
-        # work this run that never reached 'complete'. A no-op (no round
-        # trip) when nothing needed fencing this run.
-        _reconcile_needs_fence(_fence_run_state)
+    # nexus-m20mf P3 fold-in: scope the ONE shared T2 client (built by the
+    # caller, e.g. `nx index repo`'s Click group) to this run -- every
+    # per-document hook-failure record (hook_registry.py's fire_single/
+    # fire_batch/fire_document -> _record_*_hook_failure ->
+    # _persist_hook_failure -> mcp_infra.t2_ctx()) and every direct
+    # record_catalog_hook_failure call (catalog/store_hook.py,
+    # doc_indexer.py, pipeline_stages.py, indexer.py's own two sites, all
+    # of which fire from inside a FIXED hook-function call signature that
+    # cannot itself carry a `client=` argument) picks this up automatically
+    # via t2_ctx()'s own resolution rule. A no-op scope when client=None
+    # (every existing caller): t2_ctx() falls back to its pre-P3 fresh-
+    # client-per-call behavior exactly as before.
+    from nexus.mcp_infra import use_shared_t2_client_for_index_run  # noqa: PLC0415 — deferred to avoid circular import
+    with use_shared_t2_client_for_index_run(client):
+        try:
+            # RDR-137 Phase 3.8 (nexus-tts0d.13): registry.update(status=...)
+            # writes dropped per A2 verdict — status is write-only with no
+            # consumers. head_hash now writes to owners.head_hash on the
+            # catalog (Phase 1.5b column) via _set_owner_head_hash.
+            # RDR-137 followup IMP-21 (nexus-43qgm.21): inner try/except
+            # removed — both handlers unconditionally re-raised and added
+            # zero behaviour; the outer try/finally is the only meaningful
+            # guard. Vestige of the dropped status-write path.
+            if frecency_only:
+                _run_index_frecency_only(repo, registry)
+                stats: dict[str, int] = {}
+            else:
+                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_re_embed=force_re_embed, force_stale=force_stale, since_head=since_head, on_locked=on_locked, on_start=on_start, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks, fence_run_state=_fence_run_state)
+                _set_owner_head_hash(repo, _current_head(repo))
+            return stats
+        finally:
+            if lock_fd is not None:
+                unlock_file(lock_fd)
+                lock_fd.close()
+            if lock_path is not None:
+                try:
+                    lock_path.unlink()
+                except FileNotFoundError:
+                    pass  # already gone — harmless
+            # nexus-hg2dw point (2): runs on EVERY exit — normal return, an
+            # exception propagating out of `_run_index`, or a KeyboardInterrupt
+            # (SIGINT) — fail-stamping anything Pass 1 registered as needing
+            # work this run that never reached 'complete'. A no-op (no round
+            # trip) when nothing needed fencing this run.
+            _reconcile_needs_fence(_fence_run_state)
 
 
 def _build_frecency_doc_id_map(
@@ -5984,8 +6001,13 @@ def _run_index(
         _tel_store = None
         try:
             from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred to avoid import-time cost / circular deps
+            from nexus.mcp_infra import current_index_run_t2_client  # noqa: PLC0415 — deferred to avoid circular import
 
-            _tel_store = HttpTelemetryStore()
+            # nexus-m20mf P3 fold-in: shares this run's T2 client (if any)
+            # instead of opening an unshared 9th pool for this one durable
+            # write. Falls back to None (this store's own default
+            # construction) outside a live index_repository() run.
+            _tel_store = HttpTelemetryStore(client=current_index_run_t2_client())
             _tel_store.record_index_failures_batch(
                 [
                     (str(path), "UnextractableContentError", reason, "")

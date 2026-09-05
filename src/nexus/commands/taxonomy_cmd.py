@@ -13,32 +13,15 @@ import click
 import numpy as np
 import structlog
 
+from nexus.commands._helpers import T2_SHARED_CLIENT_CTX_KEY as _T2_SHARED_CLIENT_CTX_KEY
 from nexus.commands._helpers import default_db_path as _default_db_path
+from nexus.commands._helpers import (
+    t2_shared_client_from_context as _command_shared_t2_client,
+)
 from nexus.db.http_vector_client import VectorServiceError
 
 
-#: nexus-m20mf P3: the key the ``taxonomy`` group callback stashes its
-#: one-per-invocation shared httpx.Client under, inside Click's existing
-#: ``ctx.obj`` dict (``main``'s ``ctx.ensure_object(dict)`` / ``ctx.obj["verbose"]``
-#: in ``src/nexus/cli.py`` — a NEW key in that same dict, never a
-#: replacement of it, so nothing that dict already carries is disturbed).
-_T2_SHARED_CLIENT_CTX_KEY = "_t2_shared_client"
-
-
-def _current_command_shared_client():
-    """Return the current ``nx taxonomy`` invocation's shared ``httpx.Client``,
-    or ``None`` outside a live Click context (direct construction, e.g. from
-    a test or a non-CLI caller) -- ``_T2Database`` below falls back to its
-    pre-existing per-instance-client behavior in that case, so nothing
-    changes for any caller that isn't the ``taxonomy`` group's own
-    subcommands (nexus-m20mf P3, additive)."""
-    ctx = click.get_current_context(silent=True)
-    if ctx is None or not isinstance(ctx.obj, dict):
-        return None
-    return ctx.obj.get(_T2_SHARED_CLIENT_CTX_KEY)
-
-
-def _T2Database(path):
+def _T2Database(path, *, client=None):
     """Lazy T2Database constructor (avoids module-level import poisoning by test mocks).
 
     RDR-128 P3 (nexus-sbxbe.3): this factory backs ~17 ``nx taxonomy``
@@ -52,17 +35,22 @@ def _T2Database(path):
     The reads do not contend on the WAL writer lock; the writes are
     infrequent operator commands, not the automated hot path.
 
-    nexus-m20mf P3: also the single point where every one of those ~17
-    subcommands' ``T2Database`` picks up the ONE shared ``httpx.Client``
-    the ``taxonomy`` group callback built for this command invocation (see
-    ``_current_command_shared_client``) -- 8 domain stores x however many
-    times a subcommand calls this factory, sharing 1 pool instead of 8 (or
-    16, for the two-call subcommands) independent ones. Falls back to
-    ``None`` (T2Database's own pre-existing per-store-client construction)
-    outside a live ``taxonomy`` group invocation.
+    nexus-m20mf P3 fold-in (critic finding 3): *client* is a plain,
+    explicit parameter -- this factory does NOT reach into Click's
+    ambient context itself (that was the prior shape, and it produced the
+    finding-2 bug: the identical helper silently behaved differently
+    depending purely on which Click group happened to be active). Every
+    call site below fetches its own command's shared client via
+    ``_command_shared_t2_client()`` (a thin wrapper over
+    ``nexus.commands._helpers.t2_shared_client_from_context``, itself
+    intended to be called ONLY from a command function's own body) and
+    passes it in explicitly, so this factory's behavior is a pure function
+    of its arguments -- callable identically from a test with no Click
+    context at all (``client=None``, the default, is byte-identical to
+    pre-P3 construction).
     """
     from nexus.db.t2 import T2Database  # noqa: PLC0415 - deferred to avoid circular import at module load
-    return T2Database(path, client=_current_command_shared_client())  # boundary-allow: taxonomy CLI factory — read-only subcommands need raw-cursor SELECTs (no WAL writer contention) and discover/rebuild/split interleave chroma-centroid writes keyed on T2-generated topic_ids; neither can cross the daemon RPC (RDR-128 P3 documented-irreducible)
+    return T2Database(path, client=client)  # boundary-allow: taxonomy CLI factory — read-only subcommands need raw-cursor SELECTs (no WAL writer contention) and discover/rebuild/split interleave chroma-centroid writes keyed on T2-generated topic_ids; neither can cross the daemon RPC (RDR-128 P3 documented-irreducible)
 
 if TYPE_CHECKING:
     from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
@@ -398,7 +386,7 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
       nx taxonomy status -n 10                        # top 10 by docs
       nx taxonomy status --needs-review               # pending review only
     """
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         # Derive the per-collection aggregate from the public API. The raw
         # branch this replaces read the same numbers with a GROUP BY over
         # `topics` through CatalogTaxonomy's cursor (nexus-i711w sub-stage C).
@@ -582,7 +570,7 @@ def list_cmd(collection: str, depth: int) -> None:
     from nexus.taxonomy import get_topic_tree  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     depth = min(depth, 4)
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         tree = get_topic_tree(db, collection, max_depth=depth)
     if not tree:
         click.echo("No topics found. Run `nx taxonomy discover --collection <name>` first.")
@@ -638,7 +626,7 @@ def show_cmd(topic_id: int, limit: int, assignments: bool) -> None:
 
     from nexus.taxonomy import get_topic_docs  # noqa: PLC0415 - deferred to avoid circular import at module load
 
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         docs = get_topic_docs(db, topic_id, limit=limit)
     if not docs:
         click.echo(f"No documents in topic {topic_id}.")
@@ -660,7 +648,7 @@ def _show_assignment_quality(topic_id: int, limit: int) -> None:
     are filtered defensively to this topic in case a doc_id was
     reassigned between the two calls.
     """
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         doc_ids = db.taxonomy.get_topic_doc_ids(topic_id, limit=limit)
         if not doc_ids:
             click.echo(f"No documents in topic {topic_id}.")
@@ -738,7 +726,7 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
 
     total_topics = 0
     total_labeled = 0
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         for i, col_name in enumerate(targets, 1):
             if len(targets) > 1:
                 click.echo(f"[{i}/{len(targets)}] {col_name}")
@@ -804,7 +792,7 @@ def rebuild_cmd(collection: str, project: str, k: int | None) -> None:
     if k is not None:
         click.echo("Note: -k is deprecated. Cluster count is now automatic (HDBSCAN).")
 
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         t3 = make_t3()
         count = discover_for_collection(
             collection, db.taxonomy, t3, force=True,
@@ -943,14 +931,14 @@ def review_cmd(
     resolved_limit = limit if limit is not None else (5000 if auto else 15)
 
     if auto:
-        with _T2Database(_default_db_path()) as db:
+        with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
             _review_auto(
                 db, collection, resolved_limit, yes, dry_run, batch_size,
                 apply_destructive, accept_only,
             )
         return
 
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         topics = db.taxonomy.get_unreviewed_topics(collection=collection, limit=resolved_limit)
         if not topics:
             click.echo("No unreviewed topics. All done!")
@@ -1034,7 +1022,7 @@ def assign_cmd(doc_id: str, topic_label: str, collection: str) -> None:
             "chash, not a free-form identifier; pass the chash reported by "
             "`nx search` / `nx query`, not a title or tumbler."
         )
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
         if topic_id is None:
             click.echo(f"Topic '{topic_label}' not found.")
@@ -1090,7 +1078,7 @@ def rename_cmd(
     lets you fix a typo without forcing the topic through review.
     """
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
         if topic_id is None:
             click.echo(f"Topic '{topic_label}' not found.")
@@ -1115,7 +1103,7 @@ def rename_cmd(
 def merge_cmd(source_label: str, target_label: str, collection: str) -> None:
     """Merge source topic into target topic."""
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         source_id = db.taxonomy.resolve_label(source_label, collection=collection)
         if source_id is None:
             click.echo(f"Source topic '{source_label}' not found.")
@@ -1146,7 +1134,7 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
     """
     from nexus.db import make_t3  # noqa: PLC0415 - deferred to avoid circular import at module load
 
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
         if topic_id is None:
             click.echo(f"Topic '{topic_label}' not found.")
@@ -1346,7 +1334,7 @@ def links_cmd(collection: str, refresh: bool) -> None:
     from compute_topic_links (link_types contains 'cites', 'implements',
     etc.).  Use --refresh to recompute catalog-derived links first.
     """
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         if refresh:
             catalog = _try_load_catalog()
             if catalog is None:
@@ -2358,7 +2346,7 @@ def label_cmd(collection: str, relabel_all: bool) -> None:
         click.echo("claude CLI not found. Install Claude Code to use LLM labeling.")
         return
 
-    with _T2Database(_default_db_path()) as db:
+    with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         # GitHub #243: the pre-check must see split sub-topics (children
         # with parent_id set); ``get_topics()`` only returns roots, so
         # a post-split pending child would be silently skipped here.
@@ -2443,7 +2431,7 @@ def project_cmd(
     from nexus.corpus import default_projection_threshold  # noqa: PLC0415 - deferred to avoid circular import at module load
     from nexus.db import make_t3  # noqa: PLC0415 - deferred to avoid circular import at module load
 
-    db = _T2Database(_default_db_path())
+    db = _T2Database(_default_db_path(), client=_command_shared_t2_client())
     t3 = make_t3()
     # nexus-9pqoj: project_against handles both handle shapes, so pass the
     # chroma client (raw T3Database) or the service handle (HttpVectorClient
@@ -2721,7 +2709,7 @@ def hubs_cmd(
     See docs/exploration/taxonomy-projection-tuning.md for guidance on interpreting
     the output and acting on flagged topics.
     """
-    db = _T2Database(_default_db_path())
+    db = _T2Database(_default_db_path(), client=_command_shared_t2_client())
     try:
         rows = db.taxonomy.detect_hubs(
             min_collections=min_collections,
@@ -2810,7 +2798,7 @@ def audit_cmd(collection: str, threshold: float | None, top_n: int) -> None:
 
     See docs/exploration/taxonomy-projection-tuning.md for interpretation guidance.
     """
-    db = _T2Database(_default_db_path())
+    db = _T2Database(_default_db_path(), client=_command_shared_t2_client())
     try:
         report = db.taxonomy.audit_collection(
             collection, threshold=threshold, top_n=top_n,

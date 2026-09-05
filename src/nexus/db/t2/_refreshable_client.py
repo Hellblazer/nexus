@@ -536,6 +536,25 @@ class RefreshableHttpStoreMixin:
         # ownership below) is what makes close() safe to call from any one
         # store without affecting the others.
         if client is not None:
+            # nexus-m20mf P3 fold-in (code-review Suggestion): client= and
+            # timeout= are otherwise independent kwargs, and an injected
+            # client's OWN baked-in timeout always wins -- a caller passing
+            # both would get their timeout= silently ignored with no signal
+            # at all. Fail loud instead: a caller that genuinely needs a
+            # non-default timeout on a shared client must build that client
+            # itself (build_shared_t2_client(timeout=...)) rather than pass
+            # a timeout= this constructor cannot honor.
+            if timeout != _DEFAULT_TIMEOUT_S:
+                raise ValueError(
+                    f"{type(self).__name__}: client= and a non-default "
+                    f"timeout= ({timeout}) were both supplied -- the "
+                    f"injected client's own timeout always wins, so this "
+                    f"combination cannot mean what it looks like it means. "
+                    f"Either omit timeout= (the client's own timeout "
+                    f"applies), or build the shared client with the "
+                    f"desired timeout instead: "
+                    f"build_shared_t2_client(timeout={timeout})."
+                )
             self._client = client
             self._owns_client = False
         else:
