@@ -96,7 +96,7 @@ Four parallel surveys on 2026-09-05, all read-only:
 
 | Dependency | Source Searched? | Key Findings |
 | --- | --- | --- |
-| pgvector 0.8.2 (bundled) | Yes, via RDR-191's spike | An untyped `vector` column cannot carry an HNSW index; typed children cannot attach under an untyped parent. Spaces must be a column with partial indexes, never a partition key. |
+| pgvector 0.8.2 (bundled) | Yes, via RDR-191's spike | An untyped `vector` column cannot carry an HNSW index; typed children cannot attach under an untyped parent. Spaces must be a plain column, never a partition key. The three HNSW indexes RDR-191 built are full and unconditional (`vectors-004-unify-chunks.xml:316-328`, no WHERE predicate) and stay exactly as they are; `space_id` is a filter predicate in the same statement, as `collection` is today. No new vector index is created, and none is created per space, since spaces are minted at runtime and DDL goes only through Liquibase. |
 | Liquibase (engine changelogs) | Yes, changelog files | `catalog_collections` and the five validated FKs to its name are the migration surface. |
 | jOOQ codegen | Yes, `service/` build | Every new table gets generated DSL; no SQL strings. |
 
@@ -109,13 +109,13 @@ Four parallel surveys on 2026-09-05, all read-only:
 - **Verified** (2026-09-05, this tenant's live `collection_list`): the two name parsers already disagree on six live collections. `quarantine-docs__1-1__voyage-context-3__v1`, `quarantine-rdr__1-1__…`, `quarantine-rdr__1-20__…`, `quarantine-rdr__1-41__…` and the two `quarantine-code__` rows fail the client's conformant regex (`corpus.py:102`, whose content-type alternation has no `quarantine-*` entry), so `embedding_model_for_collection` (`corpus.py:573`) falls to prefix inference and reports `voyage-code-3` for names whose third segment says `voyage-context-3`; the engine's `split("__")[2]` reports `voyage-context-3`. Both are 1024 wide, so no vector is mis-sized today, but the same name yields two models depending on which side reads it. This is Gap 1 in the live estate, and it means the census for assumption 1 must group by the registry row, never by either parser.
 - **Documented**: Nelson, Literary Machines, as quoted in RDR-049: tumblers are independent of subject and category; two system directories only, author and title; categorising is user business.
 - **Documented**: CMIS multi-filing (one document in many folders), PCDM Object-to-File (one work, many representations), OAI-ORE proxies (order lives on the membership row). Sets adopt all three.
-- **Assumed**: a partial HNSW index per (space, width column) performs the same as today's per-collection index, since today's collection is a space in all but name. To be measured in the release A battery, per the throughput-before-cut directive.
+- **Assumed**: filtering the shared HNSW graph by `space_id` performs the same as filtering it by `collection` today, since a space collapses a handful of collections into one predicate value on the same index. To be measured in the release A battery, per the throughput-before-cut directive. (Corrected at plan audit round 2: an earlier draft said "partial index per space", which does not exist today and cannot be built per runtime-minted space.)
 
 ### Critical Assumptions
 
 - [x] Every existing collection maps to exactly one space with no split or merge. **Status**: Verified with a correction, 2026-09-05 (census T2 `nexus/rdr-203-census-spike-results` [24466], conexus relay, bead nexus-fvxh1, read-only aggregates against the live cloud catalog). No collection carries more than one width (A1c: 0 rows, both tenants) and no chunk lacks a registry row (A1d: 0 orphans), so every collection maps to exactly one space. The correction: `catalog_collections.embedding_model` and `model_version` are blank on 201 of 265 registry rows (42 of 44 in gate-xr789, 159 of 221 in nexus), so a seed grouped by the registry columns as written would collapse every blank row into one pseudo-space per tenant across models. A1b found zero cases of a populated registry model disagreeing with the name; the registry is unpopulated, never wrong. **Consequence**: the release A seed derives the space key from the name's model segment cross-checked against the chunk width, backfills the registry columns in the same changeset, and fails the walk on any row where the two disagree. **Method as run**: Spike, a census query over `catalog_collections` grouped by (tenant, embedding_model, model_version) before the seed changeset is written. Precedent for a cloud-readable census with no substrate access: the `chash_conformance_report(dim)` SQL function behind an engine route (`rdr180-021-chash-conformance-report.xml`, `CatalogRepository.java`), tenant-scoped under FORCE RLS; the local counterpart is the `nexus_diag` aggregate-only probe (`db/diag_connection.py`). Draft queries: scratchpad `rdr-203-census-spike.sql` (session nexus-b6).
 - [x] The chunk primary key can move from (tenant, collection, chash) to (tenant, space_id, chash) with identical uniqueness, that is, no two collections that become one space share a chash. **Status**: Falsified 2026-09-05 (same census, A2, keyed on the name's model segment as the backfilled registry would be). 3,369 of 373,881 chunks (0.9%) would be rejected by the new key: gate-xr789 voyage-context-3 1,749 colliding chashes over 1,798 rows, voyage-code-3 93 over 188; nexus voyage-context-3 618 over 835, voyage-code-3 324 over 548; minilm none. A collision is byte-identical chunk text under two names, so the dedup loses only which collection label survives, and the manifest rows keep every document whole. **Consequence**: the release A chunk relabel changeset dedups before adding the key: for each colliding (tenant, space, chash) group it elects one surviving `nexus.chunks` row, first UPDATEs every referrer of the losing rows' (tenant_id, collection, chash) key to the survivor's key (`catalog_document_chunks` via `fk_catalog_chunks_chunk`, NO ACTION and DEFERRABLE INITIALLY IMMEDIATE, so a delete before the repoint aborts the walk; `topic_assignments` via `topic_assignments_chunk_fk`, ON DELETE CASCADE, so a delete before the repoint silently destroys topic rows), then deletes the losers, then asserts the post-dedup chunk count equals the pre-dedup distinct count and that no manifest or topic row was lost (row counts before and after are equal). The migration never fails on a collision; it fails only if the repoint left a dangling reference. **Method as run**: the same census, counting chash collisions across collections that collapse.
-- [ ] Partial HNSW indexes keyed on space_id give recall and latency equal to today's per-collection indexes. **Status**: Unverified. **Method**: Spike, timed A/B on the shakedown corpus in the release A battery.
+- [ ] Filtering the full shared HNSW indexes by `space_id` gives recall and p95 latency equal to today's filter by `collection`, on the plain, hybrid and scoped paths, under the existing ef_search floor of 200. **Status**: Unverified. **Method**: Spike, timed A/B on the shakedown corpus in the release A battery (`tests/e2e/gc-ab`, with a committed search-latency baseline).
 - [x] No client outside this repository reads collection names off the wire. **Status**: Falsified 2026-09-05 (session nexus-6f). **Method**: Source search of the conexus checkout and both plugin surfaces (`conexus/`, `sn/`) for `__` splitting. The plugin surfaces are clean (the one hit, `subagent-stop-writes-scan.py:69`, splits MCP tool names, not collection names). conexus has three readers of the wire name: `deploy/parity/capture_oracle.py:79-95` derives the embedding model from segment 2, `deploy/tests/test_auy1_query_set.py:113` takes the corpus from segment 0, and `deploy/tests/test_doc_count_deadlock_probe.py:33` asserts the four-segment shape. All three are conexus's gate machinery, not an end-user client, but they break at release B. **Consequence**: release A's response must carry `space_id` and `embedding_model` as fields so conexus can stop deriving them from the name before B; a relay to conexus naming those three sites is part of release A's client work.
 
 ## Proposed Solution
@@ -138,7 +138,9 @@ Engine, release A (additive):
 - `EmbedderRouter` and `PgVectorRepository` resolve model and width from the `spaces` row for the collection named in the request; the split-on-`__` path is deleted, not kept as a fallback. Fail loud on a name with no space.
 - `/v1/vectors` accepts either a collection name (resolved to a space through `catalog_collections`) or a `space_id`; the response carries `space_id`.
 - New routes: `POST /v1/catalog/sets`, `member-of` accepted as a link type on the existing links route with a `position` attribute, `GET /v1/catalog/sets/{tumbler}/members`.
-- Combined-query functions take a scope struct (owner prefix, content types, set tumblers, model) instead of a collection list; the four existing functions become one function with optional predicates, keeping their partial-HNSW plan shape.
+- Combined-query functions take a scope struct (owner prefix, content types, set tumblers, model) instead of a collection list; the four existing functions become one function per width with optional predicates, and the plain (`plain_search_<dim>`, `vectors-009`), text-gated (`vectors-011`) and `/hybrid-search` families take the same scope, with a plan-shape test per width proving the full HNSW index is still used under the `space_id` predicate.
+- Taxonomy vector surface: `taxonomy_centroids` is keyed on `space_id` in place of `collection` (its PK carries the collection today with no FK, `taxonomy-007`); `taxonomy_ann_query_<dim>` (`vectors-013`) and `assign_from_chashes_<dim>` (`taxonomy-006/009`) take a `space_id` and a scope, and `p_cross_collection` is replaced by the scope predicate. The name-only `catalog_collections` inserts inside `assign_from_chashes_<dim>` are deleted; a collection with no registry row goes through the model policy mint.
+- Dedup provenance: `topic_assignments.source_collection` records which centroids produced an assignment and is never rewritten. The dedup drops `topic_assignments_chunk_fk` first and A3 recreates it on the new (tenant_id, space_id, chash) key, so the surviving chunk row satisfies it; `catalog_document_chunks.collection` is structural and is repointed.
 
 Client, release A:
 
@@ -218,7 +220,7 @@ The name cannot be fixed in place because it is three things. Renaming it better
 
 - **Risk**: two collections collapse into one space and share a chash, breaking the new primary key.
   **Mitigation**: measured (census [24466]): 3,369 rows, 0.9% of the estate. A collision is identical chunk text under two names and collapses to one row by RDR-108's own rule, so the relabel changeset dedups with a count assertion, not a failure. The manifest already keys on chash and needs no rewrite.
-- **Risk**: partial HNSW on space_id is slower than the per-collection index it replaces.
+- **Risk**: the `space_id` predicate on the shared HNSW graph is slower or less complete than today's `collection` predicate.
   **Mitigation**: timed A/B on the shakedown corpus in the release A battery; a regression blocks the cut (throughput-before-cut directive).
 - **Risk**: an external client parses names off the wire.
   **Mitigation**: source search of conexus and plugin surfaces before release A; the alias stays valid through A.
@@ -335,13 +337,13 @@ Gated 2026-09-05 (two rounds, substantive-critic, T2 [24476] and [24478]). Round
 
 ### Assumption Verification
 
-Gated 2026-09-05. Assumptions 1, 2 and 4 are settled by the census [24466] and the source search, each with its consequence written into the design. Assumption 3 (partial HNSW parity) stays open by design and is measured in the release A battery, where a regression blocks the cut.
+Gated 2026-09-05. Assumptions 1, 2 and 4 are settled by the census [24466] and the source search, each with its consequence written into the design. Assumption 3 (space_id filter parity on the shared HNSW graph) stays open by design and is measured in the release A battery, where a regression blocks the cut.
 
 #### API Verification
 
 | API Call | Library | Verification |
 | --- | --- | --- |
-| Partial HNSW index on `space_id` predicate | pgvector 0.8.2 | Spike |
+| Full HNSW index used under a `space_id` predicate | pgvector 0.8.2 | Spike |
 | `ADD CONSTRAINT … PRIMARY KEY USING INDEX` on 286k rows | Postgres 17 | Spike on the PITR fork |
 
 ### Scope Verification
@@ -379,4 +381,5 @@ Judged at gate 2026-09-05. The census confirmed every collection is already one 
 ## Revision History
 
 - 2026-09-05: created from the brainstorming gate session with Sam.
+- 2026-09-05 (plan audit round 2): partial-HNSW-per-space corrected to a space_id predicate on RDR-191's full indexes; taxonomy vector surface and topic-assignment provenance added to Technical Design.
 - 2026-09-05: assumptions 1, 2 and 4 settled (census [24466], conexus source search); gate round 1 BLOCKED on the manifest-FK dedup contradiction, fixed; round 2 PASSED ([24476], [24478]).
