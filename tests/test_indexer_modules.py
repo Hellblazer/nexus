@@ -250,16 +250,111 @@ def test_index_code_file_skips_current_file(tmp_path, make_ctx):
     assert index_code_file(ctx, py_file) == 0
 
 
-def test_index_code_file_returns_zero_for_non_text_file(tmp_path, make_ctx):
+def test_index_code_file_raises_for_undecodable_content(tmp_path, make_ctx):
+    """nexus-hg2dw critique round 2 (T2 critique-nexus-hg2dw-36602c67f
+    [24598] finding 4): a code file that cannot be decoded as UTF-8 text
+    must raise UnextractableContentError, not silently return 0 —
+    mirrors prose_indexer's identical treatment. Supersedes the retired
+    test_index_code_file_returns_zero_for_non_text_file (same fixture,
+    new expected contract)."""
+    from nexus.errors import UnextractableContentError
     from nexus.code_indexer import index_code_file
 
     bin_file = tmp_path / "binary.py"
     bin_file.write_bytes(b"\xff\xfe binary content")
-    # nexus-8g79.28: real empty collection; check_staleness returns
-    # False, index_code_file returns 0 for the non-text bytes.
     ctx = make_ctx(col=_real_col())
 
-    assert index_code_file(ctx, bin_file) == 0
+    with pytest.raises(UnextractableContentError, match="decode"):
+        index_code_file(ctx, bin_file)
+
+
+def test_index_code_file_fresh_skip_stays_a_plain_zero_no_exception(tmp_path, make_ctx):
+    """Control / non-regression: a genuinely fresh (unchanged) code file
+    must still return a plain 0 — no exception, no fence call."""
+    import hashlib
+    from unittest.mock import patch
+
+    from nexus.code_indexer import index_code_file
+
+    py_file = tmp_path / "hello2.py"
+    py_file.write_text("print('hello again')\n")
+    h = hashlib.sha256(py_file.read_text().encode("utf-8")).hexdigest()
+    col = _real_col()
+    col.add(
+        ids=["id1"],
+        documents=["print('hello again')"],
+        metadatas=[{
+            "content_hash": h, "embedding_model": "voyage-code-3",
+            "source_path": str(py_file),
+        }],
+    )
+    ctx = make_ctx(col=col)
+
+    with patch("nexus.doc_indexer._fence_fail") as fence_fail, \
+         patch("nexus.doc_indexer._fence_begin") as fence_begin:
+        result = index_code_file(ctx, py_file)
+
+    assert result == 0
+    fence_fail.assert_not_called()
+    fence_begin.assert_not_called()
+
+
+def test_index_code_file_begins_fence_before_chunking(tmp_path, make_ctx):
+    """T2 critique-nexus-hg2dw-36602c67f [24598] finding 1 CRITICAL /
+    finding 4: code_indexer gets the identical per-file begin-before-
+    chunk treatment as prose_indexer."""
+    from unittest.mock import patch
+
+    from nexus.code_indexer import index_code_file
+
+    py_file = tmp_path / "new_code.py"
+    py_file.write_text("def f():\n    return 1\n")
+    call_order: list[str] = []
+
+    def _fake_begin(doc_id, content_hash, collection):
+        call_order.append("begin")
+        assert doc_id == "1.1.11"
+        assert collection == "code__test"
+        assert len(content_hash) == 64
+
+    ctx = make_ctx(
+        col=_real_col(), corpus="code__test",
+        doc_id_resolver=lambda p: "1.1.11",
+    )
+
+    with patch("nexus.doc_indexer._fence_begin", side_effect=_fake_begin) as fence_begin, \
+         patch("nexus.doc_indexer._fence_fail"), \
+         patch("nexus.chunker.chunk_file") as chunk_file_mock:
+        chunk_file_mock.side_effect = lambda *a, **k: call_order.append("chunk") or []
+        with pytest.raises(Exception, match="no chunks"):
+            index_code_file(ctx, py_file)
+
+    fence_begin.assert_called_once()
+    assert call_order == ["begin", "chunk"], (
+        f"expected fence-begin BEFORE chunking, got order {call_order}"
+    )
+
+
+def test_index_code_file_fence_begin_failure_does_not_abort(tmp_path, make_ctx):
+    """code-review-nexus-hg2dw-36602c67f [24601] finding 1: a defect in
+    the per-file begin call must be fail-open for code_indexer too."""
+    from unittest.mock import patch
+
+    from nexus.code_indexer import index_code_file
+
+    py_file = tmp_path / "resilient.py"
+    py_file.write_text("def resilient():\n    return True\n")
+
+    ctx = make_ctx(
+        col=_real_col(), corpus="code__test",
+        embed_fn=lambda texts: [[0.1] * 8 for _ in texts],
+        doc_id_resolver=lambda p: "1.1.12",
+    )
+
+    with patch("nexus.doc_indexer._fence_begin", side_effect=RuntimeError("boom")):
+        result = index_code_file(ctx, py_file)
+
+    assert result >= 1, "a fence-begin defect must never abort real indexing work"
 
 
 def test_index_code_file_happy_path_new_file(tmp_path, make_ctx):
@@ -512,11 +607,82 @@ def test_index_prose_file_fresh_skip_stays_a_plain_zero_no_exception(
     ctx = make_ctx(col=col, corpus="docs__test",
                    embedding_model="voyage-context-3")
 
-    with patch("nexus.doc_indexer._fence_fail") as fence_fail:
+    with patch("nexus.doc_indexer._fence_fail") as fence_fail, \
+         patch("nexus.doc_indexer._fence_begin") as fence_begin:
         result = index_prose_file(ctx, md_file)
 
     assert result == 0
     fence_fail.assert_not_called()
+    fence_begin.assert_not_called()
+
+
+# ── nexus-hg2dw critique round 2: per-file begin, not whole-run-upfront ─────
+
+
+def test_index_prose_file_begins_fence_before_chunking(tmp_path, make_ctx):
+    """T2 critique-nexus-hg2dw-36602c67f [24598] finding 1 CRITICAL: the
+    fence must begin per FILE, immediately after staleness determines
+    real work is needed and BEFORE chunking/embedding — not batched
+    across a whole run up front (which would enlarge an uncatchable
+    kill's blast radius). Assert the begin call fires with this file's
+    real doc_id/content_hash/collection, and — the ordering half — that
+    it happens before the chunker ever runs."""
+    from unittest.mock import patch
+
+    from nexus.prose_indexer import index_prose_file
+
+    md_file = tmp_path / "new.md"
+    md_file.write_text("# New\n\nNeeds real work.\n")
+    call_order: list[str] = []
+
+    def _fake_begin(doc_id, content_hash, collection):
+        call_order.append("begin")
+        assert doc_id == "1.1.9"
+        assert collection == "docs__test"
+        assert len(content_hash) == 64  # a real sha256 hex digest
+
+    ctx = make_ctx(
+        col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
+        corpus="docs__test", embedding_model="voyage-context-3",
+        embed_fn=lambda texts: [[0.1] * 8 for _ in texts],
+        doc_id_resolver=lambda p: "1.1.9",
+    )
+
+    with patch("nexus.doc_indexer._fence_begin", side_effect=_fake_begin) as fence_begin, \
+         patch("nexus.doc_indexer._fence_fail"), \
+         patch("nexus.md_chunker.SemanticMarkdownChunker.chunk") as chunk_mock:
+        chunk_mock.side_effect = lambda *a, **k: call_order.append("chunk") or []
+        with pytest.raises(Exception, match="no chunks"):
+            index_prose_file(ctx, md_file)
+
+    fence_begin.assert_called_once()
+    assert call_order == ["begin", "chunk"], (
+        f"expected fence-begin BEFORE chunking, got order {call_order}"
+    )
+
+
+def test_index_prose_file_fence_begin_failure_does_not_abort(tmp_path, make_ctx):
+    """code-review-nexus-hg2dw-36602c67f [24601] finding 1: a defect in
+    the per-file begin call must be fail-open (logged, never raised) —
+    consistent with every other fence helper's contract."""
+    from unittest.mock import patch
+
+    from nexus.prose_indexer import index_prose_file
+
+    md_file = tmp_path / "resilient.md"
+    md_file.write_text("# Resilient\n\nStill indexes despite a fence bug.\n")
+
+    ctx = make_ctx(
+        col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
+        corpus="docs__test", embedding_model="voyage-context-3",
+        embed_fn=lambda texts: [[0.1] * 8 for _ in texts],
+        doc_id_resolver=lambda p: "1.1.10",
+    )
+
+    with patch("nexus.doc_indexer._fence_begin", side_effect=RuntimeError("boom")):
+        result = index_prose_file(ctx, md_file)
+
+    assert result >= 1, "a fence-begin defect must never abort real indexing work"
 
 
 # ── RDR-102 Phase B: source_path absent from indexer-stamped chunk meta ──

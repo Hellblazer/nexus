@@ -1802,45 +1802,6 @@ def _catalog_hook(
     return file_to_doc_id
 
 
-def _fence_begin_needs_fence(needs_fence: dict[str, tuple[str, str]]) -> None:
-    """nexus-hg2dw: stamp ``index_state='indexing'`` for every document
-    ``_catalog_hook``'s ``needs_fence`` out-param identified as needing
-    real indexing work THIS run (a new registration, or an existing
-    document whose content genuinely changed) — immediately after
-    registration, before any per-file chunking/embedding/flush begins.
-
-    Closes the registration-to-first-flush window: the existing flush-
-    grain fence (``_fire_flush_grain_begin``) only fires when a
-    ``ChunkBatcher`` batch actually flushes, which can be arbitrarily far
-    (in files, and in wall time) from Pass 1's registration. A run that
-    dies anywhere in between previously left these documents reported-
-    but-NULL — ``indexed_at`` bumped by registration, ``index_state``
-    never touched — indistinguishable from an unfenced producer (the
-    nexus-hg2dw/nexus-b9m7a work-box incident: 998 documents at one
-    instant, plus 2 stranded in 'indexing' for 142h).
-
-    Grouped by collection — ``begin_index_run_many``'s own contract is
-    one collection per call — so this pays at most one round trip per
-    DISTINCT collection in this run's registered set (code__/docs__/
-    rdr__, at most 3), never per file. Advisory / fail-open, same as
-    every other fence helper: a transport failure here is logged and
-    indexing proceeds unaffected (``_fence_begin_many`` never raises).
-
-    A document that is NOT in ``needs_fence`` (unchanged content) is
-    never touched here — fencing it would clobber a correct 'complete'
-    stamp for a file this run never processes.
-    """
-    if not needs_fence:
-        return
-    from nexus.doc_indexer import _fence_begin_many  # noqa: PLC0415 — deferred import; test patch target
-
-    by_collection: dict[str, list[tuple[str, str]]] = {}
-    for doc_id, (content_hash, collection) in needs_fence.items():
-        by_collection.setdefault(collection, []).append((doc_id, content_hash))
-    for collection, pairs in by_collection.items():
-        _fence_begin_many(pairs, collection)
-
-
 def _reconcile_needs_fence(fence_run_state: dict) -> None:
     """nexus-hg2dw: run-exit reconciliation for the registration-time
     fence above. Called unconditionally from ``index_repository``'s
@@ -1868,38 +1829,76 @@ def _reconcile_needs_fence(fence_run_state: dict) -> None:
     round trip at all) when ``needs_fence`` is empty — the common
     warm-rerun case where nothing changed.
 
+    Critique T2 critique-nexus-hg2dw-36602c67f [24598] finding 5: an
+    unresolved ``owner`` (the resolve in ``_run_index`` failed) or a
+    ``by_owner`` transport failure previously disabled reconciliation for
+    the ENTIRE run — every needs_fence doc across every collection — as a
+    silent no-op. Falls back here to a PER-DOC read
+    (``doc_indexer._index_fence_state``, N round trips instead of one,
+    acceptable at this rare, run-exit-only path) so a degraded owner
+    resolution still fail-stamps what it can, loudly logged either way.
+
     Fail-open: never raises. A reconciliation failure must never mask the
     run's own outcome (matches every fence helper's contract, doc_indexer.py).
     """
     needs_fence: dict[str, tuple[str, str]] = fence_run_state.get("needs_fence") or {}
     owner = fence_run_state.get("owner")
-    if not needs_fence or owner is None:
-        return
-    try:
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred import; test patch target
-
-        cat = make_catalog_reader()
-        if cat is None:
-            return
-        entries = {str(e.tumbler): e for e in cat.by_owner(owner)}
-    except Exception as exc:  # noqa: BLE001 — advisory reconciliation must never mask the run's own outcome
-        _log.warning("index_run_fence_reconcile_read_failed", error=str(exc))
+    if not needs_fence:
         return
 
     from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
 
-    for doc_id in needs_fence:
-        entry = entries.get(doc_id)
-        state = getattr(entry, "index_state", None) if entry is not None else None
+    def _should_fail(state: str | None) -> bool:
         # 'complete' -> genuinely resolved this run, leave it alone.
         # 'failed' -> already resolved (an in-loop failure handler, e.g.
         # prose_indexer's upload-exception fence-fail, already ran) —
         # re-failing is a harmless no-op state-wise but a needless
         # duplicate write and log line every time. Only None (never even
-        # begun — should not happen given point 1, but defensive) and
-        # 'indexing' (begun, never resolved — the actual gap this closes)
-        # get fail-stamped here.
-        if state not in ("complete", "failed"):
+        # begun) and 'indexing' (begun, never resolved — the actual gap
+        # this closes) get fail-stamped here.
+        return state not in ("complete", "failed")
+
+    entries: dict[str, object] | None = None
+    if owner is not None:
+        try:
+            from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred import; test patch target
+
+            cat = make_catalog_reader()
+            if cat is not None:
+                entries = {str(e.tumbler): e for e in cat.by_owner(owner)}
+        except Exception as exc:  # noqa: BLE001 — advisory reconciliation must never mask the run's own outcome
+            _log.warning(
+                "index_run_fence_reconcile_bulk_read_failed",
+                error=str(exc), doc_count=len(needs_fence),
+            )
+            entries = None
+
+    if entries is not None:
+        for doc_id in needs_fence:
+            entry = entries.get(doc_id)
+            state = getattr(entry, "index_state", None) if entry is not None else None
+            if _should_fail(state):
+                _fence_fail(doc_id, "index run exited without completing this document")
+        return
+
+    # Degraded path: no owner, or the bulk read itself failed. Loudly
+    # logged (never a silent no-op) and per-doc from here — slower, but
+    # correctness for THIS run's needs_fence set no longer depends on one
+    # single owner-resolution or bulk-read round trip succeeding.
+    _log.warning(
+        "index_run_fence_reconcile_degraded_per_doc",
+        reason="owner_unresolved" if owner is None else "bulk_read_failed",
+        doc_count=len(needs_fence),
+    )
+    from nexus.doc_indexer import _index_fence_state  # noqa: PLC0415 — deferred import; test patch target
+
+    for doc_id in needs_fence:
+        try:
+            state, _hash = _index_fence_state(doc_id)
+        except Exception as exc:  # noqa: BLE001 — one doc's read failure must not abort the rest
+            _log.warning("index_run_fence_reconcile_doc_read_failed", doc_id=doc_id, error=str(exc))
+            continue
+        if _should_fail(state):
             _fence_fail(doc_id, "index run exited without completing this document")
 
 
@@ -4720,15 +4719,27 @@ def _run_index(
             f"Catalog registration done ({time.monotonic() - _catalog_t0:.1f}s)"
         )
 
-    # nexus-hg2dw point (1): fence-begin the whole needs_fence set NOW,
-    # immediately after registration and before any per-file chunking/
-    # embedding/flush starts — closes the window where a run that dies
-    # before its first chunk flush previously left these documents
-    # reported-but-NULL. `fence_run_state` is an out-param the caller
-    # (index_repository) reads in its own `finally`, at run exit, to
-    # fail-stamp anything still not 'complete' — populated here, near the
-    # very top of the run, so it reflects this run's real registered set
-    # even if a crash happens anywhere LATER in this function.
+    # nexus-hg2dw / critique round 2 (T2 critique-nexus-hg2dw-36602c67f
+    # [24598], finding 1 CRITICAL): the FIRST version of this fix began
+    # the fence for the WHOLE needs_fence set right here, in one shot —
+    # closing the registration-to-first-flush window, but enlarging an
+    # UNCATCHABLE exit's (SIGKILL/OOM-kill/forced-quit) blast radius from
+    # the original incident's small in-flight batch to this run's ENTIRE
+    # not-yet-processed file set, since `finally` (and therefore
+    # _reconcile_needs_fence below) never runs on a hard kill. Reverted:
+    # there is no longer a blanket begin call here. `fence_run_state` is
+    # still populated NOW (near the very top of the run, so it reflects
+    # this run's real registered set even if a crash happens anywhere
+    # LATER in this function) purely as the SCOPE for the exit-time
+    # reconciliation (_reconcile_needs_fence, catchable exits only) —
+    # per-file fence-begin itself moved to each producer's own
+    # determination-of-real-work point (prose_indexer.index_prose_file,
+    # code_indexer.index_code_file), immediately before that file's own
+    # chunking starts, so an uncatchable kill only strands whatever is
+    # ACTIVELY in flight at that instant (bounded by `_concurrency`),
+    # matching the original incident's narrow scope, and heals via the
+    # pre-existing nexus-cp46b fence-aware staleness check on the very
+    # next normal run either way.
     if fence_run_state is not None:
         fence_run_state["needs_fence"] = _needs_fence
         try:
@@ -4740,7 +4751,6 @@ def _run_index(
             )
         except Exception as exc:  # noqa: BLE001 — advisory: exit-time reconciliation degrades to a no-op, never blocks indexing
             _log.warning("index_run_fence_owner_resolve_failed", error=str(exc))
-    _fence_begin_needs_fence(_needs_fence)
 
     # nexus-kgyoz seam 2: the resolver closure is lifted to
     # indexer_utils.build_doc_id_resolver so _run_index stays a thin

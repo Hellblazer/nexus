@@ -449,16 +449,43 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
     content, computes SHA-256, performs staleness check, AST-chunks, builds
     embed-only prefix per chunk, embeds via Voyage AI, and upserts to ChromaDB.
 
-    Returns the post-filter chunk count (chunks upserted), or 0 if
-    skipped (current) or failed.
+    Returns the post-filter chunk count (chunks upserted), or 0 ONLY when
+    the file is legitimately fresh (staleness check hit — content and
+    embedding model unchanged). nexus-hg2dw (critique round 2, T2
+    critique-nexus-hg2dw-36602c67f [24598] finding 4): every OTHER
+    zero-content outcome (the file cannot be decoded as UTF-8 text, or
+    decodes fine but produces no usable chunks) now raises
+    :class:`~nexus.errors.UnextractableContentError` instead of silently
+    returning 0, mirroring ``prose_indexer.index_prose_file``'s identical
+    treatment — a plain 0 return was indistinguishable from a legitimate
+    skip, which left a document Pass 1 had already registered fenced
+    nowhere. The raise reuses ``run_file_loop``'s existing nexus-deyd5
+    per-record-survivable handling.
     """
     from nexus.chunker import chunk_file  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.errors import UnextractableContentError  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
+
+    # nexus-hg2dw: resolved up front, before the read even happens, so a
+    # decode failure below can still fence-fail this document. Catalog
+    # Document.doc_id (RDR-101 Phase 3 PR δ): empty string when no
+    # catalog handle exists.
+    catalog_doc_id = (
+        ctx.doc_id_resolver(file_path) if ctx.doc_id_resolver is not None else ""
+    )
+
+    def _fence_fail_and_raise(reason: str) -> None:
+        # nexus-hg2dw: see prose_indexer.index_prose_file's identical
+        # helper for the full rationale.
+        if catalog_doc_id:
+            from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+            _fence_fail(catalog_doc_id, reason)
+        raise UnextractableContentError(f"{file_path}: {reason}")
 
     try:
         content = file_path.read_text(encoding="utf-8")
     except (UnicodeDecodeError, OSError) as exc:
         _log.debug("skipped non-text file", path=str(file_path), error=type(exc).__name__)
-        return 0
+        _fence_fail_and_raise(f"cannot decode as UTF-8 text ({type(exc).__name__})")
 
     source_bytes = content.encode("utf-8")
     content_hash = _hl.sha256(source_bytes).hexdigest()
@@ -467,19 +494,34 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
     comment_char = _COMMENT_CHARS.get(language, "#")
     rel_path = file_path.relative_to(ctx.repo_path)
 
-    # Staleness check — skip if content + model unchanged.
-    # nexus-dcym: prefer doc_id-keyed lookup when the catalog hook
-    # supplied a resolver. (The source_path fallback was deleted as dead
-    # code by nexus-afudo, 2026-08-05 — RDR-102 Phase 5b.)
-    catalog_doc_id_for_staleness = (
-        ctx.doc_id_resolver(file_path) if ctx.doc_id_resolver is not None else ""
-    )
+    # Staleness check — skip if content + model unchanged. Untouched by
+    # nexus-hg2dw: a file that reaches this point and reads fresh was
+    # never added to the registration-time needs_fence set, so there is
+    # nothing to reconcile for it — a plain, unfenced `return 0` remains
+    # correct here.
     if not ctx.force and check_staleness(
         ctx.col, file_path, content_hash, ctx.embedding_model,
-        doc_id=catalog_doc_id_for_staleness,
+        doc_id=catalog_doc_id,
         cache=ctx.staleness_cache,
     ):
         return 0
+
+    # nexus-hg2dw critique round 2 (T2 critique-nexus-hg2dw-36602c67f
+    # [24598] finding 1 CRITICAL; code-review-nexus-hg2dw-36602c67f
+    # [24601] finding 1): fence-begin THIS FILE right here, immediately
+    # after staleness determines real work is needed and BEFORE any
+    # chunking/embedding — see prose_indexer.index_prose_file's identical
+    # call site for the full rationale (bounding a hard kill's blast
+    # radius to whatever is actively in flight, not the whole run).
+    if catalog_doc_id:
+        try:
+            from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 — deferred import; test patch target
+            _fence_begin(catalog_doc_id, content_hash, ctx.corpus)
+        except Exception as exc:  # noqa: BLE001 — advisory: a fence-begin defect must never abort indexing
+            _log.warning(
+                "index_run_fence_begin_per_file_failed",
+                doc_id=catalog_doc_id, error=str(exc),
+            )
 
     # nexus-7niu: per-stage timer instrumentation. Silent when
     # ``ctx.stage_timers is None`` — no overhead, no output.
@@ -492,7 +534,7 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
         chunks = chunk_file(file_path, content, chunk_lines=ctx.chunk_lines)
     if not chunks:
         _log.debug("skipped file with no chunks", path=str(file_path))
-        return 0
+        _fence_fail_and_raise("no chunks produced from source content")
 
     ids: list[str] = []
     documents: list[str] = []
@@ -511,15 +553,6 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
             _line_offsets.append(_i + 1)
 
     from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415  — circular-dep avoidance (nexus.metadata_schema)
-
-    # Catalog Document.doc_id (RDR-101 Phase 3 PR δ): resolved once per
-    # file. Empty string when no catalog handle exists. RDR-108 Phase 3
-    # removed doc_id from chunk metadata; the catalog tumbler now flows
-    # through the post-store batch hook instead so the manifest can
-    # bind chunks to the document at write time.
-    catalog_doc_id = (
-        ctx.doc_id_resolver(file_path) if ctx.doc_id_resolver is not None else ""
-    )
 
     for i, chunk in enumerate(chunks):
         title = f"{rel_path}:{chunk['line_start']}-{chunk['line_end']}"
@@ -597,7 +630,7 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
         if d and d.strip()
     ]
     if not valid:
-        return 0
+        _fence_fail_and_raise("all chunks empty after whitespace filtering")
     ids, documents, metadatas, embed_texts = map(list, zip(*valid))
 
     # Embed using prefixed texts for improved retrieval quality; raw documents are stored.
@@ -650,11 +683,9 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
 
     # nexus-vw594 F1: producer #5 (nx index repo, code, legacy per-file
     # fallback — reached when the ChunkBatcher rejects the file or is
-    # absent). Fence begin BEFORE the upload, mirroring doc_indexer.py's
-    # single-flush producers; this path was previously entirely unfenced.
-    if catalog_doc_id:
-        from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 — deferred import; test patch target
-        _fence_begin(catalog_doc_id, content_hash, ctx.corpus)
+    # absent). nexus-hg2dw critique round 2: the fence-begin for this
+    # file already fired above, right after the staleness check — no
+    # second call needed here.
 
     with _stage("upload"):
         _log.debug("upserting", file=str(file_path), chunks=total_chunks)

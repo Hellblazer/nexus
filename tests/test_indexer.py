@@ -1463,14 +1463,22 @@ def test_index_code_file_skips_empty_text_chunks(tmp_path):
     assert "" not in texts and len(texts) == 1
 
 
-def test_index_code_file_returns_zero_when_all_chunks_empty(tmp_path):
+def test_index_code_file_raises_when_all_chunks_empty(tmp_path):
+    """nexus-hg2dw critique round 2 (T2 critique-nexus-hg2dw-36602c67f
+    [24598] finding 4): a code file whose chunks are all empty after
+    whitespace filtering now raises UnextractableContentError instead of
+    silently returning 0 — mirrors prose_indexer's identical treatment.
+    Supersedes the retired test_index_code_file_returns_zero_when_all_
+    chunks_empty (same fixture, new expected contract)."""
+    from nexus.errors import UnextractableContentError
     from nexus.indexer import _index_code_file
     repo = tmp_path / "repo"; repo.mkdir(); (repo / "e.py").write_text("\n\n\n")
     db, col = _mock_db(); v = _voyage(0)
     with patch("nexus.chunker.chunk_file", return_value=[_chunk(text="",fname="e.py",idx=i,count=3,ls=i,le=i) for i in range(3)]):
-        r = _index_code_file(repo/"e.py", repo, "code__repo", "voyage-code-3",
+        with pytest.raises(UnextractableContentError, match="empty"):
+            _index_code_file(repo/"e.py", repo, "code__repo", "voyage-code-3",
                              col, db, v, git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0)
-    assert r == 0; v.embed.assert_not_called(); db.upsert_chunks_with_embeddings.assert_not_called()
+    v.embed.assert_not_called(); db.upsert_chunks_with_embeddings.assert_not_called()
 
 
 # ── Force plumbing (parametrized) ───────────────────────────────────────────

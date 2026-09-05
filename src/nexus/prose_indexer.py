@@ -98,6 +98,34 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
     ):
         return 0
 
+    # nexus-hg2dw critique round 2 (T2 critique-nexus-hg2dw-36602c67f
+    # [24598] finding 1 CRITICAL; code-review-nexus-hg2dw-36602c67f
+    # [24601] finding 1): fence-begin THIS FILE right here, immediately
+    # after staleness determines real work is needed and BEFORE any
+    # chunking/embedding starts — not deferred to the batcher's flush
+    # (which can be arbitrarily later) and not batched across the whole
+    # run's registered set up front at Pass 1 (the FIRST version of this
+    # fix did that; reverted because it enlarged an uncatchable kill's
+    # blast radius from the original incident's small in-flight batch to
+    # the run's entire not-yet-processed set, since `finally` — and
+    # therefore the exit-time reconciliation — never runs on a hard
+    # SIGKILL/OOM-kill). A hard kill from here on strands at most
+    # whatever is actively in flight (bounded by the run's concurrency),
+    # matching the original incident's narrow scope; it heals via
+    # nexus-cp46b's fence-aware staleness check on the next normal run
+    # either way. Own try/except — never propagates — even though
+    # _fence_begin itself is already internally fail-open: defense in
+    # depth so a defect in THIS call site can never abort the run.
+    if catalog_doc_id:
+        try:
+            from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 — deferred import; test patch target
+            _fence_begin(catalog_doc_id, content_hash, ctx.corpus)
+        except Exception as exc:  # noqa: BLE001 — advisory: a fence-begin defect must never abort indexing
+            _log.warning(
+                "index_run_fence_begin_per_file_failed",
+                doc_id=catalog_doc_id, error=str(exc),
+            )
+
     # nexus-7niu: per-stage timer instrumentation. Silent when
     # ``ctx.stage_timers is None`` — no overhead, no output.
     _stage = (
@@ -293,12 +321,11 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
 
     # nexus-vw594 F1: producer #6 (nx index repo, prose/rdr, legacy
     # per-file fallback — reached when the ChunkBatcher rejects the file
-    # or is absent). Fence begin BEFORE the upload, mirroring
-    # doc_indexer.py's single-flush producers; this path was previously
-    # entirely unfenced.
-    if catalog_doc_id:
-        from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 — deferred import; test patch target
-        _fence_begin(catalog_doc_id, content_hash, ctx.corpus)
+    # or is absent). nexus-hg2dw critique round 2: the fence-begin for
+    # this file already fired above, right after the staleness check —
+    # no second call needed here (that used to be the ONLY begin call on
+    # this path; it is now the early one's redundant-but-harmless idempotent
+    # re-affirmation, so removed to avoid a duplicate round trip).
 
     with _stage("upload"):
         try:
