@@ -53,8 +53,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tables (nexus-gjv9b): `nx census capability --from-store`,
   `nx hook routing-stats --from-store`, retention via
   `nx doctor --trim-telemetry`, the routing hook discovers the engine from
-  the lease file and meters drops by cause; a session's orchestrator and
-  subagent split is stored alongside the flat counts.
+  the lease file and meters drops by cause.
 - Production-write guard (nexus-a2qhz): a process whose nexus package
   resolves from a dev checkout refuses HTTP writes unless
   `NX_ALLOW_PROD_WRITE` names a reason. Reads are unaffected; the installed

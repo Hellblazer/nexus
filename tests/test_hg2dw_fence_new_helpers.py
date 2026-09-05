@@ -29,9 +29,9 @@ class TestReconcileNeedsFence:
 
     def test_fail_stamps_only_non_complete_docs(self) -> None:
         needs_fence = {
-            "1.1.1": ("h1", "docs__repo__voyage-context-3__v1"),  # completed this run
-            "1.1.2": ("h2", "docs__repo__voyage-context-3__v1"),  # still 'indexing'
-            "1.1.3": ("h3", "docs__repo__voyage-context-3__v1"),  # never touched (missing)
+            "1.1.1": ("h1", "docs__repo__bge-768__v1"),  # completed this run
+            "1.1.2": ("h2", "docs__repo__bge-768__v1"),  # still 'indexing'
+            "1.1.3": ("h3", "docs__repo__bge-768__v1"),  # never touched (missing)
         }
 
         entry_complete = MagicMock(tumbler="1.1.1", index_state="complete")
@@ -49,7 +49,7 @@ class TestReconcileNeedsFence:
         assert failed_doc_ids == {"1.1.2", "1.1.3"}
 
     def test_all_complete_fails_nothing(self) -> None:
-        needs_fence = {"1.1.1": ("h1", "docs__repo__voyage-context-3__v1")}
+        needs_fence = {"1.1.1": ("h1", "docs__repo__bge-768__v1")}
         entry = MagicMock(tumbler="1.1.1", index_state="complete")
         reader = MagicMock()
         reader.by_owner.return_value = [entry]
@@ -66,7 +66,7 @@ class TestReconcileNeedsFence:
         harmless state-wise, but a needless duplicate write, and it broke
         a call-count assertion in tests/db/test_bhlfy_runfence_fail_arms.py
         before this exclusion was added."""
-        needs_fence = {"1.1.1": ("h1", "docs__repo__voyage-context-3__v1")}
+        needs_fence = {"1.1.1": ("h1", "docs__repo__bge-768__v1")}
         entry = MagicMock(tumbler="1.1.1", index_state="failed")
         reader = MagicMock()
         reader.by_owner.return_value = [entry]
@@ -87,8 +87,8 @@ class TestReconcileNeedsFenceDegradedFallback:
 
     def test_missing_owner_falls_back_to_per_doc_reads(self) -> None:
         needs_fence = {
-            "1.1.1": ("h1", "docs__repo__voyage-context-3__v1"),
-            "1.1.2": ("h2", "docs__repo__voyage-context-3__v1"),
+            "1.1.1": ("h1", "docs__repo__bge-768__v1"),
+            "1.1.2": ("h2", "docs__repo__bge-768__v1"),
         }
 
         def _fake_fence_state(doc_id):
@@ -104,7 +104,7 @@ class TestReconcileNeedsFenceDegradedFallback:
         assert failed_doc_ids == {"1.1.2"}
 
     def test_bulk_read_failure_falls_back_to_per_doc_reads(self) -> None:
-        needs_fence = {"1.1.1": ("h1", "docs__repo__voyage-context-3__v1")}
+        needs_fence = {"1.1.1": ("h1", "docs__repo__bge-768__v1")}
 
         with patch(
             "nexus.catalog.factory.make_catalog_reader",
@@ -120,7 +120,7 @@ class TestReconcileNeedsFenceDegradedFallback:
         assert fence_fail.call_args[0][0] == "1.1.1"
 
     def test_reader_none_falls_back_to_per_doc_reads(self) -> None:
-        needs_fence = {"1.1.1": ("h1", "docs__repo__voyage-context-3__v1")}
+        needs_fence = {"1.1.1": ("h1", "docs__repo__bge-768__v1")}
         with patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
              patch("nexus.doc_indexer._index_fence_state", return_value=(None, "")), \
              patch("nexus.doc_indexer._fence_fail") as fence_fail:
@@ -131,8 +131,8 @@ class TestReconcileNeedsFenceDegradedFallback:
         """One doc's individual read failing must not abort the rest of
         the fallback loop, and must never raise out of reconciliation."""
         needs_fence = {
-            "1.1.1": ("h1", "docs__repo__voyage-context-3__v1"),
-            "1.1.2": ("h2", "docs__repo__voyage-context-3__v1"),
+            "1.1.1": ("h1", "docs__repo__bge-768__v1"),
+            "1.1.2": ("h2", "docs__repo__bge-768__v1"),
         }
 
         def _fake_fence_state(doc_id):
@@ -149,7 +149,7 @@ class TestReconcileNeedsFenceDegradedFallback:
         assert failed_doc_ids == {"1.1.2"}
 
     def test_degraded_fallback_never_raises(self) -> None:
-        needs_fence = {"1.1.1": ("h1", "docs__repo__voyage-context-3__v1")}
+        needs_fence = {"1.1.1": ("h1", "docs__repo__bge-768__v1")}
         with patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
              patch(
                  "nexus.doc_indexer._index_fence_state",
@@ -180,7 +180,7 @@ class TestFenceBeginFailureCounter:
         from nexus.doc_indexer import _fence_begin, fence_begin_failure_count
 
         with patch("nexus.catalog.factory.make_catalog_writer", side_effect=RuntimeError("catalog down")):
-            _fence_begin("1.1.1", "hash", "docs__repo__voyage-context-3__v1")  # must not raise
+            _fence_begin("1.1.1", "hash", "docs__repo__bge-768__v1")  # must not raise
 
         assert fence_begin_failure_count() == 1
 
@@ -189,7 +189,7 @@ class TestFenceBeginFailureCounter:
 
         writer = MagicMock()
         with patch("nexus.catalog.factory.make_catalog_writer", return_value=writer):
-            _fence_begin("1.1.1", "hash", "docs__repo__voyage-context-3__v1")
+            _fence_begin("1.1.1", "hash", "docs__repo__bge-768__v1")
 
         assert fence_begin_failure_count() == 0
 
@@ -198,7 +198,7 @@ class TestFenceBeginFailureCounter:
 
         pairs = [("1.1.1", "h1"), ("1.1.2", "h2"), ("1.1.3", "h3")]
         with patch("nexus.catalog.factory.make_catalog_writer", side_effect=RuntimeError("catalog down")):
-            _fence_begin_many(pairs, "docs__repo__voyage-context-3__v1")  # must not raise
+            _fence_begin_many(pairs, "docs__repo__bge-768__v1")  # must not raise
 
         assert fence_begin_failure_count() == 3
 
@@ -206,8 +206,8 @@ class TestFenceBeginFailureCounter:
         from nexus.doc_indexer import _fence_begin, fence_begin_failure_count
 
         with patch("nexus.catalog.factory.make_catalog_writer", side_effect=RuntimeError("catalog down")):
-            _fence_begin("1.1.1", "hash", "docs__repo__voyage-context-3__v1")
-            _fence_begin("1.1.2", "hash", "docs__repo__voyage-context-3__v1")
+            _fence_begin("1.1.1", "hash", "docs__repo__bge-768__v1")
+            _fence_begin("1.1.2", "hash", "docs__repo__bge-768__v1")
 
         assert fence_begin_failure_count() == 2
 
@@ -219,7 +219,7 @@ class TestFenceBeginFailureCounter:
         )
 
         with patch("nexus.catalog.factory.make_catalog_writer", side_effect=RuntimeError("catalog down")):
-            _fence_begin("1.1.1", "hash", "docs__repo__voyage-context-3__v1")
+            _fence_begin("1.1.1", "hash", "docs__repo__bge-768__v1")
         assert fence_begin_failure_count() == 1
 
         reset_fence_begin_failure_count()

@@ -710,7 +710,7 @@ smoke_verify_count "$SMOKE_PASSED" "$SMOKE_EXPECTED" || exit 1
 # these carves them out of the population it measures, which is what the
 # lived_in marker is for. Post-fix skips return to exactly 21 -- the count
 # of the last green run (32403015822, 2026-08-20T18:24).
-LIVED_IN_EXPECTED=72
+LIVED_IN_EXPECTED=75  # 2026-09-05: +3 lived_in tests landed this wave
 LIVED_IN_COUNT="$(uv run pytest -m "integration and lived_in" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
 if [ "$LIVED_IN_COUNT" -ne "$LIVED_IN_EXPECTED" ]; then
   echo "[gate] VACUITY GUARD TRIPPED: lived_in carve-out is $LIVED_IN_COUNT tests, expected exactly $LIVED_IN_EXPECTED" >&2
