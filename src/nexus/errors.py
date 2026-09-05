@@ -51,6 +51,16 @@ class UnextractableContentError(NexusError):
     the "produced empty output" hard error nexus-aold added so this never
     regresses to silent zero-chunk indexing).
 
+    nexus-hg2dw extends this to ``prose_indexer.index_prose_file``'s
+    ``nx index repo`` path for a FILE THAT COULD NOT EVEN BE DECODED as
+    UTF-8 text, not only one that decoded and then produced no chunks —
+    the two are the same signal for the ``run_file_loop`` consumer below
+    (a per-record-survivable, zero-durable-data-lost skip) and, more to
+    the point, the same signal for the RUNFENCE fence: a document Pass 1
+    registered as needing this run's work must never resolve to a
+    silent, unfenced 0. Distinguished from a legitimate staleness skip
+    (a plain ``return 0``, no exception) — see that function's docstring.
+
     Distinct from two neighboring types, deliberately:
 
     - :class:`ExtractionQualityError` — text IS present but reads as

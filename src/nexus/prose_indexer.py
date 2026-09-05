@@ -35,31 +35,65 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
 
     Uses ``ctx`` in place of the old 12-parameter signature.
 
-    Returns the post-filter chunk count (chunks upserted), or 0 if
-    skipped (current) or failed.
+    Returns the post-filter chunk count (chunks upserted), or 0 ONLY when
+    the file is legitimately fresh (staleness check hit — content and
+    embedding model unchanged). nexus-hg2dw: every OTHER zero-content
+    outcome (the file cannot be decoded as UTF-8 text, or decodes fine but
+    produces no usable chunks) now raises
+    :class:`~nexus.errors.UnextractableContentError` instead of silently
+    returning 0 — a plain 0 return was indistinguishable from a legitimate
+    skip, which left a document Pass 1 had already registered fenced
+    nowhere (the registration bumps ``indexed_at``; nothing ever stamps
+    ``index_state``). The raise reuses ``run_file_loop``'s existing
+    nexus-deyd5 per-record-survivable handling — the caller sees this as a
+    named, counted skip, not a run-ending failure.
     """
     from nexus.chunker import _line_chunk  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
+    from nexus.errors import UnextractableContentError  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
     from nexus.md_chunker import SemanticMarkdownChunker, classify_section_type, parse_frontmatter  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
     from nexus.pdf_chunker import _extract_headings  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
+
+    # nexus-hg2dw: resolved up front, before the read even happens, so a
+    # decode failure below (which aborts before the staleness check's own
+    # later resolution used to run) can still fence-fail this document.
+    # Catalog Document.doc_id (RDR-101 Phase 3 PR δ): empty string when no
+    # catalog handle exists.
+    catalog_doc_id = (
+        ctx.doc_id_resolver(file_path) if ctx.doc_id_resolver is not None else ""
+    )
+
+    def _fence_fail_and_raise(reason: str) -> None:
+        # nexus-hg2dw: distinguishes a genuine zero-content outcome (this
+        # file passed — or, for the decode case, never reached — the
+        # staleness check, so it is NOT the "fresh, skip" branch below)
+        # from a legitimate skip. Reused nexus-deyd5 machinery: raising
+        # UnextractableContentError routes through run_file_loop's EXISTING
+        # per-record-survivable handling (on_skip, _skipped_files, the
+        # nexus-nukn3 durable failure record) with no changes there — the
+        # run summary now names this file as "could not be extracted"
+        # instead of silently counting it as an indistinguishable 0.
+        if catalog_doc_id:
+            from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+            _fence_fail(catalog_doc_id, reason)
+        raise UnextractableContentError(f"{file_path}: {reason}")
 
     try:
         content = file_path.read_text(encoding="utf-8")
     except (UnicodeDecodeError, OSError) as exc:
         _log.debug("skipped non-text file", path=str(file_path), error=type(exc).__name__)
-        return 0
+        _fence_fail_and_raise(f"cannot decode as UTF-8 text ({type(exc).__name__})")
 
     content_hash = _hl.sha256(content.encode()).hexdigest()
 
-    # Staleness check — skip if content + model unchanged.
-    # nexus-dcym: prefer doc_id-keyed lookup when the catalog hook
-    # supplied a resolver. (The source_path fallback was deleted as dead
-    # code by nexus-afudo, 2026-08-05 — RDR-102 Phase 5b.)
-    catalog_doc_id_for_staleness = (
-        ctx.doc_id_resolver(file_path) if ctx.doc_id_resolver is not None else ""
-    )
+    # Staleness check — skip if content + model unchanged. Untouched by
+    # nexus-hg2dw: a file that reaches this point and reads fresh was
+    # never added to the registration-time needs_fence set (indexer.py
+    # _catalog_hook only tracks a genuine file_hash content change), so
+    # there is nothing to reconcile for it — a plain, unfenced `return 0`
+    # remains correct here.
     if not ctx.force and check_staleness(
         ctx.col, file_path, content_hash, ctx.embedding_model,
-        doc_id=catalog_doc_id_for_staleness,
+        doc_id=catalog_doc_id,
         cache=ctx.staleness_cache,
     ):
         return 0
@@ -86,16 +120,9 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             chunks = SemanticMarkdownChunker().chunk(body, base_meta)
         if not chunks:
             _log.debug("skipped file with no chunks", path=str(file_path))
-            return 0
+            _fence_fail_and_raise("no chunks produced from markdown content")
 
         from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
-
-        # Catalog Document.doc_id (RDR-101 Phase 3 PR δ): resolved once per
-        # file. Empty string when no catalog handle exists; ``normalize``
-        # Step 4c drops the field on the way to T3.
-        catalog_doc_id = (
-            ctx.doc_id_resolver(file_path) if ctx.doc_id_resolver is not None else ""
-        )
 
         for chunk in chunks:
             title = f"{file_path.relative_to(ctx.repo_path)}:chunk-{chunk.chunk_index}"
@@ -138,7 +165,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             raw_chunks = _line_chunk(content)
         if not raw_chunks:
             if not content.strip():
-                return 0
+                _fence_fail_and_raise("empty file content")
             raw_chunks = [(1, 1, content)]
 
         # Detect headings across the whole file once so each line-based
@@ -154,12 +181,6 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
         _heading_offsets = [h[0] for h in _headings]
 
         from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
-
-        # Catalog Document.doc_id (RDR-101 Phase 3 PR δ): resolved once per
-        # file. Empty string when no catalog handle exists.
-        catalog_doc_id = (
-            ctx.doc_id_resolver(file_path) if ctx.doc_id_resolver is not None else ""
-        )
 
         for ls, le, text in raw_chunks:
             title = f"{file_path.relative_to(ctx.repo_path)}:{ls}-{le}"
@@ -203,7 +224,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             metadatas.append(metadata)
 
     if not documents:
-        return 0
+        _fence_fail_and_raise("no documents produced")
 
     # For non-markdown prose, embed_texts is empty; normalise to documents so
     # the filter below can work uniformly across both paths.
@@ -217,7 +238,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
         if d and d.strip()
     ]
     if not valid:
-        return 0
+        _fence_fail_and_raise("all chunks empty after whitespace filtering")
     ids, documents, metadatas, embed_texts = map(list, zip(*valid))
 
     # Embed: local mode uses embed_fn; service mode embeds server-side.

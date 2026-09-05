@@ -1015,6 +1015,7 @@ def _catalog_hook(
     stale_fence_doc_ids: set[str] | None = None,
     on_phase: Callable[[str], None] | None = None,
     complete_doc_hashes: dict[str, str] | None = None,
+    needs_fence: dict[str, tuple[str, str]] | None = None,
 ) -> dict[Path, str]:
     """Register/update indexed files in catalog. Silently skipped if catalog absent.
 
@@ -1068,6 +1069,23 @@ def _catalog_hook(
     is exhausted; ``"wait"`` proceeds after the budget (never permanently
     starve the batch). The per-repo advisory lock keeps its orthogonal job
     (two ``nx index repo`` on the same repo) up in ``index_repository``.
+
+    ``needs_fence`` (nexus-hg2dw) is an optional OUT-param:
+    ``doc_id -> (file_hash, physical_collection)`` for every document THIS
+    call determines needs real indexing work this run — a brand-new
+    registration, or an EXISTING document whose file content genuinely
+    changed (the ``file_hash != existing.meta["content_hash"]`` signal
+    already trusted elsewhere in this function for ``relink_rdr_tumblers``,
+    deliberately narrower than the broader ``changed`` flag that also
+    fires on a bare head_hash/mtime/collection bump with the file's
+    content untouched). The orchestrator uses this to fence-begin the
+    whole set immediately after registration — closing the window where a
+    run that dies between Pass 1 and its first chunk flush leaves these
+    documents reported-but-NULL (``indexed_at`` bumped by registration,
+    ``index_state`` never touched), indistinguishable from an unfenced
+    producer (the nexus-hg2dw/nexus-b9m7a work-box incident). A doc whose
+    content did NOT change is deliberately excluded — fencing it would
+    clobber a correct 'complete' stamp for a file this run never touches.
     """
     from nexus.catalog.write_priority import await_fair_window  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     file_to_doc_id: dict[Path, str] = {}
@@ -1361,21 +1379,26 @@ def _catalog_hook(
                     # JSON); a storage change that truncates precision
                     # flips this to always-changed (harmless) — never
                     # compare with tolerance, drift means changed.
+                    # nexus-hg2dw: the CONTENT-specific signal, isolated from
+                    # the broader `changed` (head_hash/mtime/collection) flag
+                    # below — a bare HEAD bump flips `changed` for the WHOLE
+                    # repo on every commit regardless of any file's actual
+                    # content, so it cannot drive fence-begin without forcing
+                    # every unchanged document to 'indexing' on every run.
+                    content_hash_changed = (
+                        bool(file_hash)
+                        and existing.meta.get("content_hash", "") != file_hash
+                    )
                     changed = (
                         existing.head_hash != head_hash
                         or existing.physical_collection != collection_name
                         or existing.source_mtime != source_mtime
-                        or (
-                            file_hash
-                            and existing.meta.get("content_hash", "") != file_hash
-                        )
+                        or content_hash_changed
                     )
-                    if (
-                        content_type == "rdr"
-                        and file_hash
-                        and existing.meta.get("content_hash", "") != file_hash
-                    ):
+                    if content_type == "rdr" and content_hash_changed:
                         relink_rdr_tumblers.append(existing.tumbler)
+                    if needs_fence is not None and content_hash_changed:
+                        needs_fence[str(existing.tumbler)] = (file_hash, collection_name)
                     if changed:
                         # nexus-xedhp: accumulate for the batched update_many
                         # below instead of an inline per-file writer.update()
@@ -1541,6 +1564,11 @@ def _catalog_hook(
                     if created:
                         new_tumblers.append(tum)
                         new_content_types.add(doc.get("content_type", ""))
+                        if needs_fence is not None:
+                            needs_fence[str(tum)] = (
+                                (doc.get("meta") or {}).get("content_hash", ""),
+                                doc.get("physical_collection", ""),
+                            )
                         continue
                     # The owner-scoped snapshot had no row for this path,
                     # yet the server reconciled onto a live row by
@@ -1572,6 +1600,11 @@ def _catalog_hook(
                         if created:
                             new_tumblers.append(tum)
                             new_content_types.add(doc.get("content_type", ""))
+                            if needs_fence is not None:
+                                needs_fence[str(tum)] = (
+                                    (doc.get("meta") or {}).get("content_hash", ""),
+                                    doc.get("physical_collection", ""),
+                                )
                         else:
                             reconciled.append((path, str(tum)))
                             _log.warning(
@@ -1762,6 +1795,107 @@ def _catalog_hook(
         if reader is not None:
             reader.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe; Catalog._db.close() is internal
     return file_to_doc_id
+
+
+def _fence_begin_needs_fence(needs_fence: dict[str, tuple[str, str]]) -> None:
+    """nexus-hg2dw: stamp ``index_state='indexing'`` for every document
+    ``_catalog_hook``'s ``needs_fence`` out-param identified as needing
+    real indexing work THIS run (a new registration, or an existing
+    document whose content genuinely changed) — immediately after
+    registration, before any per-file chunking/embedding/flush begins.
+
+    Closes the registration-to-first-flush window: the existing flush-
+    grain fence (``_fire_flush_grain_begin``) only fires when a
+    ``ChunkBatcher`` batch actually flushes, which can be arbitrarily far
+    (in files, and in wall time) from Pass 1's registration. A run that
+    dies anywhere in between previously left these documents reported-
+    but-NULL — ``indexed_at`` bumped by registration, ``index_state``
+    never touched — indistinguishable from an unfenced producer (the
+    nexus-hg2dw/nexus-b9m7a work-box incident: 998 documents at one
+    instant, plus 2 stranded in 'indexing' for 142h).
+
+    Grouped by collection — ``begin_index_run_many``'s own contract is
+    one collection per call — so this pays at most one round trip per
+    DISTINCT collection in this run's registered set (code__/docs__/
+    rdr__, at most 3), never per file. Advisory / fail-open, same as
+    every other fence helper: a transport failure here is logged and
+    indexing proceeds unaffected (``_fence_begin_many`` never raises).
+
+    A document that is NOT in ``needs_fence`` (unchanged content) is
+    never touched here — fencing it would clobber a correct 'complete'
+    stamp for a file this run never processes.
+    """
+    if not needs_fence:
+        return
+    from nexus.doc_indexer import _fence_begin_many  # noqa: PLC0415 — deferred import; test patch target
+
+    by_collection: dict[str, list[tuple[str, str]]] = {}
+    for doc_id, (content_hash, collection) in needs_fence.items():
+        by_collection.setdefault(collection, []).append((doc_id, content_hash))
+    for collection, pairs in by_collection.items():
+        _fence_begin_many(pairs, collection)
+
+
+def _reconcile_needs_fence(fence_run_state: dict) -> None:
+    """nexus-hg2dw: run-exit reconciliation for the registration-time
+    fence above. Called unconditionally from ``index_repository``'s
+    EXISTING ``finally`` block (already wraps the ``_run_index`` call and
+    already runs on normal return, an exception propagating out of
+    ``_run_index``, OR a ``KeyboardInterrupt`` — Python's ``finally``
+    fires for all three), so this closes point (2) of the nexus-hg2dw
+    fix: at run exit, fail-stamp anything registered but unflushed.
+
+    ``fence_run_state`` is a plain ``{"needs_fence": ..., "owner": ...}``
+    dict ``_run_index`` populates in place immediately after Pass 1 (near
+    the very top of the run, well before any per-file work can crash) —
+    so it survives regardless of WHERE later in the run a crash happens.
+
+    Design: re-read the CURRENT fence state for every ``needs_fence`` doc
+    from the catalog (ONE ``by_owner`` round trip, not per-doc) rather
+    than tracking "did this doc's completion get attempted" through every
+    producer's own code path (the batched flush-grain path, EACH content
+    type's direct-upload fallback, RDR's shared prose path...). Reading
+    ground truth back from the engine is what lets this work uniformly
+    across every producer without touching any of them: a doc that
+    genuinely reached 'complete', or was already resolved 'failed' by an
+    in-loop handler, is left alone; a doc still 'indexing' or entirely
+    unreported (never even begun) is fail-stamped. Skipped entirely (no
+    round trip at all) when ``needs_fence`` is empty — the common
+    warm-rerun case where nothing changed.
+
+    Fail-open: never raises. A reconciliation failure must never mask the
+    run's own outcome (matches every fence helper's contract, doc_indexer.py).
+    """
+    needs_fence: dict[str, tuple[str, str]] = fence_run_state.get("needs_fence") or {}
+    owner = fence_run_state.get("owner")
+    if not needs_fence or owner is None:
+        return
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred import; test patch target
+
+        cat = make_catalog_reader()
+        if cat is None:
+            return
+        entries = {str(e.tumbler): e for e in cat.by_owner(owner)}
+    except Exception as exc:  # noqa: BLE001 — advisory reconciliation must never mask the run's own outcome
+        _log.warning("index_run_fence_reconcile_read_failed", error=str(exc))
+        return
+
+    from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+
+    for doc_id in needs_fence:
+        entry = entries.get(doc_id)
+        state = getattr(entry, "index_state", None) if entry is not None else None
+        # 'complete' -> genuinely resolved this run, leave it alone.
+        # 'failed' -> already resolved (an in-loop failure handler, e.g.
+        # prose_indexer's upload-exception fence-fail, already ran) —
+        # re-failing is a harmless no-op state-wise but a needless
+        # duplicate write and log line every time. Only None (never even
+        # begun — should not happen given point 1, but defensive) and
+        # 'indexing' (begun, never resolved — the actual gap this closes)
+        # get fail-stamped here.
+        if state not in ("complete", "failed"):
+            _fence_fail(doc_id, "index run exited without completing this document")
 
 
 def _maybe_run_housekeeping(
@@ -2021,6 +2155,14 @@ def index_repository(
         hooks = HookRegistry()
         install_default_hooks(hooks)
 
+    # nexus-hg2dw: populated by ``_run_index`` in place, immediately after
+    # Pass 1 registration — near the very top of the run, well before any
+    # per-file work could crash — so it survives regardless of where later
+    # in the run an exception or KeyboardInterrupt actually fires. This
+    # `finally` already wraps every exit path (return, exception, SIGINT);
+    # the reconciliation call below is the ONLY new step, added at the end
+    # so it never interferes with the pre-existing lock cleanup.
+    _fence_run_state: dict = {"needs_fence": None, "owner": None}
     try:
         # RDR-137 Phase 3.8 (nexus-tts0d.13): registry.update(status=...)
         # writes dropped per A2 verdict — status is write-only with no
@@ -2034,7 +2176,7 @@ def index_repository(
             _run_index_frecency_only(repo, registry)
             stats: dict[str, int] = {}
         else:
-            stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_stale=force_stale, since_head=since_head, on_locked=on_locked, on_start=on_start, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks)
+            stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_stale=force_stale, since_head=since_head, on_locked=on_locked, on_start=on_start, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks, fence_run_state=_fence_run_state)
             _set_owner_head_hash(repo, _current_head(repo))
         return stats
     finally:
@@ -2046,6 +2188,12 @@ def index_repository(
                 lock_path.unlink()
             except FileNotFoundError:
                 pass  # already gone — harmless
+        # nexus-hg2dw point (2): runs on EVERY exit — normal return, an
+        # exception propagating out of `_run_index`, or a KeyboardInterrupt
+        # (SIGINT) — fail-stamping anything Pass 1 registered as needing
+        # work this run that never reached 'complete'. A no-op (no round
+        # trip) when nothing needed fencing this run.
+        _reconcile_needs_fence(_fence_run_state)
 
 
 def _build_frecency_doc_id_map(
@@ -3936,6 +4084,7 @@ def _run_index(
     on_flush: "Callable[[int, int, str, float, str | None], None] | None" = None,
     on_stage_timers: Callable[[Path, "StageTimers"], None] | None = None,
     hooks: "HookRegistry | None" = None,
+    fence_run_state: dict | None = None,
 ) -> dict[str, int]:
     """Full indexing pipeline: classify → route → embed → upsert → prune.
 
@@ -4542,6 +4691,10 @@ def _run_index(
     # nexus-vayt7: tumbler -> index_content_hash for every doc fenced
     # 'complete', from the same fetch; overlaid onto the caches below.
     _complete_doc_hashes: dict[str, str] = {}
+    # nexus-hg2dw: doc_id -> (file_hash, collection) for every document
+    # this run's registration determined needs real indexing work (new,
+    # or genuinely content-changed) — see _catalog_hook's own docstring.
+    _needs_fence: dict[str, tuple[str, str]] = {}
     file_to_doc_id = _catalog_hook(
         repo=repo,
         repo_name=_repo_basename,
@@ -4555,11 +4708,34 @@ def _run_index(
         stale_fence_doc_ids=_stale_fence_doc_ids,
         on_phase=on_phase,
         complete_doc_hashes=_complete_doc_hashes,
+        needs_fence=_needs_fence,
     )
     if on_phase is not None:
         on_phase(
             f"Catalog registration done ({time.monotonic() - _catalog_t0:.1f}s)"
         )
+
+    # nexus-hg2dw point (1): fence-begin the whole needs_fence set NOW,
+    # immediately after registration and before any per-file chunking/
+    # embedding/flush starts — closes the window where a run that dies
+    # before its first chunk flush previously left these documents
+    # reported-but-NULL. `fence_run_state` is an out-param the caller
+    # (index_repository) reads in its own `finally`, at run exit, to
+    # fail-stamp anything still not 'complete' — populated here, near the
+    # very top of the run, so it reflects this run's real registered set
+    # even if a crash happens anywhere LATER in this function.
+    if fence_run_state is not None:
+        fence_run_state["needs_fence"] = _needs_fence
+        try:
+            from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred import
+            _owner_reader = make_catalog_reader()
+            fence_run_state["owner"] = (
+                _owner_reader.owner_for_repo(_repo_hash)
+                if _owner_reader is not None else None
+            )
+        except Exception as exc:  # noqa: BLE001 — advisory: exit-time reconciliation degrades to a no-op, never blocks indexing
+            _log.warning("index_run_fence_owner_resolve_failed", error=str(exc))
+    _fence_begin_needs_fence(_needs_fence)
 
     # nexus-kgyoz seam 2: the resolver closure is lifted to
     # indexer_utils.build_doc_id_resolver so _run_index stays a thin

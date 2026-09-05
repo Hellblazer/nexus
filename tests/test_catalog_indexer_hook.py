@@ -220,6 +220,122 @@ class TestFixturePathAutoStamp:
         assert not entry.meta.get("non_evidentiary")
 
 
+class TestNeedsFenceOutParam:
+    """nexus-hg2dw: ``needs_fence`` names exactly the documents this run's
+    registration determined need real indexing work — new registrations,
+    and existing documents whose FILE CONTENT genuinely changed — and
+    excludes everything else, including a bare head_hash bump that
+    touches every tracked document's row without any file's content
+    changing at all."""
+
+    def test_new_file_populates_needs_fence(self, tmp_path, monkeypatch):
+        from nexus.indexer import _catalog_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        src = tmp_path / "main.py"
+        src.write_text("print('hello')")
+
+        needs_fence: dict = {}
+        _catalog_hook(
+            repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
+            head_hash="abc",
+            indexed_files=[(src, "code", "code__nexus")],
+            needs_fence=needs_fence,
+        )
+
+        owner = cat.owner_for_repo("571b8edd")
+        entry = cat.by_file_path(owner, "main.py")
+        assert str(entry.tumbler) in needs_fence
+        content_hash, collection = needs_fence[str(entry.tumbler)]
+        assert content_hash  # a real sha256, non-empty
+        assert collection == "code__nexus"
+
+    def test_head_hash_only_bump_does_not_populate_needs_fence(
+        self, tmp_path, monkeypatch,
+    ):
+        """The control case this whole design turns on: a bare git commit
+        (HEAD moves) re-sends every tracked document's head_hash without
+        touching a single file's content. Fencing these would force
+        every unchanged document to 'indexing' on every commit."""
+        from nexus.indexer import _catalog_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        src = tmp_path / "main.py"
+        src.write_text("print('hello')")
+
+        _catalog_hook(
+            repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
+            head_hash="commit-1",
+            indexed_files=[(src, "code", "code__nexus")],
+            needs_fence={},
+        )
+
+        needs_fence: dict = {}
+        _catalog_hook(
+            repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
+            head_hash="commit-2",  # HEAD moved; file content is IDENTICAL
+            indexed_files=[(src, "code", "code__nexus")],
+            needs_fence=needs_fence,
+        )
+
+        assert needs_fence == {}
+
+    def test_content_change_on_existing_doc_populates_needs_fence(
+        self, tmp_path, monkeypatch,
+    ):
+        from nexus.indexer import _catalog_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        src = tmp_path / "main.py"
+        src.write_text("v1")
+
+        _catalog_hook(
+            repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
+            head_hash="commit-1",
+            indexed_files=[(src, "code", "code__nexus")],
+            needs_fence={},
+        )
+        owner = cat.owner_for_repo("571b8edd")
+        tumbler = str(cat.by_file_path(owner, "main.py").tumbler)
+
+        src.write_text("v2 — content actually changed")
+        needs_fence: dict = {}
+        _catalog_hook(
+            repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
+            head_hash="commit-2",
+            indexed_files=[(src, "code", "code__nexus")],
+            needs_fence=needs_fence,
+        )
+
+        assert tumbler in needs_fence
+
+    def test_needs_fence_none_default_is_a_no_op(self, tmp_path, monkeypatch):
+        """The out-param is optional — omitting it must not change any
+        other behavior (backward compatible with every existing caller
+        that doesn't pass it)."""
+        from nexus.indexer import _catalog_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        src = tmp_path / "main.py"
+        src.write_text("print('hello')")
+
+        # Should not raise despite needs_fence being omitted entirely.
+        file_to_doc_id = _catalog_hook(
+            repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
+            head_hash="abc",
+            indexed_files=[(src, "code", "code__nexus")],
+        )
+        assert file_to_doc_id
+
+
 class _SpyProxy:
     """Counting proxy around a real reader/writer (integration over mocks).
 

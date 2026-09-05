@@ -357,6 +357,119 @@ def test_index_prose_file_non_markdown_uses_line_chunk(tmp_path, make_ctx):
     assert "line_start" in meta and meta["line_start"] >= 1
 
 
+# ── nexus-hg2dw: zero-content outcomes distinguished from a fresh skip ──────
+
+
+def test_index_prose_file_raises_for_undecodable_content(tmp_path, make_ctx):
+    """A file that cannot even be read as UTF-8 text must raise
+    UnextractableContentError, not silently return 0 — pre-fix this was
+    indistinguishable from a legitimate staleness skip and left a
+    registered document with no fence action at all."""
+    from nexus.errors import UnextractableContentError
+    from nexus.prose_indexer import index_prose_file
+
+    bin_file = tmp_path / "binary.txt"
+    bin_file.write_bytes(b"\xff\xfe not valid utf-8 \x00\x01")
+    ctx = make_ctx(col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
+                   corpus="docs__test", embedding_model="voyage-context-3")
+
+    with pytest.raises(UnextractableContentError, match="decode"):
+        index_prose_file(ctx, bin_file)
+
+
+def test_index_prose_file_undecodable_content_fence_fails_when_doc_id_known(
+    tmp_path, make_ctx,
+):
+    """When a doc_id_resolver supplies a catalog doc_id, the decode
+    failure must fence-fail that document before raising (nexus-hg2dw
+    point 2's underlying goal: nothing left dangling at 'indexing')."""
+    from unittest.mock import patch
+
+    from nexus.errors import UnextractableContentError
+    from nexus.prose_indexer import index_prose_file
+
+    bin_file = tmp_path / "binary.txt"
+    bin_file.write_bytes(b"\xff\xfe not valid utf-8 \x00\x01")
+    ctx = make_ctx(
+        col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
+        corpus="docs__test", embedding_model="voyage-context-3",
+        doc_id_resolver=lambda p: "1.1.7",
+    )
+
+    with patch("nexus.doc_indexer._fence_fail") as fence_fail, \
+         pytest.raises(UnextractableContentError):
+        index_prose_file(ctx, bin_file)
+
+    fence_fail.assert_called_once()
+    assert fence_fail.call_args[0][0] == "1.1.7"
+
+
+def test_index_prose_file_raises_for_empty_markdown(tmp_path, make_ctx):
+    """A markdown file that decodes fine but chunks to nothing (e.g.
+    frontmatter-only) must raise, not silently return 0 — same reasoning
+    as the decode-failure case: this is NOT a staleness skip."""
+    from nexus.errors import UnextractableContentError
+    from nexus.prose_indexer import index_prose_file
+
+    md_file = tmp_path / "empty.md"
+    md_file.write_text("---\ntitle: nothing here\n---\n")
+    ctx = make_ctx(col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
+                   corpus="docs__test", embedding_model="voyage-context-3")
+
+    with pytest.raises(UnextractableContentError):
+        index_prose_file(ctx, md_file)
+
+
+def test_index_prose_file_raises_for_empty_non_markdown(tmp_path, make_ctx):
+    """A non-markdown prose file with only whitespace must raise, not
+    silently return 0."""
+    from nexus.errors import UnextractableContentError
+    from nexus.prose_indexer import index_prose_file
+
+    txt_file = tmp_path / "blank.txt"
+    txt_file.write_text("   \n\n   \n")
+    ctx = make_ctx(col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
+                   corpus="docs__test", embedding_model="voyage-context-3")
+
+    with pytest.raises(UnextractableContentError):
+        index_prose_file(ctx, txt_file)
+
+
+def test_index_prose_file_fresh_skip_stays_a_plain_zero_no_exception(
+    tmp_path, make_ctx,
+):
+    """Control / non-regression: a genuinely fresh (unchanged) file must
+    still return a plain 0 — no exception, no fence call — exactly as
+    before nexus-hg2dw. This is the OTHER half of the distinction the
+    bead asks for: fresh-skipped vs decode-failed must both be reachable
+    and must not collapse onto the same signal."""
+    import hashlib
+    from unittest.mock import patch
+
+    from nexus.prose_indexer import index_prose_file
+
+    md_file = tmp_path / "README.md"
+    md_file.write_text("# Hello\n\nSome content here.\n")
+    h = hashlib.sha256(md_file.read_text().encode()).hexdigest()
+    col = _real_col("docs__t_" + uuid.uuid4().hex[:12])
+    col.add(
+        ids=["id1"],
+        documents=["# Hello\n\nSome content here."],
+        metadatas=[{
+            "content_hash": h, "embedding_model": "voyage-context-3",
+            "source_path": str(md_file),
+        }],
+    )
+    ctx = make_ctx(col=col, corpus="docs__test",
+                   embedding_model="voyage-context-3")
+
+    with patch("nexus.doc_indexer._fence_fail") as fence_fail:
+        result = index_prose_file(ctx, md_file)
+
+    assert result == 0
+    fence_fail.assert_not_called()
+
+
 # ── RDR-102 Phase B: source_path absent from indexer-stamped chunk meta ──
 
 
