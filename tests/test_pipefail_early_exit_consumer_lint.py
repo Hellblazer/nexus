@@ -962,14 +962,14 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # lines and shifted every site below the first extraction point
         # (:107 in the pre-edit file). Numbers regenerated from the
         # detector itself (_early_exit_consumer_hits), not arithmetic.
-        "service/native-smoke.sh:82",
-        "service/native-smoke.sh:135",
-        "service/native-smoke.sh:196",
-        "service/native-smoke.sh:248",
-        "service/native-smoke.sh:340",
-        "service/native-smoke.sh:378",
-        "service/native-smoke.sh:384",
-        "service/native-smoke.sh:387",
+        "service/native-smoke.sh:89",
+        "service/native-smoke.sh:142",
+        "service/native-smoke.sh:203",
+        "service/native-smoke.sh:255",
+        "service/native-smoke.sh:347",
+        "service/native-smoke.sh:385",
+        "service/native-smoke.sh:391",
+        "service/native-smoke.sh:394",
         # --- service/linux-native-verify.sh:43 (1 entry): a GENUINE
         # FALSE POSITIVE, not a "needs live infra" deferral -- the
         # matched pipe (`native-image --version | head -1`) sits inside a
