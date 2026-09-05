@@ -533,7 +533,7 @@ def test_shared_singleton_401_remints_without_eviction(fake_service, monkeypatch
 
     _rc._MINTED_DATA_TOKEN = "revoked-elsewhere"  # simulate an out-of-band rotation
 
-    result = mi.t2_index_write(lambda db: db.plans.echo_post("call 2"), op="run_start")
+    result = mi.t2_index_write(lambda db: db.plans.echo_post("call 2"), op="plan_match")
 
     assert result == {"echo": {"value": "call 2"}}
     assert _rc._MINT_CALLS == 2, "expected exactly one re-mint, not zero and not a loop"
@@ -543,3 +543,164 @@ def test_shared_singleton_401_remints_without_eviction(fake_service, monkeypatch
     )
     assert mi._service_t2_db is instances[0]
     assert instances[0].closed is False
+
+
+# ── nexus-m20mf P2 round 2 (critique [24578] + code review [24580]) ────────
+#
+# The first cut's plan_match/price_table/record_run closures returned a
+# bare store reference and did their REAL T2 work (matcher.plan_match's
+# library.get_plan/increment_match_metrics; get_cached_price_table's
+# query_nx_answer_runs; _nx_answer_record_run's record_nx_answer_run POST)
+# OUTSIDE the closure -- released from _service_t2_write_locked's refcount
+# before that work even started, so neither a genuine failure there nor a
+# concurrent sibling's eviction were ever attributed to the right call.
+# core.py now wraps the WHOLE call in each closure. The three tests below
+# verify the ACTUAL, differing outcome per site: plan_match's real T2
+# calls have no internal swallow, so a connectivity failure genuinely
+# evicts; price_table's and record_run's callees each have their OWN
+# documented "never raises" contract that swallows the failure before
+# _service_t2_write_locked's classifier can see it, so eviction does NOT
+# trigger there -- a real, described residual, not silently claimed fixed.
+
+
+@pytest.mark.asyncio
+async def test_plan_match_connectivity_error_evicts_the_shared_t2_singleton(
+    monkeypatch,
+) -> None:
+    """nexus-m20mf P2 round 2: matcher.plan_match's real T2 traffic
+    (HttpPlanLibrary.get_plan / increment_match_metrics) now runs INSIDE
+    the _t2_index_write closure. Neither call has an internal broad
+    except, so a genuine connectivity failure there propagates to
+    _service_t2_write_locked's classifier and evicts the shared
+    singleton -- exactly like run_start/run_outcome already did."""
+    from unittest.mock import MagicMock, patch
+
+    import nexus.mcp_infra as _infra
+
+    constructed: list[_CountingT2Database] = []
+
+    def _make_counting_t2(*_a, **_kw) -> _CountingT2Database:
+        db = _CountingT2Database()
+        constructed.append(db)
+        return db
+
+    monkeypatch.setattr("nexus.db.t2.T2Database", _make_counting_t2)
+
+    def _plan_match_connectivity_failure(*_a, **_kw):
+        raise ConnectionError("plan library unreachable")
+
+    with patch.object(_infra, "get_t1_plan_cache",
+                       return_value=MagicMock(is_available=False)), \
+         patch("nexus.plans.matcher.plan_match",
+               side_effect=_plan_match_connectivity_failure):
+        from nexus.mcp.core import nx_answer
+        result = await nx_answer("what is projection quality?")
+
+    assert "Error during plan match" in result
+    assert len(constructed) == 1, (
+        "the cache-populate closure (a bare db.plans access) still "
+        "succeeds once before the plan_match closure fails"
+    )
+    assert constructed[0].closed is True, (
+        "a genuine connectivity failure INSIDE the plan_match closure "
+        "must evict the shared T2Database singleton -- the concrete "
+        "gap critique [24578] found"
+    )
+    assert _infra._service_t2_db is None
+
+
+def test_price_table_connectivity_error_is_swallowed_not_evicted(monkeypatch) -> None:
+    """Documented residual (critique [24578]): get_cached_price_table ->
+    build_operator_price_table has its OWN
+    `except Exception: return OperatorPriceTable({})` around
+    telemetry_store.query_nx_answer_runs -- an intentional "never raises,
+    degrade to empty table" contract other callers rely on. Wrapping the
+    whole call in _t2_index_write's closure is structurally correct (the
+    real HTTP work now runs inside the refcount window), but a
+    connectivity failure there is swallowed by that inner except before
+    _service_t2_write_locked's classifier ever sees it, so eviction does
+    NOT trigger from a failure at this specific site. This test pins that
+    reality rather than asserting the eviction the literal closure-purity
+    fix does not, by itself, deliver here."""
+    from unittest.mock import MagicMock
+
+    import nexus.mcp_infra as mi
+    from nexus.plans.cost_estimate import get_cached_price_table
+
+    class _FakeT2Database:
+        def __init__(self, *_a, **_kw) -> None:
+            self.telemetry = MagicMock()
+            self.telemetry.query_nx_answer_runs.side_effect = ConnectionError(
+                "telemetry store unreachable",
+            )
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr("nexus.db.t2.T2Database", _FakeT2Database)
+
+    price_table = mi.t2_index_write(
+        lambda db: get_cached_price_table(db.telemetry, force_refresh=True),
+        op="price_table",
+    )
+
+    assert price_table.price_for("anything") == (
+        None, None, "unpriceable(no-history, not-a-known-operator)",
+    ), (
+        "build_operator_price_table degrades to an empty table on the "
+        "connectivity failure, exactly as it does for any other query "
+        "failure -- never a fabricated price"
+    )
+    assert mi._service_t2_db is not None, (
+        "the swallowed failure never reaches _service_t2_write_locked's "
+        "classifier, so the singleton is NOT evicted here -- the "
+        "documented residual, not a claimed fix"
+    )
+    assert mi._service_t2_db.closed is False
+
+
+def test_record_run_connectivity_error_is_swallowed_not_evicted(monkeypatch) -> None:
+    """Documented residual (critique [24578]): _nx_answer_record_run has
+    its OWN `except Exception: _warn_telemetry_drop(...)` around the real
+    db.telemetry.record_nx_answer_run POST -- "best-effort telemetry,
+    must not crash caller," and this helper is called from several OTHER
+    nx_answer sites this bead does not touch. Wrapping the whole call in
+    _t2_index_write's closure is structurally correct, but that internal
+    swallow means a connectivity failure here is caught before
+    _service_t2_write_locked's classifier can see it -- eviction does NOT
+    trigger from a failure at this specific site, same shape as price_table
+    above."""
+    from unittest.mock import MagicMock
+
+    import nexus.mcp_infra as mi
+    from nexus.mcp.core import _nx_answer_record_run
+
+    class _FakeT2Database:
+        def __init__(self, *_a, **_kw) -> None:
+            self.telemetry = MagicMock()
+            self.telemetry.record_nx_answer_run.side_effect = ConnectionError(
+                "telemetry store unreachable",
+            )
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr("nexus.db.t2.T2Database", _FakeT2Database)
+
+    mi.t2_index_write(
+        lambda db: _nx_answer_record_run(
+            db.telemetry, question="q", plan_id=1, matched_confidence=0.9,
+            step_count=1, final_text="answer", step_records=[],
+            duration_ms=10, trace=True,
+        ),
+        op="record_run",
+    )  # must not raise -- the internal swallow absorbs it
+
+    assert mi._service_t2_db is not None, (
+        "the swallowed failure never reaches _service_t2_write_locked's "
+        "classifier, so the singleton is NOT evicted here -- the "
+        "documented residual, not a claimed fix"
+    )
+    assert mi._service_t2_db.closed is False

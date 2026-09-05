@@ -8408,32 +8408,55 @@ async def nx_answer(
         _pinned_verb = (dimensions or {}).get("verb")
         _category_verb = _pinned_verb or _infer_verb(question)
         try:
-            # nexus-m20mf P2: the write_fn passed to _t2_index_write holds
-            # ONLY the db.* attribute access — get_t1_plan_cache's T1 reach
-            # and _plan_match's ONNX embed happen OUTSIDE it, on purpose.
-            # _service_t2_write_locked evicts the shared T2Database on a
-            # connectivity error from write_fn; a fat closure wrapping the
-            # T1/ONNX calls would let a T1-only failure evict a healthy T2
-            # singleton out from under concurrent siblings.
-            _plans_store = _t2_index_write(lambda db: db.plans, op="plan_match")
-            cache = get_t1_plan_cache(populate_from=_plans_store)
-            matches = _plan_match(
-                question,
-                library=_plans_store,
-                cache=cache,
-                dimensions=dimensions,
-                scope_preference=scope,
-                context={"user_context": context} if context else None,
-                min_confidence=effective_min_confidence,
-                n=5,
-                # nexus-0yrjr: declare what this call can actually
-                # bind so the matcher never offers a plan that cannot
-                # run. nx_answer supplies ``intent`` always and
-                # ``_nx_scope`` when the caller passed a scope; every
-                # free-text binding is aliased from the question, so
-                # only typed bindings can make a plan unrunnable.
-                available_bindings=_caller_available,
-                category_verb=_category_verb,
+            # nexus-m20mf P2 (critique [24578] fix): get_t1_plan_cache's
+            # OWN T1 reach (populate, an occasional T2 list + T1 write +
+            # ONNX embed) stays OUTSIDE any T2-eviction-protected closure
+            # — a T1-only failure there must never evict a healthy T2
+            # singleton. This resolve is its own tiny closure (a bare
+            # attribute access, cannot itself raise a connectivity error).
+            _plans_store_for_cache = _t2_index_write(
+                lambda db: db.plans, op="plan_match_cache_populate",
+            )
+            cache = get_t1_plan_cache(populate_from=_plans_store_for_cache)
+            # _plan_match's OWN real T2 traffic (HttpPlanLibrary.get_plan
+            # per candidate, increment_match_metrics on every match) must
+            # run INSIDE the closure — the critique's finding was that a
+            # bare `lambda db: db.plans` closure released the singleton's
+            # refcount and _service_t2_write_locked's connectivity-error
+            # classifier BEFORE this real HTTP work even started, so
+            # neither a genuine failure here nor a concurrent sibling's
+            # eviction were ever correctly attributed to this call.
+            # Residual, documented rather than silently accepted:
+            # PlanSessionCache (the `cache` argument) is ALSO HTTP-backed
+            # (a T1 ChromaDB collection, per its own module docstring) and
+            # `plan_match()` calls `cache.query()`/`cache.remove()`
+            # internally -- those T1 calls now share this closure's
+            # eviction window too, so a T1 query failure here can evict a
+            # healthy T2 singleton, a narrower version of the exact hazard
+            # the hoist rule exists to prevent. Splitting T1 ranking from
+            # T2 hydration inside matcher.plan_match() would close this
+            # fully; out of scope for this fix (fans out into matcher.py,
+            # not a mechanical closure-boundary correction).
+            matches = _t2_index_write(
+                lambda db: _plan_match(
+                    question,
+                    library=db.plans,
+                    cache=cache,
+                    dimensions=dimensions,
+                    scope_preference=scope,
+                    context={"user_context": context} if context else None,
+                    min_confidence=effective_min_confidence,
+                    n=5,
+                    # nexus-0yrjr: declare what this call can actually
+                    # bind so the matcher never offers a plan that cannot
+                    # run. nx_answer supplies ``intent`` always and
+                    # ``_nx_scope`` when the caller passed a scope; every
+                    # free-text binding is aliased from the question, so
+                    # only typed bindings can make a plan unrunnable.
+                    available_bindings=_caller_available,
+                    category_verb=_category_verb,
+                ),
+                op="plan_match",
             )
         except Exception as exc:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             return _result(f"Error during plan match: {exc}")
@@ -8509,11 +8532,26 @@ async def nx_answer(
         # (one cheap estimate_plan_cost call, returns it unchanged), so
         # there is no meaningful cost to always computing + logging this.
         try:
-            # nexus-m20mf P2: closure holds only the db.telemetry attribute
-            # access; get_cached_price_table's process-local TTL cache runs
-            # outside it (same hoist rule as the plan-match site above).
-            _telemetry_store = _t2_index_write(lambda db: db.telemetry, op="price_table")
-            _price_table = get_cached_price_table(_telemetry_store)
+            # nexus-m20mf P2 (critique [24578] fix): the real T2 traffic
+            # (build_operator_price_table's query_nx_answer_runs GET, fired
+            # whenever the process-local TTL cache is stale) now runs
+            # INSIDE the closure -- the prior `lambda db: db.telemetry`
+            # shape released the singleton's refcount before that GET ever
+            # started, so neither a genuine failure here nor a concurrent
+            # sibling's eviction were attributed to this call. Residual,
+            # documented rather than silently accepted: get_cached_price_
+            # table -> build_operator_price_table has its OWN internal
+            # `except Exception: return OperatorPriceTable({})` (an
+            # intentional degrade-to-empty-table contract, not a bug), so
+            # a connectivity error is swallowed there before
+            # _service_t2_write_locked's classifier can ever see it --
+            # this closure is now structurally correct but eviction still
+            # will not trigger from a failure at this specific site. No
+            # narrower fix available without changing that function's
+            # documented never-raises contract, which other callers rely on.
+            _price_table = _t2_index_write(
+                lambda db: get_cached_price_table(db.telemetry), op="price_table",
+            )
             _chosen, _decision_log = choose_within_band(
                 matches, _price_table, band=PLAN_CHOICE_CONFIDENCE_BAND,
             )
@@ -9576,16 +9614,28 @@ async def nx_answer(
 
     # ── Step 6: record run ───────────────────────────────────────────────
     try:
-        # nexus-m20mf P2: closure holds only the db.telemetry attribute
-        # access; _nx_answer_record_run's cost-summing and wire-step
-        # building run outside it and never raise on their own (the
-        # function's own try/except swallows the actual store call).
-        _telemetry_store = _t2_index_write(lambda db: db.telemetry, op="record_run")
-        _nx_answer_record_run(
-            _telemetry_store, question=question, plan_id=best.plan_id,
-            matched_confidence=best.confidence, step_count=len(result.steps),
-            final_text=final_text[:2000], step_records=_result_step_records,
-            duration_ms=elapsed_ms, trace=trace,
+        # nexus-m20mf P2 (critique [24578] fix): the whole
+        # _nx_answer_record_run call -- including its real
+        # db.telemetry.record_nx_answer_run POST -- now runs INSIDE the
+        # closure, not just a `lambda db: db.telemetry` attribute
+        # resolution. Residual, documented rather than silently accepted:
+        # _nx_answer_record_run has its OWN internal
+        # `except Exception: _warn_telemetry_drop(...)` around the POST
+        # (deliberate: "best-effort telemetry, must not crash caller",
+        # and this same helper is called from several OTHER sites this
+        # bead does not touch), so a connectivity error there is still
+        # swallowed before _service_t2_write_locked's classifier can see
+        # it -- eviction will not trigger from a failure at this specific
+        # site. Removing that internal swallow would need auditing every
+        # other call site of _nx_answer_record_run, out of scope here.
+        _t2_index_write(
+            lambda db: _nx_answer_record_run(
+                db.telemetry, question=question, plan_id=best.plan_id,
+                matched_confidence=best.confidence, step_count=len(result.steps),
+                final_text=final_text[:2000], step_records=_result_step_records,
+                duration_ms=elapsed_ms, trace=trace,
+            ),
+            op="record_run",
         )
     except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
         pass

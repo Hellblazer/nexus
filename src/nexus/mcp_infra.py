@@ -474,11 +474,17 @@ def t2_ctx():
     - memory.delete (line ~1943): scratch_delete tool
     - memory.merge_memories (line ~2069): memory_consolidate tool
     - memory.flag_stale_memories (line ~2080): memory_consolidate tool
-    - plans.increment_run_outcome (line ~3617): _nx_answer_record_outcome
-    - plans.increment_run_started (line ~4012): nx_answer
     - (nexus-pyzk7, resolved) _nx_answer_record_run + _record_tier_write now
       route through db.telemetry.record_* (backend-blind: SQLite raw OR the
       service's /v1/telemetry/*/record endpoint), not a raw db.telemetry.conn.
+
+    nexus-m20mf P2 (resolved): nx_answer's five happy-path sites --
+    plan_match, price_table, run_start, record_run, run_outcome, including
+    plans.increment_run_outcome (_nx_answer_record_outcome) and
+    plans.increment_run_started (nx_answer), formerly listed here as not
+    yet converted -- now route through t2_index_write. See that function's
+    call sites in mcp/core.py and T2 nexus/design-nexus-m20mf-single-t2-
+    transport for the closure-purity rule those conversions follow.
     """
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import (db.t2)
     return T2Database(default_db_path())  # boundary-allow: aspect_worker persist (document_aspects.upsert AspectRecord arg cannot round-trip the daemon RPC); not the every-poll hot path (RDR-128 P3)
