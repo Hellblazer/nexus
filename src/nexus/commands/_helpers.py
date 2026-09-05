@@ -138,6 +138,7 @@ def reset_identity_drop_collectors() -> None:
     from nexus.mcp_infra import (  # noqa: PLC0415 — deliberate function-local import: avoids a hard nexus.mcp_infra dependency at CLI startup
         reset_complete_refusals,
         reset_manifest_identity_drops,
+        reset_manifest_partial_doc_skips,
         reset_manifest_write_failures,
         reset_reconciled_collections_count,
         reset_superseded_sweep_stats,
@@ -153,6 +154,11 @@ def reset_identity_drop_collectors() -> None:
     # nexus-2t63u round 2: same shape again, for physical_collection
     # reconciliation visibility.
     reset_reconciled_collections_count()
+    # nexus-gup3b: same shape again — a fresh run must not inherit a prior
+    # run's per-doc continuation-flush dedup state, or a document re-indexed
+    # in THIS run right after a prior run touched it would wrongly stay in
+    # "already reported" (debug-only) mode and never get its own INFO line.
+    reset_manifest_partial_doc_skips()
 
 
 def emit_retry_summary() -> None:

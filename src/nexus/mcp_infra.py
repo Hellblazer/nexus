@@ -1094,6 +1094,47 @@ def _record_manifest_write_failure(doc_id: str) -> None:
         _MANIFEST_WRITE_FAILURES.append(doc_id)
 
 
+# nexus-gup3b: a multi-batch document's every flush AFTER the first lacks
+# position 0 (ChunkBatcher's flush grain is ~16 chunks) and is routed to the
+# per-doc append path below by design — normal for any document spanning
+# more than one flush, not a defect. Before this collector, every such flush
+# fired an unconditional WARNING ("manifest_write_many_partial_doc_skipped"):
+# a live re-index of one large document logged it 23 times, once per flush,
+# drowning genuine warnings in noise. This tracks, per doc_id, how many
+# continuation-slice flushes have been SEEN this process/run so the emitter
+# in ``_manifest_write_loop`` can log INFO once per document (the first
+# flush) and DEBUG for every later flush of the SAME document — the count
+# stays visible via ``get_manifest_partial_doc_skip_counts()`` and the DEBUG
+# event's per-doc counts, it just stops being a WARNING per batch.
+_manifest_partial_doc_skips_lock = threading.Lock()
+_MANIFEST_PARTIAL_DOC_SKIP_COUNTS: dict[str, int] = {}
+
+
+def get_manifest_partial_doc_skip_counts() -> dict[str, int]:
+    """doc_id -> number of continuation-slice flush batches seen this
+    process/run. Snapshot copy."""
+    with _manifest_partial_doc_skips_lock:
+        return dict(_MANIFEST_PARTIAL_DOC_SKIP_COUNTS)
+
+
+def reset_manifest_partial_doc_skips() -> None:
+    """Clear the collector. CLI callers invoke this at the start of an
+    indexing run (mirrors ``reset_manifest_write_failures``) so a document
+    re-indexed in a LATER run gets its own fresh first-flush INFO line
+    instead of inheriting a prior run's dedup state for the life of the
+    long-lived MCP server process."""
+    with _manifest_partial_doc_skips_lock:
+        _MANIFEST_PARTIAL_DOC_SKIP_COUNTS.clear()
+
+
+def _record_manifest_partial_doc_skip(doc_id: str) -> int:
+    """Increment and return the running per-doc continuation-flush count."""
+    with _manifest_partial_doc_skips_lock:
+        n = _MANIFEST_PARTIAL_DOC_SKIP_COUNTS.get(doc_id, 0) + 1
+        _MANIFEST_PARTIAL_DOC_SKIP_COUNTS[doc_id] = n
+        return n
+
+
 # GH #1397 / nexus-94fxl: batches the manifest hook DROPPED because no chunk in
 # the batch carried a document identity (no catalog_doc_id from the caller, no
 # legacy meta doc_id). Distinct from _MANIFEST_WRITE_FAILURES (a write that was
@@ -1895,11 +1936,36 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
             full_docs.append((doc_id, chunks))
         if continuation:
             import structlog  # noqa: PLC0415 — deferred (lazy logger)
-            structlog.get_logger().warning(
-                "manifest_write_many_partial_doc_skipped",
-                count=len(continuation),
-                note="continuation slices routed to per-doc append path",
-            )
+            _log = structlog.get_logger()
+            # nexus-gup3b: log INFO once per doc_id per run (its first
+            # continuation-slice flush); every later flush of the SAME
+            # doc_id this run only bumps the collector and logs at DEBUG
+            # under a distinct event name — see the collector's docstring
+            # above for why (23 WARNINGs for one live multi-batch document).
+            _first_seen: list[str] = []
+            _repeat_counts: dict[str, int] = {}
+            for _doc_id in continuation:
+                _n = _record_manifest_partial_doc_skip(_doc_id)
+                if _n == 1:
+                    _first_seen.append(_doc_id)
+                else:
+                    _repeat_counts[_doc_id] = _n
+            if _first_seen:
+                _log.info(
+                    "manifest_write_many_partial_doc_skipped",
+                    count=len(_first_seen),
+                    doc_ids=_first_seen,
+                    note="continuation slices routed to per-doc append path "
+                         "— normal for a multi-batch document; further "
+                         "flushes for the same document log at debug",
+                )
+            if _repeat_counts:
+                _log.debug(
+                    "manifest_write_many_partial_doc_skipped_repeat",
+                    counts=_repeat_counts,
+                    note="repeat continuation flush(es) for a document "
+                         "already reported this run",
+                )
             # nexus-5xn3k.4: a doc the producer claimed COMPLETE landing in
             # the continuation bucket is a contract violation — its batch
             # lacks position 0, so it cannot be the whole file. Never stamp

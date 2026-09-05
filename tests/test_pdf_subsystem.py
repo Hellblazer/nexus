@@ -440,11 +440,23 @@ class TestFFLigatureHelper:
         )
 
     def test_fails_on_dropped_ligature(self) -> None:
-        with pytest.raises(AssertionError, match="eficient"):
+        # code-review (T2 [24614]): match the helper's OWN crafted message
+        # ("'efficient' missing from extracted text...") rather than the
+        # echoed input text ("An eficient index." literally contains
+        # "eficient") — the prior match="eficient" passed only because
+        # pytest's assertion-rewrite introspection appends the compared
+        # runtime values below the custom message; under `--assert=plain`
+        # (rewriting disabled) only the crafted message text is raised and
+        # "eficient" is not a substring of it (double-f "efficient" vs
+        # single-f "eficient" never overlap contiguously), so the old
+        # pattern silently stopped proving anything.
+        with pytest.raises(AssertionError, match="missing from extracted text"):
             _assert_ff_ligature_words_intact("An eficient index.")
 
     def test_fails_on_second_word_dropped_ligature(self) -> None:
-        with pytest.raises(AssertionError, match="diference"):
+        # Same fix as test_fails_on_dropped_ligature above, for the second
+        # locked word.
+        with pytest.raises(AssertionError, match="'difference' missing from extracted text"):
             _assert_ff_ligature_words_intact(
                 "An efficient index makes little diference to a small corpus."
             )
@@ -452,6 +464,18 @@ class TestFFLigatureHelper:
     def test_fails_when_word_missing_entirely(self) -> None:
         with pytest.raises(AssertionError, match="difference"):
             _assert_ff_ligature_words_intact("An efficient index.")
+
+    def test_fails_when_collapsed_form_present_alongside_intact_word(self) -> None:
+        # code-review (T2 [24614]): exercises the OTHER failure branch (the
+        # `corrupted not in text` assert, ~420-423) — the intact word IS
+        # present (the first assert passes) but the single-f collapsed
+        # form ALSO appears elsewhere in the same text, which is exactly
+        # the shape a partial ligature-collapse would produce (some
+        # occurrences preserved, one dropped).
+        with pytest.raises(AssertionError, match="collapsed to a single"):
+            _assert_ff_ligature_words_intact(
+                "An efficient method also mentions an eficient shortcut."
+            )
 
 
 # ── nexus-2fyb: real-fixture formula-preservation regression guard ──────────

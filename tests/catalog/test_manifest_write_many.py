@@ -561,6 +561,125 @@ class TestManifestWriteLoopBatching:
         assert sorted(cat.replace_calls) == ["1.9.0", "1.9.1"]
 
 
+def _continuation_by_doc(doc_id: str, start_position: int) -> dict:
+    # No position 0 in this batch -> a continuation slice, same shape as
+    # a ChunkBatcher flush after the first for one large document.
+    return {
+        doc_id: [
+            (i, {"chunk_text_hash": "a" * 64, "chunk_index": start_position + i})
+            for i in range(2)
+        ]
+    }
+
+
+def _reroute_structlog_to_caplog() -> None:
+    """Reroute structlog to stdlib logging so ``caplog`` can see events
+    below the session-wide WARNING floor (conftest.py's ``pytest_configure``
+    sets ``wrapper_class=make_filtering_bound_logger(WARNING)`` for the
+    whole run — ``structlog.testing.capture_logs()`` only swaps
+    *processors*, so it never bypasses that floor and silently sees
+    nothing for an INFO/DEBUG event). Same pattern as
+    ``test_5xn3k_fence_ordering.py``'s complete-refused tests; the
+    autouse ``_restore_structlog_after_test`` fixture in conftest.py
+    restores the original config after the test.
+    """
+    import structlog
+
+    structlog.configure(
+        processors=[structlog.stdlib.render_to_log_kwargs],
+        wrapper_class=structlog.stdlib.BoundLogger,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+    )
+
+
+class TestManifestWriteManyPartialDocSkippedLogging:
+    """nexus-gup3b: a multi-batch document's every flush after the first
+    lacks position 0 and lands in the continuation bucket by design —
+    normal for any document spanning more than one ChunkBatcher flush
+    (~16 chunks), not a defect. Before this fix each flush fired an
+    unconditional WARNING; a live re-index of one large document logged
+    it 23 times for that single document, once per flush, drowning
+    genuine warnings."""
+
+    def test_three_batch_document_logs_one_info_line_not_three(self, caplog) -> None:
+        import logging
+
+        from nexus.mcp_infra import reset_manifest_partial_doc_skips
+
+        _reroute_structlog_to_caplog()
+        reset_manifest_partial_doc_skips()
+        cat = _FakeCat()
+        cat.append_manifest_chunks = lambda doc_id, chunks, collection: None
+
+        with caplog.at_level(logging.DEBUG):
+            for flush in range(3):
+                _manifest_write_loop(
+                    cat,
+                    _continuation_by_doc("1.9.0", start_position=2 + flush * 2),
+                    _COLLECTION, reader=cat,
+                )
+
+        info_records = [r for r in caplog.records if r.message == "manifest_write_many_partial_doc_skipped"]
+        repeat_records = [r for r in caplog.records if r.message == "manifest_write_many_partial_doc_skipped_repeat"]
+        warning_records = [r for r in caplog.records if r.levelname == "WARNING"]
+
+        # ONE line, not three — the whole point of this bead.
+        assert len(info_records) == 1, [r.message for r in caplog.records]
+        assert info_records[0].levelname == "INFO"
+        assert info_records[0].doc_ids == ["1.9.0"]
+        # The count stays visible: 2 later flushes for the same doc this
+        # run are reported at debug, not silently dropped.
+        assert len(repeat_records) == 2, repeat_records
+        assert all(r.levelname == "DEBUG" for r in repeat_records)
+        assert repeat_records[0].counts == {"1.9.0": 2}
+        assert repeat_records[1].counts == {"1.9.0": 3}
+        assert warning_records == []
+
+    def test_different_docs_each_get_their_own_first_info_line(self, caplog) -> None:
+        import logging
+
+        from nexus.mcp_infra import reset_manifest_partial_doc_skips
+
+        _reroute_structlog_to_caplog()
+        reset_manifest_partial_doc_skips()
+        cat = _FakeCat()
+        cat.append_manifest_chunks = lambda doc_id, chunks, collection: None
+        by_doc = {
+            **_continuation_by_doc("1.9.0", start_position=2),
+            **_continuation_by_doc("1.9.1", start_position=2),
+        }
+
+        with caplog.at_level(logging.DEBUG):
+            _manifest_write_loop(cat, by_doc, _COLLECTION, reader=cat)
+
+        info_records = [r for r in caplog.records if r.message == "manifest_write_many_partial_doc_skipped"]
+        assert len(info_records) == 1
+        assert sorted(info_records[0].doc_ids) == ["1.9.0", "1.9.1"]
+        assert info_records[0].count == 2
+
+    def test_reset_gives_a_later_run_its_own_fresh_info_line(self, caplog) -> None:
+        import logging
+
+        from nexus.mcp_infra import reset_manifest_partial_doc_skips
+
+        _reroute_structlog_to_caplog()
+        cat = _FakeCat()
+        cat.append_manifest_chunks = lambda doc_id, chunks, collection: None
+
+        reset_manifest_partial_doc_skips()
+        _manifest_write_loop(cat, _continuation_by_doc("1.9.0", 2), _COLLECTION, reader=cat)
+
+        # A fresh CLI run resets the collector -> the same doc_id gets a
+        # NEW first-flush INFO line rather than staying suppressed forever
+        # for the life of the long-lived MCP server process.
+        reset_manifest_partial_doc_skips()
+        with caplog.at_level(logging.DEBUG):
+            _manifest_write_loop(cat, _continuation_by_doc("1.9.0", 2), _COLLECTION, reader=cat)
+
+        info_records = [r for r in caplog.records if r.message == "manifest_write_many_partial_doc_skipped"]
+        assert len(info_records) == 1
+
+
 class _FlakyThenOkCat:
     """Fails the first N calls to a given write op with a transient
     connection error, then succeeds. Used to prove _manifest_write_loop
