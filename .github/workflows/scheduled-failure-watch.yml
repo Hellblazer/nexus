@@ -162,4 +162,14 @@ jobs:
         # --paired-deploy's `gh release view` publication check. This leg
         # only needs outbound HTTPS to the public managed endpoint plus the
         # `contents: read` permission above for actions/checkout.
-        run: uv run python scripts/check_engine_release_floor.py
+        #
+        # --no-record-deploy: since nexus-nx3l5 the bare post-tag verify
+        # refuses (exit 3) unless it records the deployed-engine-version
+        # tracker or is told why it cannot. This runner holds no conexus
+        # checkout, so there is no STEP-6 report here to record from; the
+        # release box records the tracker. Without the opt-out this job
+        # was red every day from 2026-08-30 while every substantive check
+        # (pin current, cloud current, source current) passed.
+        run: >-
+          uv run python scripts/check_engine_release_floor.py
+          --no-record-deploy "GitHub runner: no conexus checkout holds the STEP-6 gate reports; the release box records the tracker"
