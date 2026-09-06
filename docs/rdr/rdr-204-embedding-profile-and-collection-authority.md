@@ -32,16 +32,21 @@ name is trusted.
 
 Read on develop at `d77f9969c` (2026-09-06):
 
-- The engine parses the name in six places. Embedder routing takes
-  `segments[2]` as the model (`EmbedderRouter.resolveEmbedderStrict`);
-  the vector repository derives the vector dimension from the same segment
-  (`PgVectorRepository.dimForCollection`) and parses content type in three
-  more methods; the combined-write path and staging promote parse the
-  prefix.
-- The client parses it in six more: corpus resolution (`corpus.py`
-  `resolve_corpus`, `embedding_model_for_collection*`), the MCP corpus
-  fan-out (`core.py` `_resolve_corpus_target`, `_group_collections_by_model`),
-  the exporter, the reconciler, the recovery bundle, and context loading.
+- The engine parses the name in eight places (full grep, 2026-09-06, T2
+  `204-research-4`): embedder routing takes `segments[2]` as the model
+  (`EmbedderRouter.resolveEmbedderStrict`); the vector repository derives
+  the dimension from the same segment (`PgVectorRepository.dimForCollection`)
+  and splits the name in three more methods; the combined-write path and
+  staging promote take the content type from the prefix.
+- The client parses it in about sixty raw string sites (`split("__")`,
+  `partition("__")`, `startswith("code__")` and the like, across
+  `corpus.py`, `core.py`, `commands/*`, `db/*`, `catalog/*`, `scoring.py`,
+  `exporter.py`, `context.py`) plus thirty-four callers of the three
+  helpers that derive a model from a name
+  (`embedding_model_for_collection*`, `voyage_model_for_collection`,
+  `parse_conformant_collection_name`). An earlier cut of this RDR counted
+  twelve; the gate critique caught the undercount, and the number is now a
+  mechanized census, not a hand count.
 - The table is written with blanks. The aspect and taxonomy repositories
   insert a stub row with empty `content_type`, `owner_id`, and
   `embedding_model` when a collection is missing, so that their own
@@ -73,9 +78,10 @@ GH #667 exploited.
 
 #### Gap 1: Two sources of truth for a collection's attributes, and the wrong one is read
 
-`catalog_collections` has the columns; twelve code sites parse the name
-instead. The fix makes the table the only source and deletes the parsers,
-enforced by a census gate that only shrinks.
+`catalog_collections` has the columns; roughly a hundred code sites parse
+the name instead. The fix funnels every raw string site through three
+helpers, repoints the helpers at the table, and deletes what is left,
+enforced on both sides by a census gate that only shrinks to zero.
 
 #### Gap 2: The table cannot be trusted because stub rows carry blanks
 
@@ -86,9 +92,12 @@ turns the stub path into "register properly or fail loud".
 #### Gap 3: The embedding model is modelled as a per-collection choice it has never been
 
 Nothing records that an install has one model per content type, so the
-schema cannot refuse a collection whose recorded model disagrees with
-what the install can embed. The fix adds an install-scoped embedding
-profile that collections inherit from and are checked against.
+schema cannot refuse a new collection whose model disagrees with what the
+install embeds with. The fix adds an install-scoped embedding profile that
+new collections inherit from. The profile is a setting, not a constant:
+`local.embed_model` is already user-mutable (GH #1461), so the profile
+must be updatable, and existing collections keep the model they were
+embedded with rather than being refused when the profile moves.
 
 #### Gap 4: Lifecycle state is encoded in the name too
 
@@ -151,9 +160,18 @@ per-collection chunk counts from `nx collection list`. Full numbers in T2
 
 ### Key Discoveries
 
-- **Verified**: 12 name-parse sites, 6 engine and 6 client (listed in the
-  Problem Statement). The client also carries three `embedding_model_for_*`
-  helpers in `corpus.py` that are parsers by another name.
+- **Verified**: the parse surface, by grep on develop `b604a4a5b`
+  (T2 `204-research-4`): engine 8 sites (`EmbedderRouter:327`,
+  `PgVectorRepository:414/712/945/2180`, `CombinedWriteService:323`,
+  `StagingPromoteOps:317-318`); client about 60 raw string sites and 34
+  callers of the three model-deriving helpers. Load-bearing client
+  examples the earlier count missed: `commands/collection.py:422-423`
+  (rename validity by prefix), `db/http_vector_client.py:835/868`
+  (write-path batch sizing by prefix), `catalog/orphan_backfill.py:322`
+  (backfill content type), `scoring.py:257/279/305` (code-versus-prose
+  scoring by prefix), `db/t3.py:77/354/388` (model for a write). Matches
+  on `mcp__` tool names and `rdr-` document ids are excluded; they are not
+  collection names.
 - **Verified**: `AspectRepository` (RDR-164 P1a) and `TaxonomyRepository`
   (RDR-156 P0.2) insert `catalog_collections` stub rows with empty
   attribute columns to satisfy their FKs.
@@ -257,7 +275,8 @@ Nothing is renamed and no chunk moves.
 ### Technical Design
 
 **1. Install-scoped embedding profile.** This is the client's existing
-`effective_embedding_model_for_writes` turned into data. New table
+`effective_embedding_model_for_writes` turned into data, including its
+`local.embed_model` opt-in (which is why 1a below exists). New table
 `nexus.embedding_profile(tenant_id, content_type, embedding_model,
 dimension, PRIMARY KEY (tenant_id, content_type))`, plus a reference table
 `nexus.embedding_models(embedding_model PRIMARY KEY, dimension, provider)`
@@ -265,13 +284,27 @@ seeded with the four models the engine can serve. `nx init` writes the
 profile for the chosen mode; a cloud tenant's profile is written at tenant
 mint. The profile is the only place a model is chosen.
 
-**2. Collections inherit.** `catalog_collections.embedding_model` and a new
-`dimension` column stay as denormalised facts for joins, but they are
-written from the profile at registration and constrained: NOT NULL and
-non-empty on `content_type`, `owner_id`, `embedding_model`; a FK to
-`embedding_models`; and a trigger-or-check that the row's model equals
-`embedding_profile(tenant_id, content_type)`. A register call naming a
-different model is a 422 with the profile's value in the message. A new
+**1a. The profile is updatable.** `local.embed_model` can change at any
+time through `nx config set` (GH #1461), and that is the feature, not a
+bug. A change is a profile write: `nx upgrade`'s `provisioning`
+precondition (and the engine at boot, from its own mode) writes the
+profile row for each content type. A profile change never touches an
+existing collection's row: the row records the model its vectors were
+embedded with, which is a fact about stored bytes, and the profile
+records what new collections get. `nx doctor` reports every live
+collection whose model differs from the current profile as needing
+re-embedding under the new profile, the same re-index GH #1461 already
+requires after a switch; reads of such a collection continue to route by
+the row's own model and are never refused.
+
+**2. Collections inherit at registration.** `catalog_collections.
+embedding_model` and a new `dimension` column stay as denormalised facts
+for joins. They are constrained: NOT NULL and non-empty on
+`content_type`, `owner_id`, `embedding_model`, and a FK to
+`embedding_models`. Registration of a NEW collection writes the model
+from the current profile; a register call that names a different model is
+a 422 carrying the profile's value. There is deliberately no constraint
+tying an existing row to the current profile (see 1a). A new
 `lifecycle_state` column (`live` | `quarantine`) replaces the
 `quarantine-` prefix as the thing corpus resolution excludes.
 
@@ -300,12 +333,19 @@ mode cannot serve", which is the true condition. The stub-insert paths in
 `AspectRepository` and `TaxonomyRepository` are deleted; a write against an
 unregistered collection fails loud.
 
-**5. Client resolves through the catalog.** `corpus="code"` becomes
+**5. Client resolves through the catalog, in two moves.** First the
+funnel: every raw string site (about sixty) is rewritten to call one of
+three helpers, `collection_content_type(name)`, `collection_model(name)`,
+`collection_owner(name)`, which at that point still parse; this is
+mechanical, reviewable per file, and leaves behaviour byte-identical.
+Then the repoint: the three helpers read the catalog row (the list call
+is already fetched and cached for collection counts) and
+`corpus="code"` becomes
 `GET /v1/catalog/collections/list?content_type=code&lifecycle_state=live`.
-The six client parse sites and the three `embedding_model_for_*` helpers
-read the row. `_group_collections_by_model` groups by the column.
-`CollectionName.render` stays as the way a new name is minted; `parse`
-survives only inside the backfill and the census gate.
+`_group_collections_by_model` groups by the column. `CollectionName.render`
+stays as the way a new name is minted; `parse` survives only inside the
+backfill and the census gate. The census gate pins the raw-site count at
+each step and only shrinks; the repoint is one change, not sixty.
 
 **6. Optional, last, and out of the accepted scope:** once nothing parses,
 a new collection may be given an opaque name. Existing names never change.
@@ -378,6 +418,11 @@ the fact and lets the constraint refuse the lie.
   Would falsify the premise. Mitigation: the read-only grouping query in
   Critical Assumptions runs against the cloud before the changeset is
   cut; a violation stops the RDR at the gate, not in production.
+- **A user changes `local.embed_model` after init.** An earlier cut of this
+  design froze the profile and would have refused every later registration
+  with a 422 (gate critique, Critical 2). Mitigation is structural (1a): the
+  profile is updatable, existing rows are never checked against it, and
+  doctor names the collections that now need re-embedding.
 - **`CollectionRegistry` cache staleness after a supersede or rename.**
   Mitigation: the existing evict path fires on rename and delete
   (RDR-164 cascades); extend it to profile writes, and cover it in the
@@ -432,13 +477,19 @@ Phases 1 and 2 ride one engine cut.
 
 ### Phase 3: Client reads the catalog
 
-1. `list` route gains `content_type` and `lifecycle_state` filters.
-2. `resolve_corpus`, `_resolve_corpus_target`,
-   `_group_collections_by_model`, `embedding_model_for_*`, exporter,
-   reconciler, recovery bundle, context loader read the row.
-3. A lint-bucket census pins client `split("__")` on collection names;
-   only shrinks. `CollectionName.parse` callers reduce to the census gate
-   and the backfill.
+1. Census gate first: a lint-bucket test that greps the raw patterns
+   (`split("__")`, `partition("__")`, `startswith("<type>__")`,
+   `"__" in`) on collection names under `src/nexus`, with an explicit
+   exclusion list for `mcp__` tool names and `rdr-` ids, pinned at the
+   measured count. Every later step lowers the pin.
+2. Funnel: rewrite the raw sites to the three helpers, file by file,
+   behaviour unchanged; the gate falls to the helpers' own internals.
+3. `list` route gains `content_type` and `lifecycle_state` filters.
+4. Repoint the three helpers and `resolve_corpus` / `_resolve_corpus_target`
+   / `_group_collections_by_model` at the row; the gate falls to zero
+   outside the backfill.
+5. `CollectionName.parse` callers reduce to the census gate and the
+   backfill.
 
 Client-only release.
 
@@ -519,6 +570,9 @@ is not deferred.
 
 ### Proportionality
 
-Right-sized: one new table pair, columns on an existing one, twelve
-parse-site deletions, two census gates. Phase 4 is held out of scope on
-purpose.
+Right-sized for the engine (one new table pair, columns on an existing
+one, eight parse sites, one gate). The client half is larger than the
+first draft admitted, about sixty raw sites plus thirty-four helper
+callers, which is why Phase 3 is a funnel then a single repoint under a
+shrinking gate rather than a site-by-site rewrite. Phase 4 is held out of
+scope on purpose.
