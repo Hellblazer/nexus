@@ -185,11 +185,27 @@ class RawSqlGateTest {
      * .execute(var)/.fetch(var) evades the name heuristic — jOOQ's legitimate
      * .execute(Query)/.fetch(Field...) overloads make a match-any-identifier
      * rule false-positive on typed DSL usage, so the heuristic stays
-     * name-based. */
+     * name-based.
+     *
+     * <p>nexus-cbo4a batch 8 (GATE BLIND SPOT closed, critique T2 [24685]):
+     * {@code .executeQuery(}/{@code .executeUpdate(}/{@code .query(} used to
+     * require an IMMEDIATE string literal — the only three shapes in this
+     * whole alternation without the {@code sql|SQL|new StringBuilder}
+     * identifier alternation every sibling shape already carried. That made
+     * JDBC's {@code st.executeQuery(sql)} — the one raw-execute call inside a
+     * local wrapper like {@code count(Connection, String sql)}/{@code
+     * query(Connection, String sql)}/{@code exec(Connection, String sql)} —
+     * structurally invisible, which is how 49 catalog-read call sites behind
+     * two such wrappers went uncounted through all of batch 7 (see the
+     * critique). Widened to match the same three-way alternation as every
+     * other branch. This closes only the WRAPPER'S OWN internal call; see
+     * {@link #LOCAL_SQL_WRAPPER_DECL}/{@link #localSqlWrapperNames} below for
+     * the call-site half (a wrapper invoked with a literal SQL string is the
+     * actual raw-SQL text, not the wrapper's generic plumbing). */
     private static final Pattern RAW_EXECUTE = Pattern.compile(
         "(\\.execute\\(\\s*(\"|sql|SQL|new StringBuilder)"
-        + "|\\.query\\(\\s*\""
-        + "|\\.execute(Query|Update)\\(\\s*\""
+        + "|\\.query\\(\\s*(\"|sql|SQL|new StringBuilder)"
+        + "|\\.execute(Query|Update)\\(\\s*(\"|sql|SQL|new StringBuilder)"
         + "|\\.fetch\\(\\s*(\"|sql|SQL|new StringBuilder)"
         + "|\\.fetchOne\\(\\s*(\"|sql|SQL|new StringBuilder)"
         + "|\\.fetchAny\\(\\s*(\"|sql|SQL|new StringBuilder)"
@@ -540,12 +556,45 @@ class RawSqlGateTest {
             .trim();
     }
 
+    /**
+     * Local raw-SQL wrapper DECLARATION shape (nexus-cbo4a batch 8): a method
+     * taking exactly {@code (Connection <var>, String sql)} or {@code (...,
+     * String SQL)} — the convention this test tree uses for its own
+     * {@code count}/{@code query}/{@code exec}/{@code rows}/{@code countRows}/
+     * {@code runIds}-named helpers that fan a caller-supplied SQL string out
+     * through {@code Statement#execute}/{@code executeQuery}/
+     * {@code executeUpdate}. Detected by PARAMETER SHAPE, not by name, so a
+     * future file's differently-named wrapper is caught the same way — the
+     * literal text {@code "Connection <ident>, String sql"} appears only in a
+     * declaration's parameter list; a CALL site never repeats the type names.
+     * See {@link #localSqlWrapperNames}.
+     */
+    private static final Pattern LOCAL_SQL_WRAPPER_DECL = Pattern.compile(
+        "\\b(\\w+)\\s*\\(\\s*Connection\\s+\\w+\\s*,\\s*String\\s+(?:sql|SQL)\\s*\\)");
+
+    /** Every distinct method name in *blanked* matching {@link
+     * #LOCAL_SQL_WRAPPER_DECL} — the local raw-SQL wrapper names declared in
+     * this one file. Scoped per-file by construction (the caller always
+     * passes one file's blanked source), so there is no cross-file name
+     * collision risk between, say, one file's {@code count(Connection,
+     * String)} and an unrelated method of the same name elsewhere. */
+    static java.util.Set<String> localSqlWrapperNames(String blanked) {
+        java.util.Set<String> names = new java.util.LinkedHashSet<>();
+        Matcher m = LOCAL_SQL_WRAPPER_DECL.matcher(blanked);
+        while (m.find()) {
+            names.add(m.group(1));
+        }
+        return names;
+    }
+
     /** Per-file scan: blank comments/strings -> newline-tolerant raw-SQL
      * pattern -> brace-region method attribution -> per-statement
      * fingerprint validation (nexus-4okz4 increment 5) -> stale-fingerprint
-     * sweep. Extracted so the nexus-8kbzu adversarial meta-tests exercise
-     * the excusal logic against synthetic sources, not just the pattern
-     * against the current tree. */
+     * sweep -> local-wrapper literal call-site sweep (nexus-cbo4a batch 8,
+     * {@link #localSqlWrapperNames}/{@link #wrapperCallSites}). Extracted so
+     * the nexus-8kbzu adversarial meta-tests exercise the excusal logic
+     * against synthetic sources, not just the pattern against the current
+     * tree. */
     static List<String> scan(String fileName, String rawSource) {
         String blanked = blank(rawSource);
         Map<String, Map<String, Integer>> methodStatements =
@@ -631,6 +680,35 @@ class RawSqlGateTest {
                         + "x -- update or remove this SANCTIONED_STATEMENTS entry: "
                         + stmtEntry.getKey());
                 }
+            }
+        }
+
+        // Local-wrapper literal call-site sweep (nexus-cbo4a batch 8, GATE
+        // BLIND SPOT): a wrapper like count(Connection, String sql) is
+        // generic plumbing -- the RAW_EXECUTE match above (now widened) sees
+        // only its OWN internal st.executeQuery(sql) line, one hit per
+        // wrapper regardless of how many times it's called. The actual
+        // raw-SQL TEXT lives at each CALL SITE that feeds the wrapper a
+        // string literal (e.g. count(conn, "SELECT ...")) -- every one of
+        // those is a raw-SQL call site in its own right and must be counted
+        // as one, not folded into the wrapper's single declaration hit.
+        for (String wrapperName : localSqlWrapperNames(blanked)) {
+            for (int siteStart : wrapperCallSites(blanked, wrapperName)) {
+                int[] region = statementRegion(blanked, siteStart);
+                String argsBlanked = blanked.substring(
+                    region[0], Math.min(region[1], blanked.length()));
+                if (!argsBlanked.contains("\"")) {
+                    // No literal fed at this call site (e.g. the SQL text is
+                    // passed through from another variable, or this is the
+                    // wrapper's own declaration) -- not visible to this sweep
+                    // by design; see this method's javadoc.
+                    continue;
+                }
+                int line = 1 + (int) blanked.substring(0, siteStart).chars()
+                    .filter(c -> c == '\n').count();
+                String text = canonicalStatementText(rawSource, region);
+                violations.add(fileName + ":" + line + "  LOCAL WRAPPER LITERAL SQL CALL SITE ("
+                    + wrapperName + "): " + text);
             }
         }
         return violations;
@@ -733,6 +811,49 @@ class RawSqlGateTest {
      * widening {@code RAW_EXECUTE} to {@code executeQuery(sql)} /
      * {@code executeUpdate(sql)} identifier arguments is the recommended
      * follow-up, sized by that census before it lands.
+     *
+     * <p>Batch 8 (GATE BLIND SPOT closed): {@link #RAW_EXECUTE}'s {@code
+     * .executeQuery(}/{@code .executeUpdate(}/{@code .query(} branches were
+     * the only three shapes in the whole alternation requiring an IMMEDIATE
+     * string literal — every sibling branch already accepted a {@code
+     * sql}/{@code SQL}/{@code new StringBuilder} identifier too. Widened to
+     * match. That alone only surfaces a WRAPPER's own internal raw-execute
+     * line (one hit per wrapper declaration); the actual raw-SQL TEXT lives
+     * at each CALL SITE feeding the wrapper a string literal (e.g. {@code
+     * count(conn, "SELECT ...")}), closed by the new {@link
+     * #localSqlWrapperNames} declaration-shape detector (structural: any
+     * method taking {@code (Connection, String sql)}/{@code (..., String
+     * SQL)}, matched by parameter shape, not by name) plus {@link
+     * #wrapperCallSites} filtered to call sites whose argument list contains
+     * a literal. Standalone census (recipe below) before/after: 144 files /
+     * 1407 sites -&gt; 145 files / 1630 sites (+223, 21 files: 20 raised,
+     * {@code CatalogDeleteCollectionCascadeTest.java} newly entered). Every
+     * added site pre-existed on develop; this batch adds visibility, not new
+     * raw SQL — verified per-file against a hand grep of each changed file's
+     * literal-fed wrapper call count (e.g. {@code
+     * SchemaUpgradeRehearsalIntegrationTest.java}: 61 literal {@code count(}
+     * call sites + 1 wrapper declaration = the +62 this map records). None of
+     * the newly-visible sites are converted in this batch — that is the
+     * NEXT-shape work (seed INSERTs / row-count reads via generated tables,
+     * per batch 7's own recommendation); this batch only makes the ratchet
+     * see them.
+     *
+     * <p>Standalone census tool recipe (nexus-cbo4a, unchanged in shape from
+     * batch 2/7): copy this file into a scratch package dir, strip the one
+     * {@code @Test} method referencing {@code dev.nexus.service.vectors.
+     * DimTables}/{@code ChashSqlIdioms} (the only two real jOOQ-generated
+     * classes this file's otherwise-pure regex/string logic touches) down to
+     * an empty body, compile it alongside a small {@code Census.java} in the
+     * SAME package that calls {@link #scan} directly (package-private,
+     * visible within {@code dev.nexus.service.db}) against
+     * {@code junit-jupiter-api}/{@code assertj-core} jars from {@code ~/.m2}
+     * (no other dependency — this class does not import anything from
+     * {@code dev.nexus.service} itself except in that one stripped method),
+     * then walk {@code service/src/test/java} printing per-file counts. This
+     * IS the gate's own {@link #scan}, so the tool and the gate cannot
+     * disagree by construction; sizing a change against the ORIGINAL
+     * (unmodified) copy first is the only way to attribute a delta correctly
+     * before touching this map.
      */
     private static final Map<String, Integer> TEST_TREE_RAW_SQL_CEILING = Map.ofEntries(
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 8),
@@ -743,10 +864,11 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/Bge768ServiceEmbedIntegrationTest.java", 3),
         Map.entry("dev/nexus/service/BootstrapTokenRotationTest.java", 5),
         Map.entry("dev/nexus/service/BridgeAddressFieldsTest.java", 9),
-        Map.entry("dev/nexus/service/Catalog013RlsReplayTest.java", 6),
+        Map.entry("dev/nexus/service/Catalog013RlsReplayTest.java", 19),
         Map.entry("dev/nexus/service/Catalog016SourceUriUniqueTest.java", 8),
         Map.entry("dev/nexus/service/Catalog034TumblerGrammarTest.java", 5),
-        Map.entry("dev/nexus/service/CatalogDocumentCascadeTest.java", 2),
+        Map.entry("dev/nexus/service/CatalogDeleteCollectionCascadeTest.java", 14),
+        Map.entry("dev/nexus/service/CatalogDocumentCascadeTest.java", 11),
         Map.entry("dev/nexus/service/CatalogEngineDefects70Test.java", 6),
         Map.entry("dev/nexus/service/CatalogFtsFilenameSearchTest.java", 5),
         Map.entry("dev/nexus/service/CatalogGcAuditProducersTest.java", 9),
@@ -758,28 +880,28 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/CatalogPurgeTrashPopulationParityTest.java", 8),
         Map.entry("dev/nexus/service/CatalogPurgeTrashTest.java", 14),
         Map.entry("dev/nexus/service/CatalogPurgeTrashVacuumTest.java", 7),
-        Map.entry("dev/nexus/service/CatalogRenameCollectionTest.java", 2),
+        Map.entry("dev/nexus/service/CatalogRenameCollectionTest.java", 42),
         Map.entry("dev/nexus/service/CatalogRepositoryTest.java", 6),
-        Map.entry("dev/nexus/service/ChashConformanceReportIntegrationTest.java", 7),
+        Map.entry("dev/nexus/service/ChashConformanceReportIntegrationTest.java", 9),
         Map.entry("dev/nexus/service/ChashHandlerRerouteTest.java", 6),
         Map.entry("dev/nexus/service/ChashProbePlanShapeTest.java", 9),
-        Map.entry("dev/nexus/service/ChashRepositoryTest.java", 8),
+        Map.entry("dev/nexus/service/ChashRepositoryTest.java", 9),
         Map.entry("dev/nexus/service/ChashVectorConcurrencyTest.java", 3),
         Map.entry("dev/nexus/service/ChunksRlsBehavioralTest.java", 12),
-        Map.entry("dev/nexus/service/CollectionRegistryFkExtraTest.java", 32),
-        Map.entry("dev/nexus/service/CollectionRegistryFkTest.java", 60),
+        Map.entry("dev/nexus/service/CollectionRegistryFkExtraTest.java", 40),
+        Map.entry("dev/nexus/service/CollectionRegistryFkTest.java", 63),
         Map.entry("dev/nexus/service/CollectionVectorStatsTest.java", 18),
         Map.entry("dev/nexus/service/CombinedQueryParityIntegrationTest.java", 6),
-        Map.entry("dev/nexus/service/CombinedQueryParityTest.java", 20),
+        Map.entry("dev/nexus/service/CombinedQueryParityTest.java", 22),
         Map.entry("dev/nexus/service/CombinedWriteRepositoryTest.java", 6),
         Map.entry("dev/nexus/service/DataTokenHandlerTest.java", 4),
         Map.entry("dev/nexus/service/DenseGateScanBudgetIntegrationTest.java", 8),
         Map.entry("dev/nexus/service/ForeignKeyConstraintTest.java", 53),
-        Map.entry("dev/nexus/service/GrantsNexusDiagViewAccessIntegrationTest.java", 1),
-        Map.entry("dev/nexus/service/GrantsPgMonitorTest.java", 4),
-        Map.entry("dev/nexus/service/GrantsSvcForeignOwnedRelationTest.java", 2),
+        Map.entry("dev/nexus/service/GrantsNexusDiagViewAccessIntegrationTest.java", 13),
+        Map.entry("dev/nexus/service/GrantsPgMonitorTest.java", 11),
+        Map.entry("dev/nexus/service/GrantsSvcForeignOwnedRelationTest.java", 13),
         Map.entry("dev/nexus/service/GraphHopParityIntegrationTest.java", 9),
-        Map.entry("dev/nexus/service/GraphHopParityTest.java", 16),
+        Map.entry("dev/nexus/service/GraphHopParityTest.java", 17),
         Map.entry("dev/nexus/service/HybridSearchFunctionParityIntegrationTest.java", 7),
         Map.entry("dev/nexus/service/HybridSelectiveGateTest.java", 2),
         Map.entry("dev/nexus/service/Hygiene001NotNullMigrationRlsTest.java", 29),
@@ -806,16 +928,16 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/PlanRepositoryTest.java", 2),
         Map.entry("dev/nexus/service/PlansSchemaLiquibaseTest.java", 13),
         Map.entry("dev/nexus/service/Rdr71gw2CollectionNotNullTest.java", 21),
-        Map.entry("dev/nexus/service/RdrO8dil7GlobalManifestAntiJoinTest.java", 30),
+        Map.entry("dev/nexus/service/RdrO8dil7GlobalManifestAntiJoinTest.java", 38),
         Map.entry("dev/nexus/service/ReadShapeViewsTest.java", 32),
         Map.entry("dev/nexus/service/ReferenceOnlyChunkUpsertTest.java", 1),
         Map.entry("dev/nexus/service/RemapHandlerTest.java", 5),
         Map.entry("dev/nexus/service/RemapSchemaLiquibaseTest.java", 10),
         Map.entry("dev/nexus/service/RerankStageIntegrationTest.java", 3),
         Map.entry("dev/nexus/service/SchemaMigratorDateExecutedUtcTest.java", 2),
-        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 85),
-        Map.entry("dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java", 29),
-        Map.entry("dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java", 36),
+        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 88),
+        Map.entry("dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java", 32),
+        Map.entry("dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java", 98),
         Map.entry("dev/nexus/service/ScratchHandlerTest.java", 4),
         Map.entry("dev/nexus/service/ScratchRepositoryTest.java", 3),
         Map.entry("dev/nexus/service/ScratchSchemaLiquibaseTest.java", 11),
@@ -831,9 +953,9 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/StagingPromoteFrecencyTtlCheckRegressionTest.java", 6),
         Map.entry("dev/nexus/service/StagingPromoteOpsIntegrationTest.java", 47),
         Map.entry("dev/nexus/service/StagingSchemaLiquibaseTest.java", 11),
-        Map.entry("dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java", 10),
+        Map.entry("dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java", 20),
         Map.entry("dev/nexus/service/Taxonomy011ForeignOwnedDiagViewTest.java", 11),
-        Map.entry("dev/nexus/service/Taxonomy014TenantFkRepointTest.java", 8),
+        Map.entry("dev/nexus/service/Taxonomy014TenantFkRepointTest.java", 14),
         Map.entry("dev/nexus/service/TaxonomyAssignFromChashesRepositoryTest.java", 5),
         Map.entry("dev/nexus/service/TaxonomyCentroidAnnPlanShapeTest.java", 12),
         Map.entry("dev/nexus/service/TaxonomyCentroidRepositoryTest.java", 1),
@@ -842,8 +964,8 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/TelemetryRepositoryTest.java", 15),
         Map.entry("dev/nexus/service/TelemetrySchemaLiquibaseTest.java", 3),
         Map.entry("dev/nexus/service/TenantPoolingIsolationTest.java", 3),
-        Map.entry("dev/nexus/service/Tk070P6aTtlDaysCountedDeleteTest.java", 8),
-        Map.entry("dev/nexus/service/Tk070P6bTtlDaysCountedUpdateTest.java", 7),
+        Map.entry("dev/nexus/service/Tk070P6aTtlDaysCountedDeleteTest.java", 13),
+        Map.entry("dev/nexus/service/Tk070P6bTtlDaysCountedUpdateTest.java", 10),
         Map.entry("dev/nexus/service/TokenAdminHandlerTest.java", 10),
         Map.entry("dev/nexus/service/TokenBoundaryAdversarialTest.java", 12),
         Map.entry("dev/nexus/service/TokenScopeResolutionTest.java", 3),
@@ -891,8 +1013,25 @@ class RawSqlGateTest {
      * total. Never raised except for a genuinely new, reviewed raw-SQL
      * addition to the test tree (a new SANCTIONED-style unavoidable case),
      * never as a side effect of an unrelated change.
+     *
+     * <p><b>nexus-cbo4a batch 8 exception (GATE BLIND SPOT closed, critique
+     * T2 [24685]):</b> 1407 -> 1630, +223 sites across 21 files (20 raised,
+     * {@code CatalogDeleteCollectionCascadeTest.java} newly entered at 14 —
+     * see {@link #TEST_TREE_RAW_SQL_CEILING}'s own batch-8 paragraph). None
+     * of these 223 are NEW raw SQL — every one already existed on develop
+     * before this batch, behind a local wrapper ({@code count}/{@code
+     * query}/{@code exec}/{@code rows}/{@code countRows}/{@code runIds}
+     * shaped {@code (Connection, String sql)}) that {@link #RAW_EXECUTE}
+     * could not see until this batch widened it and added the {@link
+     * #localSqlWrapperNames}/{@link #wrapperCallSites} call-site sweep. A
+     * RISE here from making a pre-existing blind spot visible is the one
+     * case this ceiling is allowed to grow for other than a reviewed new
+     * addition — the standalone census tool (recipe in {@code
+     * nexus/dev-nexus-cbo4a-batch-8}) reproduced this exact number by
+     * calling this same {@link #scan} against the unmodified vs. widened
+     * gate, so the two can never disagree by construction.
      */
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1407;
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1630;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
@@ -1078,6 +1217,81 @@ class RawSqlGateTest {
             .as(".resultQuery(sql-prefixed-variable) must match RAW_EXECUTE, consistent "
                 + "with its .execute/.fetch/.fetchOne/.fetchAny siblings")
             .anySatisfy(h -> assertThat(h).contains("resultQuery"));
+    }
+
+    /**
+     * nexus-cbo4a batch 8 falsification proof (GATE BLIND SPOT closed,
+     * critique T2 [24685]): before this batch, {@link #RAW_EXECUTE}'s
+     * {@code .executeQuery(}/{@code .executeUpdate(}/{@code .query(}
+     * branches were the only three shapes in the whole alternation requiring
+     * an IMMEDIATE string literal -- so JDBC's {@code st.executeQuery(sql)}
+     * inside a local wrapper like {@code count(Connection, String sql)} was
+     * structurally invisible, and so was every CALL SITE feeding that
+     * wrapper a literal SQL string, which is where the actual raw-SQL text
+     * lives (this is exactly the {@code count}/{@code query} wrapper shape
+     * the critique found hiding 49 catalog reads in batch 7). This fixture
+     * pins both halves: the widened {@code RAW_EXECUTE} match on the
+     * wrapper's own internal call, and the new {@link #localSqlWrapperNames}/
+     * {@link #wrapperCallSites} sweep on the literal-fed call site. Reverting
+     * either half (the widened alternation, or the call-site sweep) makes
+     * the corresponding assertion below fail -- verified manually before
+     * landing.
+     */
+    @Test
+    void localSqlWrapper_executeQueryIdentifierArgAndLiteralCallSite_bothFlagged() {
+        String synthetic = String.join("\n",
+            "public final class SomeSchemaTest {",
+            "    private static int count(Connection c, String sql) throws Exception {",
+            "        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql)) {",
+            "            rs.next();",
+            "            return rs.getInt(1);",
+            "        }",
+            "    }",
+            "    void probe(Connection conn) throws Exception {",
+            "        int n = count(conn, \"SELECT count(*) FROM nexus.foo\");",
+            "    }",
+            "}");
+        List<String> hits = scan("SomeSchemaTest.java", synthetic);
+        assertThat(hits)
+            .as("the wrapper's own st.executeQuery(sql) line -- an identifier argument, "
+                + "not a literal -- was structurally invisible before RAW_EXECUTE's "
+                + "executeQuery/executeUpdate branches were widened to accept sql/SQL/"
+                + "new StringBuilder like every sibling shape")
+            .anySatisfy(h -> assertThat(h).contains(".executeQuery(sql"));
+        assertThat(hits)
+            .as("the call site feeding count() a literal SQL string carries the actual "
+                + "raw-SQL text and must be counted as its own violation, distinct from "
+                + "the wrapper's generic plumbing")
+            .anySatisfy(h -> assertThat(h).contains("LOCAL WRAPPER LITERAL SQL CALL SITE")
+                .contains("count")
+                .contains("SELECT count(*) FROM nexus.foo"));
+    }
+
+    /** Negative counterpart: a call site that passes the SQL text THROUGH a
+     * variable rather than a literal carries no visible raw-SQL text at that
+     * call site -- {@link #localSqlWrapperNames}'s sweep must not flag it,
+     * even though the same wrapper's own internal {@code executeQuery(sql)}
+     * line (unrelated to this call site) still produces its one hit. */
+    @Test
+    void localSqlWrapper_callSiteWithPassthroughVariable_notFlaggedAsLiteralCallSite() {
+        String synthetic = String.join("\n",
+            "public final class SomeSchemaTest {",
+            "    private static int count(Connection c, String sql) throws Exception {",
+            "        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql)) {",
+            "            rs.next();",
+            "            return rs.getInt(1);",
+            "        }",
+            "    }",
+            "    void probe(Connection conn, String otherSql) throws Exception {",
+            "        int n = count(conn, otherSql);",
+            "    }",
+            "}");
+        List<String> hits = scan("SomeSchemaTest.java", synthetic);
+        assertThat(hits)
+            .as("a passthrough call site (no literal argument) must never produce a LOCAL "
+                + "WRAPPER LITERAL SQL CALL SITE entry -- only the wrapper's own internal "
+                + "executeQuery(sql) hit is visible here")
+            .noneMatch(h -> h.contains("LOCAL WRAPPER LITERAL SQL CALL SITE"));
     }
 
     // ── nexus-zrcj7 step 4 review follow-up (critic, T2 [24235]): jOOQ's plain-SQL
