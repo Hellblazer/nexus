@@ -188,8 +188,15 @@ public final class CombinedWriteService {
         // own have-vector branch (resolveNeedEmbedIdx / batchUpdateMetadata)
         // -- the DIRECT upsert path already had this; the combined-write
         // path did not.
+        //
+        // nexus-hxrcm: under the same 40P01 retry belt as every multi-row
+        // vector write (DeadlockRetry). batchUpdateMetadata now orders its
+        // row locks by chash, which removes the same-path cycle; a residual
+        // deadlock against a DIFFERENT lock order (the superseded-chunk
+        // sweep DELETE, orphan GC) is still possible, and this SELECT +
+        // UPDATE transaction is idempotent, so re-running it is safe.
         List<Integer> needEmbedIdx = dedupChashes.isEmpty() ? new ArrayList<>()
-            : tenantScope.withTenant(tenant, ctx -> {
+            : DeadlockRetry.run(collection + " combined-write metadata refresh", () -> tenantScope.withTenant(tenant, ctx -> {
                 Map<String, String> existingText =
                     selectExistingText(ctx, ch, tenant, collection, dedupChashes);
                 List<Integer> need = new ArrayList<>();
@@ -214,7 +221,7 @@ public final class CombinedWriteService {
                         ctx, ch, collection, dedupChashes, dedupMetas, metadataOnly));
                 }
                 return need;
-            });
+            }));
 
         List<String> textsToEmbed = new ArrayList<>(needEmbedIdx.size());
         for (int idx : needEmbedIdx) {
