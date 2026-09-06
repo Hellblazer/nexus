@@ -934,14 +934,14 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # Retargeted 2026-09-06 (nexus-mfage fix B): the --artifacts
         # option block shifted the version extractions +9, and the five
         # `cp "$(ls -t dist/conexus-*.whl | head -1)"` wheel picks collapsed
-        # into ONE site inside the stage_wheel() seam (:680). Four entries
+        # into ONE site inside the stage_wheel() seam (:698 after item 2). Four entries
         # retired with the four duplicate sites; ceiling 136 -> 132.
         "tests/e2e/migration-rehearsal/run.sh:190",
         "tests/e2e/migration-rehearsal/run.sh:208",
         "tests/e2e/migration-rehearsal/run.sh:209",
         "tests/e2e/migration-rehearsal/run.sh:222",
         "tests/e2e/migration-rehearsal/run.sh:233",
-        "tests/e2e/migration-rehearsal/run.sh:680",
+        "tests/e2e/migration-rehearsal/run.sh:698",
         # --- tests/e2e/mac-signed-binary-gate.sh (7 entries): needs an
         # actually-signed macOS binary + `spctl`/`codesign` on real macOS
         # to safely verify a rewrite of the signature-inspection logic.

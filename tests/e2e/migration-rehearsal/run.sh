@@ -490,6 +490,18 @@ if [ -n "$ARTIFACTS" ]; then
     [ -x "$ARTIFACTS/native/nexus-service" ] || { echo "ARTIFACTS REFUSED (exit 3): --$LEG consumes the native candidate but $ARTIFACTS has none (built with --no-native?)" >&2; exit 3; }
   fi
   echo "[artifacts] $LEG consuming $ARTIFACTS (tree $MANIFEST_TREE, build_ref $MANIFEST_BUILD_REF)"
+  # nexus-mfage fix B item 2 — per-invocation isolation, so different legs
+  # of one battery run CONCURRENTLY while the same leg still serializes:
+  #   * the image tag carries the leg and the tree, never the fixed
+  #     $IMAGE two legs would race to build and run;
+  #   * the wheel/native come from $ARTIFACTS (staged per leg above), never
+  #     the shared dist/ or service/target;
+  #   * release.properties is never touched here (stamped once by
+  #     build-artifacts.sh under the build lease);
+  #   * the docker CLI config is a per-invocation copy (credsStore stripped
+  #     there, see below) instead of a strip-and-restore of the shared
+  #     ~/.docker/config.json two legs would interleave.
+  IMAGE="nexus-migration-rehearsal-${LEG}-${MANIFEST_TREE}"
 fi
 
 # RDR-184 P0.2 (nexus-ccs9v.2): serialize on the machine-global fixed
@@ -513,6 +525,12 @@ fi
 # shellcheck source=../lib/lock.sh disable=SC1091
 source "$SCRIPT_DIR/../lib/lock.sh"
 LOCKDIR="/tmp/nexus-e2e-locks/migration-rehearsal.lock"
+# nexus-mfage: an --artifacts invocation mutates none of the machine-global
+# resources the lock above serializes (no dist/, no service/target, no fixed
+# image tag, no shared docker config), so it takes a PER-LEG lock instead:
+# two different legs run side by side; two invocations of the same leg
+# still serialize (same per-leg image tag).
+[ -n "$ARTIFACTS" ] && LOCKDIR="/tmp/nexus-e2e-locks/migration-rehearsal-${LEG}.lock"
 mkdir -p "$(dirname "$LOCKDIR")"
 lock_acquire "$LOCKDIR" || exit 1
 # nexus-c00dw: the native-build docker step further down writes
@@ -908,7 +926,23 @@ fi
 # resolution at build time. Temporarily strip credsStore (the auths entries are
 # empty), restore on exit. docker run is unaffected (only build-time auth fails).
 DCFG="$HOME/.docker/config.json"
-if [ -f "$DCFG" ] && grep -q '"credsStore"' "$DCFG"; then
+if [ -n "$ARTIFACTS" ]; then
+  # nexus-mfage: per-invocation docker CLI config. The daemon endpoint is
+  # captured from the CURRENT context first (a redirected DOCKER_CONFIG has
+  # no contexts dir, so the CLI would fall back to the default socket), then
+  # the config is copied with credsStore stripped. The shared
+  # ~/.docker/config.json is never written.
+  _docker_host="$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || true)"
+  [ -n "$_docker_host" ] && export DOCKER_HOST="$_docker_host"
+  mkdir -p "$STAGE/docker-config"
+  if [ -f "$DCFG" ]; then
+    python3 -c "import json,sys;d=json.load(open(sys.argv[1]));d.pop('credsStore',None);json.dump(d,open(sys.argv[2],'w'),indent=2)" "$DCFG" "$STAGE/docker-config/config.json"
+  else
+    echo '{}' > "$STAGE/docker-config/config.json"
+  fi
+  export DOCKER_CONFIG="$STAGE/docker-config"
+  echo "      (per-invocation DOCKER_CONFIG=$DOCKER_CONFIG, DOCKER_HOST=${DOCKER_HOST:-<default>})"
+elif [ -f "$DCFG" ] && grep -q '"credsStore"' "$DCFG"; then
   cp "$DCFG" "$STAGE/.docker-config.bak"
   python3 -c "import json,os;p=os.path.expanduser('~/.docker/config.json');d=json.load(open(p));d.pop('credsStore',None);json.dump(d,open(p,'w'),indent=2)"
   trap 'diag_exit_guard; _guided_restore; cp "$STAGE/.docker-config.bak" "$DCFG"; rm -rf "$STAGE"; build_lease_release service 2>/dev/null || true; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
