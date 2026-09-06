@@ -50,12 +50,21 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       edited.</li>
  * </ul>
  *
- * <p>Test-side bootstrap fixtures (this repository's OWN throwaway
- * superuser-connection setup, modeling the production DBA pre-step) are
- * ALSO sanctioned per-file below — they are not product changesets, but a
+ * <p>Test-side bootstrap fixtures (this repository's OWN superuser-connection
+ * setup, modeling the production DBA pre-step) are ALSO sanctioned per-file,
+ * in {@link #SANCTIONED_JAVA_FILES} — they are not product changesets, but a
  * real regression here (a test silently losing its {@code CREATE EXTENSION}
- * step) is exactly the class of drift this gate exists to catch, so they
- * are named explicitly rather than exempted by directory.
+ * step, or a NEW file adding one outside this list) is exactly the class of
+ * drift this gate exists to catch, so they are named explicitly rather than
+ * exempted by directory. The scan walks BOTH {@code src/main/java} and
+ * {@code src/test/java} (relative to the module root, matching {@link
+ * dev.nexus.service.db.RawSqlGateTest}'s own convention for locating Java
+ * sources) in addition to the changelog XML roots above — a javadoc
+ * genuinely NEEDS to say "CREATE EXTENSION" in prose sometimes (see this very
+ * class's own javadoc), so the Java scanner strips line and block comments
+ * before searching quoted string literals, the same false-positive concern
+ * the XML scanner's {@code <comment>} exclusion already handles for
+ * changelog files.
  */
 class ExtensionBootstrapSiteConformanceTest {
 
@@ -75,6 +84,48 @@ class ExtensionBootstrapSiteConformanceTest {
      * pg_trgm}. Applied everywhere; never edited (hot rule).
      */
     private static final Set<String> SANCTIONED_FILES = Set.of("vectors-001-baseline.xml");
+
+    /**
+     * (filename) Java test fixtures sanctioned to carry a literal {@code
+     * CREATE EXTENSION IF NOT EXISTS vector}/{@code pg_trgm} string. Two
+     * shapes:
+     *
+     * <p>Eleven of them model the production DBA / client-provisioning
+     * pre-step under a superuser connection so their own {@code
+     * SchemaMigrator}/Liquibase walk (run as a NOSUPERUSER migrating role,
+     * mirroring production) has the extensions already present — see {@code
+     * SchemaMigratorIntegrationTest.bootstrapVectorExtensionsForFreshWalk}'s
+     * javadoc for the full derivation of why these specific files need this
+     * (every OTHER test either never runs Liquibase at all, or runs it via
+     * {@code PgContainerHelper#applyProductSchema}/{@code #start()}, whose
+     * shared, already-migrated cluster needs no separate extension bootstrap
+     * since {@code vectors-001-baseline.xml}'s own {@code vectors-001-1}
+     * already created it there).
+     *
+     * <p>{@code PgSessionEfSearchReadbackIntegrationTest} is the twelfth,
+     * different shape: it never runs Liquibase itself at all (it drives
+     * {@code PgSession#setHnswEfSearch} directly against a shared, already-
+     * migrated {@code PgContainerHelper#start()} cluster), and its bare
+     * {@code CREATE EXTENSION IF NOT EXISTS vector} is a purely DEFENSIVE,
+     * idempotent no-op (the shared cluster's own bootstrap already created
+     * and relocated the extension) that predates this batch — kept as
+     * belt-and-braces so the test does not depend on load ordering relative
+     * to whichever other test class happens to migrate the shared cluster
+     * first within a given surefire fork.
+     */
+    private static final Set<String> SANCTIONED_JAVA_FILES = Set.of(
+        "PgSessionEfSearchReadbackIntegrationTest.java",
+        "AspectDocIdBackfillTest.java",
+        "GrantsNexusDiagViewAccessIntegrationTest.java",
+        "GrantsPgMonitorTest.java",
+        "GrantsSvcForeignOwnedRelationTest.java",
+        "Hygiene001NotNullMigrationRlsTest.java",
+        "SchemaMigratorIntegrationTest.java",
+        "SchemaRollbackRoundTripIntegrationTest.java",
+        "SchemaUpgradeRehearsalIntegrationTest.java",
+        "VectorsRepointFunctionsIntegrationTest.java",
+        "VectorsUnifyCentroidsIntegrationTest.java",
+        "VectorsUnifyChunksIntegrationTest.java");
 
     @Test
     void createExtensionAppearsOnlyAtSanctionedBootstrapSites() throws IOException, URISyntaxException {
@@ -102,6 +153,130 @@ class ExtensionBootstrapSiteConformanceTest {
                 + "vectors-001-1, or this needs the production DBA / client-provisioning "
                 + "pre-step documented in SchemaMigrator's javadoc, not a new changeset.")
             .isEmpty();
+    }
+
+    /**
+     * Java-source half of the same invariant (F1, code review follow-up on
+     * this class's own javadoc claiming Java sites were sanctioned when the
+     * scan never actually walked {@code src/*}/java): every {@code CREATE
+     * EXTENSION} string literal in {@code src/main/java} or {@code
+     * src/test/java} must live in one of {@link #SANCTIONED_JAVA_FILES} — a
+     * NEW test silently adding its own extension-bootstrap dance (or a
+     * REMOVED file's entry going stale) is exactly the drift class this gate
+     * exists to catch on the XML side; this closes the identical gap for
+     * Java.
+     */
+    @Test
+    void createExtensionInJavaSourcesOnlyAtSanctionedFixtures() throws IOException {
+        List<String> violations = new ArrayList<>();
+
+        // This class's OWN filename is excluded: its positive-case synthetic
+        // fixtures (javaStringLiteral_withCreateExtension_flags) deliberately
+        // embed a real "CREATE EXTENSION" string literal to prove the scanner
+        // catches it — that literal is test-fixture data, not an actual
+        // bootstrap site, and would otherwise flag the gate against itself.
+        String selfFilename = ExtensionBootstrapSiteConformanceTest.class.getSimpleName() + ".java";
+
+        for (String srcRoot : List.of("main", "test")) {
+            Path root = Path.of("src", srcRoot, "java");
+            if (!Files.exists(root)) {
+                continue;
+            }
+            try (var walk = Files.walk(root)) {
+                for (Path file : walk.filter(p -> p.toString().endsWith(".java")).toList()) {
+                    String filename = file.getFileName().toString();
+                    if (SANCTIONED_JAVA_FILES.contains(filename) || filename.equals(selfFilename)) {
+                        continue;
+                    }
+                    violations.addAll(
+                        scanJavaForCreateExtension(filename, Files.readString(file)));
+                }
+            }
+        }
+
+        assertThat(violations)
+            .as("CREATE EXTENSION string literal in a Java source file outside "
+                + "SANCTIONED_JAVA_FILES (nexus-cbo4a batch 9 item 0, F1): either add the "
+                + "new fixture to that allowlist (if it genuinely needs its own superuser "
+                + "extension bootstrap, mirroring SchemaMigratorIntegrationTest."
+                + "bootstrapVectorExtensionsForFreshWalk) or use PgContainerHelper#"
+                + "applyProductSchema instead, which needs no separate bootstrap.")
+            .isEmpty();
+    }
+
+    /**
+     * Positive case for the Java-source scanner: a real string literal
+     * containing {@code CREATE EXTENSION} must flag when the file is not on
+     * the Java allowlist.
+     */
+    @Test
+    void javaStringLiteral_withCreateExtension_flags() {
+        String synthetic =
+            "class Synthetic {\n"
+            + "    void bootstrap() throws Exception {\n"
+            + "        su.createStatement().execute(\"CREATE EXTENSION IF NOT EXISTS hstore\");\n"
+            + "    }\n"
+            + "}\n";
+
+        assertThat(scanJavaForCreateExtension("Synthetic.java", synthetic))
+            .as("a CREATE EXTENSION string literal outside the Java allowlist must be flagged")
+            .hasSize(1);
+    }
+
+    /**
+     * Comment-prose evasion for the Java scanner: {@code CREATE EXTENSION}
+     * mentioned only in a {@code //} line comment or a javadoc block comment
+     * (like this very class's own javadoc) must NOT flag.
+     */
+    @Test
+    void javaCommentProseMentioningCreateExtension_doesNotFlag() {
+        String synthetic =
+            "class Synthetic {\n"
+            + "    // PREREQUISITE: CREATE EXTENSION vector runs elsewhere, not here.\n"
+            + "    /**\n"
+            + "     * Also mentions CREATE EXTENSION in a javadoc block, same as this\n"
+            + "     * class's own javadoc above.\n"
+            + "     */\n"
+            + "    void bootstrap() {\n"
+            + "        // nothing here actually calls CREATE EXTENSION\n"
+            + "    }\n"
+            + "}\n";
+
+        assertThat(scanJavaForCreateExtension("Synthetic.java", synthetic))
+            .as("CREATE EXTENSION mentioned only in Java comment prose must not false-positive")
+            .isEmpty();
+    }
+
+    /**
+     * Non-vacuity check for the Java-source allowlist, mirroring {@link
+     * #sanctionedFile_actuallyContainsCreateExtension} for the XML side:
+     * every entry in {@link #SANCTIONED_JAVA_FILES} must actually exist and
+     * actually contain a real CREATE EXTENSION string literal, or the
+     * allowlist entry is stale.
+     */
+    @Test
+    void everySanctionedJavaFile_actuallyExistsAndContainsCreateExtension() throws IOException {
+        // Searched by walking src/test/java rather than assuming a flat
+        // dev/nexus/service/ layout: most SANCTIONED_JAVA_FILES entries live
+        // there directly, but PgSessionEfSearchReadbackIntegrationTest.java
+        // lives one level deeper, under dev/nexus/service/db/.
+        Path testRoot = Path.of("src", "test", "java");
+        for (String filename : SANCTIONED_JAVA_FILES) {
+            Path found;
+            try (var walk = Files.walk(testRoot)) {
+                found = walk.filter(p -> p.getFileName().toString().equals(filename))
+                    .findFirst()
+                    .orElse(null);
+            }
+            assertThat(found)
+                .as(filename + " must exist somewhere under src/test/java — the allowlist "
+                    + "names a real file")
+                .isNotNull();
+            assertThat(scanJavaForCreateExtension(filename, Files.readString(found)))
+                .as(filename + " must itself contain a real CREATE EXTENSION string literal "
+                    + "— otherwise the allowlist entry is stale")
+                .isNotEmpty();
+        }
     }
 
     /**
@@ -243,6 +418,55 @@ class ExtensionBootstrapSiteConformanceTest {
                 continue;
             }
             body.append(line).append(' ');
+        }
+        return violations;
+    }
+
+    /**
+     * Scans Java SOURCE (not the XML changelog) for a {@code CREATE
+     * EXTENSION} string literal, after stripping {@code //} line comments and
+     * {@code /* ... * /} block comments (javadoc included — both use the
+     * same delimiter). Deliberately simple relative to {@link
+     * dev.nexus.service.db.RawSqlGateTest}'s own full statement-aware
+     * scanner: this gate only needs to know WHETHER the phrase appears in
+     * real code, not extract or canonicalize the statement, so a
+     * comment-stripped substring search is sufficient and avoids
+     * reimplementing that class's machinery for a narrower question.
+     */
+    private static List<String> scanJavaForCreateExtension(String filename, String source) {
+        List<String> violations = new ArrayList<>();
+        StringBuilder stripped = new StringBuilder(source.length());
+        boolean inBlockComment = false;
+        for (int i = 0; i < source.length(); i++) {
+            char c = source.charAt(i);
+            if (inBlockComment) {
+                if (c == '*' && i + 1 < source.length() && source.charAt(i + 1) == '/') {
+                    inBlockComment = false;
+                    i++;
+                }
+                continue;
+            }
+            if (c == '/' && i + 1 < source.length() && source.charAt(i + 1) == '*') {
+                inBlockComment = true;
+                i++;
+                continue;
+            }
+            if (c == '/' && i + 1 < source.length() && source.charAt(i + 1) == '/') {
+                // Skip to end of line — the newline itself is preserved so
+                // downstream line-number reasoning (not needed here, but kept
+                // for parity with the XML scanner's shape) stays sane.
+                while (i < source.length() && source.charAt(i) != '\n') {
+                    i++;
+                }
+                stripped.append('\n');
+                continue;
+            }
+            stripped.append(c);
+        }
+
+        if (CREATE_EXTENSION_PATTERN.matcher(stripped).find()) {
+            violations.add(filename + ": CREATE EXTENSION string literal outside the "
+                + "SANCTIONED_JAVA_FILES allowlist.");
         }
         return violations;
     }

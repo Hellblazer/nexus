@@ -69,18 +69,15 @@ public final class Main {
         hikari.setAutoCommit(true);   // pool default; TenantScope toggles to false per borrow
         // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05, nexus-zrcj7): the
         // session-search_path connectionInitSql this pool used to carry ("SET search_path
-        // TO nexus, t1, public") is retired, not sanctioned. Every nexus/t1 table and
-        // routine reference already goes through jOOQ generated Tables/Routines, which
-        // render fully schema-qualified SQL regardless of session search_path
-        // (renderSchema defaults true, unoverridden anywhere in this codebase). pg_catalog
-        // is always implicitly searched by Postgres regardless of search_path, so the
-        // comment's stated "public for pg_catalog visibility" reason was never actually
-        // true; the real (undocumented) dependency was the bare pgvector <=> operator in
-        // the search/hybrid/taxonomy-ANN SQL functions, which is registered in public
-        // (CREATE EXTENSION vector ran unqualified). Those 30 functions now each pin their
-        // own SET search_path = nexus, public in their definition (search-path-001-pin-
-        // vector-operator-functions.xml), function-scoped and caller-independent, so this
-        // pool needs no search_path override at all.
+        // TO nexus, t1, public") is retired -- every nexus/t1 table and routine reference
+        // already goes through jOOQ generated Tables/Routines, which render fully
+        // schema-qualified SQL regardless of session search_path (renderSchema defaults
+        // true, unoverridden anywhere in this codebase). The real (undocumented) dependency
+        // was the bare pgvector/pg_trgm operators and types in 33 search/hybrid/taxonomy-ANN
+        // SQL functions, which now explicitly qualify every such reference as nexus.* (both
+        // extensions are relocated into the nexus schema -- see
+        // search-path-001-relocate-vector-extensions.xml and search-path-002-qualify-
+        // vector-operator-functions.xml) instead of pinning a function-level search_path.
         // nexus-g17tf: per-boot unique application_name so the shutdown hook can
         // terminate THIS process's backends (and only these) via pg_stat_activity.
         String applicationName = dev.nexus.service.db.BackendReaper.newApplicationName(
