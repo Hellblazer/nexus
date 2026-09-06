@@ -42,6 +42,58 @@ They are not, and the count of record-path writes to collapse is three.
 Line numbers here and below drift. Every one was read on that same tip; treat
 them as pointers to be re-resolved, not as fixed addresses.
 
+### Enumerated gaps to close
+
+Three gaps, in descending order of how well the evidence supports them. The
+first is measured and structural. The second and third are real mechanisms
+whose occurrence rate is zero in the only measurement anyone has taken, and
+they are labelled that way rather than dressed up.
+
+#### Gap 1: One operation costs three round trips
+
+**Verified** against develop, and visible in the table above. Recording one run
+issues three POSTs to the same engine, two of which carry a single counter
+increment each. Each pays its own request, its own auth header build, and on
+the engine its own `TenantScope.withTenant` transaction, which means its own
+`set_config('nexus.tenant', ..., true)` GUC stamp and its own commit.
+
+What the fix delivers: one POST, one transaction, one GUC stamp. What it does
+not deliver is a latency win worth quoting; see the claim section below and
+the Context section for the numbers.
+
+#### Gap 2: The client composes an operation the engine cannot make atomic
+
+**Mechanism verified, occurrence rate measured at zero.** The three writes are
+three separate `withTenant` transactions, so no arrangement of client code can
+make them one. Between write 1 and write 3 the client can die, the host can
+restart, or the network can drop, and the plan row keeps a `use_count`
+increment with neither a success nor a failure recorded against it. Nothing
+reconciles that afterwards.
+
+RDR-198's research pass spiked this directly and found zero orphaned records:
+five plans with `use_count > 0`, 29 runs, `use_count == success_count +
+failure_count` everywhere. The gap is latent. Re-measuring it is a
+pre-acceptance research item, not something this document asserts on its own
+authority.
+
+What the fix delivers: the three writes land in one transaction or none of them
+does, so the window closes by construction rather than by luck.
+
+#### Gap 3: `use_count` counts attempts and cannot be reconciled
+
+**Verified by reading, unmeasured in the field.** Write 1 fires before
+execution, so `use_count` counts plan matches that began running, while
+`success_count + failure_count` counts runs that finished. The two are
+different populations and nothing checks them against each other.
+`plans/promote.py` reads `use_count` as its first gate,
+`use_count >= DEFAULT_MIN_USE_COUNT` where the default is 3
+(`src/nexus/plans/promote.py:47` and `:88-92`), so a plan that starts often and
+finishes rarely can clear that gate on abandoned attempts.
+
+What the fix delivers: `use_count` becomes a count of recorded runs, which
+makes `use_count == success_count + failure_count` an invariant a reader can
+check. D4 takes that change deliberately and states what it costs.
+
 ### Why this is worth an RDR and what the claim is not
 
 This is a wire-contract change across two languages on a hot path, which is
@@ -748,10 +800,11 @@ paired-deploy exception, and the reconciliation recorded.
 
 ## Residuals carried into implementation
 
-Seven findings from the round-1 plan audit, classified
+Sixteen findings from three plan-audit rounds, all classified
 DISCOVER-AT-IMPLEMENTATION. They are recorded here so the implementer meets
 them on the page rather than in the first test run. None of them re-opens a
-decision, and none is re-planned.
+decision, and none is re-planned. Items 1 to 7 came from round 1, 8 to 11 from
+round 2, and 12 to 16 from round 3.
 
 1. **`VersionHandlerReleaseVersionTest.java:121` asserts by exact equality.**
    `service/src/test/java/dev/nexus/service/http/VersionHandlerReleaseVersionTest.java`'s
@@ -977,6 +1030,15 @@ its own schedule, its own failure modes and its own tests.
 - 2026-09-05: created as draft. Picks up the scope RDR-198 withdrew and named
   as belonging in its own RDR. Scoped to the run-record operation only; the
   read-side bundle is deliberately excluded.
+- 2026-09-05: Problem Statement restructured into the `#### Gap N:` blocks the
+  formal gate's Layer 1 requires, which had it BLOCKED before any other layer
+  ran. Three gaps: the three round trips (verified), the client-composed
+  operation the engine cannot make atomic (mechanism verified, occurrence
+  measured at zero), and `use_count` counting attempts with no way to reconcile
+  it against outcomes (verified by reading, unmeasured in the field). No
+  decision changed; the gaps state what the Decisions section already answers.
+  The Residuals opener, which still said seven findings from round 1, now says
+  sixteen across three rounds.
 - 2026-09-05: round-3 plan audit folded in. Residuals-only: the round-2 blocker
   is closed and the gate is cleared, so items 12 to 16 are carried into
   implementation rather than re-planned. One of them changed live text, because
