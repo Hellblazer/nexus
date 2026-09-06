@@ -66,7 +66,7 @@ source "$SCRIPT_DIR/../lib/exit_diagnostics.sh"
 diag_arm_err_trap
 trap 'diag_exit_guard' EXIT
 
-cd "$(git rev-parse --show-toplevel)"
+cd "$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"  # the SCRIPT's checkout, never the caller's cwd: invoked from another checkout this built the wrong tree (2026-09-05 A/B)
 HERE="tests/e2e/migration-rehearsal"
 IMAGE="nexus-migration-rehearsal"
 WITH_CLOUD=0
