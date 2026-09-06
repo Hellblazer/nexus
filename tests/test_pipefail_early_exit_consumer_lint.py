@@ -867,7 +867,7 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:267",
         "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:275",
         "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:279",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:343",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:361",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:142",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:193",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:238",
@@ -931,16 +931,16 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # truncate a producer still doing work. This list is line-pinned, so
         # ANY edit to run.sh restale-izes it; that fragility is the lint's
         # own known shape, not a defect introduced here.
-        "tests/e2e/migration-rehearsal/run.sh:180",
-        "tests/e2e/migration-rehearsal/run.sh:198",
+        "tests/e2e/migration-rehearsal/run.sh:181",
         "tests/e2e/migration-rehearsal/run.sh:199",
-        "tests/e2e/migration-rehearsal/run.sh:212",
-        "tests/e2e/migration-rehearsal/run.sh:223",
-        "tests/e2e/migration-rehearsal/run.sh:653",
-        "tests/e2e/migration-rehearsal/run.sh:691",
-        "tests/e2e/migration-rehearsal/run.sh:746",
-        "tests/e2e/migration-rehearsal/run.sh:763",
-        "tests/e2e/migration-rehearsal/run.sh:811",
+        "tests/e2e/migration-rehearsal/run.sh:200",
+        "tests/e2e/migration-rehearsal/run.sh:213",
+        "tests/e2e/migration-rehearsal/run.sh:224",
+        "tests/e2e/migration-rehearsal/run.sh:654",
+        "tests/e2e/migration-rehearsal/run.sh:692",
+        "tests/e2e/migration-rehearsal/run.sh:747",
+        "tests/e2e/migration-rehearsal/run.sh:764",
+        "tests/e2e/migration-rehearsal/run.sh:812",
         # --- tests/e2e/mac-signed-binary-gate.sh (7 entries): needs an
         # actually-signed macOS binary + `spctl`/`codesign` on real macOS
         # to safely verify a rewrite of the signature-inspection logic.
@@ -1183,7 +1183,7 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         #   this guarded site itself gates nothing.
         #   Retargeted AGAIN (nexus-l8xnz): +12 for the Phase F header
         #   addition described above -- :264 -> :276, :128 -> :140.
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:341",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:359",
         "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:186",
         # tests/e2e/release-sandbox.sh (3 entries): the already-commented
         # `|| true: head is an early-exit consumer...` idiom this file's

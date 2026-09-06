@@ -415,11 +415,14 @@ else:
 PY
 )" || true  # gap-15: content-checked below, not rc-gated
 printf '%s\n' "$DEADLINE_STATUS_OUT" | sed 's/^/       | /'
-if printf '%s' "$DEADLINE_STATUS_OUT" | grep -q "^NONZERO:"; then
+# Verdict is the LAST line of the probe's output; matched on the captured
+# string, never through a grep pipe (pipefail early-exit class, nexus-i66g4).
+DEADLINE_VERDICT="${DEADLINE_STATUS_OUT##*$'\n'}"
+if [[ "$DEADLINE_VERDICT" == NONZERO:* ]]; then
   bad "deadline_aborts_total is non-zero after Phase C's index run (nexus-8hdg9 regression)"
-elif printf '%s' "$DEADLINE_STATUS_OUT" | grep -qE "^(STATUS_UNAVAILABLE|NO_ACTIVITY_ENTRIES|NOT_REPORTED)$"; then
+elif [[ "$DEADLINE_VERDICT" =~ ^(STATUS_UNAVAILABLE|NO_ACTIVITY_ENTRIES|NOT_REPORTED)$ ]]; then
   note "deadline_aborts_total: not reported by this engine"
-elif printf '%s' "$DEADLINE_STATUS_OUT" | grep -q "^ALL_ZERO$"; then
+elif [[ "$DEADLINE_VERDICT" == ALL_ZERO ]]; then
   ok "deadline_aborts_total: 0 in every entry after Phase C's index run"
 else
   bad "deadline-abort check produced unexpected output (see above)"
