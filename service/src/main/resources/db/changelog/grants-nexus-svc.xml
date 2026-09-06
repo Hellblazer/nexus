@@ -23,7 +23,12 @@
 
     WHAT nexus_svc does NOT need:
       - search_path role parameter — formerly set via ALTER ROLE (requires superuser
-        or CREATEROLE), now handled by connectionInitSql on HikariCP pools.
+        or CREATEROLE), then via connectionInitSql on HikariCP pools; nexus-cbo4a
+        batch 9 item 0 (Sam's directive, 2026-09-05, census) removed that
+        connectionInitSql too — the pool carries no search_path override of any
+        kind now, since every nexus/t1 reference already goes through jOOQ
+        generated Tables/Routines, which render fully schema-qualified SQL
+        regardless of session search_path.
       - CREATEROLE, SUPERUSER, BYPASSRLS — service role must be NOSUPERUSER NOBYPASSRLS.
       - DDL privileges (CREATE TABLE, ALTER TABLE, etc.) — the migration role (nexus_admin)
         holds those.

@@ -13,8 +13,13 @@
     Schema choice: nexus
       All nexus service tables live in the nexus schema so the .6 jOOQ
       codegen can target a single schema (generator/database/schema=nexus)
-      without listing individual tables.  The search_path for the service
-      role is set to "nexus, public" in the bootstrap step below.
+      without listing individual tables.  nexus-cbo4a batch 9 item 0 (Sam's
+      directive, 2026-09-05, census): the service role carries NO
+      search_path override of any kind, at any layer: every nexus/t1 table
+      and routine reference goes through jOOQ generated Tables/Routines,
+      which render fully schema-qualified SQL regardless of session
+      search_path (renderSchema defaults true, unoverridden anywhere in this
+      codebase).
 
     Service role bootstrap:
       The `nexus_svc` role must exist before Liquibase runs.  In production
@@ -159,8 +164,11 @@ CREATE INDEX idx_memory_fts ON nexus.memory USING GIN (fts_vector);
         DML grants for nexus_svc are now consolidated in grants-nexus-svc.xml with
         runAlways="true" so late-created roles are provisioned on restart and no silent
         skip can leave nexus_svc without table access.  ALTER ROLE ... SET search_path
-        removed: requires superuser/CREATEROLE; search_path is now set via HikariCP
-        connectionInitSql on the application pool at startup.
+        was removed even before that (requires superuser/CREATEROLE); nexus-cbo4a batch 9
+        item 0 (Sam's directive, 2026-09-05, census) removed the connectionInitSql that
+        historical note pointed to as well; the application pool carries no
+        search_path override of any kind now (see this file's own header, "Schema
+        choice" section, for why none is needed).
     -->
 
 </databaseChangeLog>
