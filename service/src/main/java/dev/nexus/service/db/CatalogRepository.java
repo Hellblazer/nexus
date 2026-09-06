@@ -3867,6 +3867,16 @@ public final class CatalogRepository {
      *   <tr><td>{@link #importChunksBatch}</td><td>RDR-176 ETL leg</td></tr>
      *   <tr><td>{@link #doImportChunk}</td><td>RDR-176 ETL leg</td></tr>
      *   <tr><td>{@link #renameCollectionTxn}</td><td>bulk re-homes existing rows into a new collection scope — nexus-11gh6 rev 2 §3.2</td></tr>
+     *   <tr><td>{@code PgVectorRepository.resolveNeedEmbedIdx}</td><td>the DIRECT upsert path's
+     *       have-vector metadata-only UPDATE on {@code nexus.chunks} (nexus-hxrcm residual). Not a
+     *       manifest writer, but the sweep's DELETE and {@code gc_quarantine_orphans}'s moves both
+     *       hold this key EXCLUSIVE while touching the same rows; ungated, the UPDATE raced them on
+     *       a different lock order (one sweep deadlock and one sweep lock_timeout in the same cloud
+     *       log window as the six write_many deadlocks, 2026-09-06). Taking SHARED here makes the
+     *       refresh WAIT for a running sweep instead of colliding with it.</td></tr>
+     *   <tr><td>{@code CombinedWriteService.writeManyCombined} phase 2a</td><td>the combined-write
+     *       path's existence SELECT + metadata-only UPDATE transaction — the same surface as the row
+     *       above, one path over (nexus-hxrcm residual).</td></tr>
      *   <tr><td>{@code ChashRepository.renameCollection}</td><td>a SECOND, independently-reachable
      *       (via {@code /v1/chash/*}) collection-rename implementation doing the SAME re-home
      *       mutation as {@link #renameCollectionTxn} — missed by the design's own coverage audit
@@ -3931,9 +3941,11 @@ public final class CatalogRepository {
      *       snapshot (which it structurally cannot see).</td></tr>
      * </table>
      *
-     * <p>Package-private, not {@code private}: {@code ChashRepository} and {@code
-     * StagingPromoteOps} are siblings in this package that independently mutate
-     * {@code catalog_document_chunks} and need the SAME gate — no public surface required.
+     * <p>{@code public static} (was package-private until nexus-hxrcm): {@code ChashRepository}
+     * and {@code StagingPromoteOps} are siblings in this package, but {@code
+     * PgVectorRepository.resolveNeedEmbedIdx} in {@code ..vectors} also mutates rows the sweep
+     * deletes and needs the SAME gate, so the key stays single-homed here and is reached
+     * cross-package rather than duplicated.
      *
      * <p>Shared locks never conflict with each other, so writers never
      * contend with writers — only with a concurrent EXCLUSIVE sweep
@@ -3961,7 +3973,7 @@ public final class CatalogRepository {
      * RawSqlGateTest.SANCTIONED_METHODS} entry needed, unlike {@link
      * #acquireIndexRunLock}'s raw {@code ctx.execute}.
      */
-    static void acquireSweepGateShared(DSLContext ctx, String tenant, String collection) {
+    public static void acquireSweepGateShared(DSLContext ctx, String tenant, String collection) {
         ctx.select(DSL.function("pg_advisory_xact_lock_shared", Object.class,
                    DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + tenant + "/" + collection))))
            .fetch();

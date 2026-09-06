@@ -4,6 +4,7 @@ package dev.nexus.service.vectors;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.ChashHex;
 import dev.nexus.service.db.CollectionRegistry;
 import dev.nexus.service.db.DeadlockRetry;
@@ -3038,6 +3039,16 @@ public final class PgVectorRepository {
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         try {
             return tenantScope.withTenant(tenant, ctx -> {
+                // nexus-hxrcm residual: the have-vector metadata-only UPDATE below touches
+                // rows the superseded-chunk sweep DELETEs and gc_quarantine_orphans moves,
+                // both under the EXCLUSIVE half of this key. SHARED here means we wait for a
+                // running sweep instead of racing it on a different lock order (40P01).
+                // First statement of the transaction, before any row is read or locked.
+                // Worst-case wait compounds: sweeps queued ahead (bounded by the client's
+                // flush_concurrency) times SWEEP_STATEMENT_TIMEOUT_MS each, not a flat 5 s;
+                // see acquireSweepGateShared's javadoc for the formula and why the writer
+                // side deliberately has no lock_timeout.
+                CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
                 Map<String, String> existingText = selectExistingChashTextCtx(ctx, ch, collection, dedupIds);
                 ExistencePartition partition = partitionByExistence(dedupIds, existingText.keySet());
                 // Test-only interleaving seam (bead nexus-f0r8p.4) — see

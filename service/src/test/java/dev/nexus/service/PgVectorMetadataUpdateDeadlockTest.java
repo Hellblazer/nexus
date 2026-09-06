@@ -23,9 +23,15 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+
+import org.jooq.DSLContext;
+import org.jooq.impl.DSL;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Bead nexus-hxrcm: the have-vector metadata-only UPDATE batch
@@ -162,6 +168,51 @@ class PgVectorMetadataUpdateDeadlockTest {
             PgVectorRepository.batchUpdateMetadata(ctx, ch, COLLECTION, ids, metas, all));
 
         assertThat(zero).containsExactly(9, 5, 1);
+    }
+
+    @Test
+    void directUpsertMetadataRefresh_waitsForExternalExclusiveSweepGate() throws Exception {
+        // nexus-hxrcm residual on the DIRECT path: resolveNeedEmbedIdx's have-vector
+        // metadata-only UPDATE now takes the SHARED sweep gate. With an EXCLUSIVE holder on
+        // the key, an identical-text re-upsert (metadata-only) must wait, not race the sweep.
+        List<String> ids = List.of(sharedIds().get(0));
+        List<String> docs = List.of("doc-" + ids.get(0));
+        List<Map<String, Object>> newMeta = metasFor(ids, 99);
+
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try (Connection external = svcDs.getConnection()) {
+            external.setAutoCommit(false);
+            DSLContext ext = DSL.using(external);
+            ext.select(DSL.function("pg_advisory_xact_lock", Object.class,
+                    DSL.function("hashtext", Integer.class,
+                        DSL.val("sweepgate:" + TENANT + "/" + COLLECTION)))).fetch();
+
+            Future<?> refresh = pool.submit(() -> pgRepo.upsertChunks(TENANT, COLLECTION, ids, docs, newMeta));
+            assertThatThrownBy(() -> refresh.get(1500, TimeUnit.MILLISECONDS))
+                .as("the have-vector metadata refresh must BLOCK on the exclusive holder")
+                .isInstanceOf(TimeoutException.class);
+            assertThat(roundOf(ids.get(0))).as("nothing landed while held").isNotEqualTo(99);
+
+            external.rollback();
+            refresh.get(30, TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(roundOf(ids.get(0))).as("landed once the gate was released").isEqualTo(99);
+    }
+
+    /** The {@code round} field of the stored metadata for one seeded chash. */
+    private int roundOf(String hexChash) {
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(DIM);
+        return tenantScope.withTenant(TENANT, ctx -> {
+            var r = ctx.select(ch.metadata()).from(ch.table())
+                .where(ch.collection().eq(COLLECTION).and(ch.chash().eq(hexChash)))
+                .fetchOne();
+            String json = r.value1().data();
+            var m = java.util.regex.Pattern.compile("\"round\":\\s*(\\d+)").matcher(json);
+            if (!m.find()) throw new AssertionError("no round in " + json);
+            return Integer.parseInt(m.group(1));
+        });
     }
 
     private Runnable worker(List<String> ids, CountDownLatch start, List<Throwable> failures) {

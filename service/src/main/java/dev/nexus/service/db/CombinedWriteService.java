@@ -197,6 +197,14 @@ public final class CombinedWriteService {
         // UPDATE transaction is idempotent, so re-running it is safe.
         List<Integer> needEmbedIdx = dedupChashes.isEmpty() ? new ArrayList<>()
             : DeadlockRetry.run(collection + " combined-write metadata refresh", () -> tenantScope.withTenant(tenant, ctx -> {
+                // nexus-hxrcm residual: SHARED sweep gate first, like every manifest
+                // writer (CatalogRepository.acquireSweepGateShared's writer table). The
+                // UPDATE below touches rows the sweep DELETEs under the EXCLUSIVE half;
+                // gated, this transaction waits for a running sweep instead of racing it.
+                // The wait compounds (sweeps queued ahead times SWEEP_STATEMENT_TIMEOUT_MS,
+                // see that javadoc), not a flat 5 s; the writer side has no lock_timeout
+                // by design, the same trade every manifest writer already makes.
+                CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
                 Map<String, String> existingText =
                     selectExistingText(ctx, ch, tenant, collection, dedupChashes);
                 List<Integer> need = new ArrayList<>();
