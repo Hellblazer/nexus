@@ -1347,10 +1347,46 @@ class TestRelocateVectorExtensionsToNexusSchema:
               "DROP EXTENSION IF EXISTS vector CASCADE; "
               "DROP EXTENSION IF EXISTS pg_trgm CASCADE; "
               "CREATE EXTENSION vector; "
-              "CREATE EXTENSION pg_trgm;")
+              "CREATE EXTENSION pg_trgm; "
+              # An install that predates this batch has ALREADY walked
+              # vectors-001-baseline.xml, so nexus.chunks_<dim> exists. The
+              # relocation honours direct=True only behind that proof (the
+              # fresh-install double-provision downgrade); a marker table
+              # with no vector column stands in for the walked state and
+              # survives the DROP EXTENSION ... CASCADE above.
+              "CREATE SCHEMA IF NOT EXISTS nexus; "
+              "CREATE TABLE IF NOT EXISTS nexus.chunks_384 (marker int);")
         assert _extension_schema(bins, result.port, os_user, "vector") == "public"
         assert _extension_schema(bins, result.port, os_user, "pg_trgm") == "public"
         yield result, config_dir
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "DROP TABLE IF EXISTS nexus.chunks_384;")
+
+    def test_direct_true_is_deferred_until_the_walk_has_passed_vectors_001(
+        self, pre_existing_install_shape, bins, os_user,
+    ):
+        """The fresh-install double-provision case (gate 2, local-service-
+        gate.sh): with no nexus.chunks_<dim> table, the cluster's Liquibase
+        walk has not run vectors-001-2/-3/-4 yet, so a caller's direct=True
+        must NOT relocate (it would break those bare vector(N) references on
+        the walk about to run); the SECURITY DEFINER function is still
+        ensured so search-path-001's mid-walk guard can do it later."""
+        from nexus.db.pg_provision import relocate_vector_extensions_to_nexus_schema
+
+        result, _ = pre_existing_install_shape
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "DROP TABLE nexus.chunks_384;")
+        actions = relocate_vector_extensions_to_nexus_schema(bins, result.port, os_user)
+
+        assert actions == [], f"direct=True must defer before the walk, got: {actions}"
+        assert _extension_schema(bins, result.port, os_user, "vector") == "public"
+        assert _extension_schema(bins, result.port, os_user, "pg_trgm") == "public"
+        row = _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname = 'nexus' AND p.proname = 'ensure_vector_extensions_relocated'",
+        )
+        assert row == "1"
 
     def test_direct_true_relocates_a_pre_existing_os_user_owned_install(
         self, pre_existing_install_shape, bins, os_user,
