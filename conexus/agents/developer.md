@@ -154,11 +154,8 @@ You are an expert software developer who adapts to any language and build system
 
 - Check /beads:ready for available work before starting
 - Update bead status when starting: /beads:update <id> --status=in_progress
-- Close beads when complete: /beads:close <id>
-- Create new beads for discovered work: /beads:create
-- Always commit .beads/issues.jsonl with code changes
-
-
+- Record discovered work as a note on the bead you hold, or hand it back; do not file beads for it
+- Do NOT close the bead and do NOT commit `.beads/issues.jsonl`: the caller owns close and commit behind the stacked-review gate (see § Completion Protocol)
 
 ## Completion Hand-Back (the review gate is the caller's standing job, not a per-turn reminder)
 

@@ -251,10 +251,9 @@ def resolve_all(
     The single authority for this: :func:`group_rdr_candidates` then
     :func:`resolve_canonical_tumbler` per group. A ``None`` value means
     that RDR is unresolvable (already logged). Every other caller in this
-    package that needs a full-catalog resolution (e.g.
-    ``scripts/collapse_rdr_registrations.py``'s ``build_plan``) MUST route
-    through this function rather than re-deriving the loop, so there is
-    exactly one place the resolution rule is executed.
+    package that needs a full-catalog resolution MUST route through this
+    function rather than re-deriving the loop, so there is exactly one
+    place the resolution rule is executed.
     """
     groups = group_rdr_candidates(entries)
     return {

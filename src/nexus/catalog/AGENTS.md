@@ -115,20 +115,13 @@ key, in order:
 
 `resolve_all` is the single authority that runs this rule over a full
 catalog fetch (group → resolve, one entry point) — every caller needing a
-full-catalog resolution routes through it rather than re-deriving the loop;
-`scripts/collapse_rdr_registrations.py`'s `build_plan` calls it directly.
+full-catalog resolution routes through it rather than re-deriving the loop.
 
-`scripts/collapse_rdr_registrations.py` is the `nx`-free reporting/collapse
-tool built on this rule: it fetches `content_type="rdr"`/`"prose"` and
-scopes every entry by `rdr_source_prefix` BEFORE grouping (never relies on
-the caller to have pre-filtered); `--dry-run` (the default) then lists, per
-RDR, every admitted registration found and which one the rule keeps;
-`--apply` sets `alias_of` on the losing registrations via the whitelisted
-`CatalogWriter.update` RPC (never `HttpCatalogClient.set_alias` directly —
-that method is not in `CATALOG_WRITE_OPS`). **Bead nexus-j9z30.20 ships the
-resolution rule and the dry-run/report tool ONLY** — `--apply` has never
-been run against the live catalog, and whether/when to run it live is a
-SEPARATE follow-up decision this bead does not schedule or imply.
+The dry-run/collapse tool that once sat beside this rule
+(`scripts/collapse_rdr_registrations.py`) was deleted 2026-09-05 (nexus-ph718):
+its live dry-run census collapsed nothing (every RDR resolved to one KEEP), its
+`--apply` had never run, and the read path tolerates duplicate registrations by
+construction, so there was nothing for it to do.
 
 ## Adding a new source-URI scheme
 
