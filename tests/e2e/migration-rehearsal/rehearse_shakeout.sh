@@ -343,6 +343,70 @@ fi
 nx search "flux capacitor array" --corpus docs -m 2 2>/dev/null | grep -qi "doc" \
   && ok "indexed content searchable" || bad "indexed content not searchable"
 
+# nexus-8hdg9 (critique T2 [24692] finding 1): the design's A/B gate contract
+# ("GET /v1/status deadline_aborts_total must be 0") was a prose promise only
+# -- nothing in this script read it. Wire it in here, right after Phase C's
+# index runs, reusing the SAME client `nx doctor --check-engine-activity` uses
+# (src/nexus/db/http_engine_status.py's fetch_engine_status) rather than
+# re-deriving the local URL/token resolution. A pre-nexus-8hdg9 engine reports
+# neither field at all (no /v1/status route on a pre-nexus-s71lr engine, or a
+# body with no deadline_aborts_total key on a pre-9a9228569 one) -- that is a
+# NOTE, not a pass, so a baseline engine still runs this gate without a false
+# green, and still fails loud the moment a real abort is ever reported.
+say "Phase C addendum — deadline_aborts_total must be 0 after the index run"
+DEADLINE_STATUS_OUT="$(python3 - <<'PY'
+from nexus.db.http_engine_status import fetch_engine_status
+
+status = fetch_engine_status()
+if status is None:
+    print("STATUS_UNAVAILABLE")
+    raise SystemExit(0)
+
+entries = {}
+local = status.get("local_embed_activity")
+if isinstance(local, dict):
+    entries["local_embed_activity"] = local
+embedder_activity = status.get("embedder_activity")
+if isinstance(embedder_activity, dict):
+    for name, entry in embedder_activity.items():
+        if isinstance(entry, dict):
+            entries[f"embedder_activity.{name}"] = entry
+
+if not entries:
+    print("NO_ACTIVITY_ENTRIES")
+    raise SystemExit(0)
+
+reported = False
+nonzero = []
+for label, entry in entries.items():
+    if "deadline_aborts_total" in entry:
+        reported = True
+        val = entry.get("deadline_aborts_total")
+        print(f"FIELD {label}.deadline_aborts_total={val}")
+        if isinstance(val, (int, float)) and val != 0:
+            nonzero.append(label)
+    else:
+        print(f"FIELD {label}.deadline_aborts_total=absent")
+
+if not reported:
+    print("NOT_REPORTED")
+elif nonzero:
+    print("NONZERO:" + ",".join(nonzero))
+else:
+    print("ALL_ZERO")
+PY
+)" || true  # gap-15: content-checked below, not rc-gated
+printf '%s\n' "$DEADLINE_STATUS_OUT" | sed 's/^/       | /'
+if printf '%s' "$DEADLINE_STATUS_OUT" | grep -q "^NONZERO:"; then
+  bad "deadline_aborts_total is non-zero after Phase C's index run (nexus-8hdg9 regression)"
+elif printf '%s' "$DEADLINE_STATUS_OUT" | grep -qE "^(STATUS_UNAVAILABLE|NO_ACTIVITY_ENTRIES|NOT_REPORTED)$"; then
+  note "deadline_aborts_total: not reported by this engine"
+elif printf '%s' "$DEADLINE_STATUS_OUT" | grep -q "^ALL_ZERO$"; then
+  ok "deadline_aborts_total: 0 in every entry after Phase C's index run"
+else
+  bad "deadline-abort check produced unexpected output (see above)"
+fi
+
 # ── Phase D: concurrent write load (the lock-convoy tier) ───────────────────
 say "Phase D — concurrent writes: parallel index + store puts; zero failures allowed"
 REPO2=/tmp/shakeout-repo-2
