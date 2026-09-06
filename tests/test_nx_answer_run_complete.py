@@ -42,10 +42,11 @@ from __future__ import annotations
 
 import ast
 import pathlib
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+import nexus.mcp_infra as mi
 from nexus.mcp.core import _nx_answer_record_complete
 from nexus.plans.runner import StepRecord
 
@@ -329,8 +330,31 @@ class TestChokePointComposesRecordAndOutcome:
     def _make_db(self) -> MagicMock:
         db = MagicMock()
         db.telemetry.record_nx_answer_run = MagicMock()
-        db.plans.increment_run_outcome = MagicMock()
         return db
+
+    def _fake_t2_index_write(self, outcome_db: MagicMock):
+        """Stand-in for ``nexus.mcp.core._t2_index_write``: runs
+        ``write_fn`` against *outcome_db* (a database SEPARATE from the
+        record half's ``db``) and records every ``op`` it was called
+        with. This is what actually exercising the round-2 review fix
+        requires — the outcome half no longer reuses the record half's
+        ``db``, it issues its own independent ``_t2_index_write`` call
+        (T2 nexus/code-review-nexus-dt2tu-1-p1 [24711],
+        nexus/critique-nexus-dt2tu-1-p1 [24713]), so a test that only
+        ever hands the choke point one shared ``MagicMock`` and checks
+        that same mock's ``increment_run_outcome`` never observes the
+        real call at all — exactly the gap the round-2 critique named.
+        Does not swallow an exception raised inside ``write_fn``, same
+        as the real ``_t2_index_write`` -> ``_service_t2_write_locked``
+        (which classifies, may evict, then re-raises).
+        """
+        ops: list[str] = []
+
+        def _fake(write_fn, *, op: str = "t2_write"):
+            ops.append(op)
+            return write_fn(outcome_db)
+
+        return _fake, ops
 
     def test_redacts_question_and_final_text_when_trace_is_false(self) -> None:
         """Falsifier: deleted the ``trace`` branch (hardcoded ``q =
@@ -395,27 +419,40 @@ class TestChokePointComposesRecordAndOutcome:
 
     def test_outcome_bump_is_a_no_op_for_falsy_plan_id(self) -> None:
         """Falsifier: dropped the ``if plan_id:`` guard — this test reds
-        because ``increment_run_outcome`` would then be called with
+        because ``_t2_index_write`` would then be invoked at all (with
         ``plan_id=0``, the synthetic inline-planner id that has no
-        library row to bump.
+        library row to bump), instead of never firing.
         """
         db = self._make_db()
-        _nx_answer_record_complete(
-            db, question="q", plan_id=0, matched_confidence=None, step_count=1,
-            final_text="a", step_records=[], duration_ms=10, trace=True,
-            success=True,
-        )
-        db.plans.increment_run_outcome.assert_not_called()
+        outcome_db = MagicMock()
+        fake_write, ops = self._fake_t2_index_write(outcome_db)
+        with patch("nexus.mcp.core._t2_index_write", fake_write):
+            _nx_answer_record_complete(
+                db, question="q", plan_id=0, matched_confidence=None, step_count=1,
+                final_text="a", step_records=[], duration_ms=10, trace=True,
+                success=True,
+            )
+        assert ops == [], "the outcome half must not call _t2_index_write at all for plan_id=0"
+        outcome_db.plans.increment_run_outcome.assert_not_called()
         db.telemetry.record_nx_answer_run.assert_called_once()
 
     def test_outcome_bump_fires_for_a_usable_plan_id(self) -> None:
+        """Round-2 review fix (T2 [24711]/[24713]): the outcome bump
+        goes through the choke point's OWN ``_t2_index_write(op=
+        "run_outcome")`` call, not the record half's ``db`` — see
+        ``_fake_t2_index_write``'s docstring.
+        """
         db = self._make_db()
-        _nx_answer_record_complete(
-            db, question="q", plan_id=42, matched_confidence=0.9, step_count=1,
-            final_text="a", step_records=[], duration_ms=10, trace=True,
-            success=True,
-        )
-        db.plans.increment_run_outcome.assert_called_once_with(42, success=True)
+        outcome_db = MagicMock()
+        fake_write, ops = self._fake_t2_index_write(outcome_db)
+        with patch("nexus.mcp.core._t2_index_write", fake_write):
+            _nx_answer_record_complete(
+                db, question="q", plan_id=42, matched_confidence=0.9, step_count=1,
+                final_text="a", step_records=[], duration_ms=10, trace=True,
+                success=True,
+            )
+        outcome_db.plans.increment_run_outcome.assert_called_once_with(42, success=True)
+        assert ops == ["run_outcome"]
 
     def test_record_failure_does_not_block_the_outcome_bump(self) -> None:
         """Residual 11: the two writes carry INDEPENDENT boundary
@@ -425,24 +462,143 @@ class TestChokePointComposesRecordAndOutcome:
         """
         db = self._make_db()
         db.telemetry.record_nx_answer_run.side_effect = RuntimeError("connection reset")
-        _nx_answer_record_complete(
-            db, question="q", plan_id=7, matched_confidence=0.5, step_count=1,
-            final_text="a", step_records=[], duration_ms=10, trace=True,
-            success=False,
-        )
-        db.plans.increment_run_outcome.assert_called_once_with(7, success=False)
+        outcome_db = MagicMock()
+        fake_write, ops = self._fake_t2_index_write(outcome_db)
+        with patch("nexus.mcp.core._t2_index_write", fake_write):
+            _nx_answer_record_complete(
+                db, question="q", plan_id=7, matched_confidence=0.5, step_count=1,
+                final_text="a", step_records=[], duration_ms=10, trace=True,
+                success=False,
+            )
+        outcome_db.plans.increment_run_outcome.assert_called_once_with(7, success=False)
+        assert ops == ["run_outcome"]
 
     def test_outcome_failure_does_not_raise(self) -> None:
         """Residual 11: losing the outcome's boundary catch turns a
         best-effort telemetry failure into a crashed answer. Falsifier:
         removed the outcome's try/except — this test reds with an
-        uncaught ``RuntimeError`` instead of returning normally.
+        uncaught ``RuntimeError`` instead of returning normally. The
+        real ``_t2_index_write`` -> ``_service_t2_write_locked`` does
+        NOT swallow the exception itself (it classifies for eviction,
+        then re-raises), so ``_fake_t2_index_write`` mirrors that: this
+        test proves the choke point's OWN catch is what keeps the
+        caller from seeing the exception, not the transport.
         """
         db = self._make_db()
-        db.plans.increment_run_outcome.side_effect = RuntimeError("connection reset")
+        outcome_db = MagicMock()
+        outcome_db.plans.increment_run_outcome.side_effect = RuntimeError("connection reset")
+        fake_write, ops = self._fake_t2_index_write(outcome_db)
+        with patch("nexus.mcp.core._t2_index_write", fake_write):
+            _nx_answer_record_complete(
+                db, question="q", plan_id=7, matched_confidence=0.5, step_count=1,
+                final_text="a", step_records=[], duration_ms=10, trace=True,
+                success=True,
+            )  # must not raise
+        db.telemetry.record_nx_answer_run.assert_called_once()
+        assert ops == ["run_outcome"]
+
+
+class TestOutcomeBumpReachesEvictionClassifier:
+    """Round-2 review fix (T2 nexus/code-review-nexus-dt2tu-1-p1 [24711],
+    nexus/critique-nexus-dt2tu-1-p1 [24713]): before this fix, the
+    choke point called ``db.plans.increment_run_outcome(...)`` directly
+    against the record half's already-open ``db``, which for 9 of 10
+    arms is a fresh, non-singleton ``T2Database`` from ``_t2_ctx()`` —
+    it never touches ``_service_t2_write_locked``'s connectivity
+    classifier at all, so a connectivity failure on the outcome bump
+    could no longer trigger the shared singleton's self-healing
+    eviction, a real behaviour ``_nx_answer_record_outcome`` provided
+    before this bead. This test proves the fix against the REAL
+    mechanism (``mcp_infra.t2_index_write`` / ``_service_t2_write_locked``
+    / the shared singleton), not a ``MagicMock`` that bypasses it —
+    mirrors the harness shape of
+    ``tests/test_t2_index_write_service_mode_cache.py``'s
+    ``test_record_run_connectivity_error_is_swallowed_not_evicted`` /
+    ``test_price_table_connectivity_error_is_swallowed_not_evicted``,
+    but proves the OPPOSITE direction: eviction DOES fire here, because
+    the outcome bump's failure must reach the classifier before this
+    function's own boundary catch absorbs it.
+
+    Falsifier exercised: temporarily replaced the outcome half's
+    ``_t2_index_write(lambda db: db.plans.increment_run_outcome(...),
+    op="run_outcome")`` call with a bare
+    ``db.plans.increment_run_outcome(...)`` against the record half's
+    ``db`` (today's pre-fix, committed shape) and confirmed this test
+    reds: with the singleton pre-warmed and healthy, the buggy code
+    raises the SAME ``ConnectionError`` (armed on the caller-supplied
+    ``db`` too, so the failure is genuinely there to see either way) but
+    never routes it through ``_t2_index_write`` at all, so the singleton
+    is left completely untouched (``mi._service_t2_db is original``,
+    ``original.closed is False``) instead of evicted. Reverted after
+    confirming red.
+
+    NON-VACUITY NOTE for anyone re-deriving this test: a version that
+    skips the pre-warm step (asserts starting from ``_service_t2_db is
+    None`` and ending at ``is None``) is vacuous against the bug — the
+    buggy code never touches ``_service_t2_write_locked`` at all for the
+    outcome write, so the singleton would stay ``None`` -> ``None``
+    whether or not the fix is present, and the assertion would pass on
+    BOTH the fixed and the buggy code. Pre-warming to a known, non-``None``,
+    unclosed instance is what makes "evicted" and "untouched" distinguishable.
+    """
+
+    def test_connectivity_failure_on_outcome_bump_evicts_the_shared_singleton(
+        self, monkeypatch,
+    ) -> None:
+        class _FakeT2Database:
+            def __init__(self, *_a, **_kw) -> None:
+                self.telemetry = MagicMock()
+                self.plans = MagicMock()
+                self.plans.increment_run_outcome.side_effect = ConnectionError(
+                    "telemetry store unreachable",
+                )
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        monkeypatch.setattr("nexus.db.t2.T2Database", _FakeT2Database)
+
+        assert mi._service_t2_db is None, (
+            "test must start with no resolved singleton -- the suite's "
+            "autouse _reset_service_t2_db fixture (conftest.py) should "
+            "already guarantee this"
+        )
+
+        # Pre-warm the shared singleton via a successful write (never
+        # touches increment_run_outcome, so the armed side_effect above
+        # does not fire here) -- see the class docstring's non-vacuity
+        # note for why this step is load-bearing.
+        mi.t2_index_write(lambda db: None, op="warmup")
+        original = mi._service_t2_db
+        assert original is not None and original.closed is False, (
+            "pre-warm must leave a healthy, resolved singleton in place"
+        )
+
+        # The record half's own db is a SEPARATE object from the
+        # singleton (exactly as `with _t2_ctx() as db:` provides for 9 of
+        # the 10 real arms) -- armed with the SAME failure so the buggy
+        # code (which calls increment_run_outcome directly on THIS db)
+        # genuinely encounters a connectivity error too, rather than the
+        # test passing merely because nothing raised at all.
+        db = MagicMock()
+        db.telemetry.record_nx_answer_run = MagicMock()
+        db.plans.increment_run_outcome.side_effect = ConnectionError(
+            "telemetry store unreachable",
+        )
+
         _nx_answer_record_complete(
-            db, question="q", plan_id=7, matched_confidence=0.5, step_count=1,
+            db, question="q", plan_id=99, matched_confidence=0.5, step_count=1,
             final_text="a", step_records=[], duration_ms=10, trace=True,
             success=True,
-        )  # must not raise
-        db.telemetry.record_nx_answer_run.assert_called_once()
+        )  # must not raise -- the choke point's own catch absorbs it
+
+        assert mi._service_t2_db is None, (
+            "the connectivity failure on the outcome bump must evict the "
+            "pre-warmed singleton (routed through _service_t2_write_locked's "
+            "classifier), not leave it in place"
+        )
+        assert original.closed is True, (
+            "the evicted singleton must actually be closed once its "
+            "refcount drains, not merely detached from _service_t2_db"
+        )

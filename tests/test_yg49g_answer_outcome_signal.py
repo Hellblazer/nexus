@@ -99,33 +99,51 @@ class TestOutcomeIsRecordedWhereItIsKnown:
         not exist yet. Any future edit that moves the record back above the
         guard reintroduces the defect regardless of what the predicate says, so
         the ORDER is pinned directly.
+
+        Round-2 review fix (T2 nexus/critique-nexus-dt2tu-1-p1 [24713],
+        SIGNIFICANT finding): the two substring checks below used to
+        search ``after_guard = src[guard:]`` — the entire rest of the
+        41KB+ file — so the test would pass just as well if
+        ``"success=True,"`` appeared ANYWHERE later in ``core.py``, not
+        specifically at the Step 6 arm this test names. Fixed by
+        splitting the property in two: (1) an exact source-order
+        comparison, the guard precedes the Step 6 comment marker (proves
+        the actual "downstream of the guard" claim, not a substring
+        search standing in for it); (2) a substring check scoped to a
+        tight window STARTING at that marker — the arm's own region, not
+        the rest of the file.
         """
-        import inspect
+        import pathlib
 
         from nexus.mcp import core
 
-        src = inspect.getsource(core.nx_answer) if hasattr(core, "nx_answer") else ""
-        if not src:
-            import pathlib
-            src = pathlib.Path(core.__file__).read_text(encoding="utf-8")
+        src = pathlib.Path(core.__file__).read_text(encoding="utf-8")
 
         guard = src.index("_nx_answer_is_empty_retrieval(result.steps)")
-        after_guard = src[guard:]
-        # The success record for the plan path must appear AFTER the guard.
-        # RDR-203 P1: the (record, outcome) pair is now one call to the
-        # choke point, _nx_answer_record_complete(..., success=True), not
-        # a standalone _nx_answer_record_outcome(best.plan_id, success=True)
-        # — check for the choke point's presence and its success=True kwarg
-        # rather than the old function's exact call shape.
-        assert "_nx_answer_record_complete(" in after_guard, (
-            "the plan path's success is no longer recorded via the "
-            "RDR-203 choke point downstream of the empty-retrieval guard "
-            "(nexus-yg49g)"
+        # The RDR-203 P1 merge site (residual 4): the success outcome
+        # merges with the run row at Step 6, past the empty-retrieval
+        # guard and the RDR-084 plan-grow block — this comment marks
+        # that arm's own region unambiguously.
+        step6 = src.index("# ── Step 6: record run")
+        assert step6 > guard, (
+            "the Step 6 arm must be downstream of the empty-retrieval "
+            "guard in source order — nx_answer is a straight-line async "
+            "function with no loop back above this guard, so source "
+            "order here is execution order (same reasoning A11's "
+            "TestRecordingArmsDownstreamOfRunStart applies to the other "
+            "direct arms)"
         )
-        assert "success=True," in after_guard, (
-            "the plan path's success record is no longer downstream of the "
-            "empty-retrieval guard — it cannot know the outcome up there "
-            "(nexus-yg49g)"
+        # A window sized to comfortably reach the choke-point call and its
+        # success=True kwarg (measured ~2KB from the marker) without
+        # spanning into unrelated code further down the file.
+        region = src[step6:step6 + 2200]
+        assert "_nx_answer_record_complete(" in region, (
+            "the plan path's success is no longer recorded via the "
+            "RDR-203 choke point at the Step 6 arm (nexus-yg49g)"
+        )
+        assert "success=True," in region, (
+            "the Step 6 arm's choke-point call no longer records "
+            "success=True (nexus-yg49g)"
         )
 
     def test_the_empty_retrieval_branch_records_a_failure(self) -> None:

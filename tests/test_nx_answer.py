@@ -3439,6 +3439,13 @@ class TestNxAnswerBudgetSeconds:
             from nexus.mcp.core import nx_answer
             await nx_answer("q", budget_seconds=20.0)
 
+        # Round-2 review fix (T2 nexus/critique-nexus-dt2tu-1-p1 [24713]):
+        # the old `record_outcome.assert_called_once_with(42,
+        # success=False)` this test replaced checked call-COUNT (exactly
+        # once) as well as both arguments. Checking only the last call's
+        # kwargs would not catch a future duplicate-call regression at
+        # this arm — restore the same call-count guarantee.
+        record_complete.assert_called_once()
         assert record_complete.call_args.kwargs.get("plan_id") == 42
         assert record_complete.call_args.kwargs.get("success") is False
 

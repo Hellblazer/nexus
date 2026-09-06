@@ -7290,21 +7290,44 @@ def _nx_answer_record_complete(
     success: bool,
 ) -> None:
     """RDR-203 P1 choke point: the ``nx_answer_runs`` record and the plan
-    outcome-counter bump for ONE converting arm, issued against the SAME
-    already-open ``db`` the caller obtained (either from ``with _t2_ctx()
-    as db:`` or from inside a ``_t2_index_write`` closure) instead of the
-    record's caller-supplied context PLUS a second, independently
-    acquired T2 write inside ``_nx_answer_record_outcome`` — the double
-    acquisition this function exists to remove (residual 5). Replaces
-    each ``(_nx_answer_record_run, _nx_answer_record_outcome)`` pair at
-    the ten converting arms; the two D6 survivors (the planner-failure
-    arm, and the RDR-200 continuation handoff) keep calling the two
-    functions directly and do not route through here.
+    outcome-counter bump for ONE converting arm, issued as ONE function
+    call instead of the two separate ``(_nx_answer_record_run,
+    _nx_answer_record_outcome)`` statements every converting arm used to
+    make. Replaces that pair at the ten converting arms; the two D6
+    survivors (the planner-failure arm, and the RDR-200 continuation
+    handoff) keep calling the two functions directly and do not route
+    through here.
 
-    This REPRODUCES both functions' bodies rather than delegating to
-    them — delegating to ``_nx_answer_record_outcome`` would keep its
-    internal ``_t2_index_write`` call, exactly the second lock this
-    function exists to remove:
+    The record half uses the caller's already-open ``db`` (from
+    ``with _t2_ctx() as db:`` or a ``_t2_index_write`` closure — residual
+    5 leaves each arm's choice of the two untouched). The outcome half
+    does NOT reuse that ``db``: it issues its own independent
+    ``_t2_index_write(op="run_outcome")`` call, byte-identical in shape
+    to ``_nx_answer_record_outcome``'s own body above. This is
+    deliberate, not an oversight (round-2 review finding, T2
+    nexus/code-review-nexus-dt2tu-1-p1 [24711] and
+    nexus/critique-nexus-dt2tu-1-p1 [24713]): a first cut of this
+    function called ``db.plans.increment_run_outcome(...)`` directly
+    against the passed-in ``db``, which silently removed the outcome
+    bump's ability to reach ``_service_t2_write_locked``'s connectivity
+    classifier on all ten arms — for the nine ``_t2_ctx()`` arms the
+    write ran against a database that never touches the shared
+    singleton at all, and for the Step 6 arm the failure was caught by
+    THIS function's own boundary catch before
+    ``_service_t2_write_locked``'s except-clause ever saw it. Routing
+    the outcome bump through its own ``_t2_index_write`` call restores
+    that path exactly: a connectivity failure there is classified and
+    can evict/rebuild the shared singleton BEFORE this function's catch
+    swallows it, precisely as ``_nx_answer_record_outcome`` behaved
+    before this bead. Nesting one ``_t2_index_write`` call inside
+    another (the Step 6 arm's shape, since its own outer call already
+    wraps the whole ``_nx_answer_record_complete`` invocation) is safe:
+    ``_service_t2_lock`` (mcp_infra.py) is released before ``write_fn``
+    runs, so the inner call's brief re-acquisition never deadlocks
+    against the outer one.
+
+    This REPRODUCES both source functions' bodies rather than
+    delegating to them, so each keeps its own behaviour precisely:
 
     - redaction (residual 9): ``trace=False`` replaces both ``question``
       and ``final_text`` with ``"[redacted]"``, mirroring
@@ -7346,7 +7369,12 @@ def _nx_answer_record_complete(
 
     if plan_id:
         try:
-            db.plans.increment_run_outcome(plan_id, success=success)
+            # Own independent _t2_index_write call, NOT the record half's
+            # `db` above — see the docstring's eviction-classifier note.
+            _t2_index_write(
+                lambda db: db.plans.increment_run_outcome(plan_id, success=success),
+                op="run_outcome",
+            )
         except Exception:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
             import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
             _slog.get_logger().warning(
