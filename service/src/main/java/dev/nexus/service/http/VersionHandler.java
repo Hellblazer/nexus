@@ -257,6 +257,14 @@ public final class VersionHandler implements HttpHandler {
      * both unconditional constants with no independent on/off state to test
      * in isolation; a caller wanting only one flag's fragment slices the
      * combined string rather than getting a second append method.
+     *
+     * <p>A7 (RDR-203 plan-audit round 2): the public conexus edge trims
+     * {@code /version} to a reviewed allowlist, so {@code
+     * nx_answer_run_complete_supported} is invisible to cloud clients until
+     * conexus allowlists it (the {@code nx_answer_steps_supported} / 7.14.0
+     * and nexus-bwulw precedent). A cloud-mode probe reading "unsupported"
+     * for this flag is the edge, not an engine defect; the relay is owned
+     * by P4 (nexus-dt2tu.4).
      */
     static void appendNxAnswerStepsCapabilityField(StringBuilder body) {
         body.append(",\"nx_answer_steps_supported\":true");

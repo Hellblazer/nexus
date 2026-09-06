@@ -22,7 +22,10 @@
       created_at      TEXT NOT NULL        -> TIMESTAMPTZ NOT NULL
       ttl             INTEGER              -> INTEGER (nullable; days)
       name            TEXT                 -> TEXT (nullable)
-      verb            TEXT                 -> TEXT (nullable)
+      verb            TEXT                 -> TEXT (nullable at this baseline; hygiene-001-not-null.xml
+                                              step 11 later ALTERs it to NOT NULL live, after deleting
+                                              pre-nexus-fiovt verb-less shakeout rows, so a raw insert
+                                              against the live schema needs an explicit verb value)
       scope           TEXT                 -> TEXT (nullable)
       dimensions      TEXT                 -> TEXT (nullable; JSON string)
       default_bindings TEXT                -> TEXT (nullable; JSON string)

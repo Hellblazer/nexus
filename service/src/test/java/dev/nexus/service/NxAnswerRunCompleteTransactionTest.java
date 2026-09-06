@@ -259,13 +259,26 @@ class NxAnswerRunCompleteTransactionTest {
             ctx.fetchCount(NX_ANSWER_STEPS, NX_ANSWER_STEPS.RUN_ID.eq(runId)));
     }
 
+    /**
+     * No {@code search_path} connection option (Sam's directive, 2026-09-05:
+     * never rely on the session search_path — brittle, a security issue, and
+     * not how this project does SQL, exactly as raw SQL strings are not).
+     * Every object this test touches is a generated jOOQ {@code Tables}
+     * reference bound to the generated {@code Nexus} schema
+     * ({@code dev.nexus.service.jooq.nexus.Nexus}, {@code DSL.name("nexus")}),
+     * so jOOQ renders every statement schema-qualified
+     * ({@code "nexus"."plans"}, {@code "nexus"."nx_answer_runs"}, ...)
+     * regardless of the connection's search_path — proven by this test
+     * passing with the option absent. Existing test files that still set
+     * this option are a separate cleanup (nexus-cbo4a batch 9); this file
+     * does not add another one.
+     */
     private com.zaxxer.hikari.HikariDataSource buildSvcDataSource() {
         var config = new com.zaxxer.hikari.HikariConfig();
         config.setJdbcUrl(pg.getJdbcUrl());
         config.setUsername(SVC_ROLE);
         config.setPassword(SVC_PASS);
         config.setMaximumPoolSize(4);
-        config.addDataSourceProperty("options", "-c search_path=nexus,public");
         return new com.zaxxer.hikari.HikariDataSource(config);
     }
 }
