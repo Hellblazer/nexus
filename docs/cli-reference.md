@@ -2135,7 +2135,9 @@ plugin's hooks.json are marked `(unregistered)` — the log is append-only
 history, so a stats row alone never proves a hook is currently live.
 
 Default log path resolves to `$NX_ROUTING_LOG_PATH`, falling back to
-`~/.config/nexus/routing_log.jsonl`. Used at the 30-day soak review
+`~/.config/nexus/routing_log.jsonl`. That file is legacy: nothing has
+written to it since the 7.32.0 plugin, and its rotation was deleted at
+nexus-gjv9b PART 3. Used at the 30-day soak review
 (RDR-121 §Phase 4) to spot false positives (high escape rate), inert
 matchers (zero fires), or overly broad blocks (high block rate).
 

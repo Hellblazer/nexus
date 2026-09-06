@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- The JSONL rotation machinery behind `capability_census.jsonl` and
+  `routing_log.jsonl` (nexus-gjv9b PART 3). Both writers moved to engine
+  tables in 7.32.0, so the rotation, tail-dedup, and the `.1`-generation
+  reader merge in `nx hook routing-stats` had no caller. Existing files are
+  left in place and still readable without `--from-store`; nothing writes to
+  them any more.
+
 ## [7.32.0] - 2026-09-05
 
 ### Removed

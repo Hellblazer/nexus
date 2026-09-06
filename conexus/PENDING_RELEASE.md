@@ -29,6 +29,13 @@ mechanize, it matters enough to ship.
 ---
 
 
-## Awaiting the next release or plugin cut (pinned: v7.31.0)
+## Awaiting the next release or plugin cut (pinned: v7.32.0)
+
+- `conexus/hooks/scripts/routing/_lib.py` (nexus-gjv9b PART 3): the dead
+  JSONL append and rotation machinery (`_default_log_path`, `_log_path`,
+  `_lock_file`/`_unlock_file`, `_rotate_log_if_oversized`) is deleted.
+  `log_routing_event` has written only to the engine's `routing_events`
+  table since the 7.32.0 plugin; nothing behavioural changes for a hook
+  caller.
 
 
