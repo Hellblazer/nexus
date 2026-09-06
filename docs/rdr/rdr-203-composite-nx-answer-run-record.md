@@ -201,13 +201,26 @@ This is a real semantic change and it is taken deliberately:
 - What is lost: the count of abandoned runs. That signal was never readable
   anyway, because an abandoned run writes no `nx_answer_runs` row either, so
   the only trace it left was a counter nobody could reconcile against anything.
-- What is unaffected: `plans/promote.py` gates on
-  `success / (success + failure)`, which does not read `use_count`.
+- What tightens: `plans/promote.py` reads `use_count` as its first gate,
+  `use_count >= DEFAULT_MIN_USE_COUNT` where the default is 3
+  (`src/nexus/plans/promote.py:47` and `:88-92`). Under the new invariant
+  `use_count` equals `success_count + failure_count`, so that gate becomes a
+  restatement of the total-completions check the second gate already implies.
+  The direction is a tightening, and it closes a real gap: today a plan that
+  begins often and finishes rarely can pad `use_count` with abandoned attempts
+  and clear the first gate on one or two real completions. After the change it
+  cannot. Nothing about the success-rate gate itself changes.
 - What skews: `last_used` moves later by the run duration, up to about 80
   seconds at p50. Nothing reads it at that resolution.
 
+An earlier draft of this section asserted that `promote.py` does not read
+`use_count`. That was false, and it was false in the direction that made the
+change look free. The corrected reading is above.
+
 The change is documented in `docs/cli-reference.md` wherever `use_count` and
-`nx answer-runs` are explained, as part of the phase that ships the client half.
+`nx answer-runs` are explained, and in `plans/promote.py`'s own module
+docstring, whose "three actual runs" gloss on the `use_count >= 3` gate goes
+stale on cutover. Both belong to the phase that ships the client half.
 
 **Rejected alternative: collapse only writes 2 and 3, leave write 1 where it
 is.** That preserves attempt semantics and still merges the run row with its
@@ -258,8 +271,21 @@ scope:
 
 - The planner-failure arm (`core.py:8570`), which records a run with
   `plan_id=None` and has no outcome to report.
-- The RDR-200 continuation handoff row.
+- The RDR-200 continuation handoff arm (`core.py:9378` for the row,
+  `core.py:9387` for its outcome). This one is a genuine
+  `(record, outcome)` pair and could convert on shape alone. It is excluded on
+  contract: RDR-200 R2 fixes the ordering (the handoff row is written before
+  the envelope is ever returned), and the handoff row plus the later
+  `nx_answer_report` row are one paired construct that `nx answer-runs` joins
+  at read time on the `continuation_id` embedded in both markers. RDR-203 does
+  not reopen that contract. The arm keeps **both** of today's writes, the
+  record and the outcome, exactly as they stand.
 - `nx_answer_report`, which appends a report event, not a run.
+
+This exclusion is the rule the rest of the document is counted against. The
+converting set is the **ten** remaining `(record, outcome)` pairs, not eleven.
+An earlier draft listed the handoff pair among the converting arms while also
+listing it here; the exclusion wins, and the counts below reflect it.
 
 The old routes are not deprecated and not removed. They serve those three
 writers, they serve the ETL import path, and they are the degradation target.
@@ -325,15 +351,19 @@ work; it does not change the tenant contract.
 One new choke point, `_nx_answer_record_complete(db, *, question, plan_id,
 matched_confidence, step_count, final_text, step_records, duration_ms, trace,
 success)`, replacing each `(_nx_answer_record_run, _nx_answer_record_outcome)`
-pair. There are eleven such pairs today, one per terminating arm, listed as
-`(record site, outcome site)`: `(8362, 8373)`, `(8890, 8898)`, `(8930, 8938)`,
-`(9015, 9027)`, `(9041, 9049)`, `(9110, 9120)`, `(9217, 9226)`, `(9378, 9387)`,
-`(9438, 9447)`, `(9572, 9551)` where the outcome is recorded first, and
-`(9709, 9591)` where the success outcome is recorded before Step 6 writes the
-row. The twelfth `_nx_answer_record_run` call, at `8570`, is the planner-failure
-arm and has no outcome; it stays on the existing route per D6. Every arm calls
-the choke point once, inside one `_t2_index_write` closure, matching the
+pair. Ten arms convert, listed as `(record site, outcome site)`:
+`(8362, 8373)`, `(8890, 8898)`, `(8930, 8938)`, `(9015, 9027)`,
+`(9041, 9049)`, `(9110, 9120)`, `(9217, 9226)`, `(9438, 9447)`,
+`(9572, 9551)` where the outcome is recorded first, and `(9709, 9591)` where
+the success outcome is recorded before Step 6 writes the row. Each calls the
+choke point once, inside one `_t2_index_write` closure, matching the
 closure-purity rule P2 established.
+
+Two of the twelve `_nx_answer_record_run` call sites do not convert, per D6:
+`8570`, the planner-failure arm, which records `plan_id=None` and has no
+outcome; and `9378` with its outcome at `9387`, the RDR-200 continuation
+handoff, which keeps both of today's writes. Ten converting pairs, two
+surviving direct writers, and that is what the census test below asserts.
 
 The run-start site at `core.py:8674` becomes conditional: issue
 `increment_run_started` only when the probe reports no support.
@@ -399,6 +429,14 @@ falsifier, per the house rule that a gate which cannot go red proves nothing.
   `(tenant, question, created_at)` twice; assert one run row and exactly one
   set of counter increments.
 - `nullPlanIdWritesRunRowAndNoCounters`.
+- `zeroPlanIdWritesRunRowAndNoCounters`: distinct from the null case and not
+  redundant with it. `plan_id` arrives as a boxed `Long`, so `null` and `0L`
+  are different values, and D1 gives them the same meaning: no library row to
+  count against. An implementation that guards only on `planId != null` would
+  bump counters against the synthetic inline-planner id 0, which is a row that
+  does not exist. Falsifier: relax the guard to a null check alone and this
+  reds while `nullPlanIdWritesRunRowAndNoCounters` stays green, which is the
+  reason both exist.
 
 `service/src/test/java/dev/nexus/service/http/TelemetryHandlerNxAnswerCompleteTest.java`
 
@@ -425,15 +463,30 @@ falsifier, per the house rule that a gate which cannot go red proves nothing.
 - `test_404_on_complete_falls_back_and_flips_the_cached_flag`: first call falls
   back to three writes, second call in the same process goes straight to three
   writes with no further attempt on `/complete`.
-- `test_every_terminating_arm_routes_through_the_choke_point`: an AST census
-  over `src/nexus/mcp/core.py` asserting no direct
-  `_nx_answer_record_outcome` call survives outside the choke point, and that
-  `increment_run_started` appears at exactly one site. This is what keeps a
-  twelfth arm added later from silently going off-contract. Falsifier: restore
-  one arm's direct pair and it reds.
+- `test_every_converting_arm_routes_through_the_choke_point`: an AST census
+  over `src/nexus/mcp/core.py` asserting that exactly two direct
+  `_nx_answer_record_run` calls survive outside the choke point, that they are
+  the two D6 exclusions (the planner-failure arm and the RDR-200 continuation
+  handoff), that exactly one direct `_nx_answer_record_outcome` call survives
+  and it is the handoff arm's, and that `increment_run_started` appears at
+  exactly one site. Naming the survivors rather than asserting zero is what
+  makes the census both true and useful: an eleventh converting arm added later
+  reds here, and so does an implementer who quietly folds a D6 exclusion in.
+  Falsifier: restore one converted arm's direct pair and the survivor count
+  goes to three.
 - `test_recording_arms_are_downstream_of_run_start`: pins the D-section
   precondition, so a future refactor that hoists an arm above the run-start
   site fails here instead of double-counting `use_count` in production.
+- `test_gateway_retry_reuses_one_created_at_stamp`: the falsifier for the
+  design's own sharpest edge (see Risks). Drive one composite POST against a
+  stub that answers 503 then 200, and assert the two attempts carry a
+  byte-identical `created_at`, so the engine's dedup index can recognise the
+  replay. Falsifier: recompute `created_at` inside the retry loop instead of
+  once at payload construction and the assertion reds. Paired with the Java
+  half, `dedupSkipLeavesPlanCountersUntouched`, which proves the engine
+  actually declines to double-bump on that replay. Neither half is sufficient
+  alone: the Python test proves the key is stable, the Java test proves a
+  stable key is honoured.
 
 `tests/test_nx_answer_t2_fanout_budget.py`
 
@@ -448,11 +501,12 @@ One developer per phase. P1 and P2 are independent and may run in parallel;
 P3 depends on both; P4 depends on P3 and on an engine tag carrying P2.
 
 **P1. Client choke point, no wire change.** Introduce
-`_nx_answer_record_complete` and route all eleven terminating arms through it.
-It issues today's two calls in today's order. The run-start site is untouched.
-Ships the AST census test and the downstream-of-run-start test. Entirely
-client-side, no engine dependency, and it reduces the P3 edit to one branch in
-one function. Exit: the census test is green and reds when one arm is reverted;
+`_nx_answer_record_complete` and route the ten converting arms through it,
+leaving the two D6 exclusions alone. It issues today's two calls in today's
+order. The run-start site is untouched. Ships the AST census test and the
+downstream-of-run-start test. Entirely client-side, no engine dependency, and
+it reduces the P3 edit to one branch in one function. Exit: the census test is
+green, names both D6 survivors, and reds when one converted arm is reverted;
 no behaviour change observable on the wire.
 
 **P2. Engine half.** The route, the handler, the repository composite, the two
@@ -465,14 +519,20 @@ red when the composite is split back into three transactions, and
 **P3. Client half behind the probe.** The capabilities-dict refactor of the
 existing probe, `record_nx_answer_run_complete`, the branch inside
 `_nx_answer_record_complete`, the conditional run-start, and the 404 downgrade
-guard. Ships the Python tests above including the budget test. Exit: the
-degradation test green against a non-supporting stub, the budget test green
-against a supporting stub, and both red when the probe is forced the other way.
+guard. P3 also owns idempotency: the composite payload stamps `created_at`
+once, at construction, before the first attempt, using the existing optional
+`created_at` field the `/record` handler already reads. Ships the Python tests
+above including the budget test and
+`test_gateway_retry_reuses_one_created_at_stamp`. Exit: the degradation test
+green against a non-supporting stub, the budget test green against a supporting
+stub, both red when the probe is forced the other way, and the retry-stamp test
+green and red when `created_at` is recomputed inside the retry loop.
 
 **P4. Pairing, cutover and documentation.** Bump
 `REQUIRED_ENGINE_VERSION` to the engine tag carrying P2 in the client release
 that carries P3, move the ledger entry from `## Unshipped` to `## Shipped`,
-and update `docs/cli-reference.md` for the `use_count` semantic change. After
+and update both `docs/cli-reference.md` and `src/nexus/plans/promote.py`'s
+module docstring for the `use_count` semantic change. After
 cutover, run the reconciliation read the research item below defines and record
 the result. Exit: `scripts/check_engine_release_floor.py` green without a
 paired-deploy exception, and the reconciliation recorded.
@@ -500,7 +560,16 @@ payload) and, under D3, skips the counters with it. That is the guard, and it
 depends on the client sending a stable `created_at` on retry rather than
 regenerating it. The implementation must stamp `created_at` once, client side,
 before the first attempt. Without that, the dedup index does not match and the
-counters double. This is the sharpest edge in the design; pin it with a test.
+counters double.
+
+The mechanism cooperates. `_post` and `_send` take the payload dict once from
+the caller and pass the same object through every gateway retry attempt, so a
+`created_at` computed at payload construction is naturally stable. Nothing
+structural enforces it, which is exactly why this is the sharpest edge, and it
+is pinned from both sides: `test_gateway_retry_reuses_one_created_at_stamp`
+proves the key is stable across attempts and
+`dedupSkipLeavesPlanCountersUntouched` proves a stable key stops the second
+apply. P3 owns the stamp and carries the Python half in its exit criteria.
 
 **Probe staleness across an engine change under a running process.** The store
 is process-lifetime after nexus-m20mf P3, so an upgrade is adopted at the next
@@ -514,9 +583,10 @@ table is process-cached with a TTL and the plan cache is a 90-second process
 singleton, so a read bundle would buy close to nothing today and its contract
 question is larger. It is not in this RDR and should not ride along.
 
-**Eleven arms is a lot of edit surface for a telemetry change.** P1 exists
-specifically to take that risk on its own, with no wire change in flight, and
-the AST census exists to keep the twelfth arm honest.
+**Ten arms is a lot of edit surface for a telemetry change, and two more arms
+deliberately do not move.** P1 exists specifically to take that risk on its
+own, with no wire change in flight. The AST census keeps both halves honest: an
+eleventh converting arm added later, and a D6 exclusion quietly folded in.
 
 ## Open research, to close before acceptance
 
@@ -556,6 +626,27 @@ instead of removing it, it makes the engine's contract a list of statements
 rather than an operation, and it gives the engine no place to enforce that a
 run record and its outcome belong together.
 
+**`idempotent=False` on the composite POST instead of a stable `created_at`.**
+The codebase already has a mechanism for exactly this risk shape.
+`_refreshable_client.py`'s `idempotent=False` (nexus-tjvgf) issues a request
+exactly once per credential, with no gateway 502/503/504 backoff loop and no
+transport-error re-resolve, and its own docstring names "a retry-budget counter
+double-incremented" among the hazards it exists to prevent.
+`record_capability_census` and `record_routing_event` already use it. Not
+using the established pattern needs a reason, and here is the reason: the
+opt-out buys the no-double-apply property by giving up the 502/503/504
+resilience that a real gateway incident motivated, and it gives it up on a
+best-effort telemetry write whose entire failure mode is being silently lost.
+The `created_at` stamp buys the same property and keeps the retry, because it
+makes the operation genuinely idempotent at the engine rather than merely
+un-retried at the client. Under the opt-out a single gateway blip drops the
+whole run record; under the stamp it is retried and deduplicated. The stamp is
+preferred for that reason and for one more: it composes, where the opt-out does
+not. If the stamp ever turns out not to hold (an engine that ignores a
+client-supplied `created_at`, a dedup index that changes shape), `idempotent=
+False` is the correct fallback and should be taken then, deliberately, with the
+resilience loss stated. It is not the first choice.
+
 **Client-side retry reconciliation instead of atomicity.** A background sweep
 that finds `use_count > success + failure` and reconciles it. That adds a
 mechanism to compensate for a gap the engine can simply not open, and it needs
@@ -566,3 +657,15 @@ its own schedule, its own failure modes and its own tests.
 - 2026-09-05: created as draft. Picks up the scope RDR-198 withdrew and named
   as belonging in its own RDR. Scoped to the run-record operation only; the
   read-side bundle is deliberately excluded.
+- 2026-09-05: critique folded in (T2 `nexus/critique-nexus-m20mf-p5-rdr-203`
+  [24680]). Five changes. The scope self-contradiction is resolved in favour of
+  D6: the RDR-200 continuation handoff arm at `9378`/`9387` does not convert,
+  the converting set is ten pairs rather than eleven, and the census test now
+  names its two survivors instead of asserting zero. D4's claim that
+  `promote.py` does not read `use_count` was false and is replaced with the
+  actual effect, a tightening of the `use_count >= 3` gate, with
+  `promote.py`'s own docstring added to P4's doc-update list. The retried-
+  composite double-apply now has a named falsifying test on both sides and sits
+  in P3's exit criteria. `idempotent=False` (nexus-tjvgf) is named and rejected
+  in Alternatives, with the fallback condition stated. A Java test for
+  `plan_id == 0` is named separately from the null case.
