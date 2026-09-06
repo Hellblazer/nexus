@@ -314,16 +314,32 @@ def search_cmd(
     # tenant's real collection names (resolve_corpus's prefix-matching
     # stages). When every --corpus value is already an explicit,
     # fully-qualified collection name (RDR-103 4-segment shape), there is
-    # nothing to resolve against — skip the round trip and use the names
-    # directly. A wildcard, prefix, or legacy short-form corpus value
-    # still pays the one list_collections() call, exactly as before, and
-    # a nonexistent-but-conformant explicit name now surfaces its "no such
-    # collection" error at search time rather than as this pre-flight
-    # warning.
+    # no PREFIX to resolve — but critique-nexus-d9xt2 traced the engine
+    # path (VectorHandler.handleSearch -> plain_search_<dim> SQL) and
+    # found NO existence check: a nonexistent-but-conformant name would
+    # silently return zero rows from `t3.search`, not an error — worse
+    # than the preflight warning this fast path replaced. Existence is
+    # instead confirmed via `collection_exists_raw`, which hits the CHEAP
+    # `GET /v1/vectors/collections` bare-name scan — not the expensive
+    # tombstone-filtered stats aggregation `list_collections()` computes
+    # over every collection's live count — so the fast path still avoids
+    # the call this bead targeted while restoring a real, named error for
+    # a missing collection. A wildcard, prefix, or legacy short-form
+    # corpus value still pays the one list_collections() call, exactly as
+    # before.
     if expanded_corpus and all(
         is_conformant_collection_name(c) for c in expanded_corpus
     ):
-        target_collections = list(dict.fromkeys(expanded_corpus))
+        target_collections = []
+        for c in dict.fromkeys(expanded_corpus):
+            try:
+                exists = db.collection_exists_raw(c)
+            except VectorServiceError as exc:
+                raise click.ClickException(str(exc)) from exc
+            if not exists:
+                click.echo(f"Warning: no collections match --corpus {c!r}", err=True)
+                continue
+            target_collections.append(c)
     else:
         all_collections = [c["name"] for c in db.list_collections()]
         target_collections = []
