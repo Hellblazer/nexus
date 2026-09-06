@@ -8,7 +8,20 @@ that surfaces the verdict to stdout and — when the gate passes and
 ``--dry-run`` is NOT set — writes a YAML template into the target tier.
 
 Shipped defaults:
-  * ``use_count >= 3`` — three actual runs.
+  * ``use_count >= 3`` — three recorded runs.
+    NOTE (RDR-203, nexus-dt2tu, 2026-09): before this change ``use_count``
+    incremented at plan-match time, before the run executed, so "three
+    actual runs" was an optimistic gloss — a plan that began often and
+    finished rarely could clear this gate on abandoned attempts, with
+    nothing to reconcile ``use_count`` against
+    ``success_count + failure_count``. Under RDR-203's composite run
+    record ``use_count`` increments at the same terminating write that
+    records ``success_count``/``failure_count``, so
+    ``use_count == success_count + failure_count`` is now an invariant per
+    plan and the "three actual runs" gloss is exactly true: this gate is a
+    restatement of the total-completions check the next gate already
+    implies. Nothing about the success-rate gate below changed; only what
+    ``use_count`` counts did.
   * ``success_count / (success_count + failure_count) >= 0.80`` —
     NOTE (nexus-yg49g, 2026-07-25): these counters used to be an EXCEPTION
     counter, not an outcome counter — ``nx_answer`` recorded success on any run

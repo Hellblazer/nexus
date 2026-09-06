@@ -2682,6 +2682,7 @@ heuristic (`builtin` when tags include `builtin-template`; `grown` when
 `project == 'personal'` with empty tags; `user` otherwise; nexus-7bwe tracks an
 explicit origin column). `--include-disabled` also shows soft-disabled rows,
 marked `[D]`. `--json` emits the same fields as a JSON array. Default limit 50.
+See § `nx plan show` below for what `use count` actually counts.
 
 ### nx plan show
 
@@ -2693,6 +2694,23 @@ Prints a plan's full record: metadata, run metrics (use / match / success /
 failure counts), dimensions, and the pretty-printed `plan_json`. The argument
 is a numeric id or a name substring (first match wins). `--json` dumps the raw
 row.
+
+**`use_count` counts recorded runs, not plan matches (RDR-203).** Before RDR-203,
+`use_count` incremented at the plan-match site, before the run executed, so it
+counted attempts rather than completions: a plan that began often and finished
+rarely could pad `use_count` past `plans/promote.py`'s `use_count >= 3`
+promotion gate on abandoned attempts, with nothing to reconcile that against
+`success_count + failure_count`. Under RDR-203's composite run record,
+`use_count` increments at the same terminating write that records
+`success_count`/`failure_count`, so `use_count == success_count + failure_count`
+is an invariant per plan, checkable rather than merely observed. It holds on
+every path, not only the composite one: the two arms that record a run without
+going through the composite response (a planner-failure before any plan runs,
+and the RDR-200 continuation handoff) each issue their own deferred use-count
+bump paired with their own terminal write, so no path records an outcome
+without having counted its use. One consequence: `last_used` now moves at the
+end of a run rather than the start, later by the run's duration (up to about
+80 seconds at p50 — nothing reads it at finer resolution than that).
 
 ### nx plan delete
 

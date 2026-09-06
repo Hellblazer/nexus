@@ -1126,6 +1126,22 @@ MCP spawn (safe, just delayed) and a downgrade is handled by the 404 guard in
 D5. A downgrade to an engine that answers something other than 404 on an
 unknown route would defeat the guard; no engine in the tree does that.
 
+**The 404-downgrade tail is a second route into the accepted orphan class.**
+P3's critique (T2 `nexus/critique-nexus-dt2tu-3-p3`, finding (b)) verified from
+source that a mid-call 404 does not close the atomicity gap the composite was
+built to close: `_nx_answer_ensure_run_started` and the fallback's
+`record_nx_answer_run` share the same `db` handle, threaded through
+unchanged, but each carries its own independent boundary catch and there is no
+rollback between them. `use_count` can therefore bump while the record write
+independently fails, leaving `use_count` one higher than
+`success_count + failure_count` for that run — the same failure shape the
+Risks section above already accepts at a measured 0.5% base rate
+(`nexus_rdr/203-research-1`), reached by a second path rather than a new one.
+This is not a new invariant violation and not a ship-blocker: the generic P4
+reconciliation read (see Open research item 3) already catches it, because it
+compares `use_count` against `success_count + failure_count` without caring
+which path produced the gap.
+
 **Scope drift toward a read-side bundle.** A plan-match plus price-table read
 bundle is the obvious next composite and is deliberately excluded. The price
 table is process-cached with a TTL and the plan cache is a 90-second process
@@ -1148,11 +1164,27 @@ eleventh converting arm added later, and a D6 exclusion quietly folded in.
    `tests/test_nx_answer_t2_fanout_budget.py`. The after number is measured by
    the per-path assertion P3 adds to that same harness. Recorded as
    `nexus_rdr/203-research-2`, with its risk stated below.
-3. **Decide whether P4's reconciliation becomes a standing check.** Still open,
-   and item 1 sharpened it: there is one orphan row in the live store from
-   before cutover. It needs either a one-time reconciliation or an explicit
-   decision to leave it. One row is small enough that leaving it is defensible;
-   the point is that the decision gets made rather than inherited.
+3. **Decide whether P4's reconciliation becomes a standing check. Recommended
+   disposition surfaced 2026-09-06, decision still Sam's.** There is one
+   orphan row in the live store from before cutover, the plan 365 row
+   (`use_count` 11, 10 successes, 0 failures, `nexus_rdr/203-research-1`). It
+   needs either a one-time hand reconciliation or an explicit decision to
+   leave it undone and documented. `nx plan --help` carries no verb that
+   corrects a single counter on a live row — `list` / `show` / `delete` /
+   `disable` / `enable` / `set-scope` / `reseed` / `hygiene` are the whole
+   surface, and none of them touches `use_count`, `success_count` or
+   `failure_count` — so a hand reconciliation today means either a direct
+   write against the live plan-library store (outside any supported `nx`
+   path, and not something a dev checkout's prod-write guard permits) or a
+   new verb built solely to fix one row once. Recommendation:
+   **leave-and-document**, one row is small enough that leaving it is
+   defensible, and the read-only reconciliation this phase already runs
+   (whether it becomes a standing check or a one-time read) is the record
+   that the decision was made rather than inherited. Whether the
+   reconciliation read itself becomes a standing check is a separate
+   question this recommendation does not answer. Neither this recommendation
+   nor the standing-check question has been put to Sam yet; both remain
+   open until they are.
 
 ## Alternatives considered
 
@@ -1223,6 +1255,19 @@ its own schedule, its own failure modes and its own tests.
   after half, and P1's downstream-of-run-start test needing to reason about
   call sites rather than definition order so it can actually fail. No decision
   changed.
+- 2026-09-06: P4 (nexus-dt2tu.4) documentation pass, tag-independent parts.
+  The Risks section gained a bullet naming the 404-downgrade tail as a second
+  route into the accepted orphan class (P3's critique, T2
+  `nexus/critique-nexus-dt2tu-3-p3` finding (b)): `use_count` can bump while
+  the fallback record write independently fails, which is the same measured
+  0.5% failure shape reached by a second path rather than a new one, and the
+  generic P4 reconciliation read already covers it. `docs/cli-reference.md`
+  (`nx plan show`) and `src/nexus/plans/promote.py`'s module docstring were
+  updated for the D4 `use_count` semantic change; the "three actual runs"
+  gloss in `promote.py` is stale until cutover and becomes literally true
+  once it lands, and both documents say so. No decision changed; this entry
+  and the P4 bump/ledger-move/reconciliation work that still depends on an
+  engine tag are tracked separately on the bead.
 - 2026-09-05: Layer 3 gate critique folded in (T2
   `nexus/critique-rdr-203-gate-64c4802bc` [24700]), two Criticals, both
   text-level. The gaps intro still said gaps 2 and 3 had an occurrence rate of
