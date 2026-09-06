@@ -1107,20 +1107,31 @@
 
     <!--
         nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): relocates the
-        pgvector-family extensions into the nexus schema. UNCONDITIONAL (no
-        precondition), gated by ownership, not superuser status; see the
-        included file's own header for the full derivation, including why an
-        is_superuser-guarded first draft produced a genuine sequencing deadlock
-        and why every extension-creation site transfers ownership via a
-        throwaway relocator role instead. Placed here, as the LAST possible
-        position before the function-qualification changeset below, and
-        deliberately NOT right after vectors-001-baseline.xml: every changeset
-        between vectors-001 and here (vectors-002's gin_trgm_ops indexes, every
-        `vector(N)` column definition, taxonomy-002's centroid tables, etc) is
-        ALREADY APPLIED history that resolves those bare identifiers via the
-        connecting role's own default search_path (which contains public, never
-        nexus), relocating any earlier would break every one of those on a
-        fresh install's very first walk.
+        pgvector-family extensions into the nexus schema. GUARDED (a
+        preConditions onFail="MARK_RAN" precondition skips the whole changeset
+        once both extensions already report extnamespace = 'nexus'), with a
+        three-tier body when it does run: attempt the ALTER EXTENSION statements
+        directly (succeeds for any superuser-driven walk, or one that already
+        owns both extensions); on insufficient_privilege, call the SECURITY
+        DEFINER nexus.ensure_vector_extensions_relocated() when it exists (the
+        NOSUPERUSER-migrating-role case pg_provision.py's own client-side
+        relocation ensures for exactly this walk); RAISE EXCEPTION naming the
+        exact remedy when even that function is absent. Stale-comment fix
+        (batch-9 gate pass, worktree-agent-ae864db44cc9fe82c): an earlier draft
+        of this comment described a DIFFERENT, superseded design (unconditional,
+        no precondition, ownership-gated via a throwaway relocator role) that
+        was replaced before merge because it bricked every pre-existing local
+        install (REASSIGN OWNED BY can never touch anything owned by the
+        cluster's bootstrap superuser). See the included file's own header for
+        the full derivation. Placed here, as the LAST possible position before
+        the function-qualification changeset below, and deliberately NOT right
+        after vectors-001-baseline.xml: every changeset between vectors-001 and
+        here (vectors-002's gin_trgm_ops indexes, every `vector(N)` column
+        definition, taxonomy-002's centroid tables, etc) is ALREADY APPLIED
+        history that resolves those bare identifiers via the connecting role's
+        own default search_path (which contains public, never nexus),
+        relocating any earlier would break every one of those on a fresh
+        install's very first walk.
     -->
     <include file="db/changelog/search-path-001-relocate-vector-extensions.xml"/>
 
