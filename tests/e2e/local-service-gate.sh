@@ -439,7 +439,23 @@ print(".".join(m.groups()) if m else "")
 ')"
 [ -n "$GATE_STAMP" ] || { echo "[gate] FATAL: could not parse REQUIRED_ENGINE_VERSION" >&2; exit 2; }
 GATE_BUILD_REF=""
-if [ -z "${NEXUS_SERVICE_BIN:-}" ]; then
+if [ -n "${NX_GATE_ARTIFACTS:-}" ]; then
+  # nexus-mfage fix B item 3: consume the stamped dev jar
+  # tests/e2e/migration-rehearsal/build-artifacts.sh built ONCE for the
+  # whole battery. The manifest's tree identity must equal this checkout's
+  # (verified here, refuses on mismatch) — the same nexus-mbeke rule
+  # run.sh --artifacts applies. Nothing in this tree is built, stamped or
+  # restored by this gate: the jar is copied into the scratch dir and the
+  # manifest's per-BUILD build_ref is what the smoke leg's discriminator
+  # (nexus-308ph) asserts against /version, in place of the per-run nonce.
+  [ -z "${NEXUS_SERVICE_BIN:-}" ] || { echo "[gate] NX_GATE_ARTIFACTS and NEXUS_SERVICE_BIN are contradictory launch artifacts; set one" >&2; exit 2; }
+  GATE_MANIFEST="$(python3 "$REPO_ROOT/tests/e2e/lib/artifact_manifest.py" verify "$NX_GATE_ARTIFACTS" "$REPO_ROOT")" || exit 3
+  GATE_BUILD_REF="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["build_ref"])' "$GATE_MANIFEST")"
+  GATE_JAR_REL="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"]["jar"]["path"])' "$GATE_MANIFEST")"
+  cp "$NX_GATE_ARTIFACTS/$GATE_JAR_REL" "$SCRATCH/gate-service.jar"
+  JAR="$SCRATCH/gate-service.jar"
+  echo "[gate] artifacts: jar from $NX_GATE_ARTIFACTS (build_ref=$GATE_BUILD_REF) — no jar rebuild, no stamp"
+elif [ -z "${NEXUS_SERVICE_BIN:-}" ]; then
   JAR_SKIP_REASON="$(uv run python3 -c '
 from tests.db._service_fixture import jar_freshness_skip_reason
 print(jar_freshness_skip_reason() or "")

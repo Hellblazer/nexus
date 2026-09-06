@@ -479,7 +479,10 @@ MANIFEST_TREE=""
 if [ -n "$ARTIFACTS" ]; then
   [ "$DO_BUILD" = 1 ] || { echo "--artifacts already means 'do not build here'; --no-build is contradictory (drop one)" >&2; exit 2; }
   ARTIFACTS="$(cd "$ARTIFACTS" 2>/dev/null && pwd)" || { echo "--artifacts: no such directory" >&2; exit 3; }
-  MANIFEST_JSON="$(python3 "$SCRIPT_DIR/../lib/artifact_manifest.py" verify "$ARTIFACTS" "$PWD")" || exit 3
+  if ! MANIFEST_JSON="$(python3 "$SCRIPT_DIR/../lib/artifact_manifest.py" verify "$ARTIFACTS" "$PWD")"; then
+    diag_record_err "$LINENO" "artifact_manifest.py verify refused $ARTIFACTS (see the ARTIFACTS REFUSED lines above)"
+    exit 3
+  fi
   MANIFEST_BUILD_REF="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["build_ref"])' "$MANIFEST_JSON")"
   MANIFEST_TREE="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["tree_hash"][:12])' "$MANIFEST_JSON")"
   MANIFEST_RELEASE_VERSION="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["release_version"])' "$MANIFEST_JSON")"

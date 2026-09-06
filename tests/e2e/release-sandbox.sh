@@ -37,7 +37,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SANDBOX="$HOME/nexus-sandbox"
+# nexus-mfage fix B item 3: NEXUS_SANDBOX_HOME overrides the fixed
+# $HOME/nexus-sandbox so two sandbox gates (smoke and shakedown in one
+# battery) run side by side, each in its own HOME. The lock follows the
+# sandbox: the fixed path keeps the fixed machine-global lock, an override
+# gets a lock keyed on its own path (same path -> same lock, so the same
+# sandbox still serializes). The tmux session name is only used by the
+# interactive tmux mode and is untouched.
+SANDBOX="${NEXUS_SANDBOX_HOME:-$HOME/nexus-sandbox}"
 TMUX_SESSION="${TMUX_SESSION:-nexus-sandbox}"
 
 MODE="${1:-help}"
@@ -645,6 +652,7 @@ fi
 # shellcheck source=./lib/lock.sh disable=SC1091
 source "$SCRIPT_DIR/lib/lock.sh"
 LOCKDIR="/tmp/nexus-e2e-locks/release-sandbox.lock"
+[[ -n "${NEXUS_SANDBOX_HOME:-}" ]] && LOCKDIR="/tmp/nexus-e2e-locks/release-sandbox-$(printf '%s' "$SANDBOX" | shasum -a 256 | cut -c1-12).lock"
 mkdir -p "$(dirname "$LOCKDIR")"
 lock_acquire "$LOCKDIR" || exit 1
 trap '_kill_live_tail; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
