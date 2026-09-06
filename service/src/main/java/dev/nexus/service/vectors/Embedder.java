@@ -74,6 +74,27 @@ public interface Embedder extends AutoCloseable {
         return null;
     }
 
+    /**
+     * Bead nexus-8hdg9 (post-{@code Phase 3/4} residual, critique T2
+     * {@code critique-nexus-8hdg9-p3-p4-808582a09} [24692]) — record one
+     * request aborted at a deadline check point OUTSIDE this embedder's own
+     * code, so the SAME {@code GET /v1/status} {@code deadline_aborts_total}
+     * counter this embedder already reports covers a check point a wrapper
+     * performs on its behalf (see {@link AdmissionControlledEmbedder}, which
+     * checks the deadline immediately after acquiring its admission permit
+     * and before ever calling into the delegate — a request abandoned while
+     * queued for admission never reaches this embedder's own sub-batch loop
+     * at all, so that loop's check point can never see it).
+     *
+     * <p>Default no-op: most implementations (test fakes, {@link
+     * VoyageEmbedder}, {@link CceEmbedder} — reached only through {@code
+     * EmbedderRouter}, never through {@link AdmissionControlledEmbedder})
+     * track nothing here. Only {@link Bge768Embedder} — the sole production
+     * delegate {@link AdmissionControlledEmbedder} wraps — overrides it.
+     */
+    default void recordDeadlineAbort() {
+    }
+
     @Override
     default void close() {}
 }

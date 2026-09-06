@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.List;
 
 /**
@@ -38,8 +41,27 @@ import java.util.List;
  * typed-retryable signal {@code TenantScope}'s admission timeout produces,
  * so {@code HttpUtil.isPoolExhausted} maps it to 503 with no new mapping
  * surface).
+ *
+ * <p><b>Post-acquire deadline check (nexus-8hdg9 residual, critique T2
+ * {@code critique-nexus-8hdg9-p3-p4-808582a09} [24692]).</b> {@link
+ * Bge768Embedder#embedSubBatched}'s between-sub-batch check point is
+ * unreachable through the standard client path in onnx-local mode: the
+ * default 16-chunk client-side POST cap ({@code
+ * NX_ONNX_LOCAL_UPSERT_CHUNK_CAP}) never produces more than one sub-batch
+ * against {@code MAX_PADDED_TOKEN_AREA}, so a request abandoned while
+ * queued for an admission permit is never bounded by that check point at
+ * all — it can hold the permit indefinitely once granted, and its retry
+ * stacks a second pass behind it. {@link #embedWithUsage} checks the
+ * deadline immediately after {@link #acquire} succeeds and before ever
+ * calling {@code delegate.embedWithUsage} — the request never does any
+ * embedding work at this check point, so this bounds worst-case permit
+ * OCCUPANCY for an already-abandoned request, distinct from (and in
+ * addition to) the delegate's own in-flight sub-batch/future check
+ * points.
  */
 public final class AdmissionControlledEmbedder implements Embedder {
+
+    private static final Logger log = LoggerFactory.getLogger(AdmissionControlledEmbedder.class);
 
     private final Embedder          delegate;
     private final LocalOnnxAdmission admission;
@@ -83,8 +105,33 @@ public final class AdmissionControlledEmbedder implements Embedder {
 
     @Override
     public EmbedResult embedWithUsage(List<String> texts) {
+        long acquireStartNanos = System.nanoTime();
         acquire("embedWithUsage");
         try {
+            // nexus-8hdg9 post-acquire check: evaluated the moment the permit is
+            // granted, BEFORE the delegate ever runs — this bounds worst-case permit
+            // OCCUPANCY for a request that was abandoned while queued, distinct from
+            // (and unreachable by) the delegate's own in-flight sub-batch/future
+            // check points. Same RequestDeadlineProbe idiom as those check points:
+            // read the deadline once, compare against a nowNanos already taken for
+            // another purpose (here, the acquire-wait timing below) rather than a
+            // second clock read.
+            long nowNanos = System.nanoTime();
+            long deadlineNanos = RequestDeadlineProbe.currentDeadlineNanos();
+            if (RequestDeadlineProbe.expired(deadlineNanos, nowNanos)) {
+                long admissionWaitMs = (nowNanos - acquireStartNanos) / 1_000_000L;
+                long pastDeadlineMs = (nowNanos - deadlineNanos) / 1_000_000L;
+                delegate.recordDeadlineAbort();  // GET /v1/status deadline_aborts_total
+                log.warn("event=embed_deadline_exceeded embedder=admission-gate what=embedWithUsage "
+                        + "texts={} admission_wait_ms={} past_deadline_ms={} retry_after_s={}",
+                        texts.size(), admissionWaitMs, pastDeadlineMs,
+                        RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS);
+                throw new RequestDeadlineExceededException(
+                        "embed deadline exceeded before delegate call (" + texts.size()
+                                + " texts, " + admissionWaitMs + "ms admission wait, "
+                                + pastDeadlineMs + "ms past deadline)",
+                        RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS);
+            }
             return delegate.embedWithUsage(texts);
         } finally {
             admission.release();

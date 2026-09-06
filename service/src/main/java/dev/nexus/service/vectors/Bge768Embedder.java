@@ -324,6 +324,18 @@ public final class Bge768Embedder implements Embedder {
     }
 
     /**
+     * Bead nexus-8hdg9 — lets {@link AdmissionControlledEmbedder}'s
+     * post-acquire, pre-delegate deadline check record onto this embedder's
+     * OWN {@code deadlineAbortsTotal} counter, the same one {@link
+     * #embedSubBatched}'s between-sub-batch check point already feeds — one
+     * counter, two check points, both visible on {@code GET /v1/status}.
+     */
+    @Override
+    public void recordDeadlineAbort() {
+        activityTracker.recordDeadlineAbort();
+    }
+
+    /**
      * Tokenizes the whole input once (cheap relative to an ONNX forward pass), then
      * greedily partitions it into sub-batches bounded by {@link #MAX_PADDED_TOKEN_AREA}
      * — never re-ordering, so results concatenate directly in input order. Each
