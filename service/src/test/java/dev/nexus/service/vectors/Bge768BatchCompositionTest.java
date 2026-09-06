@@ -455,6 +455,9 @@ class Bge768BatchCompositionTest {
                 .as("exactly one sub-batch ran before the expired deadline was observed; "
                     + "the counter must not keep advancing")
                 .isEqualTo(1);
+        assertThat(embedder.activitySnapshot().deadlineAbortsTotal())
+                .as("the abort is counted for GET /v1/status deadline_aborts_total")
+                .isGreaterThanOrEqualTo(1L);
     }
 
     /**

@@ -425,6 +425,7 @@ public final class Bge768Embedder implements Embedder {
             if (start < n && RequestDeadlineProbe.expired(deadlineNanos, nowNanos)) {
                 long elapsedMs = (nowNanos - callStartNanos) / 1_000_000L;
                 long pastDeadlineMs = (nowNanos - deadlineNanos) / 1_000_000L;
+                activityTracker.recordDeadlineAbort();  // GET /v1/status deadline_aborts_total
                 log.warn("event=embed_deadline_exceeded embedder=bge768 chunks_done={} chunks_total={} "
                         + "sub_batches_done={} elapsed_ms={} past_deadline_ms={} retry_after_s={}",
                         chunksDone, n, subBatchIndex, elapsedMs, pastDeadlineMs,

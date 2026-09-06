@@ -426,6 +426,7 @@ public final class CceEmbedder implements Embedder {
                 cancelFrom(futures, i);
                 long elapsedMs = (lastNanos - callStartNanos) / 1_000_000L;
                 long pastDeadlineMs = (lastNanos - requestDeadlineNanos) / 1_000_000L;
+                activityTracker.recordDeadlineAbort();  // GET /v1/status deadline_aborts_total
                 log.warn("event=embed_deadline_exceeded embedder=cce chunks_done={} chunks_total={} "
                         + "elapsed_ms={} past_deadline_ms={} retry_after_s={}",
                         i, n, elapsedMs, pastDeadlineMs,

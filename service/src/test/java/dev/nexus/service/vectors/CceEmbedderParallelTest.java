@@ -694,6 +694,9 @@ class CceEmbedderParallelTest {
                 clearRequestDeadline();
             }
             awaitPermitsBack(cce, parallelism);
+            assertThat(cce.activitySnapshot().deadlineAbortsTotal())
+                    .as("the abort is counted for GET /v1/status deadline_aborts_total")
+                    .isEqualTo(1L);
         }
         // With one permit, at most the first sibling can have been dispatched before
         // cancelFrom(futures, 0) interrupted the rest inside inFlight.acquire(); the
