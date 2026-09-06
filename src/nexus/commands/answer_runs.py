@@ -212,7 +212,18 @@ _EMPTY_HYDRATION_PHRASES: tuple[str, ...] = (
 #: hydration refusal) IS the degenerate signal, not the step count.
 _WELL_FORMED_DEGENERATE_CLASSES: frozenset[str] = frozenset({
     "query_listing_reroute", "empty_hydration", "budget_warning_only",
+    # nexus-90gyo / nexus-zy0kj: the answer-shape non-answers. Rows
+    # written by a post-fix nx_answer carry the ``[non-answer: <shape>]``
+    # notice (classified below by its prefix); rows written BEFORE the
+    # fix (run 706 / plan 488 class) still carry the raw payload, which
+    # the shared classifier names directly from the body.
+    "non_answer/hydration_dump", "non_answer/extractions_only",
+    "non_answer/ranking_only", "non_answer/operator_payload",
+    "non_answer/retrieval_only",
+    "non_answer/listing", "non_answer/empty",
 })
+
+_NON_ANSWER_NOTICE_RE = _re.compile(r"^\[non-answer: ([a-z_]+)\]")
 
 
 def _is_budget_warning_only_body(final_text: str) -> bool:
@@ -301,6 +312,24 @@ def _classify_degenerate_row(row: dict) -> str:
         return "empty_hydration"
     if any(phrase in final_text.strip().lower() for phrase in _EMPTY_HYDRATION_PHRASES):
         return "empty_hydration"
+    # nexus-90gyo / nexus-zy0kj: the write side's own verdict first (a
+    # code-templated notice, exact prefix), then the shared text-only
+    # classifier over the body for rows written before the notice
+    # existed (run 706 / plan 488 class).
+    m = _NON_ANSWER_NOTICE_RE.match(final_text)
+    if m is not None:
+        return f"non_answer/{m.group(1)}"
+    from nexus.plans.answer_shape import (  # noqa: PLC0415 - deferred: keep CLI startup fast
+        NON_ANSWER_SHAPES,
+        AnswerShape,
+        classify_answer_shape,
+    )
+    shape = classify_answer_shape(final_text)
+    if shape in NON_ANSWER_SHAPES and shape is not AnswerShape.LISTING:
+        # LISTING is already named by the step_count==1 header rule above
+        # (``query_listing_reroute``); a header at another step_count is
+        # deliberately "other" (see that rule's own tests).
+        return f"non_answer/{shape.value}"
     return "other"
 
 

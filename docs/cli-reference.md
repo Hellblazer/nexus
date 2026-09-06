@@ -3607,6 +3607,20 @@ every row is split three ways:
   - `error` — a plan-execution or binding error before/without any
     completed step.
   - `other` — anything else (harness probes, unclassified rows).
+  - `non_answer/<shape>` (nexus-90gyo / nexus-zy0kj) — reachable at ANY
+    `step_count`, like the nexus-x79ne well-formed shapes: the run
+    retrieved evidence but never reduced it. `<shape>` is one of
+    `hydration_dump` (the body is a `store_get_many` payload),
+    `extractions_only` (a bare `operator_extract` payload),
+    `ranking_only`, `operator_payload` (filter, check, verify or groupby
+    payload), `retrieval_only` (a search/query/traverse result payload),
+    `listing`, `empty`. A row
+    written by a post-fix client carries the `[non-answer: <shape>]`
+    notice as its `final_text` and is named by that prefix; a pre-fix row
+    (the 2026-09-06 run 706 / plan 488 class) is named from its body by
+    the same classifier `nx_answer` uses (`nexus.plans.answer_shape`).
+    Before this class existed these rows counted as executed-ok and the
+    plan-grow path saved them as successes.
 
 `--json` carries `executed_ok_count`, `executed_failed_count`,
 `degenerate_count`, `degenerate_breakdown: {class: count}`, plus a
@@ -3677,6 +3691,22 @@ predicted `usd`/`ms`/`basis`, and which one was chosen are written to
 `plan_choice` field (`{candidates, candidate_count, chosen_plan_id,
 predicted_cost_usd, basis}`; `None` on any path that never reaches Step
 1's hit branch — force_dynamic, a plan-miss, or an error before Step 1).
+
+The envelope also carries `answer_shape` (nexus-90gyo): `"answered"` when
+`final_text` is a synthesized answer, otherwise one of `hydration_dump`,
+`extractions_only`, `ranking_only`, `operator_payload`, `retrieval_only`, `listing`, `empty`.
+On a non-answer `final_text` is a one-line `[non-answer: <shape>]` notice
+(the raw payload is never returned as prose), the `chunks` list still
+carries what was retrieved, the run is recorded as a failure, and no plan
+is grown from it (nexus-zy0kj). `None` on paths that never classified:
+errors, misses, the single-step fast path, a continuation handoff.
+Grown plans are additionally gated on identifier agreement at match time
+(nexus-wj12p): a grown plan whose originating question named identifiers
+(RDR/JDR ids, bead ids, engine tags, client versions, GH/PR numbers) is
+offered only to an intent naming exactly the same set, so a question
+about RDR-197 can no longer be answered by a plan grown for RDR-176; the
+drop is logged as `plan_match_grown_literal_disagreement_dropped` and
+the call falls through to the inline planner.
 
 ### `--derive-budget` (RDR-196 .p3a, nexus-nyry9.19)
 

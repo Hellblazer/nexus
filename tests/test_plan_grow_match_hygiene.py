@@ -461,3 +461,136 @@ def test_anchored_grown_verbatim_repeat_hits_under_scope_pref(library) -> None:
         "shape, recovered by anchoring the save rather than bypassing the drop"
     )
     assert result[0].confidence == 1.0, "verbatim repeat forces confidence=1.0"
+
+
+# ── nexus-wj12p: grown-plan literal agreement ─────────────────────────────
+
+
+def test_grown_literals_extracts_identifier_shapes_only() -> None:
+    from nexus.plans.matcher import _grown_literals
+
+    lits = _grown_literals(
+        "Compare RDR-185 with rdr-176, bead nexus-4jj40.3 and conexus-vbti, "
+        "engine-service-v0.1.105, client v7.33.0, GH #1402 and PR #1510"
+    )
+    assert lits == frozenset({
+        "rdr-185", "rdr-176", "nexus-4jj40.3", "conexus-vbti",
+        "engine-service-v0.1.105", "v7.33.0", "#1402", "#1510",
+    })
+    assert _grown_literals("how does the upgrade ladder converge") == frozenset()
+    # Case and prefix are not identity (code review, 2026-09-06).
+    assert _grown_literals("gh #1402") == _grown_literals("GH#1402") == _grown_literals("#1402")
+    assert _grown_literals("Rdr-185") == _grown_literals("RDR-185")
+
+
+def test_grown_plan_with_different_rdr_literal_is_dropped(library) -> None:
+    """The live 2026-09-06 shape: plan grown from an RDR-185 vs RDR-176
+    question hit an RDR-185 vs RDR-197 question at 0.698 and answered
+    about RDR-176. The cosine floor cannot see a one-token difference;
+    the literal gate must."""
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed(
+        library,
+        query="Compare RDR-185 (single convergent upgrade ladder) with RDR-176 "
+              "(survivable managed migration readiness): what does each treat "
+              "as the unit of migration?",
+        dimensions={"verb": "research", "strategy": "compare-rdr-185"},
+        tags="ad-hoc,grown",
+    )
+    cache = _FakeCache(hits=[(plan_id, 0.30)])  # 0.70, the measured band
+    result = plan_match(
+        intent="Compare RDR-185 (single convergent upgrade ladder) with RDR-197 "
+               "(plugin-only release channel): what problem does each solve?",
+        library=library, cache=cache, min_confidence=0.40, n=5,
+    )
+    assert result == [], [(m.plan_id, m.confidence) for m in result]
+
+
+def test_grown_plan_with_same_literals_paraphrased_still_hits(library) -> None:
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed(
+        library,
+        query="Compare RDR-185 with RDR-176: what is each one's unit of migration?",
+        dimensions={"verb": "research", "strategy": "compare-rdr-185"},
+        tags="ad-hoc,grown",
+    )
+    cache = _FakeCache(hits=[(plan_id, 0.30)])
+    result = plan_match(
+        intent="How do rdr-176 and RDR-185 differ on what they migrate?",
+        library=library, cache=cache, min_confidence=0.40, n=5,
+    )
+    assert [m.plan_id for m in result] == [plan_id]
+
+
+def test_intent_adding_a_literal_the_plan_lacks_is_dropped(library) -> None:
+    """Symmetric rule: asking about RDR-185 AND RDR-197 must not be served
+    by a plan that only ever retrieved RDR-185."""
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed(
+        library,
+        query="What does RDR-185 treat as the unit of migration?",
+        dimensions={"verb": "research", "strategy": "rdr-185-unit"},
+        tags="ad-hoc,grown",
+    )
+    cache = _FakeCache(hits=[(plan_id, 0.20)])
+    result = plan_match(
+        intent="What do RDR-185 and RDR-197 each treat as the unit of migration?",
+        library=library, cache=cache, min_confidence=0.40, n=5,
+    )
+    assert result == []
+
+
+def test_grown_plan_without_literals_is_governed_by_cosine_only(library) -> None:
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed(
+        library,
+        query="How does the single convergent upgrade ladder converge?",
+        dimensions={"verb": "research", "strategy": "ladder-converge"},
+        tags="ad-hoc,grown",
+    )
+    cache = _FakeCache(hits=[(plan_id, 0.20)])
+    result = plan_match(
+        intent="How does RDR-185's upgrade ladder converge?",
+        library=library, cache=cache, min_confidence=0.40, n=5,
+    )
+    assert [m.plan_id for m in result] == [plan_id]
+
+
+def test_non_grown_plan_is_never_literal_gated(library) -> None:
+    """Builtin/library plans use $bindings, not memoized literals; the
+    gate is grown-only by construction."""
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed(
+        library,
+        query="What did RDR-176 decide about migration state?",
+        dimensions={"verb": "research", "strategy": "rdr-decision"},
+        tags="library",
+    )
+    cache = _FakeCache(hits=[(plan_id, 0.20)])
+    result = plan_match(
+        intent="What did RDR-197 decide about the plugin channel?",
+        library=library, cache=cache, min_confidence=0.40, n=5,
+    )
+    assert [m.plan_id for m in result] == [plan_id]
+
+
+def test_literal_gate_applies_on_fts5_path(library) -> None:
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed(
+        library,
+        query="Compare RDR-185 with RDR-176 on the unit of migration",
+        dimensions={"verb": "research", "strategy": "compare-rdr-185-fts"},
+        tags="ad-hoc,grown",
+    )
+    result = plan_match(
+        intent="Compare RDR-185 with RDR-197 on the unit of migration",
+        library=library, cache=_FakeCache(available=False),
+        min_confidence=0.40, n=5,
+    )
+    assert plan_id not in [m.plan_id for m in result]

@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -5290,3 +5291,152 @@ class TestNxAnswerReport:
 
         # 500-char excerpt cap, plus the marker prefix/suffix text.
         assert len(recorded[0]["final_text"]) < 600
+
+
+class TestAnswerShapeGate:
+    """nexus-90gyo / nexus-zy0kj: a plan that retrieved evidence but never
+    reduced it is a non-answer — recorded ``success=False``, never grown,
+    returned as a one-line notice plus chunks, and named in the envelope's
+    ``answer_shape``. Anchored to plan 488 / run 706 (six retrieval steps,
+    ``store_get_many`` payload as final_text) and plan 487 (extract-
+    terminal, bare extractions)."""
+
+    def _retrieval_only_result(self):
+        result = MagicMock()
+        result.steps = [
+            {"ids": ["c1"], "collections": ["rdr__1-1"], "distances": [0.1],
+             "chunk_text_hash": ["c1"]},
+            {"contents": ["\"\"\"Formal embedding parity gate"], "missing": [],
+             "section_types": ["class"]},
+        ]
+        result.dropped_reduce_steps = []
+        result.step_records = []
+        return result
+
+    @pytest.mark.asyncio
+    async def test_retrieval_only_grown_candidate_is_not_grown_and_records_failure(self):
+        from nexus.mcp.core import nx_answer
+
+        match = _ad_hoc_match_for_grow([
+            {"tool": "search", "args": {"query": "$intent", "corpus": "rdr"}},
+            {"tool": "store_get_many", "args": {"ids": "$step1.ids"}},
+        ])
+        save_mock = MagicMock(return_value=999)
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = save_mock
+        db_stub.telemetry._supports_nx_answer_run_complete.return_value = False
+        recorded: list[dict] = []
+        db_stub.telemetry.record_nx_answer_run = MagicMock(
+            side_effect=lambda **kw: recorded.append(kw) or 1
+        )
+
+        with patch("nexus.plans.matcher.plan_match", return_value=[]), \
+             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
+             patch("nexus.plans.runner.plan_run", AsyncMock(return_value=self._retrieval_only_result())), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            env = await nx_answer(question="why does RDR-160 route bge-768", structured=True)
+
+        assert not save_mock.called, "a non-answer must never be grown into the plan library"
+        assert env["answer_shape"] == "hydration_dump"
+        assert env["final_text"].startswith("[non-answer: hydration_dump]")
+        assert '"contents"' not in env["final_text"], "the payload must not be echoed as prose"
+        assert "rdr__1-1 chash:c1" in env["final_text"], "text carries the retrieved refs"
+        assert env["chunks"] and env["chunks"][0]["id"] == "c1"
+        assert env["step_count"] == 2
+        assert recorded, "the run must still be recorded"
+        assert recorded[-1]["final_text"].startswith("[non-answer: hydration_dump]")
+
+    @pytest.mark.asyncio
+    async def test_library_plan_non_answer_bumps_failure_outcome(self):
+        from nexus.mcp.core import nx_answer
+
+        def fake_match(question, **kwargs):
+            m = _make_match(plan_id=488, confidence=0.63)
+            return [replace(m, plan_json=json.dumps({"steps": [
+                {"tool": "search", "args": {"query": "$intent"}},
+                {"tool": "store_get_many", "args": {"ids": "$step1.ids"}},
+            ]}))]
+
+        library = MagicMock()
+        db_stub = MagicMock(plans=library)
+        db_stub.telemetry._supports_nx_answer_run_complete.return_value = False
+
+        with patch("nexus.plans.matcher.plan_match", side_effect=fake_match), \
+             patch("nexus.plans.runner.plan_run", AsyncMock(return_value=self._retrieval_only_result())), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            text = await nx_answer(question="why does RDR-160 route bge-768")
+
+        library.increment_run_outcome.assert_called_once_with(488, success=False)
+        assert text.startswith("[non-answer: hydration_dump]")
+        assert "plan_id=488" in text
+        # Text mode never sees the envelope's chunks; the notice carries them.
+        assert "rdr__1-1 chash:c1" in text
+
+    @pytest.mark.asyncio
+    async def test_synthesized_answer_is_answered_and_still_grows(self):
+        from nexus.mcp.core import nx_answer
+
+        match = _ad_hoc_match_for_grow([
+            {"tool": "search", "args": {"query": "$intent"}},
+            {"tool": "summarize", "args": {"inputs": "$step1.ids"}},
+        ])
+        save_mock = MagicMock(return_value=999)
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = save_mock
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 999})
+        db_stub.telemetry._supports_nx_answer_run_complete.return_value = False
+
+        with patch("nexus.plans.matcher.plan_match", return_value=[]), \
+             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
+             patch("nexus.plans.runner.plan_run", AsyncMock(return_value=_plan_run_ok())), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            env = await nx_answer(question="what is the meaning of life", structured=True)
+
+        assert save_mock.called
+        assert env["answer_shape"] == "answered"
+        assert env["final_text"] == "the answer is 42"
+
+    @pytest.mark.asyncio
+    async def test_extractions_terminal_is_a_non_answer(self):
+        from nexus.mcp.core import nx_answer
+
+        result = MagicMock()
+        result.steps = [
+            {"ids": ["c1"], "collections": ["rdr__1-1"]},
+            {"extractions": [{"item_index": 1, "rdr_id": "RDR-176"}]},
+        ]
+        result.dropped_reduce_steps = []
+        result.step_records = []
+        match = _ad_hoc_match_for_grow([
+            {"tool": "search", "args": {"query": "$intent"}},
+            {"tool": "extract", "args": {"inputs": "$step1.contents", "fields": "rdr_id"}},
+        ])
+        save_mock = MagicMock(return_value=999)
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = save_mock
+        db_stub.telemetry._supports_nx_answer_run_complete.return_value = False
+
+        with patch("nexus.plans.matcher.plan_match", return_value=[]), \
+             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
+             patch("nexus.plans.runner.plan_run", AsyncMock(return_value=result)), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            env = await nx_answer(question="compare RDR-185 with RDR-197", structured=True)
+
+        assert not save_mock.called
+        assert env["answer_shape"] == "extractions_only"
