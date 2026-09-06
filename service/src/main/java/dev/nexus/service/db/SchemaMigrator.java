@@ -67,7 +67,20 @@ import java.util.Map;
  *       9 item 0: {@code ALTER EXTENSION vector SET SCHEMA nexus; ALTER
  *       EXTENSION pg_trgm SET SCHEMA nexus;} — see "Extension relocation"
  *       below for why this is a superuser step rather than a Liquibase
- *       changeset, and for the exact failure this DBA step prevents.</li>
+ *       changeset, and for the exact failure this DBA step prevents.
+ *       <strong>This step presumes the cluster has already completed a PAST
+ *       walk of {@code vectors-001-baseline.xml}</strong> (true of every
+ *       real production cluster under this project's single-shared-cluster
+ *       deployment model). A genuinely brand-new production cluster's
+ *       FIRST-EVER walk must NOT relocate ahead of time — doing so breaks
+ *       {@code vectors-001-2/-3/-4}'s own bare {@code vector(N)}/{@code
+ *       vector_cosine_ops} references, which still need the extension
+ *       resolvable via the default, public-only search_path at that point
+ *       in the SAME walk. For that shape, skip this step entirely and
+ *       instead install the SECURITY DEFINER function pair (or run
+ *       {@code nexus.db.pg_provision}'s bootstrap) before the first walk —
+ *       see "Extension relocation" below for the mechanism that then
+ *       relocates MID-WALK, at the correct sequencing point.</li>
  *   <li>Create the schema-owner role (e.g. {@code nexus_admin}) with
  *       {@code CREATE ON DATABASE nexus} and ownership of the {@code nexus}
  *       and {@code t1} schemas.</li>
@@ -97,27 +110,53 @@ import java.util.Map;
  * ordinary Liquibase changeset — this bricked every install that predated
  * the batch, since the ownership-transfer backfill is a documented no-op for
  * an extension the bootstrap superuser already owns, with nothing left able
- * to move it. The current design instead relocates directly, as superuser,
- * OUTSIDE Liquibase (this Phase-5 DBA step for production; {@code
- * nexus.db.pg_provision}'s client-side provisioning, on every local daemon
- * start, for a local install — safe for a pre-existing install regardless of
- * timing, since its own {@code vectors-001-baseline.xml} bare {@code
- * vector(N)}/{@code vector_cosine_ops} references already ran, in a PAST
- * walk, long before relocation). The ONE case that cannot use this direct
- * mechanism is a FRESH install's first-ever walk, which runs those same bare
- * references in the SAME continuous walk as the guard changeset — for that
- * case only, the guard calls a narrow SECURITY DEFINER helper function
- * ({@code nexus.ensure_vector_extensions_relocated()}, installed by {@code
- * nexus.db.pg_provision} at fresh-provision time, never by this DBA step)
- * that performs the relocation with the function OWNER's (superuser's)
- * privilege — see that changeset's own header for the full three-tier
- * derivation (direct attempt, then the function, then a named-remedy
- * failure) and {@code relocate_vector_extensions_to_nexus_schema}'s own
- * docstring ("FRESH-INSTALL SEQUENCING") for why a from-scratch install
- * needs this and a pre-existing one does not. conexus's PITR-fork walk
- * rehearsal exercises this changelog directly against a production-shaped
- * cluster, so a DBA who skips this Phase-5 step is caught there as the named
- * FAIL LOUD case, never a silent no-op. Also note: an earlier draft believed
+ * to move it. The current design relocates via the guard changeset's own
+ * THREE-TIER body instead, uniformly for local and production installs
+ * alike: tier 1 attempts the {@code ALTER EXTENSION} directly (succeeds
+ * whenever the connecting/migrating role is or can act as superuser — this
+ * Phase-5 DBA pre-step for production is exactly what makes tier 1's
+ * precondition already satisfied, so the guard changeset MARK_RANs with no
+ * body execution at all); tier 2, on {@code insufficient_privilege} (the
+ * NOSUPERUSER {@code nexus_admin} case — every real local install, and any
+ * production cluster whose DBA skips the relocate-ahead-of-time step
+ * above), calls the narrow SECURITY DEFINER helper function ({@code
+ * nexus.ensure_vector_extensions_relocated()}, owned by the superuser) that
+ * performs the relocation with the function OWNER's privilege; tier 3 (both
+ * absent) {@code RAISE EXCEPTION} naming the exact remedy. {@code
+ * nexus.db.pg_provision}'s client-side provisioning, run on every local
+ * daemon start (and at the end of a from-scratch provision), NEVER
+ * relocates itself — an earlier revision did, gated behind a heuristic
+ * ({@code to_regclass('nexus.chunks_384'|'768'|'1024') IS NOT NULL},
+ * meant to prove "this cluster's walk has already run past the bare
+ * vector(N) references") that turned out to be permanently FALSE on every
+ * real cluster: {@code vectors-004-unify-chunks.xml} unconditionally drops
+ * all three {@code chunks_<dim>} tables in favour of the unified {@code
+ * nexus.chunks}, and every cluster old enough to ever reach this changeset
+ * has already run that changeset. That eager path silently downgraded to a
+ * no-op on every real install and was deleted outright (T2 nexus/critique-
+ * nexus-cbo4a-batch-9-gated SIGNIFICANT 1). It now only ensures the
+ * {@code nexus} schema and the
+ * SECURITY DEFINER function pair exist, which is exactly what tier 2 needs
+ * to succeed for a from-scratch install's first-ever walk — that walk runs
+ * {@code vectors-001-2/-3/-4}'s own bare references in the SAME continuous
+ * walk as the guard changeset, so relocating ahead of time would break
+ * them; the guard's tier 2 instead relocates MID-WALK, well after those
+ * changesets already ran. A genuinely brand-new PRODUCTION cluster's
+ * first-ever walk has the identical hazard and the identical fix: create
+ * the extensions in {@code public} (step 1 above) and install the SECURITY
+ * DEFINER function pair — or simply run {@code nexus.db.pg_provision}'s
+ * bootstrap against that cluster — before the first walk, rather than
+ * relocating ahead of time. See {@code
+ * search-path-001-relocate-vector-extensions.xml}'s own header for the full
+ * three-tier derivation and {@code
+ * relocate_vector_extensions_to_nexus_schema}'s own docstring for the
+ * mechanism it installs. conexus's PITR-fork walk rehearsal exercises this
+ * changelog directly against a production-shaped cluster (always an
+ * EXISTING cluster with a past walk, never a from-scratch one), so a DBA
+ * who skips this Phase-5 step there is caught as the named FAIL LOUD case,
+ * never a silent no-op — the from-scratch-production shape above is
+ * currently unrehearsed by any gate in this repository. Also note: an
+ * earlier draft believed
  * {@code pg_trgm} (trusted since PG13) needed no special treatment relative
  * to {@code vector} at all — WRONG, caught live by {@code
  * tests/e2e/local-service-gate.sh}'s first real dev-jar run: PostgreSQL

@@ -238,15 +238,15 @@ class TestVectorExtensionProvisioned:
         not enough; prove the type is usable by the non-superuser role.
 
         nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per
-        T2 nexus/critique-nexus-cbo4a-batch-9-search-path): a fresh provision()
-        creates both extensions directly as os_user and does NOT relocate
-        either into the nexus schema (relocate_vector_extensions_to_nexus_
-        schema runs with direct=False here — see that function's own
-        docstring, "FRESH-INSTALL SEQUENCING" section, for why relocating this
-        early breaks vectors-001-baseline.xml's own bare vector(N) references
-        in the SAME first Liquibase walk). The bare, unqualified `vector` type
-        this test has always used still resolves correctly at this stage, via
-        the default (public-including) search_path.
+        T2 nexus/critique-nexus-cbo4a-batch-9-search-path and again per T2
+        nexus/critique-nexus-cbo4a-batch-9-gated SIGNIFICANT 1): a fresh
+        provision() creates both extensions directly as os_user and does NOT
+        relocate either into the nexus schema —
+        relocate_vector_extensions_to_nexus_schema never relocates directly
+        any more (see that function's own docstring for why an earlier
+        eager-relocation revision was deleted). The bare, unqualified
+        `vector` type this test has always used still resolves correctly at
+        this stage, via the default (public-including) search_path.
         """
         result, config_dir = provisioned
         admin_pass = _read_credentials(
@@ -1117,49 +1117,53 @@ class TestProvisionFastPathReassignsDiagView:
 
 
 # ── relocate_vector_extensions_to_nexus_schema: nexus-cbo4a batch 9 item 0 ──
-# REDESIGNED (T2 nexus/critique-nexus-cbo4a-batch-9-search-path, a ship-
-# blocker fix, 2026-09-06). An earlier version of this suite tested an
+# REDESIGNED TWICE. First (T2 nexus/critique-nexus-cbo4a-batch-9-search-path,
+# a ship-blocker fix, 2026-09-06): an earlier version of this suite tested an
 # ownership-TRANSFER function (a throwaway superuser role, REASSIGN OWNED
 # BY, DROP ROLE) — bricked every install that predated this batch, since
 # REASSIGN OWNED BY unconditionally refuses to touch anything owned by the
 # cluster's bootstrap superuser, and a pre-existing install's extensions
 # were created directly as that superuser, no relocator role ever existing.
 # THE FIX: a superuser can relocate an extension REGARDLESS of who owns it —
-# ownership was never the actual requirement. relocate_vector_extensions_to_
-# nexus_schema now relocates DIRECTLY (direct=True, the default), no role
-# indirection, no REASSIGN, nothing to leak. The one case a direct call
-# cannot cover — a from-scratch install's FIRST-EVER Liquibase walk, which
-# runs vectors-001-baseline.xml's bare vector(N)/vector_cosine_ops
-# references in the SAME continuous walk this relocation would otherwise
-# have to precede — gets direct=False instead: no immediate relocation, only
-# a SECURITY DEFINER helper function installed for search-path-001's own
-# guard to call, mid-walk, at the correct sequencing point. See that
-# function's own docstring ("FRESH-INSTALL SEQUENCING") for the full
-# derivation this suite's tests below verify piece by piece.
+# ownership was never the actual requirement — so relocate_vector_
+# extensions_to_nexus_schema relocated directly, with a "has this cluster's
+# walk already passed the bare vector(N) references" heuristic
+# (`to_regclass('nexus.chunks_384'|'768'|'1024')`) deferring the fresh-
+# install case. Second (T2 nexus/critique-nexus-cbo4a-batch-9-gated
+# SIGNIFICANT 1): that heuristic turned out to be PERMANENTLY FALSE on every
+# real cluster — vectors-004-unify-chunks.xml drops all three chunks_<dim>
+# tables in favour of the unified nexus.chunks on the very first walk that
+# reaches this batch at all, so the eager, direct-relocation path silently
+# downgraded to a no-op everywhere it mattered and was deleted outright.
+# relocate_vector_extensions_to_nexus_schema no longer relocates anything,
+# ever, and no longer takes a `direct` parameter: it only ensures the nexus
+# schema and the SECURITY DEFINER function pair exist. Real relocation
+# happens exclusively via search-path-001-relocate-vector-extensions.xml's
+# own three-tier Liquibase guard changeset (direct ALTER for a superuser-
+# driven walk, the SECURITY DEFINER function for NOSUPERUSER nexus_admin —
+# every real install), verified end to end by TestRelocateVectorExtensions
+# ToNexusSchema below.
 
 class TestFreshProvisionCreatesVectorDirectly:
     """A brand-new provision() creates `vector` AND `pg_trgm` directly as
     os_user (the cluster superuser) — no throwaway role, no ownership
-    transfer — and does NOT relocate either into the nexus schema itself
-    (relocate_vector_extensions_to_nexus_schema is called with direct=False
-    here); it only ensures the SECURITY DEFINER relocation function exists,
-    for Liquibase's search-path-001 guard to call later, mid-walk.
+    transfer — and never relocates either into the nexus schema itself; it
+    only ensures the SECURITY DEFINER relocation function pair exists, for
+    Liquibase's search-path-001 guard to call later, mid-walk.
 
     OWN CLUSTER, not the module-scoped ``provisioned`` fixture (batch-9
     gate pass, worktree-agent-ae864db44cc9fe82c): this class's whole point
     is asserting what a cluster looks like IMMEDIATELY after a fresh
-    provision(), before anything else has touched it. ``TestIdempotency``
-    (earlier in this module) calls provision() again on the shared
-    module-scoped cluster, which hits the fast idempotency path and — by
-    design, as of this batch — actually relocates vector/pg_trgm to nexus
-    as part of that path's own "every daemon start" backfill. That is
-    correct production behavior, not a bug, but it means the module-scoped
-    cluster is no longer in its just-provisioned state by the time this
-    class runs — proven the first time this suite executed against a real
-    cluster: ``test_vector_stays_in_public_after_fresh_provision`` failed
-    with ``nexus`` where it expected ``public``. A dedicated cluster, never
-    shared with any test that re-invokes provision(), is what the class's
-    own docstring already claims to test.
+    provision(), before anything else has touched it.
+    ``TestRelocateVectorExtensionsToNexusSchema`` (below) deliberately
+    relocates the module-scoped ``provisioned`` cluster's extensions as
+    its own test subject, so a class sharing that fixture could inherit an
+    already-relocated cluster depending on execution order — proven the
+    first time this suite executed against a real cluster:
+    ``test_vector_stays_in_public_after_fresh_provision`` failed with
+    ``nexus`` where it expected ``public``. A dedicated cluster, never
+    shared with any test that relocates it, is what the class's own
+    docstring already claims to test.
     """
 
     pytestmark = pytest.mark.no_service_jar
@@ -1211,10 +1215,10 @@ class TestFreshProvisionCreatesVectorDirectly:
         assert owner == os_user
 
     def test_vector_stays_in_public_after_fresh_provision(self, provisioned, bins):
-        """Regression pin: a fresh provision() must NOT relocate the
-        extension itself — direct=False here; only Liquibase's
-        search-path-001 guard does, later, in-band, calling the SECURITY
-        DEFINER function this test's sibling proves exists."""
+        """Regression pin: provision() must NEVER relocate the extension
+        itself, fresh or otherwise; only Liquibase's search-path-001 guard
+        does, later, in-band, calling the SECURITY DEFINER function this
+        test's sibling proves exists."""
         result, _ = provisioned
         os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
         assert _extension_schema(bins, result.port, os_user, "vector") == "public"
@@ -1225,7 +1229,7 @@ class TestFreshProvisionCreatesVectorDirectly:
         assert _extension_schema(bins, result.port, os_user, "pg_trgm") == "public"
 
     def test_relocate_function_exists_after_fresh_provision(self, provisioned, bins):
-        """THE FRESH-INSTALL-SEQUENCING PROOF, part 1: the SECURITY DEFINER
+        """THE FRESH-INSTALL RELOCATION PROOF, part 1: the SECURITY DEFINER
         helper must exist after a fresh provision, even though nothing has
         been relocated yet — this is what lets search-path-001's guard
         succeed on a from-scratch install's first-ever walk."""
@@ -1239,7 +1243,7 @@ class TestFreshProvisionCreatesVectorDirectly:
         assert row == "1", "nexus.ensure_vector_extensions_relocated() must exist after provision()"
 
     def test_nexus_admin_has_execute_on_relocate_function(self, provisioned, bins):
-        """THE FRESH-INSTALL-SEQUENCING PROOF, part 2: nexus_admin — the
+        """THE FRESH-INSTALL RELOCATION PROOF, part 2: nexus_admin — the
         NOSUPERUSER role that actually runs Liquibase — must be able to
         CALL the function, or search-path-001's guard cannot reach it
         either."""
@@ -1318,9 +1322,22 @@ class TestFreshProvisionCreatesVectorDirectly:
 
 
 class TestRelocateVectorExtensionsToNexusSchema:
-    """Direct unit tests of relocate_vector_extensions_to_nexus_schema —
-    THE ship-blocker regression suite (T2 nexus/critique-nexus-cbo4a-
-    batch-9-search-path)."""
+    """Direct unit tests of relocate_vector_extensions_to_nexus_schema and
+    the SECURITY DEFINER function pair it installs (T2 nexus/critique-
+    nexus-cbo4a-batch-9-search-path, THE original ship-blocker regression
+    suite; redesigned again per T2 nexus/critique-nexus-cbo4a-batch-9-gated
+    SIGNIFICANT 1). The Python function itself never relocates vector/
+    pg_trgm any more — an earlier revision did, gated behind a walk-progress
+    heuristic that turned out to be permanently false on every real cluster
+    (see the module-level comment above ``TestFreshProvisionCreatesVector
+    Directly`` for the full derivation), so that eager path was deleted
+    outright. Real relocation happens exclusively via search-path-001's own
+    Liquibase guard changeset calling ``nexus.ensure_vector_extensions_
+    relocated()`` — these tests pin that function pair's own behavior end
+    to end: SECURITY DEFINER / ownership / grant shape, that nexus_admin
+    (NOSUPERUSER) calling it actually relocates both extensions, that a
+    repeat call is a no-op, and that the rollback-direction companion moves
+    them back."""
 
     pytestmark = pytest.mark.no_service_jar
 
@@ -1330,15 +1347,14 @@ class TestRelocateVectorExtensionsToNexusSchema:
 
     @pytest.fixture()
     def pre_existing_install_shape(self, provisioned, bins, os_user):
-        """Reproduce the EXACT shape the critique's Critical 1 describes:
-        an install that predates this batch, which created both extensions
-        directly as the cluster's bootstrap superuser (os_user) and never
-        relocated them. ACTIVELY resets to that state on every use (not
-        merely asserted) — this class's own tests relocate the shared
-        ``provisioned`` cluster's extensions as their whole point, so a
-        later test in this class would otherwise inherit an already-
-        relocated state from an earlier one. DROP EXTENSION ... CASCADE is
-        safe here: nothing in this test file leaves a persistent
+        """Reproduce the shape an install that predates this batch has:
+        both extensions created directly as the cluster's bootstrap
+        superuser (os_user), living in public. ACTIVELY resets to that
+        state on every use (not merely asserted) — this class's own tests
+        relocate the shared ``provisioned`` cluster's extensions as their
+        whole point, so a later test in this class would otherwise inherit
+        an already-relocated state from an earlier one. DROP EXTENSION ...
+        CASCADE is safe here: nothing in this test file leaves a persistent
         vector-typed object depending on either extension across tests
         (every probe table any sibling test creates is dropped in the same
         call)."""
@@ -1347,94 +1363,26 @@ class TestRelocateVectorExtensionsToNexusSchema:
               "DROP EXTENSION IF EXISTS vector CASCADE; "
               "DROP EXTENSION IF EXISTS pg_trgm CASCADE; "
               "CREATE EXTENSION vector; "
-              "CREATE EXTENSION pg_trgm; "
-              # An install that predates this batch has ALREADY walked
-              # vectors-001-baseline.xml, so nexus.chunks_<dim> exists. The
-              # relocation honours direct=True only behind that proof (the
-              # fresh-install double-provision downgrade); a marker table
-              # with no vector column stands in for the walked state and
-              # survives the DROP EXTENSION ... CASCADE above.
-              "CREATE SCHEMA IF NOT EXISTS nexus; "
-              "CREATE TABLE IF NOT EXISTS nexus.chunks_384 (marker int);")
+              "CREATE EXTENSION pg_trgm;")
         assert _extension_schema(bins, result.port, os_user, "vector") == "public"
         assert _extension_schema(bins, result.port, os_user, "pg_trgm") == "public"
         yield result, config_dir
-        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
-              "DROP TABLE IF EXISTS nexus.chunks_384;")
 
-    def test_direct_true_is_deferred_until_the_walk_has_passed_vectors_001(
+    def test_relocate_never_moves_the_extension_itself(
         self, pre_existing_install_shape, bins, os_user,
     ):
-        """The fresh-install double-provision case (gate 2, local-service-
-        gate.sh): with no nexus.chunks_<dim> table, the cluster's Liquibase
-        walk has not run vectors-001-2/-3/-4 yet, so a caller's direct=True
-        must NOT relocate (it would break those bare vector(N) references on
-        the walk about to run); the SECURITY DEFINER function is still
-        ensured so search-path-001's mid-walk guard can do it later."""
+        """Regression pin for the second redesign: calling the Python
+        function alone — however many times — must never relocate
+        anything; only Liquibase's guard changeset, via the SECURITY
+        DEFINER function, does that."""
         from nexus.db.pg_provision import relocate_vector_extensions_to_nexus_schema
 
         result, _ = pre_existing_install_shape
-        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
-              "DROP TABLE nexus.chunks_384;")
-        actions = relocate_vector_extensions_to_nexus_schema(bins, result.port, os_user)
+        relocate_vector_extensions_to_nexus_schema(bins, result.port, os_user)
+        relocate_vector_extensions_to_nexus_schema(bins, result.port, os_user)
 
-        assert actions == [], f"direct=True must defer before the walk, got: {actions}"
         assert _extension_schema(bins, result.port, os_user, "vector") == "public"
         assert _extension_schema(bins, result.port, os_user, "pg_trgm") == "public"
-        row = _query(
-            bins, result.port, NEXUS_DB_NAME, os_user,
-            "SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
-            "WHERE n.nspname = 'nexus' AND p.proname = 'ensure_vector_extensions_relocated'",
-        )
-        assert row == "1"
-
-    def test_direct_true_relocates_a_pre_existing_os_user_owned_install(
-        self, pre_existing_install_shape, bins, os_user,
-    ):
-        """THE END-TO-END SHIP-BLOCKER PROOF: an extension owned directly
-        by the bootstrap superuser (the exact shape REASSIGN OWNED BY can
-        never fix) relocates cleanly via direct=True, with no ownership
-        transfer of any kind — proving the actual fix for Critical 1."""
-        from nexus.db.pg_provision import relocate_vector_extensions_to_nexus_schema
-
-        result, _ = pre_existing_install_shape
-        actions = relocate_vector_extensions_to_nexus_schema(bins, result.port, os_user)
-
-        assert len(actions) == 2, f"expected both extensions relocated, got: {actions}"
-        assert _extension_schema(bins, result.port, os_user, "vector") == "nexus"
-        assert _extension_schema(bins, result.port, os_user, "pg_trgm") == "nexus"
-
-    def test_direct_true_is_idempotent_when_already_relocated(
-        self, pre_existing_install_shape, bins, os_user,
-    ):
-        from nexus.db.pg_provision import relocate_vector_extensions_to_nexus_schema
-
-        result, _ = pre_existing_install_shape
-        first = relocate_vector_extensions_to_nexus_schema(bins, result.port, os_user)
-        assert len(first) == 2
-
-        second = relocate_vector_extensions_to_nexus_schema(bins, result.port, os_user)
-        assert second == [], "a repeat direct=True call once both are already relocated must be a no-op"
-
-    def test_direct_false_never_relocates_but_still_ensures_the_function(
-        self, pre_existing_install_shape, bins, os_user,
-    ):
-        from nexus.db.pg_provision import relocate_vector_extensions_to_nexus_schema
-
-        result, _ = pre_existing_install_shape
-        actions = relocate_vector_extensions_to_nexus_schema(
-            bins, result.port, os_user, direct=False,
-        )
-
-        assert actions == [], "direct=False must never perform the ALTER itself"
-        assert _extension_schema(bins, result.port, os_user, "vector") == "public"
-        assert _extension_schema(bins, result.port, os_user, "pg_trgm") == "public"
-        row = _query(
-            bins, result.port, NEXUS_DB_NAME, os_user,
-            "SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
-            "WHERE n.nspname = 'nexus' AND p.proname = 'ensure_vector_extensions_relocated'",
-        )
-        assert row == "1", "direct=False must still install the SECURITY DEFINER function"
 
     def test_schema_creation_is_nexus_admin_owned(self, pre_existing_install_shape, bins, os_user):
         """Agreement check named in the redesign: whichever of pg_provision
@@ -1458,17 +1406,20 @@ class TestRelocateVectorExtensionsToNexusSchema:
         """THE SECURITY DEFINER ELEVATION PROOF: call the function AS
         nexus_admin (NOSUPERUSER, does not own either extension) and prove
         it relocates both anyway — this is the exact mechanism search-
-        path-001's guard relies on for a from-scratch install's first-ever
-        walk, verified end to end rather than merely by inspecting the
-        function's own DDL flags."""
+        path-001's guard relies on, for every real install, verified end
+        to end rather than merely by inspecting the function's own DDL
+        flags."""
         from nexus.db.pg_provision import relocate_vector_extensions_to_nexus_schema
 
         result, config_dir = pre_existing_install_shape
-        # direct=False: install the function without relocating, so the
-        # subsequent nexus_admin-driven call is what actually performs it.
-        relocate_vector_extensions_to_nexus_schema(bins, result.port, os_user, direct=False)
+        # Ensures the function pair exists without relocating anything —
+        # relocate_vector_extensions_to_nexus_schema never relocates any
+        # more, so the subsequent nexus_admin-driven call below is what
+        # actually performs it.
+        relocate_vector_extensions_to_nexus_schema(bins, result.port, os_user)
         assert _extension_schema(bins, result.port, os_user, "vector") == "public", (
-            "precondition: direct=False must not have relocated anything itself"
+            "precondition: ensuring the function pair must not have relocated "
+            "anything itself"
         )
 
         admin_pass = _read_credentials(
@@ -1484,6 +1435,67 @@ class TestRelocateVectorExtensionsToNexusSchema:
             "via the SECURITY DEFINER function"
         )
         assert _extension_schema(bins, result.port, os_user, "pg_trgm") == "nexus"
+
+    def test_security_definer_function_is_idempotent_on_repeat_call(
+        self, pre_existing_install_shape, bins, os_user,
+    ):
+        """A second nexus_admin-driven call, once both extensions are
+        already relocated, must be a harmless no-op — the function's own
+        current-schema check, not merely ALTER EXTENSION's own same-schema
+        tolerance."""
+        from nexus.db.pg_provision import relocate_vector_extensions_to_nexus_schema
+
+        result, config_dir = pre_existing_install_shape
+        relocate_vector_extensions_to_nexus_schema(bins, result.port, os_user)
+        admin_pass = _read_credentials(
+            config_dir / CREDENTIALS_FILENAME
+        )["NX_DB_ADMIN_PASS"]
+
+        _psql_as(
+            bins, result.port, "nexus_admin", admin_pass, NEXUS_DB_NAME,
+            "SELECT nexus.ensure_vector_extensions_relocated()",
+        )
+        assert _extension_schema(bins, result.port, os_user, "vector") == "nexus"
+
+        # Repeat call must not raise and must leave both extensions in nexus.
+        _psql_as(
+            bins, result.port, "nexus_admin", admin_pass, NEXUS_DB_NAME,
+            "SELECT nexus.ensure_vector_extensions_relocated()",
+        )
+        assert _extension_schema(bins, result.port, os_user, "vector") == "nexus"
+        assert _extension_schema(bins, result.port, os_user, "pg_trgm") == "nexus"
+
+    def test_unrelocate_function_moves_extensions_back_to_public(
+        self, pre_existing_install_shape, bins, os_user,
+    ):
+        """The rollback-direction companion: search-path-001's own
+        ``<rollback>`` relies on this to move both extensions back to
+        public when nexus_admin (NOSUPERUSER) is the one running the
+        rollback."""
+        from nexus.db.pg_provision import relocate_vector_extensions_to_nexus_schema
+
+        result, config_dir = pre_existing_install_shape
+        relocate_vector_extensions_to_nexus_schema(bins, result.port, os_user)
+        admin_pass = _read_credentials(
+            config_dir / CREDENTIALS_FILENAME
+        )["NX_DB_ADMIN_PASS"]
+
+        _psql_as(
+            bins, result.port, "nexus_admin", admin_pass, NEXUS_DB_NAME,
+            "SELECT nexus.ensure_vector_extensions_relocated()",
+        )
+        assert _extension_schema(bins, result.port, os_user, "vector") == "nexus", (
+            "precondition: both extensions must be relocated before testing the "
+            "rollback direction"
+        )
+
+        _psql_as(
+            bins, result.port, "nexus_admin", admin_pass, NEXUS_DB_NAME,
+            "SELECT nexus.ensure_vector_extensions_unrelocated()",
+        )
+
+        assert _extension_schema(bins, result.port, os_user, "vector") == "public"
+        assert _extension_schema(bins, result.port, os_user, "pg_trgm") == "public"
 
 
 def _extension_schema(bins, port, os_user, extname="vector"):
