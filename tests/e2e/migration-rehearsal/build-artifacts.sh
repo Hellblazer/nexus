@@ -17,6 +17,12 @@
 # nonce, nexus-308ph) under scripts/lib/build-lease.sh, and its pre-invocation
 # bytes are restored on every exit path (nexus-iws18). The nonce is recorded
 # in the manifest so each consuming leg can assert it against /version.
+# build_ref is per BUILD, not per run (nexus-308ph was per run): two legs
+# consuming the same artifacts share it by design, so it discriminates
+# "the manifest's candidate" from "some other process", not one run from
+# another. A manual re-run against an old artifacts dir therefore proves
+# only that the served binary is that dir's candidate; rebuild for a fresh
+# tree (the identity check forces that whenever the tree changed).
 #
 # The native build runs in the same GraalVM container as run.sh's own build
 # (see that file for why: the binary must match the rehearsal image's OS, and

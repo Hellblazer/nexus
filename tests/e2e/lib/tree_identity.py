@@ -5,8 +5,8 @@
 A gate may reuse a prebuilt artifact only against a tree PROVEN identical to
 the one it was built from, never on age (nexus-mbeke: a stale binary satisfies
 a shakeout silently). ``tree_hash`` is a sha256 over every tracked and
-untracked-not-ignored file in the checkout: relative path plus git blob hash,
-in path order, plus the executable bit per file. HEAD's sha alone is not identity — a dirty tree builds
+untracked-not-ignored entry in the checkout: relative path, git mode (so the
+executable bit and symlink-ness count) and blob hash, in path order. HEAD's sha alone is not identity — a dirty tree builds
 different bytes from the same HEAD — so the dirty flag is reported but the
 hash is what the consumer compares.
 
@@ -38,35 +38,53 @@ def _git(root: str, *args: str) -> bytes:
 
 def tree_identity(root: str) -> dict[str, object]:
     head = _git(root, "rev-parse", "HEAD").decode().strip()
-    listed = _git(root, "ls-files", "-co", "--exclude-standard", "-z").split(b"\0")
-    paths = sorted(
-        p for p in listed
-        if p and p.decode("utf-8", "surrogateescape") != STAMP_FILE
+    entries: dict[bytes, tuple[bytes, bytes]] = {}
+    # Tracked entries straight from the index: mode (100644 / 100755 /
+    # 120000 symlink) and blob. A symlink is hashed as git stores it (the
+    # link target), never followed, so a symlink-to-directory is identity
+    # too instead of being dropped; the executable bit is identity because
+    # a wheel or a shell gate ships it (code-review-expert and
+    # substantive-critic findings on nexus-mfage fix B, 2026-09-06).
+    for line in _git(root, "ls-files", "-s", "-z").split(b"\0"):
+        if not line:
+            continue
+        meta, path = line.split(b"\t", 1)
+        mode, blob, _stage = meta.split(b" ")
+        rel = path.decode("utf-8", "surrogateescape")
+        if rel == STAMP_FILE or not os.path.lexists(os.path.join(root, rel)):
+            continue  # stamp file excluded; a tracked-but-deleted path is absent
+        entries[path] = (mode, blob)
+    # Untracked, not ignored: content via hash-object, mode from the file.
+    untracked = [
+        p for p in _git(root, "ls-files", "-o", "--exclude-standard", "-z").split(b"\0")
+        if p and p not in entries
         and os.path.isfile(os.path.join(root, p.decode("utf-8", "surrogateescape")))
-    )
-    hashes = subprocess.run(
-        ["git", "-C", root, "hash-object", "--stdin-paths"],
-        input=b"\n".join(paths) + b"\n", check=True, capture_output=True,
-    ).stdout.split()
-    if len(hashes) != len(paths):
-        raise SystemExit(f"hash-object returned {len(hashes)} hashes for {len(paths)} paths")
+    ]
+    if untracked:
+        hashes = subprocess.run(
+            ["git", "-C", root, "hash-object", "--stdin-paths"],
+            input=b"\n".join(untracked) + b"\n", check=True, capture_output=True,
+        ).stdout.split()
+        if len(hashes) != len(untracked):
+            raise SystemExit(f"hash-object returned {len(hashes)} hashes for {len(untracked)} paths")
+        for path, blob in zip(untracked, hashes):
+            st = os.stat(os.path.join(root, path.decode("utf-8", "surrogateescape")))
+            entries[path] = (b"100755" if st.st_mode & 0o111 else b"100644", blob)
     digest = hashlib.sha256()
-    for path, blob in zip(paths, hashes):
-        # git hash-object hashes CONTENT only; the executable bit is part of
-        # what a wheel or a shell gate ships, so it is part of identity too
-        # (substantive-critic finding on nexus-mfage fix B, 2026-09-06).
-        mode = os.stat(os.path.join(root, path.decode("utf-8", "surrogateescape"))).st_mode
+    for path in sorted(entries):
+        mode, blob = entries[path]
         digest.update(path)
         digest.update(b"\0")
+        digest.update(mode)
+        digest.update(b" ")
         digest.update(blob)
-        digest.update(b"\0x" if mode & 0o111 else b"\0-")
         digest.update(b"\n")
     dirty = bool(_git(root, "status", "--porcelain", "--untracked-files=all").strip())
     return {
         "head_sha": head,
         "dirty": dirty,
         "tree_hash": digest.hexdigest(),
-        "file_count": len(paths),
+        "file_count": len(entries),
     }
 
 

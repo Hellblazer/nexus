@@ -62,7 +62,8 @@ ORDER=()
 define_leg() {  # define_leg <name> <phase> <verdict-regex> <command...>
   local name="$1" phase="$2" verdict="$3"; shift 3
   ORDER+=("$name"); LEG_PHASE[$name]="$phase"; LEG_VERDICT[$name]="$verdict"
-  LEG_CMD[$name]="$*"; LEG_STATUS[$name]="PENDING"; LEG_START[$name]=""; LEG_END[$name]=""; LEG_RC[$name]=""; LEG_LINE[$name]=""
+  # %q-quoted so a path with a space survives the bash -c replay
+  LEG_CMD[$name]="$(printf '%q ' "$@")"; LEG_STATUS[$name]="PENDING"; LEG_START[$name]=""; LEG_END[$name]=""; LEG_RC[$name]=""; LEG_LINE[$name]=""
 }
 
 REQUIRED_ENGINE="$(python3 -c '
@@ -94,10 +95,17 @@ define_leg upshakeout group  "UPGRADE-SHAKEOUT PASSED"                  tests/e2
 define_leg genflip    group  "GEN-FLIP LIVE-HOLDER (PASSED|FAILED)"     tests/e2e/gen-flip-live-holder.sh
 define_leg shakeout   alone  "CANDIDATE SHAKEOUT (PASSED|FAILED)"                tests/e2e/migration-rehearsal/run.sh --artifacts "$ARTIFACTS" --shakeout
 
+ONLY_SKIPPED=0
 if [ -n "$ONLY" ]; then
+  # Every name must be a real leg: a typo would otherwise skip the whole
+  # gate group and still print PASSED (code-review-expert, T2 [24758]).
+  IFS=',' read -r -a _only_names <<< "$ONLY"
+  for name in "${_only_names[@]}"; do
+    [ -n "${LEG_PHASE[$name]:-}" ] || { echo "--only: unknown leg '$name' (legs: ${ORDER[*]})" >&2; exit 2; }
+  done
   keep=",$ONLY,"
   for leg in "${ORDER[@]}"; do
-    [[ "$keep" == *",$leg,"* ]] || [ "${LEG_PHASE[$leg]}" = serial ] || LEG_STATUS[$leg]="SKIPPED(--only)"
+    [[ "$keep" == *",$leg,"* ]] || [ "${LEG_PHASE[$leg]}" = serial ] || { LEG_STATUS[$leg]="SKIPPED(--only)"; ONLY_SKIPPED=$((ONLY_SKIPPED+1)); }
   done
 fi
 
@@ -117,6 +125,7 @@ finish_leg() {  # finish_leg <leg> <rc>
   line="$(sed -e 's/\x1b\[[0-9;]*m//g' "$LOGS/$leg.log" | grep -E "${LEG_VERDICT[$leg]}" | tail -1 || true)"
   LEG_LINE[$leg]="$line"
   if [ "$rc" -eq 0 ] && [ -n "$line" ] && [[ "$line" =~ PASSED|BUILT ]]; then LEG_STATUS[$leg]="PASSED"
+  elif [ "$rc" -eq 0 ] && [ -n "$line" ]; then LEG_STATUS[$leg]="FAILED"; line="(exit 0 but the verdict line says otherwise) $line"
   elif [ "$rc" -eq 0 ]; then LEG_STATUS[$leg]="MISSING"; line="(exit 0 but no verdict line matching /${LEG_VERDICT[$leg]}/ — not a pass)"
   else LEG_STATUS[$leg]="FAILED"; [ -n "$line" ] || line="(exit $rc, no verdict line; tail: $(tail -3 "$LOGS/$leg.log" | tr '\n' ' ' | cut -c1-200))"
   fi
@@ -203,5 +212,8 @@ if [ -n "$GROUP_T0" ]; then
   fi
 fi
 echo "battery wall: $(( BATTERY_T1 - BATTERY_T0 ))s"
-if [ "$RED" -eq 0 ]; then echo "RELEASE BATTERY PASSED"; exit 0; fi
+if [ "$RED" -eq 0 ]; then
+  if [ "$ONLY_SKIPPED" -gt 0 ]; then echo "RELEASE BATTERY PASSED (PARTIAL: $ONLY_SKIPPED leg(s) skipped by --only — not a release verdict)"; else echo "RELEASE BATTERY PASSED"; fi
+  exit 0
+fi
 echo "RELEASE BATTERY FAILED: $RED red leg(s)"; exit 1
