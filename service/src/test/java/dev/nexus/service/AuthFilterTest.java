@@ -11,12 +11,6 @@ import dev.nexus.service.db.TokenStore;
 import dev.nexus.service.http.AuthFilter;
 import dev.nexus.service.http.RequestContext;
 import org.testcontainers.containers.PostgreSQLContainer;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -100,19 +94,7 @@ class AuthFilterTest {
         pg = PgContainerHelper.start();
         // grants-nexus-svc.xml fail-fasts if the role is absent; create it first.
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN "
-                + "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN "
-                + "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' NOSUPERUSER NOBYPASSRLS; "
-                + "  END IF; "
-                + "END $$");
-        }
-        try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(), db).update(new Contexts());
+            PgContainerHelper.applyProductSchema(su);
         }
 
         // nexus-5j7pb: back the code-under-test with nexus_svc (NOSUPERUSER NOBYPASSRLS),
