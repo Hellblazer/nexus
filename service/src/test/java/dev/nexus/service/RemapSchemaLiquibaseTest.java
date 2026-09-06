@@ -1,5 +1,8 @@
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
+import org.jooq.DSLContext;
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -110,30 +113,26 @@ class RemapSchemaLiquibaseTest {
     @Test
     void remapTable_rlsEnabledForcedAndPolicyOnTenantGuc() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet cls = su.createStatement().executeQuery(
-                "SELECT relrowsecurity, relforcerowsecurity " +
-                "FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid " +
-                "WHERE n.nspname = 'nexus' AND c.relname = 'chash_remap'");
-            assertThat(cls.next()).as("nexus.chash_remap must exist in pg_class").isTrue();
-            assertThat(cls.getBoolean("relrowsecurity"))
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgCatalogProbes.RowSecurity cls = PgCatalogProbes.rowSecurity(ctx, "nexus", "chash_remap");
+            assertThat(cls).as("nexus.chash_remap must exist in pg_class").isNotNull();
+            assertThat(cls.enabled())
                 .as("RLS must be ENABLED").isTrue();
-            assertThat(cls.getBoolean("relforcerowsecurity"))
+            assertThat(cls.forced())
                 .as("RLS must be FORCED (owner is subject to policy too)").isTrue();
 
-            ResultSet pol = su.createStatement().executeQuery(
-                "SELECT policyname, qual, with_check FROM pg_policies " +
-                "WHERE schemaname = 'nexus' AND tablename = 'chash_remap'");
-            assertThat(pol.next()).as("a policy must exist on nexus.chash_remap").isTrue();
-            String qual = pol.getString("qual");
-            String withCheck = pol.getString("with_check");
+            List<PgCatalogProbes.Policy> policies = PgCatalogProbes.policies(ctx, "nexus", "chash_remap");
+            assertThat(policies).as("a policy must exist on nexus.chash_remap").isNotEmpty();
+            String qual = policies.get(0).qual();
+            String withCheck = policies.get(0).withCheck();
             assertThat(qual)
                 .as("USING predicate must read the nexus.tenant GUC")
                 .contains("current_setting('" + TenantConstants.GUC_NAME + "'");
             assertThat(withCheck)
                 .as("WITH CHECK predicate must read the nexus.tenant GUC")
                 .contains("current_setting('" + TenantConstants.GUC_NAME + "'");
-            assertThat(pol.next())
-                .as("exactly one policy expected on nexus.chash_remap").isFalse();
+            assertThat(policies)
+                .as("exactly one policy expected on nexus.chash_remap").hasSize(1);
         }
     }
 
@@ -226,15 +225,12 @@ class RemapSchemaLiquibaseTest {
     @Test
     void remapTable_reverseIndexExists() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT indexdef FROM pg_indexes " +
-                "WHERE schemaname = 'nexus' AND tablename = 'chash_remap' " +
-                "AND indexname = 'idx_chash_remap_new'");
-            assertThat(rs.next())
+            String def = PgCatalogProbes.indexDef(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "idx_chash_remap_new");
+            assertThat(def)
                 .as("reverse index idx_chash_remap_new must exist (mirrors SQLite; " +
                     "serves new_chash → old_id reverse lookups)")
-                .isTrue();
-            String def = rs.getString("indexdef");
+                .isNotNull();
             assertThat(def).contains("tenant_id", "new_chash");
         }
     }

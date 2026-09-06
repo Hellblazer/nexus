@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import dev.nexus.service.db.Chash;
 import liquibase.Contexts;
 import liquibase.LabelExpression;
@@ -208,14 +210,10 @@ class Rdr71gw2CollectionNotNullTest {
     }
 
     private static boolean collectionIsNotNull(Connection su) throws Exception {
-        try (Statement st = su.createStatement();
-             ResultSet rs = st.executeQuery(
-                 "SELECT attnotnull FROM pg_attribute "
-                 + "WHERE attrelid = 'nexus.catalog_document_chunks'::regclass "
-                 + "AND attname = 'collection'")) {
-            assertThat(rs.next()).as("collection column must exist").isTrue();
-            return rs.getBoolean(1);
-        }
+        Boolean attnotnull = PgCatalogProbes.columnNotNull(
+            DSL.using(su, SQLDialect.POSTGRES), "nexus", "catalog_document_chunks", "collection");
+        assertThat(attnotnull).as("collection column must exist").isNotNull();
+        return attnotnull;
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -535,13 +533,11 @@ class Rdr71gw2CollectionNotNullTest {
 
     @Test
     void theConvertedIndexCarriesNoPartialPredicate() throws Exception {
-        try (Connection su = pg.createConnection("");
-             Statement st = su.createStatement();
-             ResultSet rs = st.executeQuery(
-                 "SELECT indexdef FROM pg_indexes "
-                 + "WHERE schemaname = 'nexus' AND indexname = 'idx_catalog_chunks_collection'")) {
-            assertThat(rs.next()).as("the index must still exist post-conversion").isTrue();
-            assertThat(rs.getString(1))
+        try (Connection su = pg.createConnection("")) {
+            String indexdef = PgCatalogProbes.indexDef(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "idx_catalog_chunks_collection");
+            assertThat(indexdef).as("the index must still exist post-conversion").isNotNull();
+            assertThat(indexdef)
                 .as("the WHERE collection IS NOT NULL predicate is vacuous under NOT NULL and "
                     + "must be dropped, or the index risks degrading to a seq scan the moment a "
                     + "caller stops spelling the predicate out explicitly")

@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -286,15 +288,10 @@ class Taxonomy011ForeignOwnedDiagViewTest {
     }
 
     private static String columnUdtName(Connection c) throws Exception {
-        try (var ps = c.prepareStatement(
-            "SELECT udt_name FROM information_schema.columns "
-            + "WHERE table_schema = 'nexus' AND table_name = 'topic_assignments' "
-            + "AND column_name = 'doc_id'")) {
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getString(1);
-            }
-        }
+        PgCatalogProbes.ColumnInfo col = PgCatalogProbes.columnInfo(
+            DSL.using(c, SQLDialect.POSTGRES), "nexus", "topic_assignments", "doc_id");
+        assertThat(col).as("nexus.topic_assignments.doc_id must exist").isNotNull();
+        return col.udtName();
     }
 
     private static int count(Connection c, String sql) throws Exception {

@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
@@ -416,24 +418,17 @@ class CatalogPurgeTrashVacuumTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             String[] parts = qualifiedTable.split("\\.", 2);
-            su.createStatement().execute(
-                "SELECT pg_stat_reset_single_table_counters(c.oid) FROM pg_class c "
-                + "JOIN pg_namespace n ON n.oid = c.relnamespace "
-                + "WHERE n.nspname = '" + parts[0] + "' AND c.relname = '" + parts[1] + "'");
+            PgCatalogProbes.resetTableCounters(DSL.using(su, SQLDialect.POSTGRES), parts[0], parts[1]);
         }
     }
 
     private boolean lastVacuumIsRecent(String qualifiedTable) throws Exception {
         try (Connection su = pg.createConnection("")) {
             String[] parts = qualifiedTable.split("\\.", 2);
-            PreparedStatement ps = su.prepareStatement(
-                "SELECT last_vacuum, last_analyze FROM pg_stat_user_tables "
-                + "WHERE schemaname = ? AND relname = ?");
-            ps.setString(1, parts[0]);
-            ps.setString(2, parts[1]);
-            var rs = ps.executeQuery();
-            if (!rs.next()) return false;
-            return rs.getTimestamp("last_vacuum") != null && rs.getTimestamp("last_analyze") != null;
+            PgCatalogProbes.TableStats stats = PgCatalogProbes.tableStats(
+                DSL.using(su, SQLDialect.POSTGRES), parts[0], parts[1]);
+            if (stats == null) return false;
+            return stats.lastVacuum() != null && stats.lastAnalyze() != null;
         }
     }
 }

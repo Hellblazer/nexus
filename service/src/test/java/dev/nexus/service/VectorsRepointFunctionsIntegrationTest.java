@@ -1,5 +1,8 @@
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
+import org.jooq.DSLContext;
 import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.SchemaMigrator.MigrationException;
 import dev.nexus.service.db.TenantScope;
@@ -303,13 +306,11 @@ class VectorsRepointFunctionsIntegrationTest {
                 .doesNotThrowAnyException();
 
             try (Connection conn = rig.pg().createConnection("")) {
+                DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
                 for (String obj : new String[] {
                         "live_chunks", "collection_vector_stats"}) {
-                    try (var rs = conn.createStatement().executeQuery(
-                            "SELECT 1 FROM information_schema.views "
-                                + "WHERE table_schema='nexus' AND table_name='" + obj + "'")) {
-                        assertThat(rs.next()).as("view nexus.%s must exist", obj).isTrue();
-                    }
+                    assertThat(PgCatalogProbes.viewExists(ctx, "nexus", obj))
+                        .as("view nexus.%s must exist", obj).isTrue();
                 }
                 for (String fn : new String[] {
                         "search_metadata_scoped_384", "search_metadata_scoped_768", "search_metadata_scoped_1024",
@@ -325,11 +326,8 @@ class VectorsRepointFunctionsIntegrationTest {
                         "gc_quarantine_orphans", "gc_restore_rereferenced", "gc_expire_quarantine",
                         "purge_trash",
                         "assign_from_chashes_384", "assign_from_chashes_768", "assign_from_chashes_1024"}) {
-                    try (var rs = conn.createStatement().executeQuery(
-                            "SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
-                                + "WHERE n.nspname='nexus' AND p.proname='" + fn + "'")) {
-                        assertThat(rs.next()).as("function nexus.%s must exist", fn).isTrue();
-                    }
+                    assertThat(PgCatalogProbes.routineExists(ctx, "nexus", fn))
+                        .as("function nexus.%s must exist", fn).isTrue();
                 }
             }
         } finally {
@@ -446,17 +444,11 @@ class VectorsRepointFunctionsIntegrationTest {
             applyFullBatch(rig.adminDs());
 
             try (Connection conn = rig.pg().createConnection("")) {
-                try (var rs = conn.createStatement().executeQuery(
-                        "SELECT p.proname FROM pg_proc p "
-                            + "JOIN pg_namespace n ON n.oid = p.pronamespace "
-                            + "WHERE n.nspname = 'nexus' AND ("
-                            + "p.proname LIKE 'search_metadata_scoped_%' "
-                            + "OR p.proname LIKE 'search_topic_scoped_%' "
-                            + "OR p.proname LIKE 'search_graph_hop_%' "
-                            + "OR p.proname LIKE 'search_aspect_scoped_%') "
-                            + "ORDER BY p.proname")) {
-                    var names = new java.util.ArrayList<String>();
-                    while (rs.next()) names.add(rs.getString("proname"));
+                {
+                    var names = PgCatalogProbes.routineNamesLike(
+                        DSL.using(conn, SQLDialect.POSTGRES), "nexus",
+                        "search_metadata_scoped_%", "search_topic_scoped_%",
+                        "search_graph_hop_%", "search_aspect_scoped_%");
                     assertThat(names)
                         .as("the 12 combined-query facades (4 verbs x 3 dims) must "
                             + "number 12 post-RDR-156-Decision-5 — the original 9 "

@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
@@ -185,26 +187,14 @@ class GrantsPgMonitorTest {
     }
 
     private static boolean hasRoleMembership(Connection c, String role, String memberOf) throws Exception {
-        try (var ps = c.prepareStatement("SELECT pg_has_role(?, ?, 'member')")) {
-            ps.setString(1, role);
-            ps.setString(2, memberOf);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getBoolean(1);
-            }
-        }
+        return PgCatalogProbes.hasRole(DSL.using(c, SQLDialect.POSTGRES), role, memberOf);
     }
 
     /** nexus-v80f2: {@code rolinherit = false} for *role*. */
     private static boolean isNoinherit(Connection c, String role) throws Exception {
-        try (var ps = c.prepareStatement(
-            "SELECT NOT rolinherit FROM pg_roles WHERE rolname = ?")) {
-            ps.setString(1, role);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getBoolean(1);
-            }
-        }
+        PgCatalogProbes.RoleFlags flags = PgCatalogProbes.roleFlags(DSL.using(c, SQLDialect.POSTGRES), role);
+        assertThat(flags).as("role %s must exist in pg_roles", role).isNotNull();
+        return !flags.inherit();
     }
 
     private static void exec(Connection c, String sql) throws Exception {

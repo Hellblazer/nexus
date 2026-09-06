@@ -1,5 +1,7 @@
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.SchemaMigrator;
@@ -2475,18 +2477,12 @@ class SchemaUpgradeRehearsalIntegrationTest {
     }
 
     private static boolean constraintExists(Connection conn, String conname) throws Exception {
-        try (var ps = conn.prepareStatement("SELECT 1 FROM pg_constraint WHERE conname = ?")) {
-            ps.setString(1, conname);
-            return ps.executeQuery().next();
-        }
+        return PgCatalogProbes.constraintExists(DSL.using(conn, SQLDialect.POSTGRES), conname);
     }
 
     private static boolean constraintValidated(Connection conn, String conname) throws Exception {
-        try (var ps = conn.prepareStatement("SELECT convalidated FROM pg_constraint WHERE conname = ?")) {
-            ps.setString(1, conname);
-            ResultSet rs = ps.executeQuery();
-            return rs.next() && rs.getBoolean("convalidated");
-        }
+        return Boolean.TRUE.equals(
+            PgCatalogProbes.constraintValidated(DSL.using(conn, SQLDialect.POSTGRES), conname));
     }
 
     private static int count(Connection c, String sql) throws Exception {

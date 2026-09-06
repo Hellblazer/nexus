@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.SchemaMigrator;
@@ -1329,54 +1331,42 @@ class SchemaRollbackRoundTripIntegrationTest {
     /** information_schema shape check post-rollback: TEXT/INTEGER, NOT NULL/DEFAULT restored. */
     private static void assertColumnRestoredShape(Connection c, String table, String column,
             String expectedDataType, boolean expectNullable, boolean expectDefault) throws Exception {
-        try (PreparedStatement ps = c.prepareStatement(
-                "SELECT data_type, is_nullable, column_default FROM information_schema.columns "
-                    + "WHERE table_schema='nexus' AND table_name=? AND column_name=?")) {
-            ps.setString(1, table);
-            ps.setString(2, column);
-            try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next())
-                    .as("nexus.%s.%s must exist after rollback", table, column).isTrue();
-                assertThat(rs.getString("data_type"))
-                    .as("nexus.%s.%s data_type after rollback", table, column)
-                    .isEqualTo(expectedDataType);
-                assertThat(rs.getString("is_nullable"))
-                    .as("nexus.%s.%s is_nullable after rollback", table, column)
-                    .isEqualTo(expectNullable ? "YES" : "NO");
-                String columnDefault = rs.getString("column_default");
-                if (expectDefault) {
-                    assertThat(columnDefault)
-                        .as("nexus.%s.%s must have its pre-migration DEFAULT restored — a "
-                            + "rollback that DROPped DEFAULT but forgot to SET it again leaves "
-                            + "this NULL", table, column)
-                        .isNotNull();
-                } else {
-                    assertThat(columnDefault)
-                        .as("nexus.%s.%s must have NO default (it never carried one "
-                            + "pre-migration) — a stray SET DEFAULT here is itself a bug",
-                            table, column)
-                        .isNull();
-                }
-            }
+        PgCatalogProbes.ColumnInfo col = PgCatalogProbes.columnInfo(
+            DSL.using(c, SQLDialect.POSTGRES), "nexus", table, column);
+        assertThat(col)
+            .as("nexus.%s.%s must exist after rollback", table, column).isNotNull();
+        assertThat(col.dataType())
+            .as("nexus.%s.%s data_type after rollback", table, column)
+            .isEqualTo(expectedDataType);
+        assertThat(col.isNullable())
+            .as("nexus.%s.%s is_nullable after rollback", table, column)
+            .isEqualTo(expectNullable ? "YES" : "NO");
+        String columnDefault = col.columnDefault();
+        if (expectDefault) {
+            assertThat(columnDefault)
+                .as("nexus.%s.%s must have its pre-migration DEFAULT restored — a "
+                    + "rollback that DROPped DEFAULT but forgot to SET it again leaves "
+                    + "this NULL", table, column)
+                .isNotNull();
+        } else {
+            assertThat(columnDefault)
+                .as("nexus.%s.%s must have NO default (it never carried one "
+                    + "pre-migration) — a stray SET DEFAULT here is itself a bug",
+                    table, column)
+                .isNull();
         }
     }
 
     /** information_schema shape check post-reapply: jsonb/boolean/timestamptz restored. */
     private static void assertColumnForwardShape(Connection c, String table, String column,
             String expectedDataType) throws Exception {
-        try (PreparedStatement ps = c.prepareStatement(
-                "SELECT data_type FROM information_schema.columns "
-                    + "WHERE table_schema='nexus' AND table_name=? AND column_name=?")) {
-            ps.setString(1, table);
-            ps.setString(2, column);
-            try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next())
-                    .as("nexus.%s.%s must exist after forward re-apply", table, column).isTrue();
-                assertThat(rs.getString("data_type"))
-                    .as("nexus.%s.%s data_type after forward re-apply", table, column)
-                    .isEqualTo(expectedDataType);
-            }
-        }
+        PgCatalogProbes.ColumnInfo col = PgCatalogProbes.columnInfo(
+            DSL.using(c, SQLDialect.POSTGRES), "nexus", table, column);
+        assertThat(col)
+            .as("nexus.%s.%s must exist after forward re-apply", table, column).isNotNull();
+        assertThat(col.dataType())
+            .as("nexus.%s.%s data_type after forward re-apply", table, column)
+            .isEqualTo(expectedDataType);
     }
 
     /**

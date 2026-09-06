@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 package dev.nexus.service.db;
 
+import dev.nexus.service.PgCatalogProbes;
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
@@ -114,14 +117,8 @@ class BackendReaperIntegrationTest {
     }
 
     private int countBackends(String applicationName) throws SQLException {
-        try (Connection c = pg.createConnection("");
-             PreparedStatement ps = c.prepareStatement(
-                 "SELECT count(*) FROM pg_stat_activity WHERE application_name = ?")) {
-            ps.setString(1, applicationName);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getInt(1);
-            }
+        try (Connection c = pg.createConnection("")) {
+            return PgCatalogProbes.backendCount(DSL.using(c, SQLDialect.POSTGRES), applicationName);
         }
     }
 
@@ -129,15 +126,10 @@ class BackendReaperIntegrationTest {
     private int awaitActive(String applicationName) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
         while (System.nanoTime() < deadline) {
-            try (Connection c = pg.createConnection("");
-                 PreparedStatement ps = c.prepareStatement(
-                     "SELECT pid FROM pg_stat_activity WHERE application_name = ?"
-                     + " AND state = 'active'")) {
-                ps.setString(1, applicationName);
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (rs.next()) {
-                        return rs.getInt(1);
-                    }
+            try (Connection c = pg.createConnection("")) {
+                var pids = PgCatalogProbes.activeBackendPids(DSL.using(c, SQLDialect.POSTGRES), applicationName);
+                if (!pids.isEmpty()) {
+                    return pids.get(0);
                 }
             }
             Thread.sleep(50);
@@ -146,13 +138,8 @@ class BackendReaperIntegrationTest {
     }
 
     private boolean backendExists(int pid) throws SQLException {
-        try (Connection c = pg.createConnection("");
-             PreparedStatement ps = c.prepareStatement(
-                 "SELECT 1 FROM pg_stat_activity WHERE pid = ?")) {
-            ps.setInt(1, pid);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next();
-            }
+        try (Connection c = pg.createConnection("")) {
+            return PgCatalogProbes.backendExists(DSL.using(c, SQLDialect.POSTGRES), pid);
         }
     }
 

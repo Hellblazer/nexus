@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
@@ -92,19 +94,17 @@ class CatalogLinksTumblerFkTest {
     void bothFks_existValidatedNotDeferrable_onDeleteCascade_onUpdateCascade() throws Exception {
         try (Connection su = pg.createConnection("")) {
             for (String fkName : new String[]{FK_FROM, FK_TO}) {
-                ResultSet rs = su.createStatement().executeQuery(
-                    "SELECT convalidated, condeferrable, confupdtype, confdeltype "
-                    + "FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace "
-                    + "WHERE c.contype = 'f' AND c.conname = '" + fkName + "' AND n.nspname = 'nexus'");
-                assertThat(rs.next()).as(fkName + " must exist in pg_constraint").isTrue();
-                assertThat(rs.getBoolean("convalidated"))
+                PgCatalogProbes.Constraint rs = PgCatalogProbes.foreignKey(
+                    DSL.using(su, SQLDialect.POSTGRES), "nexus", fkName);
+                assertThat(rs).as(fkName + " must exist in pg_constraint").isNotNull();
+                assertThat(rs.convalidated())
                     .as(fkName + " must be VALIDATED (catalog-032-2/3 ran)").isTrue();
-                assertThat(rs.getBoolean("condeferrable"))
+                assertThat(rs.condeferrable())
                     .as(fkName + " must be a PLAIN (non-deferrable) FK — unlike fk_catalog_chunks_chunk, "
                         + "no call site needs to defer it (RDR-194 § D2)").isFalse();
-                assertThat(rs.getString("confupdtype"))
+                assertThat(rs.confupdtype())
                     .as(fkName + " ON UPDATE must be CASCADE ('c') — RDR-194 § D2 verbatim").isEqualTo("c");
-                assertThat(rs.getString("confdeltype"))
+                assertThat(rs.confdeltype())
                     .as(fkName + " ON DELETE must be CASCADE ('c') — RDR-194 § D2 verbatim").isEqualTo("c");
             }
         }

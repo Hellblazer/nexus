@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
 import org.junit.jupiter.api.*;
@@ -205,19 +207,15 @@ class SoftDeleteTest {
     void catalogDocuments_deletedAt_isTimestamptzNullable() throws Exception {
         // RED until P1.2 adds `deleted_at timestamptz NULL` to catalog_documents.
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT data_type, is_nullable " +
-                "FROM information_schema.columns " +
-                "WHERE table_schema = 'nexus' " +
-                "  AND table_name   = 'catalog_documents' " +
-                "  AND column_name  = 'deleted_at'");
-            assertThat(rs.next())
+            PgCatalogProbes.ColumnInfo rs = PgCatalogProbes.columnInfo(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "catalog_documents", "deleted_at");
+            assertThat(rs)
                 .as("catalog_documents.deleted_at column must exist (P1.2 adds `deleted_at timestamptz NULL`)")
-                .isTrue();
-            assertThat(rs.getString("data_type"))
+                .isNotNull();
+            assertThat(rs.dataType())
                 .as("catalog_documents.deleted_at must be 'timestamp with time zone'")
                 .isEqualTo("timestamp with time zone");
-            assertThat(rs.getString("is_nullable"))
+            assertThat(rs.isNullable())
                 .as("catalog_documents.deleted_at must be nullable (tombstone = set, live = NULL)")
                 .isEqualTo("YES");
         }
@@ -227,19 +225,15 @@ class SoftDeleteTest {
     void catalogLinks_deletedAt_isTimestamptzNullable() throws Exception {
         // RED until P1.2 adds `deleted_at timestamptz NULL` to catalog_links.
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT data_type, is_nullable " +
-                "FROM information_schema.columns " +
-                "WHERE table_schema = 'nexus' " +
-                "  AND table_name   = 'catalog_links' " +
-                "  AND column_name  = 'deleted_at'");
-            assertThat(rs.next())
+            PgCatalogProbes.ColumnInfo rs = PgCatalogProbes.columnInfo(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "catalog_links", "deleted_at");
+            assertThat(rs)
                 .as("catalog_links.deleted_at column must exist (P1.2 adds `deleted_at timestamptz NULL`)")
-                .isTrue();
-            assertThat(rs.getString("data_type"))
+                .isNotNull();
+            assertThat(rs.dataType())
                 .as("catalog_links.deleted_at must be 'timestamp with time zone'")
                 .isEqualTo("timestamp with time zone");
-            assertThat(rs.getString("is_nullable"))
+            assertThat(rs.isNullable())
                 .as("catalog_links.deleted_at must be nullable")
                 .isEqualTo("YES");
         }
@@ -662,16 +656,11 @@ class SoftDeleteTest {
 
         // (c) live_chunks must NOT expose a deleted_at column (consumers never see it)
         try (Connection su = pg.createConnection("")) {
-            ResultSet colRs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM information_schema.columns " +
-                "WHERE table_schema = 'nexus' " +
-                "  AND table_name   = 'live_chunks' " +
-                "  AND column_name  = 'deleted_at'");
-            colRs.next();
-            assertThat(colRs.getInt(1))
+            assertThat(PgCatalogProbes.columnExists(
+                    DSL.using(su, SQLDialect.POSTGRES), "nexus", "live_chunks", "deleted_at"))
                 .as("live_chunks view must NOT expose a deleted_at column " +
                     "(Decision 6: single enforcement point — consumers never see it)")
-                .isEqualTo(0);
+                .isFalse();
         }
     }
 

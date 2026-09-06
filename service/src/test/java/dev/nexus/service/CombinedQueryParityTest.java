@@ -455,13 +455,11 @@ class CombinedQueryParityTest {
         // declared signature: first arg is a `vector`, and the seven-arg shape is the
         // pinned contract catalog-006 must honor.
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT pg_catalog.pg_get_function_arguments(p.oid) AS args " +
-                "  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace " +
-                " WHERE n.nspname = 'nexus' AND p.proname = 'search_metadata_scoped_1024'");
-            assertThat(rs.next())
-                .as("nexus.search_metadata_scoped_1024 must exist (catalog-006)").isTrue();
-            String args = rs.getString("args");
+            PgCatalogProbes.RoutineSignature sig = PgCatalogProbes.routineSignature(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "search_metadata_scoped_1024");
+            assertThat(sig)
+                .as("nexus.search_metadata_scoped_1024 must exist (catalog-006)").isNotNull();
+            String args = sig.arguments();
             assertThat(args)
                 .as("query vector must be the FIRST argument, typed `vector` — never "
                     + "join-sourced (Finding 5a: a join-sourced vector forces a 340ms "
@@ -553,13 +551,11 @@ class CombinedQueryParityTest {
     @Test @Order(20)
     void topic_queryVectorIsFirstArgument_signaturePinned() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT pg_catalog.pg_get_function_arguments(p.oid) AS args " +
-                "  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace " +
-                " WHERE n.nspname = 'nexus' AND p.proname = 'search_topic_scoped_1024'");
-            assertThat(rs.next())
-                .as("nexus.search_topic_scoped_1024 must exist (catalog-006)").isTrue();
-            String args = rs.getString("args");
+            PgCatalogProbes.RoutineSignature sig = PgCatalogProbes.routineSignature(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "search_topic_scoped_1024");
+            assertThat(sig)
+                .as("nexus.search_topic_scoped_1024 must exist (catalog-006)").isNotNull();
+            String args = sig.arguments();
             assertThat(args)
                 .as("topic-scoped query vector must be the FIRST argument, typed `vector`")
                 .startsWith("p_query vector");
@@ -919,13 +915,11 @@ class CombinedQueryParityTest {
     @Test @Order(100)
     void aspect_queryVectorIsFirstArgument_signaturePinned() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT pg_catalog.pg_get_function_arguments(p.oid) AS args " +
-                "  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace " +
-                " WHERE n.nspname = 'nexus' AND p.proname = 'search_aspect_scoped_1024'");
-            assertThat(rs.next())
-                .as("nexus.search_aspect_scoped_1024 must exist (vectors-008)").isTrue();
-            String args = rs.getString("args");
+            PgCatalogProbes.RoutineSignature sig = PgCatalogProbes.routineSignature(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "search_aspect_scoped_1024");
+            assertThat(sig)
+                .as("nexus.search_aspect_scoped_1024 must exist (vectors-008)").isNotNull();
+            String args = sig.arguments();
             assertThat(args)
                 .as("aspect-scoped query vector must be the FIRST argument, typed `vector`")
                 .startsWith("p_query vector");

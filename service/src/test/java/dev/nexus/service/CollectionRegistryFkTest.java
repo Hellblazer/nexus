@@ -1,5 +1,7 @@
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
@@ -317,16 +319,12 @@ class CollectionRegistryFkTest {
     void allFiveCollectionFks_existAndAreValidated() throws Exception {
         try (Connection su = pg.createConnection("")) {
             for (String fkName : ALL_FIVE_FK_NAMES) {
-                ResultSet rs = su.createStatement().executeQuery(
-                    "SELECT convalidated FROM pg_constraint c " +
-                    "JOIN pg_namespace n ON n.oid = c.connamespace " +
-                    "WHERE c.contype = 'f' " +
-                    "  AND c.conname = '" + fkName + "' " +
-                    "  AND n.nspname = 'nexus'");
-                assertThat(rs.next())
+                PgCatalogProbes.Constraint rs = PgCatalogProbes.foreignKey(
+                    DSL.using(su, SQLDialect.POSTGRES), "nexus", fkName);
+                assertThat(rs)
                     .as("FK constraint " + fkName + " must exist in pg_constraint")
-                    .isTrue();
-                assertThat(rs.getBoolean("convalidated"))
+                    .isNotNull();
+                assertThat(rs.convalidated())
                     .as("FK constraint " + fkName + " must be VALIDATED (convalidated=true) after P0.3 VALIDATE runs")
                     .isTrue();
             }
@@ -799,16 +797,13 @@ class CollectionRegistryFkTest {
         // NULL rows -- hygiene-001-6 backfills them and makes the column
         // NOT NULL DEFAULT now() again, closing the gap P0.2 opened.
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT data_type, is_nullable " +
-                "FROM information_schema.columns " +
-                "WHERE table_schema='nexus' AND table_name='catalog_collections' " +
-                "  AND column_name='created_at'");
-            assertThat(rs.next()).as("created_at column must exist in catalog_collections").isTrue();
-            assertThat(rs.getString("data_type"))
+            PgCatalogProbes.ColumnInfo rs = PgCatalogProbes.columnInfo(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "catalog_collections", "created_at");
+            assertThat(rs).as("created_at column must exist in catalog_collections").isNotNull();
+            assertThat(rs.dataType())
                 .as("catalog_collections.created_at must be 'timestamp with time zone'")
                 .isEqualTo("timestamp with time zone");
-            assertThat(rs.getString("is_nullable"))
+            assertThat(rs.isNullable())
                 .as("catalog_collections.created_at is NOT NULL again after hygiene-001-6")
                 .isEqualTo("NO");
         }
@@ -818,16 +813,13 @@ class CollectionRegistryFkTest {
     void catalogCollections_supersededAt_isTimestamptzNullable() throws Exception {
         // RED until P0.2 hygiene changeset converts superseded_at to timestamptz NULL.
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT data_type, is_nullable " +
-                "FROM information_schema.columns " +
-                "WHERE table_schema='nexus' AND table_name='catalog_collections' " +
-                "  AND column_name='superseded_at'");
-            assertThat(rs.next()).as("superseded_at column must exist in catalog_collections").isTrue();
-            assertThat(rs.getString("data_type"))
+            PgCatalogProbes.ColumnInfo rs = PgCatalogProbes.columnInfo(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "catalog_collections", "superseded_at");
+            assertThat(rs).as("superseded_at column must exist in catalog_collections").isNotNull();
+            assertThat(rs.dataType())
                 .as("catalog_collections.superseded_at must be 'timestamp with time zone' after P0.2 hygiene")
                 .isEqualTo("timestamp with time zone");
-            assertThat(rs.getString("is_nullable"))
+            assertThat(rs.isNullable())
                 .as("catalog_collections.superseded_at must be nullable after P0.2 hygiene")
                 .isEqualTo("YES");
         }
@@ -889,14 +881,12 @@ class CollectionRegistryFkTest {
         // A blind ADD UNIQUE must fail this test — the revisit is conscious
         // (pending ghost dedup sweep per RDR-156 Decision 7 + audit record above).
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM pg_indexes " +
-                "WHERE schemaname = 'nexus' " +
-                "  AND tablename  = 'catalog_documents' " +
-                "  AND indexdef LIKE '%source_uri%' " +
-                "  AND indexdef NOT LIKE '%WHERE%'");  // exclude partial idx (source_uri != '') allowed
-            rs.next();
-            assertThat(rs.getInt(1))
+            // exclude partial idx (source_uri != '') allowed
+            long fullSourceUriIndexes = PgCatalogProbes.indexDefs(
+                    DSL.using(su, SQLDialect.POSTGRES), "nexus", "catalog_documents").stream()
+                .filter(def -> def.contains("source_uri") && !def.contains("WHERE"))
+                .count();
+            assertThat(fullSourceUriIndexes)
                 .as("no full unique index on (tenant_id, source_uri) must exist — DEFERRED pending ghost dedup; " +
                     "if this fails, a constraint was added without completing the dedup sweep " +
                     "(RDR-156 Decision 7, audit 2026-06-11 found 201 duplicated source_uris)")
@@ -1330,11 +1320,10 @@ class CollectionRegistryFkTest {
         // VALIDATE now SUCCEEDS and flips convalidated=true.
         su.createStatement().execute(
             "ALTER TABLE nexus." + table + " VALIDATE CONSTRAINT " + fkName);
-        ResultSet rs = su.createStatement().executeQuery(
-            "SELECT convalidated FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace " +
-            "WHERE c.contype='f' AND c.conname='" + fkName + "' AND n.nspname='nexus'");
-        assertThat(rs.next()).isTrue();
-        assertThat(rs.getBoolean("convalidated"))
+        PgCatalogProbes.Constraint rs = PgCatalogProbes.foreignKey(
+            DSL.using(su, SQLDialect.POSTGRES), "nexus", fkName);
+        assertThat(rs).isNotNull();
+        assertThat(rs.convalidated())
             .as(table + ": VALIDATE succeeds after reconcile → convalidated=true").isTrue();
     }
 

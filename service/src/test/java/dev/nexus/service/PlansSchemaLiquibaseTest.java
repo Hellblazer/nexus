@@ -1,5 +1,8 @@
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
+import org.jooq.DSLContext;
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -105,24 +108,20 @@ class PlansSchemaLiquibaseTest {
     @Test
     void plansTable_rlsEnabledAndForced() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet cls = su.createStatement().executeQuery(
-                "SELECT relrowsecurity, relforcerowsecurity " +
-                "FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid " +
-                "WHERE n.nspname = 'nexus' AND c.relname = 'plans'");
-            assertThat(cls.next()).as("nexus.plans must exist in pg_class").isTrue();
-            assertThat(cls.getBoolean("relrowsecurity"))
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgCatalogProbes.RowSecurity cls = PgCatalogProbes.rowSecurity(ctx, "nexus", "plans");
+            assertThat(cls).as("nexus.plans must exist in pg_class").isNotNull();
+            assertThat(cls.enabled())
                 .as("relrowsecurity must be true (ENABLE ROW LEVEL SECURITY)").isTrue();
-            assertThat(cls.getBoolean("relforcerowsecurity"))
+            assertThat(cls.forced())
                 .as("relforcerowsecurity must be true (FORCE ROW LEVEL SECURITY)").isTrue();
 
-            ResultSet pol = su.createStatement().executeQuery(
-                "SELECT policyname, cmd, qual, with_check " +
-                "FROM pg_policies " +
-                "WHERE schemaname = 'nexus' AND tablename = 'plans'");
-            assertThat(pol.next()).as("at least one RLS policy must exist on nexus.plans").isTrue();
-            String polcmd    = pol.getString("cmd");
-            String qual      = pol.getString("qual");
-            String withCheck = pol.getString("with_check");
+            java.util.List<PgCatalogProbes.Policy> policies = PgCatalogProbes.policies(ctx, "nexus", "plans");
+            assertThat(policies).as("at least one RLS policy must exist on nexus.plans").isNotEmpty();
+            PgCatalogProbes.Policy pol = policies.get(0);
+            String polcmd    = pol.cmd();
+            String qual      = pol.qual();
+            String withCheck = pol.withCheck();
             assertThat(polcmd).as("policy must cover ALL commands").isEqualTo("ALL");
             assertThat(qual)
                 .as("USING expression must reference tenant_id GUC check")
@@ -148,49 +147,24 @@ class PlansSchemaLiquibaseTest {
     @Test
     void plansTable_ftsColumnAndIndexExist_tokenisationCorrect() throws Exception {
         try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // fts_vector column: exists and is a STORED generated tsvector
-            ResultSet gen = su.createStatement().executeQuery(
-                "SELECT a.attname, a.attgenerated, " +
-                "       pg_catalog.format_type(a.atttypid, a.atttypmod) AS col_type " +
-                "FROM pg_attribute a " +
-                "JOIN pg_class c ON c.oid = a.attrelid " +
-                "JOIN pg_namespace n ON n.oid = c.relnamespace " +
-                "WHERE n.nspname = 'nexus' AND c.relname = 'plans' " +
-                "  AND a.attname = 'fts_vector' AND a.attnum > 0 AND NOT a.attisdropped");
-            assertThat(gen.next()).as("fts_vector column must exist on nexus.plans").isTrue();
-            assertThat(gen.getString("col_type"))
+            PgCatalogProbes.GeneratedColumn gen =
+                PgCatalogProbes.generatedColumn(ctx, "nexus", "plans", "fts_vector");
+            assertThat(gen).as("fts_vector column must exist on nexus.plans").isNotNull();
+            assertThat(gen.colType())
                 .as("fts_vector must be tsvector type").isEqualTo("tsvector");
-            assertThat(gen.getString("attgenerated"))
+            assertThat(gen.attgenerated())
                 .as("fts_vector must be a STORED generated column (attgenerated='s')")
                 .isEqualTo("s");
 
             // GIN index on fts_vector
-            ResultSet idx = su.createStatement().executeQuery(
-                "SELECT i.relname AS index_name, am.amname AS index_type, " +
-                "       a.attname AS col_name " +
-                "FROM pg_index ix " +
-                "JOIN pg_class c  ON c.oid = ix.indrelid " +
-                "JOIN pg_class i  ON i.oid = ix.indexrelid " +
-                "JOIN pg_namespace n ON n.oid = c.relnamespace " +
-                "JOIN pg_am am ON am.oid = i.relam " +
-                "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(ix.indkey) " +
-                "WHERE n.nspname = 'nexus' AND c.relname = 'plans' " +
-                "  AND am.amname = 'gin' AND a.attname = 'fts_vector'");
-            assertThat(idx.next()).as("GIN index on fts_vector must exist on nexus.plans").isTrue();
-            assertThat(idx.getString("index_type"))
-                .as("index type must be GIN").isEqualTo("gin");
+            assertThat(PgCatalogProbes.indexCountOnColumn(ctx, "nexus", "plans", "gin", "fts_vector"))
+                .as("GIN index on fts_vector must exist on nexus.plans").isPositive();
 
             // Inspect generated column expression for tokenisation configs.
-            ResultSet expr = su.createStatement().executeQuery(
-                "SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS col_expr " +
-                "FROM pg_attrdef d " +
-                "JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum " +
-                "JOIN pg_class c ON c.oid = d.adrelid " +
-                "JOIN pg_namespace n ON n.oid = c.relnamespace " +
-                "WHERE n.nspname = 'nexus' AND c.relname = 'plans' " +
-                "  AND a.attname = 'fts_vector'");
-            assertThat(expr.next()).as("pg_attrdef must have entry for plans.fts_vector").isTrue();
-            String colExpr = expr.getString("col_expr");
+            String colExpr = PgCatalogProbes.columnExpression(ctx, "nexus", "plans", "fts_vector");
+            assertThat(colExpr).as("pg_attrdef must have entry for plans.fts_vector").isNotNull();
             assertThat(colExpr)
                 .as("generated expression must use 'english' config for match_text column (prose)")
                 .contains("english");
@@ -351,12 +325,11 @@ class PlansSchemaLiquibaseTest {
     @Test
     void serviceRole_notSuperuserNotBypassRls() {
         tenantScope.withTenant("test-tenant", ctx -> {
-            var row = ctx.fetchOne(
-                "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user");
+            PgCatalogProbes.RoleFlags row = PgCatalogProbes.currentRoleFlags(ctx);
             assertThat(row).as("pg_roles row for current_user must exist").isNotNull();
-            assertThat(row.get("rolsuper", Boolean.class))
+            assertThat(row.superuser())
                 .as("service role must NOT be superuser").isFalse();
-            assertThat(row.get("rolbypassrls", Boolean.class))
+            assertThat(row.bypassRls())
                 .as("service role must NOT have BYPASSRLS").isFalse();
             return null;
         });

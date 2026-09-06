@@ -1,5 +1,7 @@
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
@@ -47,20 +49,9 @@ class Rdr194P4ColumnCommentsIntegrationTest {
     void everyDeliberatelyLooseEdgeColumn_hasANonEmptyReasonComment() throws Exception {
         try (PostgreSQLContainer<?> pg = PgContainerHelper.start()) {
 
+            // role-001 (the master changelog's first include) creates nexus_svc.
             try (Connection su = pg.createConnection("")) {
-                su.createStatement().execute(
-                    "DO $$ BEGIN " +
-                    "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
-                    "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; " +
-                    "  END IF; " +
-                    "END $$");
-
-                Database db = DatabaseFactory.getInstance()
-                    .findCorrectDatabaseImplementation(new JdbcConnection(su));
-                Liquibase lb = new Liquibase(
-                    "db/changelog/db.changelog-master.xml",
-                    new ClassLoaderResourceAccessor(), db);
-                lb.update(new Contexts());
+                PgContainerHelper.applyProductSchema(su);
             }
 
             try (Connection c = pg.createConnection("")) {
@@ -109,17 +100,11 @@ class Rdr194P4ColumnCommentsIntegrationTest {
 
     private static void assertColumnComment(
             Connection c, String table, String column, String... mustContain) throws Exception {
-        ResultSet rs = c.createStatement().executeQuery(
-            "SELECT pgd.description FROM pg_description pgd " +
-            "JOIN pg_class cl ON cl.oid = pgd.objoid " +
-            "JOIN pg_namespace n ON n.oid = cl.relnamespace " +
-            "JOIN pg_attribute a ON a.attrelid = cl.oid AND a.attnum = pgd.objsubid " +
-            "WHERE n.nspname = 'nexus' AND cl.relname = '" + table + "' " +
-            "AND a.attname = '" + column + "'");
-        assertThat(rs.next())
+        String description = PgCatalogProbes.columnComment(
+            DSL.using(c, SQLDialect.POSTGRES), "nexus", table, column);
+        assertThat(description)
             .as("nexus.%s.%s must carry a COMMENT ON COLUMN (RDR-194 P4)", table, column)
-            .isTrue();
-        String description = rs.getString("description");
+            .isNotNull();
         assertThat(description)
             .as("nexus.%s.%s comment must be non-empty", table, column)
             .isNotBlank();

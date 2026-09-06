@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
 import org.junit.jupiter.api.*;
@@ -309,13 +311,9 @@ class ManifestFunctionsTest {
         // RED until catalog-004 creates the functions.
         try (Connection su = pg.createConnection("")) {
             for (String fn : List.of("document_text")) {
-                ResultSet rs = su.createStatement().executeQuery(
-                    "SELECT count(*) FROM information_schema.routines " +
-                    "WHERE routine_schema = 'nexus' AND routine_name = '" + fn + "'");
-                rs.next();
-                assertThat(rs.getLong(1))
+                assertThat(PgCatalogProbes.routineExists(DSL.using(su, SQLDialect.POSTGRES), "nexus", fn))
                     .as("function nexus." + fn + " must exist in the nexus schema (catalog-004)")
-                    .isGreaterThanOrEqualTo(1L);
+                    .isTrue();
             }
         }
     }
@@ -326,15 +324,12 @@ class ManifestFunctionsTest {
         try (Connection su = pg.createConnection("")) {
             // pg_proc.prosecdef = true means SECURITY DEFINER; false means SECURITY INVOKER
             for (String fn : List.of("document_text")) {
-                ResultSet rs = su.createStatement().executeQuery(
-                    "SELECT prosecdef FROM pg_proc p " +
-                    "JOIN pg_namespace n ON n.oid = p.pronamespace " +
-                    "WHERE n.nspname = 'nexus' AND p.proname = '" + fn + "' " +
-                    "LIMIT 1");
-                assertThat(rs.next())
+                Boolean prosecdef = PgCatalogProbes.routineSecurityDefiner(
+                    DSL.using(su, SQLDialect.POSTGRES), "nexus", fn);
+                assertThat(prosecdef)
                     .as("function nexus." + fn + " must exist (catalog-004)")
-                    .isTrue();
-                assertThat(rs.getBoolean("prosecdef"))
+                    .isNotNull();
+                assertThat(prosecdef)
                     .as("nexus." + fn + " must be SECURITY INVOKER (prosecdef=false), not SECURITY DEFINER")
                     .isFalse();
             }

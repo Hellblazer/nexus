@@ -1,5 +1,8 @@
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
+import org.jooq.DSLContext;
 import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.SchemaMigrator.MigrationException;
 import liquibase.Contexts;
@@ -253,29 +256,24 @@ class VectorsUnifyChunksIntegrationTest {
     }
 
     private static boolean tableExists(Connection conn, String schema, String table) throws Exception {
-        try (var ps = conn.prepareStatement(
-                "SELECT 1 FROM information_schema.tables WHERE table_schema = ? AND table_name = ?")) {
-            ps.setString(1, schema);
-            ps.setString(2, table);
-            var rs = ps.executeQuery();
-            return rs.next();
-        }
+        return PgCatalogProbes.tableExists(DSL.using(conn, SQLDialect.POSTGRES), schema, table);
     }
 
     private static boolean constraintExists(Connection conn, String conname) throws Exception {
-        try (var ps = conn.prepareStatement("SELECT 1 FROM pg_constraint WHERE conname = ?")) {
-            ps.setString(1, conname);
-            return ps.executeQuery().next();
-        }
+        return PgCatalogProbes.constraintExists(DSL.using(conn, SQLDialect.POSTGRES), conname);
     }
 
     private static boolean constraintValidated(Connection conn, String conname) throws Exception {
-        try (var ps = conn.prepareStatement(
-                "SELECT convalidated FROM pg_constraint WHERE conname = ?")) {
-            ps.setString(1, conname);
-            var rs = ps.executeQuery();
-            return rs.next() && rs.getBoolean("convalidated");
-        }
+        return Boolean.TRUE.equals(
+            PgCatalogProbes.constraintValidated(DSL.using(conn, SQLDialect.POSTGRES), conname));
+    }
+
+    private static void assertRlsEnabledAndForced(Connection conn, String table) {
+        PgCatalogProbes.RowSecurity rls = PgCatalogProbes.rowSecurity(
+            DSL.using(conn, SQLDialect.POSTGRES), "nexus", table);
+        assertThat(rls).as("nexus.%s must exist in pg_class", table).isNotNull();
+        assertThat(rls.enabled()).isTrue();
+        assertThat(rls.forced()).isTrue();
     }
 
     private static String changesetExecType(Connection conn, String id, String author, String filename)
@@ -335,18 +333,10 @@ class VectorsUnifyChunksIntegrationTest {
                     .isFalse();
 
                 // RLS.
-                try (var rs = conn.createStatement().executeQuery(
-                        "SELECT relrowsecurity, relforcerowsecurity FROM pg_class "
-                            + "WHERE relnamespace = 'nexus'::regnamespace AND relname = 'chunks'")) {
-                    assertThat(rs.next()).isTrue();
-                    assertThat(rs.getBoolean("relrowsecurity")).isTrue();
-                    assertThat(rs.getBoolean("relforcerowsecurity")).isTrue();
-                }
-                try (var rs = conn.createStatement().executeQuery(
-                        "SELECT 1 FROM pg_policies WHERE schemaname = 'nexus' AND tablename = 'chunks' "
-                            + "AND policyname = 'tenant_isolation'")) {
-                    assertThat(rs.next()).as("tenant_isolation policy must exist on nexus.chunks").isTrue();
-                }
+                assertRlsEnabledAndForced(conn, "chunks");
+                assertThat(PgCatalogProbes.policyExists(DSL.using(conn, SQLDialect.POSTGRES),
+                        "nexus", "chunks", "tenant_isolation"))
+                    .as("tenant_isolation policy must exist on nexus.chunks").isTrue();
 
                 // Idempotency: a second apply of the SAME changeset must be a no-op.
                 assertThatCode(() -> applyUnifyChangeset(rig.adminDs()))
@@ -430,13 +420,9 @@ class VectorsUnifyChunksIntegrationTest {
                 // even though those shards contributed zero rows.
                 for (String idx : new String[] {
                         "idx_chunks_embedding_384", "idx_chunks_embedding_768", "idx_chunks_embedding_1024"}) {
-                    try (var ps = conn.prepareStatement(
-                            "SELECT 1 FROM pg_indexes WHERE schemaname = 'nexus' AND indexname = ?")) {
-                        ps.setString(1, idx);
-                        assertThat(ps.executeQuery().next())
-                            .as("%s must exist unconditionally even at zero population (F13/C4)", idx)
-                            .isTrue();
-                    }
+                    assertThat(PgCatalogProbes.indexExists(DSL.using(conn, SQLDialect.POSTGRES), "nexus", idx))
+                        .as("%s must exist unconditionally even at zero population (F13/C4)", idx)
+                        .isTrue();
                 }
             }
         } finally {
@@ -594,21 +580,14 @@ class VectorsUnifyChunksIntegrationTest {
             try (Connection conn = rig.pg().createConnection("")) {
                 for (String idx : new String[] {
                         "idx_chunks_embedding_384", "idx_chunks_embedding_768", "idx_chunks_embedding_1024"}) {
-                    try (var ps = conn.prepareStatement(
-                            "SELECT pg_get_indexdef(indexrelid), amname FROM pg_index i "
-                                + "JOIN pg_class c ON c.oid = i.indexrelid "
-                                + "JOIN pg_am am ON am.oid = c.relam "
-                                + "WHERE c.relname = ?")) {
-                        ps.setString(1, idx);
-                        var rs = ps.executeQuery();
-                        assertThat(rs.next()).as("%s must exist", idx).isTrue();
-                        String def = rs.getString(1);
-                        assertThat(rs.getString("amname")).isEqualTo("hnsw");
-                        assertThat(def.toUpperCase())
-                            .as("%s must carry NO WHERE ... IS NOT NULL predicate (F13: partial "
-                                + "buys 0.11%% size and costs a silent ~250x seq-scan)", idx)
-                            .doesNotContain("WHERE");
-                    }
+                    PgCatalogProbes.IndexShape shape = PgCatalogProbes.indexShape(
+                        DSL.using(conn, SQLDialect.POSTGRES), idx);
+                    assertThat(shape).as("%s must exist", idx).isNotNull();
+                    assertThat(shape.amname()).isEqualTo("hnsw");
+                    assertThat(shape.indexdef().toUpperCase())
+                        .as("%s must carry NO WHERE ... IS NOT NULL predicate (F13: partial "
+                            + "buys 0.11%% size and costs a silent ~250x seq-scan)", idx)
+                        .doesNotContain("WHERE");
                 }
             }
         } finally {
@@ -670,15 +649,7 @@ class VectorsUnifyChunksIntegrationTest {
                         .as("the fk-002 collection FK must be restored AND validated")
                         .isTrue();
 
-                    try (var ps = conn.prepareStatement(
-                            "SELECT relrowsecurity, relforcerowsecurity FROM pg_class "
-                                + "WHERE relnamespace = 'nexus'::regnamespace AND relname = ?")) {
-                        ps.setString(1, "chunks_" + dim);
-                        var rs = ps.executeQuery();
-                        assertThat(rs.next()).isTrue();
-                        assertThat(rs.getBoolean("relrowsecurity")).isTrue();
-                        assertThat(rs.getBoolean("relforcerowsecurity")).isTrue();
-                    }
+                    assertRlsEnabledAndForced(conn, "chunks_" + dim);
                 }
 
                 // Re-apply must succeed cleanly (the round-trip's other half).

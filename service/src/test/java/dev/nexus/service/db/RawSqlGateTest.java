@@ -696,6 +696,23 @@ class RawSqlGateTest {
      * their count is now zero (40 call sites across 5 files total), and any
      * raw SQL reappearing in them fails loud as a file the ratchet has never
      * seen.
+     *
+     * <p>Batch 7 (by SHAPE, not by file): every {@code information_schema.*}
+     * and {@code pg_catalog} / {@code pg_*} READ across the tree (120 call
+     * sites, 37 files) onto the shared {@code PgCatalogProbes} helper (typed
+     * {@code DSL.table(DSL.name(...))}/{@code DSL.field(DSL.name(...), Class)}
+     * over the catalog views, {@code Meta} for table existence), plus the
+     * {@code DO $$ CREATE ROLE nexus_svc}-then-hand-rolled-Liquibase pairs in
+     * the files touched onto {@code PgContainerHelper.applyProductSchema}
+     * (role-001 creates the role). Kept raw by decision: the pgjdbc
+     * plan-cache probe in {@code PgSessionStatementTimeoutIntegrationTest}
+     * (the test IS about reusing one JDBC PreparedStatement 8x, which jOOQ
+     * cannot express), {@code SchemaMigratorIntegrationTest}'s bespoke
+     * admin/svc role bootstrap and the {@code DO $$ ... LOOP} DDL blocks in
+     * {@code SharedCluster}/{@code Taxonomy011ForeignOwnedDiagViewTest}
+     * (role/ownership DDL, not reads), and the ~40 single-site {@code DO $$
+     * CREATE ROLE nexus_svc} bootstraps in files with no other catalog read
+     * (a role-bootstrap shape, the next by-shape pass).
      */
     private static final Map<String, Integer> TEST_TREE_RAW_SQL_CEILING = Map.ofEntries(
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 8),
@@ -716,11 +733,11 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/CatalogHandlerDeleteTest.java", 2),
         Map.entry("dev/nexus/service/CatalogHandlerManifestEnvelopeTest.java", 2),
         Map.entry("dev/nexus/service/CatalogHandlerRenameTest.java", 11),
-        Map.entry("dev/nexus/service/CatalogLinksTumblerFkTest.java", 3),
+        Map.entry("dev/nexus/service/CatalogLinksTumblerFkTest.java", 2),
         Map.entry("dev/nexus/service/CatalogManifestSweepRepositoryTest.java", 24),
         Map.entry("dev/nexus/service/CatalogPurgeTrashPopulationParityTest.java", 8),
         Map.entry("dev/nexus/service/CatalogPurgeTrashTest.java", 14),
-        Map.entry("dev/nexus/service/CatalogPurgeTrashVacuumTest.java", 9),
+        Map.entry("dev/nexus/service/CatalogPurgeTrashVacuumTest.java", 7),
         Map.entry("dev/nexus/service/CatalogRenameCollectionTest.java", 2),
         Map.entry("dev/nexus/service/CatalogRepositoryTest.java", 6),
         Map.entry("dev/nexus/service/ChashConformanceReportIntegrationTest.java", 7),
@@ -729,28 +746,28 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/ChashRepositoryTest.java", 8),
         Map.entry("dev/nexus/service/ChashVectorConcurrencyTest.java", 3),
         Map.entry("dev/nexus/service/ChunksRlsBehavioralTest.java", 12),
-        Map.entry("dev/nexus/service/CollectionRegistryFkExtraTest.java", 35),
-        Map.entry("dev/nexus/service/CollectionRegistryFkTest.java", 65),
-        Map.entry("dev/nexus/service/CollectionVectorStatsTest.java", 20),
+        Map.entry("dev/nexus/service/CollectionRegistryFkExtraTest.java", 32),
+        Map.entry("dev/nexus/service/CollectionRegistryFkTest.java", 60),
+        Map.entry("dev/nexus/service/CollectionVectorStatsTest.java", 18),
         Map.entry("dev/nexus/service/CombinedQueryParityIntegrationTest.java", 6),
-        Map.entry("dev/nexus/service/CombinedQueryParityTest.java", 23),
+        Map.entry("dev/nexus/service/CombinedQueryParityTest.java", 20),
         Map.entry("dev/nexus/service/CombinedWriteRepositoryTest.java", 6),
         Map.entry("dev/nexus/service/DataTokenHandlerTest.java", 4),
         Map.entry("dev/nexus/service/DenseGateScanBudgetIntegrationTest.java", 8),
-        Map.entry("dev/nexus/service/ForeignKeyConstraintTest.java", 56),
+        Map.entry("dev/nexus/service/ForeignKeyConstraintTest.java", 53),
         Map.entry("dev/nexus/service/GrantsNexusDiagViewAccessIntegrationTest.java", 1),
-        Map.entry("dev/nexus/service/GrantsPgMonitorTest.java", 6),
+        Map.entry("dev/nexus/service/GrantsPgMonitorTest.java", 4),
         Map.entry("dev/nexus/service/GrantsSvcForeignOwnedRelationTest.java", 2),
         Map.entry("dev/nexus/service/GraphHopParityIntegrationTest.java", 9),
         Map.entry("dev/nexus/service/GraphHopParityTest.java", 16),
-        Map.entry("dev/nexus/service/HybridSearchFunctionParityIntegrationTest.java", 9),
+        Map.entry("dev/nexus/service/HybridSearchFunctionParityIntegrationTest.java", 7),
         Map.entry("dev/nexus/service/HybridSelectiveGateTest.java", 2),
         Map.entry("dev/nexus/service/Hygiene001NotNullMigrationRlsTest.java", 29),
-        Map.entry("dev/nexus/service/ManifestChunkFkTest.java", 13),
+        Map.entry("dev/nexus/service/ManifestChunkFkTest.java", 12),
         Map.entry("dev/nexus/service/ManifestCollectionStampTest.java", 11),
-        Map.entry("dev/nexus/service/ManifestFunctionsTest.java", 17),
-        Map.entry("dev/nexus/service/ManifestVerifyTest.java", 17),
-        Map.entry("dev/nexus/service/MemorySchemaLiquibaseTest.java", 19),
+        Map.entry("dev/nexus/service/ManifestFunctionsTest.java", 15),
+        Map.entry("dev/nexus/service/ManifestVerifyTest.java", 14),
+        Map.entry("dev/nexus/service/MemorySchemaLiquibaseTest.java", 13),
         Map.entry("dev/nexus/service/MigrationJobsDroppedTest.java", 1),
         Map.entry("dev/nexus/service/NextSeqSelfHealingTest.java", 1),
         Map.entry("dev/nexus/service/NextSeqSweepTest.java", 1),
@@ -767,36 +784,35 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/PipelineHandlerTest.java", 1),
         Map.entry("dev/nexus/service/PlainSearchTextGatedSearchExplainTest.java", 1),
         Map.entry("dev/nexus/service/PlanRepositoryTest.java", 2),
-        Map.entry("dev/nexus/service/PlansSchemaLiquibaseTest.java", 19),
-        Map.entry("dev/nexus/service/Rdr194P4ColumnCommentsIntegrationTest.java", 2),
-        Map.entry("dev/nexus/service/Rdr71gw2CollectionNotNullTest.java", 23),
+        Map.entry("dev/nexus/service/PlansSchemaLiquibaseTest.java", 13),
+        Map.entry("dev/nexus/service/Rdr71gw2CollectionNotNullTest.java", 21),
         Map.entry("dev/nexus/service/RdrO8dil7GlobalManifestAntiJoinTest.java", 30),
-        Map.entry("dev/nexus/service/ReadShapeViewsTest.java", 33),
+        Map.entry("dev/nexus/service/ReadShapeViewsTest.java", 32),
         Map.entry("dev/nexus/service/ReferenceOnlyChunkUpsertTest.java", 1),
         Map.entry("dev/nexus/service/RemapHandlerTest.java", 5),
-        Map.entry("dev/nexus/service/RemapSchemaLiquibaseTest.java", 13),
+        Map.entry("dev/nexus/service/RemapSchemaLiquibaseTest.java", 10),
         Map.entry("dev/nexus/service/RerankStageIntegrationTest.java", 3),
         Map.entry("dev/nexus/service/SchemaMigratorDateExecutedUtcTest.java", 2),
-        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 91),
-        Map.entry("dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java", 31),
-        Map.entry("dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java", 38),
+        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 85),
+        Map.entry("dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java", 29),
+        Map.entry("dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java", 36),
         Map.entry("dev/nexus/service/ScratchHandlerTest.java", 4),
         Map.entry("dev/nexus/service/ScratchRepositoryTest.java", 3),
-        Map.entry("dev/nexus/service/ScratchSchemaLiquibaseTest.java", 18),
-        Map.entry("dev/nexus/service/ServiceIntegrationTest.java", 21),
-        Map.entry("dev/nexus/service/ServiceTokenSchemaLiquibaseTest.java", 20),
+        Map.entry("dev/nexus/service/ScratchSchemaLiquibaseTest.java", 11),
+        Map.entry("dev/nexus/service/ServiceIntegrationTest.java", 20),
+        Map.entry("dev/nexus/service/ServiceTokenSchemaLiquibaseTest.java", 16),
         Map.entry("dev/nexus/service/ServiceTokenScopeBackfillTest.java", 6),
         Map.entry("dev/nexus/service/SessionTokenHandlerTest.java", 6),
         Map.entry("dev/nexus/service/SharedCluster.java", 3),
         Map.entry("dev/nexus/service/SharedClusterMutationFalsifyTest.java", 4),
-        Map.entry("dev/nexus/service/SharedDatabaseHandle.java", 2),
-        Map.entry("dev/nexus/service/SoftDeleteTest.java", 45),
+        Map.entry("dev/nexus/service/SharedDatabaseHandle.java", 1),
+        Map.entry("dev/nexus/service/SoftDeleteTest.java", 42),
         Map.entry("dev/nexus/service/StagingHandlerJourneyTest.java", 7),
         Map.entry("dev/nexus/service/StagingPromoteFrecencyTtlCheckRegressionTest.java", 6),
         Map.entry("dev/nexus/service/StagingPromoteOpsIntegrationTest.java", 47),
-        Map.entry("dev/nexus/service/StagingSchemaLiquibaseTest.java", 16),
+        Map.entry("dev/nexus/service/StagingSchemaLiquibaseTest.java", 11),
         Map.entry("dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java", 10),
-        Map.entry("dev/nexus/service/Taxonomy011ForeignOwnedDiagViewTest.java", 12),
+        Map.entry("dev/nexus/service/Taxonomy011ForeignOwnedDiagViewTest.java", 11),
         Map.entry("dev/nexus/service/Taxonomy014TenantFkRepointTest.java", 8),
         Map.entry("dev/nexus/service/TaxonomyAssignFromChashesRepositoryTest.java", 5),
         Map.entry("dev/nexus/service/TaxonomyCentroidAnnPlanShapeTest.java", 12),
@@ -804,7 +820,7 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/TaxonomyPersistHandlerTest.java", 3),
         Map.entry("dev/nexus/service/TaxonomyRepositoryTest.java", 8),
         Map.entry("dev/nexus/service/TelemetryRepositoryTest.java", 15),
-        Map.entry("dev/nexus/service/TelemetrySchemaLiquibaseTest.java", 11),
+        Map.entry("dev/nexus/service/TelemetrySchemaLiquibaseTest.java", 3),
         Map.entry("dev/nexus/service/TenantPoolingIsolationTest.java", 3),
         Map.entry("dev/nexus/service/Tk070P6aTtlDaysCountedDeleteTest.java", 8),
         Map.entry("dev/nexus/service/Tk070P6bTtlDaysCountedUpdateTest.java", 7),
@@ -814,7 +830,7 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/TokenStoreDataTokenSweepTest.java", 4),
         Map.entry("dev/nexus/service/TokenStoreSessionSweepTest.java", 3),
         Map.entry("dev/nexus/service/TopicsDocCountDeadlockConcurrencyTest.java", 8),
-        Map.entry("dev/nexus/service/UpdatedAtTriggerTest.java", 12),
+        Map.entry("dev/nexus/service/UpdatedAtTriggerTest.java", 9),
         Map.entry("dev/nexus/service/VectorHandlerAspectFieldGuardTest.java", 3),
         Map.entry("dev/nexus/service/VectorHandlerCombinedQueryModelGuardTest.java", 3),
         Map.entry("dev/nexus/service/VectorHandlerEmbeddingModeTest.java", 3),
@@ -822,11 +838,11 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/VectorHandlerUpstreamRateLimitedTest.java", 3),
         Map.entry("dev/nexus/service/VectorHandlerVoyageTooManyTokensTest.java", 3),
         Map.entry("dev/nexus/service/VectorHybridHttpTest.java", 2),
-        Map.entry("dev/nexus/service/VectorsChashIndexLiquibaseTest.java", 8),
-        Map.entry("dev/nexus/service/VectorsRepointFunctionsIntegrationTest.java", 66),
-        Map.entry("dev/nexus/service/VectorsUnifyCentroidsIntegrationTest.java", 22),
-        Map.entry("dev/nexus/service/VectorsUnifyChunksIntegrationTest.java", 31),
-        Map.entry("dev/nexus/service/db/BackendReaperIntegrationTest.java", 4),
+        Map.entry("dev/nexus/service/VectorsChashIndexLiquibaseTest.java", 4),
+        Map.entry("dev/nexus/service/VectorsRepointFunctionsIntegrationTest.java", 63),
+        Map.entry("dev/nexus/service/VectorsUnifyCentroidsIntegrationTest.java", 14),
+        Map.entry("dev/nexus/service/VectorsUnifyChunksIntegrationTest.java", 23),
+        Map.entry("dev/nexus/service/db/BackendReaperIntegrationTest.java", 1),
         Map.entry("dev/nexus/service/db/CollectionRegistryTest.java", 4),
         Map.entry("dev/nexus/service/db/PgSessionEfSearchReadbackIntegrationTest.java", 2),
         Map.entry("dev/nexus/service/db/PgSessionStatementTimeoutIntegrationTest.java", 7),
@@ -834,7 +850,7 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/http/CatalogHandlerManifestFkTest.java", 2),
         Map.entry("dev/nexus/service/http/CatalogHandlerSweepAndChashesManyTest.java", 1),
         Map.entry("dev/nexus/service/http/CatalogHandlerSweepNextSeqDriftTest.java", 1),
-        Map.entry("dev/nexus/service/http/IndexRunFenceTest.java", 13),
+        Map.entry("dev/nexus/service/http/IndexRunFenceTest.java", 12),
         Map.entry("dev/nexus/service/http/TaxonomyHandlerAssignFkTest.java", 2),
         Map.entry("dev/nexus/service/http/TaxonomyHandlerAssignFromChashesTest.java", 3),
         Map.entry("dev/nexus/service/http/TaxonomyHandlerImportRlsTest.java", 2),
@@ -842,7 +858,7 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/vectors/PgVectorMetadataBatchParityTest.java", 4),
         Map.entry("dev/nexus/service/vectors/PgVectorRepositoryDeleteAntiJoinTest.java", 2),
         Map.entry("dev/nexus/service/vectors/PgVectorRepositoryDimGuardTest.java", 2),
-        Map.entry("dev/nexus/service/vectors/PgVectorRepositoryGcQuarantineTest.java", 12)
+        Map.entry("dev/nexus/service/vectors/PgVectorRepositoryGcQuarantineTest.java", 11)
     );
 
     /**
@@ -856,7 +872,7 @@ class RawSqlGateTest {
      * addition to the test tree (a new SANCTIONED-style unavoidable case),
      * never as a side effect of an unrelated change.
      */
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1527;
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1407;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

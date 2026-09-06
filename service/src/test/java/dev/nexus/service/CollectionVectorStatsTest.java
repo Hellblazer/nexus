@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
 import org.junit.jupiter.api.*;
@@ -237,12 +239,8 @@ class CollectionVectorStatsTest {
     void stats_columnShape_pinnedExactly() throws Exception {
         // RED until catalog-005 adds nexus.collection_vector_stats.
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT column_name FROM information_schema.columns " +
-                " WHERE table_schema = 'nexus' AND table_name = 'collection_vector_stats' " +
-                " ORDER BY ordinal_position");
-            List<String> cols = new ArrayList<>();
-            while (rs.next()) cols.add(rs.getString(1));
+            List<String> cols = PgCatalogProbes.columnNames(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "collection_vector_stats");
             assertThat(cols)
                 .as("collection_vector_stats must expose EXACTLY " +
                     "(tenant_id, collection, dim, chunk_count, last_write) in order — " +
@@ -265,14 +263,11 @@ class CollectionVectorStatsTest {
     void stats_securityInvoker_reloptionActuallySet() throws Exception {
         // RED until catalog-005 adds nexus.collection_vector_stats.
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT reloptions FROM pg_class " +
-                " WHERE oid = 'nexus.collection_vector_stats'::regclass");
-            assertThat(rs.next())
+            assertThat(PgCatalogProbes.tableExists(DSL.using(su, SQLDialect.POSTGRES), "nexus", "collection_vector_stats"))
                 .as("collection_vector_stats must exist in pg_class").isTrue();
-            java.sql.Array arr = rs.getArray(1);
-            assertThat(arr).as("view must HAVE reloptions (security_invoker)").isNotNull();
-            String[] opts = (String[]) arr.getArray();
+            String[] opts = PgCatalogProbes.relOptions(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "collection_vector_stats");
+            assertThat(opts).as("view must HAVE reloptions (security_invoker)").isNotNull();
             assertThat(opts)
                 .as("security_invoker=true must be PHYSICALLY set on the view " +
                     "(RDR-154 standing rule — caller RLS, not definer)")

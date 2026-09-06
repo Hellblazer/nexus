@@ -1,5 +1,8 @@
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
+import org.jooq.DSLContext;
 import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.SchemaMigrator.MigrationException;
 import dev.nexus.service.db.TenantScope;
@@ -302,24 +305,19 @@ class SchemaMigratorIntegrationTest {
         SchemaMigrator.migrate(adminDs);
 
         try (Connection conn = adminDs.getConnection()) {
-            ResultSet cls = conn.createStatement().executeQuery(
-                "SELECT relrowsecurity, relforcerowsecurity " +
-                "FROM pg_class c " +
-                "JOIN pg_namespace n ON c.relnamespace = n.oid " +
-                "WHERE n.nspname = 'nexus' AND c.relname = 'memory'");
-            assertThat(cls.next())
-                .as("nexus.memory must exist in pg_class after migration").isTrue();
-            assertThat(cls.getBoolean("relrowsecurity"))
+            DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+            PgCatalogProbes.RowSecurity cls = PgCatalogProbes.rowSecurity(ctx, "nexus", "memory");
+            assertThat(cls)
+                .as("nexus.memory must exist in pg_class after migration").isNotNull();
+            assertThat(cls.enabled())
                 .as("ENABLE ROW LEVEL SECURITY must be set on nexus.memory").isTrue();
-            assertThat(cls.getBoolean("relforcerowsecurity"))
+            assertThat(cls.forced())
                 .as("FORCE ROW LEVEL SECURITY must be set on nexus.memory").isTrue();
 
-            ResultSet pol = conn.createStatement().executeQuery(
-                "SELECT qual FROM pg_policies " +
-                "WHERE schemaname = 'nexus' AND tablename = 'memory'");
-            assertThat(pol.next())
-                .as("nexus.memory must have at least one RLS policy after migration").isTrue();
-            String using = pol.getString("qual");
+            List<PgCatalogProbes.Policy> pol = PgCatalogProbes.policies(ctx, "nexus", "memory");
+            assertThat(pol)
+                .as("nexus.memory must have at least one RLS policy after migration").isNotEmpty();
+            String using = pol.get(0).qual();
             // Fix code-review M3: assert non-null BEFORE calling contains() to avoid NPE.
             assertThat(using)
                 .as("RLS USING expression must not be null")
@@ -1279,12 +1277,7 @@ class SchemaMigratorIntegrationTest {
         while (System.nanoTime() < deadline) {
             analyzed.clear();
             try (Connection conn = adminDs.getConnection()) {
-                ResultSet rs = conn.createStatement().executeQuery(
-                    "SELECT relname FROM pg_stat_user_tables "
-                    + "WHERE schemaname = 'nexus' AND last_analyze IS NOT NULL");
-                while (rs.next()) {
-                    analyzed.add(rs.getString("relname"));
-                }
+                analyzed.addAll(PgCatalogProbes.analyzedTables(DSL.using(conn, SQLDialect.POSTGRES), "nexus"));
             }
             if (analyzed.containsAll(expected)) {
                 break;
@@ -1744,16 +1737,12 @@ class SchemaMigratorIntegrationTest {
     @Order(17)
     void catalogDocumentChunksCollection_isNotNull_atHead() throws Exception {
         try (Connection conn = adminDs.getConnection()) {
-            ResultSet rs = conn.createStatement().executeQuery(
-                "SELECT a.attnotnull FROM pg_attribute a "
-                + "JOIN pg_class c ON c.oid = a.attrelid "
-                + "JOIN pg_namespace n ON n.oid = c.relnamespace "
-                + "WHERE n.nspname = 'nexus' AND c.relname = 'catalog_document_chunks' "
-                + "  AND a.attname = 'collection'");
-            assertThat(rs.next())
+            Boolean attnotnull = PgCatalogProbes.columnNotNull(
+                DSL.using(conn, SQLDialect.POSTGRES), "nexus", "catalog_document_chunks", "collection");
+            assertThat(attnotnull)
                 .as("catalog_document_chunks.collection column must exist")
-                .isTrue();
-            assertThat(rs.getBoolean("attnotnull"))
+                .isNotNull();
+            assertThat(attnotnull)
                 .as("catalog_document_chunks.collection must be NOT NULL at HEAD "
                     + "(RDR-191 Decision item 6, Phase 7 fold, nexus-o8dil.37)")
                 .isTrue();
@@ -1780,22 +1769,13 @@ class SchemaMigratorIntegrationTest {
 
     /** True iff a constraint with this name exists anywhere in the database. */
     private boolean constraintExists(Connection conn, String conname) throws Exception {
-        try (var ps = conn.prepareStatement(
-                "SELECT 1 FROM pg_constraint WHERE conname = ?")) {
-            ps.setString(1, conname);
-            ResultSet rs = ps.executeQuery();
-            return rs.next();
-        }
+        return PgCatalogProbes.constraintExists(DSL.using(conn, SQLDialect.POSTGRES), conname);
     }
 
     /** True iff a constraint with this name exists AND is validated (convalidated). */
     private boolean constraintValidated(Connection conn, String conname) throws Exception {
-        try (var ps = conn.prepareStatement(
-                "SELECT convalidated FROM pg_constraint WHERE conname = ?")) {
-            ps.setString(1, conname);
-            ResultSet rs = ps.executeQuery();
-            return rs.next() && rs.getBoolean("convalidated");
-        }
+        return Boolean.TRUE.equals(
+            PgCatalogProbes.constraintValidated(DSL.using(conn, SQLDialect.POSTGRES), conname));
     }
 
     /**

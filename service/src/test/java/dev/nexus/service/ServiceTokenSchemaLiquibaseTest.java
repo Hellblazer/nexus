@@ -1,5 +1,7 @@
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -80,23 +82,9 @@ class ServiceTokenSchemaLiquibaseTest {
         // NOBYPASSRLS. The grants-nexus-svc.xml changeset (runAlways, LAST) then
         // grants it DML on ALL TABLES in the nexus schema, including the two new
         // credential tables.
+        // role-001 (the master changelog's first include) creates nexus_svc.
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + SVC_ROLE + "') THEN " +
-                "    CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS + "' " +
-                "      NOSUPERUSER NOBYPASSRLS; " +
-                "  END IF; " +
-                "END $$");
-        }
-
-        try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(), db)
-                .update(new Contexts());
+            PgContainerHelper.applyProductSchema(su);
         }
 
         svcDs = buildSvcDs();
@@ -203,12 +191,12 @@ class ServiceTokenSchemaLiquibaseTest {
     @Test
     void serviceRole_notSuperuserNotBypassRls() throws Exception {
         try (Connection svc = svcDs.getConnection()) {
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getBoolean("rolsuper"))
+            PgCatalogProbes.RoleFlags rs = PgCatalogProbes.currentRoleFlags(
+                DSL.using(svc, SQLDialect.POSTGRES));
+            assertThat(rs).isNotNull();
+            assertThat(rs.superuser())
                 .as("service role must NOT be superuser").isFalse();
-            assertThat(rs.getBoolean("rolbypassrls"))
+            assertThat(rs.bypassRls())
                 .as("service role must NOT have BYPASSRLS (so the readability invariant "
                     + "proves RLS-off, not a role escape hatch)").isFalse();
         }
@@ -350,23 +338,17 @@ class ServiceTokenSchemaLiquibaseTest {
 
     private boolean rlsEnabled(String schema, String table) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT relrowsecurity FROM pg_class c "
-                + "JOIN pg_namespace n ON c.relnamespace = n.oid "
-                + "WHERE n.nspname = '" + schema + "' AND c.relname = '" + table + "'");
-            assertThat(rs.next()).as(schema + "." + table + " must exist in pg_class").isTrue();
-            return rs.getBoolean("relrowsecurity");
+            PgCatalogProbes.RowSecurity rs = PgCatalogProbes.rowSecurity(
+                DSL.using(su, SQLDialect.POSTGRES), schema, table);
+            assertThat(rs).as(schema + "." + table + " must exist in pg_class").isNotNull();
+            return rs.enabled();
         }
     }
 
     private Set<String> indexDefsOf(String schema, String table) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT indexdef FROM pg_indexes "
-                + "WHERE schemaname = '" + schema + "' AND tablename = '" + table + "'");
-            Set<String> defs = new HashSet<>();
-            while (rs.next()) defs.add(rs.getString("indexdef"));
-            return defs;
+            return new HashSet<>(PgCatalogProbes.indexDefs(
+                DSL.using(su, SQLDialect.POSTGRES), schema, table));
         }
     }
 

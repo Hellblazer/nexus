@@ -133,18 +133,12 @@ class ForeignKeyConstraintTest {
                 "fk_catalog_chunks_catalog_doc"
             );
             // And assert fk_ta_catalog_doc does NOT exist.
-            ResultSet noTaFk = su.createStatement().executeQuery(
-                "SELECT 1 FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace " +
-                "WHERE c.contype='f' AND c.conname='fk_ta_catalog_doc' AND n.nspname='nexus'");
-            assertThat(noTaFk.next()).as("fk_ta_catalog_doc must NOT exist (nexus-sa14p)").isFalse();
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(PgCatalogProbes.foreignKey(ctx, "nexus", "fk_ta_catalog_doc"))
+                .as("fk_ta_catalog_doc must NOT exist (nexus-sa14p)").isNull();
             for (String fkName : expectedFks) {
-                ResultSet rs = su.createStatement().executeQuery(
-                    "SELECT 1 FROM pg_constraint c " +
-                    "JOIN pg_namespace n ON n.oid = c.connamespace " +
-                    "WHERE c.contype = 'f' " +
-                    "  AND c.conname = '" + fkName + "' " +
-                    "  AND n.nspname = 'nexus'");
-                assertThat(rs.next()).as("FK constraint " + fkName + " must exist").isTrue();
+                assertThat(PgCatalogProbes.foreignKey(ctx, "nexus", fkName))
+                    .as("FK constraint " + fkName + " must exist").isNotNull();
             }
         }
     }
@@ -171,16 +165,12 @@ class ForeignKeyConstraintTest {
     @Test @Order(1)
     void manifestFk_isValidated_liveChunksPredicateDependsOnIt() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT c.convalidated FROM pg_constraint c " +
-                "JOIN pg_namespace n ON n.oid = c.connamespace " +
-                "WHERE c.contype = 'f' " +
-                "  AND c.conname = 'fk_catalog_chunks_catalog_doc' " +
-                "  AND n.nspname = 'nexus'");
-            assertThat(rs.next())
+            PgCatalogProbes.Constraint rs = PgCatalogProbes.foreignKey(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "fk_catalog_chunks_catalog_doc");
+            assertThat(rs)
                 .as("fk_catalog_chunks_catalog_doc must exist (liveChunksPredicate depends on it)")
-                .isTrue();
-            assertThat(rs.getBoolean(1))
+                .isNotNull();
+            assertThat(rs.convalidated())
                 .as("fk_catalog_chunks_catalog_doc must be VALIDATED — nexus-msz9i's dead-set "
                     + "liveChunksPredicate is only equivalent to the old form because dangling "
                     + "manifest rows are impossible; a NOT VALID FK reintroduces them")
