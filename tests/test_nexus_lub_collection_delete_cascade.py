@@ -84,7 +84,7 @@ def _seed_chunk(tenant: str, collection: str, chash_hex: str, *, dim: int = 384)
         f"INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('{tenant}', '{collection}') "
         "ON CONFLICT DO NOTHING; "
         f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}) "
-        f"VALUES ('{tenant}', '{collection}', decode('{chash_hex}', 'hex'), 'seed', '{vec}'::vector) "
+        f"VALUES ('{tenant}', '{collection}', decode('{chash_hex}', 'hex'), 'seed', '{vec}'::nexus.vector) "
         "ON CONFLICT DO NOTHING;"
     )
     psql = Path(state["pg_bin"]) / "psql"

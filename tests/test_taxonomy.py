@@ -105,7 +105,7 @@ def _seed_chunk(topic_id: int, collection: str, chash_hex: str, *, dim: int = 38
         f"SELECT tenant_id, '{collection}' FROM nexus.topics WHERE id = {topic_id} "
         "ON CONFLICT DO NOTHING; "
         f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}) "
-        f"SELECT tenant_id, '{collection}', decode('{chash_hex}', 'hex'), 'seed', '{vec}'::vector "
+        f"SELECT tenant_id, '{collection}', decode('{chash_hex}', 'hex'), 'seed', '{vec}'::nexus.vector "
         f"FROM nexus.topics WHERE id = {topic_id} "
         "ON CONFLICT DO NOTHING;"
     )
@@ -152,7 +152,7 @@ def _seed_chunks(taxonomy: Any, collection: str, chash_hexes: list[str], *, dim:
     embed_col = {384: "embedding_384", 768: "embedding_768", 1024: "embedding_1024"}[dim]
     vec = "[" + ",".join(["0"] * dim) + "]"
     values = ", ".join(
-        f"(tenant_id, '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::vector)"
+        f"(tenant_id, '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::nexus.vector)"
         for c in chash_hexes
     )
     sql = (
@@ -190,7 +190,7 @@ def _seed_chunks_for_tenant(
     embed_col = {384: "embedding_384", 768: "embedding_768", 1024: "embedding_1024"}[dim]
     vec = "[" + ",".join(["0"] * dim) + "]"
     values = ", ".join(
-        f"('{tenant}', '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::vector)"
+        f"('{tenant}', '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::nexus.vector)"
         for c in chash_hexes
     )
     sql = (

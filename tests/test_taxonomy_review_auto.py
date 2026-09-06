@@ -77,7 +77,7 @@ def _seed_chunks_for_tenant(
     embed_col = {384: "embedding_384", 768: "embedding_768", 1024: "embedding_1024"}[dim]
     vec = "[" + ",".join(["0"] * dim) + "]"
     values = ", ".join(
-        f"('{tenant}', '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::vector)"
+        f"('{tenant}', '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::nexus.vector)"
         for c in chash_hexes
     )
     sql = (

@@ -295,7 +295,7 @@ def bypass_fk_seed_chunk(
         "ON CONFLICT (tenant_id, name) DO NOTHING;\n"
         "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, "
         f"{vec_col}) VALUES ({tenant!r}, {collection!r}, "
-        f"decode({chash!r}, 'hex'), 'fk-bypass-stub', {vec_literal!r}::vector) "
+        f"decode({chash!r}, 'hex'), 'fk-bypass-stub', {vec_literal!r}::nexus.vector) "
         "ON CONFLICT (tenant_id, collection, chash) DO NOTHING;"
     )
     _run_psql(sql)
