@@ -707,7 +707,7 @@ def test_record_run_connectivity_error_is_swallowed_not_evicted(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
-async def test_run_outcome_connectivity_error_evicts_mid_call_and_record_run_still_lands(
+async def test_run_start_connectivity_error_evicts_mid_call_and_record_complete_still_lands(
     monkeypatch,
 ) -> None:
     """critique round 2 (T2 code-review-nexus-m20mf-round2 [24605]): no
@@ -717,16 +717,23 @@ async def test_run_outcome_connectivity_error_evicts_mid_call_and_record_run_sti
     tests (test_service_mode_evicts_and_rebuilds_after_write_fn_error)
     only prove it across two SEPARATE top-level t2_index_write calls.
 
-    run_outcome (Step 5, `_nx_answer_record_outcome`) is the site that
-    closes this gap: it fires BEFORE record_run (Step 6) in the SAME
-    nx_answer call, and `_nx_answer_record_outcome`'s own
-    `except Exception: ... warning(...)` swallows whatever
-    `_t2_index_write` raises -- but `_service_t2_write_locked` classifies
-    and evicts INSIDE `_t2_index_write`, before that outer swallow ever
-    runs. So the singleton is genuinely evicted, the call still
-    completes (nothing aborts), and record_run -- the very next
-    `_t2_index_write` call in the same invocation -- must resolve a
-    FRESH instance and land its write."""
+    RDR-203 P1 retarget (nexus-dt2tu.1): this test used to fail
+    ``increment_run_outcome`` (old Step 5) so the eviction happened
+    between it and ``record_run`` (old Step 6) -- two calls the choke
+    point now MERGES into one ``_t2_index_write`` call
+    (``_nx_answer_record_complete``), closing that mid-call gap. The
+    surviving pair of separate ``_t2_index_write`` calls in one
+    nx_answer invocation is run_start (Step 1,
+    ``db.plans.increment_run_started``) and the Step 6 choke point, so
+    this test now fails run_start instead: it fires BEFORE the choke
+    point in the SAME nx_answer call, and the run-start site's own
+    ``except Exception: ... warning(...)`` swallows whatever
+    ``_t2_index_write`` raises -- but ``_service_t2_write_locked``
+    classifies and evicts INSIDE ``_t2_index_write``, before that outer
+    swallow ever runs. So the singleton is genuinely evicted, the call
+    still completes (nothing aborts), and the choke point -- the very
+    next ``_t2_index_write`` call in the same invocation -- must resolve
+    a FRESH instance and land both of its writes."""
     from unittest.mock import AsyncMock, MagicMock, patch
 
     import nexus.mcp_infra as _infra
@@ -740,10 +747,10 @@ async def test_run_outcome_connectivity_error_evicts_mid_call_and_record_run_sti
         db = _CountingT2Database()
         constructed.append(db)
         if len(constructed) == 1:
-            # Only the FIRST (run_outcome's) instance fails -- simulates
+            # Only the FIRST (run_start's) instance fails -- simulates
             # "the connection this singleton held just broke." Every
             # later site must see a rebuilt, healthy instance.
-            db.plans.increment_run_outcome.side_effect = ConnectionError(
+            db.plans.increment_run_started.side_effect = ConnectionError(
                 "connection reset mid-call",
             )
         return db
@@ -769,18 +776,24 @@ async def test_run_outcome_connectivity_error_evicts_mid_call_and_record_run_sti
         result = await nx_answer("what is projection quality?")
 
     assert "final answer" in result.lower(), (
-        "run_outcome's own try/except swallows the connectivity error -- "
+        "run_start's own try/except swallows the connectivity error -- "
         "the call must complete normally despite the mid-call eviction"
     )
     assert len(constructed) == 2, (
-        "the first instance's run_outcome failure must evict the shared "
-        "singleton, forcing record_run (the next _t2_index_write call in "
-        "the SAME nx_answer call) to build a second, fresh instance"
+        "the first instance's run_start failure must evict the shared "
+        "singleton, forcing the choke point (the next _t2_index_write "
+        "call in the SAME nx_answer call) to build a second, fresh "
+        "instance"
     )
     assert constructed[0].closed is True, "the failed first instance must be evicted"
     assert constructed[1].closed is False, "the fresh second instance must survive the call"
     assert constructed[1].telemetry.record_nx_answer_run.called, (
-        "record_run must land against the freshly rebuilt singleton -- "
-        "this is the recovery-WITHIN-one-call proof the prior tests lacked"
+        "the choke point's record write must land against the freshly "
+        "rebuilt singleton -- this is the recovery-WITHIN-one-call proof "
+        "the prior tests lacked"
+    )
+    assert constructed[1].plans.increment_run_outcome.called, (
+        "the choke point's outcome bump -- merged into the SAME write as "
+        "the record above -- must also land against the rebuilt instance"
     )
     assert _infra._service_t2_db is constructed[1]

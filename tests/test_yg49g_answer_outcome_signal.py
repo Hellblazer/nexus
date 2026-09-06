@@ -112,7 +112,17 @@ class TestOutcomeIsRecordedWhereItIsKnown:
         guard = src.index("_nx_answer_is_empty_retrieval(result.steps)")
         after_guard = src[guard:]
         # The success record for the plan path must appear AFTER the guard.
-        assert "_nx_answer_record_outcome(best.plan_id, success=True)" in after_guard, (
+        # RDR-203 P1: the (record, outcome) pair is now one call to the
+        # choke point, _nx_answer_record_complete(..., success=True), not
+        # a standalone _nx_answer_record_outcome(best.plan_id, success=True)
+        # — check for the choke point's presence and its success=True kwarg
+        # rather than the old function's exact call shape.
+        assert "_nx_answer_record_complete(" in after_guard, (
+            "the plan path's success is no longer recorded via the "
+            "RDR-203 choke point downstream of the empty-retrieval guard "
+            "(nexus-yg49g)"
+        )
+        assert "success=True," in after_guard, (
             "the plan path's success record is no longer downstream of the "
             "empty-retrieval guard — it cannot know the outcome up there "
             "(nexus-yg49g)"
@@ -127,8 +137,15 @@ class TestOutcomeIsRecordedWhereItIsKnown:
         src = pathlib.Path(core.__file__).read_text(encoding="utf-8")
         guard = src.index("_nx_answer_is_empty_retrieval(result.steps)")
         # Look only at the guard's own body, not the whole rest of the file.
-        body = src[guard:guard + 2000]
-        assert "_nx_answer_record_outcome(best.plan_id, success=False)" in body, (
+        body = src[guard:guard + 3000]
+        # RDR-203 P1: the outcome no longer stands alone as
+        # _nx_answer_record_outcome(best.plan_id, success=False) — it is
+        # the success= kwarg of the choke-point call this branch makes.
+        assert "_nx_answer_record_complete(" in body, (
+            "the empty-retrieval branch no longer routes through the "
+            "RDR-203 choke point (nexus-yg49g)"
+        )
+        assert "success=False," in body, (
             "zero-evidence no longer records a failure — promote.py's "
             "success/(success+failure) gate would return to promoting plans "
             "that reliably return nothing (nexus-yg49g)"

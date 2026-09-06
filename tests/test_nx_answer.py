@@ -422,7 +422,7 @@ class TestSingleQueryPlanBindingUnsatisfiable:
                          return_value=MagicMock(is_available=False)),
             patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
             patch("nexus.mcp.core.scratch", MagicMock()),
-            patch("nexus.mcp.core._nx_answer_record_run") as record_run_spy,
+            patch("nexus.mcp.core._nx_answer_record_complete") as record_run_spy,
         ):
             from nexus.mcp.core import nx_answer
             result = await nx_answer("q")
@@ -497,7 +497,7 @@ class TestSingleQueryUnresolvedVar:
             patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
             patch("nexus.mcp.core.scratch", MagicMock()),
             patch("nexus.mcp.core.query") as query_spy,
-            patch("nexus.mcp.core._nx_answer_record_run") as record_run_spy,
+            patch("nexus.mcp.core._nx_answer_record_complete") as record_run_spy,
         ):
             from nexus.mcp.core import nx_answer
             result = await nx_answer("q")
@@ -837,7 +837,7 @@ class TestZeroEvidenceFallbackProvenance:
              patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
-             patch("nexus.mcp.core._nx_answer_record_run", side_effect=_spy):
+             patch("nexus.mcp.core._nx_answer_record_complete", side_effect=_spy):
             t2_ctx.return_value.__enter__.return_value = db_stub
             await nx_answer(question="tell me about distributed consensus")
 
@@ -3434,12 +3434,13 @@ class TestNxAnswerBudgetSeconds:
             patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
             patch("nexus.mcp.core.scratch", MagicMock()),
             patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
-            patch("nexus.mcp.core._nx_answer_record_outcome") as record_outcome,
+            patch("nexus.mcp.core._nx_answer_record_complete") as record_complete,
         ):
             from nexus.mcp.core import nx_answer
             await nx_answer("q", budget_seconds=20.0)
 
-        record_outcome.assert_called_once_with(42, success=False)
+        assert record_complete.call_args.kwargs.get("plan_id") == 42
+        assert record_complete.call_args.kwargs.get("success") is False
 
 
 # ── RDR-196 .p3c (nexus-nyry9.21): USD budget enforcement ───────────────────
@@ -4361,7 +4362,7 @@ class TestStructuredEnvelopeStepBreakdown:
             patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
             patch("nexus.mcp.core.scratch", MagicMock()),
             patch.object(_runner, "plan_run", AsyncMock(side_effect=exc)),
-            patch("nexus.mcp.core._nx_answer_record_run") as record_run_spy,
+            patch("nexus.mcp.core._nx_answer_record_complete") as record_run_spy,
         ):
             from nexus.mcp.core import nx_answer
             result = await nx_answer("q", structured=True)
@@ -4395,7 +4396,7 @@ class TestStructuredEnvelopeStepBreakdown:
             patch("nexus.mcp.core.scratch", MagicMock()),
             patch.object(_runner, "plan_run",
                          AsyncMock(side_effect=RuntimeError("no attribute here"))),
-            patch("nexus.mcp.core._nx_answer_record_run") as record_run_spy,
+            patch("nexus.mcp.core._nx_answer_record_complete") as record_run_spy,
         ):
             from nexus.mcp.core import nx_answer
             result = await nx_answer("q", structured=True)

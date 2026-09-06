@@ -7276,6 +7276,85 @@ def _nx_answer_record_outcome(plan_id: int, *, success: bool) -> None:
         )
 
 
+def _nx_answer_record_complete(
+    db: Any,
+    *,
+    question: str,
+    plan_id: int | None,
+    matched_confidence: float | None,
+    step_count: int,
+    final_text: str,
+    step_records: list[Any] | None,
+    duration_ms: int,
+    trace: bool,
+    success: bool,
+) -> None:
+    """RDR-203 P1 choke point: the ``nx_answer_runs`` record and the plan
+    outcome-counter bump for ONE converting arm, issued against the SAME
+    already-open ``db`` the caller obtained (either from ``with _t2_ctx()
+    as db:`` or from inside a ``_t2_index_write`` closure) instead of the
+    record's caller-supplied context PLUS a second, independently
+    acquired T2 write inside ``_nx_answer_record_outcome`` — the double
+    acquisition this function exists to remove (residual 5). Replaces
+    each ``(_nx_answer_record_run, _nx_answer_record_outcome)`` pair at
+    the ten converting arms; the two D6 survivors (the planner-failure
+    arm, and the RDR-200 continuation handoff) keep calling the two
+    functions directly and do not route through here.
+
+    This REPRODUCES both functions' bodies rather than delegating to
+    them — delegating to ``_nx_answer_record_outcome`` would keep its
+    internal ``_t2_index_write`` call, exactly the second lock this
+    function exists to remove:
+
+    - redaction (residual 9): ``trace=False`` replaces both ``question``
+      and ``final_text`` with ``"[redacted]"``, mirroring
+      ``_nx_answer_record_run`` above.
+    - ``cost_usd`` (residual 9): the sum of every step's known cost, or
+      ``None`` when none is known — never a fabricated ``0.0``, mirroring
+      ``_nx_answer_record_run`` above.
+    - the outcome bump no-ops on a falsy ``plan_id`` (residual 11),
+      covering the synthetic inline-planner id ``0``, mirroring
+      ``_nx_answer_record_outcome`` above.
+
+    The two writes keep INDEPENDENT boundary catches, exactly as today: a
+    run-record failure never blocks the outcome bump and vice versa, and
+    neither ever reaches the caller (residual 11 — losing either catch
+    would turn a best-effort telemetry failure into a crashed answer).
+
+    RDR-203 P1 issues today's two calls — this stays two POSTs, no wire
+    change, in this fixed record-then-outcome order. Eight of the ten
+    converting arms already post in this order; at the empty-retrieval
+    guard arm and the Step 6 success arm this order is a normalisation —
+    today those two arms POST the outcome BEFORE the record (residual 8),
+    the one wire-visible difference this phase makes. Collapsing the two
+    calls into one composite POST is RDR-203 P2/P3, not this function.
+    """
+    q = question if trace else "[redacted]"
+    text = final_text if trace else "[redacted]"
+    steps = step_records or []
+    _known_costs = [s.cost_usd for s in steps if s.cost_usd is not None]
+    cost_usd = sum(_known_costs) if _known_costs else None
+    wire_steps = [_step_record_to_wire(s) for s in steps] or None
+    try:
+        db.telemetry.record_nx_answer_run(
+            question=q, plan_id=plan_id, matched_confidence=matched_confidence,
+            step_count=step_count, final_text=text, cost_usd=cost_usd,
+            duration_ms=duration_ms, steps=wire_steps,
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort telemetry, must not crash caller (warned once via _warn_telemetry_drop)
+        _warn_telemetry_drop("nx_answer_runs", exc)
+
+    if plan_id:
+        try:
+            db.plans.increment_run_outcome(plan_id, success=success)
+        except Exception:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
+            import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+            _slog.get_logger().warning(
+                "nx_answer_plan_outcome_increment_failed",
+                plan_id=plan_id, success=success, exc_info=True,
+            )
+
+
 #: Max historical plans injected as few-shot examples into the inline
 #: planner on a miss (nexus-mhyf3 / CacheRAG R1). Three balances prompt
 #: cost against the demonstrated lift.
@@ -8359,18 +8438,18 @@ async def nx_answer(
             _step_records = []
         try:
             with _t2_ctx() as db:
-                _nx_answer_record_run(
-                    db.telemetry, question=question, plan_id=best.plan_id,
+                # nexus-yg49g doctrine: a budget-exhausted run did not
+                # complete — counts as a failure so a chronically-timing-out
+                # plan does not accrue a false success rate.
+                _nx_answer_record_complete(
+                    db, question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence, step_count=len(result.steps),
                     final_text=budget_final_text[:2000], step_records=_step_records,
                     duration_ms=int((time.monotonic() - start) * 1000), trace=trace,
+                    success=False,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
-        # nexus-yg49g doctrine: a budget-exhausted run did not complete —
-        # counts as a failure so a chronically-timing-out plan does not
-        # accrue a false success rate.
-        _nx_answer_record_outcome(best.plan_id, success=False)
         return _result(
             budget_final_text, plan_id=best.plan_id, step_count=len(result.steps),
             chunks=partial_chunks if structured else None,
@@ -8887,15 +8966,14 @@ async def nx_answer(
                 )
                 try:
                     with _t2_ctx() as db:
-                        _nx_answer_record_run(
-                            db.telemetry, question=question, plan_id=best.plan_id,
+                        _nx_answer_record_complete(
+                            db, question=question, plan_id=best.plan_id,
                             matched_confidence=best.confidence, step_count=0,
                             final_text=f"Error: {exc}", step_records=[],
-                            duration_ms=elapsed_ms, trace=trace,
+                            duration_ms=elapsed_ms, trace=trace, success=False,
                         )
                 except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
                     pass
-                _nx_answer_record_outcome(best.plan_id, success=False)
                 return _result(str(exc), plan_id=best.plan_id, step_count=0)
 
             # Resolve the same way plan_run (Step 4 below) would: caller
@@ -8927,15 +9005,14 @@ async def nx_answer(
                 )
                 try:
                     with _t2_ctx() as db:
-                        _nx_answer_record_run(
-                            db.telemetry, question=question, plan_id=best.plan_id,
+                        _nx_answer_record_complete(
+                            db, question=question, plan_id=best.plan_id,
                             matched_confidence=best.confidence, step_count=0,
                             final_text=f"Error: {exc}", step_records=[],
-                            duration_ms=elapsed_ms, trace=trace,
+                            duration_ms=elapsed_ms, trace=trace, success=False,
                         )
                 except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
                     pass
-                _nx_answer_record_outcome(best.plan_id, success=False)
                 return _result(str(exc), plan_id=best.plan_id, step_count=0)
             q = step_args.get("question", question)
             # nexus-rl59s (code review [24061] Critical): this fast path
@@ -9012,22 +9089,20 @@ async def nx_answer(
             elapsed_ms = int((time.monotonic() - start) * 1000)
             try:
                 with _t2_ctx() as db:
-                    _nx_answer_record_run(
-                        db.telemetry, question=question, plan_id=best.plan_id,
+                    # nexus-yg49g: outcome must reflect whether the run
+                    # ANSWERED, not merely that it did not raise. This branch
+                    # can hand back the literal string "No results." (built a
+                    # dozen lines above), and recording that as a success is
+                    # what let a plan be 100%-success and 0%-useful.
+                    _nx_answer_record_complete(
+                        db, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
                         final_text=str(result_text)[:2000], step_records=[],
                         duration_ms=elapsed_ms, trace=trace,
+                        success=not _nx_answer_text_is_empty(str(result_text)),
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
-            # nexus-yg49g: outcome must reflect whether the run ANSWERED, not
-            # merely that it did not raise. This branch can hand back the literal
-            # string "No results." (built a dozen lines above), and recording that
-            # as a success is what let a plan be 100%-success and 0%-useful.
-            _nx_answer_record_outcome(
-                best.plan_id,
-                success=not _nx_answer_text_is_empty(str(result_text)),
-            )
             return _result(
                 str(result_text),
                 plan_id=best.plan_id,
@@ -9038,15 +9113,14 @@ async def nx_answer(
             elapsed_ms = int((time.monotonic() - start) * 1000)
             try:
                 with _t2_ctx() as db:
-                    _nx_answer_record_run(
-                        db.telemetry, question=question, plan_id=best.plan_id,
+                    _nx_answer_record_complete(
+                        db, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
                         final_text=f"Error: {exc}", step_records=[],
-                        duration_ms=elapsed_ms, trace=trace,
+                        duration_ms=elapsed_ms, trace=trace, success=False,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
-            _nx_answer_record_outcome(best.plan_id, success=False)
             return _result(
                 f"Error in single-step query: {exc}",
                 plan_id=best.plan_id,
@@ -9107,17 +9181,17 @@ async def nx_answer(
         )
         try:
             with _t2_ctx() as db:
-                _nx_answer_record_run(
-                    db.telemetry, question=question, plan_id=best.plan_id,
+                # Counts as a failure so a chronically mis-matched plan
+                # accrues a real failure rate and stops clearing
+                # promote.py's threshold.
+                _nx_answer_record_complete(
+                    db, question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence, step_count=0,
                     final_text=f"Error: {exc}", step_records=[],
-                    duration_ms=elapsed_ms, trace=trace,
+                    duration_ms=elapsed_ms, trace=trace, success=False,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
             pass
-        # Counts as a failure so a chronically mis-matched plan accrues a
-        # real failure rate and stops clearing promote.py's threshold.
-        _nx_answer_record_outcome(best.plan_id, success=False)
         return _result(str(exc), plan_id=best.plan_id, step_count=0)
 
     # nexus-nyry9.5 (RDR-196 .r5 review-fix): the retrieval-only
@@ -9214,16 +9288,15 @@ async def nx_answer(
             _exc_step_records = []
         try:
             with _t2_ctx() as db:
-                _nx_answer_record_run(
-                    db.telemetry, question=question, plan_id=best.plan_id,
+                _nx_answer_record_complete(
+                    db, question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence,
                     step_count=len(_exc_step_records),
                     final_text=f"Error: {exc}", step_records=_exc_step_records,
-                    duration_ms=elapsed_ms, trace=trace,
+                    duration_ms=elapsed_ms, trace=trace, success=False,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
-        _nx_answer_record_outcome(best.plan_id, success=False)
         return _result(
             f"Error during plan execution: {exc}",
             plan_id=best.plan_id,
@@ -9435,16 +9508,15 @@ async def nx_answer(
                 _exc_step_records = []
             try:
                 with _t2_ctx() as db:
-                    _nx_answer_record_run(
-                        db.telemetry, question=question, plan_id=best.plan_id,
+                    _nx_answer_record_complete(
+                        db, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence,
                         step_count=len(_exc_step_records),
                         final_text=f"Error: {exc}", step_records=_exc_step_records,
-                        duration_ms=elapsed_ms, trace=trace,
+                        duration_ms=elapsed_ms, trace=trace, success=False,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
-            _nx_answer_record_outcome(best.plan_id, success=False)
             return _result(
                 f"Error during plan execution: {exc}",
                 plan_id=best.plan_id,
@@ -9546,9 +9618,9 @@ async def nx_answer(
         # nothing quickly" outcome this bead was filed about.
         #
         # The lost distinction (errored vs found-nothing) is recoverable from
-        # telemetry: _nx_answer_record_run below stores the final_text, and the
-        # structured event above marks this branch specifically.
-        _nx_answer_record_outcome(best.plan_id, success=False)
+        # telemetry: _nx_answer_record_complete below stores the final_text,
+        # and the structured event above marks this branch specifically.
+        #
         # nexus-ivv4d: name plan_id + each retrieval step's tool/corpus/query
         # so WHICH plan-side factor produced the miss is readable from the
         # return text (and, since it feeds final_text below, the telemetry
@@ -9569,12 +9641,17 @@ async def nx_answer(
         )
         try:
             with _t2_ctx() as db:
-                _nx_answer_record_run(
-                    db.telemetry, question=question, plan_id=best.plan_id,
+                # RDR-203 P1 residual 8: this arm posted outcome-then-record
+                # today (the outcome fired above, before `no_match` even
+                # existed). The choke point normalises every arm to
+                # record-then-outcome, so this is the one wire-visible POST
+                # reorder this phase makes.
+                _nx_answer_record_complete(
+                    db, question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence,
                     step_count=len(result.steps),
                     final_text=no_match[:2000], step_records=_result_step_records,
-                    duration_ms=elapsed_ms, trace=trace,
+                    duration_ms=elapsed_ms, trace=trace, success=False,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
@@ -9584,11 +9661,20 @@ async def nx_answer(
             step_records=_result_step_records,
         )
 
-    # nexus-yg49g: SUCCESS is recorded HERE — past the empty-retrieval guard,
-    # with final_text extracted and an actual answer in hand. This is the only
-    # point in the plan path where "the plan answered the question" is a
-    # statement the code can make truthfully.
-    _nx_answer_record_outcome(best.plan_id, success=True)
+    # nexus-yg49g: SUCCESS — past the empty-retrieval guard, with final_text
+    # extracted and an actual answer in hand. This is the only point in the
+    # plan path where "the plan answered the question" is a statement the
+    # code can make truthfully. RDR-203 P1 residual 4: the outcome bump for
+    # THIS success is recorded together with the run row at Step 6 below,
+    # past the RDR-084 plan-grow block — not here, where today's outcome
+    # write actually fires. Two reasons: (1) it leaves the run-record
+    # write's timing at Step 6 untouched for every call that reaches it,
+    # library-matched or ad-hoc; (2) the plan-grow block below only runs
+    # when `best.plan_id == 0`, which is exactly the condition under which
+    # the outcome bump is already a no-op (`_nx_answer_record_complete`
+    # skips it for a falsy plan_id) — so moving the bump past grow changes
+    # no counter arithmetic, only the record-vs-outcome POST order the
+    # census below pins (residual 8).
 
     _log.info(
         "nx_answer_complete",
@@ -9689,28 +9775,38 @@ async def nx_answer(
     # that completed the plan after a would-have-hit/oversized/failed
     # assembly attempt).
 
-    # ── Step 6: record run ───────────────────────────────────────────────
+    # ── Step 6: record run + outcome ─────────────────────────────────────
     try:
-        # nexus-m20mf P2 (critique [24578] fix): the whole
-        # _nx_answer_record_run call -- including its real
-        # db.telemetry.record_nx_answer_run POST -- now runs INSIDE the
-        # closure, not just a `lambda db: db.telemetry` attribute
-        # resolution. Residual, documented rather than silently accepted:
-        # _nx_answer_record_run has its OWN internal
+        # nexus-m20mf P2 (critique [24578] fix) / RDR-203 P1: the whole
+        # _nx_answer_record_complete call -- including its real
+        # db.telemetry.record_nx_answer_run POST and the plan
+        # outcome-counter bump -- runs INSIDE the closure, not just a
+        # `lambda db: db.telemetry` attribute resolution. Residual,
+        # documented rather than silently accepted: the choke point's
+        # run-record half has its OWN internal
         # `except Exception: _warn_telemetry_drop(...)` around the POST
         # (deliberate: "best-effort telemetry, must not crash caller",
-        # and this same helper is called from several OTHER sites this
-        # bead does not touch), so a connectivity error there is still
-        # swallowed before _service_t2_write_locked's classifier can see
-        # it -- eviction will not trigger from a failure at this specific
-        # site. Removing that internal swallow would need auditing every
-        # other call site of _nx_answer_record_run, out of scope here.
+        # and the same choke point is called from several OTHER sites
+        # whose `with _t2_ctx()` vs `_t2_index_write` closure choice this
+        # bead leaves untouched, residual 5), so a connectivity error
+        # there is still swallowed before
+        # _service_t2_write_locked's classifier can see it -- eviction
+        # will not trigger from a failure at this specific site.
+        # Removing that internal swallow would need auditing every other
+        # call site of the choke point, out of scope here.
+        #
+        # RDR-203 P1 residual 4/8: this is the merge site for the
+        # (success outcome, Step-6 record) pair — see the comment above
+        # the plan-grow block for why the outcome bump moves here rather
+        # than the record moving earlier. The wire-visible effect is the
+        # POST order: today outcome fires before grow and record fires
+        # after; the choke point posts record then outcome, both here.
         _t2_index_write(
-            lambda db: _nx_answer_record_run(
-                db.telemetry, question=question, plan_id=best.plan_id,
+            lambda db: _nx_answer_record_complete(
+                db, question=question, plan_id=best.plan_id,
                 matched_confidence=best.confidence, step_count=len(result.steps),
                 final_text=final_text[:2000], step_records=_result_step_records,
-                duration_ms=elapsed_ms, trace=trace,
+                duration_ms=elapsed_ms, trace=trace, success=True,
             ),
             op="record_run",
         )
