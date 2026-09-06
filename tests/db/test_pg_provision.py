@@ -236,6 +236,16 @@ class TestVectorExtensionProvisioned:
         service's Liquibase vectors-001 changeset creates a table with a
         ``vector`` column AS nexus_admin. Proving the extension row exists is
         not enough; prove the type is usable by the non-superuser role.
+
+        nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): provision()
+        transfers extension OWNERSHIP to nexus_admin but does NOT relocate it
+        into the nexus schema itself (that is Liquibase's search-path-001
+        changeset's job, later, in-band — see
+        transfer_vector_extension_ownership_to_nexus_admin's docstring for why
+        relocating this early breaks vectors-001-baseline.xml's own bare
+        vector(N) references). The bare, unqualified `vector` type this test
+        has always used still resolves correctly at this stage, via the
+        default (public-including) search_path.
         """
         result, config_dir = provisioned
         admin_pass = _read_credentials(
@@ -699,6 +709,15 @@ class TestHealDiagViewGrantsAndOwnership:
         # dependency first or the role drop fails ("privileges for view...").
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
               "REVOKE SELECT ON nexus.diag_chash_conformance FROM nexus_diag")
+        # nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): provision()
+        # now creates the nexus schema itself, so this module-scoped cluster's
+        # _backfill_diag_role calls (fired by earlier sibling tests' own
+        # idempotent re-runs) find `nexus` already present and grant
+        # nexus_diag USAGE + SELECT on it — revoke those too, same reason.
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "REVOKE ALL ON ALL TABLES IN SCHEMA nexus FROM nexus_diag")
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "REVOKE USAGE ON SCHEMA nexus FROM nexus_diag")
         _psql(bins, result.port, NEXUS_DB_NAME, os_user, "DROP ROLE IF EXISTS nexus_diag")
         try:
             assert _query(
@@ -789,17 +808,25 @@ class TestReassignDiagViewOwnerBeforeRestart:
         """The STEADY STATE this fix closes: a view created (as every
         pre-taxonomy-011-8 local install's provisioning always has)
         entirely by the superuser, never touched by anything nexus_admin-
-        owned."""
+        owned.
+
+        provision() itself never creates the nexus schema (nexus-cbo4a
+        batch 9 item 0, Sam's directive 2026-09-05: only Liquibase's own
+        early changeset does, later, when the engine first migrates — see
+        transfer_vector_extension_ownership_to_nexus_admin's docstring), so
+        this fixture creates it here, superuser-owned (unauthorized CREATE
+        SCHEMA), reproducing the legacy pre-P3c shape directly.
+        """
         result, config_dir = provisioned
         os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
               "CREATE SCHEMA IF NOT EXISTS nexus")
         # In production nexus_admin OWNS this schema (it creates it via
         # Liquibase's very first changeset), so USAGE is implicit. This
-        # fixture creates the schema directly as the superuser instead —
-        # grant USAGE explicitly so nexus_admin's own DROP VIEW attempt
-        # below fails on OWNERSHIP (the real crash-loop precondition this
-        # test proves), not on schema-level permission denied first.
+        # fixture's schema is superuser-owned instead — grant USAGE
+        # explicitly so nexus_admin's own DROP VIEW attempt below fails on
+        # OWNERSHIP (the real crash-loop precondition this test proves), not
+        # on schema-level permission denied first.
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
               "GRANT USAGE ON SCHEMA nexus TO nexus_admin")
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
@@ -810,6 +837,8 @@ class TestReassignDiagViewOwnerBeforeRestart:
         yield result, config_dir, os_user
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
               "DROP VIEW IF EXISTS nexus.diag_chash_conformance")
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "DROP SCHEMA IF EXISTS nexus")
 
     def test_absent_view_is_a_noop(self, provisioned, bins):
         from nexus.db.pg_provision import reassign_diag_view_owner_before_restart
@@ -922,7 +951,9 @@ class TestProvisionFastPathReassignsDiagView:
         """Same steady-state precondition as
         ``TestReassignDiagViewOwnerBeforeRestart.superuser_owned_view``: a
         view created entirely by the superuser, exactly what every
-        pre-taxonomy-011-8 local install's provisioning has produced."""
+        pre-taxonomy-011-8 local install's provisioning has produced. See
+        that fixture's own docstring: provision() never creates the nexus
+        schema itself, so this fixture creates it here, superuser-owned."""
         result, config_dir = provisioned
         os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
@@ -937,6 +968,8 @@ class TestProvisionFastPathReassignsDiagView:
         yield result, config_dir, os_user
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
               "DROP VIEW IF EXISTS nexus.diag_chash_conformance")
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "DROP SCHEMA IF EXISTS nexus")
 
     def test_daemon_start_path_reassigns_via_provision_fast_path(
         self, superuser_owned_view, bins,
@@ -1017,6 +1050,228 @@ class TestProvisionFastPathReassignsDiagView:
             "ON n.oid = c.relnamespace WHERE n.nspname = 'nexus' "
             "AND c.relname = 'diag_chash_conformance'",
         ) == ""
+
+
+# ── transfer_vector_extension_ownership_to_nexus_admin: nexus-cbo4a batch 9 ──
+# item 0. CORRECTED DESIGN (2026-09-05): an earlier version of this suite
+# tested a direct-relocate function that moved `vector` into the nexus
+# schema right here, in provision(), before Liquibase ever runs. Verified
+# empirically (against a live PG17 cluster, via SchemaMigratorIntegrationTest's
+# own aged-box fixtures modeling the real non-superuser migration shape) that
+# doing so breaks vectors-001-baseline.xml's OWN vectors-001-2/-3/-4 bare
+# vector(N)/vector_cosine_ops references, which run almost immediately after
+# vectors-001-1 creates the extension and need it still resolvable via the
+# default (public-including) search_path at that point. provision() now only
+# transfers OWNERSHIP to nexus_admin; the ACTUAL relocation happens later, as
+# an ordinary Liquibase changeset (search-path-001), at the correct point in
+# the FIRST walk — a walk this Python-side suite never drives, so these tests
+# assert ownership and the pre-relocation schema state, not the post-
+# relocation schema.
+
+class TestFreshProvisionTransfersVectorOwnership:
+    """A brand-new provision() creates `vector` AND `pg_trgm` under a
+    throwaway relocator role and immediately hands ownership of both to
+    nexus_admin (transfer_vector_extension_ownership_to_nexus_admin, wired
+    right after _create_roles) — but does NOT relocate either into the
+    nexus schema itself; that is Liquibase's job, later, in-band.
+
+    ROUND-2 CORRECTION (nexus-cbo4a batch 9 item 0, caught live by
+    tests/e2e/local-service-gate.sh, not by this suite): pg_trgm being a
+    TRUSTED extension since PG13 means nexus_admin CAN run its own bare
+    `CREATE EXTENSION pg_trgm` unassisted — but every one of pg_trgm's 31
+    LANGUAGE-C member functions (set_limit, similarity, word_similarity,
+    the GiST/GIN support functions, etc.) is stamped with BOOTSTRAP-
+    SUPERUSER ownership by PostgreSQL's own internal extension-install
+    mechanism regardless of who issued CREATE EXTENSION (verified against a
+    live PG17 cluster) — a self-created pg_trgm can never be relocated by
+    nexus_admin (`ALTER EXTENSION pg_trgm SET SCHEMA nexus` fails with "must
+    be owner of function set_limit"). A first draft of this class asserted
+    the opposite ("pg_trgm is NOT covered here... no ownership-transfer step
+    needed at all") and every fixture/test in this file happened to never
+    exercise the real gap, since none of them ever create pg_trgm bare — the
+    E2E gate's fresh dev-jar run is what actually caught it."""
+
+    pytestmark = pytest.mark.no_service_jar
+
+    def test_vector_is_owned_by_nexus_admin_after_fresh_provision(self, provisioned, bins):
+        result, _ = provisioned
+        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        owner = _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT extowner::regrole::text FROM pg_extension WHERE extname = 'vector'",
+        )
+        assert owner == "nexus_admin"
+
+    def test_pg_trgm_is_owned_by_nexus_admin_after_fresh_provision(self, provisioned, bins):
+        result, _ = provisioned
+        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        owner = _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT extowner::regrole::text FROM pg_extension WHERE extname = 'pg_trgm'",
+        )
+        assert owner == "nexus_admin"
+
+    def test_pg_trgm_member_functions_are_owned_by_nexus_admin_after_fresh_provision(
+        self, provisioned, bins
+    ):
+        """THE ACTUAL REGRESSION PIN: extowner alone does not prove
+        relocatability — pg_trgm's C-language member functions are the ones
+        that silently retain bootstrap-superuser ownership. This is the
+        assertion that would have caught the live gate failure before it
+        ever reached tests/e2e/local-service-gate.sh."""
+        result, _ = provisioned
+        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        non_admin_owned = _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT count(*) FROM pg_proc p "
+            "JOIN pg_depend d ON d.objid = p.oid AND d.classid = 'pg_proc'::regclass "
+            "JOIN pg_extension e ON e.oid = d.refobjid "
+            "WHERE e.extname = 'pg_trgm' AND p.proowner::regrole::text != 'nexus_admin'",
+        )
+        assert non_admin_owned == "0", (
+            "every pg_trgm member function must be owned by nexus_admin, or "
+            "ALTER EXTENSION pg_trgm SET SCHEMA nexus fails downstream"
+        )
+
+    def test_vector_stays_in_public_after_fresh_provision(self, provisioned, bins):
+        """Regression pin: provision() must NOT relocate the extension
+        itself — only Liquibase's search-path-001 changeset does, later,
+        after the bare-reference changesets it would otherwise break."""
+        result, _ = provisioned
+        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        assert _extension_schema(bins, result.port, os_user, "vector") == "public"
+
+    def test_pg_trgm_stays_in_public_after_fresh_provision(self, provisioned, bins):
+        result, _ = provisioned
+        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        assert _extension_schema(bins, result.port, os_user, "pg_trgm") == "public"
+
+    def test_relocator_role_is_dropped_after_fresh_provision(self, provisioned, bins):
+        result, _ = provisioned
+        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        row = _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT 1 FROM pg_roles WHERE rolname = 'nx_ext_relocator'",
+        )
+        assert row == "", "the throwaway relocator role must be dropped once ownership transfers"
+
+    def test_nexus_admin_can_still_use_vector_type_in_public(self, provisioned, bins):
+        """The capability that matters at THIS stage: nexus_admin (NOSUPERUSER,
+        not the extension's owner before this test's own fresh-provision setup
+        ran... it IS the owner now, but the point being proven is USAGE, which
+        never required ownership) can use the type via ordinary default
+        search_path resolution — no nexus.* qualification needed yet, since
+        the extension has not been relocated."""
+        result, config_dir = provisioned
+        admin_pass = _read_credentials(
+            config_dir / CREDENTIALS_FILENAME
+        )["NX_DB_ADMIN_PASS"]
+        out = _psql_as(
+            bins, result.port, "nexus_admin", admin_pass, NEXUS_DB_NAME,
+            "SELECT '[1,2,3]'::vector(3) OPERATOR(public.<=>) '[1,2,3]'::vector(3)",
+        )
+        assert out.strip() == "0"
+
+
+class TestTransferVectorExtensionOwnershipToNexusAdmin:
+    """Direct unit tests of transfer_vector_extension_ownership_to_nexus_admin."""
+
+    pytestmark = pytest.mark.no_service_jar
+
+    @pytest.fixture()
+    def relocator_owned_vector(self, provisioned, bins):
+        """Reproduce the PRE-transfer state _create_vector_extension leaves
+        behind on its own (a fresh provision() already transferred ownership
+        via the wired call, so recreate the relocator role and hand vector
+        back to it for this fixture's purposes)."""
+        result, config_dir = provisioned
+        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        # ALTER EXTENSION ... OWNER TO is not valid PostgreSQL grammar (verified
+        # live against a PG17 cluster while designing the real fix this test
+        # exercises), and REASSIGN OWNED BY is a blanket per-ROLE operation — it
+        # would reassign EVERYTHING nexus_admin owns on this module-scoped
+        # cluster, not just the extension, polluting sibling tests. Instead, drop
+        # and recreate the extension directly under the throwaway role (safe here:
+        # nothing depends on the vector type yet at provision()-only scope, no
+        # Liquibase walk has ever run against this fixture's cluster).
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "DROP EXTENSION vector; "
+              "CREATE ROLE nx_ext_relocator SUPERUSER; "
+              "SET ROLE nx_ext_relocator; "
+              "CREATE EXTENSION vector; "
+              "RESET ROLE")
+        yield result, config_dir, os_user
+
+    def test_already_transferred_is_a_noop(self, provisioned, bins):
+        from nexus.db.pg_provision import transfer_vector_extension_ownership_to_nexus_admin
+
+        result, config_dir = provisioned
+        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+
+        transferred = transfer_vector_extension_ownership_to_nexus_admin(bins, result.port, os_user)
+
+        assert transferred is False, (
+            "a fresh provision already transferred ownership and dropped the "
+            "relocator role; a repeat call must be a clean no-op"
+        )
+
+    def test_missing_relocator_role_entirely_is_a_noop(self, provisioned, bins):
+        """An install that predates this mechanism entirely (vector owned
+        directly by the bootstrap superuser, no relocator role ever existed)
+        must not crash — there is genuinely nothing this function can do for
+        that case (the bootstrap-superuser ownership trap is exactly why the
+        relocator-role indirection exists), so it must report a clean no-op."""
+        from nexus.db.pg_provision import transfer_vector_extension_ownership_to_nexus_admin
+
+        result, config_dir = provisioned
+        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        # ALTER EXTENSION ... OWNER TO is not valid PostgreSQL grammar (verified
+        # live against a PG17 cluster). Reproduce "owned directly by the
+        # bootstrap superuser" the honest way: drop and recreate it as os_user
+        # itself (safe here: nothing depends on the vector type yet at
+        # provision()-only scope, no Liquibase walk has ever run).
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "DROP EXTENSION vector; CREATE EXTENSION vector")
+
+        transferred = transfer_vector_extension_ownership_to_nexus_admin(bins, result.port, os_user)
+
+        assert transferred is False
+
+    def test_transfers_ownership_when_relocator_role_present(self, relocator_owned_vector, bins):
+        """THE END-TO-END PROOF: reproduce the pre-transfer state (vector
+        owned by a throwaway relocator role), run the backfill, then prove
+        ownership landed on nexus_admin and the relocator role is gone."""
+        from nexus.db.pg_provision import transfer_vector_extension_ownership_to_nexus_admin
+
+        result, config_dir, os_user = relocator_owned_vector
+        owner_before = _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT extowner::regrole::text FROM pg_extension WHERE extname = 'vector'",
+        )
+        assert owner_before == "nx_ext_relocator", "precondition: relocator role must own vector"
+
+        transferred = transfer_vector_extension_ownership_to_nexus_admin(bins, result.port, os_user)
+
+        assert transferred is True
+        owner_after = _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT extowner::regrole::text FROM pg_extension WHERE extname = 'vector'",
+        )
+        assert owner_after == "nexus_admin"
+        row = _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT 1 FROM pg_roles WHERE rolname = 'nx_ext_relocator'",
+        )
+        assert row == "", "the relocator role must be dropped after a successful transfer"
+
+
+def _extension_schema(bins, port, os_user, extname="vector"):
+    return _query(
+        bins, port, NEXUS_DB_NAME, os_user,
+        "SELECT n.nspname FROM pg_extension e "
+        "JOIN pg_namespace n ON n.oid = e.extnamespace "
+        f"WHERE e.extname = '{extname}'",
+    )
 
 
 class TestProvisionDiagConformanceViewDefersToExisting:

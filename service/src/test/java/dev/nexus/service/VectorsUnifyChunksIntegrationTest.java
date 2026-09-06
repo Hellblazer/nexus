@@ -146,8 +146,17 @@ class VectorsUnifyChunksIntegrationTest {
             su.createStatement().execute(
                 "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                     + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
+            // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): create under a
+            // FRESH, throwaway superuser role -- never `su`'s own bootstrap superuser --
+            // then REASSIGN to the migration role. See SchemaMigratorIntegrationTest's
+            // identical fix and search-path-001-relocate-vector-extensions.xml's header.
+            su.createStatement().execute("CREATE ROLE nx_ext_relocator SUPERUSER");
+            su.createStatement().execute("SET ROLE nx_ext_relocator");
             su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
             su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+            su.createStatement().execute("REASSIGN OWNED BY nx_ext_relocator TO " + role);
+            su.createStatement().execute("RESET ROLE");
+            su.createStatement().execute("DROP ROLE nx_ext_relocator");
         }
         var cfg = new com.zaxxer.hikari.HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
@@ -228,6 +237,10 @@ class VectorsUnifyChunksIntegrationTest {
                 stub.setString(2, collection);
                 stub.executeUpdate();
             }
+            // Bare (unqualified) ::vector, deliberately NOT ::nexus.vector: every caller
+            // of seedChunk runs this at the migrateUpTo(rig.adminDs(), "vectors-004-1")
+            // boundary, well before search-path-001 (placed near the changelog's end)
+            // has relocated the extension out of `public` (nexus-cbo4a batch 9 item 0).
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.chunks_" + dim
                         + " (tenant_id, collection, chash, chunk_text, embedding) "
@@ -503,7 +516,7 @@ class VectorsUnifyChunksIntegrationTest {
                 assertThatThrownBy(() -> {
                     try (var ps = su.prepareStatement(
                             "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, "
-                                + "embedding_384, embedding_768) VALUES ('t1', 'c', ?, 'x', ?::vector, ?::vector)")) {
+                                + "embedding_384, embedding_768) VALUES ('t1', 'c', ?, 'x', ?::nexus.vector, ?::nexus.vector)")) {
                         ps.setBytes(1, chash32(21));
                         String v384 = "[" + "0.01,".repeat(383) + "0.01]";
                         String v768 = "[" + "0.01,".repeat(767) + "0.01]";
@@ -521,7 +534,7 @@ class VectorsUnifyChunksIntegrationTest {
                     String vec = "[" + "0.01,".repeat(dim - 1) + "0.01]";
                     try (var ps = su.prepareStatement(
                             "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, "
-                                + "embedding_" + dim + ") VALUES ('t1', 'c', ?, 'x', ?::vector)")) {
+                                + "embedding_" + dim + ") VALUES ('t1', 'c', ?, 'x', ?::nexus.vector)")) {
                         ps.setBytes(1, chash32(30 + i));
                         ps.setString(2, vec);
                         assertThatCode(ps::executeUpdate)
@@ -697,7 +710,7 @@ class VectorsUnifyChunksIntegrationTest {
                 assertThatThrownBy(() -> {
                     try (var ps = su.prepareStatement(
                             "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-                                + "VALUES ('t1', 'c', ?, 'x', ?::vector)")) {
+                                + "VALUES ('t1', 'c', ?, 'x', ?::nexus.vector)")) {
                         ps.setBytes(1, new byte[31]);
                         ps.setString(2, "[" + "0.01,".repeat(383) + "0.01]");
                         ps.executeUpdate();
@@ -715,7 +728,7 @@ class VectorsUnifyChunksIntegrationTest {
                 assertThatThrownBy(() -> {
                     try (var ps = su.prepareStatement(
                             "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-                                + "VALUES ('t1', 'c', ?, 'x', ?::vector)")) {
+                                + "VALUES ('t1', 'c', ?, 'x', ?::nexus.vector)")) {
                         ps.setBytes(1, new byte[33]);
                         ps.setString(2, "[" + "0.01,".repeat(383) + "0.01]");
                         ps.executeUpdate();
@@ -730,7 +743,7 @@ class VectorsUnifyChunksIntegrationTest {
                 // 32-byte chash -> accepted (CONTROL).
                 try (var ps = su.prepareStatement(
                         "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-                            + "VALUES ('t1', 'c', ?, 'x', ?::vector)")) {
+                            + "VALUES ('t1', 'c', ?, 'x', ?::nexus.vector)")) {
                     ps.setBytes(1, chash32(40));
                     ps.setString(2, "[" + "0.01,".repeat(383) + "0.01]");
                     assertThatCode(ps::executeUpdate)

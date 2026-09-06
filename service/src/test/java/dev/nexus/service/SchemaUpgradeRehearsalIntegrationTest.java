@@ -1834,8 +1834,17 @@ class SchemaUpgradeRehearsalIntegrationTest {
         su.createStatement().execute(
             "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' "
                 + "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
+        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): create under a
+        // FRESH, throwaway superuser role -- never `su`'s own bootstrap superuser --
+        // then REASSIGN to the migration role. See SchemaMigratorIntegrationTest's
+        // identical fix and search-path-001-relocate-vector-extensions.xml's header.
+        su.createStatement().execute("CREATE ROLE nx_ext_relocator SUPERUSER");
+        su.createStatement().execute("SET ROLE nx_ext_relocator");
         su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
         su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+        su.createStatement().execute("REASSIGN OWNED BY nx_ext_relocator TO " + ADMIN_ROLE);
+        su.createStatement().execute("RESET ROLE");
+        su.createStatement().execute("DROP ROLE nx_ext_relocator");
     }
 
     private static HikariDataSource newAdminPool(PostgreSQLContainer<?> pg, String poolName) {

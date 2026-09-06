@@ -201,8 +201,17 @@ class GrantsNexusDiagViewAccessIntegrationTest {
         // admin role here never gets CREATEROLE, matching production.
         exec(su, "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' "
             + "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
+        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): create under a
+        // FRESH, throwaway superuser role -- never `su`'s own bootstrap superuser --
+        // then REASSIGN to the migration role. See SchemaMigratorIntegrationTest's
+        // identical fix and search-path-001-relocate-vector-extensions.xml's header.
+        exec(su, "CREATE ROLE nx_ext_relocator SUPERUSER");
+        exec(su, "SET ROLE nx_ext_relocator");
         exec(su, "CREATE EXTENSION IF NOT EXISTS vector");
         exec(su, "CREATE EXTENSION IF NOT EXISTS pg_trgm");
+        exec(su, "REASSIGN OWNED BY nx_ext_relocator TO " + ADMIN_ROLE);
+        exec(su, "RESET ROLE");
+        exec(su, "DROP ROLE nx_ext_relocator");
 
         // nexus_diag is superuser-created in production (BYPASSRLS
         // requires superuser, nexus-vounk) — never by Liquibase.

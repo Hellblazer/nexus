@@ -69,8 +69,20 @@ class GrantsSvcForeignOwnedRelationTest {
             // pg_monitor WITH ADMIN OPTION (or is superuser). See GrantsPgMonitorTest for
             // the falsification proof of this exact prerequisite.
             exec(su, "GRANT pg_monitor TO " + ADMIN_ROLE + " WITH ADMIN OPTION");
+            // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): create the
+            // extensions under a FRESH, throwaway superuser role -- never `su`'s own
+            // bootstrap superuser -- then REASSIGN everything it owns to ADMIN_ROLE and
+            // drop it. See SchemaMigratorIntegrationTest's identical bootstrap fix and
+            // search-path-001-relocate-vector-extensions.xml's header for the full
+            // derivation (REASSIGN OWNED BY unconditionally refuses the cluster's
+            // bootstrap-superuser role, which is exactly what `su` connects as here).
+            exec(su, "CREATE ROLE nx_ext_relocator SUPERUSER");
+            exec(su, "SET ROLE nx_ext_relocator");
             exec(su, "CREATE EXTENSION IF NOT EXISTS vector");
             exec(su, "CREATE EXTENSION IF NOT EXISTS pg_trgm");
+            exec(su, "REASSIGN OWNED BY nx_ext_relocator TO " + ADMIN_ROLE);
+            exec(su, "RESET ROLE");
+            exec(su, "DROP ROLE nx_ext_relocator");
 
             // 1. Full changelog AS THE NON-SUPERUSER ADMIN ROLE, from
             //    scratch. nexus_admin owns every relation it creates here —

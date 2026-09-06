@@ -955,33 +955,173 @@ def _extension_exists(bins: PgBinaries, port: int, superuser: str, extname: str)
     return "1 row" in res.stdout
 
 
-def _create_vector_extension(bins: PgBinaries, port: int, os_user: str) -> bool:
-    """Create the pgvector ``vector`` extension in the nexus database.
+#: Throwaway role used solely to hold ownership of the pgvector-family
+#: extensions (``vector``, ``pg_trgm``) between :func:`_create_vector_extension`
+#: and :func:`transfer_vector_extension_ownership_to_nexus_admin` — see the
+#: latter's docstring for why this indirection exists at all, and its
+#: correction note for why ``pg_trgm`` needs the identical treatment despite
+#: being a TRUSTED extension nexus_admin can create unassisted.
+_VECTOR_EXT_RELOCATOR_ROLE = "nx_ext_relocator"
 
-    CREATE EXTENSION requires superuser; provisioning owns the only superuser
-    context (``os_user`` is the cluster's initdb owner). nexus_admin is
-    NOSUPERUSER, so the Java service's Liquibase ``vectors-001`` changeset
-    cannot create the extension itself — it fails with 'permission denied to
-    create extension'. Creating it here, at provision time, closes that gap
-    (nexus-jdpn9 item 3, hit on the 2026-06-10 production migration run).
+
+def _create_vector_extension(bins: PgBinaries, port: int, os_user: str) -> bool:
+    """Create the pgvector-family extensions (``vector``, ``pg_trgm``) in the
+    nexus database, under a throwaway relocator role.
+
+    CREATE EXTENSION requires superuser for ``vector`` (not a TRUSTED
+    extension); provisioning owns the only superuser context (``os_user`` is
+    the cluster's initdb owner). nexus_admin is NOSUPERUSER, so the Java
+    service's Liquibase ``vectors-001`` changeset cannot create ``vector``
+    itself — it fails with 'permission denied to create extension'. Creating
+    it here, at provision time, closes that gap (nexus-jdpn9 item 3, hit on
+    the 2026-06-10 production migration run).
 
     ``check_pgvector_available`` has already verified ``vector.control`` is
     installed for these binaries, so CREATE EXTENSION will not fail for a
     missing control file. Idempotent: ``IF NOT EXISTS`` is a no-op when the
     extension is already present.
 
-    Returns True when the extension was freshly created, False on idempotent
-    skip.
+    CORRECTED for nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05):
+    creates BOTH extensions under a FRESH, throwaway superuser role
+    (:data:`_VECTOR_EXT_RELOCATOR_ROLE`) via ``SET ROLE``, NEVER as ``os_user``
+    directly. ``os_user`` is initdb's cluster owner and therefore ALWAYS the
+    BOOTSTRAP_SUPERUSERID (oid 10, regardless of its chosen name) — PostgreSQL
+    unconditionally refuses ``REASSIGN OWNED BY`` for that specific role, so an
+    extension created directly as ``os_user`` can never later be handed to
+    ``nexus_admin`` by ordinary means (verified against a live PG17 cluster; no
+    ``ALTER EXTENSION ... OWNER TO`` grammar exists either). A role created
+    fresh here has no such restriction. ``nexus_admin`` does not exist yet at
+    this point in a from-scratch provision (see :func:`provision`'s call
+    ordering), so the relocator role is left in place, still owning both
+    extensions, for :func:`transfer_vector_extension_ownership_to_nexus_admin`
+    to hand off once ``nexus_admin`` exists.
+
+    ``pg_trgm`` IS INCLUDED HERE despite being a TRUSTED extension (nexus_admin
+    could run its own ``CREATE EXTENSION pg_trgm`` unassisted) — round-2
+    correction, nexus-cbo4a batch 9 item 0: verified against a live PG17
+    cluster that PostgreSQL's trusted-extension mechanism relaxes only the
+    CREATE EXTENSION permission check itself. Every one of pg_trgm's 31
+    LANGUAGE-C member functions (``set_limit``, ``similarity``,
+    ``word_similarity``, the GiST/GIN support functions, etc.) is stamped with
+    BOOTSTRAP-SUPERUSER ownership regardless of which role actually issued
+    CREATE EXTENSION — loading a C shared library is treated as inherently
+    privileged at the object-creation level even when the top-level statement
+    is trusted-relaxed. A first draft of this fix assumed "trusted therefore
+    self-owned" and shipped believing pg_trgm needed no relocator treatment;
+    ``tests/e2e/local-service-gate.sh`` caught it live (``ALTER EXTENSION
+    pg_trgm SET SCHEMA nexus`` failing with "must be owner of function
+    set_limit" the first time a genuinely fresh install ran the real dev jar
+    against a real PG cluster) — no unit or Java-side fixture had reproduced
+    it, since every one of THOSE bootstraps happened to create pg_trgm inside
+    this SAME relocator-role dance already (copied verbatim alongside
+    ``vector``), by construction rather than by having diagnosed the
+    ownership defect. Creating pg_trgm here, under the relocator role exactly
+    like ``vector``, means Liquibase's own ``vectors-001-1`` (``CREATE
+    EXTENSION IF NOT EXISTS pg_trgm``) finds it already present (a clean
+    no-op) with every member object already correctly owned.
+
+    Returns True when either extension was freshly created, False on
+    idempotent skip (both already present).
     """
-    if _extension_exists(bins, port, os_user, "vector"):
+    vector_exists = _extension_exists(bins, port, os_user, "vector")
+    trgm_exists = _extension_exists(bins, port, os_user, "pg_trgm")
+    if vector_exists and trgm_exists:
         _log.info("pg_vector_extension_exists_skip")
+        return False
+
+    vector_clause = "" if vector_exists else "CREATE EXTENSION IF NOT EXISTS vector; "
+    trgm_clause = "" if trgm_exists else "CREATE EXTENSION IF NOT EXISTS pg_trgm; "
+    _psql(
+        bins, port, NEXUS_DB_NAME, os_user,
+        f"DO $$ BEGIN "
+        f"  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{_VECTOR_EXT_RELOCATOR_ROLE}') THEN "
+        f"    CREATE ROLE {_VECTOR_EXT_RELOCATOR_ROLE} SUPERUSER; "
+        f"  END IF; "
+        f"END $$; "
+        f"SET ROLE {_VECTOR_EXT_RELOCATOR_ROLE}; "
+        f"{vector_clause}{trgm_clause}"
+        f"RESET ROLE;",
+    )
+    _log.info("pg_vector_extension_created", db=NEXUS_DB_NAME)
+    return True
+
+
+def transfer_vector_extension_ownership_to_nexus_admin(
+    bins: PgBinaries, port: int, os_user: str
+) -> bool:
+    """Hand the pgvector-family extensions' ownership from the throwaway
+    relocator role (:func:`_create_vector_extension`) to ``nexus_admin``, then
+    drop the relocator.
+
+    CORRECTED DESIGN (nexus-cbo4a batch 9 item 0, Sam's directive
+    2026-09-05) — replaces a first draft, ``relocate_vector_extensions_to_
+    nexus``, that performed the ACTUAL ``ALTER EXTENSION ... SET SCHEMA
+    nexus`` move directly, here, as the cluster superuser, before the engine's
+    Liquibase migration ever runs. Verified empirically (against a live PG17
+    cluster, driven by SchemaMigratorIntegrationTest's own aged-box fixtures
+    once they modeled the real non-superuser migration shape end to end) that
+    doing the move THIS early is UNWORKABLE: it breaks vectors-001-baseline
+    .xml's OWN ``vectors-001-2``/``-3``/``-4`` changesets (bare ``vector(N)``
+    column types, bare ``vector_cosine_ops`` HNSW opclasses), which run almost
+    immediately after ``vectors-001-1`` creates the extension and rely on it
+    still resolving via the connecting role's default search_path (which
+    always includes ``public``, no configuration needed) at THAT point in the
+    FIRST walk. Moving the extension before that walk starts leaves ``public``
+    without it and ``nexus`` not yet in any default search_path, so those
+    changesets fail hard the very first time a from-scratch install's engine
+    runs its migration.
+
+    THE FIX: this function transfers OWNERSHIP only (never issues ``ALTER
+    EXTENSION ... SET SCHEMA`` itself). ``nexus_admin`` -- which owns both
+    extensions AND every one of their member objects from the moment this
+    function returns -- performs the ACTUAL relocation itself, as an
+    ORDINARY, UNCONDITIONAL pair of Liquibase changesets
+    (``search-path-001-relocate-vector-extensions.xml``), placed LATE in the
+    changelog, after every bare-reference changeset. ``ALTER EXTENSION ...
+    SET SCHEMA`` requires the caller to OWN the extension AND every one of its
+    member objects (and hold CREATE on the target schema, which
+    ``nexus_admin`` always has -- it owns ``nexus``) or be superuser;
+    ownership transfer alone is therefore sufficient, and the sequencing is
+    now driven entirely by the changelog's own changeset order, not by a
+    client-side guess at when it is safe to intervene.
+
+    ROUND-2 CORRECTION: an earlier version of this docstring claimed
+    ``pg_trgm`` needed NO relocator treatment because it is a TRUSTED
+    extension nexus_admin can create unassisted. Verified against a live
+    PG17 cluster (see :func:`_create_vector_extension`'s own correction
+    note) that this is FALSE: every one of pg_trgm's 31 LANGUAGE-C member
+    functions is stamped with bootstrap-superuser ownership by PostgreSQL's
+    own internal extension-install mechanism regardless of who issued CREATE
+    EXTENSION, so ``ALTER EXTENSION pg_trgm SET SCHEMA nexus`` fails with
+    "must be owner of function set_limit" (or any of the other 30) unless
+    pg_trgm was ALSO created under the relocator role. Both extensions now
+    get the identical treatment; a single ``REASSIGN OWNED BY`` transfers
+    everything the relocator role owns (both extensions, all their member
+    objects) to ``nexus_admin`` in one statement.
+
+    Idempotent and best-effort at the call site (matches this module's other
+    backfills, e.g. :func:`reassign_diag_view_owner_before_restart`): a
+    missing relocator role means either both extensions predate this
+    mechanism, were never created this way, or ownership was already
+    transferred on a prior run -- in every case, nothing to do. Query-driven
+    via a single combined statement so the check-then-act is one round trip.
+
+    Returns True when a transfer was actually performed, False on idempotent
+    skip (no relocator role found).
+    """
+    exists = _psql_tuples(
+        bins, port, NEXUS_DB_NAME, os_user,
+        f"SELECT 1 FROM pg_roles WHERE rolname = '{_VECTOR_EXT_RELOCATOR_ROLE}'",
+    )
+    if not exists:
         return False
 
     _psql(
         bins, port, NEXUS_DB_NAME, os_user,
-        "CREATE EXTENSION IF NOT EXISTS vector",
+        f"REASSIGN OWNED BY {_VECTOR_EXT_RELOCATOR_ROLE} TO nexus_admin; "
+        f"DROP ROLE {_VECTOR_EXT_RELOCATOR_ROLE};",
     )
-    _log.info("pg_vector_extension_created", db=NEXUS_DB_NAME)
+    _log.info("pg_vector_extension_ownership_transferred", to_role="nexus_admin")
     return True
 
 
@@ -1951,6 +2091,27 @@ def provision(
                         _log.warning(
                             "pg_diag_view_reassign_backfill_failed", error=str(exc)
                         )
+                    # nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05):
+                    # independent try/except, same shape as the backfills above —
+                    # one failing must not prevent the others from being
+                    # attempted. This branch means _create_vector_extension just
+                    # (re)created `vector` above because it was missing on an
+                    # EXISTING, already-running cluster (nexus-jdpn9 item 3's
+                    # exact scenario: Liquibase blocked at vectors-001-1 and
+                    # never got past it) — the migration has NOT completed a
+                    # first walk, so this is the identical pre-first-walk shape
+                    # transfer_vector_extension_ownership_to_nexus_admin's own
+                    # docstring derives the fix for: ownership transfer only,
+                    # never a direct relocate here. See that docstring for the
+                    # full derivation.
+                    try:
+                        transfer_vector_extension_ownership_to_nexus_admin(
+                            _bins, stored_port, os_user
+                        )
+                    except Exception as exc:  # noqa: BLE001 — repair path must never break the no-op re-run
+                        _log.warning(
+                            "pg_extension_ownership_transfer_backfill_failed", error=str(exc)
+                        )
                 _log.info(
                     "pg_provision_no_op",
                     port=stored_port,
@@ -2028,6 +2189,16 @@ def provision(
     )
     result.admin_role_created = roles.admin_created
     result.svc_role_created = roles.svc_created
+
+    # ── Transfer vector extension ownership to nexus_admin ─────────────────────
+    # nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): `vector` was just
+    # created above under the throwaway relocator role (nexus_admin did not
+    # exist yet at that point). Hand it to nexus_admin now that the role
+    # exists — nexus_admin performs the ACTUAL relocation itself, later, as an
+    # ordinary Liquibase changeset (search-path-001), never here. See
+    # transfer_vector_extension_ownership_to_nexus_admin's own docstring for
+    # why an earlier "relocate here directly" design was unworkable.
+    transfer_vector_extension_ownership_to_nexus_admin(bins, port, os_user)
 
     # ── Write credentials ──────────────────────────────────────────────────────
     _write_credentials(

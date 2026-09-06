@@ -93,8 +93,17 @@ class VectorsUnifyCentroidsIntegrationTest {
             su.createStatement().execute(
                 "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                     + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
+            // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): create under a
+            // FRESH, throwaway superuser role -- never `su`'s own bootstrap superuser --
+            // then REASSIGN to the migration role. See SchemaMigratorIntegrationTest's
+            // identical fix and search-path-001-relocate-vector-extensions.xml's header.
+            su.createStatement().execute("CREATE ROLE nx_ext_relocator SUPERUSER");
+            su.createStatement().execute("SET ROLE nx_ext_relocator");
             su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
             su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+            su.createStatement().execute("REASSIGN OWNED BY nx_ext_relocator TO " + role);
+            su.createStatement().execute("RESET ROLE");
+            su.createStatement().execute("DROP ROLE nx_ext_relocator");
         }
         var cfg = new com.zaxxer.hikari.HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
@@ -158,6 +167,13 @@ class VectorsUnifyCentroidsIntegrationTest {
      * registration is needed first: taxonomy_centroids_&lt;dim&gt; carries
      * no FK to catalog_collections or to nexus.topics (verified by direct
      * read of taxonomy-002-centroids.xml's own header).
+     *
+     * <p>Bare (unqualified) {@code ::vector}, deliberately NOT {@code
+     * ::nexus.vector}: every caller of this helper seeds at the {@code
+     * migrateUpTo(rig.adminDs(), "taxonomy-007-1")} boundary, well before
+     * search-path-001 (placed near the changelog's end) has relocated the
+     * extension out of {@code public} (nexus-cbo4a batch 9 item 0
+     * discovery).
      */
     private static void seedCentroid(PostgreSQLContainer<?> pg, int dim, String tenant, String collection,
                                       long topicId, String label) throws Exception {
@@ -391,7 +407,7 @@ class VectorsUnifyCentroidsIntegrationTest {
                     try (var ps = su.prepareStatement(
                             "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, label, "
                                 + "embedding_384, embedding_768) "
-                                + "VALUES ('t1', 'c', 101, 'two-embedding-label', ?::vector, ?::vector)")) {
+                                + "VALUES ('t1', 'c', 101, 'two-embedding-label', ?::nexus.vector, ?::nexus.vector)")) {
                         String v384 = "[" + "0.01,".repeat(383) + "0.01]";
                         String v768 = "[" + "0.01,".repeat(767) + "0.01]";
                         ps.setString(1, v384);
@@ -408,7 +424,7 @@ class VectorsUnifyCentroidsIntegrationTest {
                     String vec = "[" + "0.01,".repeat(dim - 1) + "0.01]";
                     try (var ps = su.prepareStatement(
                             "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, label, "
-                                + "embedding_" + dim + ") VALUES ('t1', 'c', ?, 'one-embedding-label', ?::vector)")) {
+                                + "embedding_" + dim + ") VALUES ('t1', 'c', ?, 'one-embedding-label', ?::nexus.vector)")) {
                         ps.setLong(1, 200 + i);
                         ps.setString(2, vec);
                         assertThatCode(ps::executeUpdate)

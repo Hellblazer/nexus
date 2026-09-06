@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05, nexus-zrcj7): relocate
+    the pgvector-family extensions (vector, pg_trgm) into the nexus schema, so the
+    33 functions in search-path-002-qualify-vector-operator-functions.xml can
+    reference nexus.vector / nexus.word_similarity / OPERATOR(nexus.&lt;=&gt;) /
+    OPERATOR(nexus.&lt;%) explicitly instead of depending on the calling session's
+    search_path containing public (where CREATE EXTENSION landed unqualified,
+    vectors-001-baseline.xml).
+
+    OWNERSHIP, NOT SUPERUSER STATUS, GATES THIS: ALTER EXTENSION ... SET SCHEMA
+    requires the caller to OWN the extension (and hold CREATE on the target
+    schema) OR be superuser. An EARLIER version of this changeset gated on
+    {@code current_setting('is_superuser') = 'on'} and skipped (onFail="MARK_RAN")
+    for the real production/local-install shape, where nexus_admin (NOSUPERUSER,
+    the role that runs this changelog everywhere outside the superuser-driven test
+    paths) is the one connecting. That gate produced a genuine sequencing deadlock,
+    caught by SchemaMigratorIntegrationTest's own aged-box fixtures once they were
+    made to model the real non-superuser shape end to end: relocating the extension
+    BEFORE Liquibase runs at all (the only point a truly EXTERNAL superuser step
+    can act) breaks vectors-001-baseline.xml's OWN vectors-001-2/-3/-4 (bare
+    `vector(N)` / `vector_cosine_ops` column and index types), which run almost
+    immediately after vectors-001-1 creates the extension and rely on it still
+    being resolvable via the connecting role's default search_path (which always
+    includes public, with no configuration needed) at THAT point in the walk.
+    Relocating this LATE (this changeset's actual placement, after every
+    bare-reference changeset) is correct for a single continuous walk, but an
+    external, one-shot DBA step run before the walk starts cannot land at that
+    exact later point without pausing the walk mid-flight — operationally
+    unworkable for a real deployment.
+
+    The actual fix (verified against a live PG17 container before landing here):
+    PostgreSQL has NO "ALTER EXTENSION ... OWNER TO" grammar (confirmed via a live
+    cluster's own \h ALTER EXTENSION output), and REASSIGN OWNED BY unconditionally
+    refuses to touch the cluster's BOOTSTRAP-superuser role (the one initdb
+    creates, always oid 10 regardless of its chosen name); it does NOT
+    refuse for any OTHER superuser role. So every extension-creation site (this
+    test tree's fixtures, nexus.db.pg_provision, the documented production DBA
+    prerequisite) creates the extensions under a FRESH, throwaway superuser role
+    (never the raw bootstrap superuser) and immediately REASSIGNs everything that
+    role owns to the real migrating role (nexus_admin or its test-tree
+    equivalents), then drops the throwaway role. The migrating role now OWNS the
+    extensions from the moment Liquibase first connects, exactly the same
+    ownership shape a superuser-driven walk (jOOQ codegen's Testcontainers
+    bootstrap, this test tree's PgContainerHelper#applyProductSchema, both of
+    which run the whole changelog over a superuser connection directly and so
+    never needed this step at all) has by construction. This changeset itself is
+    now UNCONDITIONAL: whoever runs it either owns the extensions (via the
+    ownership-transfer step above) or is superuser (bypasses ownership checks
+    entirely), so no precondition is needed to skip it: there is no shape left
+    where it would fail. See nexus.db.pg_provision.transfer_vector_extension_
+    ownership_to_nexus_admin's own docstring for the exact ownership-transfer mechanics,
+    and SchemaMigratorIntegrationTest's aged-box fixture bootstrap for the
+    identical dance applied to a throwaway test role. The production DBA
+    prerequisite text (SchemaMigrator's javadoc) documents the same step for a
+    managed/production cluster, a live-deployment sequencing decision Sam owns,
+    not assumed here.
+
+    Idempotent regardless: a repeat ALTER EXTENSION ... SET SCHEMA to the SAME
+    schema succeeds silently (verified empirically), so running this on an
+    already-relocated database is harmless, though Liquibase's own
+    run-exactly-once-per-id guarantee means that case never actually arises for a
+    single changelog walk.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="search-path-001-1" author="nexus-cbo4a">
+        <comment>Relocate the vector extension into the nexus schema. Unconditional: the migrating role either owns the extension (transferred to it by the DBA/client-provisioning bootstrap step before this changelog ever ran) or is superuser (bypasses ownership checks).</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER EXTENSION vector SET SCHEMA nexus;
+        </sql>
+        <rollback>
+            <sql>ALTER EXTENSION vector SET SCHEMA public;</sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-001-2" author="nexus-cbo4a">
+        <comment>Relocate the pg_trgm extension into the nexus schema. Unconditional: the migrating role either owns the extension (transferred to it by the DBA/client-provisioning bootstrap step before this changelog ever ran) or is superuser (bypasses ownership checks).</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER EXTENSION pg_trgm SET SCHEMA nexus;
+        </sql>
+        <rollback>
+            <sql>ALTER EXTENSION pg_trgm SET SCHEMA public;</sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

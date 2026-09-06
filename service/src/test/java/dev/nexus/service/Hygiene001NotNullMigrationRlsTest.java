@@ -339,6 +339,11 @@ class Hygiene001NotNullMigrationRlsTest {
     private static void seedLegacyChunkAndManifest(Connection su, String tenant, String legacyChash)
             throws Exception {
         String collection = tenant + "__coll__voyage-context-3__v1";
+        // Bare (unqualified) ::vector, deliberately NOT ::nexus.vector: this INSERT
+        // runs at migrateUpTo's TARGET_CHANGESET_ID point, well before search-path-001
+        // (placed near the changelog's end) has relocated the extension -- it is
+        // still in `public` here (nexus-cbo4a batch 9 item 0 discovery, same class as
+        // SchemaMigratorIntegrationTest's lateUpgradingDeployment... test).
         su.createStatement().execute(
             "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
             + "VALUES ('" + tenant + "', '" + collection + "', '" + legacyChash + "', "
@@ -411,8 +416,17 @@ class Hygiene001NotNullMigrationRlsTest {
             su.createStatement().execute(
                 "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' "
                 + "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
+            // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): create under a
+            // FRESH, throwaway superuser role -- never `su`'s own bootstrap superuser --
+            // then REASSIGN to the migration role. See SchemaMigratorIntegrationTest's
+            // identical fix and search-path-001-relocate-vector-extensions.xml's header.
+            su.createStatement().execute("CREATE ROLE nx_ext_relocator SUPERUSER");
+            su.createStatement().execute("SET ROLE nx_ext_relocator");
             su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
             su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+            su.createStatement().execute("REASSIGN OWNED BY nx_ext_relocator TO " + role);
+            su.createStatement().execute("RESET ROLE");
+            su.createStatement().execute("DROP ROLE nx_ext_relocator");
         }
     }
 
