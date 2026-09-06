@@ -190,6 +190,42 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  */
 class SchemaRollbackRoundTripIntegrationTest {
 
+    private static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
+        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
+        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+        su.createStatement().execute(
+            "CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION " + migratingRole);
+        su.createStatement().execute(
+            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_relocated() "
+            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $relofunc$ "
+            + "BEGIN "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "END; "
+            + "$relofunc$");
+        su.createStatement().execute(
+            "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO " + migratingRole);
+            su.createStatement().execute(
+                "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated() "
+                + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $unrelofunc$ "
+                + "BEGIN "
+                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'public' THEN "
+                + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA public'; "
+                + "  END IF; "
+                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'public' THEN "
+                + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA public'; "
+                + "  END IF; "
+                + "END; "
+                + "$unrelofunc$");
+            su.createStatement().execute(
+                "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO " + migratingRole);
+    }
+
+
     private static final Logger log =
         LoggerFactory.getLogger(SchemaRollbackRoundTripIntegrationTest.class);
 
@@ -638,6 +674,26 @@ class SchemaRollbackRoundTripIntegrationTest {
                             + "the rollback. This is the assertion the manual repro used and the "
                             + "only thing that distinguishes a real revert from a silent no-op")
                         .isEmpty();
+                }
+
+                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per
+                // T2 nexus/critique-nexus-cbo4a-batch-9-search-path): the rollback just
+                // above walked all the way to memory-001-1's own rollback (DROP SCHEMA IF
+                // EXISTS nexus CASCADE), which takes nexus.ensure_vector_extensions_
+                // relocated()/_unrelocated() down with it — those SECURITY DEFINER
+                // functions live in the nexus schema. search-path-001's rollback (a few
+                // changesets back, in reverse order) already used the function to move
+                // vector/pg_trgm back to public, correctly, but the function itself does
+                // not survive the LATER (older) schema-cascade-drop. A real cluster never
+                // hits this: nexus.db.pg_provision reinstalls the function on every daemon
+                // start, strictly before any Liquibase walk. This in-process test drives
+                // SchemaMigrator directly, with no daemon between the rollback and the
+                // reapply, so it must reproduce that reinstall itself -- mirroring exactly
+                // what a real restart would do -- before the walk can reach search-path-001
+                // again.
+                try (Connection su = pg.createConnection("")) {
+                    su.setAutoCommit(true);
+                    bootstrapVectorExtensionsForFreshWalk(su, ADMIN_ROLE);
                 }
 
                 // ── FORWARD AGAIN: the schema must come back identical. ─────
@@ -1994,17 +2050,15 @@ class SchemaRollbackRoundTripIntegrationTest {
         su.createStatement().execute(
             "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' "
                 + "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): create under a
-        // FRESH, throwaway superuser role -- never `su`'s own bootstrap superuser --
-        // then REASSIGN to the migration role. See SchemaMigratorIntegrationTest's
-        // identical fix and search-path-001-relocate-vector-extensions.xml's header.
-        su.createStatement().execute("CREATE ROLE nx_ext_relocator SUPERUSER");
-        su.createStatement().execute("SET ROLE nx_ext_relocator");
-        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
-        su.createStatement().execute("REASSIGN OWNED BY nx_ext_relocator TO " + ADMIN_ROLE);
-        su.createStatement().execute("RESET ROLE");
-        su.createStatement().execute("DROP ROLE nx_ext_relocator");
+        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+        // nexus/critique-nexus-cbo4a-batch-9-search-path): see
+        // SchemaMigratorIntegrationTest.bootstrapVectorExtensionsForFreshWalk's own
+        // javadoc for the full derivation -- creates the extensions directly as
+        // `su` and installs a SECURITY DEFINER relocation helper for search-path-
+        // 001's guard to call mid-walk, since this walk resumes through both
+        // vectors-001-baseline.xml and search-path-001/002 in one continuous pass
+        // as a NOSUPERUSER role.
+        bootstrapVectorExtensionsForFreshWalk(su, ADMIN_ROLE);
     }
 
     private static HikariDataSource newAdminPool(PostgreSQLContainer<?> pg, String poolName) {

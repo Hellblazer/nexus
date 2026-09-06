@@ -957,7 +957,7 @@ class RawSqlGateTest {
         // sites in this file -- see search-path-001-relocate-vector-
         // extensions.xml's header for why relocating the extension directly,
         // here, before Liquibase ever runs, is unworkable.
-        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 128),
+        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 79),
         // nexus-cbo4a batch 9 item 0: 32 -> 37 (extension-ownership-transfer dance).
         Map.entry("dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java", 37),
         // nexus-cbo4a batch 9 item 0: 98 -> 103 (extension-ownership-transfer dance).
@@ -1092,7 +1092,7 @@ class RawSqlGateTest {
      * SchemaMigrator#migrate} directly (the production entrypoint under
      * test), never a hand-rolled {@code Liquibase} call to fold.
      */
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1688;
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1639;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
