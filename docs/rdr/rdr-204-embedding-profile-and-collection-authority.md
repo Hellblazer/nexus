@@ -184,6 +184,35 @@ per-collection chunk counts from `nx collection list`. Full numbers in T2
   parameters today (`CatalogHandler.handleCollectionList` calls
   `repo.listCollections(tenant)` unconditionally); the `content_type` and
   `lifecycle_state` filters are new work in Phase 3.
+- **Verified**: the vector dimension ground truth already exists as a view.
+  `nexus.collection_vector_stats` (vectors-005-1) derives `dim` per
+  `(tenant, collection)` from the stored column (`CASE WHEN embedding_384 IS
+  NOT NULL THEN 384 ...`) and groups by `(collection, dim)`. Read live
+  through `GET /v1/vectors/collections`: 70 rows for 70 collections, every
+  one at 1024, no collection with two dimensions. The backfill's verify
+  step is a join against this view, not new SQL.
+- **Verified**: the client already carries the profile as code.
+  `corpus.effective_embedding_model_for_writes(content_type)` (RDR-109 P2)
+  returns the local token in local mode, the per-content-type Voyage token
+  in cloud mode, and mirrors cloud when `local.embed_model=voyage-*` is
+  configured (nexus-35ok4, GH #1461); the engine mirrors it with a
+  pure-Voyage or pure-ONNX router. The profile table is that function as
+  data; the GH #1461 opt-in becomes a profile write.
+- **Verified**: registration derives a collection's attributes by parsing
+  the name it has just rendered (`indexer.py:785-800`), and one path
+  hardcodes `embedding_model="voyage-context-3"` (`commands/index.py:100`).
+  Phase 1 replaces both with a profile read.
+- **Verified**: six tables carry FKs into `catalog_collections`
+  (`fk-002/003/004`): `chunks`, `document_aspects`, `document_highlights`,
+  `aspect_extraction_queue`, `taxonomy_meta`, `topics`, plus the
+  `document_chunks` manifest by collection column. The ghost sweep checks
+  all of them; the `chunks` FK is `ON DELETE RESTRICT`, so a mistaken
+  delete fails loud regardless.
+- **Verified**: the model token vocabulary is five tokens on the engine
+  (`MODEL_DIMS`: the three Voyage tokens at 1024, `bge-base-en-v15-768`,
+  `minilm-l6-v2-384`) and four on the client (no `voyage-3`). The
+  `embedding_models` seed is the four shared tokens; `voyage-3` has no
+  client token and no live rows and is not seeded.
 - **Verified**: `CollectionRegistry` caches only `(tenant, name)` presence:
   process-local, unbounded, marked after commit, evicted on delete and on
   the canonical branch of rename. Holding the row instead of a boolean is
@@ -203,11 +232,12 @@ per-collection chunk counts from `nx collection list`. Full numbers in T2
   **Method**: Spike (live census) + Source Search. Still to run before the
   backfill ships: the same grouping across every cloud tenant, read-only,
   from conexus's side (a relay to Sam; this box sees one tenant).
-- [ ] For every collection that owns chunks, the non-null vector column in
-  `nexus.chunks` is the same for all its rows. **Status**: Unverified; the
-  client has no read path to `nexus.chunks` columns. **Method**: Spike, the
-  backfill changeset's own precondition query. Ghost rows (zero chunks) are
-  outside this assumption by construction.
+- [x] For every collection that owns chunks, the non-null vector column in
+  `nexus.chunks` is the same for all its rows and matches the profile.
+  **Status**: Verified on this tenant through `collection_vector_stats`
+  (70 collections, one dimension each, all 1024). **Method**: Spike. The
+  backfill re-runs the same check on every install as its precondition;
+  ghost rows are outside it by construction.
 - [x] No consumer needs a fact from the name that the table cannot carry.
   **Status**: Verified by the parse-site census: every extracted value is
   one of content_type, owner_id, embedding_model, or the quarantine prefix.
@@ -226,7 +256,8 @@ Nothing is renamed and no chunk moves.
 
 ### Technical Design
 
-**1. Install-scoped embedding profile.** New table
+**1. Install-scoped embedding profile.** This is the client's existing
+`effective_embedding_model_for_writes` turned into data. New table
 `nexus.embedding_profile(tenant_id, content_type, embedding_model,
 dimension, PRIMARY KEY (tenant_id, content_type))`, plus a reference table
 `nexus.embedding_models(embedding_model PRIMARY KEY, dimension, provider)`
@@ -249,8 +280,9 @@ ghosts: a `catalog_collections` row with zero `nexus.chunks` rows, zero
 `document_chunks` manifest rows, and zero aspect or highlight references is
 deleted (153 of 223 rows on this tenant; a row still referenced by a
 manifest or an aspect is kept and reported, never guessed at). The second
-walks every surviving row. Ground truth is `nexus.chunks`: the single
-non-null vector column across the collection's rows gives the dimension;
+walks every surviving row. Ground truth is `nexus.collection_vector_stats`
+(one row per `(collection, dim)` derived from the stored column): exactly
+one row per collection gives the dimension, two rows is a disagreement;
 the profile gives the model for that content type; the two must agree. On
 agreement the row is written from the profile and the name is never read.
 On disagreement, or on a collection whose rows use more than one column,
