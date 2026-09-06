@@ -713,6 +713,26 @@ class RawSqlGateTest {
      * (role/ownership DDL, not reads), and the ~40 single-site {@code DO $$
      * CREATE ROLE nexus_svc} bootstraps in files with no other catalog read
      * (a role-bootstrap shape, the next by-shape pass).
+     *
+     * <p>Batch 7 fold-in (critique T2 [24685]): the first pass missed 49
+     * catalog reads that reached the database through a LOCAL wrapper --
+     * {@code count(Connection, String)} / {@code query(Connection, String)}
+     * in {@code SchemaUpgradeRehearsalIntegrationTest} (35: FORCE-RLS
+     * restoration pins, information_schema.tables/columns and pg_constraint /
+     * pg_indexes counts), {@code SchemaRollbackRoundTripIntegrationTest} (13:
+     * the whole-schema {@code schemaShape} snapshot, extension list, grant
+     * probes, {@code tablesInSchema}) and one {@code pg_get_userbyid} owner
+     * check in {@code Taxonomy011ForeignOwnedDiagViewTest}. All 49 are now on
+     * {@code PgCatalogProbes}; the two wrappers with no remaining caller are
+     * deleted. NONE of those 49 ever counted in this map: {@link #RAW_EXECUTE}
+     * matches {@code .executeQuery(} only when a string LITERAL follows, so a
+     * wrapper's {@code st.executeQuery(sql)} and every call site feeding it
+     * SQL text are invisible to the ratchet by construction. That is the gate
+     * blind spot this fold-in surfaced, so the file entries below did not
+     * move for it (29 / 36 / 11 before and after, per the standalone census);
+     * widening {@code RAW_EXECUTE} to {@code executeQuery(sql)} /
+     * {@code executeUpdate(sql)} identifier arguments is the recommended
+     * follow-up, sized by that census before it lands.
      */
     private static final Map<String, Integer> TEST_TREE_RAW_SQL_CEILING = Map.ofEntries(
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 8),

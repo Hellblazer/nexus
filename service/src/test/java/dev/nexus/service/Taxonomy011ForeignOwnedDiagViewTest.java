@@ -237,13 +237,12 @@ class Taxonomy011ForeignOwnedDiagViewTest {
             "ALTER TABLE nexus.topic_assignments ALTER COLUMN doc_id TYPE TEXT USING encode(doc_id, 'hex')");
         su.createStatement().execute(
             "CREATE VIEW nexus.diag_chash_conformance AS SELECT 1 AS n");
-        assertThat(count(su,
-            "SELECT count(*) FROM pg_class c JOIN pg_namespace n "
-            + "ON n.oid = c.relnamespace WHERE n.nspname = 'nexus' "
-            + "AND c.relname = 'diag_chash_conformance' "
-            + "AND pg_get_userbyid(c.relowner) <> '" + ADMIN_ROLE + "'"))
+        String owner = PgCatalogProbes.relationOwner(
+            DSL.using(su, SQLDialect.POSTGRES), "nexus", "diag_chash_conformance");
+        assertThat(owner)
             .as("sanity: the seeded view must be foreign-owned relative to the replay role")
-            .isEqualTo(1);
+            .isNotNull()
+            .isNotEqualTo(ADMIN_ROLE);
     }
 
     /**
@@ -294,10 +293,4 @@ class Taxonomy011ForeignOwnedDiagViewTest {
         return col.udtName();
     }
 
-    private static int count(Connection c, String sql) throws Exception {
-        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            rs.next();
-            return rs.getInt(1);
-        }
-    }
 }

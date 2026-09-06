@@ -9,6 +9,7 @@ import org.jooq.Record;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
 
+import java.util.Collection;
 import java.util.List;
 
 /**
@@ -38,7 +39,13 @@ public final class PgCatalogProbes {
         }
     }
 
-    /** Does {@code schema.table} (table or view) exist? */
+    /**
+     * Does {@code schema.table} exist? Covers views too: jOOQ's JDBC-backed
+     * {@code Meta} asks the driver for TABLE and VIEW (and materialized view)
+     * relation types by default, which ReadShapeViewsTest's view-existence
+     * assertions exercise against live Postgres; a jOOQ upgrade that narrowed
+     * that default would surface there first.
+     */
     public static boolean tableExists(DSLContext ctx, String schema, String table) {
         return !ctx.meta()
             .filterSchemas(s -> s.getName().equals(schema))
@@ -341,6 +348,15 @@ public final class PgCatalogProbes {
     }
 
     // ── pg_constraint ────────────────────────────────────────────────────
+    //
+    // Schema qualification is deliberately MIXED in this section, each probe
+    // matching the raw SQL it replaced: constraintExists / constraintValidated /
+    // constraintCountLike look up a BARE conname across every schema (constraint
+    // names are unique per table, not per database, so two schemas may each carry
+    // a constraint of the same name -- the callers today probe names that occur
+    // once), while foreignKey / foreignKeyDeleteActions / constraintCountByType
+    // join pg_namespace and are scoped to one schema. Pick the qualified form for
+    // any new caller whose name could recur across nexus / staging / t1.
 
     /** The FK-relevant columns of one {@code pg_constraint} row. */
     public record Constraint(boolean convalidated, boolean condeferrable, boolean condeferred,
@@ -427,7 +443,16 @@ public final class PgCatalogProbes {
             .fetch(proname);
     }
 
-    /** {@code pg_proc.prosecdef} (SECURITY DEFINER) of the first overload, or null when absent. */
+    /**
+     * {@code pg_proc.prosecdef} (SECURITY DEFINER) of ONE overload of {@code name},
+     * or null when absent. The raw SQL this replaced (ManifestFunctionsTest,
+     * ManifestVerifyTest, UpdatedAtTriggerTest) was {@code ... LIMIT 1} with no
+     * ORDER BY, and so is this: for an OVERLOADED function name the row chosen is
+     * whichever Postgres returns first, so the answer is only meaningful when every
+     * overload shares the same security mode, or the name has a single overload
+     * (true of every caller today). Add an argument-signature filter before
+     * probing an overloaded name.
+     */
     public static Boolean routineSecurityDefiner(DSLContext ctx, String schema, String name) {
         Field<Boolean> prosecdef = DSL.field(DSL.name("p", "prosecdef"), Boolean.class);
         return ctx.select(prosecdef)
@@ -578,5 +603,194 @@ public final class PgCatalogProbes {
     public static int pgClassRowsNamed(DSLContext ctx, String relname) {
         return ctx.fetchCount(DSL.table(DSL.name("pg_class")),
             DSL.field(DSL.name("relname"), String.class).eq(relname));
+    }
+
+    // ── whole-schema snapshots (rollback / rehearsal harnesses) ──────────
+
+    /** Number of constraints (any schema) whose {@code conname LIKE pattern}. */
+    public static int constraintCountLike(DSLContext ctx, String pattern) {
+        return ctx.fetchCount(DSL.table(DSL.name("pg_constraint")),
+            DSL.field(DSL.name("conname"), String.class).like(pattern));
+    }
+
+    /** Number of constraints of {@code contype} ('c','f','p','u',...) declared on {@code schema.table}. */
+    public static int constraintCountByType(DSLContext ctx, String schema, String table, String contype) {
+        return ctx.fetchCount(
+            DSL.table(DSL.name("pg_constraint")).as("c")
+                .join(pgClassAs("t")).on(DSL.field(DSL.name("t", "oid")).eq(DSL.field(DSL.name("c", "conrelid"))))
+                .join(pgNamespaceAs("n"))
+                    .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("t", "relnamespace")))),
+            DSL.field(DSL.name("n", "nspname"), String.class).eq(schema)
+                .and(DSL.field(DSL.name("t", "relname"), String.class).eq(table))
+                .and(DSL.field(DSL.name("c", "contype"), String.class).eq(contype)));
+    }
+
+    /**
+     * How many of the named {@code schema.table} relations currently carry
+     * {@code relforcerowsecurity} -- the "FORCE ROW LEVEL SECURITY restored on
+     * every toggled table" pin the migration rehearsals make after each
+     * NO FORCE / FORCE toggle-wrapped changeset. A relation that does not exist
+     * counts as not forced.
+     */
+    public static int forcedRowSecurityCount(DSLContext ctx, String... qualifiedTables) {
+        int forced = 0;
+        for (String qualified : qualifiedTables) {
+            String[] parts = qualified.split("\\.", 2);
+            RowSecurity rls = rowSecurity(ctx, parts[0], parts[1]);
+            if (rls != null && rls.forced()) {
+                forced++;
+            }
+        }
+        return forced;
+    }
+
+    /** {@code pg_get_userbyid(pg_class.relowner)} of {@code schema.relation}, or null when absent. */
+    public static String relationOwner(DSLContext ctx, String schema, String relation) {
+        Field<String> owner = DSL.function("pg_get_userbyid", String.class, DSL.field(DSL.name("c", "relowner")));
+        return ctx.select(owner)
+            .from(pgClassAs("c"))
+            .join(pgNamespaceAs("n"))
+                .on(DSL.field(DSL.name("c", "relnamespace")).eq(DSL.field(DSL.name("n", "oid"))))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(schema))
+            .and(DSL.field(DSL.name("c", "relname"), String.class).eq(relation))
+            .fetchOne(owner);
+    }
+
+    /** Installed extension names ({@code pg_extension.extname}), sorted. */
+    public static List<String> extensionNames(DSLContext ctx) {
+        Field<String> extname = DSL.field(DSL.name("extname"), String.class);
+        return ctx.select(extname).from(DSL.table(DSL.name("pg_extension"))).orderBy(extname).fetch(extname);
+    }
+
+    /** One {@code pg_indexes} row. */
+    public record IndexRow(String schema, String table, String indexname, String indexdef) {
+    }
+
+    public static List<IndexRow> indexesIn(DSLContext ctx, Collection<String> schemas) {
+        Field<String> schemaname = DSL.field(DSL.name("schemaname"), String.class);
+        Field<String> tablename = DSL.field(DSL.name("tablename"), String.class);
+        Field<String> indexname = DSL.field(DSL.name("indexname"), String.class);
+        Field<String> indexdef = DSL.field(DSL.name("indexdef"), String.class);
+        return ctx.select(schemaname, tablename, indexname, indexdef)
+            .from(DSL.table(DSL.name("pg_indexes")))
+            .where(schemaname.in(schemas))
+            .fetch(r -> new IndexRow(r.get(schemaname), r.get(tablename), r.get(indexname), r.get(indexdef)));
+    }
+
+    /** A generated column's stored expression ({@code pg_get_expr(adbin, adrelid)}). */
+    public record GeneratedExpression(String schema, String table, String column, String expression) {
+    }
+
+    /** Every generated column ({@code attgenerated <> ''}) in {@code schemas} with its expression. */
+    public static List<GeneratedExpression> generatedExpressionsIn(DSLContext ctx, Collection<String> schemas) {
+        Field<String> nspname = DSL.field(DSL.name("n", "nspname"), String.class);
+        Field<String> relname = DSL.field(DSL.name("cl", "relname"), String.class);
+        Field<String> attname = DSL.field(DSL.name("a", "attname"), String.class);
+        Field<String> expr = DSL.function("pg_get_expr", String.class,
+            DSL.field(DSL.name("d", "adbin")), DSL.field(DSL.name("d", "adrelid")));
+        return ctx.select(nspname, relname, attname, expr)
+            .from(DSL.table(DSL.name("pg_attrdef")).as("d"))
+            .join(pgClassAs("cl")).on(DSL.field(DSL.name("cl", "oid")).eq(DSL.field(DSL.name("d", "adrelid"))))
+            .join(pgNamespaceAs("n"))
+                .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("cl", "relnamespace"))))
+            .join(DSL.table(DSL.name("pg_attribute")).as("a"))
+                .on(DSL.field(DSL.name("a", "attrelid")).eq(DSL.field(DSL.name("d", "adrelid"))))
+                .and(DSL.field(DSL.name("a", "attnum")).eq(DSL.field(DSL.name("d", "adnum"))))
+            .where(nspname.in(schemas))
+            .and(DSL.field(DSL.name("a", "attgenerated"), String.class).ne(""))
+            .fetch(r -> new GeneratedExpression(r.get(nspname), r.get(relname), r.get(attname), r.get(expr)));
+    }
+
+    /** One constraint with its rendered definition ({@code pg_get_constraintdef}). */
+    public record ConstraintDefinition(String schema, String table, String conname, String definition) {
+    }
+
+    public static List<ConstraintDefinition> constraintDefinitionsIn(DSLContext ctx, Collection<String> schemas) {
+        Field<String> nspname = DSL.field(DSL.name("n", "nspname"), String.class);
+        Field<String> relname = DSL.field(DSL.name("cl", "relname"), String.class);
+        Field<String> conname = DSL.field(DSL.name("con", "conname"), String.class);
+        Field<String> def = DSL.function("pg_get_constraintdef", String.class, DSL.field(DSL.name("con", "oid")));
+        return ctx.select(nspname, relname, conname, def)
+            .from(DSL.table(DSL.name("pg_constraint")).as("con"))
+            .join(pgClassAs("cl")).on(DSL.field(DSL.name("cl", "oid")).eq(DSL.field(DSL.name("con", "conrelid"))))
+            .join(pgNamespaceAs("n"))
+                .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("cl", "relnamespace"))))
+            .where(nspname.in(schemas))
+            .fetch(r -> new ConstraintDefinition(r.get(nspname), r.get(relname), r.get(conname), r.get(def)));
+    }
+
+    /**
+     * One {@code information_schema.role_table_grants} row, joined to the granted
+     * relation's {@code pg_class.relkind} ('r' table, 'p' partitioned, 'v' view, ...)
+     * so callers can separate base-table grants from view grants.
+     */
+    public record TableGrant(String grantee, String privilege, String schema, String table, String relkind) {
+    }
+
+    /** Every table-level grant in {@code schemas}, all grantees (PUBLIC and the current user included). */
+    public static List<TableGrant> tableGrantsIn(DSLContext ctx, Collection<String> schemas) {
+        Field<String> grantee = DSL.field(DSL.name("g", "grantee"), String.class);
+        Field<String> privilege = DSL.field(DSL.name("g", "privilege_type"), String.class);
+        Field<String> schema = DSL.field(DSL.name("g", "table_schema"), String.class);
+        Field<String> table = DSL.field(DSL.name("g", "table_name"), String.class);
+        Field<String> relkind = DSL.field(DSL.name("cl", "relkind"), String.class);
+        return ctx.select(grantee, privilege, schema, table, relkind)
+            .from(DSL.table(DSL.name("information_schema", "role_table_grants")).as("g"))
+            .join(pgNamespaceAs("n")).on(DSL.field(DSL.name("n", "nspname"), String.class).eq(schema))
+            .join(pgClassAs("cl")).on(DSL.field(DSL.name("cl", "relname"), String.class).eq(table))
+                .and(DSL.field(DSL.name("cl", "relnamespace")).eq(DSL.field(DSL.name("n", "oid"))))
+            .where(schema.in(schemas))
+            .fetch(r -> new TableGrant(r.get(grantee), r.get(privilege), r.get(schema), r.get(table), r.get(relkind)));
+    }
+
+    /** One {@code pg_policies} row with its schema and table. */
+    public record PolicyRow(String schema, String table, String policyname, String qual, String withCheck) {
+    }
+
+    public static List<PolicyRow> policiesIn(DSLContext ctx, Collection<String> schemas) {
+        Field<String> schemaname = DSL.field(DSL.name("schemaname"), String.class);
+        Field<String> tablename = DSL.field(DSL.name("tablename"), String.class);
+        Field<String> policyname = DSL.field(DSL.name("policyname"), String.class);
+        Field<String> qual = DSL.field(DSL.name("qual"), String.class);
+        Field<String> withCheck = DSL.field(DSL.name("with_check"), String.class);
+        return ctx.select(schemaname, tablename, policyname, qual, withCheck)
+            .from(DSL.table(DSL.name("pg_policies")))
+            .where(schemaname.in(schemas))
+            .fetch(r -> new PolicyRow(r.get(schemaname), r.get(tablename), r.get(policyname),
+                r.get(qual), r.get(withCheck)));
+    }
+
+    /** RLS flags of one ordinary table ({@code relkind = 'r'}). */
+    public record RowSecurityRow(String schema, String table, boolean enabled, boolean forced) {
+    }
+
+    public static List<RowSecurityRow> rowSecurityIn(DSLContext ctx, Collection<String> schemas) {
+        Field<String> nspname = DSL.field(DSL.name("n", "nspname"), String.class);
+        Field<String> relname = DSL.field(DSL.name("cl", "relname"), String.class);
+        Field<Boolean> rls = DSL.field(DSL.name("cl", "relrowsecurity"), Boolean.class);
+        Field<Boolean> forced = DSL.field(DSL.name("cl", "relforcerowsecurity"), Boolean.class);
+        return ctx.select(nspname, relname, rls, forced)
+            .from(pgClassAs("cl"))
+            .join(pgNamespaceAs("n"))
+                .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("cl", "relnamespace"))))
+            .where(nspname.in(schemas))
+            .and(DSL.field(DSL.name("cl", "relkind"), String.class).eq("r"))
+            .fetch(r -> new RowSecurityRow(r.get(nspname), r.get(relname), r.get(rls), r.get(forced)));
+    }
+
+    /** One {@code information_schema.columns} row with its schema and table. */
+    public record ColumnRow(String schema, String table, String column, String dataType, String isNullable) {
+    }
+
+    public static List<ColumnRow> columnsIn(DSLContext ctx, Collection<String> schemas) {
+        Field<String> schema = DSL.field(DSL.name("table_schema"), String.class);
+        Field<String> table = DSL.field(DSL.name("table_name"), String.class);
+        Field<String> column = DSL.field(DSL.name("column_name"), String.class);
+        Field<String> dataType = DSL.field(DSL.name("data_type"), String.class);
+        Field<String> isNullable = DSL.field(DSL.name("is_nullable"), String.class);
+        return ctx.select(schema, table, column, dataType, isNullable)
+            .from(DSL.table(DSL.name("information_schema", "columns")))
+            .where(schema.in(schemas))
+            .fetch(r -> new ColumnRow(r.get(schema), r.get(table), r.get(column), r.get(dataType), r.get(isNullable)));
     }
 }
