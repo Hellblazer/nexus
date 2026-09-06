@@ -63,18 +63,22 @@ the Context section for the numbers.
 
 #### Gap 2: The client composes an operation the engine cannot make atomic
 
-**Mechanism verified, occurrence rate measured at zero.** The three writes are
+**Mechanism verified, occurrence rate measured at 1 in 190.** The three writes are
 three separate `withTenant` transactions, so no arrangement of client code can
 make them one. Between write 1 and write 3 the client can die, the host can
 restart, or the network can drop, and the plan row keeps a `use_count`
 increment with neither a success nor a failure recorded against it. Nothing
 reconciles that afterwards.
 
-RDR-198's research pass spiked this directly and found zero orphaned records:
-five plans with `use_count > 0`, 29 runs, `use_count == success_count +
-failure_count` everywhere. The gap is latent. Re-measuring it is a
-pre-acceptance research item, not something this document asserts on its own
-authority.
+RDR-198's research pass spiked this and found zero orphaned records: five plans
+with `use_count > 0`, 29 runs, `use_count == success_count + failure_count`
+everywhere. The pre-acceptance re-measure of 2026-09-05 went wider and found
+one: 30 plans, 16 with `use_count > 0`, 190 recorded uses against 189 outcomes,
+the single orphan on plan 365 with `use_count` 11, 10 successes and no
+failures. That is 0.5% of runs. So the gap is real and rare rather than
+unobserved, and what the record cannot say is whether that one was an abandoned
+call, a crashed process, or a lost outcome POST. The finding is
+`nexus_rdr/203-research-1`.
 
 What the fix delivers: the three writes land in one transaction or none of them
 does, so the window closes by construction rather than by luck.
@@ -112,12 +116,13 @@ about 60ms on that 80-second call, 0.07%. Two of the three round trips this
 RDR removes are small POSTs against the same host. Anyone justifying this work
 on latency is quoting a number that was withdrawn.
 
-The claim is also not a fix for an observed defect. RDR-198's research pass
-spiked the orphan window directly and found zero orphaned records: across all
-five plans with `use_count > 0`, 29 runs, `use_count == success_count +
-failure_count` held everywhere. The atomicity gap is latent. It is recorded
-below with that base rate attached, and re-measuring it is a gate item before
-acceptance rather than a claim this document makes on its own authority.
+The claim is also not a fix for a common defect. RDR-198's research pass spiked
+the orphan window and found nothing: five plans, 29 runs, no orphan. The
+pre-acceptance re-measure went wider and found one in 190 uses, 0.5%. So the
+atomicity gap does occur, rarely, and this document carries the measured rate
+rather than an argument in place of one. One orphan in 190 is not a reason to
+do this work on its own; it is a real integrity gap that closing the round-trip
+count happens to close as well.
 
 ## Relationship to prior RDRs
 
@@ -162,7 +167,9 @@ the engine its own `TenantScope.withTenant` transaction, which means its own
 are three transactions. Between write 1 and write 3 the client can die, the
 host can restart, or the network can drop, and the plan row keeps a `use_count`
 increment with neither a success nor a failure recorded against it. Nothing
-reconciles that. The measured rate of it happening is zero out of 29 runs.
+reconciles that. The measured rate is one orphan in 190 recorded uses across 16
+plans (`nexus_rdr/203-research-1`, 2026-09-05), against RDR-198's earlier zero
+in 29.
 
 **Failure independence, which cuts both ways.** Today a 429 or a transport
 error costs one of the three writes and the other two still land, producing a
@@ -171,6 +178,61 @@ All three writes are best-effort telemetry wrapped in boundary catches at every
 call site, so neither shape can break a user-facing answer. Partial telemetry
 is the worse of the two outcomes, which is the same reasoning
 `recordNxAnswerRun` already applies to its parent and child rows.
+
+## Research Findings
+
+Both pre-acceptance items from the Open research section were investigated on
+2026-09-05 and recorded in T2 under `nexus_rdr`. One came back with a number
+that changed a claim in this document, which is what the research step is for.
+
+### Key Discoveries
+
+- **✅ Verified** (spike) — The orphan window does fire, rarely. A read of the
+  live plan library found 30 plans, 16 with `use_count > 0`, 190 recorded uses
+  against 189 outcomes: exactly one orphan, plan 365, `use_count` 11 with 10
+  successes and no failures. That is 0.5% of runs, against RDR-198's earlier
+  zero in 29. What this does not say is why: the record cannot distinguish an
+  abandoned call from a crashed process from a lost outcome POST. Consequence
+  for this RDR: the justification stays round-trip count and operation
+  placement, with the atomicity gap attached as a measured, small base rate
+  rather than as an unobserved hypothesis or an urgent defect.
+  *Source: `nx plan list --json` plus `nx plan show --json` per used plan,
+  read-only, 2026-09-05; recorded as `nexus_rdr/203-research-1`.*
+
+- **✅ Verified** (source search plus an existing test) — The before half of the
+  round-trip count. One `nx_answer` with a plan hit issues three run-record
+  writes on three routes, `POST /v1/plans/metrics/run_start`,
+  `POST /v1/telemetry/nx_answer_runs/record` and
+  `POST /v1/plans/metrics/run_outcome`, plus one `GET /version` capability
+  probe per process. The instrument already exists:
+  `tests/test_nx_answer_t2_fanout_budget.py` wraps `httpx.Client.send` and
+  records every outbound `(method, path)` for one call on the test substrate,
+  and it already pins the post-nexus-m20mf transport budget at one
+  `T2Database` construction, at most eight `httpx.Client` constructions, and at
+  most one `/version` probe per process. What it does not do is assert any
+  per-path count, so the before number is read from the code and from that
+  harness rather than from an assertion.
+  *Source: `tests/test_nx_answer_t2_fanout_budget.py`, and the run_start /
+  record / run_outcome call sites in `src/nexus/mcp/core.py`; recorded as
+  `nexus_rdr/203-research-2`.*
+
+- **❓ Assumed** (source search) — The after half of the round-trip count: one
+  `POST /v1/telemetry/nx_answer_runs/complete` per converting call against a
+  supporting engine, and three POSTs for a D6 survivor or a 404-downgrade call.
+  This is a prediction from the design, not a measurement, and it stays Assumed
+  until P3 lands.
+  **Risk:** P3 ships without the per-path assertion and the central claim of
+  this RDR is never actually measured, leaving a round-trip argument backed by
+  reading rather than counting. That is the same class of error the retracted
+  90% figure came from, so it is worth naming rather than assuming good
+  behaviour.
+  **Mitigation:** the per-path assertion is written into P3's exit criteria,
+  residual 15 fixes the route list it must count (four routes, including
+  `/complete`, not three), and residual 16 lists
+  `tests/test_nx_answer_t2_fanout_budget.py` as a P3 edit so the harness is
+  updated with the behaviour rather than after it.
+  *Source: this RDR's D1, D5 and D6, plus P3's exit criteria; recorded as the
+  second half of `nexus_rdr/203-research-2`.*
 
 ## Decisions
 
@@ -912,11 +974,13 @@ Five more from the round-3 audit, which was residuals-only:
 
 ## Risks
 
-**The atomicity case rests on a latent gap with a measured rate of zero.**
-RDR-198's spike found no orphans in 29 runs across five plans. If the re-measure
-below also finds zero, the honest justification narrows to round-trip count and
-operation placement, and "do nothing" gets stronger. This RDR should not be
-accepted on an atomicity argument that its own evidence does not carry.
+**The atomicity case rests on a rare gap: one orphan in 190 uses.** RDR-198's
+spike found none in 29 runs; the wider re-measure found one in 190, 0.5%
+(`nexus_rdr/203-research-1`). That is enough to say the mechanism fires in
+practice and not enough to carry the work on its own. The justification stays
+round-trip count and operation placement, with the integrity gap attached as a
+measured, small base rate. This RDR should not be accepted on an atomicity
+argument its own evidence does not carry.
 
 **One 429 now refuses the whole record.** The engine's request-scoped 429
 budget is not in `_send`'s retryable set, and a 429 raises. Today that costs
@@ -963,27 +1027,26 @@ eleventh converting arm added later, and a D6 exclusion quietly folded in.
 
 ## Open research, to close before acceptance
 
-1. **Re-measure the orphan base rate.** Re-run RDR-198's spike against the
-   current store: for every plan with `use_count > 0`, compare `use_count` with
-   `success_count + failure_count`. Record the counts and the date. On a live
-   install this is a read through `nx plan list` and the plan library, never a
-   write, and never from a dev session against the operator's install.
-2. **Confirm the round-trip claim end to end.** On the test substrate, count
-   HTTP requests by path for one fixed `nx_answer` question before and after
-   P3, and record the numbers. Expected direction, stated in advance so a miss
-   is visible: three run-record POSTs become one, `/version` probes stay at one
-   per process, and wall clock moves by an amount too small to measure against
-   an 80-second call. The counts are the claim.
-3. **Decide whether P4's reconciliation becomes a standing check.** If the
-   re-measure finds a non-zero orphan population from before cutover, those
-   rows need either a one-time reconciliation or an explicit decision to leave
-   them.
+1. **Re-measure the orphan base rate. DONE, 2026-09-05.** One orphan in 190
+   recorded uses across 16 plans with `use_count > 0`. Recorded as
+   `nexus_rdr/203-research-1` and carried in Research Findings below.
+2. **Confirm the round-trip claim end to end. Before half DONE, after half
+   pending P3.** The before number is three run-record POSTs on three routes
+   plus one `/version` probe per process, read from the code and from
+   `tests/test_nx_answer_t2_fanout_budget.py`. The after number is measured by
+   the per-path assertion P3 adds to that same harness. Recorded as
+   `nexus_rdr/203-research-2`, with its risk stated below.
+3. **Decide whether P4's reconciliation becomes a standing check.** Still open,
+   and item 1 sharpened it: there is one orphan row in the live store from
+   before cutover. It needs either a one-time reconciliation or an explicit
+   decision to leave it. One row is small enough that leaving it is defensible;
+   the point is that the decision gets made rather than inherited.
 
 ## Alternatives considered
 
 **Do nothing.** Serious, and the strongest competitor. The measured cost is two
 small POSTs per run against the same host on a call whose p50 is 80 seconds,
-and the integrity gap has a measured occurrence rate of zero. What do-nothing
+and the integrity gap fires about once in 190 runs. What do-nothing
 does not answer is Sam's direction on the bead, which was about where the
 operation lives rather than what it costs: the client composes an operation the
 engine could own, and every future reader of that code has to reconstruct the
@@ -1030,6 +1093,19 @@ its own schedule, its own failure modes and its own tests.
 - 2026-09-05: created as draft. Picks up the scope RDR-198 withdrew and named
   as belonging in its own RDR. Scoped to the run-record operation only; the
   read-side bundle is deliberately excluded.
+- 2026-09-05: both pre-acceptance research items recorded, and a
+  `## Research Findings` section added carrying them in the rdr-research
+  entry format. The orphan re-measure changed a claim: one orphan in 190
+  recorded uses across 16 plans, 0.5%, against RDR-198's zero in 29. Every
+  "measured at zero" statement in the document is corrected to that number,
+  in Gap 2, the claim section, Context, Risks and Alternatives. The gap is now
+  rare rather than unobserved, which strengthens it slightly and changes
+  nothing about the justification, which stays round-trip count and operation
+  placement. The round-trip item's before half is Verified and its after half
+  is Assumed until P3 lands, with the risk (P3 ships without the per-path
+  assertion and the claim is never measured) and its mitigation stated.
+  Open research item 3 is sharpened rather than closed: there is one real
+  orphan row in the live store to reconcile or deliberately leave.
 - 2026-09-05: Problem Statement restructured into the `#### Gap N:` blocks the
   formal gate's Layer 1 requires, which had it BLOCKED before any other layer
   ran. Three gaps: the three round trips (verified), the client-composed
