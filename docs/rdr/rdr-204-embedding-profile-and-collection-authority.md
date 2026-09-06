@@ -144,7 +144,10 @@ paths, two of which write blanks, and read by none of the hot paths.
 ### Investigation
 
 Source search on develop `d77f9969c`, 2026-09-06. Live census on this box
-(cloud mode) with `nx collection list`.
+(cloud mode, tenant `default`) on 2026-09-06 ~23:30Z: `catalog_collections`
+rows read through `HttpCatalogClient.list_collections()`, joined to the
+per-collection chunk counts from `nx collection list`. Full numbers in T2
+`nexus/rdr-204-catalog-collections-census-2026-09-06` [24785].
 
 ### Key Discoveries
 
@@ -157,11 +160,35 @@ Source search on develop `d77f9969c`, 2026-09-06. Live census on this box
 - **Verified**: `chunks_collection_fk` exists (`fk-002-collection-registry.xml`),
   so a chunk cannot reference a collection without a row. The name is
   already a key; it is only its *content* that is still read.
-- **Verified**: live collections on this box are 61 rows in five prefixes,
-  `code`, `docs`, `rdr`, `knowledge`, and `quarantine-{code,docs,rdr}`.
-  Every `code` collection is voyage-code-3; every other is voyage-context-3.
-  The per-content-type model rule holds on the live estate with zero
-  exceptions.
+- **Verified**: 70 live collections (at least one chunk) against 223
+  `catalog_collections` rows. The 153 rows with zero chunks are ghosts:
+  106 two-segment Chroma-era names, 45 four-segment, 2 three-segment. All
+  22 `legacy_grandfathered` rows are ghosts. Ghosts have no vector column to
+  verify against, which changes the backfill (see Technical Design step 3).
+- **Verified**: 158 of 223 rows carry blank `content_type`, `owner_id`, and
+  `embedding_model`. Twelve of those blank rows belong to LIVE collections
+  (`code__1-{2,3,5}`, `docs__1-{2,3,4,5}`, `docs__default`, `rdr__1-{2,3}`
+  and two more): the stub inserts landed on real collections, so Gap 2 is
+  live, not hypothetical.
+- **Verified**: among the 70 live collections the model is a function of
+  content type with zero exceptions: `code` and `quarantine-code` are
+  voyage-code-3; `docs`, `rdr`, `knowledge` and their quarantines are
+  voyage-context-3. The only `minilm-l6-v2-384` rows on the tenant are four
+  ghosts with zero chunks (`code|docs|rdr__1-2188__...` and
+  `knowledge__ingestgate__...`), which is the 384-era relic class RDR-144
+  and RDR-162 retired.
+- **Verified**: where a row has a model, it agrees with the name's model
+  segment in every case (0 disagreements). The table is wrong by omission,
+  not by contradiction.
+- **Verified**: `GET /v1/catalog/collections/list` takes no filter
+  parameters today (`CatalogHandler.handleCollectionList` calls
+  `repo.listCollections(tenant)` unconditionally); the `content_type` and
+  `lifecycle_state` filters are new work in Phase 3.
+- **Verified**: `CollectionRegistry` caches only `(tenant, name)` presence:
+  process-local, unbounded, marked after commit, evicted on delete and on
+  the canonical branch of rename. Holding the row instead of a boolean is
+  an additive change to the same class with the same invalidation points,
+  plus one new eviction on profile write.
 - **Verified**: `_group_collections_by_model` (nexus-3l6gz) groups a corpus
   fan-out by parsed model so a mixed-model query is embedded once per
   model. It needs the model per collection, not the name.
@@ -170,22 +197,25 @@ Source search on develop `d77f9969c`, 2026-09-06. Live census on this box
 
 ### Critical Assumptions
 
-- [ ] Every install has exactly one embedding model per content type, and it
-  is a function of mode alone. **Status**: Verified for this box and by
-  RDR-160's design. **Method**: Spike (live census) + Source Search. To
-  re-verify against the cloud estate before the backfill ships: a read-only
-  query grouping `catalog_collections` by `(tenant_id, content_type,
-  embedding_model)` must return one model per pair.
-- [ ] For every existing collection the non-null vector column in
-  `nexus.chunks` is the same for all its rows. **Status**: Unverified.
-  **Method**: Spike, the backfill changeset's own precondition query.
-- [ ] No consumer needs a fact from the name that the table cannot carry.
+- [x] Every install has exactly one embedding model per content type, and it
+  is a function of mode alone. **Status**: Verified on this tenant (70 live
+  collections, zero exceptions) and by RDR-160's design for local mode.
+  **Method**: Spike (live census) + Source Search. Still to run before the
+  backfill ships: the same grouping across every cloud tenant, read-only,
+  from conexus's side (a relay to Sam; this box sees one tenant).
+- [ ] For every collection that owns chunks, the non-null vector column in
+  `nexus.chunks` is the same for all its rows. **Status**: Unverified; the
+  client has no read path to `nexus.chunks` columns. **Method**: Spike, the
+  backfill changeset's own precondition query. Ghost rows (zero chunks) are
+  outside this assumption by construction.
+- [x] No consumer needs a fact from the name that the table cannot carry.
   **Status**: Verified by the parse-site census: every extracted value is
   one of content_type, owner_id, embedding_model, or the quarantine prefix.
   **Method**: Source Search.
-- [ ] `CollectionRegistry`'s cache can hold the row, not only the name,
-  without a correctness change to its invalidation. **Status**: Unverified.
-  **Method**: Source Search during Phase 2.
+- [x] `CollectionRegistry`'s cache can hold the row, not only the name,
+  without a correctness change to its invalidation. **Status**: Verified by
+  reading the class: its invalidation points are delete and rename, both
+  post-commit; profile write is the one new point. **Method**: Source Search.
 
 ## Proposed Solution
 
@@ -214,8 +244,12 @@ different model is a 422 with the profile's value in the message. A new
 `lifecycle_state` column (`live` | `quarantine`) replaces the
 `quarantine-` prefix as the thing corpus resolution excludes.
 
-**3. The one-time backfill.** One additive changeset walks every existing
-`catalog_collections` row. Ground truth is `nexus.chunks`: the single
+**3. The one-time backfill.** Two changesets, in order. The first sweeps
+ghosts: a `catalog_collections` row with zero `nexus.chunks` rows, zero
+`document_chunks` manifest rows, and zero aspect or highlight references is
+deleted (153 of 223 rows on this tenant; a row still referenced by a
+manifest or an aspect is kept and reported, never guessed at). The second
+walks every surviving row. Ground truth is `nexus.chunks`: the single
 non-null vector column across the collection's rows gives the dimension;
 the profile gives the model for that content type; the two must agree. On
 agreement the row is written from the profile and the name is never read.
