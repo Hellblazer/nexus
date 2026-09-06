@@ -126,7 +126,7 @@ import java.util.Map;
  * nexus.db.pg_provision}'s client-side provisioning, run on every local
  * daemon start (and at the end of a from-scratch provision), NEVER
  * relocates itself — an earlier revision did, gated behind a heuristic
- * ({@code to_regclass('nexus.chunks_384'|'768'|'1024') IS NOT NULL},
+ * (a probe for the per-dim chunk tables vectors-001 created,
  * meant to prove "this cluster's walk has already run past the bare
  * vector(N) references") that turned out to be permanently FALSE on every
  * real cluster: {@code vectors-004-unify-chunks.xml} unconditionally drops

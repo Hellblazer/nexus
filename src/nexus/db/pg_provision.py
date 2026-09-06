@@ -1070,9 +1070,9 @@ def relocate_vector_extensions_to_nexus_schema(
     earlier revision of this function and its docstring): an earlier
     revision of this function DID relocate directly on every daemon start,
     gated behind a "has this cluster's Liquibase walk already run past the
-    bare vector(N) references" heuristic
-    (``to_regclass('nexus.chunks_384'|'768'|'1024') IS NOT NULL``). That
-    heuristic is permanently false on every real cluster:
+    bare vector(N) references" heuristic (a probe for the per-dim chunk
+    tables vectors-001 created). That heuristic is permanently false on
+    every real cluster:
     ``vectors-004-unify-chunks.xml`` unconditionally drops all three
     ``chunks_<dim>`` tables in favour of the unified ``nexus.chunks`` table,
     and every cluster that has completed one full walk — which is every

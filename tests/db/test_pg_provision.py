@@ -1127,9 +1127,9 @@ class TestProvisionFastPathReassignsDiagView:
 # THE FIX: a superuser can relocate an extension REGARDLESS of who owns it —
 # ownership was never the actual requirement — so relocate_vector_
 # extensions_to_nexus_schema relocated directly, with a "has this cluster's
-# walk already passed the bare vector(N) references" heuristic
-# (`to_regclass('nexus.chunks_384'|'768'|'1024')`) deferring the fresh-
-# install case. Second (T2 nexus/critique-nexus-cbo4a-batch-9-gated
+# walk already passed the bare vector(N) references" heuristic (a probe for
+# the per-dim chunk tables vectors-001 created) deferring the fresh-install
+# case. Second (T2 nexus/critique-nexus-cbo4a-batch-9-gated
 # SIGNIFICANT 1): that heuristic turned out to be PERMANENTLY FALSE on every
 # real cluster — vectors-004-unify-chunks.xml drops all three chunks_<dim>
 # tables in favour of the unified nexus.chunks on the very first walk that
