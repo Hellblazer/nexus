@@ -280,6 +280,24 @@ printf '%s\n' "$DOCTOR_OUT" | grep -q "Traceback" && bad "doctor raised a traceb
 
 # ── Phase C: index + staleness (incremental must work) ──────────────────────
 say "Phase C — index a synthetic repo; staleness must make re-index incremental"
+
+# nexus-8hdg9 (critique T2 [24692] finding 2): report + verify the effective
+# per-POST onnx-local upsert-chunk cap the SAME way
+# tests/e2e/local-index-memory-gate.sh already does -- a live read-back
+# through the installed wheel, never assumed -- so a
+# NX_ONNX_LOCAL_UPSERT_CHUNK_CAP raised on the host (run.sh's `-e` forward)
+# is PROVABLY in effect for this Phase C run, not silently ignored.
+EFFECTIVE_CAP="$(python3 -c 'from nexus.db.http_vector_client import _ONNX_LOCAL_UPSERT_CHUNK_CAP as c; print(c)' 2>/dev/null)" || true
+if [ -n "${NX_ONNX_LOCAL_UPSERT_CHUNK_CAP:-}" ]; then
+  if [ "$EFFECTIVE_CAP" = "$NX_ONNX_LOCAL_UPSERT_CHUNK_CAP" ]; then
+    ok "onnx-local upsert-chunk cap raised to $EFFECTIVE_CAP (NX_ONNX_LOCAL_UPSERT_CHUNK_CAP), VERIFIED"
+  else
+    bad "requested cap $NX_ONNX_LOCAL_UPSERT_CHUNK_CAP but the effective cap reads back as ${EFFECTIVE_CAP:-<none>} — the override did not take effect"
+  fi
+else
+  note "onnx-local upsert-chunk cap: ${EFFECTIVE_CAP:-<unknown>} (default; set NX_ONNX_LOCAL_UPSERT_CHUNK_CAP on the host to raise it above 16 and reach the multi-sub-batch deadline check point)"
+fi
+
 REPO=/tmp/shakeout-repo
 rm -rf "$REPO"; mkdir -p "$REPO/src" "$REPO/docs"
 for i in $(seq 1 60); do

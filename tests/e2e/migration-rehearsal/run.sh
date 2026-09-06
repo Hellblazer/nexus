@@ -11,6 +11,7 @@
 #   NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade  # nexus-86mx2 PUBLISHED-TARGET mode: upgrade to the REAL published PyPI wheel X.Y.Z (sha256-verified against PyPI's own JSON API) instead of the worktree build; unset = worktree behavior unchanged
 #   tests/e2e/migration-rehearsal/run.sh --comprehensive # Phase D: daily-driver surface (T2/T1/T3/catalog/doctor), deterministic bge-768 LOCAL only
 #   tests/e2e/migration-rehearsal/run.sh --stress      # Phase E: concurrency + queue-drain stress, same bge-768-local dependency as Phase D
+#   NX_ONNX_LOCAL_UPSERT_CHUNK_CAP=<n> tests/e2e/migration-rehearsal/run.sh --shakeout  # nexus-8hdg9: forwarded into the container so `nx index repo` in Phase C posts more than the default 16 chunks/request — the default cap means candidateArea (16*512^2) can never exceed MAX_PADDED_TOKEN_AREA, so a request never splits into more than one sub-batch and the engine-side deadline check between sub-batches is never reached. Same mechanism as tests/e2e/local-index-memory-gate.sh. Unset = unchanged default (16, byte-identical to before nexus-97dp4).
 #
 # KNOWN COVERAGE GAP (nexus-f4apk): --comprehensive/--stress and --with-cloud are
 # mutually exclusive by construction (Phase D/E are bge-768 LOCAL; --with-cloud
@@ -862,6 +863,17 @@ BUILD_ARGS=()
 docker build ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} -f "$STAGE/Dockerfile" -t "$IMAGE" "$STAGE"
 
 run_env=(-e "WITH_CLOUD=$WITH_CLOUD" -e "COMPREHENSIVE=$COMPREHENSIVE" -e "STRESS=$STRESS")
+# nexus-8hdg9: forward the client-side per-POST onnx-local upsert chunk cap
+# (src/nexus/db/http_vector_client.py, same read-at-import mechanism
+# tests/e2e/local-index-memory-gate.sh already uses) only when the operator
+# actually set it on the host — without this it is DEAD through the only
+# documented entrypoint (`-e` is the sole channel into the container, same
+# lesson as UV_HTTP_TIMEOUT / NX_SHAKEOUT_E2E_* above). Not gated to any one
+# leg: every leg's `nx index` calls read it the same way. Unset host env ->
+# nothing forwarded -> the container's compiled-in default (16) is
+# unchanged.
+[ -n "${NX_ONNX_LOCAL_UPSERT_CHUNK_CAP:-}" ] && \
+  run_env+=(-e "NX_ONNX_LOCAL_UPSERT_CHUNK_CAP=$NX_ONNX_LOCAL_UPSERT_CHUNK_CAP")
 if [ "$ACQUIRE" = 1 ]; then
   # nexus-1ddsy: the tag under test is supplied by the operator and is NOT
   # defaulted — the whole point is to exercise a specific published artifact.
