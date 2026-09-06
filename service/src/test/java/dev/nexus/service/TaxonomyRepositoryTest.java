@@ -105,7 +105,7 @@ class TaxonomyRepositoryTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
                 + "VALUES ('" + tenant + "', '" + collection + "', decode('" + chashHex + "', 'hex'), "
-                + "'seed', '" + zeroVec + "'::vector) ON CONFLICT DO NOTHING");
+                + "'seed', '" + zeroVec + "'::nexus.vector) ON CONFLICT DO NOTHING");
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
@@ -861,7 +861,9 @@ class TaxonomyRepositoryTest {
         rawConfig.setUsername(SVC_ROLE);
         rawConfig.setPassword(SVC_PASS);
         rawConfig.setMaximumPoolSize(1);
-        rawConfig.addDataSourceProperty("options", "-c search_path=nexus,public");
+        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): no session
+        // search_path connection option; the raw query below already qualifies
+        // nexus.topics explicitly.
         com.zaxxer.hikari.HikariDataSource rawDs = new com.zaxxer.hikari.HikariDataSource(rawConfig);
         try (Connection c = rawDs.getConnection()) {
             c.setAutoCommit(true);
@@ -1628,7 +1630,9 @@ class TaxonomyRepositoryTest {
         config.setUsername(SVC_ROLE);
         config.setPassword(SVC_PASS);
         config.setMaximumPoolSize(5);
-        config.addDataSourceProperty("options", "-c search_path=nexus,public");
+        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): no session
+        // search_path connection option; jOOQ generated Tables render fully
+        // schema-qualified SQL regardless of search_path.
         return new com.zaxxer.hikari.HikariDataSource(config);
     }
 

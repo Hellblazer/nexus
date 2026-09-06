@@ -867,7 +867,8 @@ class RawSqlGateTest {
      */
     private static final Map<String, Integer> TEST_TREE_RAW_SQL_CEILING = Map.ofEntries(
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 8),
-        Map.entry("dev/nexus/service/AspectDocIdBackfillTest.java", 12),
+        // nexus-cbo4a batch 9 item 0: 12 -> 17 (extension-ownership-transfer dance).
+        Map.entry("dev/nexus/service/AspectDocIdBackfillTest.java", 17),
         Map.entry("dev/nexus/service/AspectOperatorQueryTest.java", 1),
         Map.entry("dev/nexus/service/AspectRepositoryTest.java", 6),
         Map.entry("dev/nexus/service/AuthFilterTest.java", 6),
@@ -907,14 +908,18 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/DataTokenHandlerTest.java", 3),
         Map.entry("dev/nexus/service/DenseGateScanBudgetIntegrationTest.java", 8),
         Map.entry("dev/nexus/service/ForeignKeyConstraintTest.java", 53),
-        Map.entry("dev/nexus/service/GrantsNexusDiagViewAccessIntegrationTest.java", 13),
-        Map.entry("dev/nexus/service/GrantsPgMonitorTest.java", 11),
-        Map.entry("dev/nexus/service/GrantsSvcForeignOwnedRelationTest.java", 13),
+        // nexus-cbo4a batch 9 item 0: 13 -> 18 (extension-ownership-transfer dance).
+        Map.entry("dev/nexus/service/GrantsNexusDiagViewAccessIntegrationTest.java", 18),
+        // nexus-cbo4a batch 9 item 0: 11 -> 16 (extension-ownership-transfer dance).
+        Map.entry("dev/nexus/service/GrantsPgMonitorTest.java", 16),
+        // nexus-cbo4a batch 9 item 0: 13 -> 18 (extension-ownership-transfer dance).
+        Map.entry("dev/nexus/service/GrantsSvcForeignOwnedRelationTest.java", 18),
         Map.entry("dev/nexus/service/GraphHopParityIntegrationTest.java", 8),
         Map.entry("dev/nexus/service/GraphHopParityTest.java", 17),
         Map.entry("dev/nexus/service/HybridSearchFunctionParityIntegrationTest.java", 7),
         Map.entry("dev/nexus/service/HybridSelectiveGateTest.java", 2),
-        Map.entry("dev/nexus/service/Hygiene001NotNullMigrationRlsTest.java", 29),
+        // nexus-cbo4a batch 9 item 0: 29 -> 34 (extension-ownership-transfer dance).
+        Map.entry("dev/nexus/service/Hygiene001NotNullMigrationRlsTest.java", 34),
         Map.entry("dev/nexus/service/ManifestChunkFkTest.java", 12),
         Map.entry("dev/nexus/service/ManifestCollectionStampTest.java", 10),
         Map.entry("dev/nexus/service/ManifestFunctionsTest.java", 15),
@@ -929,7 +934,7 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/PgVectorCombinedQueryContractTest.java", 7),
         Map.entry("dev/nexus/service/PgVectorEmbedSkipGcRaceTest.java", 3),
         Map.entry("dev/nexus/service/PgVectorRepositoryContractTest.java", 9),
-        Map.entry("dev/nexus/service/PgVectorRepositoryRawSqlPlanShapeTest.java", 14),
+        Map.entry("dev/nexus/service/PgVectorRepositoryRawSqlPlanShapeTest.java", 14), // nexus-cbo4a: signature qualification only, no new sites
         Map.entry("dev/nexus/service/PgVectorServingContractTest.java", 6),
         Map.entry("dev/nexus/service/PgVectorTombstoneFilterTest.java", 4),
         Map.entry("dev/nexus/service/PgVectorUpsertDeadlockTest.java", 1),
@@ -945,9 +950,18 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/RemapSchemaLiquibaseTest.java", 10),
         Map.entry("dev/nexus/service/RerankStageIntegrationTest.java", 2),
         Map.entry("dev/nexus/service/SchemaMigratorDateExecutedUtcTest.java", 2),
-        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 88),
-        Map.entry("dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java", 32),
-        Map.entry("dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java", 98),
+        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): 88 -> 128.
+        // The extension-ownership-transfer dance (CREATE ROLE nx_ext_relocator
+        // SUPERUSER; SET ROLE; CREATE EXTENSION x2; REASSIGN OWNED BY; RESET
+        // ROLE; DROP ROLE) replaces a plain CREATE EXTENSION at 8 bootstrap
+        // sites in this file -- see search-path-001-relocate-vector-
+        // extensions.xml's header for why relocating the extension directly,
+        // here, before Liquibase ever runs, is unworkable.
+        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 128),
+        // nexus-cbo4a batch 9 item 0: 32 -> 37 (extension-ownership-transfer dance).
+        Map.entry("dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java", 37),
+        // nexus-cbo4a batch 9 item 0: 98 -> 103 (extension-ownership-transfer dance).
+        Map.entry("dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java", 103),
         Map.entry("dev/nexus/service/ScratchHandlerTest.java", 4),
         Map.entry("dev/nexus/service/ScratchRepositoryTest.java", 3),
         Map.entry("dev/nexus/service/ScratchSchemaLiquibaseTest.java", 11),
@@ -991,9 +1005,12 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/VectorHandlerVoyageTooManyTokensTest.java", 2),
         Map.entry("dev/nexus/service/VectorHybridHttpTest.java", 1),
         Map.entry("dev/nexus/service/VectorsChashIndexLiquibaseTest.java", 4),
-        Map.entry("dev/nexus/service/VectorsRepointFunctionsIntegrationTest.java", 63),
-        Map.entry("dev/nexus/service/VectorsUnifyCentroidsIntegrationTest.java", 14),
-        Map.entry("dev/nexus/service/VectorsUnifyChunksIntegrationTest.java", 23),
+        // nexus-cbo4a batch 9 item 0: 63 -> 68 (extension-ownership-transfer dance).
+        Map.entry("dev/nexus/service/VectorsRepointFunctionsIntegrationTest.java", 68),
+        // nexus-cbo4a batch 9 item 0: 14 -> 19 (extension-ownership-transfer dance).
+        Map.entry("dev/nexus/service/VectorsUnifyCentroidsIntegrationTest.java", 19),
+        // nexus-cbo4a batch 9 item 0: 23 -> 28 (extension-ownership-transfer dance).
+        Map.entry("dev/nexus/service/VectorsUnifyChunksIntegrationTest.java", 28),
         Map.entry("dev/nexus/service/db/BackendReaperIntegrationTest.java", 1),
         Map.entry("dev/nexus/service/db/CollectionRegistryTest.java", 3),
         Map.entry("dev/nexus/service/db/PgSessionEfSearchReadbackIntegrationTest.java", 2),
@@ -1075,7 +1092,7 @@ class RawSqlGateTest {
      * SchemaMigrator#migrate} directly (the production entrypoint under
      * test), never a hand-rolled {@code Liquibase} call to fold.
      */
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1598;
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1688;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
@@ -2152,6 +2169,180 @@ class RawSqlGateTest {
         assertThat(scanDslTemplates("Whatever.java", synthetic))
             .as("a javadoc/comment MENTION of DSL.sql(...) must never be mistaken for a "
                 + "live call site")
+            .isEmpty();
+    }
+
+    // ── nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05, nexus-zrcj7): no
+    //    session search_path, ever. This class's PRODUCTION connectionInitSql
+    //    ("SET search_path TO nexus, t1, public" on Main.java's HikariConfig) and
+    //    its ~11 test copies (8 setConnectionInitSql call sites plus 3 "-c
+    //    search_path=..." datasource-property sites across 2 files) are deleted,
+    //    not sanctioned, in this same batch. This scan makes sure neither shape
+    //    can come back. DELIBERATELY does NOT scan for the ROLE-level {@code ALTER
+    //    ROLE ... SET search_path} shape ({@code db.changelog-test-role.xml}'s
+    //    {@code bootstrapServiceRole} plus its own remaining per-class literal
+    //    copies) -- that shape is real, understood, and its removal is a SEPARATE,
+    //    already-identified item (batch 9 item 1: fold the leftover per-class
+    //    literals onto {@code PgContainerHelper.bootstrapServiceRole}/{@code
+    //    seedServiceToken}), not this batch's scope; a blanket "any SET
+    //    search_path string literal" scan would fail loud today against that
+    //    known, deferred population instead of catching a genuine regression. ──
+
+    /** Per-file scan: every {@code setConnectionInitSql(...)} call site (unconditional --
+     * this method sets a SESSION-level search_path/GUC string on a connection pool, and
+     * every legitimate schema reference already goes through schema-qualified jOOQ
+     * generated Tables/Routines or a function-pinned {@code SET search_path} in the
+     * function definition itself, so there is no remaining legitimate caller), PLUS
+     * every string literal matching the PostgreSQL JDBC {@code options} connection-
+     * property shape used to set a search_path GUC (the "dash-c" idiom two test files
+     * used as an alternative to {@code setConnectionInitSql}). The first half runs
+     * against the FULLY {@link #blank}ed source (comments AND string-literal contents
+     * blanked, delimiters kept) -- matching {@link #scanDslTemplates}'s own {@code
+     * DSL.sql(...)} precedent -- since {@code setConnectionInitSql} is a bare method
+     * call, never itself string content, so full blanking both hides this class's own
+     * synthetic fixtures/violation text (each embeds the identifier inside a Java
+     * string literal) AND still catches every live call site (code, never string
+     * content). The second half needs the connection-option STRING'S OWN CONTENT
+     * visible to match at all, so it runs against {@link #blankComments} instead
+     * (comments only); this file's own fixtures and messages therefore build that
+     * shape via string concatenation rather than one contiguous literal, so this
+     * class's own real source never spells the shape out as a single matchable run --
+     * exactly how {@link #scanDslTemplates}'s field/condition/query/table matcher
+     * keeps its own risky-looking fixture text inside a blanked comment instead. */
+    static List<String> scanSessionSearchPathReliance(String fileName, String rawSource) {
+        String fullyBlanked = blank(rawSource);
+        String commentsBlanked = blankComments(rawSource);
+        List<String> violations = new ArrayList<>();
+
+        Matcher initSql = Pattern.compile("\\bsetConnectionInitSql\\s*\\(").matcher(fullyBlanked);
+        while (initSql.find()) {
+            int line = 1 + (int) fullyBlanked.substring(0, initSql.start()).chars()
+                .filter(c -> c == '\n').count();
+            violations.add(fileName + ":" + line + "  setConnectionInitSql(...) -- session "
+                + "search_path (or any other session-level init SQL) on a connection pool is "
+                + "retired (Sam's directive, nexus-zrcj7, 2026-09-05); every legitimate schema "
+                + "reference already goes through schema-qualified jOOQ Tables/Routines or a "
+                + "function-pinned SET search_path in the function definition itself");
+        }
+
+        Matcher optionsProp = Pattern.compile("-c\\s+search_path\\s*=").matcher(commentsBlanked);
+        while (optionsProp.find()) {
+            int line = 1 + (int) commentsBlanked.substring(0, optionsProp.start()).chars()
+                .filter(c -> c == '\n').count();
+            violations.add(fileName + ":" + line + "  a PostgreSQL JDBC \"options\" "
+                + "connection-property string setting a search_path GUC -- the "
+                + "addDataSourceProperty(\"options\", ...) equivalent of "
+                + "setConnectionInitSql; same retirement, same reason");
+        }
+
+        return violations;
+    }
+
+    /**
+     * Scans BOTH {@code src/main/java} AND {@code src/test/java} for {@link
+     * #scanSessionSearchPathReliance} violations. Zero-tolerance in both trees:
+     * this batch converted every known call site (Main.java's production pool plus
+     * 8 test setConnectionInitSql copies and 3 "-c search_path=" datasource-property
+     * sites across 2 files), so there is no grandfathered population to ratchet
+     * against, unlike {@link #noRawExecuteSqlRegressionInTestSources}.
+     */
+    @Test
+    void noSessionSearchPathConnectionOptionInMainOrTestSources() throws IOException {
+        List<String> violations = new ArrayList<>();
+        for (String root : List.of("main", "test")) {
+            Path r = Path.of("src", root, "java");
+            assertThat(r).exists();
+            try (Stream<Path> files = Files.walk(r)) {
+                files.filter(p -> p.toString().endsWith(".java")).forEach(p -> {
+                    try {
+                        violations.addAll(scanSessionSearchPathReliance(
+                            p.getFileName().toString(), Files.readString(p)));
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+            }
+        }
+        assertThat(violations)
+            .as("session-level search_path connection option (setConnectionInitSql(...) or "
+                + "a PostgreSQL JDBC \"options\" property setting the same GUC) -- see "
+                + "scanSessionSearchPathReliance's own javadoc; never sanctioned, always "
+                + "convert onto schema-qualified jOOQ Tables/Routines or a function-pinned "
+                + "SET search_path")
+            .isEmpty();
+    }
+
+    @Test
+    void searchPathReliance_setConnectionInitSql_isFlagged() {
+        String synthetic = String.join("\n",
+            "public final class Whatever {",
+            "    void danger() {",
+            "        cfg.setConnectionInitSql(\"SET search_path TO nexus, t1, public\");",
+            "    }",
+            "}");
+        assertThat(scanSessionSearchPathReliance("Whatever.java", synthetic))
+            .as("setConnectionInitSql(...) must fail loud unconditionally")
+            .anySatisfy(h -> assertThat(h).contains("setConnectionInitSql"));
+    }
+
+    @Test
+    void searchPathReliance_dataSourcePropertyOptionsShape_isFlagged() {
+        // The "-c " / "search_path=..." split below is deliberate (nexus-cbo4a batch 9
+        // item 0 follow-up, T2 [24718]'s own gate-blind-spot fix): this file's OWN raw
+        // source must never spell the shape out as one contiguous run, or the outer
+        // noSessionSearchPathConnectionOptionInMainOrTestSources walk flags THIS
+        // fixture when it scans RawSqlGateTest.java itself (blankComments leaves
+        // string content visible, unlike blank). Concatenation reassembles the exact
+        // target text at runtime, which is what this isolated unit test exercises.
+        String dashCOption = "-c " + "search_path=nexus,public";
+        String synthetic = String.join("\n",
+            "public final class Whatever {",
+            "    void danger() {",
+            "        config.addDataSourceProperty(\"options\", \"" + dashCOption + "\");",
+            "    }",
+            "}");
+        assertThat(scanSessionSearchPathReliance("Whatever.java", synthetic))
+            .as("the PostgreSQL JDBC \"options\" search_path connection-property shape "
+                + "must fail loud")
+            .anySatisfy(h -> assertThat(h).contains("search_path GUC"));
+    }
+
+    @Test
+    void searchPathReliance_javadocMention_isNotFlagged() {
+        // Same deliberate split as searchPathReliance_dataSourcePropertyOptionsShape_isFlagged
+        // above -- this fixture's own javadoc-mention text must not spell the "-c
+        // search_path=" shape out as one contiguous run in RawSqlGateTest.java's own
+        // source either, even though it sits inside a FAKE javadoc comment from the
+        // synthetic source's perspective (the outer walk sees only real string-literal
+        // content here, not a real Java comment of THIS file).
+        String dashCOption = "-c " + "search_path=nexus,public";
+        String synthetic = String.join("\n",
+            "public final class Whatever {",
+            "    /** formerly used {@code setConnectionInitSql(\"SET search_path TO nexus, "
+                + "public\")} and \"" + dashCOption + "\" here */",
+            "    void safe() {",
+            "    }",
+            "}");
+        assertThat(scanSessionSearchPathReliance("Whatever.java", synthetic))
+            .as("a javadoc/comment MENTION of either retired shape must never be mistaken "
+                + "for a live call site")
+            .isEmpty();
+    }
+
+    @Test
+    void searchPathReliance_alterRoleShape_isDeliberatelyNotFlagged() {
+        String synthetic = String.join("\n",
+            "public final class Whatever {",
+            "    void stillLegal() throws Exception {",
+            "        su.createStatement().execute(\"ALTER ROLE nexus_svc SET search_path TO "
+                + "nexus, public\");",
+            "    }",
+            "}");
+        assertThat(scanSessionSearchPathReliance("Whatever.java", synthetic))
+            .as("the ROLE-level ALTER ROLE ... SET search_path shape is a separate, "
+                + "already-identified, deferred item (batch 9 item 1: fold onto "
+                + "PgContainerHelper.bootstrapServiceRole/seedServiceToken) -- deliberately "
+                + "out of THIS scan's scope, not a gap")
             .isEmpty();
     }
 

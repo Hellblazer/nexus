@@ -1690,7 +1690,9 @@ class TelemetryRepositoryTest {
         config.setUsername(SVC_ROLE);
         config.setPassword(SVC_PASS);
         config.setMaximumPoolSize(4);
-        config.addDataSourceProperty("options", "-c search_path=nexus,public");
+        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): no session
+        // search_path connection option; jOOQ generated Tables render fully
+        // schema-qualified SQL regardless of search_path.
         return new com.zaxxer.hikari.HikariDataSource(config);
     }
     // ── nexus-24p05: retention markers ───────────────────────────────────────

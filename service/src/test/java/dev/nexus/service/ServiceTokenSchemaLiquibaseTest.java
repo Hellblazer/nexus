@@ -359,7 +359,9 @@ class ServiceTokenSchemaLiquibaseTest {
         config.setPassword(SVC_PASS);
         config.setMaximumPoolSize(5);
         config.setAutoCommit(true);
-        config.setConnectionInitSql("SET search_path TO nexus, t1, public");
+        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): no session
+        // search_path connectionInitSql; jOOQ generated Tables render fully
+        // schema-qualified SQL regardless of search_path.
         return new HikariDataSource(config);
     }
 }

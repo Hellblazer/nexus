@@ -113,7 +113,9 @@ class AuthFilterTest {
         cfg.setPassword(PgContainerHelper.SVC_PASSWORD);
         cfg.setMaximumPoolSize(5);
         cfg.setAutoCommit(true);
-        cfg.setConnectionInitSql("SET search_path TO nexus, t1, public");
+        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): no session
+        // search_path connectionInitSql; jOOQ generated Tables render fully
+        // schema-qualified SQL regardless of search_path.
         ds = new HikariDataSource(cfg);
 
         clock = new MutableClock(T0);
