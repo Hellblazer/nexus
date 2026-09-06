@@ -867,8 +867,9 @@ class RawSqlGateTest {
      */
     private static final Map<String, Integer> TEST_TREE_RAW_SQL_CEILING = Map.ofEntries(
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 8),
-        // nexus-cbo4a batch 9 item 0: 12 -> 17 (extension-ownership-transfer dance).
-        Map.entry("dev/nexus/service/AspectDocIdBackfillTest.java", 17),
+        // nexus-cbo4a batch 9 item 0: 12 -> 17 (extension-ownership-transfer dance);
+        // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 17 -> 19 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
+        Map.entry("dev/nexus/service/AspectDocIdBackfillTest.java", 19),
         Map.entry("dev/nexus/service/AspectOperatorQueryTest.java", 1),
         Map.entry("dev/nexus/service/AspectRepositoryTest.java", 6),
         Map.entry("dev/nexus/service/AuthFilterTest.java", 6),
@@ -908,18 +909,22 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/DataTokenHandlerTest.java", 3),
         Map.entry("dev/nexus/service/DenseGateScanBudgetIntegrationTest.java", 8),
         Map.entry("dev/nexus/service/ForeignKeyConstraintTest.java", 53),
-        // nexus-cbo4a batch 9 item 0: 13 -> 18 (extension-ownership-transfer dance).
-        Map.entry("dev/nexus/service/GrantsNexusDiagViewAccessIntegrationTest.java", 18),
-        // nexus-cbo4a batch 9 item 0: 11 -> 16 (extension-ownership-transfer dance).
-        Map.entry("dev/nexus/service/GrantsPgMonitorTest.java", 16),
-        // nexus-cbo4a batch 9 item 0: 13 -> 18 (extension-ownership-transfer dance).
-        Map.entry("dev/nexus/service/GrantsSvcForeignOwnedRelationTest.java", 18),
+        // nexus-cbo4a batch 9 item 0: 13 -> 18 (extension-ownership-transfer dance);
+        // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 18 -> 20 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
+        Map.entry("dev/nexus/service/GrantsNexusDiagViewAccessIntegrationTest.java", 20),
+        // nexus-cbo4a batch 9 item 0: 11 -> 16 (extension-ownership-transfer dance);
+        // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 16 -> 18 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
+        Map.entry("dev/nexus/service/GrantsPgMonitorTest.java", 18),
+        // nexus-cbo4a batch 9 item 0: 13 -> 18 (extension-ownership-transfer dance);
+        // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 18 -> 20 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
+        Map.entry("dev/nexus/service/GrantsSvcForeignOwnedRelationTest.java", 20),
         Map.entry("dev/nexus/service/GraphHopParityIntegrationTest.java", 8),
         Map.entry("dev/nexus/service/GraphHopParityTest.java", 17),
         Map.entry("dev/nexus/service/HybridSearchFunctionParityIntegrationTest.java", 7),
         Map.entry("dev/nexus/service/HybridSelectiveGateTest.java", 2),
-        // nexus-cbo4a batch 9 item 0: 29 -> 34 (extension-ownership-transfer dance).
-        Map.entry("dev/nexus/service/Hygiene001NotNullMigrationRlsTest.java", 34),
+        // nexus-cbo4a batch 9 item 0: 29 -> 34 (extension-ownership-transfer dance);
+        // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 34 -> 36 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
+        Map.entry("dev/nexus/service/Hygiene001NotNullMigrationRlsTest.java", 36),
         Map.entry("dev/nexus/service/ManifestChunkFkTest.java", 12),
         Map.entry("dev/nexus/service/ManifestCollectionStampTest.java", 10),
         Map.entry("dev/nexus/service/ManifestFunctionsTest.java", 15),
@@ -964,12 +969,18 @@ class RawSqlGateTest {
         // _unrelocated() pair search-path-001's own guard calls mid-walk),
         // which is why the final ceiling here is LOWER than the pre-batch
         // baseline despite the new SECURITY DEFINER function bodies' own
-        // raw SQL.
-        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 79),
-        // nexus-cbo4a batch 9 item 0: 32 -> 37 (extension-ownership-transfer dance).
-        Map.entry("dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java", 37),
-        // nexus-cbo4a batch 9 item 0: 98 -> 103 (extension-ownership-transfer dance).
-        Map.entry("dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java", 103),
+        // raw SQL. Round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated
+        // IMPORTANT 1): 79 -> 81 (REVOKE EXECUTE ... FROM PUBLIC hardening
+        // on both SECURITY DEFINER mirrors, closing the gap between this
+        // and Python's own relocate_vector_extensions_to_nexus_schema,
+        // which has carried the REVOKE since commit 7d04c40cf).
+        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 81),
+        // nexus-cbo4a batch 9 item 0: 32 -> 37 (extension-ownership-transfer dance);
+        // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 37 -> 39 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
+        Map.entry("dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java", 39),
+        // nexus-cbo4a batch 9 item 0: 98 -> 103 (extension-ownership-transfer dance);
+        // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 103 -> 105 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
+        Map.entry("dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java", 105),
         Map.entry("dev/nexus/service/ScratchHandlerTest.java", 4),
         Map.entry("dev/nexus/service/ScratchRepositoryTest.java", 3),
         Map.entry("dev/nexus/service/ScratchSchemaLiquibaseTest.java", 11),
@@ -1013,12 +1024,15 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/VectorHandlerVoyageTooManyTokensTest.java", 2),
         Map.entry("dev/nexus/service/VectorHybridHttpTest.java", 1),
         Map.entry("dev/nexus/service/VectorsChashIndexLiquibaseTest.java", 4),
-        // nexus-cbo4a batch 9 item 0: 63 -> 68 (extension-ownership-transfer dance).
-        Map.entry("dev/nexus/service/VectorsRepointFunctionsIntegrationTest.java", 68),
-        // nexus-cbo4a batch 9 item 0: 14 -> 19 (extension-ownership-transfer dance).
-        Map.entry("dev/nexus/service/VectorsUnifyCentroidsIntegrationTest.java", 19),
-        // nexus-cbo4a batch 9 item 0: 23 -> 28 (extension-ownership-transfer dance).
-        Map.entry("dev/nexus/service/VectorsUnifyChunksIntegrationTest.java", 28),
+        // nexus-cbo4a batch 9 item 0: 63 -> 68 (extension-ownership-transfer dance);
+        // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 68 -> 70 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
+        Map.entry("dev/nexus/service/VectorsRepointFunctionsIntegrationTest.java", 70),
+        // nexus-cbo4a batch 9 item 0: 14 -> 19 (extension-ownership-transfer dance);
+        // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 19 -> 21 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
+        Map.entry("dev/nexus/service/VectorsUnifyCentroidsIntegrationTest.java", 21),
+        // nexus-cbo4a batch 9 item 0: 23 -> 28 (extension-ownership-transfer dance);
+        // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 28 -> 30 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
+        Map.entry("dev/nexus/service/VectorsUnifyChunksIntegrationTest.java", 30),
         Map.entry("dev/nexus/service/db/BackendReaperIntegrationTest.java", 1),
         Map.entry("dev/nexus/service/db/CollectionRegistryTest.java", 3),
         Map.entry("dev/nexus/service/db/PgSessionEfSearchReadbackIntegrationTest.java", 2),
@@ -1100,7 +1114,7 @@ class RawSqlGateTest {
      * SchemaMigrator#migrate} directly (the production entrypoint under
      * test), never a hand-rolled {@code Liquibase} call to fold.
      */
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1639;
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1661;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

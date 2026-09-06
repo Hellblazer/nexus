@@ -72,6 +72,7 @@ class GrantsPgMonitorTest {
             + "  END IF; "
             + "END; "
             + "$relofunc$");
+        exec(su, "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() FROM PUBLIC");
         exec(su, "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO " + migratingRole);
         exec(su,
             "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated() "
@@ -85,6 +86,7 @@ class GrantsPgMonitorTest {
             + "  END IF; "
             + "END; "
             + "$unrelofunc$");
+        exec(su, "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() FROM PUBLIC");
         exec(su, "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO " + migratingRole);
     }
 

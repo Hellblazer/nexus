@@ -94,26 +94,35 @@ class SchemaMigratorIntegrationTest {
 
     /**
      * nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
-     * nexus/critique-nexus-cbo4a-batch-9-search-path, a ship-blocker fix). Creates
-     * {@code vector}/{@code pg_trgm} directly as the connection's own superuser
-     * (no throwaway role, no REASSIGN OWNED BY — a superuser can relocate either
-     * extension regardless of ownership, so there is nothing to transfer), then
-     * installs {@code nexus.ensure_vector_extensions_relocated()} — a SECURITY
-     * DEFINER function owned by that same superuser — WITHOUT relocating the
-     * extensions itself. Mirrors {@code nexus.db.pg_provision.
-     * relocate_vector_extensions_to_nexus_schema(..., direct=False)} exactly,
-     * for exactly the same reason: every test in this file resumes through
-     * vectors-001-baseline.xml's bare {@code vector(N)}/{@code vector_cosine_ops}
-     * references AND search-path-001/002 in ONE continuous {@code
-     * SchemaMigrator.migrate()} call, so the extensions must stay resolvable via
-     * the migrating role's default (public-only) search_path through vectors-001,
-     * then get relocated MID-WALK — which the migrating role (NOSUPERUSER)
-     * cannot do itself, but CAN trigger by calling this function, since a
-     * SECURITY DEFINER function runs with its OWNER's privileges. search-path-
-     * 001's own guard changeset calls it, by qualified name, at exactly that
-     * point. See {@code relocate_vector_extensions_to_nexus_schema}'s own
-     * docstring ("FRESH-INSTALL SEQUENCING") and search-path-001-relocate-
-     * vector-extensions.xml's header for the full derivation.
+     * nexus/critique-nexus-cbo4a-batch-9-search-path, a ship-blocker fix, and
+     * again per T2 nexus/critique-nexus-cbo4a-batch-9-gated SIGNIFICANT 1/2).
+     * Creates {@code vector}/{@code pg_trgm} directly as the connection's own
+     * superuser (no throwaway role, no REASSIGN OWNED BY — a superuser can
+     * relocate either extension regardless of ownership, so there is nothing to
+     * transfer), then installs the SECURITY DEFINER function pair —
+     * {@code nexus.ensure_vector_extensions_relocated()} and its rollback-
+     * direction companion {@code nexus.ensure_vector_extensions_unrelocated()},
+     * both owned by that same superuser, both {@code REVOKE EXECUTE ... FROM
+     * PUBLIC} before the explicit {@code GRANT ... TO} the migrating role —
+     * WITHOUT relocating the extensions itself. Mirrors {@code
+     * nexus.db.pg_provision.relocate_vector_extensions_to_nexus_schema} exactly
+     * (that Python function no longer takes a {@code direct} parameter — an
+     * earlier revision's eager, every-daemon-start relocation path turned out to
+     * be permanently unreachable on any real cluster and was deleted; the
+     * function's only remaining job, mirrored here, is ensuring the schema and
+     * this function pair exist), for exactly the same reason: every test in this
+     * file resumes through vectors-001-baseline.xml's bare {@code vector(N)}/
+     * {@code vector_cosine_ops} references AND search-path-001/002 in ONE
+     * continuous {@code SchemaMigrator.migrate()} call, so the extensions must
+     * stay resolvable via the migrating role's default (public-only) search_path
+     * through vectors-001, then get relocated MID-WALK — which the migrating
+     * role (NOSUPERUSER) cannot do itself, but CAN trigger by calling this
+     * function, since a SECURITY DEFINER function runs with its OWNER's
+     * privileges. search-path-001's own guard changeset calls it, by qualified
+     * name, at exactly that point. See {@code
+     * relocate_vector_extensions_to_nexus_schema}'s own docstring and
+     * search-path-001-relocate-vector-extensions.xml's header for the full
+     * derivation.
      *
      * @param su the superuser connection (e.g. the embedded Postgres's own
      *           bootstrap connection)
@@ -139,6 +148,8 @@ class SchemaMigratorIntegrationTest {
             + "END; "
             + "$relofunc$");
         su.createStatement().execute(
+            "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() FROM PUBLIC");
+        su.createStatement().execute(
             "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO "
             + migratingRole);
         su.createStatement().execute(
@@ -153,6 +164,8 @@ class SchemaMigratorIntegrationTest {
             + "  END IF; "
             + "END; "
             + "$unrelofunc$");
+        su.createStatement().execute(
+            "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() FROM PUBLIC");
         su.createStatement().execute(
             "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO "
             + migratingRole);
@@ -220,7 +233,8 @@ class SchemaMigratorIntegrationTest {
             // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
             // directly as `su` (superuser) and install the SECURITY DEFINER relocation
             // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
-            // nexus_schema(..., direct=False) -- this walk resumes through vectors-001
+            // nexus_schema (no direct-relocation parameter any more -- see that
+            // function's own docstring) -- this walk resumes through vectors-001
             // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
             // below, so the extension must stay bare-resolvable in public through
             // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
@@ -556,7 +570,8 @@ class SchemaMigratorIntegrationTest {
                 // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
                 // directly as `su` (superuser) and install the SECURITY DEFINER relocation
                 // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
-                // nexus_schema(..., direct=False) -- this walk resumes through vectors-001
+                // nexus_schema (no direct-relocation parameter any more -- see that
+                // function's own docstring) -- this walk resumes through vectors-001
                 // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
                 // below, so the extension must stay bare-resolvable in public through
                 // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
@@ -735,7 +750,8 @@ class SchemaMigratorIntegrationTest {
                 // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
                 // directly as `su` (superuser) and install the SECURITY DEFINER relocation
                 // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
-                // nexus_schema(..., direct=False) -- this walk resumes through vectors-001
+                // nexus_schema (no direct-relocation parameter any more -- see that
+                // function's own docstring) -- this walk resumes through vectors-001
                 // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
                 // below, so the extension must stay bare-resolvable in public through
                 // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
@@ -947,7 +963,8 @@ class SchemaMigratorIntegrationTest {
                 // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
                 // directly as `su` (superuser) and install the SECURITY DEFINER relocation
                 // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
-                // nexus_schema(..., direct=False) -- this walk resumes through vectors-001
+                // nexus_schema (no direct-relocation parameter any more -- see that
+                // function's own docstring) -- this walk resumes through vectors-001
                 // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
                 // below, so the extension must stay bare-resolvable in public through
                 // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
@@ -1171,7 +1188,8 @@ class SchemaMigratorIntegrationTest {
                 // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
                 // directly as `su` (superuser) and install the SECURITY DEFINER relocation
                 // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
-                // nexus_schema(..., direct=False) -- this walk resumes through vectors-001
+                // nexus_schema (no direct-relocation parameter any more -- see that
+                // function's own docstring) -- this walk resumes through vectors-001
                 // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
                 // below, so the extension must stay bare-resolvable in public through
                 // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
@@ -1457,7 +1475,8 @@ class SchemaMigratorIntegrationTest {
                 // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
                 // directly as `su` (superuser) and install the SECURITY DEFINER relocation
                 // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
-                // nexus_schema(..., direct=False) -- this walk resumes through vectors-001
+                // nexus_schema (no direct-relocation parameter any more -- see that
+                // function's own docstring) -- this walk resumes through vectors-001
                 // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
                 // below, so the extension must stay bare-resolvable in public through
                 // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
@@ -1639,7 +1658,8 @@ class SchemaMigratorIntegrationTest {
                 // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
                 // directly as `su` (superuser) and install the SECURITY DEFINER relocation
                 // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
-                // nexus_schema(..., direct=False) -- this walk resumes through vectors-001
+                // nexus_schema (no direct-relocation parameter any more -- see that
+                // function's own docstring) -- this walk resumes through vectors-001
                 // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
                 // below, so the extension must stay bare-resolvable in public through
                 // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
@@ -1800,7 +1820,8 @@ class SchemaMigratorIntegrationTest {
                 // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
                 // directly as `su` (superuser) and install the SECURITY DEFINER relocation
                 // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
-                // nexus_schema(..., direct=False) -- this walk resumes through vectors-001
+                // nexus_schema (no direct-relocation parameter any more -- see that
+                // function's own docstring) -- this walk resumes through vectors-001
                 // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
                 // below, so the extension must stay bare-resolvable in public through
                 // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's

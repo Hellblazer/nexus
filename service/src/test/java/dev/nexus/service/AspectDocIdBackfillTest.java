@@ -71,6 +71,8 @@ class AspectDocIdBackfillTest {
             + "END; "
             + "$relofunc$");
         su.createStatement().execute(
+            "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() FROM PUBLIC");
+        su.createStatement().execute(
             "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO " + migratingRole);
             su.createStatement().execute(
                 "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated() "
@@ -84,6 +86,8 @@ class AspectDocIdBackfillTest {
                 + "  END IF; "
                 + "END; "
                 + "$unrelofunc$");
+            su.createStatement().execute(
+                "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() FROM PUBLIC");
             su.createStatement().execute(
                 "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO " + migratingRole);
     }
