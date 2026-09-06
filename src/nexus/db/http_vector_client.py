@@ -1264,8 +1264,9 @@ _UPSERT_CHUNKS_TIMEOUT_S = 600
 
 #: nexus-8hdg9 phase 5: the client declares its own embed budget to the engine
 #: on the upsert-chunks POST via :data:`_REQUEST_DEADLINE_HEADER`, and the
-#: engine prefers it over its ``NX_EMBED_DEADLINE_MS`` default (clamped to that
-#: default as a ceiling -- ``RequestDeadline.resolveBudgetMs``). The value is
+#: engine uses it in place of its ``NX_EMBED_DEADLINE_MS`` default
+#: (``RequestDeadline.resolveBudgetMs``; the default is the fallback for an
+#: absent or malformed header only). The value is
 #: derived from the socket timeout above minus this margin so the server-side
 #: deadline always fires BEFORE the client's own socket read gives up: a
 #: deadline equal to or past the socket timeout would be unreachable, exactly
