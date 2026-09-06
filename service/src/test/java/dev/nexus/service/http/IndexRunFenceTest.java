@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.http;
 
+import dev.nexus.service.PgCatalogProbes;
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpContext;
 import com.sun.net.httpserver.HttpExchange;
@@ -745,10 +748,7 @@ class IndexRunFenceTest {
             for (int i = 0; i < 50 && !sawWaiter; i++) {
                 Thread.sleep(20);
                 try (Connection su = pg.createConnection("")) {
-                    var rs = su.createStatement().executeQuery(
-                        "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted");
-                    rs.next();
-                    sawWaiter = rs.getLong(1) > 0;
+                    sawWaiter = PgCatalogProbes.advisoryLockWaiters(DSL.using(su, SQLDialect.POSTGRES)) > 0;
                 }
             }
             assertThat(sawWaiter)
@@ -860,7 +860,7 @@ class IndexRunFenceTest {
             su.createStatement().execute(
                 "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
                 "VALUES ('" + TENANT + "', '" + COLLECTION + "', decode('" + chashHex + "', 'hex'), " +
-                "'chunk text', ('[1" + ",0".repeat(1023) + "]')::vector) " +
+                "'chunk text', ('[1" + ",0".repeat(1023) + "]')::nexus.vector) " +
                 "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
         } catch (Exception e) {
             throw new RuntimeException(e);

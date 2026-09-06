@@ -1,0 +1,217 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05, nexus-zrcj7): relocate
+    the pgvector-family extensions (vector, pg_trgm) into the nexus schema, so the
+    33 functions in search-path-002-qualify-vector-operator-functions.xml can
+    reference nexus.vector / nexus.word_similarity / OPERATOR(nexus.&lt;=&gt;) /
+    OPERATOR(nexus.&lt;%) explicitly instead of depending on the calling session's
+    search_path containing public (where CREATE EXTENSION landed unqualified,
+    vectors-001-baseline.xml).
+
+    REDESIGNED (T2 nexus/critique-nexus-cbo4a-batch-9-search-path, ship-blocker):
+    a FIRST version of this changeset performed the relocation itself
+    (unconditional ALTER EXTENSION ... SET SCHEMA nexus), on the theory that an
+    ownership-transfer step run by every extension-creation site (a throwaway
+    superuser role, REASSIGN OWNED BY, DROP ROLE) would always hand nexus_admin
+    ownership of both extensions before Liquibase ever connected. WRONG for every
+    install that existed BEFORE this batch: those installs created vector/pg_trgm
+    directly as the cluster's bootstrap superuser (oid 10, always - initdb's own
+    role), the ownership-transfer backfill is a documented no-op for that specific
+    case (REASSIGN OWNED BY unconditionally refuses to touch anything owned by the
+    bootstrap superuser, by Postgres design, with no workaround), and nexus_admin
+    - NOSUPERUSER, the only role that ever runs this changelog outside the
+    superuser-driven test/jOOQ-codegen paths - can never itself execute ALTER
+    EXTENSION on an extension it does not own. Every existing local install would
+    fail this changeset on its very first walk past this batch and never boot.
+
+    THE FIX: relocation is no longer performed here directly by nexus_admin, since
+    nexus_admin structurally cannot own the extension or become superuser. Two
+    mechanisms now do the actual work, for two different sequencing shapes:
+
+    - EVERY provision and EVERY daemon start, pre-existing or fresh alike:
+      nexus.db.pg_provision's relocate_vector_extensions_to_nexus_schema ensures
+      the nexus schema and a narrow SECURITY DEFINER function pair exist -
+      nexus.ensure_vector_extensions_relocated() (owned by os_user, granted
+      EXECUTE to nexus_admin) and its rollback-direction companion - OUTSIDE
+      Liquibase entirely, strictly BEFORE this changelog ever runs
+      (storage_service_daemon._ensure_pg_running -> _backfill_provision_grants ->
+      provision(), Step 1 of every _start_locked, before Step 2 spawns the
+      service binary). It never relocates the extension itself: an earlier
+      revision of that function DID relocate directly on every daemon start,
+      gated behind a "has this cluster's walk already run past vectors-001-2/-3/
+      -4" heuristic that turned out to be permanently false on every real
+      cluster (vectors-004-unify-chunks.xml drops the very chunks_&lt;dim&gt;
+      tables that heuristic checked for), so that eager path silently downgraded
+      to a no-op everywhere it mattered and was deleted (T2 nexus/critique-
+      nexus-cbo4a-batch-9-gated SIGNIFICANT 1). THIS changeset's own three-tier
+      body below is therefore the ONLY place actual relocation ever happens, for
+      every install shape uniformly - superuser-driven walks resolve it at tier
+      1, NOSUPERUSER nexus_admin walks (every real local or managed install) at
+      tier 2 via the SECURITY DEFINER function pg_provision already ensured
+      exists. For a managed/production cluster, a documented DBA pre-step
+      (SchemaMigrator's own Phase-5 provisioning javadoc) runs the same two
+      ALTER EXTENSION statements as a superuser, once, before the first walk
+      carrying this batch, in case the provisioner never ran there. conexus's
+      PITR-fork walk rehearsal (the real pre-deploy gate for any tag carrying a
+      changeset) exercises this changelog directly, so a skipped pre-step there
+      is caught as the FAIL LOUD case below, never a silent no-op.
+
+    - FRESH install, first-ever walk: it runs vectors-001-baseline.xml's bare
+      vector(N)/vector_cosine_ops references (vectors-001-2/-3/-4) in the SAME
+      continuous walk this changeset belongs to. Those changesets cannot be
+      edited to qualify them - every EXISTING install already applied that exact
+      text and Liquibase checksums it, so editing it is the NO-EDIT-APPLIED-
+      CHANGESETS hot rule violated for every one of them - and pinning a
+      search_path on the migration connection just to keep them resolving bare
+      would silently reintroduce, for the WHOLE changelog, the exact reliance
+      this entire batch exists to retire. Since pg_provision never relocates
+      ahead of the walk (see above), those bare references keep resolving
+      correctly regardless of when relative to them pg_provision's own call
+      happened; relocation only ever happens HERE, later in the SAME walk, well
+      after vectors-001-2/-3/-4 already ran with the extension still resolvable
+      in public.
+
+    This changeset's OWN job, given nexus_admin can never relocate the extension by
+    itself directly, is to GUARD that relocation has happened (or make it happen,
+    via the SECURITY DEFINER function, when this is the one walk that can only be
+    fixed here), with a THIRD tier, tried first, that keeps every superuser-
+    driven walk (PgContainerHelper#applyProductSchema, the jOOQ codegen plugin's
+    Testcontainers bootstrap) working with ZERO extra setup, exactly as before
+    this redesign:
+
+    - Precondition checks whether BOTH extensions already report
+      extnamespace = 'nexus'. If so (the expected steady state - every walk after
+      the pre-existing-install fast-path fix above has already run at least once,
+      or a walk resuming after this changeset's own prior successful run), onFail=
+      "MARK_RAN" fires - there is nothing left to do, so it is marked applied
+      without executing its body.
+    - If NOT - either extension is still in public - the precondition FAILS to
+      match, so the changeset body runs, in this order:
+      1. ATTEMPT the ALTER EXTENSION statements directly, inside a nested
+         exception-handling block. This succeeds immediately, with no further
+         action, whenever the CONNECTING role is superuser (every su-driven test
+         walk and the jOOQ codegen plugin's own bootstrap) OR happens to already
+         own both extensions - covering every shape this changeset covered
+         before this SECURITY DEFINER addition, unchanged. A repeat ALTER
+         EXTENSION to the SAME schema an extension is already in succeeds
+         silently (verified empirically), so attempting both unconditionally,
+         even if only one of the two actually needs to move, is harmless.
+      2. On `insufficient_privilege` (SQLSTATE 42501 - Postgres's "must be owner
+         of extension" error for this specific case), the nested block's
+         exception handler fires: call nexus.ensure_vector_extensions_relocated()
+         when that function exists (the fresh-install, NOSUPERUSER-migrating-role
+         case - see above), which performs the relocation via SECURITY DEFINER
+         elevation and returns normally.
+      3. WHY A MISSING FUNCTION MUST HALT, NOT SKIP: search-path-002's 33
+         functions already reference nexus.vector / OPERATOR(nexus.&lt;=&gt;)
+         explicitly; a silent skip here would let those functions get CREATE OR
+         REPLACEd against a name (nexus.vector) that does not exist yet, which
+         fails LATER, on a DIFFERENT changeset, with a raw "schema nexus does not
+         exist" or "type nexus.vector does not exist" error that names no remedy
+         at all - strictly worse than failing HERE, on the changeset whose entire
+         job is checking exactly this precondition, with a message naming the
+         exact fix. A missing function here (after tier 1 already failed with
+         insufficient_privilege) means the pg_provision.py path never ran (a
+         managed/production cluster where the DBA forgot the documented pre-step
+         and never installed the function either) - the only remaining case, so
+         the changeset RAISEs an exception naming the two ALTER EXTENSION
+         statements a superuser needs to run. None of these three tiers require
+         ownership of anything to ATTEMPT - a PL/pgSQL DO block executes as the
+         calling role regardless of what it does or does not own, and a failed
+         attempt, a qualified function call (permissions checked at call time via
+         GRANT EXECUTE, not ownership), and RAISE EXCEPTION are all ordinary
+         operations any role can attempt.
+
+    RECOVERY FROM A HALT BETWEEN THIS CHANGESET AND search-path-002: this
+    changeset itself makes NO schema change when it halts (the RAISE EXCEPTION
+    branch runs before any DDL statement), so a walk that halts there has changed
+    NOTHING relative to the walk's state one changeset earlier - there is no
+    half-applied state to reason about for the HALT case specifically. (The
+    SUCCESS case, calling the SECURITY DEFINER function, DOES make a schema
+    change - exactly the intended one, and the function is itself idempotent, so a
+    resumed walk re-entering this changeset after an interruption elsewhere finds
+    the precondition already satisfied and MARK_RANs instead.) The fix for a halt
+    is exactly the message names: run the two ALTER EXTENSION statements as a
+    superuser (or, for a local install, simply start the daemon again once its own
+    relocate step has had a chance to run - the halt here means it did not run, or
+    ran and failed, before Liquibase started), then re-run the walk. Liquibase's
+    own retry-from-the-first-unapplied-changeset behavior picks this changeset back
+    up cleanly since it was never marked applied; both this changeset and
+    search-path-002's 33 (each independently idempotent via CREATE OR REPLACE)
+    tolerate a re-run with no cleanup step required.
+
+    ROLLBACK: NOT a no-op, and this is deliberate. This changeset's rollback moves
+    both extensions back to public via the identical three-tier logic as the
+    forward direction, in reverse (direct ALTER first, falling back on
+    insufficient_privilege to a companion SECURITY DEFINER function,
+    nexus.ensure_vector_extensions_unrelocated(), installed by nexus.db.pg_provision
+    alongside the forward one). WHY THIS CANNOT BE A NO-OP, discovered live by
+    SchemaRollbackRoundTripIntegrationTest's rollback-to-zero scenario: search-
+    path-002's 33 rollbacks (which fire FIRST, being applied LAST) restore their
+    OWN nexus.*-qualified bodies, correctly, since the extension is still in nexus
+    at that point - but every changeset OLDER than this one (rolling back NEXT, in
+    reverse order) was written assuming vector resolves BARE via public, exactly
+    like vectors-001-baseline.xml's own forward-direction changesets. A no-op
+    rollback here would leave vector permanently in nexus for the rest of a
+    rollback-to-zero walk, failing the very next older changeset that references
+    it bare with a raw "type vector does not exist" error - the identical
+    sequencing constraint the forward direction has, mirrored. Rollback-to-zero is
+    a test-only path (production never rolls back past its own installed version),
+    so unlike the forward direction there is no separate DBA-runbook concern here;
+    the same fail-loud RAISE EXCEPTION tier still applies for diagnosability if
+    genuinely neither the direct attempt nor the function succeeds.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="search-path-001-1" author="nexus-cbo4a">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="false">
+SELECT COALESCE(
+    (
+        (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') = 'nexus'
+        AND (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') = 'nexus'
+    ),
+    false
+)::text
+            </sqlCheck>
+        </preConditions>
+        <comment>Guard that vector and pg_trgm are already relocated into the nexus schema before search-path-002's 33 functions reference nexus.vector / OPERATOR(nexus.&lt;=&gt;). Skips (MARK_RAN) when both are already relocated. Otherwise: attempts the ALTER EXTENSION statements directly (succeeds when the connecting role is superuser or already owns both, e.g. every su-driven test/jOOQ-codegen walk, unchanged from before this redesign); on insufficient_privilege, calls the SECURITY DEFINER nexus.ensure_vector_extensions_relocated() when it exists (the fresh-install, NOSUPERUSER-migrating-role case); halts with the exact remedy when that function is also absent (a managed/production cluster whose DBA pre-step never ran).</comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+BEGIN
+    BEGIN
+        EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus';
+        EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA nexus';
+    EXCEPTION WHEN insufficient_privilege THEN
+        IF to_regprocedure('nexus.ensure_vector_extensions_relocated()') IS NOT NULL THEN
+            PERFORM nexus.ensure_vector_extensions_relocated();
+        ELSE
+            RAISE EXCEPTION 'nexus-cbo4a batch 9: vector/pg_trgm are not yet relocated into the nexus schema, this role cannot relocate them directly, and no nexus.ensure_vector_extensions_relocated() helper is installed to do it from here. This must happen as a superuser step BEFORE this Liquibase walk. For a local install, start the nx daemon again (nexus.db.pg_provision installs this helper function on every daemon start, before this walk ever runs). Otherwise, run as a superuser: ALTER EXTENSION vector SET SCHEMA nexus; ALTER EXTENSION pg_trgm SET SCHEMA nexus;';
+        END IF;
+    END;
+END $$;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+DO $$
+BEGIN
+    BEGIN
+        EXECUTE 'ALTER EXTENSION vector SET SCHEMA public';
+        EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA public';
+    EXCEPTION WHEN insufficient_privilege THEN
+        IF to_regprocedure('nexus.ensure_vector_extensions_unrelocated()') IS NOT NULL THEN
+            PERFORM nexus.ensure_vector_extensions_unrelocated();
+        ELSE
+            RAISE EXCEPTION 'nexus-cbo4a batch 9 rollback: vector/pg_trgm could not be moved back to public, this role cannot relocate them directly, and no nexus.ensure_vector_extensions_unrelocated() helper is installed to do it from here. Run as a superuser: ALTER EXTENSION vector SET SCHEMA public; ALTER EXTENSION pg_trgm SET SCHEMA public;';
+        END IF;
+    END;
+END $$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

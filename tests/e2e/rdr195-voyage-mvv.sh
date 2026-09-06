@@ -243,7 +243,7 @@ NX_DB_ADMIN_URL="jdbc:postgresql://127.0.0.1:$PG_PORT/$DBNAME" \
 NX_DB_ADMIN_USER="$PG_USER" \
 NX_DB_ADMIN_PASS="" \
 NX_VOYAGE_API_KEY="$VOYAGE_API_KEY" \
-java -jar "$JAR" >>"$ENGINE_LOG" 2>&1 &
+java -Duser.timezone=UTC -jar "$JAR" >>"$ENGINE_LOG" 2>&1 &
 SVC_PID=$!
 echo "[mvv] engine pid: $SVC_PID"
 

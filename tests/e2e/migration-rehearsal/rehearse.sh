@@ -129,6 +129,11 @@ for i in $(seq 1 30); do
 done
 nx daemon service status 2>&1 | sed 's/^/       /' || true
 [ "$healthy" = 1 ] && ok "service healthy (native binary serving, schema migrated)" || bad "service did not reach healthy"
+# nexus-mfage: under run.sh --artifacts, the serving binary must be the
+# manifest's candidate (build_ref asserted against /version).
+# shellcheck source=lib/assert_build_ref.sh disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert_build_ref.sh"
+assert_build_ref "candidate identity" || true
 
 if [ "$healthy" != 1 ]; then say "ABORT (service never came up — Phase A is the gate)"; exit 1; fi
 

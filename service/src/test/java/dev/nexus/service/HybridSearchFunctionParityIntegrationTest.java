@@ -227,20 +227,9 @@ class HybridSearchFunctionParityIntegrationTest {
     @BeforeAll
     void startAll() throws Exception {
         pg = PgContainerHelper.start();
+        // role-001 (the master changelog's first include) creates nexus_svc.
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') "
-                + "THEN CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' NOSUPERUSER NOBYPASSRLS; "
-                + "END IF; END $$");
-        }
-        try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            try (Liquibase lb = new Liquibase("db/changelog/db.changelog-master.xml",
-                    new ClassLoaderResourceAccessor(), db)) {
-                lb.update(new Contexts());
-            }
+            PgContainerHelper.applyProductSchema(su);
         }
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
@@ -398,7 +387,7 @@ class HybridSearchFunctionParityIntegrationTest {
             String queryText, List<String> collections, double trgmThreshold, int n) {
         float[] vec = embedQuery(collections.get(0), queryText);
         String sql = "SELECT id, content, collection, score FROM nexus.hybrid_search_" + dim
-            + "(?::vector, ?, ARRAY[" + placeholders(collections.size()) + "]::text[], NULL::jsonb, ?)";
+            + "(?::nexus.vector, ?, ARRAY[" + placeholders(collections.size()) + "]::text[], NULL::jsonb, ?)";
         List<Object> binds = new ArrayList<>();
         binds.add(vectorLiteral(vec));
         binds.add(queryText);
@@ -509,14 +498,8 @@ class HybridSearchFunctionParityIntegrationTest {
     @Test
     void guard_hybridSearchFunctionExists_perDim() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            List<String> found = new ArrayList<>();
-            try (var rs = su.createStatement().executeQuery(
-                    "SELECT p.proname FROM pg_proc p "
-                    + "JOIN pg_namespace n ON n.oid = p.pronamespace "
-                    + "WHERE n.nspname = 'nexus' AND p.proname LIKE 'hybrid_search_%' "
-                    + "ORDER BY p.proname")) {
-                while (rs.next()) found.add(rs.getString(1));
-            }
+            List<String> found = PgCatalogProbes.routineNamesLike(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "hybrid_search_%");
             assertThat(found)
                 .as("nexus.hybrid_search_384/768/1024 must exist (RDR-156 P5.2 not yet "
                     + "landed -- this is the expected P5.1 TDD-RED failure, not a bug in "

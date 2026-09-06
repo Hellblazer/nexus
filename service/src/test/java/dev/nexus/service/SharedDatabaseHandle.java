@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -109,9 +111,8 @@ final class SharedDatabaseHandle extends PostgreSQLContainer<SharedDatabaseHandl
     public void stop() {
         try (Connection admin = SharedCluster.controlConnection(delegate)) {
             admin.setAutoCommit(true);
+            PgCatalogProbes.terminateOtherBackends(DSL.using(admin, SQLDialect.POSTGRES), dbName);
             try (var st = admin.createStatement()) {
-                st.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                    + "WHERE datname = '" + dbName + "' AND pid <> pg_backend_pid()");
                 st.execute("DROP DATABASE IF EXISTS \"" + dbName + "\"");
             }
         } catch (SQLException e) {

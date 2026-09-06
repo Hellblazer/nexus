@@ -119,6 +119,133 @@ class CapabilityCensusAndRoutingEventsHandlerTest {
     }
 
     @Test
+    void census_record_withScopeSplit_queryReturnsNestedOrchestratorSubagent() throws Exception {
+        // nexus-gjv9b PART 3 prerequisite: capabilities_orchestrator /
+        // capabilities_subagent on the request combine into ONE
+        // capabilities_by_scope JSONB column, round-tripping as a nested
+        // {"orchestrator": {...}, "subagent": {...}} object on read.
+        var resp = post("/v1/telemetry/capability_census/record", TOKEN, TENANT,
+            "{\"session_id\":\"sess-scope-1\",\"ts\":\"2026-09-05T00:00:00Z\","
+            + "\"blindspot\":false,\"capabilities\":{\"skill\":3,\"agent\":1,\"serena\":1,"
+            + "\"nx_answer\":0,\"search_query\":0,\"other_nx_mcp\":0,\"baseline\":0,\"other\":0},"
+            + "\"capabilities_orchestrator\":{\"skill\":2,\"agent\":1,\"serena\":0},"
+            + "\"capabilities_subagent\":{\"skill\":1,\"agent\":0,\"serena\":1},"
+            + "\"dispatches\":1,\"total_calls\":5}");
+        assertThat(resp.statusCode()).isEqualTo(200);
+
+        var row = censusRows(TOKEN, TENANT, "sess-scope-1").get(0);
+        @SuppressWarnings("unchecked")
+        var byScope = (Map<String, Object>) row.get("capabilities_by_scope");
+        assertThat(byScope).isNotNull();
+        @SuppressWarnings("unchecked")
+        var orch = (Map<String, Object>) byScope.get("orchestrator");
+        @SuppressWarnings("unchecked")
+        var sub = (Map<String, Object>) byScope.get("subagent");
+        assertThat(orch.get("skill")).isEqualTo(2);
+        assertThat(orch.get("agent")).isEqualTo(1);
+        assertThat(sub.get("skill")).isEqualTo(1);
+        assertThat(sub.get("serena")).isEqualTo(1);
+    }
+
+    @Test
+    void census_record_old731ClientShape_acceptedWithNullScope() throws Exception {
+        // Confirmed BY TEST, not by reading the guard (coordinator
+        // directive after critique-nexus-gjv9b-part3-9695b260f): the
+        // EXACT wire shape every conexus 7.31.0-and-earlier client sends
+        // -- a full 8-key flat capabilities map with several non-zero
+        // values, no capabilities_orchestrator/capabilities_subagent
+        // fields at all -- must be accepted 200 with capabilities_by_scope
+        // left NULL, never a 400 and never a fabricated all-zero
+        // breakdown. This is a real falsifier: if
+        // requireFlatMatchesScopeSum ever ran unconditionally (treating
+        // an ABSENT split as an implicit all-zero split, rather than
+        // skipping the invariant entirely when neither side is present),
+        // skill=3/agent=1/nx_answer=2 here would each disagree with a
+        // sum of 0 and this request would 400 -- exactly the regression
+        // this test exists to catch.
+        var resp = post("/v1/telemetry/capability_census/record", TOKEN, TENANT,
+            "{\"session_id\":\"sess-old-client-shape\",\"blindspot\":false,"
+            + "\"capabilities\":{\"skill\":3,\"agent\":1,\"serena\":0,"
+            + "\"nx_answer\":2,\"search_query\":0,\"other_nx_mcp\":0,\"baseline\":4,\"other\":0},"
+            + "\"dispatches\":1,\"total_calls\":10}");
+        assertThat(resp.statusCode()).isEqualTo(200);
+
+        var row = censusRows(TOKEN, TENANT, "sess-old-client-shape").get(0);
+        assertThat(row.get("capabilities_by_scope")).isNull();
+        @SuppressWarnings("unchecked")
+        var caps = (Map<String, Object>) row.get("capabilities");
+        assertThat(caps.get("skill")).isEqualTo(3);
+        assertThat(caps.get("baseline")).isEqualTo(4);
+    }
+
+    @Test
+    void census_blindspotRow_ignoresScopeSplitEvenIfSent() throws Exception {
+        // A blindspot record's capabilities/dispatches/total_calls are
+        // always NULL regardless of what the client sends; the split
+        // must follow the same rule, never a measured breakdown for a
+        // session that was never actually measured.
+        var resp = post("/v1/telemetry/capability_census/record", TOKEN, TENANT,
+            "{\"session_id\":\"sess-blind-scope\",\"blindspot\":true,"
+            + "\"unmeasurable_reason\":\"no-transcript-found\","
+            + "\"capabilities_orchestrator\":{\"skill\":9},"
+            + "\"capabilities_subagent\":{\"skill\":9}}");
+        assertThat(resp.statusCode()).isEqualTo(200);
+
+        var row = censusRows(TOKEN, TENANT, "sess-blind-scope").get(0);
+        assertThat(row.get("blindspot")).isEqualTo(true);
+        assertThat(row.get("capabilities_by_scope")).isNull();
+    }
+
+    @Test
+    void census_record_flatDisagreesWithScopeSum_rejected400() throws Exception {
+        // critique-nexus-gjv9b-part3-9695b260f Significant 4: two
+        // disagreeing views of one measurement must never both land.
+        // flat skill=5 but orchestrator(2)+subagent(1)=3 -- rejected.
+        var resp = post("/v1/telemetry/capability_census/record", TOKEN, TENANT,
+            "{\"session_id\":\"sess-scope-mismatch\",\"blindspot\":false,"
+            + "\"capabilities\":{\"skill\":5},"
+            + "\"capabilities_orchestrator\":{\"skill\":2},"
+            + "\"capabilities_subagent\":{\"skill\":1},"
+            + "\"dispatches\":0,\"total_calls\":5}");
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("skill");
+
+        assertThat(censusRows(TOKEN, TENANT, "sess-scope-mismatch"))
+            .as("a rejected write must not partially land")
+            .isEmpty();
+    }
+
+    @Test
+    void census_record_scopeSumMatchesFlat_accepted200() throws Exception {
+        // The positive counterpart: a caller whose flat total already
+        // equals the sum over scopes must NOT be rejected -- this is the
+        // shape every shipped writer produces.
+        var resp = post("/v1/telemetry/capability_census/record", TOKEN, TENANT,
+            "{\"session_id\":\"sess-scope-consistent\",\"blindspot\":false,"
+            + "\"capabilities\":{\"skill\":3},"
+            + "\"capabilities_orchestrator\":{\"skill\":2},"
+            + "\"capabilities_subagent\":{\"skill\":1},"
+            + "\"dispatches\":0,\"total_calls\":3}");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(censusRows(TOKEN, TENANT, "sess-scope-consistent")).hasSize(1);
+    }
+
+    @Test
+    void census_record_flatOmitsACapabilityTheSplitCarries_rejected400() throws Exception {
+        // A capability present ONLY in the split (implicit flat zero) must
+        // be checked too -- the union-of-keys rule, not just the flat
+        // map's own keys.
+        var resp = post("/v1/telemetry/capability_census/record", TOKEN, TENANT,
+            "{\"session_id\":\"sess-scope-implicit-mismatch\",\"blindspot\":false,"
+            + "\"capabilities\":{},"
+            + "\"capabilities_orchestrator\":{\"agent\":1},"
+            + "\"capabilities_subagent\":{},"
+            + "\"dispatches\":0,\"total_calls\":0}");
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("agent");
+    }
+
+    @Test
     void census_reRecordingSameSession_upsertsNotDuplicates() throws Exception {
         post("/v1/telemetry/capability_census/record", TOKEN, TENANT,
             "{\"session_id\":\"sess-up\",\"blindspot\":false,"

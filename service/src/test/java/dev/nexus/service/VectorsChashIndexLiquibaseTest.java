@@ -93,16 +93,8 @@ class VectorsChashIndexLiquibaseTest {
 
         // grants-nexus-svc.xml (runAlways, last in the master changelog) grants
         // to nexus_svc; the role must exist before the changelog runs.
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
-                "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; " +
-                "  END IF; " +
-                "END $$");
-        }
-
+        // role-001 (the master changelog's first include) creates nexus_svc
+        // before grants-nexus-svc.xml needs it.
         runLiquibaseUpdate();
         seedChunkRows();
     }
@@ -152,7 +144,7 @@ class VectorsChashIndexLiquibaseTest {
             "INSERT INTO nexus.chunks" +
             " (tenant_id, collection, chash, chunk_text, embedding_" + dim + ") VALUES " +
             "('" + TENANT + "', '" + collection + "', decode('" + chashHex + "', 'hex'), " +
-            "'chunk " + chashHex.substring(0, 8) + "', " + zeroVec(dim) + "::vector)" +
+            "'chunk " + chashHex.substring(0, 8) + "', " + zeroVec(dim) + "::nexus.vector)" +
             " ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
     }
 
@@ -174,19 +166,13 @@ class VectorsChashIndexLiquibaseTest {
     void tenantChashIndexExistsOnChunksTable() throws Exception {
         try (Connection su = pg.createConnection("")) {
             String indexName = "idx_chunks_tenant_chash";
-            try (ResultSet rs = su.createStatement().executeQuery(
-                    "SELECT indexdef FROM pg_indexes " +
-                    "WHERE schemaname = 'nexus' " +
-                    "  AND tablename = 'chunks' " +
-                    "  AND indexname = '" + indexName + "'")) {
-                assertThat(rs.next())
-                    .as("index %s must exist on nexus.chunks", indexName)
-                    .isTrue();
-                String indexdef = rs.getString("indexdef");
-                assertThat(indexdef)
-                    .as("index %s must be a btree on (tenant_id, chash)", indexName)
-                    .contains("USING btree (tenant_id, chash)");
-            }
+            String indexdef = PgCatalogProbes.indexDef(DSL.using(su, SQLDialect.POSTGRES), "nexus", indexName);
+            assertThat(indexdef)
+                .as("index %s must exist on nexus.chunks", indexName)
+                .isNotNull();
+            assertThat(indexdef)
+                .as("index %s must be a btree on (tenant_id, chash)", indexName)
+                .contains("ON nexus.chunks USING btree (tenant_id, chash)");
         }
     }
 
@@ -198,17 +184,13 @@ class VectorsChashIndexLiquibaseTest {
         // precondition would then mask forever) serves no queries.
         try (Connection su = pg.createConnection("")) {
             String indexName = "idx_chunks_tenant_chash";
-            try (ResultSet rs = su.createStatement().executeQuery(
-                    "SELECT i.indisvalid FROM pg_index i " +
-                    "JOIN pg_class c ON c.oid = i.indexrelid " +
-                    "WHERE c.relname = '" + indexName + "'")) {
-                assertThat(rs.next())
-                    .as("pg_index row for %s", indexName)
-                    .isTrue();
-                assertThat(rs.getBoolean("indisvalid"))
-                    .as("index %s must be VALID", indexName)
-                    .isTrue();
-            }
+            Boolean indisvalid = PgCatalogProbes.indexIsValid(DSL.using(su, SQLDialect.POSTGRES), indexName);
+            assertThat(indisvalid)
+                .as("pg_index row for %s", indexName)
+                .isNotNull();
+            assertThat(indisvalid)
+                .as("index %s must be VALID", indexName)
+                .isTrue();
         }
     }
 
@@ -275,15 +257,9 @@ class VectorsChashIndexLiquibaseTest {
     void secondLiquibaseUpdateIsCleanNoOp() throws Exception {
         runLiquibaseUpdate();
         try (Connection su = pg.createConnection("")) {
-            try (ResultSet rs = su.createStatement().executeQuery(
-                    "SELECT COUNT(*) FROM pg_indexes " +
-                    "WHERE schemaname = 'nexus' " +
-                    "  AND indexname = 'idx_chunks_tenant_chash'")) {
-                rs.next();
-                assertThat(rs.getInt(1))
-                    .as("exactly one (tenant_id, chash) index on the unified nexus.chunks table")
-                    .isEqualTo(1);
-            }
+            assertThat(PgCatalogProbes.indexExists(DSL.using(su, SQLDialect.POSTGRES), "nexus", "idx_chunks_tenant_chash"))
+                .as("exactly one (tenant_id, chash) index on the unified nexus.chunks table")
+                .isTrue();
         }
     }
 

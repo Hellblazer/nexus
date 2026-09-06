@@ -142,7 +142,7 @@ class ChashConformanceReportIntegrationTest {
     private static void insertChunk768(Connection su, String tenant, byte[] chash, String text) {
         try (PreparedStatement ps = su.prepareStatement(
             "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768) "
-            + "VALUES (?, ?, ?, ?, ?::vector)")) {
+            + "VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
             ps.setString(1, tenant);
             ps.setString(2, COLLECTION);
             ps.setBytes(3, chash);

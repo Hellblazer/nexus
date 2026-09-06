@@ -2135,7 +2135,9 @@ plugin's hooks.json are marked `(unregistered)` — the log is append-only
 history, so a stats row alone never proves a hook is currently live.
 
 Default log path resolves to `$NX_ROUTING_LOG_PATH`, falling back to
-`~/.config/nexus/routing_log.jsonl`. Used at the 30-day soak review
+`~/.config/nexus/routing_log.jsonl`. That file is legacy: nothing has
+written to it since the 7.32.0 plugin, and its rotation was deleted at
+nexus-gjv9b PART 3. Used at the 30-day soak review
 (RDR-121 §Phase 4) to spot false positives (high escape rate), inert
 matchers (zero fires), or overly broad blocks (high block rate).
 
@@ -2680,6 +2682,7 @@ heuristic (`builtin` when tags include `builtin-template`; `grown` when
 `project == 'personal'` with empty tags; `user` otherwise; nexus-7bwe tracks an
 explicit origin column). `--include-disabled` also shows soft-disabled rows,
 marked `[D]`. `--json` emits the same fields as a JSON array. Default limit 50.
+See § `nx plan show` below for what `use count` actually counts.
 
 ### nx plan show
 
@@ -2691,6 +2694,23 @@ Prints a plan's full record: metadata, run metrics (use / match / success /
 failure counts), dimensions, and the pretty-printed `plan_json`. The argument
 is a numeric id or a name substring (first match wins). `--json` dumps the raw
 row.
+
+**`use_count` counts recorded runs, not plan matches (RDR-203).** Before RDR-203,
+`use_count` incremented at the plan-match site, before the run executed, so it
+counted attempts rather than completions: a plan that began often and finished
+rarely could pad `use_count` past `plans/promote.py`'s `use_count >= 3`
+promotion gate on abandoned attempts, with nothing to reconcile that against
+`success_count + failure_count`. Under RDR-203's composite run record,
+`use_count` increments at the same terminating write that records
+`success_count`/`failure_count`, so `use_count == success_count + failure_count`
+is an invariant per plan, checkable rather than merely observed. It holds on
+every path, not only the composite one: the two arms that record a run without
+going through the composite response (a planner-failure before any plan runs,
+and the RDR-200 continuation handoff) each issue their own deferred use-count
+bump paired with their own terminal write, so no path records an outcome
+without having counted its use. One consequence: `last_used` now moves at the
+end of a run rather than the start, later by the run's duration (up to about
+80 seconds at p50 — nothing reads it at finer resolution than that).
 
 ### nx plan delete
 
@@ -3066,6 +3086,37 @@ spawns it automatically (spawn-if-absent, single-flight) from the storing
 process precisely so that inheritance happens.
 
 ---
+
+## nx agents
+
+```
+nx agents install worktree-developer [--check] [--dry-run] [--sn-dir DIR] [--conexus-dir DIR] [--dest FILE]
+```
+
+Generate a user-scope Claude Code agent from parts the installed plugins ship
+(nexus-uympf). `worktree-developer` is the conexus `developer` agent with a
+PRIVATE Serena MCP server (`serena-wt`) that the agent roots at its own
+worktree, so symbol-level editing is safe under `isolation: "worktree"` where
+the sn guard denies the shared server's write tools. Plugin-shipped agents
+cannot declare `mcpServers`, which is why the file has to live in
+`~/.claude/agents/` and why it is generated rather than copied: the
+frontmatter and activation preamble come from `sn/examples/worktree-developer.md`,
+the body is `conexus/agents/developer.md` verbatim with its `_shared/` links
+rewritten to the installed conexus directory, and the generated header names
+both source versions.
+
+| Flag | Effect |
+|------|--------|
+| `--check` | Write nothing; exit 1 if `~/.claude/agents/worktree-developer.md` is missing or differs from what the installed plugins would generate. Run it after a plugin update. |
+| `--dry-run` | Print the composed agent to stdout. |
+| `--sn-dir`, `--conexus-dir` | Read the parts from these directories instead of the paths in `~/.claude/plugins/installed_plugins.json` (a dev checkout, or tests). |
+| `--dest` | Write somewhere other than `~/.claude/agents/<name>.md`. |
+
+After installing, allow `mcp__serena-wt__*` in `~/.claude/settings.json`
+permissions; the sn auto-approve covers only the plugin's own server.
+`nx doctor` warns (non-fatal) when the generated file lags the installed
+plugins, so drift is caught without anyone remembering `--check`.
+`--check` and `--dry-run` are mutually exclusive.
 
 ## nx self install
 

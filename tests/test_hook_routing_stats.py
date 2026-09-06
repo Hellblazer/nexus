@@ -94,9 +94,9 @@ def test_aggregate_ignores_records_without_rule(tmp_path):
 # ---------------------------------------------------------------------------
 # Rotated-generation reading (Sam-directed fix pass, 2026-08-20)
 #
-# log_routing_event (conexus/hooks/scripts/routing/_lib.py) rotates
-# routing_log.jsonl to routing_log.jsonl.1 via atomic rename once it
-# exceeds its byte cap. A reader that only looked at the live file would
+# The routing hook's JSONL writer (deleted at nexus-gjv9b PART 3) rotated
+# routing_log.jsonl to routing_log.jsonl.1 via atomic rename; real boxes
+# still hold that history, so the reader keeps merging both files. A reader that only looked at the live file would
 # silently HALVE its longitudinal window at every rotation -- these tests
 # pin that aggregate()/escape_events() read the rotated ".1" generation
 # (oldest-first) THEN the live file, so both windows are visible.

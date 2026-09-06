@@ -186,7 +186,7 @@ class CatalogGcAuditProducersTest {
             for (String c : List.of(dropped)) {
                 var ps = su.prepareStatement(
                     "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384)"
-                    + " VALUES (?, ?, decode(?, 'hex'), ?, ?::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+                    + " VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
                 ps.setString(1, TENANT);
                 ps.setString(2, collection);
                 ps.setString(3, c);
@@ -214,7 +214,7 @@ class CatalogGcAuditProducersTest {
             String zeroVec = "[" + "0,".repeat(383) + "0]";
             var ps = su.prepareStatement(
                 "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384)"
-                + " VALUES (?, ?, decode(?, 'hex'), ?, ?::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+                + " VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
             ps.setString(1, TENANT);
             ps.setString(2, collection);
             ps.setString(3, kept);
@@ -284,7 +284,7 @@ class CatalogGcAuditProducersTest {
             String zeroVec = "[" + "0,".repeat(383) + "0]";
             var ps = su.prepareStatement(
                 "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384)"
-                + " VALUES (?, ?, decode(?, 'hex'), ?, ?::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+                + " VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
             ps.setString(1, TENANT);
             ps.setString(2, collection);
             ps.setString(3, orphan);

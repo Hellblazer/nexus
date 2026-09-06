@@ -87,7 +87,10 @@ class TenantPoolingIsolationTest {
         cfg.setMaximumPoolSize(1);                          // one server connection, reused
         cfg.setMinimumIdle(1);
         cfg.setAutoCommit(true);
-        cfg.setConnectionInitSql("SET search_path TO nexus, t1, public");
+        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): no session
+        // search_path connectionInitSql. MemoryRepository accesses t1.scratch/
+        // nexus.* exclusively through jOOQ generated Tables, which render fully
+        // schema-qualified SQL regardless of session search_path.
         ds = new HikariDataSource(cfg);
 
         repo = new MemoryRepository(new TenantScope(ds));

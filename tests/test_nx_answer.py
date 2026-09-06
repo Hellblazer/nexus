@@ -422,7 +422,7 @@ class TestSingleQueryPlanBindingUnsatisfiable:
                          return_value=MagicMock(is_available=False)),
             patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
             patch("nexus.mcp.core.scratch", MagicMock()),
-            patch("nexus.mcp.core._nx_answer_record_run") as record_run_spy,
+            patch("nexus.mcp.core._nx_answer_record_complete") as record_run_spy,
         ):
             from nexus.mcp.core import nx_answer
             result = await nx_answer("q")
@@ -497,7 +497,7 @@ class TestSingleQueryUnresolvedVar:
             patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
             patch("nexus.mcp.core.scratch", MagicMock()),
             patch("nexus.mcp.core.query") as query_spy,
-            patch("nexus.mcp.core._nx_answer_record_run") as record_run_spy,
+            patch("nexus.mcp.core._nx_answer_record_complete") as record_run_spy,
         ):
             from nexus.mcp.core import nx_answer
             result = await nx_answer("q")
@@ -837,7 +837,7 @@ class TestZeroEvidenceFallbackProvenance:
              patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
-             patch("nexus.mcp.core._nx_answer_record_run", side_effect=_spy):
+             patch("nexus.mcp.core._nx_answer_record_complete", side_effect=_spy):
             t2_ctx.return_value.__enter__.return_value = db_stub
             await nx_answer(question="tell me about distributed consensus")
 
@@ -1038,6 +1038,14 @@ class TestPlanRunTelemetry:
         library = MagicMock()
         db_stub = MagicMock(plans=library)
         db_stub.conn = MagicMock()
+        # RDR-203 P3: the run-start site now probes
+        # `_supports_nx_answer_run_complete` unconditionally, and an
+        # unconfigured MagicMock method returns a truthy MagicMock,
+        # which would silently route this call through the composite
+        # branch instead of the (increment_run_started,
+        # increment_run_outcome) pair this test pins. Force the
+        # degradation path explicitly.
+        db_stub.telemetry._supports_nx_answer_run_complete.return_value = False
 
         with patch("nexus.plans.matcher.plan_match", side_effect=fake_match), \
              patch("nexus.plans.runner.plan_run",
@@ -1109,6 +1117,9 @@ class TestPlanRunTelemetry:
         library = MagicMock()
         db_stub = MagicMock(plans=library)
         db_stub.conn = MagicMock()
+        # RDR-203 P3: force the degradation path -- see the sibling test
+        # above's identical comment.
+        db_stub.telemetry._supports_nx_answer_run_complete.return_value = False
 
         with patch("nexus.plans.matcher.plan_match", side_effect=fake_match), \
              patch("nexus.plans.runner.plan_run",
@@ -3434,12 +3445,20 @@ class TestNxAnswerBudgetSeconds:
             patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
             patch("nexus.mcp.core.scratch", MagicMock()),
             patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
-            patch("nexus.mcp.core._nx_answer_record_outcome") as record_outcome,
+            patch("nexus.mcp.core._nx_answer_record_complete") as record_complete,
         ):
             from nexus.mcp.core import nx_answer
             await nx_answer("q", budget_seconds=20.0)
 
-        record_outcome.assert_called_once_with(42, success=False)
+        # Round-2 review fix (T2 nexus/critique-nexus-dt2tu-1-p1 [24713]):
+        # the old `record_outcome.assert_called_once_with(42,
+        # success=False)` this test replaced checked call-COUNT (exactly
+        # once) as well as both arguments. Checking only the last call's
+        # kwargs would not catch a future duplicate-call regression at
+        # this arm — restore the same call-count guarantee.
+        record_complete.assert_called_once()
+        assert record_complete.call_args.kwargs.get("plan_id") == 42
+        assert record_complete.call_args.kwargs.get("success") is False
 
 
 # ── RDR-196 .p3c (nexus-nyry9.21): USD budget enforcement ───────────────────
@@ -4361,7 +4380,7 @@ class TestStructuredEnvelopeStepBreakdown:
             patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
             patch("nexus.mcp.core.scratch", MagicMock()),
             patch.object(_runner, "plan_run", AsyncMock(side_effect=exc)),
-            patch("nexus.mcp.core._nx_answer_record_run") as record_run_spy,
+            patch("nexus.mcp.core._nx_answer_record_complete") as record_run_spy,
         ):
             from nexus.mcp.core import nx_answer
             result = await nx_answer("q", structured=True)
@@ -4395,7 +4414,7 @@ class TestStructuredEnvelopeStepBreakdown:
             patch("nexus.mcp.core.scratch", MagicMock()),
             patch.object(_runner, "plan_run",
                          AsyncMock(side_effect=RuntimeError("no attribute here"))),
-            patch("nexus.mcp.core._nx_answer_record_run") as record_run_spy,
+            patch("nexus.mcp.core._nx_answer_record_complete") as record_run_spy,
         ):
             from nexus.mcp.core import nx_answer
             result = await nx_answer("q", structured=True)
@@ -5005,6 +5024,12 @@ class TestContinuationGoLiveMidPrefixFailure:
         db_stub = MagicMock()
         db_stub.plans.save_plan = MagicMock(return_value=1)
         db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+        # RDR-203 P3: force the degradation path -- an unconfigured
+        # MagicMock `_supports_nx_answer_run_complete()` return is truthy,
+        # which would silently route this cut-short arm through the
+        # composite branch (`record_nx_answer_run_complete`) instead of
+        # the `record_nx_answer_run` call this test pins.
+        db_stub.telemetry._supports_nx_answer_run_complete.return_value = False
         db_stub.telemetry.record_nx_answer_run.side_effect = (
             lambda **kw: recorded_calls.append(kw)
         )
@@ -5076,6 +5101,12 @@ class TestContinuationGoLiveMidPrefixFailure:
         db_stub = MagicMock()
         db_stub.plans.save_plan = MagicMock(return_value=1)
         db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+        # RDR-203 P3: force the degradation path -- an unconfigured
+        # MagicMock `_supports_nx_answer_run_complete()` return is truthy,
+        # which would silently route this cut-short arm through the
+        # composite branch (`record_nx_answer_run_complete`) instead of
+        # the `record_nx_answer_run` call this test pins.
+        db_stub.telemetry._supports_nx_answer_run_complete.return_value = False
         db_stub.telemetry.record_nx_answer_run.side_effect = (
             lambda **kw: recorded_calls.append(kw)
         )
@@ -5141,6 +5172,12 @@ class TestContinuationGoLiveMidPrefixFailure:
         db_stub = MagicMock()
         db_stub.plans.save_plan = MagicMock(return_value=1)
         db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+        # RDR-203 P3: force the degradation path -- an unconfigured
+        # MagicMock `_supports_nx_answer_run_complete()` return is truthy,
+        # which would silently route this cut-short arm through the
+        # composite branch (`record_nx_answer_run_complete`) instead of
+        # the `record_nx_answer_run` call this test pins.
+        db_stub.telemetry._supports_nx_answer_run_complete.return_value = False
         db_stub.telemetry.record_nx_answer_run.side_effect = (
             lambda **kw: recorded_calls.append(kw)
         )

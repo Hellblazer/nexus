@@ -187,6 +187,11 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 [ "$healthy" = 1 ] && ok "candidate serving (healthy)" || { bad "service never healthy"; exit 1; }
+# nexus-mfage: under run.sh --artifacts the served binary must be the
+# manifest's candidate (build_ref), not whatever else could be listening.
+# shellcheck source=lib/assert_build_ref.sh disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert_build_ref.sh"
+assert_build_ref "candidate identity" || exit 1
 
 # ── Phase B: CLI verb matrix ─────────────────────────────────────────────────
 say "Phase B — CLI verb matrix (every verb against the served candidate)"
@@ -280,6 +285,24 @@ printf '%s\n' "$DOCTOR_OUT" | grep -q "Traceback" && bad "doctor raised a traceb
 
 # ── Phase C: index + staleness (incremental must work) ──────────────────────
 say "Phase C — index a synthetic repo; staleness must make re-index incremental"
+
+# nexus-8hdg9 (critique T2 [24692] finding 2): report + verify the effective
+# per-POST onnx-local upsert-chunk cap the SAME way
+# tests/e2e/local-index-memory-gate.sh already does -- a live read-back
+# through the installed wheel, never assumed -- so a
+# NX_ONNX_LOCAL_UPSERT_CHUNK_CAP raised on the host (run.sh's `-e` forward)
+# is PROVABLY in effect for this Phase C run, not silently ignored.
+EFFECTIVE_CAP="$(python3 -c 'from nexus.db.http_vector_client import _ONNX_LOCAL_UPSERT_CHUNK_CAP as c; print(c)' 2>/dev/null)" || true
+if [ -n "${NX_ONNX_LOCAL_UPSERT_CHUNK_CAP:-}" ]; then
+  if [ "$EFFECTIVE_CAP" = "$NX_ONNX_LOCAL_UPSERT_CHUNK_CAP" ]; then
+    ok "onnx-local upsert-chunk cap raised to $EFFECTIVE_CAP (NX_ONNX_LOCAL_UPSERT_CHUNK_CAP), VERIFIED"
+  else
+    bad "requested cap $NX_ONNX_LOCAL_UPSERT_CHUNK_CAP but the effective cap reads back as ${EFFECTIVE_CAP:-<none>} — the override did not take effect"
+  fi
+else
+  note "onnx-local upsert-chunk cap: ${EFFECTIVE_CAP:-<unknown>} (default; set NX_ONNX_LOCAL_UPSERT_CHUNK_CAP on the host to raise it above 16 and reach the multi-sub-batch deadline check point)"
+fi
+
 REPO=/tmp/shakeout-repo
 rm -rf "$REPO"; mkdir -p "$REPO/src" "$REPO/docs"
 for i in $(seq 1 60); do
@@ -342,6 +365,73 @@ else
 fi
 nx search "flux capacitor array" --corpus docs -m 2 2>/dev/null | grep -qi "doc" \
   && ok "indexed content searchable" || bad "indexed content not searchable"
+
+# nexus-8hdg9 (critique T2 [24692] finding 1): the design's A/B gate contract
+# ("GET /v1/status deadline_aborts_total must be 0") was a prose promise only
+# -- nothing in this script read it. Wire it in here, right after Phase C's
+# index runs, reusing the SAME client `nx doctor --check-engine-activity` uses
+# (src/nexus/db/http_engine_status.py's fetch_engine_status) rather than
+# re-deriving the local URL/token resolution. A pre-nexus-8hdg9 engine reports
+# neither field at all (no /v1/status route on a pre-nexus-s71lr engine, or a
+# body with no deadline_aborts_total key on a pre-9a9228569 one) -- that is a
+# NOTE, not a pass, so a baseline engine still runs this gate without a false
+# green, and still fails loud the moment a real abort is ever reported.
+say "Phase C addendum — deadline_aborts_total must be 0 after the index run"
+DEADLINE_STATUS_OUT="$(python3 - <<'PY'
+from nexus.db.http_engine_status import fetch_engine_status
+
+status = fetch_engine_status()
+if status is None:
+    print("STATUS_UNAVAILABLE")
+    raise SystemExit(0)
+
+entries = {}
+local = status.get("local_embed_activity")
+if isinstance(local, dict):
+    entries["local_embed_activity"] = local
+embedder_activity = status.get("embedder_activity")
+if isinstance(embedder_activity, dict):
+    for name, entry in embedder_activity.items():
+        if isinstance(entry, dict):
+            entries[f"embedder_activity.{name}"] = entry
+
+if not entries:
+    print("NO_ACTIVITY_ENTRIES")
+    raise SystemExit(0)
+
+reported = False
+nonzero = []
+for label, entry in entries.items():
+    if "deadline_aborts_total" in entry:
+        reported = True
+        val = entry.get("deadline_aborts_total")
+        print(f"FIELD {label}.deadline_aborts_total={val}")
+        if isinstance(val, (int, float)) and val != 0:
+            nonzero.append(label)
+    else:
+        print(f"FIELD {label}.deadline_aborts_total=absent")
+
+if not reported:
+    print("NOT_REPORTED")
+elif nonzero:
+    print("NONZERO:" + ",".join(nonzero))
+else:
+    print("ALL_ZERO")
+PY
+)" || true  # gap-15: content-checked below, not rc-gated
+printf '%s\n' "$DEADLINE_STATUS_OUT" | sed 's/^/       | /'
+# Verdict is the LAST line of the probe's output; matched on the captured
+# string, never through a grep pipe (pipefail early-exit class, nexus-i66g4).
+DEADLINE_VERDICT="${DEADLINE_STATUS_OUT##*$'\n'}"
+if [[ "$DEADLINE_VERDICT" == NONZERO:* ]]; then
+  bad "deadline_aborts_total is non-zero after Phase C's index run (nexus-8hdg9 regression)"
+elif [[ "$DEADLINE_VERDICT" =~ ^(STATUS_UNAVAILABLE|NO_ACTIVITY_ENTRIES|NOT_REPORTED)$ ]]; then
+  note "deadline_aborts_total: not reported by this engine"
+elif [[ "$DEADLINE_VERDICT" == ALL_ZERO ]]; then
+  ok "deadline_aborts_total: 0 in every entry after Phase C's index run"
+else
+  bad "deadline-abort check produced unexpected output (see above)"
+fi
 
 # ── Phase D: concurrent write load (the lock-convoy tier) ───────────────────
 say "Phase D — concurrent writes: parallel index + store puts; zero failures allowed"

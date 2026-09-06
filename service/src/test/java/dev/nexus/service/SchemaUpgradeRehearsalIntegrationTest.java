@@ -1,5 +1,7 @@
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.SchemaMigrator;
@@ -124,6 +126,46 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  * specifically so this skip path is never exercised in CI.
  */
 class SchemaUpgradeRehearsalIntegrationTest {
+
+    private static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
+        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
+        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+        su.createStatement().execute(
+            "CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION " + migratingRole);
+        su.createStatement().execute(
+            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_relocated() "
+            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $relofunc$ "
+            + "BEGIN "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "END; "
+            + "$relofunc$");
+        su.createStatement().execute(
+            "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() FROM PUBLIC");
+        su.createStatement().execute(
+            "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO " + migratingRole);
+            su.createStatement().execute(
+                "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated() "
+                + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $unrelofunc$ "
+                + "BEGIN "
+                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'public' THEN "
+                + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA public'; "
+                + "  END IF; "
+                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'public' THEN "
+                + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA public'; "
+                + "  END IF; "
+                + "END; "
+                + "$unrelofunc$");
+            su.createStatement().execute(
+                "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() FROM PUBLIC");
+            su.createStatement().execute(
+                "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO " + migratingRole);
+    }
+
 
     private static final Logger log = LoggerFactory.getLogger(SchemaUpgradeRehearsalIntegrationTest.class);
 
@@ -872,14 +914,10 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // then dropped with the table. Post-hop observability of
                     // the DML-took-effect property rides the MANIFEST witness
                     // below.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM information_schema.tables "
-                        + "WHERE table_schema = 'nexus' AND table_name = 'chash_index'"))
+                    assertThat((PgCatalogProbes.tableExists(DSL.using(su, SQLDialect.POSTGRES), "nexus", "chash_index") ? 1 : 0))
                         .as("chash_index gone at HEAD (rdr187-2)")
                         .isEqualTo(0);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_constraint "
-                        + "WHERE conname LIKE 'chash_index_chash%'"))
+                    assertThat(PgCatalogProbes.constraintCountLike(DSL.using(su, SQLDialect.POSTGRES), "chash_index_chash%"))
                         .as("its constraints died with it")
                         .isEqualTo(0);
 
@@ -955,10 +993,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         + "WHERE tumbler = '1.1.201' AND deleted_at IS NOT NULL"))
                         .as("the loser must be TOMBSTONED, never hard-deleted")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_indexes "
-                        + "WHERE schemaname = 'nexus' "
-                        + "AND indexname = 'ux_catalog_documents_live_source_uri'"))
+                    assertThat((PgCatalogProbes.indexExists(DSL.using(su, SQLDialect.POSTGRES), "nexus", "ux_catalog_documents_live_source_uri") ? 1 : 0))
                         .as("catalog-016-1's partial unique index exists at HEAD")
                         .isEqualTo(1);
 
@@ -979,10 +1014,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                                 + "document's tumbler under FORCE-RLS, not silently no-op")
                             .isEqualTo("1.1.204");
                     }
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
-                        + "'nexus.document_aspects'::regclass, "
-                        + "'nexus.catalog_documents'::regclass)"))
+                    assertThat(PgCatalogProbes.forcedRowSecurityCount(DSL.using(su, SQLDialect.POSTGRES), "nexus.document_aspects", "nexus.catalog_documents"))
                         .as("aspects-004-1 must RESTORE FORCE ROW LEVEL SECURITY on both "
                             + "toggled tables within its own changeset")
                         .isEqualTo(2);
@@ -990,10 +1022,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // Both fixes must RESTORE FORCE within their own changeset.
                     // (chash_index left the toggled-set observation with the
                     // DROP — RDR-187; the two surviving toggled tables pin it.)
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
-                        + "'nexus.catalog_document_chunks'::regclass, "
-                        + "'nexus.catalog_documents'::regclass)"))
+                    assertThat(PgCatalogProbes.forcedRowSecurityCount(DSL.using(su, SQLDialect.POSTGRES), "nexus.catalog_document_chunks", "nexus.catalog_documents"))
                         .as("FORCE ROW LEVEL SECURITY restored on every toggled surviving table")
                         .isEqualTo(2);
 
@@ -1042,11 +1071,9 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "hygiene-001-5 deletes it by HEAD")
                         .isEqualTo(0);
                     for (String t : new String[] {"chunks_384", "chunks_768", "chunks_1024"}) {
-                        assertThat(count(su,
-                            "SELECT count(*) FROM information_schema.tables "
-                            + "WHERE table_schema = 'nexus' AND table_name = '" + t + "'"))
+                        assertThat(PgCatalogProbes.tableExists(DSL.using(su, SQLDialect.POSTGRES), "nexus", t))
                             .as(t + " gone at HEAD (vectors-004-1 unify, same old-tag->HEAD hop)")
-                            .isEqualTo(0);
+                            .isFalse();
                     }
 
                     // taxonomy-007-1 leg (nexus-jv3ue): the analogous straddle
@@ -1072,11 +1099,9 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .isEqualTo(1);
                     for (String t : new String[] {
                             "taxonomy_centroids_384", "taxonomy_centroids_768", "taxonomy_centroids_1024"}) {
-                        assertThat(count(su,
-                            "SELECT count(*) FROM information_schema.tables "
-                            + "WHERE table_schema = 'nexus' AND table_name = '" + t + "'"))
+                        assertThat(PgCatalogProbes.tableExists(DSL.using(su, SQLDialect.POSTGRES), "nexus", t))
                             .as(t + " gone at HEAD (taxonomy-007-1 unify, same old-tag->HEAD hop)")
-                            .isEqualTo(0);
+                            .isFalse();
                     }
 
                     // Contrast pin vs the schema-divergence test: with no injected
@@ -1267,9 +1292,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     assertThat(changesetExecType(su, "fk-004-0-reconcile-precount", "nexus-iq0qr"))
                         .as("fk-004-0-reconcile-precount must EXECUTE at HEAD")
                         .isEqualTo("EXECUTED");
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
-                        + "'nexus.chunks'::regclass, 'nexus.catalog_collections'::regclass)"))
+                    assertThat(PgCatalogProbes.forcedRowSecurityCount(DSL.using(su, SQLDialect.POSTGRES), "nexus.chunks", "nexus.catalog_collections"))
                         .as("FORCE ROW LEVEL SECURITY restored on both tables "
                             + "fk-004-0-reconcile-precount toggled")
                         .isEqualTo(2);
@@ -1302,9 +1325,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "only succeeds if fk-004-1-reconcile ran to completion under its own "
                             + "RLS toggle without erroring")
                         .isTrue();
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
-                        + "'nexus.chunks'::regclass, 'nexus.catalog_collections'::regclass)"))
+                    assertThat(PgCatalogProbes.forcedRowSecurityCount(DSL.using(su, SQLDialect.POSTGRES), "nexus.chunks", "nexus.catalog_collections"))
                         .as("FORCE ROW LEVEL SECURITY restored on both tables fk-004-1-reconcile toggled")
                         .isEqualTo(2);
 
@@ -1345,9 +1366,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "VALIDATE only succeeds if the anti-join DELETE actually ran and left no "
                             + "dangling to_tumbler behind")
                         .isTrue();
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
-                        + "'nexus.catalog_links'::regclass, 'nexus.catalog_documents'::regclass)"))
+                    assertThat(PgCatalogProbes.forcedRowSecurityCount(DSL.using(su, SQLDialect.POSTGRES), "nexus.catalog_links", "nexus.catalog_documents"))
                         .as("FORCE ROW LEVEL SECURITY restored on both tables catalog-032-1 toggled")
                         .isEqualTo(2);
 
@@ -1463,15 +1482,10 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "a few changesets later in this SAME migration walk, would have "
                             + "RAISE EXCEPTIONed the whole walk first")
                         .isEqualTo(0);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
-                        + "'nexus.topic_assignments'::regclass, 'nexus.chunks'::regclass)"))
+                    assertThat(PgCatalogProbes.forcedRowSecurityCount(DSL.using(su, SQLDialect.POSTGRES), "nexus.topic_assignments", "nexus.chunks"))
                         .as("FORCE ROW LEVEL SECURITY restored on both tables taxonomy-010-1 toggled")
                         .isEqualTo(2);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM information_schema.columns "
-                        + "WHERE table_schema = 'nexus' AND table_name = 'topic_assignments' "
-                        + "AND column_name = 'source_collection' AND is_nullable = 'NO'"))
+                    assertThat(columnMatches(DSL.using(su, SQLDialect.POSTGRES), "nexus", "topic_assignments", "source_collection", col -> col != null && "NO".equals(col.isNullable())))
                         .as("source_collection must be SET NOT NULL at HEAD -- taxonomy-010-1's "
                             + "final DDL step, only reachable if all three DML steps ahead of it "
                             + "left no NULL row behind")
@@ -1496,17 +1510,12 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // are the POSITIVE, independently-verifiable proof the ALTER itself
                     // (not just the guard) actually ran, matching fk-004-0-reconcile-
                     // precount's own "changeset EXECUTES" bar.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM information_schema.columns "
-                        + "WHERE table_schema = 'nexus' AND table_name = 'topic_assignments' "
-                        + "AND column_name = 'doc_id' AND udt_name = 'bytea'"))
+                    assertThat(columnMatches(DSL.using(su, SQLDialect.POSTGRES), "nexus", "topic_assignments", "doc_id", col -> col != null && "bytea".equals(col.udtName())))
                         .as("topic_assignments.doc_id must be bytea at HEAD -- taxonomy-011-1's "
                             + "ALTER COLUMN TYPE, only reachable if the guard above found zero "
                             + "non-canonical rows")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity "
-                        + "AND oid = 'nexus.topic_assignments'::regclass"))
+                    assertThat(PgCatalogProbes.forcedRowSecurityCount(DSL.using(su, SQLDialect.POSTGRES), "nexus.topic_assignments"))
                         .as("FORCE ROW LEVEL SECURITY restored on nexus.topic_assignments after "
                             + "taxonomy-011-1's own NO FORCE/FORCE toggle around its guard")
                         .isEqualTo(1);
@@ -1547,16 +1556,12 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "DELETE arms above, so taxonomy-012-2 by construction deletes nothing "
                             + "new in this hop")
                         .isEqualTo(0);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_constraint "
-                        + "WHERE conname = 'topic_assignments_chunk_fk' AND convalidated"))
+                    assertThat((Boolean.TRUE.equals(PgCatalogProbes.constraintValidated(DSL.using(su, SQLDialect.POSTGRES), "topic_assignments_chunk_fk")) ? 1 : 0))
                         .as("topic_assignments_chunk_fk must exist and be VALIDATED at HEAD -- "
                             + "only reachable if taxonomy-012-1's NOT VALID add, taxonomy-012-2's "
                             + "remediation, and taxonomy-012-3's VALIDATE all ran in this same walk")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
-                        + "'nexus.topic_assignments'::regclass, 'nexus.chunks'::regclass)"))
+                    assertThat(PgCatalogProbes.forcedRowSecurityCount(DSL.using(su, SQLDialect.POSTGRES), "nexus.topic_assignments", "nexus.chunks"))
                         .as("FORCE ROW LEVEL SECURITY restored on both tables taxonomy-012-2's own "
                             + "toggle-wrap covers")
                         .isEqualTo(2);
@@ -1591,16 +1596,12 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "nexus.topics row this hop seeds carries a NULL parent_id, so the "
                             + "self-referential anti-join by construction finds nothing")
                         .isEqualTo(0);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_constraint "
-                        + "WHERE conname = 'fk_topics_parent_tenant' AND convalidated"))
+                    assertThat((Boolean.TRUE.equals(PgCatalogProbes.constraintValidated(DSL.using(su, SQLDialect.POSTGRES), "fk_topics_parent_tenant")) ? 1 : 0))
                         .as("fk_topics_parent_tenant must exist and be VALIDATED at HEAD -- only "
                             + "reachable if taxonomy-014-2's DROP, ADD NOT VALID, anti-join, and "
                             + "VALIDATE all ran in this same walk")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity "
-                        + "AND oid = 'nexus.topics'::regclass"))
+                    assertThat(PgCatalogProbes.forcedRowSecurityCount(DSL.using(su, SQLDialect.POSTGRES), "nexus.topics"))
                         .as("FORCE ROW LEVEL SECURITY restored on nexus.topics after "
                             + "taxonomy-014-2's own toggle-wrap")
                         .isEqualTo(1);
@@ -1613,14 +1614,10 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "nexus.topic_assignments for tenant t1 was already drained to zero "
                             + "by taxonomy-010-1's three DELETE arms above")
                         .isEqualTo(0);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_constraint "
-                        + "WHERE conname = 'fk_topic_assignments_topic_tenant' AND convalidated"))
+                    assertThat((Boolean.TRUE.equals(PgCatalogProbes.constraintValidated(DSL.using(su, SQLDialect.POSTGRES), "fk_topic_assignments_topic_tenant")) ? 1 : 0))
                         .as("fk_topic_assignments_topic_tenant must exist and be VALIDATED at HEAD")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
-                        + "'nexus.topic_assignments'::regclass, 'nexus.topics'::regclass)"))
+                    assertThat(PgCatalogProbes.forcedRowSecurityCount(DSL.using(su, SQLDialect.POSTGRES), "nexus.topic_assignments", "nexus.topics"))
                         .as("FORCE ROW LEVEL SECURITY restored on both tables taxonomy-014-3's own "
                             + "toggle-wrap covers")
                         .isEqualTo(2);
@@ -1632,14 +1629,10 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .as("taxonomy-014-4's own anti-join population is empty -- "
                             + "nexus.topic_links is never seeded anywhere in this hop")
                         .isEqualTo(0);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_constraint "
-                        + "WHERE conname = 'fk_topic_links_from_topic_tenant' AND convalidated"))
+                    assertThat((Boolean.TRUE.equals(PgCatalogProbes.constraintValidated(DSL.using(su, SQLDialect.POSTGRES), "fk_topic_links_from_topic_tenant")) ? 1 : 0))
                         .as("fk_topic_links_from_topic_tenant must exist and be VALIDATED at HEAD")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
-                        + "'nexus.topic_links'::regclass, 'nexus.topics'::regclass)"))
+                    assertThat(PgCatalogProbes.forcedRowSecurityCount(DSL.using(su, SQLDialect.POSTGRES), "nexus.topic_links", "nexus.topics"))
                         .as("FORCE ROW LEVEL SECURITY restored on both tables taxonomy-014-4's own "
                             + "toggle-wrap covers")
                         .isEqualTo(2);
@@ -1651,20 +1644,15 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .as("taxonomy-014-5's own anti-join population is empty -- "
                             + "nexus.topic_links is never seeded anywhere in this hop")
                         .isEqualTo(0);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_constraint "
-                        + "WHERE conname = 'fk_topic_links_to_topic_tenant' AND convalidated"))
+                    assertThat((Boolean.TRUE.equals(PgCatalogProbes.constraintValidated(DSL.using(su, SQLDialect.POSTGRES), "fk_topic_links_to_topic_tenant")) ? 1 : 0))
                         .as("fk_topic_links_to_topic_tenant must exist and be VALIDATED at HEAD")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
-                        + "'nexus.topic_links'::regclass, 'nexus.topics'::regclass)"))
+                    assertThat(PgCatalogProbes.forcedRowSecurityCount(DSL.using(su, SQLDialect.POSTGRES), "nexus.topic_links", "nexus.topics"))
                         .as("FORCE ROW LEVEL SECURITY restored on both tables taxonomy-014-5's own "
                             + "toggle-wrap covers")
                         .isEqualTo(2);
 
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_constraint WHERE conname = 'topics_tenant_id_unique'"))
+                    assertThat((PgCatalogProbes.constraintExists(DSL.using(su, SQLDialect.POSTGRES), "topics_tenant_id_unique") ? 1 : 0))
                         .as("topics_tenant_id_unique must exist at HEAD -- taxonomy-014-1's "
                             + "unconditional UNIQUE (tenant_id, id), the precondition every "
                             + "repoint above builds on")
@@ -1690,19 +1678,13 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "DELETE untouched -- the KEEP arm, proving the DELETE is "
                             + "selective on ttl=0 and not a blanket wipe")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM information_schema.columns WHERE table_schema = "
-                        + "'nexus' AND table_name = 'memory' AND column_name = 'ttl_days'"))
+                    assertThat(columnMatches(DSL.using(su, SQLDialect.POSTGRES), "nexus", "memory", "ttl_days", col -> col != null))
                         .as("nexus.memory.ttl must be renamed to ttl_days at HEAD")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_constraint "
-                        + "WHERE conname = 'memory_ttl_days_positive_chk'"))
+                    assertThat((PgCatalogProbes.constraintExists(DSL.using(su, SQLDialect.POSTGRES), "memory_ttl_days_positive_chk") ? 1 : 0))
                         .as("memory_ttl_days_positive_chk must exist at HEAD")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity "
-                        + "AND oid = 'nexus.memory'::regclass"))
+                    assertThat(PgCatalogProbes.forcedRowSecurityCount(DSL.using(su, SQLDialect.POSTGRES), "nexus.memory"))
                         .as("FORCE ROW LEVEL SECURITY restored on nexus.memory after "
                             + "memory-003-1's own toggle-wrap")
                         .isEqualTo(1);
@@ -1720,19 +1702,13 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .as("the NULL-ttl (permanent) decoy row must survive plans-003-1's "
                             + "DELETE untouched -- the KEEP arm")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM information_schema.columns WHERE table_schema = "
-                        + "'nexus' AND table_name = 'plans' AND column_name = 'ttl_days'"))
+                    assertThat(columnMatches(DSL.using(su, SQLDialect.POSTGRES), "nexus", "plans", "ttl_days", col -> col != null))
                         .as("nexus.plans.ttl must be renamed to ttl_days at HEAD")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_constraint "
-                        + "WHERE conname = 'plans_ttl_days_positive_chk'"))
+                    assertThat((PgCatalogProbes.constraintExists(DSL.using(su, SQLDialect.POSTGRES), "plans_ttl_days_positive_chk") ? 1 : 0))
                         .as("plans_ttl_days_positive_chk must exist at HEAD")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity "
-                        + "AND oid = 'nexus.plans'::regclass"))
+                    assertThat(PgCatalogProbes.forcedRowSecurityCount(DSL.using(su, SQLDialect.POSTGRES), "nexus.plans"))
                         .as("FORCE ROW LEVEL SECURITY restored on nexus.plans after "
                             + "plans-003-1's own toggle-wrap")
                         .isEqualTo(1);
@@ -1769,14 +1745,10 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "telemetry-006-1 -- the UPDATE is unconditional across every "
                             + "row in this hop, not scoped to the dedicated fixture")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_constraint "
-                        + "WHERE conname = 'frecency_ttl_days_positive_chk'"))
+                    assertThat((PgCatalogProbes.constraintExists(DSL.using(su, SQLDialect.POSTGRES), "frecency_ttl_days_positive_chk") ? 1 : 0))
                         .as("frecency_ttl_days_positive_chk must exist at HEAD")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity "
-                        + "AND oid = 'nexus.frecency'::regclass"))
+                    assertThat(PgCatalogProbes.forcedRowSecurityCount(DSL.using(su, SQLDialect.POSTGRES), "nexus.frecency"))
                         .as("FORCE ROW LEVEL SECURITY restored on nexus.frecency after "
                             + "telemetry-006-1's own toggle-wrap")
                         .isEqualTo(1);
@@ -1792,17 +1764,10 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // Exception already covers this), the table still exists with the
                     // DROP DEFAULT/DROP NOT NULL shape landed, and -- unlike
                     // telemetry-006-1 -- carries NO CHECK (staging stays typeless).
-                    assertThat(count(su,
-                        "SELECT count(*) FROM information_schema.columns WHERE "
-                        + "table_schema = 'staging' AND table_name = 'frecency' AND "
-                        + "column_name = 'ttl_days' AND is_nullable = 'YES' AND "
-                        + "column_default IS NULL"))
+                    assertThat(columnMatches(DSL.using(su, SQLDialect.POSTGRES), "staging", "frecency", "ttl_days", col -> col != null && "YES".equals(col.isNullable()) && col.columnDefault() == null))
                         .as("staging.frecency.ttl_days must be nullable with no default at HEAD")
                         .isEqualTo(1);
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid "
-                        + "JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = 'staging' "
-                        + "AND t.relname = 'frecency' AND c.contype = 'c'"))
+                    assertThat(PgCatalogProbes.constraintCountByType(DSL.using(su, SQLDialect.POSTGRES), "staging", "frecency", "c"))
                         .as("staging.frecency must carry NO CHECK constraint -- typeless "
                             + "landing by design, matching legacy-001-3's identical exemption")
                         .isEqualTo(0);
@@ -1909,8 +1874,15 @@ class SchemaUpgradeRehearsalIntegrationTest {
         su.createStatement().execute(
             "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' "
                 + "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+        // nexus/critique-nexus-cbo4a-batch-9-search-path): see
+        // SchemaMigratorIntegrationTest.bootstrapVectorExtensionsForFreshWalk's own
+        // javadoc for the full derivation -- creates the extensions directly as
+        // `su` and installs a SECURITY DEFINER relocation helper for search-path-
+        // 001's guard to call mid-walk, since this walk resumes through both
+        // vectors-001-baseline.xml and search-path-001/002 in one continuous pass
+        // as a NOSUPERUSER role.
+        bootstrapVectorExtensionsForFreshWalk(su, ADMIN_ROLE);
     }
 
     private static HikariDataSource newAdminPool(PostgreSQLContainer<?> pg, String poolName) {
@@ -2475,18 +2447,19 @@ class SchemaUpgradeRehearsalIntegrationTest {
     }
 
     private static boolean constraintExists(Connection conn, String conname) throws Exception {
-        try (var ps = conn.prepareStatement("SELECT 1 FROM pg_constraint WHERE conname = ?")) {
-            ps.setString(1, conname);
-            return ps.executeQuery().next();
-        }
+        return PgCatalogProbes.constraintExists(DSL.using(conn, SQLDialect.POSTGRES), conname);
     }
 
     private static boolean constraintValidated(Connection conn, String conname) throws Exception {
-        try (var ps = conn.prepareStatement("SELECT convalidated FROM pg_constraint WHERE conname = ?")) {
-            ps.setString(1, conname);
-            ResultSet rs = ps.executeQuery();
-            return rs.next() && rs.getBoolean("convalidated");
-        }
+        return Boolean.TRUE.equals(
+            PgCatalogProbes.constraintValidated(DSL.using(conn, SQLDialect.POSTGRES), conname));
+    }
+
+
+    /** One-column predicate over {@link PgCatalogProbes#columnInfo}; 1 when it holds, else 0 (absent column included). */
+    private static int columnMatches(org.jooq.DSLContext ctx, String schema, String table, String column,
+                                     java.util.function.Predicate<PgCatalogProbes.ColumnInfo> predicate) {
+        return predicate.test(PgCatalogProbes.columnInfo(ctx, schema, table, column)) ? 1 : 0;
     }
 
     private static int count(Connection c, String sql) throws Exception {

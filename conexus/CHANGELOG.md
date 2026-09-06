@@ -4,6 +4,17 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.33.0] - 2026-09-06
+
+- Plugin version aligned with conexus 7.33.0.
+- conexus: `agents/developer.md`'s Beads Integration section no longer tells
+  the agent to close beads or commit the beads file, matching its Completion
+  Protocol (nexus-yhcxi); `worktree-developer` inherits it at the next
+  `nx agents install`.
+- conexus: `hooks/scripts/routing/_lib.py` drops the dead JSONL append and
+  rotation machinery; `log_routing_event` writes only to the engine's
+  `routing_events` table, as it has since 7.32.0 (nexus-gjv9b PART 3).
+
 ## [7.32.0] - 2026-09-05
 
 - Plugin version aligned with conexus 7.32.0.

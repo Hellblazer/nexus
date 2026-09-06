@@ -208,4 +208,112 @@ class AdmissionControlledEmbedderTest {
             Thread.sleep(5);
         }
     }
+
+    // ── nexus-8hdg9 post-acquire deadline check (critique T2 [24692]) ────────
+
+    /** Fake local embedder that records whether {@link #embedWithUsage} and
+     *  {@link #recordDeadlineAbort} were actually invoked, without blocking —
+     *  the check point under test fires (or doesn't) BEFORE any delegate call,
+     *  so these tests need no concurrency, only call counts. */
+    private static final class RecordingFakeEmbedder implements Embedder {
+        final AtomicInteger embedWithUsageCalls = new AtomicInteger(0);
+        final AtomicInteger deadlineAbortCalls  = new AtomicInteger(0);
+
+        @Override
+        public List<float[]> embed(List<String> texts) {
+            return texts.stream().map(t -> new float[8]).toList();
+        }
+
+        @Override
+        public EmbedResult embedWithUsage(List<String> texts) {
+            embedWithUsageCalls.incrementAndGet();
+            return new EmbedResult(embed(texts), 0L);
+        }
+
+        @Override
+        public void recordDeadlineAbort() {
+            deadlineAbortCalls.incrementAndGet();
+        }
+
+        @Override
+        public String modelToken() {
+            return "fake-local";
+        }
+    }
+
+    /**
+     * The fix's own falsification test: a request whose deadline already
+     * expired while it waited for an admission permit must be aborted the
+     * moment the permit is granted — before the delegate ever runs. Without
+     * this check point, {@link Bge768Embedder#embedSubBatched}'s
+     * between-sub-batch check is unreachable through the standard
+     * 16-chunk-capped client path (candidateArea never exceeds
+     * MAX_PADDED_TOKEN_AREA at that size), so an abandoned request would hold
+     * its permit for the full delegate call regardless of its deadline.
+     */
+    @Test
+    void expiredDeadlineAfterAcquireAbortsBeforeDelegate() {
+        LocalOnnxAdmission admission = new LocalOnnxAdmission(2, 1000);
+        RecordingFakeEmbedder fake = new RecordingFakeEmbedder();
+        AdmissionControlledEmbedder gated = new AdmissionControlledEmbedder(fake, admission, false);
+        int baseline = admission.inFlightCount();
+
+        // Minted as "now": by the time acquire() returns (uncontended, near-instant)
+        // it is already in the past.
+        dev.nexus.service.http.RequestContext.setDeadlineNanos(System.nanoTime());
+        try {
+            assertThatThrownBy(() -> gated.embedWithUsage(List.of("x")))
+                    .isInstanceOf(RequestDeadlineExceededException.class)
+                    .hasMessageContaining("before delegate call");
+        } finally {
+            dev.nexus.service.http.RequestContext.clearDeadline();
+        }
+
+        assertThat(fake.embedWithUsageCalls.get())
+                .as("delegate must never be called once the deadline has already expired")
+                .isZero();
+        assertThat(fake.deadlineAbortCalls.get())
+                .as("the abort is recorded on the delegate's tracker so GET /v1/status "
+                    + "deadline_aborts_total counts it")
+                .isEqualTo(1);
+        assertThat(admission.inFlightCount())
+                .as("the admission permit taken before the check must still be released")
+                .isEqualTo(baseline);
+        assertThat(admission.queueLength()).isZero();
+    }
+
+    /** A live (far-future) deadline never aborts; the delegate runs normally. */
+    @Test
+    void liveDeadlineProceeds() {
+        LocalOnnxAdmission admission = new LocalOnnxAdmission(2, 1000);
+        RecordingFakeEmbedder fake = new RecordingFakeEmbedder();
+        AdmissionControlledEmbedder gated = new AdmissionControlledEmbedder(fake, admission, false);
+
+        dev.nexus.service.http.RequestContext.setDeadlineNanos(
+                System.nanoTime() + TimeUnit.MINUTES.toNanos(5));
+        try {
+            EmbedResult result = gated.embedWithUsage(List.of("a", "b"));
+            assertThat(result.embeddings()).hasSize(2);
+        } finally {
+            dev.nexus.service.http.RequestContext.clearDeadline();
+        }
+
+        assertThat(fake.embedWithUsageCalls.get()).isEqualTo(1);
+        assertThat(fake.deadlineAbortCalls.get()).isZero();
+    }
+
+    /** No deadline in context (direct construction, in-process callers): never aborted. */
+    @Test
+    void noDeadlineProceeds() {
+        dev.nexus.service.http.RequestContext.clearDeadline();
+        LocalOnnxAdmission admission = new LocalOnnxAdmission(2, 1000);
+        RecordingFakeEmbedder fake = new RecordingFakeEmbedder();
+        AdmissionControlledEmbedder gated = new AdmissionControlledEmbedder(fake, admission, false);
+
+        EmbedResult result = gated.embedWithUsage(List.of("a", "b"));
+
+        assertThat(result.embeddings()).hasSize(2);
+        assertThat(fake.embedWithUsageCalls.get()).isEqualTo(1);
+        assertThat(fake.deadlineAbortCalls.get()).isZero();
+    }
 }

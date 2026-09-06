@@ -1,5 +1,8 @@
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
+import org.jooq.DSLContext;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
@@ -71,23 +74,10 @@ class StagingSchemaLiquibaseTest {
     @BeforeAll
     void startAll() throws Exception {
         pg = PgContainerHelper.start();
+        // role-001 (the master changelog's first include) creates nexus_svc
+        // before the staging-4 runAlways grants need it.
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            // nexus_svc must exist BEFORE Liquibase so the staging-4
-            // runAlways grants actually apply to it.
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
-                "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' NOSUPERUSER NOBYPASSRLS; " +
-                "  END IF; " +
-                "END $$");
-        }
-        try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(), db)
-                .update(new Contexts());
+            PgContainerHelper.applyProductSchema(su);
         }
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
@@ -108,10 +98,8 @@ class StagingSchemaLiquibaseTest {
     @Test
     void allLandingTables_exist() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            Set<String> actual = new HashSet<>();
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT tablename FROM pg_tables WHERE schemaname = 'staging'");
-            while (rs.next()) actual.add(rs.getString(1));
+            Set<String> actual = new HashSet<>(
+                PgCatalogProbes.tablesInSchema(DSL.using(su, SQLDialect.POSTGRES), "staging"));
             assertThat(actual)
                 .as("staging must hold the polymorphic chunks table plus the "
                     + "full CASCADE_STORES pointer-store inventory — a missing "
@@ -124,19 +112,15 @@ class StagingSchemaLiquibaseTest {
     @Test
     void everyStagingTable_hasForcedRlsAndTenantPolicy() throws Exception {
         try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             for (String t : STAGING_TABLES) {
-                ResultSet cls = su.createStatement().executeQuery(
-                    "SELECT relrowsecurity, relforcerowsecurity "
-                    + "FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid "
-                    + "WHERE n.nspname = 'staging' AND c.relname = '" + t + "'");
-                assertThat(cls.next()).as("staging.%s must exist", t).isTrue();
-                assertThat(cls.getBoolean(1)).as("staging.%s RLS enabled", t).isTrue();
-                assertThat(cls.getBoolean(2)).as("staging.%s RLS forced", t).isTrue();
-                ResultSet pol = su.createStatement().executeQuery(
-                    "SELECT qual FROM pg_policies WHERE schemaname = 'staging' "
-                    + "AND tablename = '" + t + "'");
-                assertThat(pol.next()).as("staging.%s tenant policy", t).isTrue();
-                assertThat(pol.getString(1)).contains("nexus.tenant");
+                PgCatalogProbes.RowSecurity cls = PgCatalogProbes.rowSecurity(ctx, "staging", t);
+                assertThat(cls).as("staging.%s must exist", t).isNotNull();
+                assertThat(cls.enabled()).as("staging.%s RLS enabled", t).isTrue();
+                assertThat(cls.forced()).as("staging.%s RLS forced", t).isTrue();
+                List<PgCatalogProbes.Policy> pol = PgCatalogProbes.policies(ctx, "staging", t);
+                assertThat(pol).as("staging.%s tenant policy", t).isNotEmpty();
+                assertThat(pol.get(0).qual()).contains("nexus.tenant");
             }
         }
     }
@@ -147,11 +131,11 @@ class StagingSchemaLiquibaseTest {
         tenantScope.withTenant(T_A, ctx -> {
             ctx.execute("INSERT INTO staging.chunks "
                 + "(tenant_id, collection, dim, legacy_ref, chunk_text, embedding, model) VALUES "
-                + "(?, 'knowledge__k__bge-base-en-v15-768__v1', 768, ?, 'sixteen char era', '[1,0,0]'::vector, 'bge-768')",
+                + "(?, 'knowledge__k__bge-base-en-v15-768__v1', 768, ?, 'sixteen char era', '[1,0,0]'::nexus.vector, 'bge-768')",
                 T_A, "b46c7915c303245f");
             ctx.execute("INSERT INTO staging.chunks "
                 + "(tenant_id, collection, dim, legacy_ref, chunk_text, embedding, model) VALUES "
-                + "(?, 'knowledge__k__bge-base-en-v15-768__v1', 768, ?, 'thirty-two hex era', '[1,0,0,0,0]'::vector, 'bge-768')",
+                + "(?, 'knowledge__k__bge-base-en-v15-768__v1', 768, ?, 'thirty-two hex era', '[1,0,0,0,0]'::nexus.vector, 'bge-768')",
                 T_A, "0123456789abcdef0123456789abcdef");
             ctx.execute("INSERT INTO staging.chunks "
                 + "(tenant_id, collection, dim, legacy_ref, chunk_text, embedding, model) VALUES "
@@ -160,7 +144,7 @@ class StagingSchemaLiquibaseTest {
             return null;
         });
         Integer distinctDims = tenantScope.withTenant(T_A, ctx ->
-            ctx.fetchOne("SELECT count(DISTINCT vector_dims(embedding)) FROM staging.chunks "
+            ctx.fetchOne("SELECT count(DISTINCT nexus.vector_dims(embedding)) FROM staging.chunks "
                 + "WHERE embedding IS NOT NULL").get(0, Integer.class));
         assertThat(distinctDims)
             .as("the untyped vector column must hold MIXED dims (3 and 5 here) — "
@@ -197,13 +181,11 @@ class StagingSchemaLiquibaseTest {
     void stagingChashIndex_isDropped() {
         // RDR-187 nexus-piwya.11 (rdr187-002): the dead-sink landing twin of
         // the retired router is gone.
-        Integer present = tenantScope.withTenant(T_A, ctx ->
-            ctx.fetchOne("SELECT count(*) FROM information_schema.tables "
-                + "WHERE table_schema = 'staging' AND table_name = 'chash_index'")
-               .get(0, Integer.class));
+        Boolean present = tenantScope.withTenant(T_A, ctx ->
+            PgCatalogProbes.tableExists(ctx, "staging", "chash_index"));
         assertThat(present)
             .as("staging.chash_index must be dropped (rdr187-002)")
-            .isZero();
+            .isFalse();
     }
 
     // nexus-lgdel.l1: chashOldBytesFn_isTheCanonicalMapping_consistentWithTheLemma

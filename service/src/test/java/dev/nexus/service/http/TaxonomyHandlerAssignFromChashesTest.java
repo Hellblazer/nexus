@@ -194,7 +194,7 @@ class TaxonomyHandlerAssignFromChashesTest {
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.chunks"
                     + " (tenant_id, collection, chash, chunk_text, embedding_" + DIM + ")"
-                    + " VALUES (?, ?, decode(?, 'hex'), ?, ?::vector)")) {
+                    + " VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector)")) {
                 ps.setString(1, TENANT);
                 ps.setString(2, COL);
                 ps.setString(3, hexChashValue);
@@ -236,7 +236,7 @@ class TaxonomyHandlerAssignFromChashesTest {
                     // label: taxonomy_centroids.label is NOT NULL (hygiene-001-9b,
                     // nexus-tk070.p6a follow-on) -- no assertion in this class
                     // reads the label value.
-                    + " (tenant_id, collection, topic_id, label, embedding_" + DIM + ") VALUES (?, ?, ?, ?, ?::vector)")) {
+                    + " (tenant_id, collection, topic_id, label, embedding_" + DIM + ") VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
                 ps.setString(1, TENANT);
                 ps.setString(2, collection);
                 ps.setLong(3, topicId);

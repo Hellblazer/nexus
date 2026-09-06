@@ -1,5 +1,7 @@
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
@@ -84,22 +86,9 @@ class CollectionRegistryFkExtraTest {
     @BeforeAll
     void startAll() throws Exception {
         pg = PgContainerHelper.start();
+        // role-001 (the master changelog's first include) creates nexus_svc.
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
-                "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' NOSUPERUSER NOBYPASSRLS; " +
-                "  END IF; " +
-                "END $$");
-        }
-        try (Connection su = pg.createConnection("")) {
-            var lb = new Liquibase(
-                "db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(),
-                DatabaseFactory.getInstance().findCorrectDatabaseImplementation(
-                    new JdbcConnection(su)));
-            lb.update(new Contexts());
+            PgContainerHelper.applyProductSchema(su);
         }
     }
 
@@ -260,13 +249,11 @@ class CollectionRegistryFkExtraTest {
     void allFiveExtraCollectionFks_existAndAreValidated() throws Exception {
         try (Connection su = pg.createConnection("")) {
             for (String fkName : ALL_FIVE_FK_NAMES) {
-                ResultSet rs = su.createStatement().executeQuery(
-                    "SELECT convalidated FROM pg_constraint c " +
-                    "JOIN pg_namespace n ON n.oid = c.connamespace " +
-                    "WHERE c.contype = 'f' AND c.conname = '" + fkName + "' AND n.nspname = 'nexus'");
-                assertThat(rs.next())
-                    .as("FK constraint " + fkName + " must exist in pg_constraint").isTrue();
-                assertThat(rs.getBoolean("convalidated"))
+                PgCatalogProbes.Constraint rs = PgCatalogProbes.foreignKey(
+                    DSL.using(su, SQLDialect.POSTGRES), "nexus", fkName);
+                assertThat(rs)
+                    .as("FK constraint " + fkName + " must exist in pg_constraint").isNotNull();
+                assertThat(rs.convalidated())
                     .as("FK " + fkName + " must be VALIDATED (convalidated=true) after P1b VALIDATE runs")
                     .isTrue();
             }
@@ -620,11 +607,10 @@ class CollectionRegistryFkExtraTest {
         // VALIDATE now SUCCEEDS and flips convalidated=true.
         su.createStatement().execute(
             "ALTER TABLE nexus." + table + " VALIDATE CONSTRAINT " + fkName);
-        ResultSet rs = su.createStatement().executeQuery(
-            "SELECT convalidated FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace " +
-            "WHERE c.contype='f' AND c.conname='" + fkName + "' AND n.nspname='nexus'");
-        assertThat(rs.next()).isTrue();
-        assertThat(rs.getBoolean("convalidated"))
+        PgCatalogProbes.Constraint rs = PgCatalogProbes.foreignKey(
+            DSL.using(su, SQLDialect.POSTGRES), "nexus", fkName);
+        assertThat(rs).isNotNull();
+        assertThat(rs.convalidated())
             .as(table + ": VALIDATE succeeds after reconcile → convalidated=true").isTrue();
     }
 

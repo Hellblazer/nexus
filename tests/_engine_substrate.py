@@ -789,7 +789,7 @@ def _boot() -> dict:
     svc_log_path = os.path.join(pgdata, "engine.log")
     svc_log = open(svc_log_path, "wb")  # noqa: SIM115 — lifetime spans the pytest session, closed with the process
     svc = subprocess.Popen(
-        [java, "-jar", str(_JAR)], env=env,
+        [java, "-Duser.timezone=UTC", "-jar", str(_JAR)], env=env,
         stdout=svc_log, stderr=subprocess.STDOUT,
         preexec_fn=os.setsid,
     )

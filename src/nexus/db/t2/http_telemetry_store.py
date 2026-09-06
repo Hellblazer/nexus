@@ -382,17 +382,55 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "newest": data.get("newest"),
         }
 
-    #: RDR-196 .p1d (nexus-nyry9.10) capability-probe cache. Class-level
-    #: default; the first probe on THIS instance shadows it with an
-    #: instance attribute — "cache per store instance" per the bead's own
-    #: design note. Note this buys less than it sounds: ``T2Database.__init__``
+    #: RDR-203 P3 (nexus-dt2tu.3) capabilities-dict generalization of the
+    #: RDR-196 .p1d single-bool probe cache. Class-level default; the
+    #: first probe on THIS instance shadows it with an instance attribute
+    #: — "one cached ``/version`` body per store instance" per D5, so a
+    #: second capability flag (``nx_answer_run_complete_supported``)
+    #: costs no second round trip. ``None`` means "not yet probed";
+    #: anything else — including ``{}`` on a failed or unreachable probe
+    #: (residual 10) — means "already probed this process, use this."
+    #: Note this buys less than it sounds: ``T2Database.__init__``
     #: constructs a FRESH ``HttpTelemetryStore()`` on every ``t2_ctx()`` call
     #: (see ``mcp_infra.t2_ctx``'s own docstring — "fresh per call"), so in
     #: production this cache rarely outlives a single ``_nx_answer_record_run``
     #: call and every nx_answer invocation re-probes. That is a known,
     #: accepted cost (one extra GET on an already multi-second-plus
     #: operation), not a bug — see the class docstring for the full account.
-    _nx_answer_steps_supported_cache: bool | None = None
+    _version_capabilities_cache: dict[str, Any] | None = None
+
+    def _version_capabilities(self) -> dict[str, Any]:
+        """One cached ``GET /version`` body per store instance. NEVER raises.
+
+        RDR-203 P3 (nexus-dt2tu.3): the shared read behind every
+        ``/version``-flag capability probe on this store
+        (:meth:`_supports_nx_answer_steps`,
+        :meth:`_supports_nx_answer_run_complete`) — a second flag on the
+        same body is a dict-key read, not a second round trip, which is
+        what keeps the existing budget of at most one ``/version`` probe
+        per process (:mod:`tests.test_nx_answer_t2_fanout_budget`) intact
+        after this refactor.
+
+        A failed or unreachable probe caches an EMPTY dict (residual
+        10) — same "cache the negative result" property the predecessor
+        single-bool cache had (``http_telemetry_store.py`` pre-P3:
+        ``_nx_answer_steps_supported_cache = False`` on any exception
+        before returning), so an unreachable engine costs one GET attempt
+        per process, not one per call. Every capability read below
+        degrades to "unsupported" against an empty dict, matching that
+        contract.
+        """
+        if self._version_capabilities_cache is not None:
+            return self._version_capabilities_cache
+        try:
+            resp = self._get("/version")
+        except Exception as exc:  # noqa: BLE001 — capability probe must never raise; caller degrades to the unsupported path
+            _log.warning("nx_answer_version_capabilities_probe_failed", error=str(exc))
+            self._version_capabilities_cache = {}
+            return {}
+        caps = resp if isinstance(resp, dict) else {}
+        self._version_capabilities_cache = caps
+        return caps
 
     def _supports_nx_answer_steps(self) -> bool:
         """Capability probe (RDR-196 .p1d): does the engine THIS store talks
@@ -401,7 +439,11 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         Reads ``GET /version``'s ``nx_answer_steps_supported`` field (added
         at ``.p1c`` / nexus-nyry9.9, unconditionally ``true`` whenever
         present — see ``TelemetryHandler``/``VersionHandler`` on the engine
-        side). Cached per store INSTANCE, matching
+        side) via :meth:`_version_capabilities`'s cached body (RDR-203 P3
+        capabilities-dict refactor — this method's own contract is
+        unchanged, only the cache it reads from is shared with the new
+        ``nx_answer_run_complete_supported`` flag). Cached per store
+        INSTANCE, matching
         :func:`nexus.db.http_vector_client.get_http_vector_client`'s
         "the deployed engine does not change under a running client"
         reasoning for the ``INCOMPATIBLE`` probe class — simpler than that
@@ -430,17 +472,52 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         (nexus-bwulw class: the public edge has stubbed ``/version``
         before).
         """
-        if self._nx_answer_steps_supported_cache is not None:
-            return self._nx_answer_steps_supported_cache
-        try:
-            resp = self._get("/version")
-        except Exception as exc:  # noqa: BLE001 — capability probe must never raise; caller degrades to run-row-only
-            _log.warning("nx_answer_steps_probe_failed", error=str(exc))
-            self._nx_answer_steps_supported_cache = False
-            return False
-        supported = bool(resp.get("nx_answer_steps_supported")) if isinstance(resp, dict) else False
-        self._nx_answer_steps_supported_cache = supported
-        return supported
+        return bool(self._version_capabilities().get("nx_answer_steps_supported"))
+
+    def _supports_nx_answer_run_complete(self) -> bool:
+        """RDR-203 D1/D5 (nexus-dt2tu.3): does the engine THIS store talks to
+        accept ``POST /v1/telemetry/nx_answer_runs/complete``, the one
+        composite write replacing the (run_start, record, run_outcome)
+        triple?
+
+        Reads ``GET /version``'s ``nx_answer_run_complete_supported`` field
+        via the SAME cached body :meth:`_supports_nx_answer_steps` reads —
+        one probe per process either way. NEVER raises; an absent field,
+        a non-2xx response, or any transport failure all read as
+        unsupported, which is the safe direction (D5): a new client
+        against an old engine records everything it records today.
+
+        This is the read the run-start site in ``core.py`` consults
+        exactly once per call (D5's per-call capability record) — it is
+        NOT re-read by any terminating arm; see
+        ``_nx_answer_record_complete``'s own docstring for why a fresh
+        read here would break the mid-call-flip invariant.
+        """
+        return bool(self._version_capabilities().get("nx_answer_run_complete_supported"))
+
+    def _downgrade_nx_answer_run_complete_support(self) -> None:
+        """RDR-203 D5 404-downgrade guard: a 404 from ``/complete`` against a
+        cache that answered ``True`` means the probe was right when read
+        and wrong now — the engine underneath this running client no
+        longer honours the route (or never did and the flag was a false
+        positive, equally worth correcting).
+
+        Flips the cached capability for FUTURE calls on this store
+        instance only — the call that triggered this downgrade completes
+        itself from its own per-call record (the caller's job, not
+        this method's; see ``_nx_answer_record_complete``). Logs once,
+        here, at the moment of the flip.
+        """
+        caps = dict(self._version_capabilities_cache or {})
+        caps["nx_answer_run_complete_supported"] = False
+        self._version_capabilities_cache = caps
+        _log.warning(
+            "nx_answer_run_complete_404_downgrade",
+            note="POST /v1/telemetry/nx_answer_runs/complete 404'd against a "
+                 "cache that answered supported=True; future calls on this "
+                 "store instance degrade to the (run_start, record, "
+                 "run_outcome) fallback",
+        )
 
     def record_nx_answer_run(
         self,
@@ -505,6 +582,72 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                     consequence="run row recorded without per-step telemetry",
                 )
         self._post("/v1/telemetry/nx_answer_runs/record", payload)
+
+    def record_nx_answer_run_complete(
+        self,
+        *,
+        question: str,
+        plan_id: int | None,
+        matched_confidence: float | None,
+        step_count: int,
+        final_text: str,
+        cost_usd: float | None,
+        duration_ms: int,
+        created_at: str,
+        steps: list[dict[str, Any]] | None,
+        success: bool,
+    ) -> None:
+        """RDR-203 D1/D5 (nexus-dt2tu.3): the one composite POST replacing the
+        client's (run_start, record, run_outcome) triple against a
+        supporting engine. Calls
+        ``POST /v1/telemetry/nx_answer_runs/complete``.
+
+        Wire call ONLY — does not consult :meth:`_supports_nx_answer_run_complete`
+        itself. That decision belongs to the caller (``core.py``'s
+        ``_nx_answer_record_complete`` choke point), which is what knows
+        ``plan_id`` and the per-call capability record, and whose D5
+        fallback needs the plans store too (this store has no access to
+        ``db.plans``).
+
+        A 404 — the caller's cached probe said supported, the running
+        engine now disagrees — PROPAGATES to the caller as
+        ``httpx.HTTPStatusError`` rather than being swallowed here; the
+        caller turns it into the deferred (run_start, record, outcome)
+        fallback per D5's downgrade guard, and calls
+        :meth:`_downgrade_nx_answer_run_complete_support` to correct the
+        cache for future calls. Any other failure (a 429, a 5xx that
+        survives the gateway retry, a transport error) also propagates —
+        this route's best-effort behaviour is the caller's decision, not
+        this method's, exactly as :meth:`record_nx_answer_run` keeps its
+        own best-effort catch at ITS call site rather than here.
+
+        ``created_at`` is REQUIRED and is never computed by this method
+        (D1): the engine's dedup key is ``(tenant, question, created_at)``,
+        so a value this method invented per call — or per retry — would
+        defeat that key. The caller stamps it ONCE, at payload
+        construction, before the first attempt (RDR-203 Idempotency) —
+        the same dict this method builds is then handed to ``_post``,
+        which reuses it verbatim across any gateway retry, so the stamp
+        this method receives is what actually goes out on every attempt.
+
+        ``outcome`` is a closed vocabulary the engine enforces
+        (``"success"``/``"failure"``, D1) — derived here from *success*
+        rather than accepted as a string, so this method's own signature
+        cannot pass the engine a value it would 400 on.
+        """
+        payload: dict[str, Any] = {
+            "question":           question,
+            "plan_id":            plan_id,
+            "matched_confidence": matched_confidence,
+            "step_count":         step_count,
+            "final_text":         final_text,
+            "cost_usd":           cost_usd,
+            "duration_ms":        duration_ms,
+            "created_at":         created_at,
+            "steps":              steps,
+            "outcome":            "success" if success else "failure",
+        }
+        self._post("/v1/telemetry/nx_answer_runs/complete", payload)
 
     def query_nx_answer_runs(
         self,
@@ -1382,10 +1525,20 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         capabilities: dict[str, int] | None = None,
         dispatches: int | None = None,
         total_calls: int | None = None,
+        capabilities_orchestrator: dict[str, int] | None = None,
+        capabilities_subagent: dict[str, int] | None = None,
         timeout: float = 2.0,
     ) -> None:
         """Upsert one session's capability census. Calls
         ``POST /v1/telemetry/capability_census/record``.
+
+        *capabilities_orchestrator* / *capabilities_subagent* (nexus-gjv9b
+        PART 3 prerequisite) carry the orchestrator/subagent-split
+        dimension — same 8-value vocabulary as *capabilities*, whose own
+        value is the MERGED total of the two. Both additive and optional:
+        omitting them (an old caller, or a blindspot record where neither
+        is ever meaningful) leaves the engine's ``capabilities_by_scope``
+        column NULL, never a fabricated all-zero breakdown.
 
         Single-attempt with a hard *timeout* (default 2.0s, matching
         ``_print_service_tier_summary``'s own precedent): this method is
@@ -1422,6 +1575,10 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             payload["capabilities"] = capabilities or {}
             payload["dispatches"] = dispatches
             payload["total_calls"] = total_calls
+            if capabilities_orchestrator is not None:
+                payload["capabilities_orchestrator"] = capabilities_orchestrator
+            if capabilities_subagent is not None:
+                payload["capabilities_subagent"] = capabilities_subagent
         self._post(
             "/v1/telemetry/capability_census/record",
             payload,

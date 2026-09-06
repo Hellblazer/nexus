@@ -94,7 +94,7 @@ class CatalogEngineDefects70Test {
                 tenant, collection);
             return ctx.execute(
                 "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-                + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::vector) "
+                + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::nexus.vector) "
                 + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING",
                 tenant, collection, chashHex, STUB_VECTOR_384);
         });
@@ -1273,7 +1273,7 @@ class CatalogEngineDefects70Test {
                     "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_1024) "
                     + "VALUES ('" + TENANT + "', '" + collection + "', decode('" + chash + "', 'hex'), '"
                     + text.replace("'", "''") + "', "
-                    + "('[' || repeat('0.1,', 1023) || '0.1]')::vector) "
+                    + "('[' || repeat('0.1,', 1023) || '0.1]')::nexus.vector) "
                     + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
             }
         }

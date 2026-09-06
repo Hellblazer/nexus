@@ -492,7 +492,16 @@ class TestRequiredEngineVersion:
         # and routing_events (telemetry-009..012), GET /v1/status embed activity,
         # rerank retry hints, and the combined-write metadata refresh; v0.1.101 to
         # v0.1.103 were burned on build-only defects with the same engine tree.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 104)
+        # ->(0,1,105) 2026-09-06: v0.1.105 carries the request embed deadline
+        # (nexus-8hdg9 phases 3/4/5: check points, X-Nexus-Request-Deadline-Ms,
+        # NX_EMBED_DEADLINE_MAX_MS, deadline_aborts_total on /v1/status), the
+        # RDR-203 P2 composite route POST /v1/telemetry/nx_answer_runs/complete
+        # with its /version flag, capability_census.capabilities_by_scope
+        # (telemetry-013), the session search_path retirement (nexus-cbo4a
+        # batch 9: vector/pg_trgm relocated into the nexus schema by
+        # search-path-001, 33 functions qualified in search-path-002), and the
+        # JVM UTC pin (nexus-9gaj7). 35 changesets over a v0.1.104 store.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 105)
 
 
 class TestParseEngineVersion:

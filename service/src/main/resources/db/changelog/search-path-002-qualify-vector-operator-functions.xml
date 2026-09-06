@@ -1,0 +1,3062 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05, nexus-zrcj7): every one of
+    these 33 pgvector/pg_trgm SQL functions across the combined-query, graph-hop,
+    hybrid-search, plain-search, hybrid-selectivity-dispatch, and taxonomy-ANN
+    function families was a SILENT search_path reliance the census (T2
+    nexus/census-search-path-reliance-2026-09-06) surfaced independently of the
+    directive's own named examples: none of them qualified the cosine-distance
+    operator, the vector parameter type, or (for 6 of the 33) the pg_trgm
+    word_similarity function / &lt;% threshold operator (3 more, text_gate_probe,
+    use only the &lt;% operator, no vector at all: a text-only trigram gate), and
+    each resolved only via the CALLING session's search_path.
+
+    Corrected design (a first draft qualified everything as OPERATOR(public.&lt;=&gt;)
+    and was itself corrected after review): the extensions are RELOCATED into the
+    nexus schema before this changelog ever runs, as a superuser step outside
+    Liquibase entirely (nexus.db.pg_provision's relocate function, on every local
+    daemon start; a documented DBA pre-step for a managed/production cluster);
+    nexus_admin, the NOSUPERUSER role that runs this changelog, structurally cannot
+    perform the relocation itself; a SEPARATE search-path-001-1 changeset in a
+    different file (search-path-001-relocate-vector-extensions.xml) guards that
+    relocation already happened, or (a fresh install's own first walk only, via a
+    SECURITY DEFINER helper function nexus.db.pg_provision installs for exactly
+    this case) performs it right there instead (see that file's own header comment
+    for the full derivation, including why an earlier draft that had nexus_admin
+    relocate directly, unconditionally, was abandoned). Either way, by the time
+    THIS changelog runs, both extensions are guaranteed to already be in nexus.
+    Every reference here
+    is qualified as nexus.* instead of public.*. A second false start pinned SET
+    search_path = nexus, public on the
+    function definition (the same pattern nexus.purge_trash, catalog-029-3, already
+    established for its own unqualifiable SET CONSTRAINTS statement) and was
+    REVERTED after CombinedQueryParityTest/PlainSearchTextGatedSearchExplainTest/
+    TaxonomyCentroidAnnPlanShapeTest's own EXPLAIN-plan assertions caught it
+    immediately: Postgres disqualifies a LANGUAGE sql function from planner INLINING
+    the instant it carries ANY function-level SET clause, and every one of these
+    functions is written to BE inlined (LANGUAGE sql, no SET, single statement) so
+    the caller's ORDER BY/LIMIT pushes straight into the HNSW index. Explicit
+    OPERATOR(schema.op)/schema.type/schema.function qualification is ordinary
+    expression-level syntax, not a function attribute, so it does not touch
+    inlining eligibility at all.
+
+    Every changeset below CREATE OR REPLACEs an already-shipped, currently-live
+    function with a body that is byte-for-byte identical to its current definition
+    except the qualifications named in its own comment. Verified programmatically:
+    operator/type/function occurrence counts preserved 1:1, diffed against the live
+    source changelog file named in each changeset's own comment, never hand-
+    transcribed. This changeset never edits an applied changeset; it layers a new
+    one on top, same discipline as every other CREATE-OR-REPLACE repoint in this
+    codebase (vectors-005, catalog-029-3, etc).
+
+    Placed last among function-defining changelogs (after every file that currently
+    owns one of these functions) so the CREATE OR REPLACE always applies to the
+    truly live body, but before the two grants files since grants target the
+    function name, unaffected by this repoint. Must run AFTER search-path-001 (the
+    relocation) in master order: these functions reference nexus.vector, which
+    does not exist until the extension actually lives there.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="search-path-002-1" author="nexus-cbo4a">
+        <comment>nexus.search_metadata_scoped_384: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-006-null-distance-guards.xml's vectors-006-1.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_384(
+    p_query        nexus.vector(384),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_subtree      text,
+    p_where        jsonb,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+       AND d.alias_of = ''
+       AND (p_subtree      IS NULL OR d.tumbler LIKE p_subtree || '.%')
+       AND (p_where        IS NULL OR c.metadata @&gt; p_where)
+       AND c.embedding_384 IS NOT NULL
+     ORDER BY c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-006-null-distance-guards.xml's original bare vectors-006-1 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-006-null-distance-guards.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_384(
+    p_query        nexus.vector(384),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_subtree      text,
+    p_where        jsonb,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+       AND d.alias_of = ''
+       AND (p_subtree      IS NULL OR d.tumbler LIKE p_subtree || '.%')
+       AND (p_where        IS NULL OR c.metadata @&gt; p_where)
+       AND c.embedding_384 IS NOT NULL
+     ORDER BY c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-2" author="nexus-cbo4a">
+        <comment>nexus.search_metadata_scoped_768: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-006-null-distance-guards.xml's vectors-006-1.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_768(
+    p_query        nexus.vector(768),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_subtree      text,
+    p_where        jsonb,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+       AND d.alias_of = ''
+       AND (p_subtree      IS NULL OR d.tumbler LIKE p_subtree || '.%')
+       AND (p_where        IS NULL OR c.metadata @&gt; p_where)
+       AND c.embedding_768 IS NOT NULL
+     ORDER BY c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-006-null-distance-guards.xml's original bare vectors-006-1 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-006-null-distance-guards.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_768(
+    p_query        nexus.vector(768),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_subtree      text,
+    p_where        jsonb,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+       AND d.alias_of = ''
+       AND (p_subtree      IS NULL OR d.tumbler LIKE p_subtree || '.%')
+       AND (p_where        IS NULL OR c.metadata @&gt; p_where)
+       AND c.embedding_768 IS NOT NULL
+     ORDER BY c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-3" author="nexus-cbo4a">
+        <comment>nexus.search_metadata_scoped_1024: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-006-null-distance-guards.xml's vectors-006-1.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_1024(
+    p_query        nexus.vector(1024),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_subtree      text,
+    p_where        jsonb,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+       AND d.alias_of = ''
+       AND (p_subtree      IS NULL OR d.tumbler LIKE p_subtree || '.%')
+       AND (p_where        IS NULL OR c.metadata @&gt; p_where)
+       AND c.embedding_1024 IS NOT NULL
+     ORDER BY c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-006-null-distance-guards.xml's original bare vectors-006-1 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-006-null-distance-guards.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_1024(
+    p_query        nexus.vector(1024),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_subtree      text,
+    p_where        jsonb,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+       AND d.alias_of = ''
+       AND (p_subtree      IS NULL OR d.tumbler LIKE p_subtree || '.%')
+       AND (p_where        IS NULL OR c.metadata @&gt; p_where)
+       AND c.embedding_1024 IS NOT NULL
+     ORDER BY c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-4" author="nexus-cbo4a">
+        <comment>nexus.search_graph_hop_384: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-006-null-distance-guards.xml's vectors-006-2.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_384(
+    p_query       nexus.vector(384),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
+             WHERE r.d &lt; p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND c.embedding_384 IS NOT NULL
+     ORDER BY c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-006-null-distance-guards.xml's original bare vectors-006-2 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-006-null-distance-guards.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_384(
+    p_query       nexus.vector(384),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
+             WHERE r.d &lt; p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND c.embedding_384 IS NOT NULL
+     ORDER BY c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-5" author="nexus-cbo4a">
+        <comment>nexus.search_graph_hop_768: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-006-null-distance-guards.xml's vectors-006-2.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_768(
+    p_query       nexus.vector(768),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
+             WHERE r.d &lt; p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND c.embedding_768 IS NOT NULL
+     ORDER BY c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-006-null-distance-guards.xml's original bare vectors-006-2 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-006-null-distance-guards.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_768(
+    p_query       nexus.vector(768),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
+             WHERE r.d &lt; p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND c.embedding_768 IS NOT NULL
+     ORDER BY c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-6" author="nexus-cbo4a">
+        <comment>nexus.search_graph_hop_1024: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-006-null-distance-guards.xml's vectors-006-2.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_1024(
+    p_query       nexus.vector(1024),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
+             WHERE r.d &lt; p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND c.embedding_1024 IS NOT NULL
+     ORDER BY c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-006-null-distance-guards.xml's original bare vectors-006-2 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-006-null-distance-guards.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_1024(
+    p_query       nexus.vector(1024),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
+             WHERE r.d &lt; p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND c.embedding_1024 IS NOT NULL
+     ORDER BY c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-7" author="nexus-cbo4a">
+        <comment>nexus.search_topic_scoped_384: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to taxonomy-011-doc-id-bytea.xml's taxonomy-011-5.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_384(
+    p_query       nexus.vector(384),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query)::float8
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND c.embedding_384 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not taxonomy-011-doc-id-bytea.xml's original bare taxonomy-011-5 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by taxonomy-011-doc-id-bytea.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_384(
+    p_query       nexus.vector(384),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query)::float8
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND c.embedding_384 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-8" author="nexus-cbo4a">
+        <comment>nexus.search_topic_scoped_768: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to taxonomy-011-doc-id-bytea.xml's taxonomy-011-6.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_768(
+    p_query       nexus.vector(768),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query)::float8
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND c.embedding_768 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not taxonomy-011-doc-id-bytea.xml's original bare taxonomy-011-6 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by taxonomy-011-doc-id-bytea.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_768(
+    p_query       nexus.vector(768),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query)::float8
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND c.embedding_768 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-9" author="nexus-cbo4a">
+        <comment>nexus.search_topic_scoped_1024: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to taxonomy-011-doc-id-bytea.xml's taxonomy-011-7.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_1024(
+    p_query       nexus.vector(1024),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query)::float8
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND c.embedding_1024 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not taxonomy-011-doc-id-bytea.xml's original bare taxonomy-011-7 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by taxonomy-011-doc-id-bytea.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_1024(
+    p_query       nexus.vector(1024),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query)::float8
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND c.embedding_1024 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-10" author="nexus-cbo4a">
+        <comment>nexus.assign_from_chashes_384: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to taxonomy-011-doc-id-bytea.xml's taxonomy-011-2.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_384(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   c.chash                                                         AS m_chash_bytes,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) ct.embedding_384))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection &lt;&gt; p_collection
+               AND ct.embedding_384 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_384 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) ct.embedding_384) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity &gt; COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity &gt; COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   c.chash                                                         AS m_chash_bytes,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) ct.embedding_384))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection = p_collection
+               AND ct.embedding_384 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_384 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) ct.embedding_384) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id, 'centroid', p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not taxonomy-011-doc-id-bytea.xml's original bare taxonomy-011-2 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by taxonomy-011-doc-id-bytea.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_384(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   c.chash                                                         AS m_chash_bytes,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) ct.embedding_384))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection &lt;&gt; p_collection
+               AND ct.embedding_384 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_384 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) ct.embedding_384) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity &gt; COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity &gt; COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   c.chash                                                         AS m_chash_bytes,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) ct.embedding_384))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection = p_collection
+               AND ct.embedding_384 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_384 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) ct.embedding_384) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id, 'centroid', p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-11" author="nexus-cbo4a">
+        <comment>nexus.assign_from_chashes_768: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to taxonomy-011-doc-id-bytea.xml's taxonomy-011-3.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_768(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   c.chash                                                         AS m_chash_bytes,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) ct.embedding_768))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection &lt;&gt; p_collection
+               AND ct.embedding_768 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_768 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) ct.embedding_768) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity &gt; COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity &gt; COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   c.chash                                                         AS m_chash_bytes,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) ct.embedding_768))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection = p_collection
+               AND ct.embedding_768 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_768 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) ct.embedding_768) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id, 'centroid', p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not taxonomy-011-doc-id-bytea.xml's original bare taxonomy-011-3 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by taxonomy-011-doc-id-bytea.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_768(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   c.chash                                                         AS m_chash_bytes,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) ct.embedding_768))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection &lt;&gt; p_collection
+               AND ct.embedding_768 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_768 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) ct.embedding_768) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity &gt; COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity &gt; COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   c.chash                                                         AS m_chash_bytes,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) ct.embedding_768))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection = p_collection
+               AND ct.embedding_768 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_768 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) ct.embedding_768) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id, 'centroid', p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-12" author="nexus-cbo4a">
+        <comment>nexus.assign_from_chashes_1024: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to taxonomy-011-doc-id-bytea.xml's taxonomy-011-4.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_1024(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                            AS m_chash,
+                   c.chash                                                           AS m_chash_bytes,
+                   ct.topic_id                                                       AS m_topic_id,
+                   (1 - (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) ct.embedding_1024))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection &lt;&gt; p_collection
+               AND ct.embedding_1024 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_1024 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) ct.embedding_1024) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity &gt; COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity &gt; COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                            AS m_chash,
+                   c.chash                                                           AS m_chash_bytes,
+                   ct.topic_id                                                       AS m_topic_id,
+                   (1 - (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) ct.embedding_1024))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection = p_collection
+               AND ct.embedding_1024 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_1024 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) ct.embedding_1024) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id, 'centroid', p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not taxonomy-011-doc-id-bytea.xml's original bare taxonomy-011-4 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by taxonomy-011-doc-id-bytea.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_1024(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                            AS m_chash,
+                   c.chash                                                           AS m_chash_bytes,
+                   ct.topic_id                                                       AS m_topic_id,
+                   (1 - (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) ct.embedding_1024))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection &lt;&gt; p_collection
+               AND ct.embedding_1024 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_1024 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) ct.embedding_1024) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity &gt; COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity &gt; COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                            AS m_chash,
+                   c.chash                                                           AS m_chash_bytes,
+                   ct.topic_id                                                       AS m_topic_id,
+                   (1 - (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) ct.embedding_1024))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection = p_collection
+               AND ct.embedding_1024 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_1024 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) ct.embedding_1024) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id, 'centroid', p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-13" author="nexus-cbo4a">
+        <comment>nexus.hybrid_search_384: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type; nexus.word_similarity(...) for the bare pg_trgm call; OPERATOR(nexus.&lt;%) for the bare pg_trgm word-similarity threshold operator. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-007-hybrid-search-functions.xml's vectors-007-1.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.hybrid_search_384(
+    p_query       nexus.vector(384),
+    p_query_text  text,
+    p_collections text[],
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, score float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH gate AS (
+        SELECT encode(c.chash, 'hex') AS id,
+               c.chunk_text,
+               c.collection,
+               row_number() OVER (ORDER BY c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query, c.chash ASC) AS vec_rank,
+               row_number() OVER (ORDER BY ts_rank_cd(c.chunk_tsv, plainto_tsquery('english', p_query_text)) DESC, c.chash ASC) AS ts_rank,
+               row_number() OVER (ORDER BY nexus.word_similarity(p_query_text, c.chunk_text) DESC, c.chash ASC) AS trgm_rank
+          FROM nexus.chunks c
+         WHERE c.collection = ANY(p_collections)
+           AND c.embedding_384 IS NOT NULL
+           AND (p_where IS NULL OR c.metadata @&gt; p_where)
+           AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.&lt;%) c.chunk_text)
+           AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                             JOIN nexus.catalog_documents d
+                               ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                            WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                              AND d.deleted_at IS NOT NULL
+                              AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                                JOIN nexus.catalog_documents d2
+                                                  ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                               WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                                 AND d2.deleted_at IS NULL)))
+    )
+    SELECT g.id,
+           g.chunk_text,
+           g.collection,
+           (1.0 / (60 + g.vec_rank)
+              + 1.0 / (60 + g.ts_rank)
+              + 1.0 / (60 + g.trgm_rank))::float8 AS score
+      FROM gate g
+     ORDER BY score DESC, g.id ASC
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-007-hybrid-search-functions.xml's original bare vectors-007-1 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-007-hybrid-search-functions.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.hybrid_search_384(
+    p_query       nexus.vector(384),
+    p_query_text  text,
+    p_collections text[],
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, score float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH gate AS (
+        SELECT encode(c.chash, 'hex') AS id,
+               c.chunk_text,
+               c.collection,
+               row_number() OVER (ORDER BY c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query, c.chash ASC) AS vec_rank,
+               row_number() OVER (ORDER BY ts_rank_cd(c.chunk_tsv, plainto_tsquery('english', p_query_text)) DESC, c.chash ASC) AS ts_rank,
+               row_number() OVER (ORDER BY nexus.word_similarity(p_query_text, c.chunk_text) DESC, c.chash ASC) AS trgm_rank
+          FROM nexus.chunks c
+         WHERE c.collection = ANY(p_collections)
+           AND c.embedding_384 IS NOT NULL
+           AND (p_where IS NULL OR c.metadata @&gt; p_where)
+           AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.&lt;%) c.chunk_text)
+           AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                             JOIN nexus.catalog_documents d
+                               ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                            WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                              AND d.deleted_at IS NOT NULL
+                              AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                                JOIN nexus.catalog_documents d2
+                                                  ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                               WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                                 AND d2.deleted_at IS NULL)))
+    )
+    SELECT g.id,
+           g.chunk_text,
+           g.collection,
+           (1.0 / (60 + g.vec_rank)
+              + 1.0 / (60 + g.ts_rank)
+              + 1.0 / (60 + g.trgm_rank))::float8 AS score
+      FROM gate g
+     ORDER BY score DESC, g.id ASC
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-14" author="nexus-cbo4a">
+        <comment>nexus.hybrid_search_768: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type; nexus.word_similarity(...) for the bare pg_trgm call; OPERATOR(nexus.&lt;%) for the bare pg_trgm word-similarity threshold operator. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-007-hybrid-search-functions.xml's vectors-007-1.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.hybrid_search_768(
+    p_query       nexus.vector(768),
+    p_query_text  text,
+    p_collections text[],
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, score float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH gate AS (
+        SELECT encode(c.chash, 'hex') AS id,
+               c.chunk_text,
+               c.collection,
+               row_number() OVER (ORDER BY c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query, c.chash ASC) AS vec_rank,
+               row_number() OVER (ORDER BY ts_rank_cd(c.chunk_tsv, plainto_tsquery('english', p_query_text)) DESC, c.chash ASC) AS ts_rank,
+               row_number() OVER (ORDER BY nexus.word_similarity(p_query_text, c.chunk_text) DESC, c.chash ASC) AS trgm_rank
+          FROM nexus.chunks c
+         WHERE c.collection = ANY(p_collections)
+           AND c.embedding_768 IS NOT NULL
+           AND (p_where IS NULL OR c.metadata @&gt; p_where)
+           AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.&lt;%) c.chunk_text)
+           AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                             JOIN nexus.catalog_documents d
+                               ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                            WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                              AND d.deleted_at IS NOT NULL
+                              AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                                JOIN nexus.catalog_documents d2
+                                                  ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                               WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                                 AND d2.deleted_at IS NULL)))
+    )
+    SELECT g.id,
+           g.chunk_text,
+           g.collection,
+           (1.0 / (60 + g.vec_rank)
+              + 1.0 / (60 + g.ts_rank)
+              + 1.0 / (60 + g.trgm_rank))::float8 AS score
+      FROM gate g
+     ORDER BY score DESC, g.id ASC
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-007-hybrid-search-functions.xml's original bare vectors-007-1 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-007-hybrid-search-functions.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.hybrid_search_768(
+    p_query       nexus.vector(768),
+    p_query_text  text,
+    p_collections text[],
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, score float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH gate AS (
+        SELECT encode(c.chash, 'hex') AS id,
+               c.chunk_text,
+               c.collection,
+               row_number() OVER (ORDER BY c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query, c.chash ASC) AS vec_rank,
+               row_number() OVER (ORDER BY ts_rank_cd(c.chunk_tsv, plainto_tsquery('english', p_query_text)) DESC, c.chash ASC) AS ts_rank,
+               row_number() OVER (ORDER BY nexus.word_similarity(p_query_text, c.chunk_text) DESC, c.chash ASC) AS trgm_rank
+          FROM nexus.chunks c
+         WHERE c.collection = ANY(p_collections)
+           AND c.embedding_768 IS NOT NULL
+           AND (p_where IS NULL OR c.metadata @&gt; p_where)
+           AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.&lt;%) c.chunk_text)
+           AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                             JOIN nexus.catalog_documents d
+                               ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                            WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                              AND d.deleted_at IS NOT NULL
+                              AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                                JOIN nexus.catalog_documents d2
+                                                  ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                               WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                                 AND d2.deleted_at IS NULL)))
+    )
+    SELECT g.id,
+           g.chunk_text,
+           g.collection,
+           (1.0 / (60 + g.vec_rank)
+              + 1.0 / (60 + g.ts_rank)
+              + 1.0 / (60 + g.trgm_rank))::float8 AS score
+      FROM gate g
+     ORDER BY score DESC, g.id ASC
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-15" author="nexus-cbo4a">
+        <comment>nexus.hybrid_search_1024: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type; nexus.word_similarity(...) for the bare pg_trgm call; OPERATOR(nexus.&lt;%) for the bare pg_trgm word-similarity threshold operator. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-007-hybrid-search-functions.xml's vectors-007-1.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.hybrid_search_1024(
+    p_query       nexus.vector(1024),
+    p_query_text  text,
+    p_collections text[],
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, score float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH gate AS (
+        SELECT encode(c.chash, 'hex') AS id,
+               c.chunk_text,
+               c.collection,
+               row_number() OVER (ORDER BY c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query, c.chash ASC) AS vec_rank,
+               row_number() OVER (ORDER BY ts_rank_cd(c.chunk_tsv, plainto_tsquery('english', p_query_text)) DESC, c.chash ASC) AS ts_rank,
+               row_number() OVER (ORDER BY nexus.word_similarity(p_query_text, c.chunk_text) DESC, c.chash ASC) AS trgm_rank
+          FROM nexus.chunks c
+         WHERE c.collection = ANY(p_collections)
+           AND c.embedding_1024 IS NOT NULL
+           AND (p_where IS NULL OR c.metadata @&gt; p_where)
+           AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.&lt;%) c.chunk_text)
+           AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                             JOIN nexus.catalog_documents d
+                               ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                            WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                              AND d.deleted_at IS NOT NULL
+                              AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                                JOIN nexus.catalog_documents d2
+                                                  ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                               WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                                 AND d2.deleted_at IS NULL)))
+    )
+    SELECT g.id,
+           g.chunk_text,
+           g.collection,
+           (1.0 / (60 + g.vec_rank)
+              + 1.0 / (60 + g.ts_rank)
+              + 1.0 / (60 + g.trgm_rank))::float8 AS score
+      FROM gate g
+     ORDER BY score DESC, g.id ASC
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-007-hybrid-search-functions.xml's original bare vectors-007-1 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-007-hybrid-search-functions.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.hybrid_search_1024(
+    p_query       nexus.vector(1024),
+    p_query_text  text,
+    p_collections text[],
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, score float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH gate AS (
+        SELECT encode(c.chash, 'hex') AS id,
+               c.chunk_text,
+               c.collection,
+               row_number() OVER (ORDER BY c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query, c.chash ASC) AS vec_rank,
+               row_number() OVER (ORDER BY ts_rank_cd(c.chunk_tsv, plainto_tsquery('english', p_query_text)) DESC, c.chash ASC) AS ts_rank,
+               row_number() OVER (ORDER BY nexus.word_similarity(p_query_text, c.chunk_text) DESC, c.chash ASC) AS trgm_rank
+          FROM nexus.chunks c
+         WHERE c.collection = ANY(p_collections)
+           AND c.embedding_1024 IS NOT NULL
+           AND (p_where IS NULL OR c.metadata @&gt; p_where)
+           AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.&lt;%) c.chunk_text)
+           AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                             JOIN nexus.catalog_documents d
+                               ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                            WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                              AND d.deleted_at IS NOT NULL
+                              AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                                JOIN nexus.catalog_documents d2
+                                                  ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                               WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                                 AND d2.deleted_at IS NULL)))
+    )
+    SELECT g.id,
+           g.chunk_text,
+           g.collection,
+           (1.0 / (60 + g.vec_rank)
+              + 1.0 / (60 + g.ts_rank)
+              + 1.0 / (60 + g.trgm_rank))::float8 AS score
+      FROM gate g
+     ORDER BY score DESC, g.id ASC
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-16" author="nexus-cbo4a">
+        <comment>nexus.search_aspect_scoped_384: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-008-aspect-scoped.xml's vectors-008-1.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_aspect_scoped_384(
+    p_query           nexus.vector(384),
+    p_collections     text[],
+    p_field           text,
+    p_pattern         text,
+    p_min_confidence  float8,
+    p_where           jsonb,
+    p_n               int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN nexus.document_aspects a
+        ON a.tenant_id = d.tenant_id AND a.doc_id = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND d.alias_of = ''
+       AND c.embedding_384 IS NOT NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_min_confidence IS NULL OR a.confidence &gt;= p_min_confidence)
+       AND (p_field IS NULL OR CASE p_field
+               WHEN 'problem_formulation'    THEN a.problem_formulation
+               WHEN 'proposed_method'        THEN a.proposed_method
+               WHEN 'experimental_datasets'  THEN a.experimental_datasets
+               WHEN 'experimental_baselines' THEN a.experimental_baselines
+               WHEN 'experimental_results'   THEN a.experimental_results
+           END ILIKE '%' || p_pattern || '%')
+     ORDER BY c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-008-aspect-scoped.xml's original bare vectors-008-1 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-008-aspect-scoped.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_aspect_scoped_384(
+    p_query           nexus.vector(384),
+    p_collections     text[],
+    p_field           text,
+    p_pattern         text,
+    p_min_confidence  float8,
+    p_where           jsonb,
+    p_n               int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN nexus.document_aspects a
+        ON a.tenant_id = d.tenant_id AND a.doc_id = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND d.alias_of = ''
+       AND c.embedding_384 IS NOT NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_min_confidence IS NULL OR a.confidence &gt;= p_min_confidence)
+       AND (p_field IS NULL OR CASE p_field
+               WHEN 'problem_formulation'    THEN a.problem_formulation
+               WHEN 'proposed_method'        THEN a.proposed_method
+               WHEN 'experimental_datasets'  THEN a.experimental_datasets
+               WHEN 'experimental_baselines' THEN a.experimental_baselines
+               WHEN 'experimental_results'   THEN a.experimental_results
+           END ILIKE '%' || p_pattern || '%')
+     ORDER BY c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-17" author="nexus-cbo4a">
+        <comment>nexus.search_aspect_scoped_768: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-008-aspect-scoped.xml's vectors-008-1.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_aspect_scoped_768(
+    p_query           nexus.vector(768),
+    p_collections     text[],
+    p_field           text,
+    p_pattern         text,
+    p_min_confidence  float8,
+    p_where           jsonb,
+    p_n               int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN nexus.document_aspects a
+        ON a.tenant_id = d.tenant_id AND a.doc_id = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND d.alias_of = ''
+       AND c.embedding_768 IS NOT NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_min_confidence IS NULL OR a.confidence &gt;= p_min_confidence)
+       AND (p_field IS NULL OR CASE p_field
+               WHEN 'problem_formulation'    THEN a.problem_formulation
+               WHEN 'proposed_method'        THEN a.proposed_method
+               WHEN 'experimental_datasets'  THEN a.experimental_datasets
+               WHEN 'experimental_baselines' THEN a.experimental_baselines
+               WHEN 'experimental_results'   THEN a.experimental_results
+           END ILIKE '%' || p_pattern || '%')
+     ORDER BY c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-008-aspect-scoped.xml's original bare vectors-008-1 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-008-aspect-scoped.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_aspect_scoped_768(
+    p_query           nexus.vector(768),
+    p_collections     text[],
+    p_field           text,
+    p_pattern         text,
+    p_min_confidence  float8,
+    p_where           jsonb,
+    p_n               int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN nexus.document_aspects a
+        ON a.tenant_id = d.tenant_id AND a.doc_id = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND d.alias_of = ''
+       AND c.embedding_768 IS NOT NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_min_confidence IS NULL OR a.confidence &gt;= p_min_confidence)
+       AND (p_field IS NULL OR CASE p_field
+               WHEN 'problem_formulation'    THEN a.problem_formulation
+               WHEN 'proposed_method'        THEN a.proposed_method
+               WHEN 'experimental_datasets'  THEN a.experimental_datasets
+               WHEN 'experimental_baselines' THEN a.experimental_baselines
+               WHEN 'experimental_results'   THEN a.experimental_results
+           END ILIKE '%' || p_pattern || '%')
+     ORDER BY c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-18" author="nexus-cbo4a">
+        <comment>nexus.search_aspect_scoped_1024: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-008-aspect-scoped.xml's vectors-008-1.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_aspect_scoped_1024(
+    p_query           nexus.vector(1024),
+    p_collections     text[],
+    p_field           text,
+    p_pattern         text,
+    p_min_confidence  float8,
+    p_where           jsonb,
+    p_n               int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN nexus.document_aspects a
+        ON a.tenant_id = d.tenant_id AND a.doc_id = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND d.alias_of = ''
+       AND c.embedding_1024 IS NOT NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_min_confidence IS NULL OR a.confidence &gt;= p_min_confidence)
+       AND (p_field IS NULL OR CASE p_field
+               WHEN 'problem_formulation'    THEN a.problem_formulation
+               WHEN 'proposed_method'        THEN a.proposed_method
+               WHEN 'experimental_datasets'  THEN a.experimental_datasets
+               WHEN 'experimental_baselines' THEN a.experimental_baselines
+               WHEN 'experimental_results'   THEN a.experimental_results
+           END ILIKE '%' || p_pattern || '%')
+     ORDER BY c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-008-aspect-scoped.xml's original bare vectors-008-1 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-008-aspect-scoped.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_aspect_scoped_1024(
+    p_query           nexus.vector(1024),
+    p_collections     text[],
+    p_field           text,
+    p_pattern         text,
+    p_min_confidence  float8,
+    p_where           jsonb,
+    p_n               int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN nexus.document_aspects a
+        ON a.tenant_id = d.tenant_id AND a.doc_id = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND d.alias_of = ''
+       AND c.embedding_1024 IS NOT NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_min_confidence IS NULL OR a.confidence &gt;= p_min_confidence)
+       AND (p_field IS NULL OR CASE p_field
+               WHEN 'problem_formulation'    THEN a.problem_formulation
+               WHEN 'proposed_method'        THEN a.proposed_method
+               WHEN 'experimental_datasets'  THEN a.experimental_datasets
+               WHEN 'experimental_baselines' THEN a.experimental_baselines
+               WHEN 'experimental_results'   THEN a.experimental_results
+           END ILIKE '%' || p_pattern || '%')
+     ORDER BY c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-19" author="nexus-cbo4a">
+        <comment>nexus.plain_search_384: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-009-plain-search.xml's vectors-009-1.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.plain_search_384(
+    p_query        nexus.vector(384),
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_384 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+     ORDER BY c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-009-plain-search.xml's original bare vectors-009-1 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-009-plain-search.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.plain_search_384(
+    p_query        nexus.vector(384),
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_384 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+     ORDER BY c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-20" author="nexus-cbo4a">
+        <comment>nexus.plain_search_768: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-009-plain-search.xml's vectors-009-1.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.plain_search_768(
+    p_query        nexus.vector(768),
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_768 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+     ORDER BY c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-009-plain-search.xml's original bare vectors-009-1 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-009-plain-search.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.plain_search_768(
+    p_query        nexus.vector(768),
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_768 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+     ORDER BY c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-21" author="nexus-cbo4a">
+        <comment>nexus.plain_search_1024: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-009-plain-search.xml's vectors-009-1.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.plain_search_1024(
+    p_query        nexus.vector(1024),
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_1024 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+     ORDER BY c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-009-plain-search.xml's original bare vectors-009-1 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-009-plain-search.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.plain_search_1024(
+    p_query        nexus.vector(1024),
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_1024 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+     ORDER BY c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-22" author="nexus-cbo4a">
+        <comment>nexus.text_gate_probe_384: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;%) for the bare pg_trgm word-similarity threshold operator. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-011-hybrid-selectivity-dispatch.xml's vectors-011-1 EXCEPT the CREATE clause itself: vectors-011-1's original used bare CREATE FUNCTION (this is its first definition), so this repoint uses CREATE OR REPLACE FUNCTION since the function already exists by the time this changeset runs.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gate_probe_384(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     LIMIT p_cap
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-011-hybrid-selectivity-dispatch.xml's original bare vectors-011-1 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-011-hybrid-selectivity-dispatch.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gate_probe_384(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     LIMIT p_cap
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-23" author="nexus-cbo4a">
+        <comment>nexus.text_gate_probe_768: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;%) for the bare pg_trgm word-similarity threshold operator. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-011-hybrid-selectivity-dispatch.xml's vectors-011-1 EXCEPT the CREATE clause itself: vectors-011-1's original used bare CREATE FUNCTION (this is its first definition), so this repoint uses CREATE OR REPLACE FUNCTION since the function already exists by the time this changeset runs.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gate_probe_768(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     LIMIT p_cap
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-011-hybrid-selectivity-dispatch.xml's original bare vectors-011-1 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-011-hybrid-selectivity-dispatch.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gate_probe_768(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     LIMIT p_cap
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-24" author="nexus-cbo4a">
+        <comment>nexus.text_gate_probe_1024: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;%) for the bare pg_trgm word-similarity threshold operator. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-011-hybrid-selectivity-dispatch.xml's vectors-011-1 EXCEPT the CREATE clause itself: vectors-011-1's original used bare CREATE FUNCTION (this is its first definition), so this repoint uses CREATE OR REPLACE FUNCTION since the function already exists by the time this changeset runs.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gate_probe_1024(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     LIMIT p_cap
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-011-hybrid-selectivity-dispatch.xml's original bare vectors-011-1 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-011-hybrid-selectivity-dispatch.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gate_probe_1024(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     LIMIT p_cap
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-25" author="nexus-cbo4a">
+        <comment>nexus.text_gated_search_hnsw_first_384: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type; OPERATOR(nexus.&lt;%) for the bare pg_trgm word-similarity threshold operator. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-011-hybrid-selectivity-dispatch.xml's vectors-011-2.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_hnsw_first_384(
+    p_query        nexus.vector(384),
+    p_query_text   text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_384 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     ORDER BY c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-011-hybrid-selectivity-dispatch.xml's original bare vectors-011-2 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-011-hybrid-selectivity-dispatch.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_hnsw_first_384(
+    p_query        nexus.vector(384),
+    p_query_text   text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_384 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     ORDER BY c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-26" author="nexus-cbo4a">
+        <comment>nexus.text_gated_search_hnsw_first_768: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type; OPERATOR(nexus.&lt;%) for the bare pg_trgm word-similarity threshold operator. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-011-hybrid-selectivity-dispatch.xml's vectors-011-2.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_hnsw_first_768(
+    p_query        nexus.vector(768),
+    p_query_text   text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_768 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     ORDER BY c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-011-hybrid-selectivity-dispatch.xml's original bare vectors-011-2 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-011-hybrid-selectivity-dispatch.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_hnsw_first_768(
+    p_query        nexus.vector(768),
+    p_query_text   text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_768 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     ORDER BY c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-27" author="nexus-cbo4a">
+        <comment>nexus.text_gated_search_hnsw_first_1024: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type; OPERATOR(nexus.&lt;%) for the bare pg_trgm word-similarity threshold operator. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-011-hybrid-selectivity-dispatch.xml's vectors-011-2.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_hnsw_first_1024(
+    p_query        nexus.vector(1024),
+    p_query_text   text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_1024 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     ORDER BY c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-011-hybrid-selectivity-dispatch.xml's original bare vectors-011-2 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-011-hybrid-selectivity-dispatch.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_hnsw_first_1024(
+    p_query        nexus.vector(1024),
+    p_query_text   text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_1024 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     ORDER BY c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-28" author="nexus-cbo4a">
+        <comment>nexus.text_gated_search_by_chash_384: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-011-hybrid-selectivity-dispatch.xml's vectors-011-3.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_by_chash_384(
+    p_query        nexus.vector(384),
+    p_chashes      bytea[],
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_384 IS NOT NULL
+       AND c.chash = ANY(p_chashes)
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+     ORDER BY c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-011-hybrid-selectivity-dispatch.xml's original bare vectors-011-3 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-011-hybrid-selectivity-dispatch.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_by_chash_384(
+    p_query        nexus.vector(384),
+    p_chashes      bytea[],
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_384 IS NOT NULL
+       AND c.chash = ANY(p_chashes)
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+     ORDER BY c.embedding_384 OPERATOR(nexus.&lt;=&gt;) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-29" author="nexus-cbo4a">
+        <comment>nexus.text_gated_search_by_chash_768: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-011-hybrid-selectivity-dispatch.xml's vectors-011-3.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_by_chash_768(
+    p_query        nexus.vector(768),
+    p_chashes      bytea[],
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_768 IS NOT NULL
+       AND c.chash = ANY(p_chashes)
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+     ORDER BY c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-011-hybrid-selectivity-dispatch.xml's original bare vectors-011-3 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-011-hybrid-selectivity-dispatch.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_by_chash_768(
+    p_query        nexus.vector(768),
+    p_chashes      bytea[],
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_768 IS NOT NULL
+       AND c.chash = ANY(p_chashes)
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+     ORDER BY c.embedding_768 OPERATOR(nexus.&lt;=&gt;) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-30" author="nexus-cbo4a">
+        <comment>nexus.text_gated_search_by_chash_1024: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-011-hybrid-selectivity-dispatch.xml's vectors-011-3.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_by_chash_1024(
+    p_query        nexus.vector(1024),
+    p_chashes      bytea[],
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_1024 IS NOT NULL
+       AND c.chash = ANY(p_chashes)
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+     ORDER BY c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-011-hybrid-selectivity-dispatch.xml's original bare vectors-011-3 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-011-hybrid-selectivity-dispatch.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_by_chash_1024(
+    p_query        nexus.vector(1024),
+    p_chashes      bytea[],
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_1024 IS NOT NULL
+       AND c.chash = ANY(p_chashes)
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+     ORDER BY c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-31" author="nexus-cbo4a">
+        <comment>nexus.taxonomy_ann_query_384: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-013-taxonomy-ann-query.xml's vectors-013-1.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_384(
+    p_embedding         nexus.vector(384),
+    p_collection        text,
+    p_cross_collection  boolean,
+    p_n                 int
+) RETURNS TABLE(topic_id bigint, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT topic_id,
+           (embedding_384 OPERATOR(nexus.&lt;=&gt;) p_embedding)::float8 AS distance
+      FROM nexus.taxonomy_centroids
+     WHERE embedding_384 IS NOT NULL
+       AND (CASE WHEN p_cross_collection THEN collection &lt;&gt; p_collection
+                 ELSE collection = p_collection END)
+     ORDER BY embedding_384 OPERATOR(nexus.&lt;=&gt;) p_embedding, topic_id ASC
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-013-taxonomy-ann-query.xml's original bare vectors-013-1 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-013-taxonomy-ann-query.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_384(
+    p_embedding         nexus.vector(384),
+    p_collection        text,
+    p_cross_collection  boolean,
+    p_n                 int
+) RETURNS TABLE(topic_id bigint, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT topic_id,
+           (embedding_384 OPERATOR(nexus.&lt;=&gt;) p_embedding)::float8 AS distance
+      FROM nexus.taxonomy_centroids
+     WHERE embedding_384 IS NOT NULL
+       AND (CASE WHEN p_cross_collection THEN collection &lt;&gt; p_collection
+                 ELSE collection = p_collection END)
+     ORDER BY embedding_384 OPERATOR(nexus.&lt;=&gt;) p_embedding, topic_id ASC
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-32" author="nexus-cbo4a">
+        <comment>nexus.taxonomy_ann_query_768: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-013-taxonomy-ann-query.xml's vectors-013-1.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_768(
+    p_embedding         nexus.vector(768),
+    p_collection        text,
+    p_cross_collection  boolean,
+    p_n                 int
+) RETURNS TABLE(topic_id bigint, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT topic_id,
+           (embedding_768 OPERATOR(nexus.&lt;=&gt;) p_embedding)::float8 AS distance
+      FROM nexus.taxonomy_centroids
+     WHERE embedding_768 IS NOT NULL
+       AND (CASE WHEN p_cross_collection THEN collection &lt;&gt; p_collection
+                 ELSE collection = p_collection END)
+     ORDER BY embedding_768 OPERATOR(nexus.&lt;=&gt;) p_embedding, topic_id ASC
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-013-taxonomy-ann-query.xml's original bare vectors-013-1 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-013-taxonomy-ann-query.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_768(
+    p_embedding         nexus.vector(768),
+    p_collection        text,
+    p_cross_collection  boolean,
+    p_n                 int
+) RETURNS TABLE(topic_id bigint, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT topic_id,
+           (embedding_768 OPERATOR(nexus.&lt;=&gt;) p_embedding)::float8 AS distance
+      FROM nexus.taxonomy_centroids
+     WHERE embedding_768 IS NOT NULL
+       AND (CASE WHEN p_cross_collection THEN collection &lt;&gt; p_collection
+                 ELSE collection = p_collection END)
+     ORDER BY embedding_768 OPERATOR(nexus.&lt;=&gt;) p_embedding, topic_id ASC
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="search-path-002-33" author="nexus-cbo4a">
+        <comment>nexus.taxonomy_ann_query_1024: qualify every pgvector/pg_trgm extension-object reference now that both extensions live in the nexus schema (the extensions are relocated before this changelog ever runs (nexus.db.pg_provision, every daemon start, local; a documented DBA pre-step, cloud) -- search-path-001 only guards that it happened, never performs it itself): OPERATOR(nexus.&lt;=&gt;) for the cosine-distance operator; nexus.vector(N) for the vector parameter type. NOT a function-level SET search_path pin: that disqualifies this LANGUAGE sql function from planner inlining, breaking the HNSW index pushdown these functions are designed around (verified empirically before choosing explicit qualification instead). Body otherwise byte-for-byte identical to vectors-013-taxonomy-ann-query.xml's vectors-013-1.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_1024(
+    p_embedding         nexus.vector(1024),
+    p_collection        text,
+    p_cross_collection  boolean,
+    p_n                 int
+) RETURNS TABLE(topic_id bigint, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT topic_id,
+           (embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_embedding)::float8 AS distance
+      FROM nexus.taxonomy_centroids
+     WHERE embedding_1024 IS NOT NULL
+       AND (CASE WHEN p_cross_collection THEN collection &lt;&gt; p_collection
+                 ELSE collection = p_collection END)
+     ORDER BY embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_embedding, topic_id ASC
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- nexus-cbo4a batch 9 item 0: this rollback reapplies the SAME qualified body the forward changeset installs, not vectors-013-taxonomy-ann-query.xml's original bare vectors-013-1 body. A genuine bare-body restore is unsafe here: search-path-001's own rollback performs no schema change at all now (a pure guard on the forward path); the extension's schema location is managed entirely outside Liquibase (nexus.db.pg_provision on every daemon start, or a documented DBA pre-step in production) and is never moved back to public by any Liquibase rollback, so it is still in nexus at this point regardless of rollback order, and a bare, unqualified vector/&lt;=&gt; reference would fail to resolve, then this rollback's SQL would raise a hard Postgres error. The function is later DROPPED outright by vectors-013-taxonomy-ann-query.xml's own rollback (further down this reverse sequence), so this transiently-qualified body is never relied on after that point. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_1024(
+    p_embedding         nexus.vector(1024),
+    p_collection        text,
+    p_cross_collection  boolean,
+    p_n                 int
+) RETURNS TABLE(topic_id bigint, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT topic_id,
+           (embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_embedding)::float8 AS distance
+      FROM nexus.taxonomy_centroids
+     WHERE embedding_1024 IS NOT NULL
+       AND (CASE WHEN p_cross_collection THEN collection &lt;&gt; p_collection
+                 ELSE collection = p_collection END)
+     ORDER BY embedding_1024 OPERATOR(nexus.&lt;=&gt;) p_embedding, topic_id ASC
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

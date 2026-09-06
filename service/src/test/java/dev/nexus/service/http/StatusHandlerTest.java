@@ -94,7 +94,7 @@ class StatusHandlerTest {
         // real tracker lives in VoyageEmbedderBatchSplitTest/
         // CceEmbedderParallelTest.
         EmbedActivitySnapshot fake = new EmbedActivitySnapshot(
-                true, 42L, 7L, 3.5, 100L, -1, -1);
+                true, 42L, 7L, 3.5, 100L, -1, -1, 0L);
         var trackedEmbedder = new dev.nexus.service.vectors.Embedder() {
             @Override public String modelToken() { return "voyage-code-3"; }
             @Override public List<float[]> embed(List<String> texts) { return List.of(); }
@@ -112,12 +112,35 @@ class StatusHandlerTest {
         assertThat(perEmbedder.get("chunks_done_total").asLong()).isEqualTo(42L);
         assertThat(perEmbedder.get("queue_depth").asInt()).isEqualTo(-1);
         assertThat(perEmbedder.get("thread_width").asInt()).isEqualTo(-1);
+        assertThat(perEmbedder.get("deadline_aborts_total").asLong()).isEqualTo(0L);
+    }
+
+    @Test
+    void deadlineAbortsTotal_isReportedInBothActivityShapes() throws Exception {
+        // nexus-8hdg9 phases 3/4 ([additive]): the counter the throughput A/B gate
+        // reads. Distinct non-zero values per shape so a swapped source is visible.
+        EmbedActivitySnapshot local = new EmbedActivitySnapshot(
+                false, 10L, 2L, 1.0, 5_000L, 0, 4, 3L);
+        EmbedActivitySnapshot cloud = new EmbedActivitySnapshot(
+                false, 20L, 20L, 2.0, 6_000L, -1, -1, 7L);
+        var trackedEmbedder = new dev.nexus.service.vectors.Embedder() {
+            @Override public String modelToken() { return "voyage-context-3"; }
+            @Override public List<float[]> embed(List<String> texts) { return List.of(); }
+            @Override public EmbedActivitySnapshot activitySnapshot() { return cloud; }
+        };
+        var router = new EmbedderRouter(trackedEmbedder, "document");
+        start(new StatusHandler(router, () -> local));
+
+        JsonNode body = get();
+        assertThat(body.get("local_embed_activity").get("deadline_aborts_total").asLong()).isEqualTo(3L);
+        assertThat(body.get("embedder_activity").get("voyage-context-3")
+                .get("deadline_aborts_total").asLong()).isEqualTo(7L);
     }
 
     @Test
     void withSupplier_reportsRealSnapshotFields() throws Exception {
         EmbedActivitySnapshot fake = new EmbedActivitySnapshot(
-                true, 1024L, 64L, 7.7, 230L, 0, 4);
+                true, 1024L, 64L, 7.7, 230L, 0, 4, 0L);
         start(new StatusHandler(null, () -> fake));
 
         JsonNode body = get();
@@ -130,6 +153,7 @@ class StatusHandlerTest {
         assertThat(activity.get("last_activity_age_ms").asLong()).isEqualTo(230L);
         assertThat(activity.get("queue_depth").asInt()).isEqualTo(0);
         assertThat(activity.get("thread_width").asInt()).isEqualTo(4);
+        assertThat(activity.get("deadline_aborts_total").asLong()).isEqualTo(0L);
     }
 
     @Test

@@ -58,6 +58,46 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class Hygiene001NotNullMigrationRlsTest {
 
+    private static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
+        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
+        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+        su.createStatement().execute(
+            "CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION " + migratingRole);
+        su.createStatement().execute(
+            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_relocated() "
+            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $relofunc$ "
+            + "BEGIN "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "END; "
+            + "$relofunc$");
+        su.createStatement().execute(
+            "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() FROM PUBLIC");
+        su.createStatement().execute(
+            "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO " + migratingRole);
+            su.createStatement().execute(
+                "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated() "
+                + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $unrelofunc$ "
+                + "BEGIN "
+                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'public' THEN "
+                + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA public'; "
+                + "  END IF; "
+                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'public' THEN "
+                + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA public'; "
+                + "  END IF; "
+                + "END; "
+                + "$unrelofunc$");
+            su.createStatement().execute(
+                "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() FROM PUBLIC");
+            su.createStatement().execute(
+                "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO " + migratingRole);
+    }
+
+
     private static final String TARGET_CHANGESET_ID = "hygiene-001-1";
     private static final String MASTER_CHANGELOG = "db/changelog/db.changelog-master.xml";
     private static final String TENANT_1 = "hygiene001-rls-tenant-1";
@@ -339,6 +379,11 @@ class Hygiene001NotNullMigrationRlsTest {
     private static void seedLegacyChunkAndManifest(Connection su, String tenant, String legacyChash)
             throws Exception {
         String collection = tenant + "__coll__voyage-context-3__v1";
+        // Bare (unqualified) ::vector, deliberately NOT ::nexus.vector: this INSERT
+        // runs at migrateUpTo's TARGET_CHANGESET_ID point, well before search-path-001
+        // (placed near the changelog's end) has relocated the extension -- it is
+        // still in `public` here (nexus-cbo4a batch 9 item 0 discovery, same class as
+        // SchemaMigratorIntegrationTest's lateUpgradingDeployment... test).
         su.createStatement().execute(
             "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
             + "VALUES ('" + tenant + "', '" + collection + "', '" + legacyChash + "', "
@@ -411,8 +456,15 @@ class Hygiene001NotNullMigrationRlsTest {
             su.createStatement().execute(
                 "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' "
                 + "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-            su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-            su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+            // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+            // nexus/critique-nexus-cbo4a-batch-9-search-path): see
+            // SchemaMigratorIntegrationTest.bootstrapVectorExtensionsForFreshWalk's own
+            // javadoc for the full derivation -- creates the extensions directly as
+            // `su` and installs a SECURITY DEFINER relocation helper for search-path-
+            // 001's guard to call mid-walk, since this walk resumes through both
+            // vectors-001-baseline.xml and search-path-001/002 in one continuous pass
+            // as a NOSUPERUSER role.
+            bootstrapVectorExtensionsForFreshWalk(su, role);
         }
     }
 

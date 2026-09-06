@@ -62,6 +62,22 @@ class EmbedActivityTrackerTest {
     }
 
     @Test
+    void deadlineAbortsAccumulateIndependentlyOfSubBatchCounts() {
+        // nexus-8hdg9 phases 3/4: an abort is not a sub-batch and must not move the
+        // activity counters; the sub-batch record must not move the abort counter.
+        EmbedActivityTracker tracker = new EmbedActivityTracker(ACTIVE_WINDOW_NANOS);
+        assertThat(tracker.snapshot(0L, -1, -1).deadlineAbortsTotal()).isEqualTo(0L);
+        tracker.record(4, 2.0, 0L);
+        tracker.recordDeadlineAbort();
+        tracker.recordDeadlineAbort();
+
+        EmbedActivitySnapshot snap = tracker.snapshot(0L, -1, -1);
+        assertThat(snap.deadlineAbortsTotal()).isEqualTo(2L);
+        assertThat(snap.subBatchesTotal()).isEqualTo(1L);
+        assertThat(snap.chunksDoneTotal()).isEqualTo(4L);
+    }
+
+    @Test
     void agedPastTheActiveWindowReportsInactiveButKeepsTheCounts() {
         EmbedActivityTracker tracker = new EmbedActivityTracker(ACTIVE_WINDOW_NANOS);
         tracker.record(20, 4.0, 0L);

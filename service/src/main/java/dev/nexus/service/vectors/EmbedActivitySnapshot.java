@@ -38,6 +38,15 @@ package dev.nexus.service.vectors;
  * @param threadWidth       the configured admission-permit ceiling (read from
  *                          {@code LocalOnnxAdmission}), or -1 when no admission
  *                          gate is wired.
+ * @param deadlineAbortsTotal cumulative embed calls this embedder aborted at a
+ *                          cooperative request-deadline check point (nexus-8hdg9
+ *                          phases 3/4; {@code RequestDeadlineExceededException}
+ *                          raised from {@code Bge768Embedder.embedSubBatched} or
+ *                          {@code CceEmbedder.embedParallel}). Monotonic over the
+ *                          process lifetime. The phase-3/4 throughput A/B gate
+ *                          asserts this is ZERO on a healthy run: a non-zero
+ *                          count on a healthy baseline is a failed gate, not a
+ *                          tuning note (design record §4).
  */
 public record EmbedActivitySnapshot(
         boolean active,
@@ -46,5 +55,6 @@ public record EmbedActivitySnapshot(
         double lastChunksPerSec,
         long lastActivityAgeMs,
         int queueDepth,
-        int threadWidth) {
+        int threadWidth,
+        long deadlineAbortsTotal) {
 }

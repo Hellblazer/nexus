@@ -128,7 +128,7 @@ def test_count_list_collections_and_reindex_existence_agree_on_mixed_dim_collect
         "INSERT INTO nexus.chunks "
         "(tenant_id, collection, chash, chunk_text, embedding_1024, metadata, created_at) "
         f"VALUES ('{tenant}', '{_COLLECTION}', decode('{foreign_chash}', 'hex'), "
-        f"'foreign-dim chunk text', '{vec_1024}'::vector, '{{}}'::jsonb, now())"
+        f"'foreign-dim chunk text', '{vec_1024}'::nexus.vector, '{{}}'::jsonb, now())"
     ))
 
     # ── (a) count() <-> list_collections() cross-endpoint agreement ────────

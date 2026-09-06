@@ -1,5 +1,8 @@
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
+import org.jooq.DSLContext;
 import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.SchemaMigrator.MigrationException;
 import liquibase.Contexts;
@@ -57,6 +60,46 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class VectorsUnifyCentroidsIntegrationTest {
 
+    private static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
+        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
+        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+        su.createStatement().execute(
+            "CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION " + migratingRole);
+        su.createStatement().execute(
+            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_relocated() "
+            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $relofunc$ "
+            + "BEGIN "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "END; "
+            + "$relofunc$");
+        su.createStatement().execute(
+            "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() FROM PUBLIC");
+        su.createStatement().execute(
+            "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO " + migratingRole);
+            su.createStatement().execute(
+                "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated() "
+                + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $unrelofunc$ "
+                + "BEGIN "
+                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'public' THEN "
+                + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA public'; "
+                + "  END IF; "
+                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'public' THEN "
+                + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA public'; "
+                + "  END IF; "
+                + "END; "
+                + "$unrelofunc$");
+            su.createStatement().execute(
+                "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() FROM PUBLIC");
+            su.createStatement().execute(
+                "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO " + migratingRole);
+    }
+
+
     private static final String SVC_ROLE = "nexus_svc";
     private static final String SVC_PASS = "nexus_svc_pass";
     // Staged OUTSIDE db/changelog/ — see taxonomy-007-unify-centroids.xml's
@@ -90,8 +133,15 @@ class VectorsUnifyCentroidsIntegrationTest {
             su.createStatement().execute(
                 "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                     + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-            su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-            su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+            // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+            // nexus/critique-nexus-cbo4a-batch-9-search-path): see
+            // SchemaMigratorIntegrationTest.bootstrapVectorExtensionsForFreshWalk's own
+            // javadoc for the full derivation -- creates the extensions directly as
+            // `su` and installs a SECURITY DEFINER relocation helper for search-path-
+            // 001's guard to call mid-walk, since this walk resumes through both
+            // vectors-001-baseline.xml and search-path-001/002 in one continuous pass
+            // as a NOSUPERUSER role.
+            bootstrapVectorExtensionsForFreshWalk(su, role);
         }
         var cfg = new com.zaxxer.hikari.HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
@@ -155,6 +205,13 @@ class VectorsUnifyCentroidsIntegrationTest {
      * registration is needed first: taxonomy_centroids_&lt;dim&gt; carries
      * no FK to catalog_collections or to nexus.topics (verified by direct
      * read of taxonomy-002-centroids.xml's own header).
+     *
+     * <p>Bare (unqualified) {@code ::vector}, deliberately NOT {@code
+     * ::nexus.vector}: every caller of this helper seeds at the {@code
+     * migrateUpTo(rig.adminDs(), "taxonomy-007-1")} boundary, well before
+     * search-path-001 (placed near the changelog's end) has relocated the
+     * extension out of {@code public} (nexus-cbo4a batch 9 item 0
+     * discovery).
      */
     private static void seedCentroid(PostgreSQLContainer<?> pg, int dim, String tenant, String collection,
                                       long topicId, String label) throws Exception {
@@ -182,20 +239,19 @@ class VectorsUnifyCentroidsIntegrationTest {
     }
 
     private static boolean tableExists(Connection conn, String schema, String table) throws Exception {
-        try (var ps = conn.prepareStatement(
-                "SELECT 1 FROM information_schema.tables WHERE table_schema = ? AND table_name = ?")) {
-            ps.setString(1, schema);
-            ps.setString(2, table);
-            var rs = ps.executeQuery();
-            return rs.next();
-        }
+        return PgCatalogProbes.tableExists(DSL.using(conn, SQLDialect.POSTGRES), schema, table);
     }
 
     private static boolean constraintExists(Connection conn, String conname) throws Exception {
-        try (var ps = conn.prepareStatement("SELECT 1 FROM pg_constraint WHERE conname = ?")) {
-            ps.setString(1, conname);
-            return ps.executeQuery().next();
-        }
+        return PgCatalogProbes.constraintExists(DSL.using(conn, SQLDialect.POSTGRES), conname);
+    }
+
+    private static void assertRlsEnabledAndForced(Connection conn, String table) {
+        PgCatalogProbes.RowSecurity rls = PgCatalogProbes.rowSecurity(
+            DSL.using(conn, SQLDialect.POSTGRES), "nexus", table);
+        assertThat(rls).as("nexus.%s must exist in pg_class", table).isNotNull();
+        assertThat(rls.enabled()).isTrue();
+        assertThat(rls.forced()).isTrue();
     }
 
     // ── Test 1: fresh install, full replay from genesis ─────────────────────
@@ -225,18 +281,10 @@ class VectorsUnifyCentroidsIntegrationTest {
                 assertThat(constraintExists(conn, "taxonomy_centroids_exactly_one_embedding")).isTrue();
 
                 // RLS.
-                try (var rs = conn.createStatement().executeQuery(
-                        "SELECT relrowsecurity, relforcerowsecurity FROM pg_class "
-                            + "WHERE relnamespace = 'nexus'::regnamespace AND relname = 'taxonomy_centroids'")) {
-                    assertThat(rs.next()).isTrue();
-                    assertThat(rs.getBoolean("relrowsecurity")).isTrue();
-                    assertThat(rs.getBoolean("relforcerowsecurity")).isTrue();
-                }
-                try (var rs = conn.createStatement().executeQuery(
-                        "SELECT 1 FROM pg_policies WHERE schemaname = 'nexus' AND tablename = 'taxonomy_centroids' "
-                            + "AND policyname = 'tenant_isolation'")) {
-                    assertThat(rs.next()).as("tenant_isolation policy must exist on nexus.taxonomy_centroids").isTrue();
-                }
+                assertRlsEnabledAndForced(conn, "taxonomy_centroids");
+                assertThat(PgCatalogProbes.policyExists(DSL.using(conn, SQLDialect.POSTGRES),
+                        "nexus", "taxonomy_centroids", "tenant_isolation"))
+                    .as("tenant_isolation policy must exist on nexus.taxonomy_centroids").isTrue();
 
                 // Idempotency: a second apply of the SAME changeset must be a no-op.
                 assertThatCode(() -> applyUnifyChangeset(rig.adminDs()))
@@ -324,13 +372,9 @@ class VectorsUnifyCentroidsIntegrationTest {
                         "idx_taxonomy_centroids_embedding_384",
                         "idx_taxonomy_centroids_embedding_768",
                         "idx_taxonomy_centroids_embedding_1024"}) {
-                    try (var ps = conn.prepareStatement(
-                            "SELECT 1 FROM pg_indexes WHERE schemaname = 'nexus' AND indexname = ?")) {
-                        ps.setString(1, idx);
-                        assertThat(ps.executeQuery().next())
-                            .as("%s must exist unconditionally even at zero population", idx)
-                            .isTrue();
-                    }
+                    assertThat(PgCatalogProbes.indexExists(DSL.using(conn, SQLDialect.POSTGRES), "nexus", idx))
+                        .as("%s must exist unconditionally even at zero population", idx)
+                        .isTrue();
                 }
             }
         } finally {
@@ -401,7 +445,7 @@ class VectorsUnifyCentroidsIntegrationTest {
                     try (var ps = su.prepareStatement(
                             "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, label, "
                                 + "embedding_384, embedding_768) "
-                                + "VALUES ('t1', 'c', 101, 'two-embedding-label', ?::vector, ?::vector)")) {
+                                + "VALUES ('t1', 'c', 101, 'two-embedding-label', ?::nexus.vector, ?::nexus.vector)")) {
                         String v384 = "[" + "0.01,".repeat(383) + "0.01]";
                         String v768 = "[" + "0.01,".repeat(767) + "0.01]";
                         ps.setString(1, v384);
@@ -418,7 +462,7 @@ class VectorsUnifyCentroidsIntegrationTest {
                     String vec = "[" + "0.01,".repeat(dim - 1) + "0.01]";
                     try (var ps = su.prepareStatement(
                             "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, label, "
-                                + "embedding_" + dim + ") VALUES ('t1', 'c', ?, 'one-embedding-label', ?::vector)")) {
+                                + "embedding_" + dim + ") VALUES ('t1', 'c', ?, 'one-embedding-label', ?::nexus.vector)")) {
                         ps.setLong(1, 200 + i);
                         ps.setString(2, vec);
                         assertThatCode(ps::executeUpdate)
@@ -445,20 +489,13 @@ class VectorsUnifyCentroidsIntegrationTest {
                         "idx_taxonomy_centroids_embedding_384",
                         "idx_taxonomy_centroids_embedding_768",
                         "idx_taxonomy_centroids_embedding_1024"}) {
-                    try (var ps = conn.prepareStatement(
-                            "SELECT pg_get_indexdef(indexrelid), amname FROM pg_index i "
-                                + "JOIN pg_class c ON c.oid = i.indexrelid "
-                                + "JOIN pg_am am ON am.oid = c.relam "
-                                + "WHERE c.relname = ?")) {
-                        ps.setString(1, idx);
-                        var rs = ps.executeQuery();
-                        assertThat(rs.next()).as("%s must exist", idx).isTrue();
-                        String def = rs.getString(1);
-                        assertThat(rs.getString("amname")).isEqualTo("hnsw");
-                        assertThat(def.toUpperCase())
-                            .as("%s must carry NO WHERE ... IS NOT NULL predicate", idx)
-                            .doesNotContain("WHERE");
-                    }
+                    PgCatalogProbes.IndexShape shape = PgCatalogProbes.indexShape(
+                        DSL.using(conn, SQLDialect.POSTGRES), idx);
+                    assertThat(shape).as("%s must exist", idx).isNotNull();
+                    assertThat(shape.amname()).isEqualTo("hnsw");
+                    assertThat(shape.indexdef().toUpperCase())
+                        .as("%s must carry NO WHERE ... IS NOT NULL predicate", idx)
+                        .doesNotContain("WHERE");
                 }
             }
         } finally {
@@ -513,22 +550,11 @@ class VectorsUnifyCentroidsIntegrationTest {
                 // octet CHECK / FK analog to verify here (neither exists on
                 // this family — see file header divergences 1/2).
                 for (String dim : new String[] {"384", "768", "1024"}) {
-                    try (var ps = conn.prepareStatement(
-                            "SELECT relrowsecurity, relforcerowsecurity FROM pg_class "
-                                + "WHERE relnamespace = 'nexus'::regnamespace AND relname = ?")) {
-                        ps.setString(1, "taxonomy_centroids_" + dim);
-                        var rs = ps.executeQuery();
-                        assertThat(rs.next()).isTrue();
-                        assertThat(rs.getBoolean("relrowsecurity")).isTrue();
-                        assertThat(rs.getBoolean("relforcerowsecurity")).isTrue();
-                    }
-                    try (var ps = conn.prepareStatement(
-                            "SELECT 1 FROM pg_indexes WHERE schemaname = 'nexus' AND indexname = ?")) {
-                        ps.setString(1, "idx_taxonomy_centroids_" + dim + "_embedding");
-                        assertThat(ps.executeQuery().next())
-                            .as("taxonomy_centroids_%s's HNSW index must be restored", dim)
-                            .isTrue();
-                    }
+                    assertRlsEnabledAndForced(conn, "taxonomy_centroids_" + dim);
+                    assertThat(PgCatalogProbes.indexExists(DSL.using(conn, SQLDialect.POSTGRES),
+                            "nexus", "idx_taxonomy_centroids_" + dim + "_embedding"))
+                        .as("taxonomy_centroids_%s's HNSW index must be restored", dim)
+                        .isTrue();
                 }
 
                 // Re-apply must succeed cleanly (the round-trip's other half).

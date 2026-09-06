@@ -39,13 +39,17 @@ def fetch_engine_status(*, timeout: float = 5.0) -> dict | None:
         from nexus.db.service_endpoint import (  # noqa: PLC0415 — deferred to keep CLI startup fast
             resolve_service_endpoint_with_evidence_gate,
         )
-        base_url, _token = resolve_service_endpoint_with_evidence_gate()
+        base_url, token = resolve_service_endpoint_with_evidence_gate()
     except Exception as exc:  # noqa: BLE001 — fail-closed: an unresolvable endpoint is "unprobeable", not a crash
         _log.debug("engine_status_endpoint_unresolvable", error=str(exc))
         return None
 
     try:
-        resp = httpx.get(f"{base_url.rstrip('/')}/v1/status", timeout=timeout)
+        # /v1/status is under the auth-gated /v1 prefix: the public edge answers
+        # 403 to a bare GET and 200 with the resolved token (nexus-grzai; the
+        # unauthenticated probe reported a false UNKNOWN on every cloud box).
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        resp = httpx.get(f"{base_url.rstrip('/')}/v1/status", headers=headers, timeout=timeout)
         resp.raise_for_status()
         body = resp.json()
     except Exception as exc:  # noqa: BLE001 — fail-closed: a transport blip or a pre-nexus-s71lr engine (404) is "unprobeable"

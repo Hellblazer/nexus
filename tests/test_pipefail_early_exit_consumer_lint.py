@@ -796,13 +796,13 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # fix's own verification" so each transform is checked against a
         # real rehearsal rather than reviewed by inspection alone.
         "tests/e2e/migration-rehearsal/rehearse.sh:125",
-        "tests/e2e/migration-rehearsal/rehearse.sh:161",
-        "tests/e2e/migration-rehearsal/rehearse.sh:181",
-        "tests/e2e/migration-rehearsal/rehearse.sh:187",
-        "tests/e2e/migration-rehearsal/rehearse.sh:252",
-        "tests/e2e/migration-rehearsal/rehearse.sh:274",
-        "tests/e2e/migration-rehearsal/rehearse.sh:300",
-        "tests/e2e/migration-rehearsal/rehearse.sh:301",
+        "tests/e2e/migration-rehearsal/rehearse.sh:166",
+        "tests/e2e/migration-rehearsal/rehearse.sh:186",
+        "tests/e2e/migration-rehearsal/rehearse.sh:192",
+        "tests/e2e/migration-rehearsal/rehearse.sh:257",
+        "tests/e2e/migration-rehearsal/rehearse.sh:279",
+        "tests/e2e/migration-rehearsal/rehearse.sh:305",
+        "tests/e2e/migration-rehearsal/rehearse.sh:306",
         "tests/e2e/migration-rehearsal/rehearse_acquire.sh:122",
         "tests/e2e/migration-rehearsal/rehearse_acquire.sh:80",
         "tests/e2e/migration-rehearsal/rehearse_cold.sh:113",
@@ -857,17 +857,17 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # regenerated from the detector itself (_early_exit_consumer_hits),
         # not arithmetic.
         "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:133",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:217",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:220",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:230",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:236",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:222",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:225",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:235",
         "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:241",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:247",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:256",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:267",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:275",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:279",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:343",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:246",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:252",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:261",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:272",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:280",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:284",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:366",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:142",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:193",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:238",
@@ -931,16 +931,17 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # truncate a producer still doing work. This list is line-pinned, so
         # ANY edit to run.sh restale-izes it; that fragility is the lint's
         # own known shape, not a defect introduced here.
-        "tests/e2e/migration-rehearsal/run.sh:180",
-        "tests/e2e/migration-rehearsal/run.sh:198",
-        "tests/e2e/migration-rehearsal/run.sh:199",
-        "tests/e2e/migration-rehearsal/run.sh:212",
-        "tests/e2e/migration-rehearsal/run.sh:223",
-        "tests/e2e/migration-rehearsal/run.sh:653",
-        "tests/e2e/migration-rehearsal/run.sh:691",
-        "tests/e2e/migration-rehearsal/run.sh:746",
-        "tests/e2e/migration-rehearsal/run.sh:763",
-        "tests/e2e/migration-rehearsal/run.sh:811",
+        # Retargeted 2026-09-06 (nexus-mfage fix B): the --artifacts
+        # option block shifted the version extractions +9, and the five
+        # `cp "$(ls -t dist/conexus-*.whl | head -1)"` wheel picks collapsed
+        # into ONE site inside the stage_wheel() seam (:701 after items 2-3). Four entries
+        # retired with the four duplicate sites; ceiling 136 -> 132.
+        "tests/e2e/migration-rehearsal/run.sh:190",
+        "tests/e2e/migration-rehearsal/run.sh:208",
+        "tests/e2e/migration-rehearsal/run.sh:209",
+        "tests/e2e/migration-rehearsal/run.sh:222",
+        "tests/e2e/migration-rehearsal/run.sh:233",
+        "tests/e2e/migration-rehearsal/run.sh:701",
         # --- tests/e2e/mac-signed-binary-gate.sh (7 entries): needs an
         # actually-signed macOS binary + `spctl`/`codesign` on real macOS
         # to safely verify a rewrite of the signature-inspection logic.
@@ -962,14 +963,17 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # lines and shifted every site below the first extraction point
         # (:107 in the pre-edit file). Numbers regenerated from the
         # detector itself (_early_exit_consumer_hits), not arithmetic.
-        "service/native-smoke.sh:89",
-        "service/native-smoke.sh:142",
-        "service/native-smoke.sh:203",
-        "service/native-smoke.sh:255",
-        "service/native-smoke.sh:347",
-        "service/native-smoke.sh:385",
-        "service/native-smoke.sh:391",
-        "service/native-smoke.sh:394",
+        # Retargeted again (nexus-9gaj7): a 2-line comment landed ahead
+        # of the "$BIN" launch line (-Duser.timezone=UTC defense-in-depth),
+        # shifting every site below it by +2.
+        "service/native-smoke.sh:91",
+        "service/native-smoke.sh:144",
+        "service/native-smoke.sh:205",
+        "service/native-smoke.sh:257",
+        "service/native-smoke.sh:349",
+        "service/native-smoke.sh:387",
+        "service/native-smoke.sh:393",
+        "service/native-smoke.sh:396",
         # --- service/linux-native-verify.sh:43 (1 entry): a GENUINE
         # FALSE POSITIVE, not a "needs live infra" deferral -- the
         # matched pipe (`native-image --version | head -1`) sits inside a
@@ -1036,12 +1040,12 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:303",
         "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:353",
         "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:356",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:441",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:477",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:480",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:496",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:501",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:506",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:447",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:483",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:486",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:502",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:507",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:512",
     }
 )
 # 157: +1 for rehearse_package_upgrade.sh:173 -- the 898d41762 axis-naming
@@ -1062,7 +1066,7 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
 # `head -1` site, deleted with the leg) removed entries wholesale:
 # 169 - 21 - 15 - 1 = 132. The remaining 5 run.sh sites were retargeted in
 # place, not counted as a change.
-_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 136
+_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 132
 
 
 def test_pipefail_early_exit_exempt_ratchet() -> None:
@@ -1183,7 +1187,7 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         #   this guarded site itself gates nothing.
         #   Retargeted AGAIN (nexus-l8xnz): +12 for the Phase F header
         #   addition described above -- :264 -> :276, :128 -> :140.
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:341",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:364",
         "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:186",
         # tests/e2e/release-sandbox.sh (3 entries): the already-commented
         # `|| true: head is an early-exit consumer...` idiom this file's
@@ -1204,9 +1208,9 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         #   can be appended only for --check-schema, +11 lines before this
         #   region): :1130 -> :1141, :1134 -> :1145, :1182 -> :1193. Same 3
         #   sites, same rationale -- only an earlier, unrelated loop grew.
-        "tests/e2e/release-sandbox.sh:1230",
-        "tests/e2e/release-sandbox.sh:1234",
-        "tests/e2e/release-sandbox.sh:1282",
+        "tests/e2e/release-sandbox.sh:1238",
+        "tests/e2e/release-sandbox.sh:1242",
+        "tests/e2e/release-sandbox.sh:1290",
     }
 )
 _PIPEFAIL_OR_TRUE_SITES_CEILING = 9

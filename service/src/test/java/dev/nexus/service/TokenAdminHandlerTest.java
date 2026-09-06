@@ -7,12 +7,6 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TokenHashing;
 import org.testcontainers.containers.PostgreSQLContainer;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -51,16 +45,7 @@ class TokenAdminHandlerTest {
     void startAll() throws Exception {
         pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='nexus_svc') THEN "
-                + "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
-        }
-        try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(), db).update(new Contexts());
+            PgContainerHelper.applyProductSchema(su);
         }
         // Seed the persistent root token (Phase E nexus-gmiaf.32.5) used to authenticate
         // the admin calls: BOUND to the default tenant with ROOT_TOKEN_LABEL so the
@@ -93,7 +78,9 @@ class TokenAdminHandlerTest {
         cfg.setPassword(PgContainerHelper.SVC_PASSWORD);
         cfg.setMaximumPoolSize(5);
         cfg.setAutoCommit(true);
-        cfg.setConnectionInitSql("SET search_path TO nexus, t1, public");
+        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): no session
+        // search_path connectionInitSql; jOOQ generated Tables render fully
+        // schema-qualified SQL regardless of search_path.
         ds = new HikariDataSource(cfg);
 
         service = new NexusService(0, BOOT, ds);

@@ -158,7 +158,7 @@ class CombinedWriteRepositoryTest {
             String zeroVec = "[" + "0,".repeat(383) + "0]";
             var ps = su.prepareStatement(
                 "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ")"
-                + " VALUES (?, ?, ?, ?, ?::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+                + " VALUES (?, ?, ?, ?, ?::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
             ps.setString(1, tenant);
             ps.setString(2, collection);
             ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));

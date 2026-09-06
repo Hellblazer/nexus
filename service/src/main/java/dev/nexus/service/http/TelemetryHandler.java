@@ -15,10 +15,13 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * RDR-152 bead nexus-gmiaf.12 — Telemetry HTTP endpoints.
@@ -42,6 +45,7 @@ import java.util.Map;
  *                                              exact total (nexus-onjvy)
  *   GET  /v1/telemetry/retention/markers       cumulative-deletes retention markers (nexus-24p05)
  *   POST /v1/telemetry/nx_answer_runs/record   record an nx_answer run
+ *   POST /v1/telemetry/nx_answer_runs/complete one-transaction run+steps+plan-counters (RDR-203)
  *   GET  /v1/telemetry/nx_answer_runs/query     rows + exact aggregates (nexus-eho3u)
  *   POST /v1/telemetry/hook_failures/record    record a hook failure
  *   GET  /v1/telemetry/hook_failures/list      list hook failures + exact totals (nexus-onjvy)
@@ -158,6 +162,7 @@ public final class TelemetryHandler implements HttpHandler {
                 case "/tier_writes/list"       -> handleTierWritesList(exchange, tenant, method);
                 case "/retention/markers"      -> handleRetentionMarkers(exchange, tenant, method);
                 case "/nx_answer_runs/record"  -> handleNxAnswerRunRecord(exchange, tenant, method);
+                case "/nx_answer_runs/complete" -> handleNxAnswerRunComplete(exchange, tenant, method);
                 case "/nx_answer_runs/query"   -> handleNxAnswerRunsQuery(exchange, tenant, method);
                 case "/hook_failures/record"   -> handleHookFailureRecord(exchange, tenant, method);
                 case "/hook_failures/list"     -> handleHookFailureList(exchange, tenant, method);
@@ -404,6 +409,95 @@ public final class TelemetryHandler implements HttpHandler {
         repo.recordNxAnswerRun(tenant, question, planId, conf, stepCount, finalText, cost,
             durationMsV, createdAt, steps);
         HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    /**
+     * The closed vocabulary D1 (RDR-203) allows for {@code outcome} on
+     * {@code POST /v1/telemetry/nx_answer_runs/complete}.
+     */
+    private static final Set<String> VALID_NX_ANSWER_OUTCOMES = Set.of("success", "failure");
+
+    /**
+     * {@code POST /v1/telemetry/nx_answer_runs/complete} (RDR-203 D1/D2) — the
+     * one-transaction composite: {@code /record}'s body plus two additional
+     * REQUIRED fields, {@code outcome} and {@code created_at}, both enforced
+     * with a 400 naming the field rather than any silent default (D1's
+     * no-silent-fallback-for-correctness rule, the same reasoning already
+     * applied to a step's {@code ok} and {@code step_index}). This is a
+     * {@code /complete}-only rule: {@link #handleNxAnswerRunRecord} above
+     * keeps its exact lenient handling untouched (absent {@code created_at}
+     * stamps {@code now()} inside {@code TelemetryRepository.recordNxAnswerRun}),
+     * because the ETL path, the RDR-203 D6 survivors and {@code
+     * nx_answer_report} all rely on that leniency.
+     *
+     * <p>{@code created_at} is parsed here, in the handler, rather than being
+     * handed to the repository as a raw string and reparsed leniently there —
+     * the point of requiring it on this route is that a retried composite
+     * POST must carry the SAME {@code created_at} so the engine's dedup index
+     * {@code (tenant_id, question, created_at)} can recognise the replay (D3);
+     * a lenient reparse that could silently substitute {@code now()} on any
+     * edge case would defeat that.
+     */
+    private void handleNxAnswerRunComplete(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        String question = requireString(body, "question");
+        Long planId      = optLongNull(body, "plan_id");
+        Double conf      = optDoubleNull(body, "matched_confidence");
+        int stepCount    = optInt(body, "step_count", 0);
+        String finalText = optStr(body, "final_text");
+        Double cost      = optDoubleNull(body, "cost_usd");
+        Long durationMs  = optLongNull(body, "duration_ms");
+        long durationMsV = durationMs != null ? durationMs : 0L;
+        boolean success  = requireOutcome(body);
+        OffsetDateTime createdAt = requireCreatedAt(body);
+        List<TelemetryRepository.StepInput> steps = parseNxAnswerSteps(body.get("steps"));
+        repo.recordNxAnswerRunComplete(tenant, question, planId, conf, stepCount, finalText, cost,
+            durationMsV, createdAt, steps, success);
+        HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    /**
+     * D1 (RDR-203): {@code outcome} is a closed vocabulary of exactly
+     * {@code "success"} and {@code "failure"}. A missing or unrecognized
+     * value is a 400 naming the field, never a default — a string rather than
+     * a boolean because {@code success: false} on a request body invites
+     * being read as "the request itself failed" rather than "the run's
+     * outcome was a failure".
+     */
+    private boolean requireOutcome(Map<String, Object> body) {
+        String outcome = requireString(body, "outcome");
+        if (!VALID_NX_ANSWER_OUTCOMES.contains(outcome)) {
+            throw new IllegalArgumentException(
+                "Field 'outcome' must be one of \"success\", \"failure\": \"" + outcome + "\"");
+        }
+        return "success".equals(outcome);
+    }
+
+    /**
+     * D1 (RDR-203): {@code created_at} is REQUIRED on {@code /complete} —
+     * missing, blank or unparsable is a 400 naming the field. It is the dedup
+     * key that makes a retried composite POST idempotent (D3): stamping
+     * {@code now()} on each retry attempt, the way {@code /record} does when
+     * the field is absent, would mean the dedup index never matches and a
+     * lost response would double-apply the plan counters.
+     *
+     * <p>Accepts the same two ISO-8601 shapes {@code
+     * TelemetryRepository.parseTsStrict} accepts on the ETL path ({@code
+     * ...Z} or {@code ...+00:00}) — this method is not a call to that method
+     * (different package: {@code parseTsStrict} is package-private to {@code
+     * dev.nexus.service.db}), but the same parse strategy, so the two 400
+     * paths ({@code /complete}'s live-write requirement and the ETL import's
+     * fidelity requirement) read identically shaped input the same way.
+     */
+    private OffsetDateTime requireCreatedAt(Map<String, Object> body) {
+        String raw = requireString(body, "created_at");
+        try {
+            return OffsetDateTime.parse(raw.endsWith("Z") ? raw.replace("Z", "+00:00") : raw);
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException(
+                "Field 'created_at' is not a valid ISO-8601 timestamp: \"" + raw + "\"", e);
+        }
     }
 
     /**
@@ -710,6 +804,33 @@ public final class TelemetryHandler implements HttpHandler {
      * entirely (or {@code null}) on a {@code blindspot=true} record, which
      * this handler never rejects — a census that could not measure the
      * transcript still records THAT fact.
+     *
+     * <p>nexus-gjv9b PART 3 prerequisite: two OPTIONAL sibling objects,
+     * {@code capabilities_orchestrator} and {@code capabilities_subagent}
+     * (same 8-value vocabulary, same shape as {@code capabilities}), carry
+     * the orchestrator/subagent-split dimension the transcript-walk reader
+     * already has. Additive — a caller sending neither (an old client, or
+     * a blindspot record) leaves {@code capabilities_by_scope} NULL, the
+     * exact pre-PART-3 write.
+     *
+     * <p>SINGLE SOURCE OF TRUTH (critique-nexus-gjv9b-part3-9695b260f
+     * Significant 4): when a caller sends the split, this handler rejects
+     * (400) any capability whose flat {@code capabilities} count does not
+     * equal the sum of its {@code capabilities_orchestrator} +
+     * {@code capabilities_subagent} counts — two disagreeing views of one
+     * measurement must never both land. The client (this bead's own
+     * writer, {@code _session_end_census.build_capability_census_record})
+     * DERIVES the flat total from the split rather than computing it
+     * independently, so this check should never fire against the shipped
+     * writer; it exists for any OTHER caller (a manual API write, a
+     * different SDK, a partial migration) that could otherwise write
+     * inconsistent values with no defined "which wins". Readers: the flat
+     * {@code cap_*} columns / {@code capabilities} field remain the
+     * authoritative source for total counts (unchanged consumers keep
+     * working untouched); {@code capabilities_by_scope} is authoritative
+     * ONLY for the orchestrator/subagent split dimension, never a second
+     * source for the total — this validation is what keeps that promise
+     * true rather than merely documented.
      */
     private void handleCapabilityCensusRecord(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -718,20 +839,70 @@ public final class TelemetryHandler implements HttpHandler {
         String ts        = optStr(body, "ts");
         boolean blindspot = Boolean.TRUE.equals(body.get("blindspot"));
         String unmeasurableReason = optStrNull(body, "unmeasurable_reason");
-        Map<String, Integer> capabilities = new java.util.LinkedHashMap<>();
-        Object rawCaps = body.get("capabilities");
-        if (rawCaps instanceof Map<?, ?> m) {
-            for (var e : m.entrySet()) {
-                if (e.getKey() instanceof String k && e.getValue() instanceof Number n) {
-                    capabilities.put(k, n.intValue());
-                }
+        Map<String, Integer> capabilities = extractCapsMap(body.get("capabilities"));
+        Map<String, Integer> capabilitiesOrchestrator = extractCapsMap(body.get("capabilities_orchestrator"));
+        Map<String, Integer> capabilitiesSubagent = extractCapsMap(body.get("capabilities_subagent"));
+        String capabilitiesByScopeJson = null;
+        if (!capabilitiesOrchestrator.isEmpty() || !capabilitiesSubagent.isEmpty()) {
+            if (!blindspot) {
+                requireFlatMatchesScopeSum(capabilities, capabilitiesOrchestrator, capabilitiesSubagent);
             }
+            var byScope = new java.util.LinkedHashMap<String, Object>();
+            byScope.put("orchestrator", capabilitiesOrchestrator);
+            byScope.put("subagent", capabilitiesSubagent);
+            capabilitiesByScopeJson = json(byScope);
         }
         Integer dispatches = optInt(body, "dispatches");
         Integer totalCalls = optInt(body, "total_calls");
         repo.recordCapabilityCensus(tenant, sessionId, ts, blindspot, unmeasurableReason,
-            capabilities, dispatches, totalCalls);
+            capabilities, dispatches, totalCalls, capabilitiesByScopeJson);
         HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    /**
+     * Reject (400) any capability where {@code flat[cap] != orchestrator
+     * .getOrDefault(cap,0) + subagent.getOrDefault(cap,0)} — the union of
+     * keys across all three maps, so a capability present ONLY in the
+     * split (never in the flat map) is checked against an implicit flat
+     * zero, and vice versa.
+     */
+    private void requireFlatMatchesScopeSum(Map<String, Integer> flat,
+                                            Map<String, Integer> orchestrator,
+                                            Map<String, Integer> subagent) {
+        var keys = new java.util.LinkedHashSet<String>();
+        keys.addAll(flat.keySet());
+        keys.addAll(orchestrator.keySet());
+        keys.addAll(subagent.keySet());
+        for (String k : keys) {
+            int flatCount = flat.getOrDefault(k, 0);
+            int scopeSum = orchestrator.getOrDefault(k, 0) + subagent.getOrDefault(k, 0);
+            if (flatCount != scopeSum) {
+                throw new IllegalArgumentException(
+                    "capabilities['" + k + "']=" + flatCount + " does not equal "
+                    + "capabilities_orchestrator+capabilities_subagent=" + scopeSum
+                    + " for that capability -- the flat total must be the sum over scopes");
+            }
+        }
+    }
+
+    /**
+     * Coerce a {@code capabilities}-shaped request field (a JSON object of
+     * string keys to numeric values) into {@code Map<String, Integer>}.
+     * Anything else (absent, {@code null}, wrong element types) yields an
+     * empty map rather than a 400 — the three capability_census callers of
+     * this helper (nexus-gjv9b PART 3 prerequisite) all treat "empty" and
+     * "absent" identically (a blindspot record, or a pre-split client).
+     */
+    private Map<String, Integer> extractCapsMap(Object raw) {
+        Map<String, Integer> caps = new java.util.LinkedHashMap<>();
+        if (raw instanceof Map<?, ?> m) {
+            for (var e : m.entrySet()) {
+                if (e.getKey() instanceof String k && e.getValue() instanceof Number n) {
+                    caps.put(k, n.intValue());
+                }
+            }
+        }
+        return caps;
     }
 
     /**

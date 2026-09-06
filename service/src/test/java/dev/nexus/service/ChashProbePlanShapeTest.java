@@ -72,16 +72,6 @@ class ChashProbePlanShapeTest {
         pg = PgContainerHelper.start();
 
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
-                "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; " +
-                "  END IF; " +
-                "END $$");
-        }
-
-        try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
         }
 
@@ -129,7 +119,7 @@ class ChashProbePlanShapeTest {
                     "       decode(md5('p" + dim + "-' || i) || md5('q" + dim + "-' || i), 'hex'), " +
                     "       'plan chunk ' || i, v.vec " +
                     "FROM generate_series(1, " + CHUNKS_PER_DIM + ") i " +
-                    "CROSS JOIN (SELECT ('[1' || repeat(',0', " + (dim - 1) + ") || ']')::vector AS vec) v");
+                    "CROSS JOIN (SELECT ('[1' || repeat(',0', " + (dim - 1) + ") || ']')::nexus.vector AS vec) v");
             }
 
             // A multi-collection sample: one 768-derived chash also lands in
@@ -140,7 +130,7 @@ class ChashProbePlanShapeTest {
                 "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) " +
                 "SELECT '" + TENANT + "', 'plan-384', " +
                 "       decode('" + liveChash(768, 42) + "', 'hex'), 'cross-model copy', " +
-                "       ('[1' || repeat(',0', 383) || ']')::vector");
+                "       ('[1' || repeat(',0', 383) || ']')::nexus.vector");
             PgContainerHelper.analyzeTable(su, CHUNKS);
         }
     }

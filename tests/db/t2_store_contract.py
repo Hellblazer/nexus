@@ -357,6 +357,15 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         # the read surface's first and only home, not a port of a SQLite
         # reader, so it needs the supplemental entry.
         'query_nx_answer_runs': ['since', 'limit'],
+        # RDR-203 D1/P3 (nexus-dt2tu.3): POST /v1/telemetry/nx_answer_runs/complete
+        # is a brand-new route added long after every SQLite store was
+        # deleted (RDR-158 P4) — service-mode-only by construction, same
+        # no-twin shape as list_hook_failures/query_nx_answer_runs above.
+        'record_nx_answer_run_complete': [
+            'question', 'plan_id', 'matched_confidence', 'step_count',
+            'final_text', 'cost_usd', 'duration_ms', 'created_at', 'steps',
+            'success',
+        ],
         # nexus-nukn3: index_failures is a brand-new table (no SQLite
         # predecessor at all — RDR-158 P4 had already deleted every SQLite
         # store before this table existed), so all three methods are
@@ -373,9 +382,16 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         # ~/.config/nexus/capability_census.jsonl (Sam directive
         # 2026-08-20) — service-only by construction, no SQLite twin ever
         # existed for a table that did not exist until this bead.
+        # nexus-gjv9b PART 3 prerequisite: capabilities_orchestrator /
+        # capabilities_subagent are NEW trailing params (the orchestrator/
+        # subagent-split dimension), appended before the pre-existing
+        # timeout kwarg — legitimate re-signaturing per this file's own
+        # docstring, not the reorder-the-prefix drift the parity check
+        # guards against (the first eight names are unchanged, in order).
         'record_capability_census': [
             'session_id', 'ts', 'blindspot', 'unmeasurable_reason',
-            'capabilities', 'dispatches', 'total_calls', 'timeout',
+            'capabilities', 'dispatches', 'total_calls',
+            'capabilities_orchestrator', 'capabilities_subagent', 'timeout',
         ],
         'query_capability_census': ['session_id', 'since', 'limit'],
         # nexus-gjv9b review fold-in, critique Significant 4: retention,

@@ -125,7 +125,7 @@ class PgVectorRepositoryDimGuardTest {
              PreparedStatement ps = su.prepareStatement(
                  "INSERT INTO nexus.chunks "
                  + "(tenant_id, collection, chash, chunk_text, embedding_768, metadata, created_at) "
-                 + "VALUES (?, ?, decode(?, 'hex'), ?, ?::vector, '{}'::jsonb, now())")) {
+                 + "VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector, '{}'::jsonb, now())")) {
             su.setAutoCommit(true);
             ps.setString(1, TENANT);
             ps.setString(2, COLLECTION);
@@ -148,7 +148,7 @@ class PgVectorRepositoryDimGuardTest {
              PreparedStatement ps = su.prepareStatement(
                  "INSERT INTO nexus.chunks "
                  + "(tenant_id, collection, chash, chunk_text, embedding_768, metadata, created_at) "
-                 + "VALUES (?, ?, decode(?, 'hex'), ?, ?::vector, '{}'::jsonb, now())")) {
+                 + "VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector, '{}'::jsonb, now())")) {
             su.setAutoCommit(true);
             ps.setString(1, TENANT);
             ps.setString(2, COLLECTION_NULLGUARD);

@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
@@ -34,17 +36,9 @@ class UpdatedAtTriggerTest {
     @BeforeAll
     void startAll() throws Exception {
         pg = PgContainerHelper.start();
+        // role-001 (the master changelog's first include) creates nexus_svc.
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='nexus_svc') THEN "
-                + "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
-        }
-        try (Connection su = pg.createConnection("")) {
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(),
-                DatabaseFactory.getInstance().findCorrectDatabaseImplementation(
-                    new JdbcConnection(su))).update(new Contexts());
+            PgContainerHelper.applyProductSchema(su);
         }
     }
 
@@ -86,11 +80,10 @@ class UpdatedAtTriggerTest {
     @Test
     void stampFunction_isSecurityInvoker() throws Exception {
         try (Connection c = pg.createConnection("")) {
-            ResultSet rs = c.createStatement().executeQuery(
-                "SELECT prosecdef FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
-                + "WHERE n.nspname = 'nexus' AND p.proname = 'stamp_updated_at'");
-            assertThat(rs.next()).as("stamp_updated_at must exist").isTrue();
-            assertThat(rs.getBoolean("prosecdef"))
+            Boolean prosecdef = PgCatalogProbes.routineSecurityDefiner(
+                DSL.using(c, SQLDialect.POSTGRES), "nexus", "stamp_updated_at");
+            assertThat(prosecdef).as("stamp_updated_at must exist").isNotNull();
+            assertThat(prosecdef)
                 .as("stamp_updated_at must be SECURITY INVOKER (prosecdef=false)").isFalse();
         }
     }
@@ -157,9 +150,6 @@ class UpdatedAtTriggerTest {
     }
 
     private static boolean hasColumn(Connection c, String table, String col) throws Exception {
-        ResultSet rs = c.createStatement().executeQuery(
-            "SELECT 1 FROM information_schema.columns WHERE table_schema = 'nexus' "
-            + "AND table_name = '" + table + "' AND column_name = '" + col + "'");
-        return rs.next();
+        return PgCatalogProbes.columnExists(DSL.using(c, SQLDialect.POSTGRES), "nexus", table, col);
     }
 }

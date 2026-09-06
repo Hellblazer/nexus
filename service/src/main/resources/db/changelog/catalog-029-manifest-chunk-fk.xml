@@ -255,10 +255,16 @@ ALTER TABLE nexus.catalog_document_chunks VALIDATE CONSTRAINT fk_catalog_chunks_
             function level: unlike every other statement in this body (already
             schema-qualified), SET CONSTRAINTS's constraint_name has no
             schema-qualification syntax in Postgres -- it resolves via the CALLING
-            session's search_path. Production nexus_svc connections get "nexus" on
-            their search_path via HikariCP connection properties, but any other
-            caller (a superuser session with the Postgres default search_path, an
-            ad-hoc psql session, a test harness's raw JDBC connection) does not, and
+            session's search_path. STALE-PROSE CORRECTION (nexus-cbo4a batch 9 item 0,
+            2026-09-06, T2 nexus/critique-nexus-cbo4a-batch-9-gated SIGNIFICANT 3):
+            this comment previously said production nexus_svc connections got "nexus"
+            on their search_path via HikariCP connectionInitSql -- that mechanism is
+            DELETED as of this same batch (Main.java no longer sets it for any pool).
+            The point stands regardless: NO caller (nexus_svc included, now that its
+            own session search_path is never pinned either) can rely on "nexus" being
+            on the calling session's search_path, and a superuser session with the
+            Postgres default search_path, an ad-hoc psql session, or a test harness's
+            raw JDBC connection never had it in the first place, so
             SET CONSTRAINTS fk_catalog_chunks_chunk DEFERRED then fails with
             "constraint fk_catalog_chunks_chunk does not exist" even though the
             constraint is right there on nexus.catalog_document_chunks. Pinning the

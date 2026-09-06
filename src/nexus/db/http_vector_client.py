@@ -490,6 +490,12 @@ def _request_once(
         "Authorization": f"Bearer {token}",
         "X-Nexus-Tenant": tenant,
     }
+    # nexus-8hdg9 phase 5: declare the client's embed budget on the routes
+    # that carry one (see _REQUEST_DEADLINE_MS_BY_PATH_SUFFIX). Advisory and
+    # additive -- an engine that does not know the header ignores it.
+    deadline_ms = _request_deadline_ms_for(path)
+    if deadline_ms is not None:
+        headers[_REQUEST_DEADLINE_HEADER] = str(deadline_ms)
     data = None
     if body is not None:
         headers["Content-Type"] = "application/json"
@@ -1242,16 +1248,71 @@ _T3_WRITE_PATH_SUFFIXES: tuple[str, ...] = (
 )
 
 
+#: Socket timeout (seconds) for the two ``/v1/vectors/upsert-chunks`` call
+#: sites below. nexus-8hdg9 phase 2 critique remediation (T2
+#: ``critique-nexus-8hdg9-p2-5ce59b36d`` [24651] finding 3): this value MUST
+#: stay strictly ABOVE the Java engine's ``RequestDeadline.DEFAULT_DEADLINE_MS``
+#: (``service/src/main/java/dev/nexus/service/http/RequestDeadline.java``,
+#: currently 300_000ms) — otherwise this client's own socket read would time
+#: out BEFORE the server's deadline ever fires, and the honest 503 the server
+#: sends instead of a silent hang would never be reachable. No shared Java/
+#: Python constant file exists, so the ordering is enforced by
+#: ``tests/test_embed_deadline_default_ordering.py``, which reads the Java
+#: constant out of its source file and asserts against this one — update
+#: BOTH sides' comments (and rerun that test) if either value ever moves.
+_UPSERT_CHUNKS_TIMEOUT_S = 600
+
+#: nexus-8hdg9 phase 5: the client declares its own embed budget to the engine
+#: on the upsert-chunks POST via :data:`_REQUEST_DEADLINE_HEADER`, and the
+#: engine uses it in place of its ``NX_EMBED_DEADLINE_MS`` default
+#: (``RequestDeadline.resolveBudgetMs``; the default is the fallback for an
+#: absent or malformed header only). The value is
+#: derived from the socket timeout above minus this margin so the server-side
+#: deadline always fires BEFORE the client's own socket read gives up: a
+#: deadline equal to or past the socket timeout would be unreachable, exactly
+#: the ordering ``tests/test_embed_deadline_default_ordering.py`` already
+#: enforces between the engine's env default and the socket timeout. That test
+#: pins this margin too (header value strictly below the socket timeout).
+_UPSERT_CHUNKS_DEADLINE_MARGIN_S = 60
+
+#: Header value (milliseconds) stamped on ``/v1/vectors/upsert-chunks`` POSTs.
+_UPSERT_CHUNKS_DEADLINE_MS = (_UPSERT_CHUNKS_TIMEOUT_S - _UPSERT_CHUNKS_DEADLINE_MARGIN_S) * 1000
+
+#: Advisory request header carrying the client's embed budget in milliseconds.
+#: Wire-additive both directions: an old engine ignores an unknown request
+#: header; a new engine with no header falls back to its env default.
+_REQUEST_DEADLINE_HEADER = "X-Nexus-Request-Deadline-Ms"
+
+#: Route-keyed deadline table consulted by :func:`_request_once`. Keyed on the
+#: path SUFFIX (the same shape as :data:`_T3_WRITE_PATH_SUFFIXES`) rather than
+#: threaded through ``_post``'s signature, so the many test doubles that
+#: replace ``_post`` with a ``(path, body, *, tenant, timeout)`` callable keep
+#: their exact shape. Only the embed-bearing write route carries a budget; the
+#: search family's own 120s socket timeout is already tighter than the
+#: engine's default deadline, so a header there would declare nothing new.
+_REQUEST_DEADLINE_MS_BY_PATH_SUFFIX: dict[str, int] = {
+    "/upsert-chunks": _UPSERT_CHUNKS_DEADLINE_MS,
+}
+
+
+def _request_deadline_ms_for(path: str) -> int | None:
+    """Budget to declare for ``path``, or ``None`` when the route carries none."""
+    for suffix, deadline_ms in _REQUEST_DEADLINE_MS_BY_PATH_SUFFIX.items():
+        if path.endswith(suffix):
+            return deadline_ms
+    return None
+
+
 def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120) -> Any:
     """POST JSON to the service endpoint, return parsed response body.
 
     ``timeout`` defaults to 120s for read/search/delete paths. The upsert-chunks
-    call site passes 600s: a 300-chunk CCE (voyage-context-3) upsert batch
-    routinely exceeds 120s server-side (embed is synchronous in the request);
-    the RDR-155 production migration false-timed-out on exactly this until
-    raised (bead nexus-rvfwj, 2026-06-10 — docs__1-16 + docs__1-1 evidence).
-    Per dual-review S2 the raise is deliberately NOT global — a slow search
-    should still fail fast.
+    call site passes :data:`_UPSERT_CHUNKS_TIMEOUT_S` (600s): a 300-chunk CCE
+    (voyage-context-3) upsert batch routinely exceeds 120s server-side (embed
+    is synchronous in the request); the RDR-155 production migration
+    false-timed-out on exactly this until raised (bead nexus-rvfwj,
+    2026-06-10 — docs__1-16 + docs__1-1 evidence). Per dual-review S2 the
+    raise is deliberately NOT global — a slow search should still fail fast.
 
     nexus-a2qhz: a WRITE-shaped *path* (:data:`_T3_WRITE_PATH_SUFFIXES`)
     routes through :func:`~nexus.db.service_endpoint.guard_production_write`
@@ -1986,7 +2047,8 @@ class HttpVectorClient:
                 from nexus.retry import _vector_with_retry  # noqa: PLC0415 — deferred import: avoids a module-load-time httpx dependency for this otherwise-urllib-only module (matches the deferred-import convention every other _vector_with_retry caller uses)
 
                 result = _vector_with_retry(
-                    _post, "/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600,
+                    _post, "/v1/vectors/upsert-chunks", body, tenant=self._tenant,
+                    timeout=_UPSERT_CHUNKS_TIMEOUT_S,
                     # nexus-8hdg9 phase 1: a bare TimeoutError on an upsert is
                     # refused rather than retried. _request_once uses ONE
                     # socket timeout for connect AND read, so this fires for
@@ -2005,7 +2067,8 @@ class HttpVectorClient:
                 )
             else:
                 result = _post(
-                    "/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600,
+                    "/v1/vectors/upsert-chunks", body, tenant=self._tenant,
+                    timeout=_UPSERT_CHUNKS_TIMEOUT_S,
                 )
             # nexus-znwc2 / nexus-ir6eh: the engine echoes ids.length as
             # `upserted` unconditionally (VectorHandler), so any deviation —

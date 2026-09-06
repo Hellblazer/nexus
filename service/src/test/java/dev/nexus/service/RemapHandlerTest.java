@@ -576,7 +576,7 @@ class RemapHandlerTest {
                 su.createStatement().execute(
                     "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
                     "VALUES ('" + TENANT + "', '" + collection + "', decode('" + chash(seedPrefix + i) + "', 'hex'), " +
-                    "'text', ('[1" + ",0".repeat(1023) + "]')::vector) " +
+                    "'text', ('[1" + ",0".repeat(1023) + "]')::nexus.vector) " +
                     "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
             }
         }

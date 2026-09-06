@@ -1,5 +1,8 @@
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
+import org.jooq.DSLContext;
 import dev.nexus.service.db.ScratchRepository;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -100,12 +103,10 @@ class ScratchSchemaLiquibaseTest {
     @Test
     void scratchTable_isUnlogged() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT relpersistence FROM pg_class c " +
-                "JOIN pg_namespace n ON c.relnamespace = n.oid " +
-                "WHERE n.nspname = 't1' AND c.relname = 'scratch'");
-            assertThat(rs.next()).as("t1.scratch must exist in pg_class").isTrue();
-            assertThat(rs.getString("relpersistence"))
+            String relpersistence = PgCatalogProbes.relPersistence(
+                DSL.using(su, SQLDialect.POSTGRES), "t1", "scratch");
+            assertThat(relpersistence).as("t1.scratch must exist in pg_class").isNotNull();
+            assertThat(relpersistence)
                 .as("t1.scratch must be UNLOGGED (relpersistence='u')")
                 .isEqualTo("u");
         }
@@ -116,23 +117,20 @@ class ScratchSchemaLiquibaseTest {
     @Test
     void scratchTable_rlsEnabledAndForced_usingT1TenantGuc() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet cls = su.createStatement().executeQuery(
-                "SELECT relrowsecurity, relforcerowsecurity " +
-                "FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid " +
-                "WHERE n.nspname = 't1' AND c.relname = 'scratch'");
-            assertThat(cls.next()).isTrue();
-            assertThat(cls.getBoolean("relrowsecurity")).as("RLS must be enabled").isTrue();
-            assertThat(cls.getBoolean("relforcerowsecurity")).as("RLS must be forced").isTrue();
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgCatalogProbes.RowSecurity cls = PgCatalogProbes.rowSecurity(ctx, "t1", "scratch");
+            assertThat(cls).isNotNull();
+            assertThat(cls.enabled()).as("RLS must be enabled").isTrue();
+            assertThat(cls.forced()).as("RLS must be forced").isTrue();
 
-            ResultSet pol = su.createStatement().executeQuery(
-                "SELECT policyname, cmd, qual, with_check " +
-                "FROM pg_policies WHERE schemaname = 't1' AND tablename = 'scratch'");
-            assertThat(pol.next()).as("at least one RLS policy must exist on t1.scratch").isTrue();
-            assertThat(pol.getString("cmd")).as("policy must cover ALL commands").isEqualTo("ALL");
-            assertThat(pol.getString("qual"))
+            java.util.List<PgCatalogProbes.Policy> policies = PgCatalogProbes.policies(ctx, "t1", "scratch");
+            assertThat(policies).as("at least one RLS policy must exist on t1.scratch").isNotEmpty();
+            PgCatalogProbes.Policy pol = policies.get(0);
+            assertThat(pol.cmd()).as("policy must cover ALL commands").isEqualTo("ALL");
+            assertThat(pol.qual())
                 .as("USING must reference nexus.t1_tenant GUC (NOT nexus.tenant)")
                 .contains("t1_tenant");
-            assertThat(pol.getString("with_check"))
+            assertThat(pol.withCheck())
                 .as("WITH CHECK must reference nexus.t1_tenant GUC")
                 .contains("t1_tenant");
         }
@@ -143,40 +141,21 @@ class ScratchSchemaLiquibaseTest {
     @Test
     void scratchTable_ftsColumnAndIndex_tokenisationCorrect() throws Exception {
         try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // Verify STORED generated column
-            ResultSet gen = su.createStatement().executeQuery(
-                "SELECT a.attgenerated, pg_catalog.format_type(a.atttypid, a.atttypmod) AS col_type " +
-                "FROM pg_attribute a " +
-                "JOIN pg_class c ON c.oid = a.attrelid " +
-                "JOIN pg_namespace n ON n.oid = c.relnamespace " +
-                "WHERE n.nspname = 't1' AND c.relname = 'scratch' " +
-                "  AND a.attname = 'fts_vector' AND a.attnum > 0 AND NOT a.attisdropped");
-            assertThat(gen.next()).as("fts_vector must exist").isTrue();
-            assertThat(gen.getString("col_type")).isEqualTo("tsvector");
-            assertThat(gen.getString("attgenerated")).as("must be STORED").isEqualTo("s");
+            PgCatalogProbes.GeneratedColumn gen =
+                PgCatalogProbes.generatedColumn(ctx, "t1", "scratch", "fts_vector");
+            assertThat(gen).as("fts_vector must exist").isNotNull();
+            assertThat(gen.colType()).isEqualTo("tsvector");
+            assertThat(gen.attgenerated()).as("must be STORED").isEqualTo("s");
 
             // Verify GIN index
-            ResultSet idx = su.createStatement().executeQuery(
-                "SELECT am.amname FROM pg_index ix " +
-                "JOIN pg_class c  ON c.oid = ix.indrelid " +
-                "JOIN pg_class i  ON i.oid = ix.indexrelid " +
-                "JOIN pg_namespace n ON n.oid = c.relnamespace " +
-                "JOIN pg_am am ON am.oid = i.relam " +
-                "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(ix.indkey) " +
-                "WHERE n.nspname = 't1' AND c.relname = 'scratch' " +
-                "  AND am.amname = 'gin' AND a.attname = 'fts_vector'");
-            assertThat(idx.next()).as("GIN index on fts_vector must exist").isTrue();
+            assertThat(PgCatalogProbes.indexCountOnColumn(ctx, "t1", "scratch", "gin", "fts_vector"))
+                .as("GIN index on fts_vector must exist").isPositive();
 
             // Verify generated expression uses 'english' and 'simple' configs
-            ResultSet expr = su.createStatement().executeQuery(
-                "SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS col_expr " +
-                "FROM pg_attrdef d " +
-                "JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum " +
-                "JOIN pg_class c ON c.oid = d.adrelid " +
-                "JOIN pg_namespace n ON n.oid = c.relnamespace " +
-                "WHERE n.nspname = 't1' AND c.relname = 'scratch' AND a.attname = 'fts_vector'");
-            assertThat(expr.next()).isTrue();
-            String colExpr = expr.getString("col_expr");
+            String colExpr = PgCatalogProbes.columnExpression(ctx, "t1", "scratch", "fts_vector");
+            assertThat(colExpr).isNotNull();
             assertThat(colExpr).as("must use english config").contains("english");
             assertThat(colExpr).as("must use simple config for tags").contains("simple");
         }
@@ -244,12 +223,11 @@ class ScratchSchemaLiquibaseTest {
     @Test
     void serviceRole_notSuperuserNotBypassRls() {
         tenantScope.withTenant("test-tenant", ScratchRepository.T1_TENANT_GUC, ctx -> {
-            var row = ctx.fetchOne(
-                "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user");
+            PgCatalogProbes.RoleFlags row = PgCatalogProbes.currentRoleFlags(ctx);
             assertThat(row).isNotNull();
-            assertThat(row.get("rolsuper", Boolean.class))
+            assertThat(row.superuser())
                 .as("service role must NOT be superuser").isFalse();
-            assertThat(row.get("rolbypassrls", Boolean.class))
+            assertThat(row.bypassRls())
                 .as("service role must NOT have BYPASSRLS").isFalse();
             return null;
         });

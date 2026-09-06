@@ -126,7 +126,8 @@ def test_spawn_native_uses_binary_argv(tmp_path):
         creds=_CREDS,
     )
     argv = _spawn_and_capture_argv(sup)
-    assert argv == [str(binary)], "native launch must exec the binary directly"
+    # nexus-9gaj7: the launch line carries the UTC pin; the binary is still argv[0].
+    assert argv == [str(binary), "-Duser.timezone=UTC"], "native launch must exec the binary directly"
 
 
 # ── RDR-161: no schema-skew gate on the native path ──────────────────────────

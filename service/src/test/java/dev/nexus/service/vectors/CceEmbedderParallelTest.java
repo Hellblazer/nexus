@@ -652,4 +652,117 @@ class CceEmbedderParallelTest {
             assertThat(snap.lastActivityAgeMs()).isGreaterThanOrEqualTo(0);
         }
     }
+
+    // ── nexus-8hdg9 phase 4: cooperative deadline before each collected future ──
+
+    private static void setRequestDeadline(long deadlineNanos) {
+        dev.nexus.service.http.RequestContext.setDeadlineNanos(deadlineNanos);
+    }
+
+    private static void clearRequestDeadline() {
+        dev.nexus.service.http.RequestContext.clearDeadline();
+    }
+
+    /** Poll until the fan-out's permits are all back, or fail after 5s. */
+    private static void awaitPermitsBack(CceEmbedder cce, int parallelism) throws Exception {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+        while (cce.inFlightAvailablePermits() != parallelism) {
+            if (System.nanoTime() - deadline > 0) break;
+            Thread.sleep(10);
+        }
+        assertThat(cce.inFlightAvailablePermits())
+                .as("every dispatched sibling released its permit after the abort")
+                .isEqualTo(parallelism);
+    }
+
+    @Test
+    void expiredDeadlineCancelsUnstartedSiblings() throws Exception {
+        int parallelism = 1;
+        List<String> texts = new ArrayList<>();
+        for (int i = 0; i < 6; i++) {
+            String t = "dl-unstarted-" + i;
+            texts.add(t);
+            latencyMs.put(t, 50L);
+        }
+        try (CceEmbedder cce = embedder(parallelism)) {
+            setRequestDeadline(System.nanoTime());  // already expired at the first check
+            try {
+                assertThatThrownBy(() -> cce.embed(texts))
+                        .isInstanceOf(RequestDeadlineExceededException.class)
+                        .hasMessageContaining("0/6 chunks");
+            } finally {
+                clearRequestDeadline();
+            }
+            awaitPermitsBack(cce, parallelism);
+            assertThat(cce.activitySnapshot().deadlineAbortsTotal())
+                    .as("the abort is counted for GET /v1/status deadline_aborts_total")
+                    .isEqualTo(1L);
+        }
+        // With one permit, at most the first sibling can have been dispatched before
+        // cancelFrom(futures, 0) interrupted the rest inside inFlight.acquire(); the
+        // unstarted five never reached the fake Voyage.
+        assertThat(requestTexts.stream().filter(t -> t.startsWith("dl-unstarted-")).count())
+                .as("unstarted siblings must never be dispatched after the abort")
+                .isLessThanOrEqualTo(1);
+    }
+
+    @Test
+    void alreadyDispatchedCallsAreStillBilled() throws Exception {
+        // Records the class javadoc's documented asymmetry: a deadline that expires
+        // mid-batch cannot un-send the first wave. Parallelism 4 dispatches four calls
+        // at once; the deadline (40ms) expires while they are in flight (150ms each),
+        // so the check before futures.get(1) aborts -- but all four were billed.
+        int parallelism = 4;
+        List<String> texts = new ArrayList<>();
+        for (int i = 0; i < 8; i++) {
+            String t = "dl-billed-" + i;
+            texts.add(t);
+            latencyMs.put(t, 150L);
+        }
+        try (CceEmbedder cce = embedder(parallelism)) {
+            setRequestDeadline(System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(40));
+            try {
+                assertThatThrownBy(() -> cce.embed(texts))
+                        .isInstanceOf(RequestDeadlineExceededException.class);
+            } finally {
+                clearRequestDeadline();
+            }
+            awaitPermitsBack(cce, parallelism);
+        }
+        assertThat(requestTexts.stream().filter(t -> t.startsWith("dl-billed-")).count())
+                .as("the first wave was dispatched (and billed) before the deadline was observed")
+                .isGreaterThanOrEqualTo(parallelism);
+    }
+
+    @Test
+    void permitCountReturnsToBaselineAfterDeadlineAbort() throws Exception {
+        int parallelism = 3;
+        List<String> texts = new ArrayList<>();
+        for (int i = 0; i < 9; i++) {
+            String t = "dl-permits-" + i;
+            texts.add(t);
+            latencyMs.put(t, 100L);
+        }
+        try (CceEmbedder cce = embedder(parallelism)) {
+            assertThat(cce.inFlightAvailablePermits()).isEqualTo(parallelism);
+            setRequestDeadline(System.nanoTime());
+            try {
+                assertThatThrownBy(() -> cce.embedWithUsage(texts))
+                        .isInstanceOf(RequestDeadlineExceededException.class);
+            } finally {
+                clearRequestDeadline();
+            }
+            // cancel(true) interrupts the dispatched siblings; each releases in its finally.
+            awaitPermitsBack(cce, parallelism);
+        }
+    }
+
+    @Test
+    void noRequestDeadlineNeverAbortsTheFanOut() {
+        clearRequestDeadline();
+        List<String> texts = List.of("dl-none-0", "dl-none-1", "dl-none-2");
+        try (CceEmbedder cce = embedder(2)) {
+            assertThat(cce.embed(texts)).hasSize(3);
+        }
+    }
 }

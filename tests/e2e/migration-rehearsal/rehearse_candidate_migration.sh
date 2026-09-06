@@ -419,6 +419,12 @@ fi
 RV1="$(_release_version)"
 [ "$RV1" = "$FLOOR_VERSION" ] && ok "/version release_version=$RV1 — the candidate self-reports the floor stamp" \
   || bad "/version release_version=$RV1, expected $FLOOR_VERSION — the RELEASE_PROPS stamp did not take"
+# nexus-mfage: under run.sh --artifacts, the swapped-in candidate must also
+# report the manifest's build_ref — release_version alone is shared with the
+# floor engine by construction (that is what the stamp is for).
+# shellcheck source=lib/assert_build_ref.sh disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert_build_ref.sh"
+assert_build_ref "candidate identity" || true
 POST_SHA="$(sha256sum "$SVC_WELL_KNOWN_DIR/nexus-service" | awk '{print $1}')"
 [ "$POST_SHA" = "$CAND_SHA" ] && ok "post-start binary sha is UNCHANGED from the swapped-in candidate — nothing silently re-acquired it" \
   || bad "post-start binary sha ($POST_SHA) differs from the swapped-in candidate ($CAND_SHA) — something replaced it during start"

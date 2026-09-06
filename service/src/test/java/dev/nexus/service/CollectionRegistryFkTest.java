@@ -1,5 +1,7 @@
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
@@ -198,7 +200,7 @@ class CollectionRegistryFkTest {
                 "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
                 "VALUES ('" + TENANT_A + "', 'ctrl-col-384', " +
                 "'" + validChash("384ctrl") + "', 'text', " +
-                vectorLiteral(384) + "::vector)");
+                vectorLiteral(384) + "::nexus.vector)");
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
                 "WHERE tenant_id='" + TENANT_A + "' AND collection='ctrl-col-384'");
@@ -218,7 +220,7 @@ class CollectionRegistryFkTest {
                     + DimTables.embeddingColumn(384) + ") " +
                     "VALUES ('" + TENANT_A + "', 'unreg-col-384', " +
                     "'" + validChash("384bad") + "', 'text', " +
-                    vectorLiteral(384) + "::vector)")
+                    vectorLiteral(384) + "::nexus.vector)")
             );
             assertThat(ex.getMessage())
                 .as("chunks_collection_fk must reject unregistered collection")
@@ -237,7 +239,7 @@ class CollectionRegistryFkTest {
                 "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(768) + ") " +
                 "VALUES ('" + TENANT_A + "', 'ctrl-col-768', " +
                 "'" + validChash("768ctrl") + "', 'text', " +
-                vectorLiteral(768) + "::vector)");
+                vectorLiteral(768) + "::nexus.vector)");
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
                 "WHERE tenant_id='" + TENANT_A + "' AND collection='ctrl-col-768'");
@@ -257,7 +259,7 @@ class CollectionRegistryFkTest {
                     + DimTables.embeddingColumn(768) + ") " +
                     "VALUES ('" + TENANT_A + "', 'unreg-col-768', " +
                     "'" + validChash("768bad") + "', 'text', " +
-                    vectorLiteral(768) + "::vector)")
+                    vectorLiteral(768) + "::nexus.vector)")
             );
             assertThat(ex.getMessage())
                 .as("chunks_collection_fk must reject unregistered collection")
@@ -276,7 +278,7 @@ class CollectionRegistryFkTest {
                 "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
                 "VALUES ('" + TENANT_A + "', 'ctrl-col-1024', " +
                 "'" + validChash("1024ctrl") + "', 'text', " +
-                vectorLiteral(1024) + "::vector)");
+                vectorLiteral(1024) + "::nexus.vector)");
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
                 "WHERE tenant_id='" + TENANT_A + "' AND collection='ctrl-col-1024'");
@@ -296,7 +298,7 @@ class CollectionRegistryFkTest {
                     + DimTables.embeddingColumn(1024) + ") " +
                     "VALUES ('" + TENANT_A + "', 'unreg-col-1024', " +
                     "'" + validChash("1024bad") + "', 'text', " +
-                    vectorLiteral(1024) + "::vector)")
+                    vectorLiteral(1024) + "::nexus.vector)")
             );
             assertThat(ex.getMessage())
                 .as("chunks_collection_fk must reject unregistered collection")
@@ -317,16 +319,12 @@ class CollectionRegistryFkTest {
     void allFiveCollectionFks_existAndAreValidated() throws Exception {
         try (Connection su = pg.createConnection("")) {
             for (String fkName : ALL_FIVE_FK_NAMES) {
-                ResultSet rs = su.createStatement().executeQuery(
-                    "SELECT convalidated FROM pg_constraint c " +
-                    "JOIN pg_namespace n ON n.oid = c.connamespace " +
-                    "WHERE c.contype = 'f' " +
-                    "  AND c.conname = '" + fkName + "' " +
-                    "  AND n.nspname = 'nexus'");
-                assertThat(rs.next())
+                PgCatalogProbes.Constraint rs = PgCatalogProbes.foreignKey(
+                    DSL.using(su, SQLDialect.POSTGRES), "nexus", fkName);
+                assertThat(rs)
                     .as("FK constraint " + fkName + " must exist in pg_constraint")
-                    .isTrue();
-                assertThat(rs.getBoolean("convalidated"))
+                    .isNotNull();
+                assertThat(rs.convalidated())
                     .as("FK constraint " + fkName + " must be VALIDATED (convalidated=true) after P0.3 VALIDATE runs")
                     .isTrue();
             }
@@ -476,7 +474,7 @@ class CollectionRegistryFkTest {
                 + DimTables.embeddingColumn(384) + ") " +
                 "VALUES ('" + TENANT_A + "', 'restrict-col-384', " +
                 "'" + validChash("restrict384") + "', 'text', " +
-                vectorLiteral(384) + "::vector)");
+                vectorLiteral(384) + "::nexus.vector)");
 
             // DELETE must be rejected because a live chunk row references the collection
             PSQLException ex = assertThrows(PSQLException.class, () ->
@@ -503,7 +501,7 @@ class CollectionRegistryFkTest {
                 "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
                 "VALUES ('" + TENANT_A + "', 'restrict-col-after', " +
                 "'" + ch + "', 'text', " +
-                vectorLiteral(384) + "::vector)");
+                vectorLiteral(384) + "::nexus.vector)");
 
             // Delete the chunk row first
             su.createStatement().execute(
@@ -545,7 +543,7 @@ class CollectionRegistryFkTest {
                     "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding) " +
                     "VALUES ('" + TENANT_A + "', 'chk-col-384-31', " +
                     "'" + chashOfLen(31) + "', 'text', " +
-                    vectorLiteral(384) + "::vector)")
+                    vectorLiteral(384) + "::nexus.vector)")
             );
             assertThat(ex.getMessage())
                 .as("chunks_384_chash_len_check must reject chash of length 31")
@@ -567,7 +565,7 @@ class CollectionRegistryFkTest {
                     "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding) " +
                     "VALUES ('" + TENANT_A + "', 'chk-col-384-33', " +
                     "'" + chashOfLen(33) + "', 'text', " +
-                    vectorLiteral(384) + "::vector)")
+                    vectorLiteral(384) + "::nexus.vector)")
             );
             assertThat(ex.getMessage())
                 .as("chunks_384_chash_len_check must reject chash of length 33")
@@ -586,7 +584,7 @@ class CollectionRegistryFkTest {
                 "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
                 "VALUES ('" + TENANT_A + "', 'chk-col-384-32', " +
                 "'" + validChash("384-32ok") + "', 'text', " +
-                vectorLiteral(384) + "::vector)");
+                vectorLiteral(384) + "::nexus.vector)");
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE chash='" + validChash("384-32ok") + "'");
             rs.next();
@@ -608,7 +606,7 @@ class CollectionRegistryFkTest {
                     "INSERT INTO nexus.chunks_768 (tenant_id, collection, chash, chunk_text, embedding) " +
                     "VALUES ('" + TENANT_A + "', 'chk-col-768-31', " +
                     "'" + chashOfLen(31) + "', 'text', " +
-                    vectorLiteral(768) + "::vector)")
+                    vectorLiteral(768) + "::nexus.vector)")
             );
             assertThat(ex.getMessage())
                 .as("chunks_768_chash_len_check must reject chash of length 31")
@@ -630,7 +628,7 @@ class CollectionRegistryFkTest {
                     "INSERT INTO nexus.chunks_768 (tenant_id, collection, chash, chunk_text, embedding) " +
                     "VALUES ('" + TENANT_A + "', 'chk-col-768-33', " +
                     "'" + chashOfLen(33) + "', 'text', " +
-                    vectorLiteral(768) + "::vector)")
+                    vectorLiteral(768) + "::nexus.vector)")
             );
             assertThat(ex.getMessage())
                 .as("chunks_768_chash_len_check must reject chash of length 33")
@@ -652,7 +650,7 @@ class CollectionRegistryFkTest {
                     "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) " +
                     "VALUES ('" + TENANT_A + "', 'chk-col-1024-31', " +
                     "'" + chashOfLen(31) + "', 'text', " +
-                    vectorLiteral(1024) + "::vector)")
+                    vectorLiteral(1024) + "::nexus.vector)")
             );
             assertThat(ex.getMessage())
                 .as("chunks_1024_chash_len_check must reject chash of length 31")
@@ -674,7 +672,7 @@ class CollectionRegistryFkTest {
                     "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) " +
                     "VALUES ('" + TENANT_A + "', 'chk-col-1024-33', " +
                     "'" + chashOfLen(33) + "', 'text', " +
-                    vectorLiteral(1024) + "::vector)")
+                    vectorLiteral(1024) + "::nexus.vector)")
             );
             assertThat(ex.getMessage())
                 .as("chunks_1024_chash_len_check must reject chash of length 33")
@@ -730,7 +728,7 @@ class CollectionRegistryFkTest {
             su.createStatement().execute(
                 "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
                 "VALUES ('" + TENANT_A + "', 'chk-manifest-coll', '" + validChash("manifestok") + "', 'text', " +
-                vectorLiteral(384) + "::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+                vectorLiteral(384) + "::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
                 "VALUES ('" + TENANT_A + "', 'chk-manifest-doc', 2, '" + validChash("manifestok") + "', 'chk-manifest-coll')");
@@ -772,7 +770,7 @@ class CollectionRegistryFkTest {
             su.createStatement().execute(
                 "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
                 "VALUES ('" + TENANT_A + "', 'pos-chk-coll', '" + validChash("pos-zero") + "', 'text', " +
-                vectorLiteral(384) + "::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+                vectorLiteral(384) + "::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
                 "VALUES ('" + TENANT_A + "', 'pos-chk-doc', 0, '" + validChash("pos-zero") + "', 'pos-chk-coll') " +
@@ -799,16 +797,13 @@ class CollectionRegistryFkTest {
         // NULL rows -- hygiene-001-6 backfills them and makes the column
         // NOT NULL DEFAULT now() again, closing the gap P0.2 opened.
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT data_type, is_nullable " +
-                "FROM information_schema.columns " +
-                "WHERE table_schema='nexus' AND table_name='catalog_collections' " +
-                "  AND column_name='created_at'");
-            assertThat(rs.next()).as("created_at column must exist in catalog_collections").isTrue();
-            assertThat(rs.getString("data_type"))
+            PgCatalogProbes.ColumnInfo rs = PgCatalogProbes.columnInfo(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "catalog_collections", "created_at");
+            assertThat(rs).as("created_at column must exist in catalog_collections").isNotNull();
+            assertThat(rs.dataType())
                 .as("catalog_collections.created_at must be 'timestamp with time zone'")
                 .isEqualTo("timestamp with time zone");
-            assertThat(rs.getString("is_nullable"))
+            assertThat(rs.isNullable())
                 .as("catalog_collections.created_at is NOT NULL again after hygiene-001-6")
                 .isEqualTo("NO");
         }
@@ -818,16 +813,13 @@ class CollectionRegistryFkTest {
     void catalogCollections_supersededAt_isTimestamptzNullable() throws Exception {
         // RED until P0.2 hygiene changeset converts superseded_at to timestamptz NULL.
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT data_type, is_nullable " +
-                "FROM information_schema.columns " +
-                "WHERE table_schema='nexus' AND table_name='catalog_collections' " +
-                "  AND column_name='superseded_at'");
-            assertThat(rs.next()).as("superseded_at column must exist in catalog_collections").isTrue();
-            assertThat(rs.getString("data_type"))
+            PgCatalogProbes.ColumnInfo rs = PgCatalogProbes.columnInfo(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "catalog_collections", "superseded_at");
+            assertThat(rs).as("superseded_at column must exist in catalog_collections").isNotNull();
+            assertThat(rs.dataType())
                 .as("catalog_collections.superseded_at must be 'timestamp with time zone' after P0.2 hygiene")
                 .isEqualTo("timestamp with time zone");
-            assertThat(rs.getString("is_nullable"))
+            assertThat(rs.isNullable())
                 .as("catalog_collections.superseded_at must be nullable after P0.2 hygiene")
                 .isEqualTo("YES");
         }
@@ -889,14 +881,12 @@ class CollectionRegistryFkTest {
         // A blind ADD UNIQUE must fail this test — the revisit is conscious
         // (pending ghost dedup sweep per RDR-156 Decision 7 + audit record above).
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM pg_indexes " +
-                "WHERE schemaname = 'nexus' " +
-                "  AND tablename  = 'catalog_documents' " +
-                "  AND indexdef LIKE '%source_uri%' " +
-                "  AND indexdef NOT LIKE '%WHERE%'");  // exclude partial idx (source_uri != '') allowed
-            rs.next();
-            assertThat(rs.getInt(1))
+            // exclude partial idx (source_uri != '') allowed
+            long fullSourceUriIndexes = PgCatalogProbes.indexDefs(
+                    DSL.using(su, SQLDialect.POSTGRES), "nexus", "catalog_documents").stream()
+                .filter(def -> def.contains("source_uri") && !def.contains("WHERE"))
+                .count();
+            assertThat(fullSourceUriIndexes)
                 .as("no full unique index on (tenant_id, source_uri) must exist — DEFERRED pending ghost dedup; " +
                     "if this fails, a constraint was added without completing the dedup sweep " +
                     "(RDR-156 Decision 7, audit 2026-06-11 found 201 duplicated source_uris)")
@@ -928,7 +918,7 @@ class CollectionRegistryFkTest {
                     + DimTables.embeddingColumn(384) + ") " +
                     "VALUES ('" + TENANT_A + "', 'xtenant-col-b', " +
                     "'" + validChash("xtenant384") + "', 'text', " +
-                    vectorLiteral(384) + "::vector)")
+                    vectorLiteral(384) + "::nexus.vector)")
             );
             assertThat(ex.getMessage())
                 .as("composite FK must reject cross-tenant collection reference in nexus.chunks")
@@ -958,7 +948,7 @@ class CollectionRegistryFkTest {
                     + DimTables.embeddingColumn(384) + ") " +
                     "VALUES ('" + TENANT_A + "', 'xtenant-rls-col-b', " +
                     "'" + validChash("xtenant-rls") + "', 'text', " +
-                    vectorLiteral(384) + "::vector)")
+                    vectorLiteral(384) + "::nexus.vector)")
             );
             assertThat(ex.getMessage())
                 .as("composite FK must reject cross-tenant collection reference via svc-role RLS posture")
@@ -1119,7 +1109,7 @@ class CollectionRegistryFkTest {
                 "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
                 "VALUES ('" + tenant + "', '" + oldName + "', " +
                 "'" + validChash("grp12chunk1") + "', 'rename-test chunk', " +
-                vectorLiteral(384) + "::vector)");
+                vectorLiteral(384) + "::nexus.vector)");
         }
 
         // TenantScope / CatalogRepository via svc role.
@@ -1197,7 +1187,7 @@ class CollectionRegistryFkTest {
             assertReconcileLoadBearing(su, "chunks", FK_CHUNKS_UNIFIED, "collection", "ON DELETE RESTRICT", T, COL,
                 "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, "
                 + DimTables.embeddingColumn(384) + ") " +
-                "VALUES ('" + T + "', '" + COL + "', '" + validChash("p03c384") + "', 'text', " + vectorLiteral(384) + "::vector)",
+                "VALUES ('" + T + "', '" + COL + "', '" + validChash("p03c384") + "', 'text', " + vectorLiteral(384) + "::nexus.vector)",
                 "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
                 "SELECT DISTINCT tenant_id, collection FROM " + DimTables.CHUNKS_TABLE_NAME
                 + " ON CONFLICT (tenant_id, name) DO NOTHING");
@@ -1217,7 +1207,7 @@ class CollectionRegistryFkTest {
             assertReconcileLoadBearing(su, "chunks", FK_CHUNKS_UNIFIED, "collection", "ON DELETE RESTRICT", T, COL,
                 "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, "
                 + DimTables.embeddingColumn(768) + ") " +
-                "VALUES ('" + T + "', '" + COL + "', '" + validChash("p03c768") + "', 'text', " + vectorLiteral(768) + "::vector)",
+                "VALUES ('" + T + "', '" + COL + "', '" + validChash("p03c768") + "', 'text', " + vectorLiteral(768) + "::nexus.vector)",
                 "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
                 "SELECT DISTINCT tenant_id, collection FROM " + DimTables.CHUNKS_TABLE_NAME
                 + " ON CONFLICT (tenant_id, name) DO NOTHING");
@@ -1236,7 +1226,7 @@ class CollectionRegistryFkTest {
             assertReconcileLoadBearing(su, "chunks", FK_CHUNKS_UNIFIED, "collection", "ON DELETE RESTRICT", T, COL,
                 "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, "
                 + DimTables.embeddingColumn(1024) + ") " +
-                "VALUES ('" + T + "', '" + COL + "', '" + validChash("p03c1024") + "', 'text', " + vectorLiteral(1024) + "::vector)",
+                "VALUES ('" + T + "', '" + COL + "', '" + validChash("p03c1024") + "', 'text', " + vectorLiteral(1024) + "::nexus.vector)",
                 "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
                 "SELECT DISTINCT tenant_id, collection FROM " + DimTables.CHUNKS_TABLE_NAME
                 + " ON CONFLICT (tenant_id, name) DO NOTHING");
@@ -1330,11 +1320,10 @@ class CollectionRegistryFkTest {
         // VALIDATE now SUCCEEDS and flips convalidated=true.
         su.createStatement().execute(
             "ALTER TABLE nexus." + table + " VALIDATE CONSTRAINT " + fkName);
-        ResultSet rs = su.createStatement().executeQuery(
-            "SELECT convalidated FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace " +
-            "WHERE c.contype='f' AND c.conname='" + fkName + "' AND n.nspname='nexus'");
-        assertThat(rs.next()).isTrue();
-        assertThat(rs.getBoolean("convalidated"))
+        PgCatalogProbes.Constraint rs = PgCatalogProbes.foreignKey(
+            DSL.using(su, SQLDialect.POSTGRES), "nexus", fkName);
+        assertThat(rs).isNotNull();
+        assertThat(rs.convalidated())
             .as(table + ": VALIDATE succeeds after reconcile → convalidated=true").isTrue();
     }
 
@@ -1392,8 +1381,8 @@ class CollectionRegistryFkTest {
 
     /**
      * Generate a pgvector literal string of {@code dim} uniform 0.1 components.
-     * Format: {@code '[0.1,0.1,...,0.1]'} — safe for {@code ?::vector} and for
-     * inline literal with {@code ::vector} cast.
+     * Format: {@code '[0.1,0.1,...,0.1]'} — safe for {@code ?::nexus.vector} and for
+     * inline literal with {@code ::nexus.vector} cast.
      *
      * <p>Matches the pattern from ChunksRlsBehavioralTest.vectorLiteral().
      */

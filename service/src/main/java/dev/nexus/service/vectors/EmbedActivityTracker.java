@@ -25,6 +25,8 @@ final class EmbedActivityTracker {
     private final AtomicLong lastActivityNanos = new AtomicLong(Long.MIN_VALUE);
     private final AtomicLong lastChunksPerSecBits =
             new AtomicLong(Double.doubleToLongBits(0.0));
+    /** nexus-8hdg9 phases 3/4: see {@link EmbedActivitySnapshot#deadlineAbortsTotal()}. */
+    private final AtomicLong deadlineAbortsTotal = new AtomicLong(0);
 
     /** Sentinel meaning "never recorded" — mirrors {@link EmbedProgressGate}'s
      * {@code NEVER_LOGGED} convention. */
@@ -48,6 +50,13 @@ final class EmbedActivityTracker {
         lastActivityNanos.set(nowNanos);
     }
 
+    /** Record one embed call aborted at a request-deadline check point
+     * (nexus-8hdg9 phases 3/4). Called immediately before the
+     * {@code RequestDeadlineExceededException} is thrown. */
+    void recordDeadlineAbort() {
+        deadlineAbortsTotal.incrementAndGet();
+    }
+
     /** A point-in-time view as of {@code nowNanos}. {@code active} is a
      * half-open window: {@code [0, activeWindowNanos)} since the last record
      * counts as active, exactly at or past the boundary does not.
@@ -68,6 +77,6 @@ final class EmbedActivityTracker {
         return new EmbedActivitySnapshot(
                 active, chunksDoneTotal.get(), subBatchesTotal.get(),
                 Double.longBitsToDouble(lastChunksPerSecBits.get()), ageMs,
-                queueDepth, threadWidth);
+                queueDepth, threadWidth, deadlineAbortsTotal.get());
     }
 }

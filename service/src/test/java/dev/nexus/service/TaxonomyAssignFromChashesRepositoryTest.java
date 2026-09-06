@@ -573,7 +573,7 @@ class TaxonomyAssignFromChashesRepositoryTest {
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.chunks"
                     + " (tenant_id, collection, chash, chunk_text, embedding_" + dim + ")"
-                    + " VALUES (?, ?, decode(?, 'hex'), ?, ?::vector)")) {
+                    + " VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector)")) {
                 ps.setString(1, tenant);
                 ps.setString(2, collection);
                 ps.setString(3, hexChashValue);
@@ -627,7 +627,7 @@ class TaxonomyAssignFromChashesRepositoryTest {
                     // nexus-tk070.p6a follow-on) -- no test in this class asserts
                     // on the label value, so a fixed placeholder satisfies the
                     // constraint without changing any assertion surface.
-                    + " (tenant_id, collection, topic_id, label, embedding_" + dim + ") VALUES (?, ?, ?, ?, ?::vector)")) {
+                    + " (tenant_id, collection, topic_id, label, embedding_" + dim + ") VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
                 ps.setString(1, tenant);
                 ps.setString(2, collection);
                 ps.setLong(3, topicId);

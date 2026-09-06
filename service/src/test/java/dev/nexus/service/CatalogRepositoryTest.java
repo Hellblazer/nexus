@@ -91,7 +91,7 @@ class CatalogRepositoryTest {
                 tenant, collection);
             ctx.execute(
                 "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-                + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::vector) "
+                + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::nexus.vector) "
                 + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING",
                 tenant, collection, chashHex, STUB_VECTOR_384);
             return null;
@@ -3238,7 +3238,7 @@ class CatalogRepositoryTest {
             var ps = su.prepareStatement(
                 "INSERT INTO nexus.chunks"
                 + " (tenant_id, collection, chash, chunk_text, embedding_768, metadata)"
-                + " VALUES (?, ?, ?, ?, ?::vector, ?::jsonb)"
+                + " VALUES (?, ?, ?, ?, ?::nexus.vector, ?::jsonb)"
                 + " ON CONFLICT (tenant_id, collection, chash) DO NOTHING"
             );
             ps.setString(1, SPAN_TENANT);

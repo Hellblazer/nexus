@@ -56,7 +56,7 @@ class PgSessionEfSearchReadbackIntegrationTest {
             // per-backend at library load; without this the set below lands
             // on an unvalidated placeholder (measured: current_setting reads
             // "" after rollback instead of the extension default 40).
-            ctx.resultQuery("SELECT '[1]'::vector").fetch();
+            ctx.resultQuery("SELECT '[1]'::nexus.vector").fetch();
 
             // Small request: the floor dominates (default 200 — no
             // NX_HNSW_EF_SEARCH in the test env, pinned by the assertion).

@@ -303,7 +303,7 @@ class PgVectorCombinedQueryContractTest {
         su.createStatement().execute(
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ") "
             + "VALUES ('" + tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), '" + text + "', "
-            + vec2(dim, x, y) + "::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+            + vec2(dim, x, y) + "::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
     }
 
     private static long insertTopic(Connection su, String tenant, String label, String collection)

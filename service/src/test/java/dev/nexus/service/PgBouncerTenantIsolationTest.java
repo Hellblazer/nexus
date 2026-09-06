@@ -136,7 +136,14 @@ class PgBouncerTenantIsolationTest {
         cfg.setPassword(PgContainerHelper.SVC_PASSWORD);
         cfg.setMaximumPoolSize(4);   // several CLIENT conns; PgBouncer multiplexes onto 1 server
         cfg.setAutoCommit(true);
-        cfg.setConnectionInitSql("SET search_path TO nexus, t1, public");
+        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): no session
+        // search_path connectionInitSql. This is doubly appropriate here: PgBouncer
+        // transaction-mode pooling does not guarantee session-level state (including
+        // a connectionInitSql SET) survives across transactions on the SAME client
+        // connection, so a session-search_path dependency was never actually reliable
+        // under this test's own pooling mode even before the directive. MemoryRepository/
+        // AspectRepository access t1.scratch/nexus.* exclusively through jOOQ generated
+        // Tables, which render fully schema-qualified SQL regardless of search_path.
         // PgBouncer transaction mode is incompatible with JDBC server-side prepared
         // statements that outlive a transaction; disable them so the driver uses the
         // simple/unnamed path (the documented client setting for txn-mode pooling, what a

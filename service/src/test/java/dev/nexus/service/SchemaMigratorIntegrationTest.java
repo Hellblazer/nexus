@@ -1,5 +1,8 @@
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
+import org.jooq.DSLContext;
 import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.SchemaMigrator.MigrationException;
 import dev.nexus.service.db.TenantScope;
@@ -89,6 +92,85 @@ class SchemaMigratorIntegrationTest {
 
     private static final Set<String> EXPECTED_T1_TABLES = Set.of("scratch");
 
+    /**
+     * nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+     * nexus/critique-nexus-cbo4a-batch-9-search-path, a ship-blocker fix, and
+     * again per T2 nexus/critique-nexus-cbo4a-batch-9-gated SIGNIFICANT 1/2).
+     * Creates {@code vector}/{@code pg_trgm} directly as the connection's own
+     * superuser (no throwaway role, no REASSIGN OWNED BY — a superuser can
+     * relocate either extension regardless of ownership, so there is nothing to
+     * transfer), then installs the SECURITY DEFINER function pair —
+     * {@code nexus.ensure_vector_extensions_relocated()} and its rollback-
+     * direction companion {@code nexus.ensure_vector_extensions_unrelocated()},
+     * both owned by that same superuser, both {@code REVOKE EXECUTE ... FROM
+     * PUBLIC} before the explicit {@code GRANT ... TO} the migrating role —
+     * WITHOUT relocating the extensions itself. Mirrors {@code
+     * nexus.db.pg_provision.relocate_vector_extensions_to_nexus_schema} exactly
+     * (that Python function no longer takes a {@code direct} parameter — an
+     * earlier revision's eager, every-daemon-start relocation path turned out to
+     * be permanently unreachable on any real cluster and was deleted; the
+     * function's only remaining job, mirrored here, is ensuring the schema and
+     * this function pair exist), for exactly the same reason: every test in this
+     * file resumes through vectors-001-baseline.xml's bare {@code vector(N)}/
+     * {@code vector_cosine_ops} references AND search-path-001/002 in ONE
+     * continuous {@code SchemaMigrator.migrate()} call, so the extensions must
+     * stay resolvable via the migrating role's default (public-only) search_path
+     * through vectors-001, then get relocated MID-WALK — which the migrating
+     * role (NOSUPERUSER) cannot do itself, but CAN trigger by calling this
+     * function, since a SECURITY DEFINER function runs with its OWNER's
+     * privileges. search-path-001's own guard changeset calls it, by qualified
+     * name, at exactly that point. See {@code
+     * relocate_vector_extensions_to_nexus_schema}'s own docstring and
+     * search-path-001-relocate-vector-extensions.xml's header for the full
+     * derivation.
+     *
+     * @param su the superuser connection (e.g. the embedded Postgres's own
+     *           bootstrap connection)
+     * @param migratingRole the NOSUPERUSER role that will run the Liquibase
+     *                      walk and therefore needs EXECUTE on the function
+     */
+    private static void bootstrapVectorExtensionsForFreshWalk(
+            Connection su, String migratingRole) throws Exception {
+        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
+        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+        su.createStatement().execute(
+            "CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION " + migratingRole);
+        su.createStatement().execute(
+            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_relocated() "
+            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $relofunc$ "
+            + "BEGIN "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "END; "
+            + "$relofunc$");
+        su.createStatement().execute(
+            "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() FROM PUBLIC");
+        su.createStatement().execute(
+            "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO "
+            + migratingRole);
+        su.createStatement().execute(
+            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated() "
+            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $unrelofunc$ "
+            + "BEGIN "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'public' THEN "
+            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA public'; "
+            + "  END IF; "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'public' THEN "
+            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA public'; "
+            + "  END IF; "
+            + "END; "
+            + "$unrelofunc$");
+        su.createStatement().execute(
+            "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() FROM PUBLIC");
+        su.createStatement().execute(
+            "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO "
+            + migratingRole);
+    }
+
     // ── Fixtures ─────────────────────────────────────────────────────────────
 
     PostgreSQLContainer<?> pg;
@@ -147,14 +229,18 @@ class SchemaMigratorIntegrationTest {
             // the falsification proof of this exact prerequisite.
             su.createStatement().execute("GRANT pg_monitor TO " + ADMIN_ROLE + " WITH ADMIN OPTION");
 
-            // Pre-create pgvector and pg_trgm extensions as superuser (DBA step).
-            // CREATE EXTENSION requires superuser in PostgreSQL; in production the DBA
-            // installs extensions before nexus_admin runs the Liquibase changelog.
-            // The vectors-001-baseline.xml changeset uses CREATE EXTENSION IF NOT EXISTS,
-            // so it is idempotent: if already installed here it becomes a no-op when
-            // Liquibase runs as nexus_admin_test.
-            su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-            su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+            // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+            // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
+            // directly as `su` (superuser) and install the SECURITY DEFINER relocation
+            // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
+            // nexus_schema (no direct-relocation parameter any more -- see that
+            // function's own docstring) -- this walk resumes through vectors-001
+            // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
+            // below, so the extension must stay bare-resolvable in public through
+            // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
+            // own guard calling this function -- see that changeset's header for the
+            // full derivation.
+            bootstrapVectorExtensionsForFreshWalk(su, ADMIN_ROLE);
         }
 
         // ── Phase B: build connection pools ─────────────────────────────────────
@@ -168,13 +254,14 @@ class SchemaMigratorIntegrationTest {
         adminCfg.setPoolName("nexus-admin-test");
         adminDs = new com.zaxxer.hikari.HikariDataSource(adminCfg);
 
-        // Service pool: nexus_svc (NOSUPERUSER NOBYPASSRLS) with search_path via initSql.
+        // Service pool: nexus_svc (NOSUPERUSER NOBYPASSRLS). nexus-cbo4a batch 9 item 0
+        // (Sam's directive, 2026-09-05): no session search_path connectionInitSql; jOOQ
+        // generated Tables render fully schema-qualified SQL regardless of search_path.
         var svcCfg = new com.zaxxer.hikari.HikariConfig();
         svcCfg.setJdbcUrl(pg.getJdbcUrl());
         svcCfg.setUsername(SVC_ROLE);
         svcCfg.setPassword(SVC_PASS);
         svcCfg.setMaximumPoolSize(3);
-        svcCfg.setConnectionInitSql("SET search_path TO nexus, t1, public");
         svcCfg.setPoolName("nexus-svc-test");
         svcDs = new com.zaxxer.hikari.HikariDataSource(svcCfg);
     }
@@ -302,24 +389,19 @@ class SchemaMigratorIntegrationTest {
         SchemaMigrator.migrate(adminDs);
 
         try (Connection conn = adminDs.getConnection()) {
-            ResultSet cls = conn.createStatement().executeQuery(
-                "SELECT relrowsecurity, relforcerowsecurity " +
-                "FROM pg_class c " +
-                "JOIN pg_namespace n ON c.relnamespace = n.oid " +
-                "WHERE n.nspname = 'nexus' AND c.relname = 'memory'");
-            assertThat(cls.next())
-                .as("nexus.memory must exist in pg_class after migration").isTrue();
-            assertThat(cls.getBoolean("relrowsecurity"))
+            DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+            PgCatalogProbes.RowSecurity cls = PgCatalogProbes.rowSecurity(ctx, "nexus", "memory");
+            assertThat(cls)
+                .as("nexus.memory must exist in pg_class after migration").isNotNull();
+            assertThat(cls.enabled())
                 .as("ENABLE ROW LEVEL SECURITY must be set on nexus.memory").isTrue();
-            assertThat(cls.getBoolean("relforcerowsecurity"))
+            assertThat(cls.forced())
                 .as("FORCE ROW LEVEL SECURITY must be set on nexus.memory").isTrue();
 
-            ResultSet pol = conn.createStatement().executeQuery(
-                "SELECT qual FROM pg_policies " +
-                "WHERE schemaname = 'nexus' AND tablename = 'memory'");
-            assertThat(pol.next())
-                .as("nexus.memory must have at least one RLS policy after migration").isTrue();
-            String using = pol.getString("qual");
+            List<PgCatalogProbes.Policy> pol = PgCatalogProbes.policies(ctx, "nexus", "memory");
+            assertThat(pol)
+                .as("nexus.memory must have at least one RLS policy after migration").isNotEmpty();
+            String using = pol.get(0).qual();
             // Fix code-review M3: assert non-null BEFORE calling contains() to avoid NPE.
             assertThat(using)
                 .as("RLS USING expression must not be null")
@@ -484,8 +566,18 @@ class SchemaMigratorIntegrationTest {
                 su.createStatement().execute(
                     "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+                // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
+                // directly as `su` (superuser) and install the SECURITY DEFINER relocation
+                // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
+                // nexus_schema (no direct-relocation parameter any more -- see that
+                // function's own docstring) -- this walk resumes through vectors-001
+                // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
+                // below, so the extension must stay bare-resolvable in public through
+                // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
+                // own guard calling this function -- see that changeset's header for the
+                // full derivation.
+                bootstrapVectorExtensionsForFreshWalk(su, role);
             }
 
             var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -654,8 +746,18 @@ class SchemaMigratorIntegrationTest {
                 su.createStatement().execute(
                     "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+                // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
+                // directly as `su` (superuser) and install the SECURITY DEFINER relocation
+                // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
+                // nexus_schema (no direct-relocation parameter any more -- see that
+                // function's own docstring) -- this walk resumes through vectors-001
+                // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
+                // below, so the extension must stay bare-resolvable in public through
+                // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
+                // own guard calling this function -- see that changeset's header for the
+                // full derivation.
+                bootstrapVectorExtensionsForFreshWalk(su, role);
             }
 
             var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -857,8 +959,18 @@ class SchemaMigratorIntegrationTest {
                 su.createStatement().execute(
                     "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+                // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
+                // directly as `su` (superuser) and install the SECURITY DEFINER relocation
+                // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
+                // nexus_schema (no direct-relocation parameter any more -- see that
+                // function's own docstring) -- this walk resumes through vectors-001
+                // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
+                // below, so the extension must stay bare-resolvable in public through
+                // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
+                // own guard calling this function -- see that changeset's header for the
+                // full derivation.
+                bootstrapVectorExtensionsForFreshWalk(su, role);
             }
 
             var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -1072,8 +1184,18 @@ class SchemaMigratorIntegrationTest {
                 su.createStatement().execute(
                     "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+                // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
+                // directly as `su` (superuser) and install the SECURITY DEFINER relocation
+                // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
+                // nexus_schema (no direct-relocation parameter any more -- see that
+                // function's own docstring) -- this walk resumes through vectors-001
+                // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
+                // below, so the extension must stay bare-resolvable in public through
+                // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
+                // own guard calling this function -- see that changeset's header for the
+                // full derivation.
+                bootstrapVectorExtensionsForFreshWalk(su, role);
             }
 
             var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -1279,12 +1401,7 @@ class SchemaMigratorIntegrationTest {
         while (System.nanoTime() < deadline) {
             analyzed.clear();
             try (Connection conn = adminDs.getConnection()) {
-                ResultSet rs = conn.createStatement().executeQuery(
-                    "SELECT relname FROM pg_stat_user_tables "
-                    + "WHERE schemaname = 'nexus' AND last_analyze IS NOT NULL");
-                while (rs.next()) {
-                    analyzed.add(rs.getString("relname"));
-                }
+                analyzed.addAll(PgCatalogProbes.analyzedTables(DSL.using(conn, SQLDialect.POSTGRES), "nexus"));
             }
             if (analyzed.containsAll(expected)) {
                 break;
@@ -1354,8 +1471,18 @@ class SchemaMigratorIntegrationTest {
                 su.createStatement().execute(
                     "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+                // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
+                // directly as `su` (superuser) and install the SECURITY DEFINER relocation
+                // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
+                // nexus_schema (no direct-relocation parameter any more -- see that
+                // function's own docstring) -- this walk resumes through vectors-001
+                // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
+                // below, so the extension must stay bare-resolvable in public through
+                // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
+                // own guard calling this function -- see that changeset's header for the
+                // full derivation.
+                bootstrapVectorExtensionsForFreshWalk(su, role);
             }
 
             var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -1411,6 +1538,17 @@ class SchemaMigratorIntegrationTest {
                     su.createStatement().execute(
                         "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
                         + "VALUES ('" + tenant + "', 'o8dil29-doc', 'late upgrade doc', '" + collection + "')");
+                    // Bare (unqualified) ::vector, deliberately NOT ::nexus.vector: this
+                    // INSERT runs at Phase C, mid-walk, BEFORE catalog-029-0 and therefore
+                    // well before search-path-001 (placed near the end of the changelog)
+                    // has relocated the extension -- it is still in `public` at this exact
+                    // point, resolvable only via the connecting role's default search_path
+                    // (which always includes public). Phase D's full SchemaMigrator.migrate()
+                    // resumes through search-path-001/002 and beyond, so every OTHER
+                    // reference in this file that runs AFTER a full migrate() call is
+                    // correctly qualified as nexus.vector; this one site is the sole
+                    // exception, and is exempt from that qualification for exactly this
+                    // reason (nexus-cbo4a batch 9 item 0 discovery).
                     su.createStatement().execute(
                         "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) VALUES "
                         + "('" + tenant + "', '" + collection + "', decode('" + goodChash + "', 'hex'), 'good text', "
@@ -1516,8 +1654,18 @@ class SchemaMigratorIntegrationTest {
                 su.createStatement().execute(
                     "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+                // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
+                // directly as `su` (superuser) and install the SECURITY DEFINER relocation
+                // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
+                // nexus_schema (no direct-relocation parameter any more -- see that
+                // function's own docstring) -- this walk resumes through vectors-001
+                // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
+                // below, so the extension must stay bare-resolvable in public through
+                // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
+                // own guard calling this function -- see that changeset's header for the
+                // full derivation.
+                bootstrapVectorExtensionsForFreshWalk(su, role);
             }
 
             var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -1668,8 +1816,18 @@ class SchemaMigratorIntegrationTest {
                 su.createStatement().execute(
                     "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+                // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
+                // directly as `su` (superuser) and install the SECURITY DEFINER relocation
+                // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
+                // nexus_schema (no direct-relocation parameter any more -- see that
+                // function's own docstring) -- this walk resumes through vectors-001
+                // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
+                // below, so the extension must stay bare-resolvable in public through
+                // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
+                // own guard calling this function -- see that changeset's header for the
+                // full derivation.
+                bootstrapVectorExtensionsForFreshWalk(su, role);
             }
 
             var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -1699,7 +1857,7 @@ class SchemaMigratorIntegrationTest {
                     su.createStatement().execute(
                         "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_1024) "
                         + "VALUES ('" + tenant + "', '" + unregCollection + "', decode('" + chash + "', 'hex'), "
-                        + "'neg text', ('[" + "0.1,".repeat(1023) + "0.1]')::vector)");
+                        + "'neg text', ('[" + "0.1,".repeat(1023) + "0.1]')::nexus.vector)");
                     su.createStatement().execute(
                         "ALTER TABLE nexus.chunks "
                         + "ADD CONSTRAINT chunks_collection_fk "
@@ -1744,16 +1902,12 @@ class SchemaMigratorIntegrationTest {
     @Order(17)
     void catalogDocumentChunksCollection_isNotNull_atHead() throws Exception {
         try (Connection conn = adminDs.getConnection()) {
-            ResultSet rs = conn.createStatement().executeQuery(
-                "SELECT a.attnotnull FROM pg_attribute a "
-                + "JOIN pg_class c ON c.oid = a.attrelid "
-                + "JOIN pg_namespace n ON n.oid = c.relnamespace "
-                + "WHERE n.nspname = 'nexus' AND c.relname = 'catalog_document_chunks' "
-                + "  AND a.attname = 'collection'");
-            assertThat(rs.next())
+            Boolean attnotnull = PgCatalogProbes.columnNotNull(
+                DSL.using(conn, SQLDialect.POSTGRES), "nexus", "catalog_document_chunks", "collection");
+            assertThat(attnotnull)
                 .as("catalog_document_chunks.collection column must exist")
-                .isTrue();
-            assertThat(rs.getBoolean("attnotnull"))
+                .isNotNull();
+            assertThat(attnotnull)
                 .as("catalog_document_chunks.collection must be NOT NULL at HEAD "
                     + "(RDR-191 Decision item 6, Phase 7 fold, nexus-o8dil.37)")
                 .isTrue();
@@ -1780,22 +1934,13 @@ class SchemaMigratorIntegrationTest {
 
     /** True iff a constraint with this name exists anywhere in the database. */
     private boolean constraintExists(Connection conn, String conname) throws Exception {
-        try (var ps = conn.prepareStatement(
-                "SELECT 1 FROM pg_constraint WHERE conname = ?")) {
-            ps.setString(1, conname);
-            ResultSet rs = ps.executeQuery();
-            return rs.next();
-        }
+        return PgCatalogProbes.constraintExists(DSL.using(conn, SQLDialect.POSTGRES), conname);
     }
 
     /** True iff a constraint with this name exists AND is validated (convalidated). */
     private boolean constraintValidated(Connection conn, String conname) throws Exception {
-        try (var ps = conn.prepareStatement(
-                "SELECT convalidated FROM pg_constraint WHERE conname = ?")) {
-            ps.setString(1, conname);
-            ResultSet rs = ps.executeQuery();
-            return rs.next() && rs.getBoolean("convalidated");
-        }
+        return Boolean.TRUE.equals(
+            PgCatalogProbes.constraintValidated(DSL.using(conn, SQLDialect.POSTGRES), conname));
     }
 
     /**

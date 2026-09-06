@@ -37,7 +37,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * RDR-191 Phase 4 (bead nexus-o8dil.16, F13 hazard) — EXPLAIN-based plan-shape proof for
  * the three raw-SQL bare-{@code embedding} sites {@link PgVectorRepository} fixed under the
  * chunks_384/768/1024 -&gt; {@code nexus.chunks} unification: {@link
- * PgVectorRepository#searchWithTokens} ({@code embedding <=> ?::vector} at the old line
+ * PgVectorRepository#searchWithTokens} ({@code embedding <=> ?::nexus.vector} at the old line
  * ~993), and both branches of {@link PgVectorRepository#hybridSearch} — the selective-gate
  * rank (old line ~1324) and the dense-gate HNSW-first rank (old line ~1337).
  *
@@ -149,13 +149,13 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             // helper's ALL TABLES IN SCHEMA nexus grant.
             su.createStatement().execute(
                 "GRANT EXECUTE ON FUNCTION nexus.search_metadata_scoped_1024"
-                + "(vector, text[], text, text, int, text, text, jsonb, int) TO " + SVC_ROLE);
+                + "(nexus.vector, text[], text, text, int, text, text, jsonb, int) TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT EXECUTE ON FUNCTION nexus.search_graph_hop_768"
-                + "(vector, text[], text[], text, int, text, jsonb, int) TO " + SVC_ROLE);
+                + "(nexus.vector, text[], text[], text, int, text, jsonb, int) TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT EXECUTE ON FUNCTION nexus.search_topic_scoped_384"
-                + "(vector, text, text, int) TO " + SVC_ROLE);
+                + "(nexus.vector, text, text, int) TO " + SVC_ROLE);
         }
 
         // Second role + pool, DEDICATED to the real-call companion test (found during
@@ -278,7 +278,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                     + "       decode(md5('planshape-" + dim + "-' || i) || md5('fill-" + dim + "-' || i), 'hex'), "
                     + "       'planshape filler chunk ' || i, v.vec "
                     + "FROM generate_series(1, " + CHUNKS_PER_DIM + ") i "
-                    + "CROSS JOIN LATERAL (SELECT (array_agg(random() * 2 - 1))::vector AS vec"
+                    + "CROSS JOIN LATERAL (SELECT (array_agg(random() * 2 - 1))::nexus.vector AS vec"
                     + "                    FROM generate_series(1, " + dim + ")) v");
                 // The single nearest row: unit vector along the first axis (distance 0 from
                 // a query vector pointed the same way) — the target every behavioral
@@ -288,7 +288,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                     "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, " + embCol + ") "
                     + "VALUES ('" + TENANT + "', '" + coll + "', decode('" + nearestChash + "', 'hex'), "
                     + "'planshape nearest target chunk', "
-                    + "('[1' || repeat(',0', " + (dim - 1) + ") || ']')::vector)");
+                    + "('[1' || repeat(',0', " + (dim - 1) + ") || ']')::nexus.vector)");
                 if (dim == 1024) {
                     nearestChash1024 = nearestChash;
                 }

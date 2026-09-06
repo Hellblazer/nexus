@@ -22,6 +22,8 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.TimeZone;
 import java.sql.Statement;
 import java.util.ArrayList;
@@ -62,6 +64,25 @@ import java.util.Map;
  *       role below is NOSUPERUSER, so changeset {@code vectors-001-1} fails
  *       without this DBA pre-step (it becomes an idempotent no-op once the
  *       extensions exist).</li>
+ *   <li>RELOCATE both extensions into the {@code nexus} schema, also as
+ *       superuser, BEFORE the first migration run carrying nexus-cbo4a batch
+ *       9 item 0: {@code ALTER EXTENSION vector SET SCHEMA nexus; ALTER
+ *       EXTENSION pg_trgm SET SCHEMA nexus;} — see "Extension relocation"
+ *       below for why this is a superuser step rather than a Liquibase
+ *       changeset, and for the exact failure this DBA step prevents.
+ *       <strong>This step presumes the cluster has already completed a PAST
+ *       walk of {@code vectors-001-baseline.xml}</strong> (true of every
+ *       real production cluster under this project's single-shared-cluster
+ *       deployment model). A genuinely brand-new production cluster's
+ *       FIRST-EVER walk must NOT relocate ahead of time — doing so breaks
+ *       {@code vectors-001-2/-3/-4}'s own bare {@code vector(N)}/{@code
+ *       vector_cosine_ops} references, which still need the extension
+ *       resolvable via the default, public-only search_path at that point
+ *       in the SAME walk. For that shape, skip this step entirely and
+ *       instead install the SECURITY DEFINER function pair (or run
+ *       {@code nexus.db.pg_provision}'s bootstrap) before the first walk —
+ *       see "Extension relocation" below for the mechanism that then
+ *       relocates MID-WALK, at the correct sequencing point.</li>
  *   <li>Create the schema-owner role (e.g. {@code nexus_admin}) with
  *       {@code CREATE ON DATABASE nexus} and ownership of the {@code nexus}
  *       and {@code t1} schemas.</li>
@@ -72,6 +93,79 @@ import java.util.Map;
  * The changelogs' post-DDL grant DO-blocks (changeset suffix {@code -5} in
  * each baseline) then grant DML rights to {@code nexus_svc} automatically
  * during the first migration run.
+ *
+ * <p><strong>Extension relocation (nexus-cbo4a batch 9 item 0, Sam's
+ * directive, 2026-09-05; REDESIGNED per T2 nexus/critique-nexus-cbo4a-
+ * batch-9-search-path, a ship-blocker fix).</strong> {@code vector} and
+ * {@code pg_trgm} are both relocatable extensions and live in the {@code
+ * nexus} schema, not {@code public} — every SQL function in the changelog
+ * references their types/operators/functions as {@code nexus.*} rather than
+ * relying on the calling session's search_path. {@code
+ * search-path-001-relocate-vector-extensions.xml} GUARDS that this
+ * relocation already happened; it does not perform it unconditionally
+ * itself, because the schema-owner role (NOSUPERUSER) can never own or
+ * relocate an extension that predates this batch — created directly as the
+ * cluster's bootstrap superuser, which {@code REASSIGN OWNED BY}
+ * unconditionally refuses to ever hand off. An EARLIER design instead had
+ * every extension-creation site transfer OWNERSHIP to the schema-owner role
+ * via a throwaway superuser role, then relocate unconditionally from an
+ * ordinary Liquibase changeset — this bricked every install that predated
+ * the batch, since the ownership-transfer backfill is a documented no-op for
+ * an extension the bootstrap superuser already owns, with nothing left able
+ * to move it. The current design relocates via the guard changeset's own
+ * THREE-TIER body instead, uniformly for local and production installs
+ * alike: tier 1 attempts the {@code ALTER EXTENSION} directly (succeeds
+ * whenever the connecting/migrating role is or can act as superuser — this
+ * Phase-5 DBA pre-step for production is exactly what makes tier 1's
+ * precondition already satisfied, so the guard changeset MARK_RANs with no
+ * body execution at all); tier 2, on {@code insufficient_privilege} (the
+ * NOSUPERUSER {@code nexus_admin} case — every real local install, and any
+ * production cluster whose DBA skips the relocate-ahead-of-time step
+ * above), calls the narrow SECURITY DEFINER helper function ({@code
+ * nexus.ensure_vector_extensions_relocated()}, owned by the superuser) that
+ * performs the relocation with the function OWNER's privilege; tier 3 (both
+ * absent) {@code RAISE EXCEPTION} naming the exact remedy. {@code
+ * nexus.db.pg_provision}'s client-side provisioning, run on every local
+ * daemon start (and at the end of a from-scratch provision), NEVER
+ * relocates itself — an earlier revision did, gated behind a heuristic
+ * (a probe for the per-dim chunk tables vectors-001 created,
+ * meant to prove "this cluster's walk has already run past the bare
+ * vector(N) references") that turned out to be permanently FALSE on every
+ * real cluster: {@code vectors-004-unify-chunks.xml} unconditionally drops
+ * all three {@code chunks_<dim>} tables in favour of the unified {@code
+ * nexus.chunks}, and every cluster old enough to ever reach this changeset
+ * has already run that changeset. That eager path silently downgraded to a
+ * no-op on every real install and was deleted outright (T2 nexus/critique-
+ * nexus-cbo4a-batch-9-gated SIGNIFICANT 1). It now only ensures the
+ * {@code nexus} schema and the
+ * SECURITY DEFINER function pair exist, which is exactly what tier 2 needs
+ * to succeed for a from-scratch install's first-ever walk — that walk runs
+ * {@code vectors-001-2/-3/-4}'s own bare references in the SAME continuous
+ * walk as the guard changeset, so relocating ahead of time would break
+ * them; the guard's tier 2 instead relocates MID-WALK, well after those
+ * changesets already ran. A genuinely brand-new PRODUCTION cluster's
+ * first-ever walk has the identical hazard and the identical fix: create
+ * the extensions in {@code public} (step 1 above) and install the SECURITY
+ * DEFINER function pair — or simply run {@code nexus.db.pg_provision}'s
+ * bootstrap against that cluster — before the first walk, rather than
+ * relocating ahead of time. See {@code
+ * search-path-001-relocate-vector-extensions.xml}'s own header for the full
+ * three-tier derivation and {@code
+ * relocate_vector_extensions_to_nexus_schema}'s own docstring for the
+ * mechanism it installs. conexus's PITR-fork walk rehearsal exercises this
+ * changelog directly against a production-shaped cluster (always an
+ * EXISTING cluster with a past walk, never a from-scratch one), so a DBA
+ * who skips this Phase-5 step there is caught as the named FAIL LOUD case,
+ * never a silent no-op — the from-scratch-production shape above is
+ * currently unrehearsed by any gate in this repository. Also note: an
+ * earlier draft believed
+ * {@code pg_trgm} (trusted since PG13) needed no special treatment relative
+ * to {@code vector} at all — WRONG, caught live by {@code
+ * tests/e2e/local-service-gate.sh}'s first real dev-jar run: PostgreSQL
+ * stamps every one of pg_trgm's 31 LANGUAGE-C member functions with
+ * bootstrap-superuser ownership regardless of who issues CREATE EXTENSION,
+ * trusted or not, so both extensions always relocate together, identically,
+ * everywhere this Phase-5 step or {@code nexus.db.pg_provision} runs.
  *
  * <p>RDR-152 bead nexus-net63.
  */
@@ -137,7 +231,11 @@ public final class SchemaMigrator {
      */
     public static MigrationOutcome migrate(DataSource ds) {
         log.info("event=schema_migration_start changelog={}", MASTER_CHANGELOG);
-        pinJvmTimeZoneToUtc();
+        try {
+            pinJvmTimeZoneToUtc();
+        } catch (TimeZonePinFailedException e) {
+            throw new MigrationException("JVM timezone pin failed", e);
+        }
 
         try (Connection conn = ds.getConnection()) {
             // nexus-rph82: Liquibase stamps databasechangelog.dateexecuted with the
@@ -232,9 +330,18 @@ public final class SchemaMigrator {
     }
 
     // ── nexus-x0s52: truthful walk counts ────────────────────────────────────
-    // Unqualified table references, deliberately: these run on the SAME
-    // connection Liquibase itself uses, so they resolve to exactly the
-    // databasechangelog Liquibase reads and writes.
+    // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): databasechangelog
+    // is explicitly schema-qualified as "public" below (DSL.name("public",
+    // "databasechangelog") / to_regclass('public.databasechangelog')), matching
+    // VersionHandler's own DATABASECHANGELOG constant -- this table is Liquibase's
+    // own bookkeeping table, created via a migration connection that carries no
+    // search_path override, so it lands in Postgres's own default schema
+    // ("$user", public) resolving to public. Previously unqualified and relying on
+    // the calling session's search_path (the SAME connection Liquibase itself just
+    // used, which happened to still resolve correctly) -- exactly the silent
+    // reliance Sam's directive retires; the table's actual location is fixed and
+    // known, so naming it explicitly costs nothing and removes any dependency on
+    // resolution order.
     //
     // nexus-zrcj7 step 4 review follow-up (critic, T2 [24235]): the three methods
     // below used to carry raw JDBC Statement/PreparedStatement calls, EXEMPTED with
@@ -244,11 +351,11 @@ public final class SchemaMigrator {
     // is a plain java.sql.Connection like any other, and jOOQ's DSL.using(Connection,
     // SQLDialect) wraps ANY such connection -- so the architectural constraint does
     // NOT actually preclude typed DSL here. Converted: DSL.table(DSL.name(
-    // "databasechangelog")) / DSL.field(DSL.name("dateexecuted"), ...) for Liquibase's
-    // own bookkeeping table (outside jOOQ codegen's modeled schemata, but nameable via
-    // the same safe quoted-identifier idiom ChashCensus.java/StagingPromoteOps.java/
-    // this bead's own TaxonomyRepository#advanceTopicsIdSequence conversion already
-    // use), DSL.function("to_regclass", ...) for the existence probe, and
+    // "public", "databasechangelog")) / DSL.field(DSL.name("dateexecuted"), ...) for
+    // Liquibase's own bookkeeping table (outside jOOQ codegen's modeled schemata, but
+    // nameable via the same safe quoted-identifier idiom ChashCensus.java/
+    // StagingPromoteOps.java/this bead's own TaxonomyRepository#advanceTopicsIdSequence
+    // conversion already use), DSL.function("to_regclass", ...) for the existence probe, and
     // DSL.currentTimestamp() -- which jOOQ's own Postgres dialect renders as
     // CAST(CURRENT_TIMESTAMP AS timestamp without time zone), the EXACT semantic
     // equivalent of the retired "now()::timestamp" (session-zone wall clock, tz
@@ -265,7 +372,7 @@ public final class SchemaMigrator {
         try {
             DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
             String regclass = ctx.select(DSL.function(
-                    "to_regclass", SQLDataType.VARCHAR, DSL.val("databasechangelog")))
+                    "to_regclass", SQLDataType.VARCHAR, DSL.val("public.databasechangelog")))
                 .fetchOne(0, String.class);
             if (regclass == null) {
                 return -1L;
@@ -275,7 +382,7 @@ public final class SchemaMigrator {
             // keep this method's own long return type without narrowing anywhere.
             Field<Long> cnt = DSL.count().cast(SQLDataType.BIGINT);
             return ctx.select(cnt)
-                .from(DSL.table(DSL.name("databasechangelog")))
+                .from(DSL.table(DSL.name("public", "databasechangelog")))
                 .fetchOne(cnt);
         } catch (DataAccessException e) {
             throw new SQLException("countChangelogRows failed", e);
@@ -294,7 +401,7 @@ public final class SchemaMigrator {
                 DSL.field(DSL.name("dateexecuted"), java.sql.Timestamp.class);
             Field<Long> cnt = DSL.count().cast(SQLDataType.BIGINT);
             return ctx.select(cnt)
-                .from(DSL.table(DSL.name("databasechangelog")))
+                .from(DSL.table(DSL.name("public", "databasechangelog")))
                 .where(dateExecuted.greaterOrEqual(since))
                 .fetchOne(cnt);
         } catch (DataAccessException e) {
@@ -506,6 +613,65 @@ public final class SchemaMigrator {
             TimeZone.setDefault(TimeZone.getTimeZone(UTC_ID));
             System.setProperty("user.timezone", UTC_ID);
             log.info("event=schema_migration_jvm_timezone_pinned from={} to={}", before.getID(), UTC_ID);
+        }
+        assertJvmTimeZoneIsUtc();
+    }
+
+    /**
+     * Boot-time verification that the pin above actually took (nexus-9gaj7).
+     *
+     * <p>{@code pinJvmTimeZoneToUtc()} unconditionally calls
+     * {@link TimeZone#setDefault(TimeZone)}, but that call is a plain static
+     * field write with no return signal — a platform that ignores it (a
+     * {@code SecurityManager} rejecting the mutation, a native-image
+     * runtime-init ordering surprise, or a later, un-reviewed
+     * {@code TimeZone.setDefault} call racing this one on a JVM that does
+     * spawn a second thread before {@code main()} finishes) would otherwise
+     * fail SILENTLY: every caller downstream keeps assuming UTC (Liquibase's
+     * {@code dateexecuted} stamp, {@link CatalogRepository#tsOrNull}, the
+     * {@code SET TIME ZONE 'UTC'} session pin below) while the JVM's actual
+     * clock reads local time. That is exactly
+     * the nexus-rph82 failure shape one layer up: wrong-direction silence
+     * that surfaces as "nothing was applied" hours after the fact, not as a
+     * boot failure at the one moment it is cheap to diagnose.
+     *
+     * <p>Compares zone RULES rather than the zone ID string: {@code "UTC"},
+     * {@code "Etc/UTC"}, {@code "GMT"}, and {@code "Z"} are all zero-offset,
+     * no-DST zones that satisfy the actual requirement (every instant reads
+     * the same wall-clock value system-wide) even though their IDs differ —
+     * an ID-string compare would false-positive-fail a platform that
+     * legitimately resolves the pin to one of those aliases.
+     *
+     * <p>Package-private for direct unit testing (SchemaMigratorTimeZoneAssertTest),
+     * matching the {@link CatalogRepository#tsOrNull}-style test-seam
+     * convention already established in this package.
+     */
+    static void assertJvmTimeZoneIsUtc() {
+        ZoneId zone = ZoneId.systemDefault();
+        if (!zone.getRules().equals(ZoneOffset.UTC.getRules())) {
+            log.error("event=jvm_timezone_pin_failed observed_zone={} remedy=\"pass "
+                    + "-Duser.timezone=UTC on the JVM/native-image launch command line "
+                    + "and check for a later TimeZone.setDefault(...) call overriding "
+                    + "the pin\"", zone.getId());
+            throw new TimeZonePinFailedException(
+                "JVM default zone is " + zone.getId() + " after pinJvmTimeZoneToUtc(); "
+                + "expected UTC (or a zero-offset, no-DST alias). Pass "
+                + "-Duser.timezone=UTC on the launch command line.");
+        }
+    }
+
+    /**
+     * Unchecked exception thrown when {@link #assertJvmTimeZoneIsUtc()} finds
+     * the JVM's default zone is not UTC after {@link #pinJvmTimeZoneToUtc()}
+     * attempted to pin it (nexus-9gaj7). {@code Main.java} catches this at its
+     * own top-of-{@code main} pin call and calls {@code System.exit(1)}; inside
+     * {@link #migrate(DataSource)} it is wrapped as a {@link MigrationException}
+     * so that method's throws-contract stays uniform for its other callers
+     * (migration rehearsals, the test suite).
+     */
+    public static final class TimeZonePinFailedException extends RuntimeException {
+        public TimeZonePinFailedException(String message) {
+            super(message);
         }
     }
 

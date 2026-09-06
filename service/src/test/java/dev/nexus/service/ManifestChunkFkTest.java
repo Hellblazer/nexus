@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
@@ -103,21 +105,19 @@ class ManifestChunkFkTest {
     @Order(10)
     void fk_existsValidatedDeferrableOnUpdateCascade_notPlainOnDeleteRestrict() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT convalidated, condeferrable, condeferred, confupdtype, confdeltype "
-                + "FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace "
-                + "WHERE c.contype = 'f' AND c.conname = '" + FK_NAME + "' AND n.nspname = 'nexus'");
-            assertThat(rs.next()).as(FK_NAME + " must exist in pg_constraint").isTrue();
-            assertThat(rs.getBoolean("convalidated"))
+            PgCatalogProbes.Constraint rs = PgCatalogProbes.foreignKey(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", FK_NAME);
+            assertThat(rs).as(FK_NAME + " must exist in pg_constraint").isNotNull();
+            assertThat(rs.convalidated())
                 .as(FK_NAME + " must be VALIDATED (catalog-029-2 ran)").isTrue();
-            assertThat(rs.getBoolean("condeferrable"))
+            assertThat(rs.condeferrable())
                 .as(FK_NAME + " must be DEFERRABLE (F8a/F10b — plain RESTRICT cannot be)").isTrue();
-            assertThat(rs.getBoolean("condeferred"))
+            assertThat(rs.condeferred())
                 .as(FK_NAME + " must be INITIALLY IMMEDIATE, not INITIALLY DEFERRED by default (F10b: "
                     + "statement-local error locality outside the two class-B sites)").isFalse();
-            assertThat(rs.getString("confupdtype"))
+            assertThat(rs.confupdtype())
                 .as("ON UPDATE must be CASCADE ('c') — mandatory per F10a").isEqualTo("c");
-            assertThat(rs.getString("confdeltype"))
+            assertThat(rs.confdeltype())
                 .as("ON DELETE must be NO ACTION ('a'), never RESTRICT ('r') — RESTRICT can never be "
                     + "deferred in PostgreSQL (F8a), so a deferrable FK cannot carry it").isEqualTo("a");
         }

@@ -124,11 +124,13 @@ def _iter_records(path: pathlib.Path) -> Iterable[dict[str, Any]]:
     """Read the routing log, OLDEST-FIRST: the rotated ``.1`` generation
     (if present) then the live file.
 
-    ``log_routing_event`` (``conexus/hooks/scripts/routing/_lib.py``,
-    Sam-directed fix pass 2026-08-20) rotates the live file to
-    ``<name>.1`` via atomic rename once it exceeds its byte cap -- so
-    recent history can live split across two files immediately after a
-    rotation. A reader that only looked at the live file would silently
+    The routing hook's JSONL writer (deleted at nexus-gjv9b PART 3,
+    2026-09-05, when the writer moved to the engine's ``routing_events``
+    table) rotated the live file to ``<name>.1`` via atomic rename once it
+    exceeded its byte cap, so history on a real box lives split across the
+    two files (measured 2026-09-05: 4.97 MB in ``.1`` against 179 KB live).
+    Nothing writes either file any more; this merge stays for as long as
+    the files do. A reader that only looked at the live file would silently
     HALVE its longitudinal window at every rotation, exactly the gap
     this function closes for every caller (``aggregate``/
     ``aggregate_detailed``/``escape_events`` all funnel through here --

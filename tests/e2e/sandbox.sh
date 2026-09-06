@@ -10,7 +10,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SANDBOX="$HOME/nexus-sandbox"
+# nexus-mfage fix B item 3: NEXUS_SANDBOX_HOME overrides the fixed
+# $HOME/nexus-sandbox so two sandbox gates (smoke and shakedown in one
+# battery) run side by side, each in its own HOME. The lock follows the
+# sandbox: the fixed path keeps the fixed machine-global lock, an override
+# gets a lock keyed on its own path (same path -> same lock, so the same
+# sandbox still serializes). The tmux session name is only used by the
+# interactive tmux mode and is untouched.
+SANDBOX="${NEXUS_SANDBOX_HOME:-$HOME/nexus-sandbox}"
 
 # RDR-184 P0 guard-surface gap (nexus-ccs9v.4/.5 review): this script
 # mutates the IDENTICAL fixed resource ($HOME/nexus-sandbox, unconditional
@@ -23,6 +30,7 @@ SANDBOX="$HOME/nexus-sandbox"
 # shellcheck source=./lib/lock.sh disable=SC1091
 source "$SCRIPT_DIR/lib/lock.sh"
 LOCKDIR="/tmp/nexus-e2e-locks/release-sandbox.lock"
+[[ -n "${NEXUS_SANDBOX_HOME:-}" ]] && LOCKDIR="/tmp/nexus-e2e-locks/release-sandbox-$(printf '%s' "$SANDBOX" | shasum -a 256 | cut -c1-12).lock"
 mkdir -p "$(dirname "$LOCKDIR")"
 # Held-by-parent seam: release-sandbox.sh already holds this exact lock when
 # it invokes us on its fresh-sandbox path — the lock is non-reentrant, so a
@@ -100,4 +108,4 @@ echo '{"hasCompletedOnboarding":true}' > "$SANDBOX/.claude.json"
 chmod 600 "$SANDBOX/activate"
 
 echo "Sandbox ready. Enter with:"
-echo "  source ~/nexus-sandbox/activate"
+echo "  source $SANDBOX/activate"

@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.PgCatalogProbes;
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
@@ -309,7 +312,7 @@ class PgVectorRepositoryGcQuarantineTest {
                 st.execute(
                     "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
                     + "VALUES ('" + TENANT_A + "', '" + originCol + "', NULL, 'x', "
-                    + "('[' || repeat('0,', 1023) || '0]')::vector)");
+                    + "('[' || repeat('0,', 1023) || '0]')::nexus.vector)");
             }
         }).isInstanceOf(SQLException.class);
     }
@@ -775,11 +778,10 @@ class PgVectorRepositoryGcQuarantineTest {
      *  superuser connection used by the other raw-SQL fixture helpers above
      *  suffices. */
     private String functionDefinition(String signature) throws SQLException {
-        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
-            var rs = st.executeQuery(
-                "SELECT pg_get_functiondef('" + signature + "'::regprocedure)");
-            rs.next();
-            return rs.getString(1);
+        try (var conn = pg.createConnection("")) {
+            String def = PgCatalogProbes.routineDefinition(DSL.using(conn, SQLDialect.POSTGRES), signature);
+            assertThat(def).as("%s must resolve via to_regprocedure", signature).isNotNull();
+            return def;
         }
     }
 }

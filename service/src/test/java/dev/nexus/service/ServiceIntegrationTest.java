@@ -147,13 +147,12 @@ class ServiceIntegrationTest {
         // C4 defensive assertion (S0.4 review requirement):
         // service user must NOT be superuser or BYPASSRLS
         tenantScope.withTenant("tenant-A", ctx -> {
-            var row = ctx.fetchOne(
-                "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user");
+            PgCatalogProbes.RoleFlags row = PgCatalogProbes.currentRoleFlags(ctx);
             assertThat(row).isNotNull();
-            assertThat(row.get("rolsuper", Boolean.class))
+            assertThat(row.superuser())
                 .as("service user must not be superuser")
                 .isFalse();
-            assertThat(row.get("rolbypassrls", Boolean.class))
+            assertThat(row.bypassRls())
                 .as("service user must not bypass RLS")
                 .isFalse();
             return null;

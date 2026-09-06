@@ -278,7 +278,7 @@ class TaxonomyPersistHandlerTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, " + embeddingCol + ") VALUES " +
                 "('" + TENANT + "', '" + collection + "', decode('" + chashHex + "', 'hex'), 'persist-test chunk', " +
-                "('[" + "0.1,".repeat(dim - 1) + "0.1]')::vector) " +
+                "('[" + "0.1,".repeat(dim - 1) + "0.1]')::nexus.vector) " +
                 "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
         }
     }

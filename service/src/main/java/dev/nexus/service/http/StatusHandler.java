@@ -27,8 +27,14 @@ import java.util.function.Supplier;
  * <pre>{"embedding_mode":"onnx-local",
  *  "local_embed_activity":{"active":true,"chunks_done_total":1024,
  *    "sub_batches_total":64,"last_chunks_per_sec":7.7,
- *    "last_activity_age_ms":230,"queue_depth":0,"thread_width":4},
+ *    "last_activity_age_ms":230,"queue_depth":0,"thread_width":4,
+ *    "deadline_aborts_total":0},
  *  "embedder_activity":{"bge-base-en-v15-768":{...same shape...}}}</pre>
+ *
+ * <p>{@code deadline_aborts_total} (nexus-8hdg9 phases 3/4, ADDITIVE, in
+ * every entry of both shapes) counts embed calls the embedder aborted at a
+ * cooperative request-deadline check point. The throughput A/B gate reads it
+ * and requires ZERO on a healthy run.
  *
  * <p>{@code embedding_mode} mirrors {@code /version}'s field (via the SAME
  * {@link EmbedderRouter#modeName()}) so a caller does not need a second probe
@@ -127,6 +133,9 @@ public final class StatusHandler implements HttpHandler {
             .append(",\"last_activity_age_ms\":").append(snap.lastActivityAgeMs())
             .append(",\"queue_depth\":").append(snap.queueDepth())
             .append(",\"thread_width\":").append(snap.threadWidth())
+            // nexus-8hdg9 phases 3/4, [additive]: the A/B gate asserts this is 0 on a
+            // healthy run. Present in every entry, local_embed_activity included.
+            .append(",\"deadline_aborts_total\":").append(snap.deadlineAbortsTotal())
             .append('}');
     }
 }

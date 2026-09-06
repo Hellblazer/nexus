@@ -160,8 +160,12 @@ CREATE INDEX idx_scratch_fts ON t1.scratch USING GIN (fts_vector);
         DML grants for nexus_svc are now consolidated in grants-nexus-svc.xml with
         runAlways="true" so late-created roles are provisioned on restart and no silent
         skip can leave nexus_svc without table access.  ALTER ROLE ... SET search_path
-        removed: requires superuser/CREATEROLE; search_path is now set via HikariCP
-        connectionInitSql on the application pool at startup.
+        was removed even before that (requires superuser/CREATEROLE); nexus-cbo4a batch 9
+        item 0 (Sam's directive, 2026-09-05, census) removed the connectionInitSql that
+        historical note pointed to as well; the application pool carries no
+        search_path override of any kind now (every nexus/t1 reference goes through
+        jOOQ generated Tables/Routines, which render fully schema-qualified SQL
+        regardless of session search_path).
     -->
 
 </databaseChangeLog>

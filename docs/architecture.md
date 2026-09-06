@@ -643,6 +643,10 @@ taxonomy_assign_hook()             # mcp_infra.py  (fires on every store_put)
   │  nearest centroid → topic_id → INSERT OR IGNORE topic_assignments
   ▼
 search_cross_corpus()              # search_engine.py
+  │  one POST /v1/vectors/search per embedding-model group (collections of one
+  │  prefix share a model; nexus-d9xt2), per-collection floor n_results*mult,
+  │  capped at 300 and split into sub-batches above it; thresholds and
+  │  diagnostics still resolved per collection from the row's collection tag
   │  get_assignments_for_docs(result_ids) → topic_assignments dict
   │  apply_topic_boost(): distance -= 0.1 (same topic), -= 0.05 (linked topic)
   │  topic grouping when assignment coverage >50%

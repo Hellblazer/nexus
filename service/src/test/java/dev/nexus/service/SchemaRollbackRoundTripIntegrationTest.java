@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.DSLContext;
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.SchemaMigrator;
@@ -187,6 +190,46 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  */
 class SchemaRollbackRoundTripIntegrationTest {
 
+    private static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
+        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
+        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+        su.createStatement().execute(
+            "CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION " + migratingRole);
+        su.createStatement().execute(
+            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_relocated() "
+            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $relofunc$ "
+            + "BEGIN "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "END; "
+            + "$relofunc$");
+        su.createStatement().execute(
+            "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() FROM PUBLIC");
+        su.createStatement().execute(
+            "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO " + migratingRole);
+            su.createStatement().execute(
+                "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated() "
+                + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $unrelofunc$ "
+                + "BEGIN "
+                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'public' THEN "
+                + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA public'; "
+                + "  END IF; "
+                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'public' THEN "
+                + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA public'; "
+                + "  END IF; "
+                + "END; "
+                + "$unrelofunc$");
+            su.createStatement().execute(
+                "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() FROM PUBLIC");
+            su.createStatement().execute(
+                "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO " + migratingRole);
+    }
+
+
     private static final Logger log =
         LoggerFactory.getLogger(SchemaRollbackRoundTripIntegrationTest.class);
 
@@ -194,7 +237,6 @@ class SchemaRollbackRoundTripIntegrationTest {
 
     private static final String ADMIN_ROLE = "nexus_admin_rollback";
     private static final String ADMIN_PASS = "nexus_admin_rollback_pass";
-
 
     /**
      * The ELEVEN {@code runAlways} changesets, in master order. Formerly ten after
@@ -418,13 +460,10 @@ class SchemaRollbackRoundTripIntegrationTest {
                 int viewEraRows;
                 SchemaMigrator.migrate(ds);
                 try (Connection c = ds.getConnection()) {
-                    assertThat(count(c,
-                        "SELECT count(*) FROM pg_class cl JOIN pg_namespace n "
-                        + "ON n.oid = cl.relnamespace WHERE n.nspname = 'nexus' "
-                        + "AND cl.relname = 'diag_chash_conformance'"))
+                    assertThat(PgCatalogProbes.tableExists(dsl(c), "nexus", "diag_chash_conformance"))
                         .as("taxonomy-011-8 must have created the view in this SAME "
                             + "fresh walk, before grants-nexus-diag-1 ever ran")
-                        .isEqualTo(1);
+                        .isTrue();
                     assertThat(diagBaseTableGrants(c))
                         .as("a FRESH cluster must land DIRECTLY in view era — "
                             + "grants-nexus-diag-1's legacy branch must NOT have fired "
@@ -616,7 +655,7 @@ class SchemaRollbackRoundTripIntegrationTest {
                                 + "its bookkeeping without dropping its object", schema)
                             .isEmpty();
                     }
-                    assertThat(query(c, "SELECT extname FROM pg_extension ORDER BY 1"))
+                    assertThat(PgCatalogProbes.extensionNames(dsl(c)))
                         .as("the DBA-owned extensions must SURVIVE a rollback to the floor — that "
                             + "boundary is the whole reason the floor exists, and a rollback that "
                             + "reached past it would be uninstalling the DBA's provisioning")
@@ -630,15 +669,35 @@ class SchemaRollbackRoundTripIntegrationTest {
                     // identical schema. Without this, "does not throw" was the
                     // only thing proven for exactly the changeset that motivated
                     // the bead.
-                    assertThat(query(c,
-                            "SELECT grantee || ' ' || privilege_type "
-                                + "FROM information_schema.role_table_grants "
-                                + "WHERE grantee = 'nexus_svc' AND table_schema = 'staging'"))
+                    assertThat(PgCatalogProbes.tableGrantsIn(dsl(c), List.of("staging")).stream()
+                            .filter(g -> g.grantee().equals("nexus_svc"))
+                            .map(g -> g.grantee() + " " + g.privilege())
+                            .toList())
                         .as("staging-4-svc-grants' rollback must have EXECUTED, not merely parsed "
                             + "— nexus_svc must hold zero privileges in the staging schema after "
                             + "the rollback. This is the assertion the manual repro used and the "
                             + "only thing that distinguishes a real revert from a silent no-op")
                         .isEmpty();
+                }
+
+                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per
+                // T2 nexus/critique-nexus-cbo4a-batch-9-search-path): the rollback just
+                // above walked all the way to memory-001-1's own rollback (DROP SCHEMA IF
+                // EXISTS nexus CASCADE), which takes nexus.ensure_vector_extensions_
+                // relocated()/_unrelocated() down with it — those SECURITY DEFINER
+                // functions live in the nexus schema. search-path-001's rollback (a few
+                // changesets back, in reverse order) already used the function to move
+                // vector/pg_trgm back to public, correctly, but the function itself does
+                // not survive the LATER (older) schema-cascade-drop. A real cluster never
+                // hits this: nexus.db.pg_provision reinstalls the function on every daemon
+                // start, strictly before any Liquibase walk. This in-process test drives
+                // SchemaMigrator directly, with no daemon between the rollback and the
+                // reapply, so it must reproduce that reinstall itself -- mirroring exactly
+                // what a real restart would do -- before the walk can reach search-path-001
+                // again.
+                try (Connection su = pg.createConnection("")) {
+                    su.setAutoCommit(true);
+                    bootstrapVectorExtensionsForFreshWalk(su, ADMIN_ROLE);
                 }
 
                 // ── FORWARD AGAIN: the schema must come back identical. ─────
@@ -1329,54 +1388,42 @@ class SchemaRollbackRoundTripIntegrationTest {
     /** information_schema shape check post-rollback: TEXT/INTEGER, NOT NULL/DEFAULT restored. */
     private static void assertColumnRestoredShape(Connection c, String table, String column,
             String expectedDataType, boolean expectNullable, boolean expectDefault) throws Exception {
-        try (PreparedStatement ps = c.prepareStatement(
-                "SELECT data_type, is_nullable, column_default FROM information_schema.columns "
-                    + "WHERE table_schema='nexus' AND table_name=? AND column_name=?")) {
-            ps.setString(1, table);
-            ps.setString(2, column);
-            try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next())
-                    .as("nexus.%s.%s must exist after rollback", table, column).isTrue();
-                assertThat(rs.getString("data_type"))
-                    .as("nexus.%s.%s data_type after rollback", table, column)
-                    .isEqualTo(expectedDataType);
-                assertThat(rs.getString("is_nullable"))
-                    .as("nexus.%s.%s is_nullable after rollback", table, column)
-                    .isEqualTo(expectNullable ? "YES" : "NO");
-                String columnDefault = rs.getString("column_default");
-                if (expectDefault) {
-                    assertThat(columnDefault)
-                        .as("nexus.%s.%s must have its pre-migration DEFAULT restored — a "
-                            + "rollback that DROPped DEFAULT but forgot to SET it again leaves "
-                            + "this NULL", table, column)
-                        .isNotNull();
-                } else {
-                    assertThat(columnDefault)
-                        .as("nexus.%s.%s must have NO default (it never carried one "
-                            + "pre-migration) — a stray SET DEFAULT here is itself a bug",
-                            table, column)
-                        .isNull();
-                }
-            }
+        PgCatalogProbes.ColumnInfo col = PgCatalogProbes.columnInfo(
+            DSL.using(c, SQLDialect.POSTGRES), "nexus", table, column);
+        assertThat(col)
+            .as("nexus.%s.%s must exist after rollback", table, column).isNotNull();
+        assertThat(col.dataType())
+            .as("nexus.%s.%s data_type after rollback", table, column)
+            .isEqualTo(expectedDataType);
+        assertThat(col.isNullable())
+            .as("nexus.%s.%s is_nullable after rollback", table, column)
+            .isEqualTo(expectNullable ? "YES" : "NO");
+        String columnDefault = col.columnDefault();
+        if (expectDefault) {
+            assertThat(columnDefault)
+                .as("nexus.%s.%s must have its pre-migration DEFAULT restored — a "
+                    + "rollback that DROPped DEFAULT but forgot to SET it again leaves "
+                    + "this NULL", table, column)
+                .isNotNull();
+        } else {
+            assertThat(columnDefault)
+                .as("nexus.%s.%s must have NO default (it never carried one "
+                    + "pre-migration) — a stray SET DEFAULT here is itself a bug",
+                    table, column)
+                .isNull();
         }
     }
 
     /** information_schema shape check post-reapply: jsonb/boolean/timestamptz restored. */
     private static void assertColumnForwardShape(Connection c, String table, String column,
             String expectedDataType) throws Exception {
-        try (PreparedStatement ps = c.prepareStatement(
-                "SELECT data_type FROM information_schema.columns "
-                    + "WHERE table_schema='nexus' AND table_name=? AND column_name=?")) {
-            ps.setString(1, table);
-            ps.setString(2, column);
-            try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next())
-                    .as("nexus.%s.%s must exist after forward re-apply", table, column).isTrue();
-                assertThat(rs.getString("data_type"))
-                    .as("nexus.%s.%s data_type after forward re-apply", table, column)
-                    .isEqualTo(expectedDataType);
-            }
-        }
+        PgCatalogProbes.ColumnInfo col = PgCatalogProbes.columnInfo(
+            DSL.using(c, SQLDialect.POSTGRES), "nexus", table, column);
+        assertThat(col)
+            .as("nexus.%s.%s must exist after forward re-apply", table, column).isNotNull();
+        assertThat(col.dataType())
+            .as("nexus.%s.%s data_type after forward re-apply", table, column)
+            .isEqualTo(expectedDataType);
     }
 
     /**
@@ -1877,38 +1924,29 @@ class SchemaRollbackRoundTripIntegrationTest {
      * grants (staging-4-svc-grants / grants-*).
      */
     private static Map<String, List<String>> schemaShape(Connection c) throws Exception {
+        DSLContext ctx = dsl(c);
+        List<String> schemas = List.of("nexus", "staging");
+        String currentUser = c.getMetaData().getUserName();
         Map<String, List<String>> shape = new LinkedHashMap<>();
-        shape.put("tables", query(c,
-            "SELECT schemaname || '.' || tablename FROM pg_tables "
-                + "WHERE schemaname IN ('nexus','staging') ORDER BY 1"));
-        shape.put("indexes", query(c,
-            "SELECT schemaname || '.' || indexname || ' = ' || indexdef FROM pg_indexes "
-                + "WHERE schemaname IN ('nexus','staging') ORDER BY 1"));
+        List<String> tables = new ArrayList<>();
+        for (String schema : schemas) {
+            for (String t : PgCatalogProbes.tablesInSchema(ctx, schema)) {
+                tables.add(schema + "." + t);
+            }
+        }
+        shape.put("tables", sorted(tables));
+        shape.put("indexes", sorted(PgCatalogProbes.indexesIn(ctx, schemas).stream()
+            .map(i -> i.schema() + "." + i.indexname() + " = " + i.indexdef()).toList()));
         // Generated-column expressions: the exact thing the FTS rollbacks revert.
         // pg_get_expr renders the stored expression, so a rollback that restores
         // a DIFFERENT expression is caught, not just a missing column.
-        shape.put("generatedColumns", query(c,
-            "SELECT n.nspname || '.' || cl.relname || '.' || a.attname || ' = ' "
-                + "|| pg_get_expr(d.adbin, d.adrelid) "
-                + "FROM pg_attrdef d "
-                + "JOIN pg_class cl ON cl.oid = d.adrelid "
-                + "JOIN pg_namespace n ON n.oid = cl.relnamespace "
-                + "JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum "
-                + "WHERE n.nspname IN ('nexus','staging') AND a.attgenerated <> '' "
-                + "ORDER BY 1"));
-        shape.put("constraints", query(c,
-            "SELECT n.nspname || '.' || cl.relname || '.' || con.conname || ' = ' "
-                + "|| pg_get_constraintdef(con.oid) "
-                + "FROM pg_constraint con "
-                + "JOIN pg_class cl ON cl.oid = con.conrelid "
-                + "JOIN pg_namespace n ON n.oid = cl.relnamespace "
-                + "WHERE n.nspname IN ('nexus','staging') ORDER BY 1"));
-        shape.put("grants", query(c,
-            "SELECT grantee || ' ' || privilege_type || ' ON ' "
-                + "|| table_schema || '.' || table_name "
-                + "FROM information_schema.role_table_grants "
-                + "WHERE table_schema IN ('nexus','staging') "
-                + "AND grantee NOT IN ('PUBLIC', current_user) ORDER BY 1"));
+        shape.put("generatedColumns", sorted(PgCatalogProbes.generatedExpressionsIn(ctx, schemas).stream()
+            .map(g -> g.schema() + "." + g.table() + "." + g.column() + " = " + g.expression()).toList()));
+        shape.put("constraints", sorted(PgCatalogProbes.constraintDefinitionsIn(ctx, schemas).stream()
+            .map(k -> k.schema() + "." + k.table() + "." + k.conname() + " = " + k.definition()).toList()));
+        shape.put("grants", sorted(PgCatalogProbes.tableGrantsIn(ctx, schemas).stream()
+            .filter(g -> !g.grantee().equals("PUBLIC") && !g.grantee().equals(currentUser))
+            .map(g -> g.grantee() + " " + g.privilege() + " ON " + g.schema() + "." + g.table()).toList()));
         // RLS is the highest-value category for THIS codebase and was missing
         // from the first cut. chash-001-2's rollback (rewritten in this commit)
         // does DROP POLICY / NO FORCE / DISABLE ROW LEVEL SECURITY, and
@@ -1917,25 +1955,31 @@ class SchemaRollbackRoundTripIntegrationTest {
         // table, or a policy whose USING expression drifted, passes green — and
         // "FORCE-RLS silently no-ops migration DML" is already a recorded
         // incident class here.
-        shape.put("policies", query(c,
-            "SELECT schemaname || '.' || tablename || '.' || policyname || ' = ' "
-                + "|| coalesce(qual,'') || ' | ' || coalesce(with_check,'') "
-                + "FROM pg_policies WHERE schemaname IN ('nexus','staging') ORDER BY 1"));
-        shape.put("rlsFlags", query(c,
-            "SELECT n.nspname || '.' || cl.relname || ' rls=' || cl.relrowsecurity "
-                + "|| ' force=' || cl.relforcerowsecurity "
-                + "FROM pg_class cl JOIN pg_namespace n ON n.oid = cl.relnamespace "
-                + "WHERE n.nspname IN ('nexus','staging') AND cl.relkind = 'r' ORDER BY 1"));
+        shape.put("policies", sorted(PgCatalogProbes.policiesIn(ctx, schemas).stream()
+            .map(p -> p.schema() + "." + p.table() + "." + p.policyname() + " = "
+                + (p.qual() == null ? "" : p.qual()) + " | " + (p.withCheck() == null ? "" : p.withCheck()))
+            .toList()));
+        shape.put("rlsFlags", sorted(PgCatalogProbes.rowSecurityIn(ctx, schemas).stream()
+            .map(r -> r.schema() + "." + r.table() + " rls=" + r.enabled() + " force=" + r.forced()).toList()));
         // rdr180-3..7 are ALTER COLUMN ... TYPE bytea conversions carrying empty
         // <rollback/>, and the octet_length CHECK renders identically for text
         // and bytea — so nothing else here would notice a column that came back
         // as the wrong type.
-        shape.put("columns", query(c,
-            "SELECT table_schema || '.' || table_name || '.' || column_name || ' ' "
-                + "|| data_type || ' null=' || is_nullable "
-                + "FROM information_schema.columns "
-                + "WHERE table_schema IN ('nexus','staging') ORDER BY 1"));
+        shape.put("columns", sorted(PgCatalogProbes.columnsIn(ctx, schemas).stream()
+            .map(k -> k.schema() + "." + k.table() + "." + k.column() + " " + k.dataType() + " null=" + k.isNullable())
+            .toList()));
         return shape;
+    }
+
+    private static DSLContext dsl(Connection c) {
+        return DSL.using(c, SQLDialect.POSTGRES);
+    }
+
+    /** Sorted copy; both sides of every shape diff go through this, so the order is self-consistent. */
+    private static List<String> sorted(List<String> rows) {
+        List<String> out = new ArrayList<>(rows);
+        java.util.Collections.sort(out);
+        return out;
     }
 
     private static List<String> query(Connection c, String sql) throws Exception {
@@ -1946,13 +1990,6 @@ class SchemaRollbackRoundTripIntegrationTest {
             }
         }
         return out;
-    }
-
-    private static int count(Connection c, String sql) throws Exception {
-        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            rs.next();
-            return rs.getInt(1);
-        }
     }
 
     /** The last {@code n} changeset ids by execution order (newest first). */
@@ -1978,15 +2015,11 @@ class SchemaRollbackRoundTripIntegrationTest {
      * post-revoke assertion unsatisfiable.
      */
     private static List<String> diagBaseTableGrants(Connection c) throws Exception {
-        return query(c,
-            "SELECT g.table_schema || '.' || g.table_name "
-                + "FROM information_schema.role_table_grants g "
-                + "JOIN pg_namespace n ON n.nspname = g.table_schema "
-                + "JOIN pg_class cl ON cl.relname = g.table_name "
-                + "  AND cl.relnamespace = n.oid "
-                + "WHERE g.grantee = 'nexus_diag' AND g.privilege_type = 'SELECT' "
-                + "AND g.table_schema IN ('nexus','t1') AND cl.relkind IN ('r','p') "
-                + "ORDER BY 1");
+        return sorted(PgCatalogProbes.tableGrantsIn(dsl(c), List.of("nexus", "t1")).stream()
+            .filter(g -> g.grantee().equals("nexus_diag") && g.privilege().equals("SELECT"))
+            .filter(g -> g.relkind().equals("r") || g.relkind().equals("p"))
+            .map(g -> g.schema() + "." + g.table())
+            .toList());
     }
 
     private static int changelogRowCount(Connection c) throws Exception {
@@ -1999,8 +2032,7 @@ class SchemaRollbackRoundTripIntegrationTest {
     }
 
     private static List<String> tablesInSchema(Connection c, String schema) throws Exception {
-        return query(c,
-            "SELECT tablename FROM pg_tables WHERE schemaname = '" + schema + "' ORDER BY 1");
+        return sorted(PgCatalogProbes.tablesInSchema(dsl(c), schema));
     }
 
     // ── Container bootstrap (mirrors SchemaUpgradeRehearsalIntegrationTest) ──
@@ -2022,8 +2054,15 @@ class SchemaRollbackRoundTripIntegrationTest {
         su.createStatement().execute(
             "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' "
                 + "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+        // nexus/critique-nexus-cbo4a-batch-9-search-path): see
+        // SchemaMigratorIntegrationTest.bootstrapVectorExtensionsForFreshWalk's own
+        // javadoc for the full derivation -- creates the extensions directly as
+        // `su` and installs a SECURITY DEFINER relocation helper for search-path-
+        // 001's guard to call mid-walk, since this walk resumes through both
+        // vectors-001-baseline.xml and search-path-001/002 in one continuous pass
+        // as a NOSUPERUSER role.
+        bootstrapVectorExtensionsForFreshWalk(su, ADMIN_ROLE);
     }
 
     private static HikariDataSource newAdminPool(PostgreSQLContainer<?> pg, String poolName) {

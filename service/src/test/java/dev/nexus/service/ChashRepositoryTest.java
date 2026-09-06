@@ -4,11 +4,6 @@ import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashRepository;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -81,22 +76,7 @@ class ChashRepositoryTest {
         pg = PgContainerHelper.start();
 
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
-                "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; " +
-                "  END IF; " +
-                "END $$");
-        }
-
-        try (Connection su = pg.createConnection("")) {
-            var lb = new Liquibase(
-                "db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(),
-                DatabaseFactory.getInstance().findCorrectDatabaseImplementation(
-                    new JdbcConnection(su)));
-            lb.update(new Contexts());
+            PgContainerHelper.applyProductSchema(su);
         }
 
         var config = new com.zaxxer.hikari.HikariConfig();
@@ -463,7 +443,7 @@ class ChashRepositoryTest {
             "INSERT INTO nexus.chunks" +
             " (tenant_id, collection, chash, chunk_text, embedding_" + dim + ", created_at) VALUES " +
             "('" + tenant + "', '" + collection + "', decode('" + chash.toHex() + "', 'hex'), " +
-            "'chunk " + chash.toHex().substring(0, 8) + "', " + unitVec(dim) + "::vector, " +
+            "'chunk " + chash.toHex().substring(0, 8) + "', " + unitVec(dim) + "::nexus.vector, " +
             "TIMESTAMPTZ '" + createdAt + "')");
     }
 

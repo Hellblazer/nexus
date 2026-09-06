@@ -7,7 +7,7 @@ import click
 import structlog
 
 from nexus.config import get_telemetry_config, get_tuning_config, load_config
-from nexus.corpus import resolve_corpus
+from nexus.corpus import is_conformant_collection_name, resolve_corpus
 from nexus.commands.store import _t3
 from nexus.ripgrep_cache import search_ripgrep
 from nexus.formatters import (
@@ -294,7 +294,6 @@ def search_cmd(
     # the query no longer carries ``chunk_count`` to chroma.
 
     db = _t3()
-    all_collections = [c["name"] for c in db.list_collections()]
 
     # Pre-split each --corpus value on commas so the CLI accepts the
     # same CSV form that MCP search(corpus=...) documents (#538 /
@@ -307,14 +306,49 @@ def search_cmd(
             if part:
                 expanded_corpus.append(part)
 
-    target_collections: list[str] = []
-    for c in expanded_corpus:
-        matched = resolve_corpus(c, all_collections)
-        if not matched:
-            click.echo(f"Warning: no collections match --corpus {c!r}", err=True)
-        target_collections.extend(matched)
-
-    target_collections = list(dict.fromkeys(target_collections))
+    # nexus-d9xt2: GET /v1/vectors/stats (db.list_collections()) costs
+    # ~1.1s and, unlike the long-lived MCP process (which caches it —
+    # see nexus.mcp_infra's _collections_cache), the CLI is a fresh
+    # process every invocation and would pay it on every search. It
+    # exists only to resolve a --corpus prefix/short-form against the
+    # tenant's real collection names (resolve_corpus's prefix-matching
+    # stages). When every --corpus value is already an explicit,
+    # fully-qualified collection name (RDR-103 4-segment shape), there is
+    # no PREFIX to resolve — but critique-nexus-d9xt2 traced the engine
+    # path (VectorHandler.handleSearch -> plain_search_<dim> SQL) and
+    # found NO existence check: a nonexistent-but-conformant name would
+    # silently return zero rows from `t3.search`, not an error — worse
+    # than the preflight warning this fast path replaced. Existence is
+    # instead confirmed via `collection_exists_raw`, which hits the CHEAP
+    # `GET /v1/vectors/collections` bare-name scan — not the expensive
+    # tombstone-filtered stats aggregation `list_collections()` computes
+    # over every collection's live count — so the fast path still avoids
+    # the call this bead targeted while restoring a real, named error for
+    # a missing collection. A wildcard, prefix, or legacy short-form
+    # corpus value still pays the one list_collections() call, exactly as
+    # before.
+    if expanded_corpus and all(
+        is_conformant_collection_name(c) for c in expanded_corpus
+    ):
+        target_collections = []
+        for c in dict.fromkeys(expanded_corpus):
+            try:
+                exists = db.collection_exists_raw(c)
+            except VectorServiceError as exc:
+                raise click.ClickException(str(exc)) from exc
+            if not exists:
+                click.echo(f"Warning: no collections match --corpus {c!r}", err=True)
+                continue
+            target_collections.append(c)
+    else:
+        all_collections = [c["name"] for c in db.list_collections()]
+        target_collections = []
+        for c in expanded_corpus:
+            matched = resolve_corpus(c, all_collections)
+            if not matched:
+                click.echo(f"Warning: no collections match --corpus {c!r}", err=True)
+            target_collections.extend(matched)
+        target_collections = list(dict.fromkeys(target_collections))
 
     if not target_collections:
         click.echo("no matching collections found — use: nx collection list", err=True)

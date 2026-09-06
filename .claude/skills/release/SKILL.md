@@ -99,6 +99,7 @@ away.
 ### 1. Run unit + integration suite
 
 ```bash
+tests/e2e/release-battery.sh         # nexus-mfage: every E2E gate below (and 1b, 6, 6b, 6c) in ONE parallel run — artifacts built once, per-leg logs, verdict table, exit 1 on any red; the unit suite still runs SERIAL to it
 uv run pytest                        # unit suite (no API keys)
 tests/e2e/local-service-gate.sh      # integration incl. the local-service functional gate
 tests/e2e/migration-rehearsal/run.sh --package-upgrade   # ONE-engine convergence MVV (nexus-cfgo9)

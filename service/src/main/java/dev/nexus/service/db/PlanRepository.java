@@ -458,11 +458,7 @@ public final class PlanRepository {
      */
     public void incrementRunStarted(String tenant, long id) {
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.update(PLANS)
-               .set(PLANS.USE_COUNT, PLANS.USE_COUNT.add(1))
-               .set(PLANS.LAST_USED, OffsetDateTime.now(ZoneOffset.UTC))
-               .where(PLANS.ID.eq(id))
-               .execute();
+            incrementRunStartedIn(ctx, id);
             return null;
         });
     }
@@ -475,19 +471,57 @@ public final class PlanRepository {
      */
     public void incrementRunOutcome(String tenant, long id, boolean success) {
         tenantScope.withTenant(tenant, ctx -> {
-            if (success) {
-                ctx.update(PLANS)
-                   .set(PLANS.SUCCESS_COUNT, PLANS.SUCCESS_COUNT.add(1))
-                   .where(PLANS.ID.eq(id))
-                   .execute();
-            } else {
-                ctx.update(PLANS)
-                   .set(PLANS.FAILURE_COUNT, PLANS.FAILURE_COUNT.add(1))
-                   .where(PLANS.ID.eq(id))
-                   .execute();
-            }
+            incrementRunOutcomeIn(ctx, id, success);
             return null;
         });
+    }
+
+    /**
+     * RDR-203 D2/residual 3 — the body of {@link #incrementRunStarted}, lifted
+     * to a package-private static taking a caller-supplied {@link DSLContext}
+     * rather than opening its own {@code withTenant}. {@code TelemetryRepository}
+     * (same package, {@code dev.nexus.service.db}) calls this directly from
+     * inside its own composite {@code withTenant} lambda
+     * ({@code recordNxAnswerRunComplete}) so the increment lands in the SAME
+     * transaction as the run-row insert, rather than opening a second one.
+     * {@link #incrementRunStarted} above is now a thin {@code withTenant}
+     * wrapper over this method — same DSL, same behaviour, one copy.
+     *
+     * <p>Static, not instance, because {@code TelemetryRepository}'s
+     * constructor takes only a {@link TenantScope} ({@code
+     * TelemetryRepository.java:57}) and {@code NexusService} builds the two
+     * repositories independently — an instance helper would mean handing
+     * {@code TelemetryRepository} a {@code PlanRepository} it has nowhere to
+     * store, for a helper that takes its {@code DSLContext} as an argument and
+     * holds no state of its own.
+     */
+    static void incrementRunStartedIn(DSLContext ctx, long id) {
+        ctx.update(PLANS)
+           .set(PLANS.USE_COUNT, PLANS.USE_COUNT.add(1))
+           .set(PLANS.LAST_USED, OffsetDateTime.now(ZoneOffset.UTC))
+           .where(PLANS.ID.eq(id))
+           .execute();
+    }
+
+    /**
+     * RDR-203 D2/residual 3 — the body of {@link #incrementRunOutcome},
+     * lifted the same way as {@link #incrementRunStartedIn}. See that
+     * method's javadoc for why this is static rather than an instance method.
+     *
+     * @param success true to increment success_count, false for failure_count
+     */
+    static void incrementRunOutcomeIn(DSLContext ctx, long id, boolean success) {
+        if (success) {
+            ctx.update(PLANS)
+               .set(PLANS.SUCCESS_COUNT, PLANS.SUCCESS_COUNT.add(1))
+               .where(PLANS.ID.eq(id))
+               .execute();
+        } else {
+            ctx.update(PLANS)
+               .set(PLANS.FAILURE_COUNT, PLANS.FAILURE_COUNT.add(1))
+               .where(PLANS.ID.eq(id))
+               .execute();
+        }
     }
 
     // ── Fidelity-preserving import (ETL path) ──────────────────────────────────

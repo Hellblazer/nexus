@@ -39,6 +39,31 @@ Rules when touching this layer:
   Retiring a journey deliberately = lower that lint's floor in the same
   commit, with rationale.
 
+## Live-cloud recall-parity gate (nexus-d9xt2)
+
+`tests/test_search_fanout_recall_parity.py` (`integration` marker, skipped by
+default — `uv run pytest -m integration tests/test_search_fanout_recall_parity.py`)
+compares the model-grouped batched cross-corpus fan-out against the pre-fix
+one-call-per-collection fan-out (loaded standalone via `git show <pre-fix
+SHA>:src/nexus/search_engine.py`) across 10 real queries spanning all five
+corpus specs, asserting top-10 id-set Jaccard overlap ≥ 0.9 per query against
+this box's own live cloud collections. Reads only — `search_cross_corpus`
+never writes — and self-skips on a named content precondition (this tenant
+missing real collections for one of the five corpus specs) rather than
+passing vacuously. Run it by hand after any change to
+`nexus.search_engine.search_cross_corpus`'s batching, grouping, or per-batch
+sizing logic; it is not wired into CI (the `integration` marker is excluded
+from `addopts` project-wide, same as every other live-substrate gate in this
+file).
+
+The bounded-retry decision that separates a real regression from measured
+ANN/embedding-index jitter (`_is_confirmed_regression`) is a pure function
+with its own fast, non-`integration` unit coverage in
+`tests/test_search_fanout_recall_parity_retry_logic.py` — run in the default
+loop, so a revert of the "a second failure fails" contract (accepting
+whichever of two measurements came back last, win or lose) is caught without
+needing live-cloud credentials.
+
 ## Test-authoring directives (compression arc, 2026-08-05)
 
 Distilled from P0–P3 (design records in T2:

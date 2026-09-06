@@ -69,12 +69,83 @@ public final class AuthFilter extends Filter {
     private static final String TENANT_HEADER = "X-Nexus-Tenant";
     private static final String SESSION_HEADER = "X-Nexus-T1-Session";
 
+    /**
+     * Public alias of {@link RequestDeadline#REQUEST_DEADLINE_HEADER} (nexus-8hdg9
+     * phase 5): {@code RequestDeadline} is package-private, and {@code
+     * AuthFilterTest} lives one package up.
+     */
+    public static final String REQUEST_DEADLINE_HEADER = RequestDeadline.REQUEST_DEADLINE_HEADER;
+
     private final TokenCache tokenCache;
     private final TokenStore tokenStore;
 
+    /**
+     * Request embed-deadline budget (nexus-8hdg9 phase 2), resolved ONCE at
+     * construction -- mirrors {@code LocalOnnxAdmission.fromEnv()}'s resolve-
+     * once-at-boot shape rather than re-parsing the env on every request.
+     * {@link RequestDeadline#newDeadlineNanos(long)} mints a fresh deadline
+     * from this budget per request, for EVERY route, in {@link #doFilter}
+     * (see {@code RequestDeadlineExceededException}'s javadoc for why this
+     * is not upsert-specific).
+     */
+    private final long deadlineBudgetMs;
+
+    /**
+     * Hard ceiling on any request's embed budget (nexus-8hdg9 phase 3, review
+     * carry-in T2 [24681]): {@link RequestDeadline#DEADLINE_MAX_MS_ENV},
+     * resolved once at construction like {@link #deadlineBudgetMs}. Both the
+     * client's header budget and the env default are clamped to it in
+     * {@link RequestDeadline#resolveBudgetMs(String, long, long)}.
+     */
+    private final long deadlineMaxMs;
+
     public AuthFilter(TokenCache tokenCache, TokenStore tokenStore) {
+        this(tokenCache, tokenStore, RequestDeadline.deadlineMsFromEnv(),
+             RequestDeadline.deadlineMaxMsFromEnv());
+    }
+
+    /**
+     * Test-support constructor (nexus-8hdg9 phase 2 review remediation, T2
+     * {@code code-review-nexus-8hdg9-p2-5ce59b36d} [24650]): bypasses {@link
+     * RequestDeadline#deadlineMsFromEnv()}'s real-process-env read so a test
+     * can assert the WIRING -- that {@link RequestContext#deadlineNanos()}
+     * carries the budget this constructor was given -- without mutating the
+     * JVM's actual environment. Java offers no supported, non-reflective way
+     * to set an env var for a running process, so this constructor is the
+     * injectable-resolver seam {@code deadlineMsFromEnv(Function)} already
+     * gives {@link AuthFilter} itself; a same-package test would call that
+     * resolver directly, but {@code AuthFilterTest} lives in {@code
+     * dev.nexus.service}, one package up, where a package-private overload
+     * is not visible -- hence public, unlike {@code LocalOnnxAdmission}'s
+     * same-package-private injection points. The public two-arg constructor
+     * above delegates here with the real env-resolved budget; production
+     * code has exactly one construction path
+     * ({@code NexusService} → the two-arg form), this constructor exists
+     * for tests only.
+     *
+     * @param deadlineBudgetMs the embed-deadline budget in milliseconds --
+     *                         what {@link RequestDeadline#deadlineMsFromEnv()}
+     *                         would have returned for some {@code
+     *                         NX_EMBED_DEADLINE_MS} value
+     */
+    public AuthFilter(TokenCache tokenCache, TokenStore tokenStore, long deadlineBudgetMs) {
+        this(tokenCache, tokenStore, deadlineBudgetMs, RequestDeadline.deadlineMaxMsFromEnv());
+    }
+
+    /**
+     * Test-support constructor with an explicit hard ceiling (nexus-8hdg9
+     * phase 3 carry-in); same rationale as the 3-arg form.
+     *
+     * @param deadlineMaxMs the ceiling in milliseconds -- what {@link
+     *                      RequestDeadline#deadlineMaxMsFromEnv()} would have
+     *                      returned for some {@code NX_EMBED_DEADLINE_MAX_MS}
+     */
+    public AuthFilter(TokenCache tokenCache, TokenStore tokenStore, long deadlineBudgetMs,
+                      long deadlineMaxMs) {
         this.tokenCache = Objects.requireNonNull(tokenCache, "tokenCache");
         this.tokenStore = Objects.requireNonNull(tokenStore, "tokenStore");
+        this.deadlineBudgetMs = deadlineBudgetMs;
+        this.deadlineMaxMs = deadlineMaxMs;
     }
 
     @Override
@@ -184,10 +255,22 @@ public final class AuthFilter extends Filter {
         // 4. Publish the principal thread-confined; clear after dispatch.
         RequestContext.set(new RequestContext.Principal(
             tenant, sessionId, mintedSession, isOperator, scope, credentialHash));
+        // nexus-8hdg9 phase 2: mint the request's embed deadline alongside the
+        // principal, for EVERY route, from the budget resolved once at construction.
+        // Phase 5: a client that declares its own budget via the advisory
+        // X-Nexus-Request-Deadline-Ms header replaces the env default outright;
+        // absent or malformed falls back to the default. Either is clamped to the
+        // NX_EMBED_DEADLINE_MAX_MS hard ceiling (phase 3 carry-in).
+        // Cleared together with the principal in the finally below.
+        long budgetMs = RequestDeadline.resolveBudgetMs(
+            exchange.getRequestHeaders().getFirst(RequestDeadline.REQUEST_DEADLINE_HEADER),
+            deadlineBudgetMs, deadlineMaxMs);
+        RequestContext.setDeadlineNanos(RequestDeadline.newDeadlineNanos(budgetMs));
         try {
             chain.doFilter(exchange);
         } finally {
             RequestContext.clear();
+            RequestContext.clearDeadline();
         }
     }
 

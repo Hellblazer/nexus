@@ -1,5 +1,8 @@
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
+import org.jooq.DSLContext;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
@@ -70,23 +73,9 @@ class TelemetrySchemaLiquibaseTest {
     void startAll() throws Exception {
         pg = PgContainerHelper.start();
 
+        // role-001 (the master changelog's first include) creates nexus_svc.
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
-                "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; " +
-                "  END IF; " +
-                "END $$");
-        }
-
-        try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            Liquibase liquibase = new Liquibase(
-                "db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(), db);
-            liquibase.update(new Contexts());
+            PgContainerHelper.applyProductSchema(su);
         }
     }
 
@@ -151,14 +140,11 @@ class TelemetrySchemaLiquibaseTest {
     @Test
     void nxAnswerSteps_runIdForeignKeyCascadesOnDelete() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT confdeltype FROM pg_constraint c " +
-                "JOIN pg_class t ON t.oid = c.conrelid " +
-                "JOIN pg_namespace n ON n.oid = t.relnamespace " +
-                "WHERE n.nspname = 'nexus' AND t.relname = 'nx_answer_steps' AND c.contype = 'f'");
-            assertThat(rs.next()).as("nx_answer_steps must have a foreign key").isTrue();
+            List<String> deleteActions = PgCatalogProbes.foreignKeyDeleteActions(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "nx_answer_steps");
+            assertThat(deleteActions).as("nx_answer_steps must have a foreign key").isNotEmpty();
             // 'c' = ON DELETE CASCADE (pg_constraint.confdeltype)
-            assertThat(rs.getString("confdeltype")).isEqualTo("c");
+            assertThat(deleteActions.get(0)).isEqualTo("c");
         }
     }
 
@@ -192,16 +178,14 @@ class TelemetrySchemaLiquibaseTest {
     @Test
     void nxAnswerRuns_costUsdIsNullableNoDefault() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT is_nullable, column_default FROM information_schema.columns "
-                + "WHERE table_schema = 'nexus' AND table_name = 'nx_answer_runs' "
-                + "AND column_name = 'cost_usd'");
-            assertThat(rs.next()).as("nx_answer_runs.cost_usd column must exist").isTrue();
-            assertThat(rs.getString("is_nullable"))
+            PgCatalogProbes.ColumnInfo col = PgCatalogProbes.columnInfo(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "nx_answer_runs", "cost_usd");
+            assertThat(col).as("nx_answer_runs.cost_usd column must exist").isNotNull();
+            assertThat(col.isNullable())
                 .as("telemetry-007-3 must DROP NOT NULL on nx_answer_runs.cost_usd "
                     + "(RDR-196 risk 1: a client null must not be forced to 0.0)")
                 .isEqualTo("YES");
-            assertThat(rs.getString("column_default"))
+            assertThat(col.columnDefault())
                 .as("telemetry-007-3 must DROP DEFAULT on nx_answer_runs.cost_usd")
                 .isNull();
         }
@@ -212,23 +196,17 @@ class TelemetrySchemaLiquibaseTest {
     @Test
     void allTelemetryTables_rlsEnabledForcedWithPolicy() throws Exception {
         try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             for (String table : ALL_TEL_TABLES) {
-                ResultSet cls = su.createStatement().executeQuery(
-                    "SELECT relrowsecurity, relforcerowsecurity " +
-                    "FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid " +
-                    "WHERE n.nspname = 'nexus' AND c.relname = '" + table + "'");
-                assertThat(cls.next()).as(table + " must exist in pg_class").isTrue();
-                assertThat(cls.getBoolean("relrowsecurity"))
+                PgCatalogProbes.RowSecurity cls = PgCatalogProbes.rowSecurity(ctx, "nexus", table);
+                assertThat(cls).as(table + " must exist in pg_class").isNotNull();
+                assertThat(cls.enabled())
                     .as(table + ": relrowsecurity must be true").isTrue();
-                assertThat(cls.getBoolean("relforcerowsecurity"))
+                assertThat(cls.forced())
                     .as(table + ": relforcerowsecurity must be true").isTrue();
 
-                ResultSet pol = su.createStatement().executeQuery(
-                    "SELECT COUNT(*) AS cnt FROM pg_policies " +
-                    "WHERE schemaname = 'nexus' AND tablename = '" + table + "'");
-                pol.next();
-                assertThat(pol.getLong("cnt"))
-                    .as(table + " must have at least one RLS policy").isGreaterThan(0);
+                assertThat(PgCatalogProbes.policies(ctx, "nexus", table))
+                    .as(table + " must have at least one RLS policy").isNotEmpty();
             }
         }
     }
@@ -238,19 +216,11 @@ class TelemetrySchemaLiquibaseTest {
     @Test
     void allTelemetryTables_noTsvectorColumns() throws Exception {
         try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             for (String table : ALL_TEL_TABLES) {
-                ResultSet rs = su.createStatement().executeQuery(
-                    "SELECT COUNT(*) AS cnt " +
-                    "FROM pg_attribute a " +
-                    "JOIN pg_class c ON c.oid = a.attrelid " +
-                    "JOIN pg_namespace n ON n.oid = c.relnamespace " +
-                    "JOIN pg_type t ON t.oid = a.atttypid " +
-                    "WHERE n.nspname = 'nexus' AND c.relname = '" + table + "' " +
-                    "  AND t.typname = 'tsvector' AND a.attnum > 0 AND NOT a.attisdropped");
-                rs.next();
-                assertThat(rs.getLong("cnt"))
+                assertThat(PgCatalogProbes.columnCountOfType(ctx, "nexus", table, "tsvector"))
                     .as(table + " must NOT have any tsvector columns (telemetry is not FTS-searched)")
-                    .isEqualTo(0L);
+                    .isZero();
             }
         }
     }
@@ -270,24 +240,14 @@ class TelemetrySchemaLiquibaseTest {
         );
 
         try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             for (var entry : tableToTsCol) {
                 String table = entry[0];
                 String tsCol  = entry[1];
 
-                ResultSet idx = su.createStatement().executeQuery(
-                    "SELECT COUNT(*) AS cnt " +
-                    "FROM pg_index ix " +
-                    "JOIN pg_class c  ON c.oid = ix.indrelid " +
-                    "JOIN pg_class i  ON i.oid = ix.indexrelid " +
-                    "JOIN pg_namespace n ON n.oid = c.relnamespace " +
-                    "JOIN pg_am am ON am.oid = i.relam " +
-                    "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(ix.indkey) " +
-                    "WHERE n.nspname = 'nexus' AND c.relname = '" + table + "' " +
-                    "  AND am.amname = 'btree' AND a.attname = '" + tsCol + "'");
-                idx.next();
-                assertThat(idx.getLong("cnt"))
+                assertThat(PgCatalogProbes.indexCountOnColumn(ctx, "nexus", table, "btree", tsCol))
                     .as("BTree index on " + table + "." + tsCol + " must exist for time-range queries")
-                    .isGreaterThan(0L);
+                    .isPositive();
             }
         }
     }
@@ -305,19 +265,14 @@ class TelemetrySchemaLiquibaseTest {
         );
 
         try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             for (var entry : dedupIndexNames) {
                 String table     = entry[0];
                 String indexName = entry[1];
 
-                ResultSet idx = su.createStatement().executeQuery(
-                    "SELECT COUNT(*) AS cnt " +
-                    "FROM pg_indexes " +
-                    "WHERE schemaname = 'nexus' AND tablename = '" + table + "' " +
-                    "  AND indexname = '" + indexName + "'");
-                idx.next();
-                assertThat(idx.getLong("cnt"))
+                assertThat(PgCatalogProbes.indexExists(ctx, "nexus", indexName))
                     .as("ETL dedup index " + indexName + " must exist on " + table)
-                    .isEqualTo(1L);
+                    .isTrue();
             }
         }
     }

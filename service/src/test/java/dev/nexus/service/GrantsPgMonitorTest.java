@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
@@ -53,6 +55,41 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * throw).
  */
 class GrantsPgMonitorTest {
+
+    private static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
+        exec(su, "CREATE EXTENSION IF NOT EXISTS vector");
+        exec(su, "CREATE EXTENSION IF NOT EXISTS pg_trgm");
+        exec(su, "CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION " + migratingRole);
+        exec(su,
+            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_relocated() "
+            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $relofunc$ "
+            + "BEGIN "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "END; "
+            + "$relofunc$");
+        exec(su, "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() FROM PUBLIC");
+        exec(su, "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO " + migratingRole);
+        exec(su,
+            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated() "
+            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $unrelofunc$ "
+            + "BEGIN "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'public' THEN "
+            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA public'; "
+            + "  END IF; "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'public' THEN "
+            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA public'; "
+            + "  END IF; "
+            + "END; "
+            + "$unrelofunc$");
+        exec(su, "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() FROM PUBLIC");
+        exec(su, "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO " + migratingRole);
+    }
+
 
     private static final String ADMIN_ROLE = "nexus_admin_pgmonitor_replay";
     private static final String ADMIN_PASS = "nexus_admin_pgmonitor_replay_pw";
@@ -165,8 +202,15 @@ class GrantsPgMonitorTest {
             + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT");
         exec(su, "GRANT CREATE ON DATABASE postgres TO " + ADMIN_ROLE);
         exec(su, "GRANT CREATE ON SCHEMA public TO " + ADMIN_ROLE);
-        exec(su, "CREATE EXTENSION IF NOT EXISTS vector");
-        exec(su, "CREATE EXTENSION IF NOT EXISTS pg_trgm");
+        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+        // nexus/critique-nexus-cbo4a-batch-9-search-path): see
+        // SchemaMigratorIntegrationTest.bootstrapVectorExtensionsForFreshWalk's own
+        // javadoc for the full derivation -- creates the extensions directly as
+        // `su` and installs a SECURITY DEFINER relocation helper for search-path-
+        // 001's guard to call mid-walk, since this walk resumes through both
+        // vectors-001-baseline.xml and search-path-001/002 in one continuous pass
+        // as a NOSUPERUSER role.
+        bootstrapVectorExtensionsForFreshWalk(su, ADMIN_ROLE);
     }
 
     /**
@@ -185,26 +229,14 @@ class GrantsPgMonitorTest {
     }
 
     private static boolean hasRoleMembership(Connection c, String role, String memberOf) throws Exception {
-        try (var ps = c.prepareStatement("SELECT pg_has_role(?, ?, 'member')")) {
-            ps.setString(1, role);
-            ps.setString(2, memberOf);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getBoolean(1);
-            }
-        }
+        return PgCatalogProbes.hasRole(DSL.using(c, SQLDialect.POSTGRES), role, memberOf);
     }
 
     /** nexus-v80f2: {@code rolinherit = false} for *role*. */
     private static boolean isNoinherit(Connection c, String role) throws Exception {
-        try (var ps = c.prepareStatement(
-            "SELECT NOT rolinherit FROM pg_roles WHERE rolname = ?")) {
-            ps.setString(1, role);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getBoolean(1);
-            }
-        }
+        PgCatalogProbes.RoleFlags flags = PgCatalogProbes.roleFlags(DSL.using(c, SQLDialect.POSTGRES), role);
+        assertThat(flags).as("role %s must exist in pg_roles", role).isNotNull();
+        return !flags.inherit();
     }
 
     private static void exec(Connection c, String sql) throws Exception {

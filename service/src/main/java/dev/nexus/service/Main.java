@@ -47,7 +47,16 @@ public final class Main {
     public static void main(String[] args) throws Exception {
         // nexus-rph82: one clock for the whole process, pinned before any
         // datasource negotiates a session zone. See SchemaMigrator.pinJvmTimeZoneToUtc.
-        SchemaMigrator.pinJvmTimeZoneToUtc();
+        // nexus-9gaj7: the pin asserts itself and fails loud (System.exit(1))
+        // rather than let a silently-ignored TimeZone.setDefault leave every
+        // downstream UTC assumption (Liquibase's dateexecuted stamp, tsOrNull,
+        // the SET TIME ZONE session pin) quietly wrong.
+        try {
+            SchemaMigrator.pinJvmTimeZoneToUtc();
+        } catch (SchemaMigrator.TimeZonePinFailedException e) {
+            log.error("event=jvm_timezone_pin_failed_at_boot error=\"{}\"", e.getMessage(), e);
+            System.exit(1);
+        }
         int port   = intEnv("NX_SERVICE_PORT", 8080);
         // RDR-152 bead nexus-gmiaf.32.5: NX_SERVICE_TOKEN is the persistent random
         // root bearer token (minted + persisted by `nx init --service`). Auth resolves
@@ -67,9 +76,17 @@ public final class Main {
         hikari.setPassword(dbPass);
         hikari.setMaximumPoolSize(poolSize);
         hikari.setAutoCommit(true);   // pool default; TenantScope toggles to false per borrow
-        // search_path: set via connectionInitSql (not ALTER ROLE, which requires superuser).
-        // Covers nexus (T2 tables), t1 (T1 scratch), and public for pg_catalog visibility.
-        hikari.setConnectionInitSql("SET search_path TO nexus, t1, public");
+        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05, nexus-zrcj7): the
+        // session-search_path connectionInitSql this pool used to carry ("SET search_path
+        // TO nexus, t1, public") is retired -- every nexus/t1 table and routine reference
+        // already goes through jOOQ generated Tables/Routines, which render fully
+        // schema-qualified SQL regardless of session search_path (renderSchema defaults
+        // true, unoverridden anywhere in this codebase). The real (undocumented) dependency
+        // was the bare pgvector/pg_trgm operators and types in 33 search/hybrid/taxonomy-ANN
+        // SQL functions, which now explicitly qualify every such reference as nexus.* (both
+        // extensions are relocated into the nexus schema -- see
+        // search-path-001-relocate-vector-extensions.xml and search-path-002-qualify-
+        // vector-operator-functions.xml) instead of pinning a function-level search_path.
         // nexus-g17tf: per-boot unique application_name so the shutdown hook can
         // terminate THIS process's backends (and only these) via pg_stat_activity.
         String applicationName = dev.nexus.service.db.BackendReaper.newApplicationName(

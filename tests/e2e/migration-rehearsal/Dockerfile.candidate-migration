@@ -67,5 +67,7 @@ COPY --chown=nexus:nexus worktree-wheel/ /home/nexus/worktree-wheel/
 # at Stage 4, after the floor engine has already populated the store.
 COPY --chown=nexus:nexus native/ /opt/nexus-service-native/
 COPY --chown=nexus:nexus rehearse_candidate_migration.sh /home/nexus/rehearse_candidate_migration.sh
+# lib/assert_build_ref.sh: the manifest build_ref assertion (nexus-mfage).
+COPY --chown=nexus:nexus lib/ /home/nexus/lib/
 
 ENTRYPOINT ["/bin/bash", "/home/nexus/rehearse_candidate_migration.sh"]

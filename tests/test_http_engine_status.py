@@ -56,6 +56,22 @@ def test_fetch_engine_status_returns_parsed_body_on_success():
     mock_get.assert_called_once()
     assert mock_get.call_args.args[0] == "http://127.0.0.1:1/v1/status"
     assert mock_get.call_args.kwargs["timeout"] == 3.0
+    # nexus-grzai: /v1/status sits under the auth-gated /v1 prefix -- the public
+    # edge answers 403 to a bare GET and 200 with the resolved token. The
+    # resolver hands the token over; the probe must send it.
+    assert mock_get.call_args.kwargs["headers"] == {"Authorization": "Bearer tok"}
+
+
+def test_fetch_engine_status_sends_no_auth_header_without_a_token():
+    resp = MagicMock()
+    resp.raise_for_status.return_value = None
+    resp.json.return_value = {"embedding_mode": "onnx-local"}
+    with patch(
+        "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+        return_value=("http://127.0.0.1:1", None),
+    ), patch("nexus.db.http_engine_status.httpx.get", return_value=resp) as mock_get:
+        assert fetch_engine_status() is not None
+    assert "Authorization" not in mock_get.call_args.kwargs["headers"]
 
 
 def test_fetch_engine_status_returns_none_on_non_dict_body():

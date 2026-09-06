@@ -1352,7 +1352,7 @@ class PgVectorRepositoryContractTest {
         lit.append(']');
         try (Connection su = pg.createConnection("");
              PreparedStatement ps = su.prepareStatement(
-                 "SELECT " + DimTables.embeddingColumn(dim) + " <=> ?::vector FROM " + DimTables.CHUNKS_TABLE_NAME
+                 "SELECT " + DimTables.embeddingColumn(dim) + " OPERATOR(nexus.<=>) ?::nexus.vector FROM " + DimTables.CHUNKS_TABLE_NAME
                  + " WHERE collection = ? AND chash = ?")) {
             ps.setString(1, lit.toString());
             ps.setString(2, collection);

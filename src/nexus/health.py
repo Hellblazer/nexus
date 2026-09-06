@@ -2882,6 +2882,26 @@ def _check_plugin_name() -> list[HealthResult]:
     ]
 
 
+def _check_worktree_developer_agent() -> list[HealthResult]:
+    """nexus-uympf: warn when the generated ``~/.claude/agents/worktree-developer.md``
+    lags the installed plugins. Opt-in agent: absent means nothing to check.
+    ``nx agents install --check`` is the explicit form; this is the one that
+    fires without anyone remembering to run it (critique finding 2)."""
+    from nexus.commands.agents_cmd import worktree_developer_drift  # noqa: PLC0415 — deferred to avoid circular import
+    problem = worktree_developer_drift()
+    if problem is None:
+        return []
+    return [
+        HealthResult(
+            label="worktree-developer agent (generated)",
+            ok=False,
+            warn=True,
+            detail=problem,
+            fix_suggestions=["nx agents install worktree-developer"],
+        )
+    ]
+
+
 def _check_credential_persistence() -> list[HealthResult]:
     """nexus-m7evs: warn when cloud credentials live in shell env only.
 
@@ -6262,6 +6282,7 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     results.extend(_check_generation_layout())
     results.extend(_check_process_skew())
     results.extend(_check_plugin_name())
+    results.extend(_check_worktree_developer_agent())
     results.extend(_check_credential_persistence())
     results.extend(_check_mint_token())
 

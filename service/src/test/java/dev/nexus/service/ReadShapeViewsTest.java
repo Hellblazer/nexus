@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
+import org.jooq.DSLContext;
 import dev.nexus.service.db.TenantScope;
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -441,7 +444,7 @@ class ReadShapeViewsTest {
         su.createStatement().execute(
             "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) VALUES ("
             + "'" + tenant + "', '" + collection + "', '" + c + "', 'stub', "
-            + "('[" + "0.1,".repeat(383) + "0.1]')::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+            + "('[" + "0.1,".repeat(383) + "0.1]')::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
             + "VALUES ('" + tenant + "', '" + docId + "', " + pos + ", '" + c + "', '" + collection + "')");
@@ -452,13 +455,13 @@ class ReadShapeViewsTest {
     @Test @Order(10)
     void everyView_hasSecurityInvokerReloption() throws Exception {
         try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             for (String view : VIEWS) {
-                ResultSet rs = su.createStatement().executeQuery(
-                    "SELECT reloptions FROM pg_class WHERE oid = 'nexus." + view + "'::regclass");
-                assertThat(rs.next()).as("view nexus.%s must exist", view).isTrue();
-                java.sql.Array arr = rs.getArray(1);
+                assertThat(PgCatalogProbes.tableExists(ctx, "nexus", view))
+                    .as("view nexus.%s must exist", view).isTrue();
+                String[] arr = PgCatalogProbes.relOptions(ctx, "nexus", view);
                 assertThat(arr).as("nexus.%s must HAVE reloptions", view).isNotNull();
-                assertThat((String[]) arr.getArray())
+                assertThat(arr)
                     .as("nexus.%s must have security_invoker=true PHYSICALLY set (RDR-154 standing rule)", view)
                     .contains("security_invoker=true");
             }

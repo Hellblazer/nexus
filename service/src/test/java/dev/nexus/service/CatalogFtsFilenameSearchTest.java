@@ -58,15 +58,6 @@ class CatalogFtsFilenameSearchTest {
     void startAll() throws Exception {
         pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN "
-                + "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN "
-                + "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' NOSUPERUSER NOBYPASSRLS; "
-                + "  END IF; "
-                + "END $$");
-        }
-        try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
         }
         ds = PgContainerHelper.superuserDataSource(pg);
@@ -336,7 +327,7 @@ class CatalogFtsFilenameSearchTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) VALUES ("
                 + "'" + TENANT + "', '" + COLLECTION + "', decode('" + chashHex + "', 'hex'), 'stub', "
-                + "('[" + "0.1,".repeat(383) + "0.1]')::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+                + "('[" + "0.1,".repeat(383) + "0.1]')::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

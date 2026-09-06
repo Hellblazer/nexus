@@ -124,7 +124,7 @@ class CatalogManifestSweepRepositoryTest {
                 tenant, collection);
             return ctx.execute(
                 "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-                + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::vector) "
+                + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::nexus.vector) "
                 + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING",
                 tenant, collection, chashHex, STUB_VECTOR_384);
         });
@@ -213,7 +213,7 @@ class CatalogManifestSweepRepositoryTest {
             // embedding column.
             var ps = su.prepareStatement(
                 "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384)"
-                + " VALUES (?, ?, ?, ?, ?::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+                + " VALUES (?, ?, ?, ?, ?::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
             ps.setString(1, tenant);
             ps.setString(2, collection);
             ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
@@ -1151,7 +1151,7 @@ class CatalogManifestSweepRepositoryTest {
             String zeroVec = "[" + "0,".repeat(383) + "0]";
             try (var ps = su.prepareStatement(
                     "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384)"
-                    + " VALUES (?, ?, ?, ?, ?::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING")) {
+                    + " VALUES (?, ?, ?, ?, ?::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING")) {
                 for (String hex : dropped) {
                     ps.setString(1, TENANT_A);
                     ps.setString(2, col);

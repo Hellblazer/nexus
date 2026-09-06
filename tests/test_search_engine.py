@@ -1401,6 +1401,511 @@ class TestThresholdGateServiceMode:
         assert {r.id for r in results} == {"a", "b"}
 
 
+# ── nexus-d9xt2: model-grouped fan-out request-count ─────────────────────────
+#
+# Recipe from the bead: patch ``nexus.db.http_vector_client._request`` (the
+# transport-level function every ``HttpVectorClient`` call funnels through)
+# and count POST /v1/vectors/search calls per corpus spec, through the REAL
+# ``HttpVectorClient.search()`` request-building/response-parsing code — not
+# a fake ``.search()`` that could hide a regression in how ``search_engine``
+# builds the combined call. FALSIFIER: reverting search_cross_corpus's
+# fan-out to one call per collection (the pre-nexus-d9xt2 ``_search_one``
+# loop) makes every case below see ``len(collections)`` calls instead of the
+# per-model-group count asserted here.
+
+
+def _conformant_collections(content_type: str, model: str, n: int) -> list[str]:
+    """*n* RDR-103-conformant collection names of one (content_type, model)."""
+    return [f"{content_type}__c{i}__{model}__v1" for i in range(n)]
+
+
+class _RequestCountingT3:
+    """Real ``HttpVectorClient`` wired to a fake transport (nexus-d9xt2).
+
+    Patches the module-level ``_request`` function that every ``_post``/
+    ``_get`` call funnels through, so ``HttpVectorClient.search()`` runs its
+    real request-building and response-parsing code end to end. Every
+    ``POST /v1/vectors/search`` call is recorded (collections + n_results);
+    the response tags each row with its collection via round-robin over the
+    call's own collection list, matching the engine's real combined-query
+    contract (RDR-155 P4: "returns the collection per row").
+    """
+
+    def __init__(self, monkeypatch, rows_per_call: int = 3):
+        from nexus.db import http_vector_client as hvc
+
+        self.search_calls: list[dict] = []
+        self._rows_per_call = rows_per_call
+        self.client = hvc.HttpVectorClient()
+
+        def _fake_request(method, path, *, tenant, timeout, body):
+            if method == "POST" and path == "/v1/vectors/search":
+                cols = body["collections"]
+                self.search_calls.append(
+                    {"collections": list(cols), "n_results": body["n_results"]},
+                )
+                rows = []
+                for i in range(min(self._rows_per_call, body["n_results"])):
+                    col = cols[i % len(cols)]
+                    rows.append({
+                        "id": f"{col}-{i}", "content": "x",
+                        "distance": 0.1 + i * 0.001, "collection": col,
+                    })
+                return rows
+            raise AssertionError(f"unexpected request in this test: {method} {path}")
+
+        monkeypatch.setattr(hvc, "_request", _fake_request)
+
+
+@pytest.mark.usefixtures("cloud_mode")
+class TestModelGroupedFanOutRequestCount:
+    """nexus-d9xt2: one combined ``/v1/vectors/search`` call per embedding-
+    model group replaces the old one call per collection."""
+
+    @pytest.fixture(autouse=True)
+    def _disable_contradiction_check(self, monkeypatch):
+        # Keep this test scoped to the fan-out call count -- contradiction
+        # detection would add POST /v1/vectors/get-embeddings calls the fake
+        # transport above does not implement.
+        monkeypatch.setattr(
+            "nexus.search_engine.load_config",
+            lambda: {"search": {"contradiction_check": False}},
+        )
+
+    def test_knowledge_corpus_splits_into_two_calls(self, monkeypatch):
+        """12 knowledge collections (one model, mult=4) -> the group's own
+        floor-restoring sizing (critique round 2 Critical:
+        ``_desired_candidate_count`` = max(10*4, 12*max(5,10*4)) =
+        max(40, 480) = 480 > QUOTAS.MAX_QUERY_RESULTS=300) now splits into
+        2 calls of 6 collections each, never one per collection (12 would
+        be the fully-degraded count) and never the single combined call
+        the flat (mult-dropping) floor used to allow."""
+        cols = _conformant_collections("knowledge", "voyage-context-3", 12)
+        fake = _RequestCountingT3(monkeypatch)
+        search_cross_corpus(
+            "q", cols, 10, fake.client,
+            threshold_override=float("inf"), cluster_by=None,
+        )
+        assert len(fake.search_calls) == 2
+        call_sets = [set(c["collections"]) for c in fake.search_calls]
+        assert call_sets[0] & call_sets[1] == set()
+        assert call_sets[0] | call_sets[1] == set(cols)
+        for c in fake.search_calls:
+            assert c["n_results"] <= 300
+
+    def test_code_corpus_splits_into_two_calls(self, monkeypatch):
+        """20 code collections (one model, mult=2) -> max(10*2,
+        20*max(5,10*2)) = max(20, 400) = 400 > 300, splits into 2 calls of
+        10 collections each."""
+        cols = _conformant_collections("code", "voyage-code-3", 20)
+        fake = _RequestCountingT3(monkeypatch)
+        search_cross_corpus(
+            "q", cols, 10, fake.client,
+            threshold_override=float("inf"), cluster_by=None,
+        )
+        assert len(fake.search_calls) == 2
+        call_sets = [set(c["collections"]) for c in fake.search_calls]
+        assert call_sets[0] & call_sets[1] == set()
+        assert call_sets[0] | call_sets[1] == set(cols)
+        for c in fake.search_calls:
+            assert c["n_results"] <= 300
+
+    def test_all_corpus_issues_one_call_per_model_group(self, monkeypatch):
+        """corpus=all spans two embedding models (voyage-code-3 for code,
+        voyage-context-3 for knowledge/docs/rdr). Neither group fits in a
+        single call once the floor is correctly scaled by the group's own
+        overfetch multiplier (critique round 2 Critical): the 20-collection
+        code group (mult=2) needs max(20, 20*20)=400>300 -> splits into 2;
+        the 44-collection knowledge+docs+rdr group (mult=4) needs
+        max(40, 44*40)=1760>300 -> splits into 6 -- 8 calls total, still
+        never one per collection (64 would be the fully-degraded count)."""
+        code_cols = _conformant_collections("code", "voyage-code-3", 20)
+        knowledge_cols = _conformant_collections("knowledge", "voyage-context-3", 12)
+        docs_cols = _conformant_collections("docs", "voyage-context-3", 23)
+        rdr_cols = _conformant_collections("rdr", "voyage-context-3", 9)
+        voyage_context_cols = knowledge_cols + docs_cols + rdr_cols
+        all_cols = code_cols + voyage_context_cols
+
+        fake = _RequestCountingT3(monkeypatch)
+        search_cross_corpus(
+            "q", all_cols, 10, fake.client,
+            threshold_override=float("inf"), cluster_by=None,
+        )
+        assert len(fake.search_calls) == 8
+        code_calls = [c for c in fake.search_calls if set(c["collections"]) <= set(code_cols)]
+        context_calls = [c for c in fake.search_calls if set(c["collections"]) <= set(voyage_context_cols)]
+        assert len(code_calls) == 2
+        assert len(context_calls) == 6
+        # Each group's split calls cover it exactly once, with no overlap
+        # and no drop.
+        code_sets = [set(c["collections"]) for c in code_calls]
+        assert set.union(*code_sets) == set(code_cols)
+        assert sum(len(s) for s in code_sets) == len(code_cols)
+        context_sets = [set(c["collections"]) for c in context_calls]
+        assert set.union(*context_sets) == set(voyage_context_cols)
+        assert sum(len(s) for s in context_sets) == len(voyage_context_cols)
+        # Every split call still respects the service cap.
+        for c in fake.search_calls:
+            assert c["n_results"] <= 300
+
+    def test_falsifier_documents_the_pre_fix_call_count(self, monkeypatch):
+        """Not a regression test on its own -- documents the count the OLD
+        one-call-per-collection fan-out would have produced, so a revert of
+        the nexus-d9xt2 grouping shows up as a call-count regression here
+        rather than only in wall-clock time."""
+        cols = _conformant_collections("knowledge", "voyage-context-3", 12)
+        fake = _RequestCountingT3(monkeypatch)
+        search_cross_corpus(
+            "q", cols, 10, fake.client,
+            threshold_override=float("inf"), cluster_by=None,
+        )
+        # The grouped (and, past the per-collection floor's own breakeven
+        # size, split) fan-out issues 2 calls here, never len(cols)=12.
+        assert len(fake.search_calls) == 2
+        assert len(fake.search_calls) != len(cols)
+
+
+# ── nexus-d9xt2 review/critique fold-in: per-group sizing formula ───────────
+
+
+@pytest.mark.usefixtures("cloud_mode")
+class TestDesiredCandidateCountSizing:
+    """Code-review-nexus-d9xt2 Critical: per_k must scale with len(cols),
+    not just n_results*mult -- a 44-collection group at n_results=10
+    previously requested only 40 total candidates (0.9/collection before
+    threshold filtering), silently starving most members to zero rows.
+
+    Critique round 2 Critical: the FIRST fix's floor (``max(5,
+    n_results)``) still dropped the group's own overfetch multiplier --
+    since ``len(cols) * floor >= floor >= n_results * mult`` for every
+    ``len(cols) >= 1``, the floor term now ALWAYS determines
+    ``_desired_candidate_count`` once *mult* is folded into the floor
+    itself (``max(5, n_results * mult)``); the outer ``max(...)`` with
+    the bare ``n_results * mult`` term is kept only as a defensive
+    floor for a pathological empty ``cols`` (never hit via
+    :func:`_group_collections_by_embedding_model`, which never emits an
+    empty group)."""
+
+    def test_small_group_uses_the_mult_term(self):
+        from nexus.search_engine import _desired_candidate_count
+        # 1 knowledge collection, n_results=10, mult=4:
+        # floor = max(5, 10*4) = 40; max(40, 1*40) = 40.
+        assert _desired_candidate_count(
+            _conformant_collections("knowledge", "voyage-context-3", 1), 10,
+        ) == 40
+
+    def test_knowledge_12_at_n_results_10(self):
+        from nexus.search_engine import _desired_candidate_count
+        # floor = max(5, 10*4) = 40. max(10*4, 12*40) = max(40, 480) = 480.
+        assert _desired_candidate_count(
+            _conformant_collections("knowledge", "voyage-context-3", 12), 10,
+        ) == 480
+
+    def test_code_20_at_n_results_10(self):
+        from nexus.search_engine import _desired_candidate_count
+        # floor = max(5, 10*2) = 20. max(10*2, 20*20) = max(20, 400) = 400.
+        assert _desired_candidate_count(
+            _conformant_collections("code", "voyage-code-3", 20), 10,
+        ) == 400
+
+    def test_44_collection_group_exceeds_the_cap_uncapped(self):
+        from nexus.search_engine import _desired_candidate_count
+        from nexus.db.limits import QUOTAS
+        # floor = max(5, 10*4) = 40. max(10*4, 44*40) = max(40, 1760) = 1760
+        # -- this is the exact shape (this tenant's corpus=all
+        # knowledge+docs+rdr group) that silently starved to 40 total
+        # candidates before round 1's fix, and to 440 (still short of the
+        # group's own historical n_results*mult=4x-per-collection budget
+        # once len(cols)=44 crossed the mult=4 breakeven point) after it.
+        desired = _desired_candidate_count(
+            _conformant_collections("knowledge", "voyage-context-3", 44), 10,
+        )
+        assert desired == 1760
+        assert desired > QUOTAS.MAX_QUERY_RESULTS
+
+    def test_floor_dominates_at_low_n_results(self):
+        from nexus.search_engine import _desired_candidate_count
+        # n_results=1, mult=4: n_results*mult=4 < 5, so the absolute-5
+        # floor wins: floor = max(5, 4) = 5. 10 collections * 5 = 50,
+        # vs n_results*mult = 1*4 = 4 -- the floor term must win.
+        assert _desired_candidate_count(
+            _conformant_collections("knowledge", "voyage-context-3", 10), 1,
+        ) == 50
+
+    def test_group_size_scales_the_mult_scaled_floor(self):
+        from nexus.search_engine import _desired_candidate_count
+        # n_results=100, mult=4: floor = max(5, 100*4) = 400 (mult, not
+        # the absolute 5, sets the floor at this n_results). 2 collections
+        # * 400 = 800 -- the len(cols)*floor term dominates the bare
+        # n_results*mult=400 term for any len(cols) >= 1, exactly as the
+        # class docstring above states; this was named
+        # "mult_dominates_at_high_n_results_small_group" before the fix
+        # restored mult to the floor itself, when 400 (the bare mult
+        # term) was still the larger of the two.
+        assert _desired_candidate_count(
+            _conformant_collections("knowledge", "voyage-context-3", 2), 100,
+        ) == 800
+
+
+# ── nexus-d9xt2 review/critique fold-in: batch-failure fallback ─────────────
+
+
+class _PoisonableFakeT3:
+    """Real combined-search-shaped fake T3 (nexus-d9xt2 review Important #1
+    / critique Critical #2): raises ``VectorServiceError`` for ANY call
+    whose collection list includes *bad* -- including a singleton call for
+    *bad* alone, matching a genuinely-orphaned collection that fails no
+    matter how it's queried. Succeeds otherwise, tagging every returned row
+    with its own collection (the real combined-response contract). Tracks
+    every call's collection list and in-flight concurrency so tests can
+    assert both WHICH collections were queried together and whether the
+    fallback ran in parallel.
+    """
+
+    def __init__(self, healthy_rows: dict, bad: str, delay: float = 0.0):
+        import threading
+
+        self._healthy_rows = healthy_rows
+        self._bad = bad
+        self._delay = delay
+        self.calls: list[list[str]] = []
+        self._lock = threading.Lock()
+        self._inflight = 0
+        self.max_inflight = 0
+
+    def search(self, query, collection_names, n_results=10, where=None):
+        import time
+
+        from nexus.db.http_vector_client import VectorServiceError
+
+        self.calls.append(list(collection_names))
+        with self._lock:
+            self._inflight += 1
+            self.max_inflight = max(self.max_inflight, self._inflight)
+        try:
+            time.sleep(self._delay)
+            if self._bad in collection_names:
+                # Real dimension-mismatch error shape (nexus-9tsdf /
+                # nexus-pebfx.8) -- the permanent class this fake models.
+                # Must contain "dim" for _is_permanent_poisoning_error to
+                # classify it as memoizable (critique round 2 Significant:
+                # narrowing the memo to this class only).
+                raise VectorServiceError(
+                    f"POST /v1/vectors/search -> HTTP 400: {self._bad} "
+                    "produced a 1024-dim vector but the collection "
+                    "dispatches to embedding_384",
+                )
+            rows = []
+            for col in collection_names:
+                for r in self._healthy_rows.get(col, []):
+                    rows.append({**r, "collection": col})
+            return rows
+        finally:
+            with self._lock:
+                self._inflight -= 1
+
+
+class TestBatchFailureFallbackAndPoisoning:
+    """nexus-d9xt2 review Important #1 / critique Critical #2: the
+    multi-collection ``VectorServiceError`` fallback path (previously
+    wholly untested), its re-parallelization, and the per-process
+    poisoned-collection memo that stops one orphan from permanently
+    downgrading its whole model group."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_poison_set(self, monkeypatch):
+        # Module-level poisoning state must never leak across tests.
+        import nexus.search_engine as se
+        monkeypatch.setattr(se, "_poisoned_collections", set())
+
+    def _setup(self, n_good: int = 3, delay: float = 0.0):
+        good = _conformant_collections("knowledge", "voyage-context-3", n_good)
+        bad = "knowledge__orphan__voyage-context-3__v1"
+        cols = good + [bad]
+        rows = {c: [{"id": f"{c}-0", "content": "x", "distance": 0.1}] for c in good}
+        return good, bad, cols, _PoisonableFakeT3(rows, bad=bad, delay=delay)
+
+    def test_multi_collection_fallback_isolates_the_bad_member(self):
+        good, bad, cols, t3 = self._setup()
+        results = search_cross_corpus(
+            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None,
+        )
+        # The bad collection is excluded; every healthy one survives.
+        assert {r.id for r in results} == {f"{c}-0" for c in good}
+        # One batched attempt (all 4 collections together), then a
+        # fallback of 4 singleton calls (3 succeed, 1 -- bad -- fails
+        # again in isolation, exactly as nexus-9tsdf/pebfx.8 intends).
+        assert len(t3.calls) == 1 + len(cols)
+        assert sorted(t3.calls[0]) == sorted(cols)
+        singleton_calls = sorted(t3.calls[1:])
+        assert singleton_calls == sorted([[c] for c in cols])
+
+    def test_fallback_runs_in_parallel_not_serially(self):
+        # nexus-d9xt2 critique Critical #2: the fallback used to be a
+        # plain serial for-loop inside the one outer-pool worker thread
+        # already assigned to the failed batch -- slower than the
+        # pre-fix design, not merely equal to it. With 5 healthy
+        # collections + delay, a serial fallback can never show
+        # max_inflight > 1 among the singleton retries; a parallel one
+        # (bounded at min(8, len(cols))) will.
+        _good, _bad, cols, t3 = self._setup(n_good=5, delay=0.05)
+        search_cross_corpus(
+            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None,
+        )
+        assert t3.max_inflight > 1
+
+    def test_poisoned_collection_excluded_from_batching_on_next_call(self):
+        good, bad, cols, t3 = self._setup()
+        # First call: discovers and memoizes the poisoned collection via
+        # the fallback.
+        search_cross_corpus(
+            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None,
+        )
+        t3.calls.clear()
+
+        # Second call, same corpus: the poisoned collection must be its
+        # OWN singleton batch from the START -- never bundled with its
+        # healthy siblings again, so the healthy group stays fast.
+        search_cross_corpus(
+            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None,
+        )
+        assert [bad] in t3.calls
+        healthy_calls = [c for c in t3.calls if bad not in c]
+        assert any(sorted(c) == sorted(good) for c in healthy_calls)
+        # No batch on the second call should ever mix bad with healthy
+        # collections again.
+        assert all(bad not in c or c == [bad] for c in t3.calls)
+
+    def test_poisoning_logged_once(self):
+        from structlog.testing import capture_logs
+        _good, _bad, cols, t3 = self._setup()
+        with capture_logs() as logs:
+            search_cross_corpus(
+                "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None,
+            )
+            search_cross_corpus(
+                "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None,
+            )
+        poisoning_events = [
+            e for e in logs if e["event"] == "collection_poisoned_excluded_from_batching"
+        ]
+        assert len(poisoning_events) == 1
+
+
+class _TransientFailureFakeT3:
+    """Models a collection that fails transiently (a 429/503 blip, an
+    edge-WAF hiccup) rather than permanently -- critique round 2
+    Significant: the poisoning memo previously fired on ANY
+    ``VectorServiceError``, so this scenario (nothing exercised it before)
+    would have permanently downgraded *flaky* to singleton-only batching
+    forever, with no re-validation.
+
+    *flaky* fails every call that includes it (batch or singleton) until
+    ``fail_until_call`` total invocations naming it have been made, then
+    self-heals -- i.e. a real, if slow, transient blip that eventually
+    clears. The error message deliberately contains no "dim" substring
+    (unlike ``_PoisonableFakeT3``'s permanent orphan class), matching a
+    transport-level or non-dimension HTTP failure.
+    """
+
+    def __init__(self, healthy_rows: dict, flaky: str, fail_until_call: int):
+        self._healthy_rows = healthy_rows
+        self._flaky = flaky
+        self._fail_until_call = fail_until_call
+        self._flaky_call_count = 0
+        self.calls: list[list[str]] = []
+
+    def search(self, query, collection_names, n_results=10, where=None):
+        from nexus.db.http_vector_client import VectorServiceError
+
+        self.calls.append(list(collection_names))
+        if self._flaky in collection_names:
+            self._flaky_call_count += 1
+            if self._flaky_call_count <= self._fail_until_call:
+                raise VectorServiceError(
+                    f"POST /v1/vectors/search -> HTTP 503: {self._flaky} "
+                    "service temporarily unavailable",
+                )
+        rows = []
+        for col in collection_names:
+            for r in self._healthy_rows.get(col, []):
+                rows.append({**r, "collection": col})
+        return rows
+
+
+class TestTransientFailureIsNotPoisoned:
+    """nexus-d9xt2 critique round 2 Significant: a transient
+    ``VectorServiceError`` must not be memoized -- only the permanent
+    (dimension-mismatch/orphan) class should be."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_poison_set(self, monkeypatch):
+        import nexus.search_engine as se
+        monkeypatch.setattr(se, "_poisoned_collections", set())
+
+    def _setup(self, fail_until_call: int):
+        good = _conformant_collections("knowledge", "voyage-context-3", 3)
+        flaky = "knowledge__flaky__voyage-context-3__v1"
+        cols = good + [flaky]
+        rows = {c: [{"id": f"{c}-0", "content": "x", "distance": 0.1}] for c in good}
+        rows[flaky] = [{"id": f"{flaky}-0", "content": "x", "distance": 0.1}]
+        return good, flaky, cols, _TransientFailureFakeT3(rows, flaky=flaky, fail_until_call=fail_until_call)
+
+    def test_transient_failure_is_retried_on_the_next_call_not_memoized(self):
+        # Fails on both the first call's batch attempt AND its isolated
+        # singleton fallback retry (2 invocations naming *flaky*), then
+        # self-heals -- a real transient blip, not a permanent one.
+        good, flaky, cols, t3 = self._setup(fail_until_call=2)
+
+        first = search_cross_corpus(
+            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None,
+        )
+        # First call: flaky fails even in isolation -- excluded from this
+        # call's results, same as the permanent case would look on its
+        # first failure.
+        assert {r.id for r in first} == {f"{c}-0" for c in good}
+
+        import nexus.search_engine as se
+        # Not memoized: a transient failure must not poison the module-
+        # level set the permanent class uses.
+        assert flaky not in se._poisoned_collections
+
+        t3.calls.clear()
+        second = search_cross_corpus(
+            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None,
+        )
+        # Second call: flaky is retried bundled with its healthy siblings
+        # (not routed to a permanent singleton) and, self-healed, now
+        # succeeds -- its result is present.
+        assert {r.id for r in second} == {f"{c}-0" for c in good} | {f"{flaky}-0"}
+        assert any(sorted(c) == sorted(cols) for c in t3.calls)
+
+    def test_a_second_transient_failure_is_not_silently_swallowed(self):
+        # Falsifier for the test above: if the fake's failure never
+        # reproduces (e.g. a test bug always healing on the first
+        # isolated retry), this must fail loudly rather than pass by
+        # accident. fail_until_call=100 means *flaky* never heals within
+        # this test's calls -- every result set must exclude it, on
+        # every call, and it must still not be memoized.
+        good, flaky, cols, t3 = self._setup(fail_until_call=100)
+
+        first = search_cross_corpus(
+            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None,
+        )
+        assert {r.id for r in first} == {f"{c}-0" for c in good}
+
+        second = search_cross_corpus(
+            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None,
+        )
+        # Still failing, still not memoized -- flaky stays bundled with
+        # its healthy siblings on every call rather than being permanently
+        # exiled, and still comes back excluded (not silently dropped
+        # from being retried).
+        assert {r.id for r in second} == {f"{c}-0" for c in good}
+        import nexus.search_engine as se
+        assert flaky not in se._poisoned_collections
+
+
 # ── apply_ranking_boosts ─────────────────────────────────────
 #
 # Single shared implementation of the CLI's post-retrieval ranking boosts

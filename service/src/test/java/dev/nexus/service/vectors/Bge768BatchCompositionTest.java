@@ -417,4 +417,86 @@ class Bge768BatchCompositionTest {
             fresh.close();
         }
     }
+
+    // ── nexus-8hdg9 phase 3: cooperative deadline between sub-batches ────────────
+
+    /** The oversize shape {@link #oversizeBatch_internalSubBatching_multipleInvocations_outputsMatchSingles()}
+     * proves forces more than one {@code session.run()}; the deadline tests below depend on
+     * that so a second sub-batch exists for the check point to refuse. */
+    private static List<String> oversizeCorpus() {
+        List<String> big = new ArrayList<>();
+        for (int i = 0; i < 20; i++) {
+            big.add(longText("deadline check between sub batches permit release counter " + i, 480));
+        }
+        return big;
+    }
+
+    /**
+     * The bead's own falsification test (design record §3 phase 3): with an already-expired
+     * deadline in the request context, the sub-batch loop runs exactly ONE ONNX invocation
+     * (the in-flight {@code session.run()} is the granularity floor) and then stops -- the
+     * counter must not advance to the 2+ invocations the same corpus produces with no
+     * deadline. The exception surfaces UNWRAPPED, so VectorHandler's 503 arm can see it.
+     */
+    @Test
+    void expiredDeadlineStopsFurtherOnnxInvocations() {
+        List<String> big = oversizeCorpus();
+        embedder.resetOnnxInvocationCount();
+        // Minted as "now": by the time the first sub-batch returns it is in the past.
+        dev.nexus.service.http.RequestContext.setDeadlineNanos(System.nanoTime());
+        try {
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> embedder.embed(big))
+                    .isInstanceOf(RequestDeadlineExceededException.class)
+                    .hasMessageContaining("past deadline");
+        } finally {
+            dev.nexus.service.http.RequestContext.clearDeadline();
+        }
+        assertThat(embedder.onnxInvocationCount())
+                .as("exactly one sub-batch ran before the expired deadline was observed; "
+                    + "the counter must not keep advancing")
+                .isEqualTo(1);
+        assertThat(embedder.activitySnapshot().deadlineAbortsTotal())
+                .as("the abort is counted for GET /v1/status deadline_aborts_total")
+                .isGreaterThanOrEqualTo(1L);
+    }
+
+    /**
+     * Permit accounting after an abort: the admission permit taken by
+     * {@link AdmissionControlledEmbedder} is released by its {@code finally}, so
+     * {@link LocalOnnxAdmission#inFlightCount()} is back at baseline and the exception
+     * propagates through the wrapper unwrapped.
+     */
+    @Test
+    void deadlineExpiryReleasesTheAdmissionPermit() {
+        LocalOnnxAdmission gate = new LocalOnnxAdmission(2, 1000);
+        embedder.setAdmissionGate(gate);
+        AdmissionControlledEmbedder gated = new AdmissionControlledEmbedder(embedder, gate, false);
+        int baseline = gate.inFlightCount();
+        List<String> big = oversizeCorpus();
+        dev.nexus.service.http.RequestContext.setDeadlineNanos(System.nanoTime());
+        try {
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> gated.embedWithUsage(big))
+                    .isInstanceOf(RequestDeadlineExceededException.class);
+        } finally {
+            dev.nexus.service.http.RequestContext.clearDeadline();
+            embedder.setAdmissionGate(null);
+        }
+        assertThat(gate.inFlightCount())
+                .as("the admission permit must be released on a deadline abort")
+                .isEqualTo(baseline);
+        assertThat(gate.queueLength()).isEqualTo(0);
+    }
+
+    /** No deadline in context (direct construction, in-process callers): never aborted. */
+    @Test
+    void noDeadlineNeverAborts() {
+        dev.nexus.service.http.RequestContext.clearDeadline();
+        List<String> big = oversizeCorpus();
+        embedder.resetOnnxInvocationCount();
+        List<float[]> out = embedder.embed(big);
+        assertThat(out).hasSize(big.size());
+        assertThat(embedder.onnxInvocationCount())
+                .as("the same corpus needs 2+ sub-batches; without a deadline they all run")
+                .isGreaterThan(1);
+    }
 }

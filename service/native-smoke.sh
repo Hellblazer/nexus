@@ -71,7 +71,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"$BIN" > /tmp/native-smoke-svc.log 2>&1 &
+# nexus-9gaj7: -Duser.timezone=UTC defense-in-depth alongside Main.main's
+# in-process TimeZone.setDefault(UTC) pin (asserted at boot, fails loud).
+"$BIN" -Duser.timezone=UTC > /tmp/native-smoke-svc.log 2>&1 &
 SVCPID=$!
 U="http://localhost:${SVCPORT}"
 

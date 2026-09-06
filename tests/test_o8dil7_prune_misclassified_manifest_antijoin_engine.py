@@ -531,7 +531,7 @@ def test_inverted_control_handseeded_dangling_row_detected(t2_service_env):
     # the anti-join cannot pass by "the chunk table happens to be empty".
     _psql(state, (
         "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_1024) "
-        f"VALUES ('{tenant}', '{coll}', decode('{pin_chash}', 'hex'), 'pin', '{vec_1024}'::vector)"
+        f"VALUES ('{tenant}', '{coll}', decode('{pin_chash}', 'hex'), 'pin', '{vec_1024}'::nexus.vector)"
     ))
     _psql(state, (
         "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "

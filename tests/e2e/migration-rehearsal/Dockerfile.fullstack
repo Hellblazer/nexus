@@ -48,7 +48,7 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
 COPY requirements.txt /tmp/requirements.txt
 RUN --mount=type=cache,target=/home/nexus/.cache/uv,uid=1000,gid=1000 \
     uv venv --python 3.12 /home/nexus/nxenv \
-    && uv pip install --python /home/nexus/nxenv -r /tmp/requirements.txt
+    && uv pip install --python /home/nexus/nxenv --index-strategy unsafe-best-match -r /tmp/requirements.txt
 COPY conexus-*.whl /tmp/
 RUN --mount=type=cache,target=/home/nexus/.cache/uv,uid=1000,gid=1000 \
     uv pip install --python /home/nexus/nxenv --no-deps /tmp/conexus-*.whl \

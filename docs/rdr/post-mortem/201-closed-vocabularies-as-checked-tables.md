@@ -104,8 +104,9 @@ Trade-offs section was corrected rather than left flattering.
   set, so its append-only classification is unreachable; and the entry contract
   still accepts either a bare path or a verb-prefixed one, which is the
   tolerance that hid the last defect.
-- **nexus-ph718** — `collapse_rdr_registrations.py --apply` has never run live
-  and nothing depends on it. Run it or delete it; do not leave it unowned.
+- **nexus-ph718** — `collapse_rdr_registrations.py --apply` had never run live
+  and nothing depended on it. Resolved 2026-09-05: deleted, after a live dry-run
+  census showed zero registrations to collapse.
 - The `needs-reexamination` markers have no automatic resolution path. A marker
   is cleared by hand once the record has actually been re-examined. Whether
   that is enough is a question for the first person who reads a long one.

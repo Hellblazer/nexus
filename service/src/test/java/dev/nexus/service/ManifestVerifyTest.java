@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
@@ -155,14 +157,10 @@ class ManifestVerifyTest {
         try (Connection su = pg.createConnection("")) {
             for (String col : new String[]{
                     "index_state", "index_content_hash", "index_run_id", "index_started_at"}) {
-                ResultSet rs = su.createStatement().executeQuery(
-                    "SELECT count(*) FROM information_schema.columns " +
-                    "WHERE table_schema = 'nexus' AND table_name = 'catalog_documents' " +
-                    "AND column_name = '" + col + "'");
-                rs.next();
-                assertThat(rs.getLong(1))
+                assertThat(PgCatalogProbes.columnExists(
+                        DSL.using(su, SQLDialect.POSTGRES), "nexus", "catalog_documents", col))
                     .as("catalog_documents." + col + " must exist (catalog-020-1)")
-                    .isEqualTo(1L);
+                    .isTrue();
             }
         }
     }
@@ -194,13 +192,11 @@ class ManifestVerifyTest {
         // changed. This reads pg_catalog's actual stored index definition and checks
         // the predicate text itself.
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT indexdef FROM pg_indexes " +
-                "WHERE schemaname = 'nexus' AND indexname = 'idx_catalog_documents_index_state'");
-            assertThat(rs.next())
+            String indexdef = PgCatalogProbes.indexDef(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "idx_catalog_documents_index_state");
+            assertThat(indexdef)
                 .as("idx_catalog_documents_index_state must exist (catalog-020-2)")
-                .isTrue();
-            String indexdef = rs.getString("indexdef");
+                .isNotNull();
             // Postgres normalizes the stored definition — e.g. it renders the
             // predicate as "WHERE (index_state <> 'complete'::text)" (explicit
             // ::text cast, parens around the operand). Strip both so the assertion
@@ -535,12 +531,10 @@ class ManifestVerifyTest {
         // RDR-191 Phase 6 (nexus-o8dil.33): narrowed from bothFunctions_areSecurityInvoker
         // to manifest_verify(text) only — manifest_verify_all() is dropped.
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT prosecdef FROM pg_proc p " +
-                "JOIN pg_namespace n ON n.oid = p.pronamespace " +
-                "WHERE n.nspname = 'nexus' AND p.proname = 'manifest_verify' LIMIT 1");
-            assertThat(rs.next()).as("nexus.manifest_verify must exist").isTrue();
-            assertThat(rs.getBoolean("prosecdef"))
+            Boolean prosecdef = PgCatalogProbes.routineSecurityDefiner(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "manifest_verify");
+            assertThat(prosecdef).as("nexus.manifest_verify must exist").isNotNull();
+            assertThat(prosecdef)
                 .as("nexus.manifest_verify must be SECURITY INVOKER (prosecdef=false)")
                 .isFalse();
         }
@@ -639,7 +633,7 @@ class ManifestVerifyTest {
         su.createStatement().execute(
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
             "VALUES ('" + tenantId + "', '" + collection + "', decode('" + chashHex + "', 'hex'), " +
-            "'chunk text', ('[1" + ",0".repeat(1023) + "]')::vector) " +
+            "'chunk text', ('[1" + ",0".repeat(1023) + "]')::nexus.vector) " +
             "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
     }
 
@@ -654,7 +648,7 @@ class ManifestVerifyTest {
         su.createStatement().execute(
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
             "VALUES ('" + tenantId + "', '" + collection + "', decode('" + chashHex + "', 'hex'), " +
-            "'chunk text', ('[1" + ",0".repeat(383) + "]')::vector) " +
+            "'chunk text', ('[1" + ",0".repeat(383) + "]')::nexus.vector) " +
             "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
     }
 }

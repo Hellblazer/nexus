@@ -2420,10 +2420,12 @@ class TestLeaseTtlAndHeapBound:
         monkeypatch.setattr(ssd_mod, "_popen", _fake_popen)
         monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18078)
         sup._spawn_service()
-        # -Xmx must immediately follow the binary path (native-image consumes
-        # runtime options before app args).
+        # -Duser.timezone=UTC (nexus-9gaj7) then -Xmx must immediately follow
+        # the binary path (native-image consumes runtime options before app
+        # args).
         assert captured["argv"][0] == str(sup._binary_path)
-        assert captured["argv"][1] == "-Xmx1g"
+        assert captured["argv"][1] == "-Duser.timezone=UTC"
+        assert captured["argv"][2] == "-Xmx1g"
 
     def test_spawn_service_rejects_malformed_max_heap(
         self, config_dir: Path, clock: _FakeClock, monkeypatch

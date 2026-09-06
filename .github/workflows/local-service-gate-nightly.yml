@@ -247,6 +247,13 @@ jobs:
         # shape — @pytest.mark.integration, self-provisioning against the
         # shared engine substrate, zero other CI wiring — so it joins the
         # same allowlist rather than inventing a second gate.
+        env:
+          # nexus-a2qhz: these files self-provision against the engine
+          # substrate and write to it; the production-write guard refuses a
+          # dev-checkout write without a reason-bearing opt-in (31 setup
+          # errors on the 2026-09-06 run, the first after the guard landed).
+          # Never production: the endpoint is the run's own throwaway engine.
+          NX_ALLOW_PROD_WRITE: "nightly ungated-integration step: self-provisioned throwaway engine substrate on the CI runner (nexus-a2qhz)"
         run: |
           set -euo pipefail
           uv run pytest \

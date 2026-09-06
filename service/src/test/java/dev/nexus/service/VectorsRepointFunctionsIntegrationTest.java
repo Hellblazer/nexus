@@ -1,5 +1,8 @@
 package dev.nexus.service;
 
+import org.jooq.impl.DSL;
+import org.jooq.SQLDialect;
+import org.jooq.DSLContext;
 import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.SchemaMigrator.MigrationException;
 import dev.nexus.service.db.TenantScope;
@@ -91,6 +94,46 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class VectorsRepointFunctionsIntegrationTest {
 
+    private static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
+        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
+        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+        su.createStatement().execute(
+            "CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION " + migratingRole);
+        su.createStatement().execute(
+            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_relocated() "
+            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $relofunc$ "
+            + "BEGIN "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "END; "
+            + "$relofunc$");
+        su.createStatement().execute(
+            "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() FROM PUBLIC");
+        su.createStatement().execute(
+            "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO " + migratingRole);
+            su.createStatement().execute(
+                "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated() "
+                + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $unrelofunc$ "
+                + "BEGIN "
+                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'public' THEN "
+                + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA public'; "
+                + "  END IF; "
+                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'public' THEN "
+                + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA public'; "
+                + "  END IF; "
+                + "END; "
+                + "$unrelofunc$");
+            su.createStatement().execute(
+                "REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() FROM PUBLIC");
+            su.createStatement().execute(
+                "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO " + migratingRole);
+    }
+
+
     private static final String SVC_ROLE = "nexus_svc";
     private static final String SVC_PASS = "nexus_svc_pass";
     private static final String VECTORS_004 = "db/changelog/vectors-004-unify-chunks.xml";
@@ -123,8 +166,15 @@ class VectorsRepointFunctionsIntegrationTest {
             su.createStatement().execute(
                 "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                     + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-            su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-            su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+            // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+            // nexus/critique-nexus-cbo4a-batch-9-search-path): see
+            // SchemaMigratorIntegrationTest.bootstrapVectorExtensionsForFreshWalk's own
+            // javadoc for the full derivation -- creates the extensions directly as
+            // `su` and installs a SECURITY DEFINER relocation helper for search-path-
+            // 001's guard to call mid-walk, since this walk resumes through both
+            // vectors-001-baseline.xml and search-path-001/002 in one continuous pass
+            // as a NOSUPERUSER role.
+            bootstrapVectorExtensionsForFreshWalk(su, role);
         }
         var cfg = new com.zaxxer.hikari.HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
@@ -215,7 +265,7 @@ class VectorsRepointFunctionsIntegrationTest {
             // inserted — chunk insert MUST precede the manifest insert below.
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-                        + "VALUES (?, ?, ?, ?, ?::vector)")) {
+                        + "VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
                 ps.setString(1, TENANT);
                 ps.setString(2, collection);
                 ps.setBytes(3, chash);
@@ -237,7 +287,7 @@ class VectorsRepointFunctionsIntegrationTest {
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.taxonomy_centroids "
                         + "(tenant_id, collection, topic_id, embedding_384, label, doc_count) "
-                        + "VALUES (?, ?, 1, ?::vector, 'alpha', 1)")) {
+                        + "VALUES (?, ?, 1, ?::nexus.vector, 'alpha', 1)")) {
                 ps.setString(1, TENANT);
                 ps.setString(2, collection);
                 ps.setString(3, vectorLiteral(384, 0.02));
@@ -303,13 +353,11 @@ class VectorsRepointFunctionsIntegrationTest {
                 .doesNotThrowAnyException();
 
             try (Connection conn = rig.pg().createConnection("")) {
+                DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
                 for (String obj : new String[] {
                         "live_chunks", "collection_vector_stats"}) {
-                    try (var rs = conn.createStatement().executeQuery(
-                            "SELECT 1 FROM information_schema.views "
-                                + "WHERE table_schema='nexus' AND table_name='" + obj + "'")) {
-                        assertThat(rs.next()).as("view nexus.%s must exist", obj).isTrue();
-                    }
+                    assertThat(PgCatalogProbes.viewExists(ctx, "nexus", obj))
+                        .as("view nexus.%s must exist", obj).isTrue();
                 }
                 for (String fn : new String[] {
                         "search_metadata_scoped_384", "search_metadata_scoped_768", "search_metadata_scoped_1024",
@@ -325,11 +373,8 @@ class VectorsRepointFunctionsIntegrationTest {
                         "gc_quarantine_orphans", "gc_restore_rereferenced", "gc_expire_quarantine",
                         "purge_trash",
                         "assign_from_chashes_384", "assign_from_chashes_768", "assign_from_chashes_1024"}) {
-                    try (var rs = conn.createStatement().executeQuery(
-                            "SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
-                                + "WHERE n.nspname='nexus' AND p.proname='" + fn + "'")) {
-                        assertThat(rs.next()).as("function nexus.%s must exist", fn).isTrue();
-                    }
+                    assertThat(PgCatalogProbes.routineExists(ctx, "nexus", fn))
+                        .as("function nexus.%s must exist", fn).isTrue();
                 }
             }
         } finally {
@@ -351,7 +396,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 // search_metadata_scoped_384: must find the seeded chunk.
                 try (PreparedStatement ps = conn.prepareStatement(
                         "SELECT * FROM nexus.search_metadata_scoped_384("
-                            + "?::vector, ?, NULL, NULL, NULL, NULL, NULL, NULL, 10)")) {
+                            + "?::nexus.vector, ?, NULL, NULL, NULL, NULL, NULL, NULL, 10)")) {
                     ps.setString(1, vectorLiteral(384, 0.01));
                     ps.setArray(2, conn.createArrayOf("text", new String[] {fx.collection()}));
                     var rs = ps.executeQuery();
@@ -364,7 +409,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 for (int dim : new int[] {768, 1024}) {
                     try (PreparedStatement ps = conn.prepareStatement(
                             "SELECT * FROM nexus.search_metadata_scoped_" + dim + "("
-                                + "?::vector, ?, NULL, NULL, NULL, NULL, NULL, NULL, 10)")) {
+                                + "?::nexus.vector, ?, NULL, NULL, NULL, NULL, NULL, NULL, 10)")) {
                         ps.setString(1, vectorLiteral(dim, 0.01));
                         ps.setArray(2, conn.createArrayOf("text", new String[] {fx.collection()}));
                         assertThatCode(ps::executeQuery)
@@ -375,7 +420,7 @@ class VectorsRepointFunctionsIntegrationTest {
 
                 // search_topic_scoped_384: must find the seeded chunk via topic_assignments.
                 try (PreparedStatement ps = conn.prepareStatement(
-                        "SELECT * FROM nexus.search_topic_scoped_384(?::vector, 'alpha', ?, 10)")) {
+                        "SELECT * FROM nexus.search_topic_scoped_384(?::nexus.vector, 'alpha', ?, 10)")) {
                     ps.setString(1, vectorLiteral(384, 0.01));
                     ps.setString(2, fx.collection());
                     var rs = ps.executeQuery();
@@ -383,7 +428,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 }
                 for (int dim : new int[] {768, 1024}) {
                     try (PreparedStatement ps = conn.prepareStatement(
-                            "SELECT * FROM nexus.search_topic_scoped_" + dim + "(?::vector, 'alpha', ?, 10)")) {
+                            "SELECT * FROM nexus.search_topic_scoped_" + dim + "(?::nexus.vector, 'alpha', ?, 10)")) {
                         ps.setString(1, vectorLiteral(dim, 0.01));
                         ps.setString(2, fx.collection());
                         assertThatCode(ps::executeQuery)
@@ -396,7 +441,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 // 'cites'), depth 1, direction both, from itself as the seed.
                 try (PreparedStatement ps = conn.prepareStatement(
                         "SELECT * FROM nexus.search_graph_hop_384("
-                            + "?::vector, ?, ?, NULL, 1, 'both', NULL, 10)")) {
+                            + "?::nexus.vector, ?, ?, NULL, 1, 'both', NULL, 10)")) {
                     ps.setString(1, vectorLiteral(384, 0.01));
                     ps.setArray(2, conn.createArrayOf("text", new String[] {fx.docTumbler()}));
                     ps.setArray(3, conn.createArrayOf("text", new String[] {fx.collection()}));
@@ -406,7 +451,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 for (int dim : new int[] {768, 1024}) {
                     try (PreparedStatement ps = conn.prepareStatement(
                             "SELECT * FROM nexus.search_graph_hop_" + dim + "("
-                                + "?::vector, ?, ?, NULL, 1, 'both', NULL, 10)")) {
+                                + "?::nexus.vector, ?, ?, NULL, 1, 'both', NULL, 10)")) {
                         ps.setString(1, vectorLiteral(dim, 0.01));
                         ps.setArray(2, conn.createArrayOf("text", new String[] {fx.docTumbler()}));
                         ps.setArray(3, conn.createArrayOf("text", new String[] {fx.collection()}));
@@ -446,17 +491,11 @@ class VectorsRepointFunctionsIntegrationTest {
             applyFullBatch(rig.adminDs());
 
             try (Connection conn = rig.pg().createConnection("")) {
-                try (var rs = conn.createStatement().executeQuery(
-                        "SELECT p.proname FROM pg_proc p "
-                            + "JOIN pg_namespace n ON n.oid = p.pronamespace "
-                            + "WHERE n.nspname = 'nexus' AND ("
-                            + "p.proname LIKE 'search_metadata_scoped_%' "
-                            + "OR p.proname LIKE 'search_topic_scoped_%' "
-                            + "OR p.proname LIKE 'search_graph_hop_%' "
-                            + "OR p.proname LIKE 'search_aspect_scoped_%') "
-                            + "ORDER BY p.proname")) {
-                    var names = new java.util.ArrayList<String>();
-                    while (rs.next()) names.add(rs.getString("proname"));
+                {
+                    var names = PgCatalogProbes.routineNamesLike(
+                        DSL.using(conn, SQLDialect.POSTGRES), "nexus",
+                        "search_metadata_scoped_%", "search_topic_scoped_%",
+                        "search_graph_hop_%", "search_aspect_scoped_%");
                     assertThat(names)
                         .as("the 12 combined-query facades (4 verbs x 3 dims) must "
                             + "number 12 post-RDR-156-Decision-5 — the original 9 "
@@ -676,7 +715,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 // referenced by any catalog_document_chunks row.
                 try (PreparedStatement ps = su.prepareStatement(
                         "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-                            + "VALUES (?, ?, ?, ?, ?::vector)")) {
+                            + "VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
                     ps.setString(1, TENANT);
                     ps.setString(2, origin);
                     ps.setBytes(3, orphanChash);
@@ -766,7 +805,7 @@ class VectorsRepointFunctionsIntegrationTest {
                     su.setAutoCommit(true);
                     try (PreparedStatement ps = su.prepareStatement(
                             "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384, metadata) "
-                                + "VALUES (?, ?, ?, ?, ?::vector, ?::jsonb)")) {
+                                + "VALUES (?, ?, ?, ?, ?::nexus.vector, ?::jsonb)")) {
                         ps.setString(1, TENANT);
                         ps.setString(2, quarantineFlow);
                         ps.setBytes(3, expireChash);
@@ -853,7 +892,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 // quarantine target, same chash.
                 try (PreparedStatement ps = su.prepareStatement(
                         "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768, metadata) "
-                            + "VALUES (?, ?, ?, ?, ?::vector, ?::jsonb)")) {
+                            + "VALUES (?, ?, ?, ?, ?::nexus.vector, ?::jsonb)")) {
                     ps.setString(1, TENANT);
                     ps.setString(2, quarantineShared);
                     ps.setBytes(3, collisionChash);
@@ -869,7 +908,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 // per-dim distinctness).
                 try (PreparedStatement ps = su.prepareStatement(
                         "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-                            + "VALUES (?, ?, ?, ?, ?::vector)")) {
+                            + "VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
                     ps.setString(1, TENANT);
                     ps.setString(2, fx.collection());
                     ps.setBytes(3, collisionChash);
@@ -939,7 +978,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 // DIFFERENT dim (1024) than the row being restored (384).
                 try (PreparedStatement ps = su.prepareStatement(
                         "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_1024) "
-                            + "VALUES (?, ?, ?, ?, ?::vector)")) {
+                            + "VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
                     ps.setString(1, TENANT);
                     ps.setString(2, fx.collection());
                     ps.setBytes(3, collisionChash);
@@ -950,7 +989,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 // The quarantined row to be restored, dim 384.
                 try (PreparedStatement ps = su.prepareStatement(
                         "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384, metadata) "
-                            + "VALUES (?, ?, ?, ?, ?::vector, ?::jsonb)")) {
+                            + "VALUES (?, ?, ?, ?, ?::nexus.vector, ?::jsonb)")) {
                     ps.setString(1, TENANT);
                     ps.setString(2, quarantineCollection);
                     ps.setBytes(3, collisionChash);
@@ -1054,7 +1093,7 @@ class VectorsRepointFunctionsIntegrationTest {
                     // requires the nexus.chunks row before the manifest row below.
                     try (PreparedStatement ps = su.prepareStatement(
                             "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-                                + "VALUES (?, ?, ?, ?, ?::vector)")) {
+                                + "VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
                         ps.setString(1, TENANT);
                         ps.setString(2, collection);
                         ps.setBytes(3, chash);
@@ -1118,7 +1157,7 @@ class VectorsRepointFunctionsIntegrationTest {
             throws Exception {
         try (PreparedStatement ps = conn.prepareStatement(
                 "SELECT id FROM nexus.search_graph_hop_384("
-                    + "?::vector, ?, ?, 'cites', ?, 'out', NULL, 10)")) {
+                    + "?::nexus.vector, ?, ?, 'cites', ?, 'out', NULL, 10)")) {
             ps.setString(1, vectorLiteral(384, 0.09));
             ps.setArray(2, conn.createArrayOf("text", new String[] {seed}));
             ps.setArray(3, conn.createArrayOf("text", new String[] {collection}));
