@@ -117,7 +117,7 @@ env \
     NX_DB_USER="${NX_DB_USER}" \
     NX_DB_PASS="${NX_DB_PASS}" \
     NX_POOL_SIZE=4 \
-    java -jar "${JAR}" \
+    java -Duser.timezone=UTC -jar "${JAR}" \
     > "${SANDBOX_HOME}/service.log" 2>&1 &
 
 SVC_PID=$!
