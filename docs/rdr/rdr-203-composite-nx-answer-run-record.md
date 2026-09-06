@@ -266,37 +266,78 @@ path cheap to test: it is the current code path, reached through one branch.
 A probe that fails to reach `/version` reads as unsupported. The direction is
 safe: a new client against an old engine records everything it records today.
 
-**`run_start` is deferred, never dropped.** Skipping the early
-`increment_run_started` when the probe reports support is only sound if every
-path that does not terminate through `/complete` issues one itself. It does.
-One helper, `_nx_answer_ensure_run_started(db, plan_id)`, issues
-`increment_run_started` immediately before any direct `_nx_answer_record_run`
-write, and no-ops when `plan_id` is null or zero. Two kinds of path use it: the
-D6 survivors, which never route through `/complete` at all, and the 404
-downgrade below, which discovers mid-call that it cannot. The helper is what
-makes the early skip safe, and it is why the probe may flip under a call in
-flight without leaving anything uncounted.
+**The capability decision is made once per call, and carried.** The run-start
+site reads the probe exactly once and records two booleans in the call's own
+state:
 
-Exactly one bump per call, in every combination. A call reaches exactly one
-terminating arm. If that arm converts, the composite bumps once, server side.
-If it is a D6 survivor, the helper bumps once. If the composite 404s, nothing
-was applied server side (the route does not exist), and the fallback bumps
-once. There is no path on which both fire.
+- `composite_supported_at_start`, the probe's answer at that moment.
+- `early_bump_fired`, true when the early site actually issued
+  `increment_run_started`, which happens when the probe said no support and the
+  plan id is usable.
+
+Every terminating arm, and `_nx_answer_ensure_run_started` itself, keys on that
+record. Never on `plan_id` alone, and never on a fresh read of the shared
+cached flag. Two rules follow:
+
+1. If `early_bump_fired`, no arm bumps again.
+2. If not `early_bump_fired`, exactly one of the composite route or the
+   deferred helper bumps, and the arm decides which from the per-call record.
+
+**`run_start` is deferred, never dropped, and never doubled.**
+`_nx_answer_ensure_run_started(db, plan_id, early_bump_fired)` issues
+`increment_run_started` immediately before any direct `_nx_answer_record_run`
+write, and no-ops when the plan id is null or zero **or** when
+`early_bump_fired` is already true. Both halves of that condition are load
+bearing. A `plan_id`-only no-op double-counts on the case round 2 found:
+non-supporting engine, D6 survivor, where the early site already bumped and the
+survivor's helper would bump again for one outcome.
+
+**Rule 1 is enforced by routing, not by a wire field.** The composite is taken
+only when `composite_supported_at_start` is true, and `early_bump_fired` can
+only be true when it is false, so the pair (early bump fired, composite route)
+is unreachable by construction. The alternative, a `count_use: false` field on
+the composite telling the engine to skip the increment, was rejected: it puts
+one client's private call history into the wire contract, makes the engine's
+behaviour depend on a claim it cannot verify, and doubles the engine's tested
+surface for a combination that cannot occur. The engine route stays stateless,
+always incrementing for a usable plan id, and the client's job is to route
+correctly rather than to instruct.
+
+**Exactly one bump per call, over four cases plus the mid-call flip.** A call
+reaches exactly one terminating arm.
+
+| engine | arm | early bump | who bumps | total |
+|---|---|---|---|---|
+| supporting | converting | not fired | the composite, server side | 1 |
+| supporting | D6 survivor | not fired | the deferred helper | 1 |
+| non-supporting | converting | fired at the early site | nobody again; the helper no-ops on `early_bump_fired` | 1 |
+| non-supporting | D6 survivor | fired at the early site | nobody again; same no-op | 1 |
+
+The mid-call flip is the fifth case and it is why the record exists. A sibling
+call's 404 flips the shared cached flag between this call's run-start read and
+its terminating arm. This call routes from its own record, so it still takes
+the composite, that POST 404s against the same old engine, and the fallback
+below completes it: `early_bump_fired` is false, so the deferred helper bumps
+once. Round 2 found the version of this that reads the flag live instead: the
+arm goes down the plain path after the early site already skipped, and the bump
+is lost. A flip during a call changes future calls, never this one.
 
 **Downgrade guard.** The probe caches for the life of a process, and after
 nexus-m20mf P2 and P3 that is the life of the MCP host. If a supporting engine
 is replaced by a non-supporting one under a running client, the cached `true`
 would post to a route that 404s and the entire run record would be lost,
 including the outcome, which is worse than today. The client therefore treats a
-404 from `/complete` as a probe correction: it flips the cached flag to false,
-logs it once, and then completes the tripping call on the degradation path,
-issuing `_nx_answer_ensure_run_started`, then the record, then the outcome, in
-that order. Three POSTs for that call, one composite POST for every call after
-it in the process. "Falls back to the three-call path for that call" is then
-literally true and testable, which an earlier draft asserted without making it
-so: it flipped the flag and left the tripping call's own record on the floor.
-A 404 is the only status treated this way; a 429 or a 5xx is a transport
-failure and keeps today's drop-and-warn handling.
+404 from `/complete` as a probe correction: it flips the cached flag to false
+**for future calls**, logs it once, and then completes the tripping call from
+that call's own record, issuing `_nx_answer_ensure_run_started` (which bumps,
+because `early_bump_fired` is false on any call that reached the composite),
+then the record, then the outcome, in that order. Three POSTs for that call,
+one composite POST for every call after it in the process. "Falls back to the
+three-call path for that call" is then literally true and testable, which an
+earlier draft asserted without making it so: it flipped the flag and left the
+tripping call's own record on the floor. A 404 is the only status treated this
+way; a 429 or a 5xx is a transport failure and keeps today's drop-and-warn
+handling.
 
 ### D6. What stays on the existing route
 
@@ -421,14 +462,22 @@ outcome; and `9378` with its outcome at `9387`, the RDR-200 continuation
 handoff, which keeps both of today's writes. Ten converting pairs, two
 surviving direct writers, and that is what the census test below asserts.
 
-A second new helper, `_nx_answer_ensure_run_started(db, plan_id)`, issues
-`increment_run_started` and no-ops on a null or zero plan id. It is called
-immediately before each of the two surviving direct `_nx_answer_record_run`
-writes, and by `_nx_answer_record_complete`'s 404 fallback before its record
-write. The run-start site at `core.py:8674` becomes conditional in the other
-direction: issue `increment_run_started` only when the probe reports no
-support. Read together, the rule is that the bump moves rather than
-disappearing, and the census test below is what holds that rule in place.
+A second new helper,
+`_nx_answer_ensure_run_started(db, plan_id, early_bump_fired)`, issues
+`increment_run_started` and no-ops on a null or zero plan id or when the early
+bump already fired. It is called immediately before each of the two surviving
+direct `_nx_answer_record_run` writes, by `_nx_answer_record_complete`'s
+degradation branch, and by its 404 fallback, in each case before the record
+write.
+
+The run-start site at `core.py:8674` becomes the one place the capability
+question is asked. It reads the probe once, issues `increment_run_started` only
+when the answer is no support, and records `composite_supported_at_start` and
+`early_bump_fired` in the call's own state (D5). Every arm and the helper read
+that record. Nothing downstream re-reads the shared cached flag, which is what
+makes a sibling's mid-call downgrade unable to change this call's arithmetic.
+Read together, the rule is that the bump moves rather than disappearing or
+doubling, and the census test below is what holds it in place.
 
 **Precondition this depends on, verified and pinned.** Every arm that carries a
 non-zero `plan_id` executes downstream of the run-start site, so the composite
@@ -569,6 +618,21 @@ falsifier, per the house rule that a gate which cannot go red proves nothing.
   `use_count` one short, which is the exact shape that would make
   `promote.py`'s `use_count >= 3` gate unclearable for a handoff-heavy plan.
   Never against the operator's live install.
+- `test_non_supporting_engine_handoff_arm_bumps_use_count_exactly_once`: the
+  other half of that pair, and the case round 2 found. Against a stub whose
+  `/version` reports no support, drive a call that terminates on the handoff
+  arm and assert exactly one POST to `/v1/plans/metrics/run_start`: the early
+  site fires it, and the survivor's helper no-ops on `early_bump_fired`.
+  Falsifier: make the helper's no-op condition `plan_id`-only again and the
+  assertion sees two, which is the double count this test exists for.
+- `test_mid_call_flag_flip_does_not_change_this_calls_bump_count`: flip the
+  shared store's cached capability flag from true to false between the
+  run-start site's read and the terminating arm, and assert exactly one bump
+  for that call whichever arm it reaches. Falsifier: have the arm consult the
+  shared flag instead of the per-call record, together with a plain path that
+  carries no deferred bump, and the assertion sees zero. This is the sibling
+  interference case: the flip belongs to future calls, and this test is what
+  says so in code rather than in prose.
 
 `tests/test_nx_answer_t2_fanout_budget.py`
 
@@ -589,7 +653,13 @@ order. The run-start site is untouched. Ships the AST census test and the
 downstream-of-run-start test. Entirely client-side, no engine dependency, and
 it reduces the P3 edit to one branch in one function. Exit: the census test is
 green, names both D6 survivors, and reds when one converted arm is reverted;
-no behaviour change observable on the wire.
+no route and no payload changes, and the only wire-visible difference is the
+POST order on the two reversed pairs `(9572, 9551)` and `(9709, 9591)`, where
+the outcome goes out before the record today (residual 8). P1 also carries
+residuals 9 and 11: the choke point reproduces `_nx_answer_record_run`'s
+redaction and `cost_usd` derivation and `_nx_answer_record_outcome`'s
+`plan_id` guard and boundary catch, with a redaction test on the choke-point
+path.
 
 **P2. Engine half.** The route, the handler, the repository composite, the two
 lifted `PlanRepository` helpers, the `/version` flag, the Java test classes
@@ -603,21 +673,26 @@ composite is split back into three transactions, and `RawSqlGateTest` green
 with no new sanctioned region.
 
 **P3. Client half behind the probe.** The capabilities-dict refactor of the
-existing probe, `record_nx_answer_run_complete`, the branch inside
-`_nx_answer_record_complete`, the conditional run-start, the new
-`_nx_answer_ensure_run_started` helper with its calls at the two D6 survivors,
-and the 404 downgrade guard including its deferred `run_start`. P3 also owns
-idempotency: the composite payload stamps `created_at` once, at construction,
-before the first attempt, using the existing optional `created_at` field the
-`/record` handler already reads. Ships the Python tests above including the
-budget test, `test_gateway_retry_reuses_one_created_at_stamp`, the 404
-downgrade ordering test, and the handoff invariant test. Exit: the degradation
-test green against a non-supporting stub, the budget test green against a
-supporting stub, both red when the probe is forced the other way, the
-retry-stamp test green and red when `created_at` is recomputed inside the retry
-loop, the 404 test showing three POSTs in order then one composite, and the
-handoff invariant test green and red when the survivor's deferred bump is
-removed.
+existing probe, including its cache-a-failed-probe behaviour (residual 10),
+`record_nx_answer_run_complete`, the branch inside
+`_nx_answer_record_complete`, the per-call capability record set at the
+run-start site, the new `_nx_answer_ensure_run_started` helper with its
+`early_bump_fired` guard and its calls at the two D6 survivors and on both
+degradation branches, and the 404 downgrade guard including its deferred
+`run_start`. P3 also owns idempotency: the composite payload stamps
+`created_at` once, at construction, before the first attempt, using the
+existing optional `created_at` field the `/record` handler already reads.
+Ships the Python tests above including the budget test,
+`test_gateway_retry_reuses_one_created_at_stamp`, the 404 downgrade ordering
+test, the handoff invariant test, the non-supporting-engine handoff test and
+the mid-call flip test. Exit: the degradation test green against a
+non-supporting stub, the budget test green against a supporting stub, both red
+when the probe is forced the other way, the retry-stamp test green and red when
+`created_at` is recomputed inside the retry loop, the 404 test showing three
+POSTs in order then one composite, the handoff invariant test green and red
+when the survivor's deferred bump is removed, and both bump-count tests green
+and red under their own falsifiers (a `plan_id`-only no-op condition, and an
+arm that re-reads the shared flag).
 
 **P4. Pairing, cutover and documentation.** Bump
 `REQUIRED_ENGINE_VERSION` to the engine tag carrying P2 in the client release
@@ -670,6 +745,37 @@ decision, and none is re-planned.
 7. **`NxAnswerRunCompleteTransactionTest` sits beside `TelemetryRepositoryTest`.**
    That is `service/src/test/java/dev/nexus/service/`, not a `db/`
    subpackage. An earlier draft named the `db/` path, which does not exist.
+
+Four more from the round-2 audit, same classification:
+
+8. **P1's "no behaviour change observable on the wire" is false for the two
+   reversed pairs.** At `(9572, 9551)` and `(9709, 9591)` the outcome POST goes
+   out before the record POST today. Collapsing each into one choke-point call
+   necessarily picks an order, so those two arms change the order of two POSTs
+   even though P1 changes no route and no payload. P1's exit criterion names
+   the exception rather than claiming a property it does not have.
+9. **The choke point must reproduce what `_nx_answer_record_run` does before
+   the wire call.** Two behaviours live in that function rather than in the
+   store: `trace=False` replaces both `question` and `final_text` with
+   `[redacted]`, and `cost_usd` is the sum of the step records' known costs, or
+   `None` when none is known, never a fabricated `0.0` (`core.py:7078-7083`).
+   The composite path has to carry both. A test must cover redaction on the
+   composite path specifically, since a redaction that silently stops applying
+   on a new route is not visible in any output the caller sees.
+10. **`_version_capabilities()` must cache a failed or empty probe.** Today
+    `_supports_nx_answer_steps` writes `False` into its cache on any exception
+    before returning (`http_telemetry_store.py:437-440`), so an unreachable
+    `/version` costs one attempt per process rather than one per call. The
+    capabilities dict has to keep that property, or the budget test's
+    one-probe-per-process assertion holds only on the happy path.
+11. **Inlining the outcome increment must reproduce
+    `_nx_answer_record_outcome`'s two guards.** It returns early when
+    `plan_id` is falsy, covering the synthetic inline-planner id 0, and it
+    wraps the write in a boundary catch that logs
+    `nx_answer_plan_outcome_increment_failed` rather than raising
+    (`core.py:7256-7276`). Both have to survive the move into the choke point;
+    losing the catch turns a best-effort telemetry failure into a crashed
+    answer.
 
 ## Risks
 
@@ -791,6 +897,20 @@ its own schedule, its own failure modes and its own tests.
 - 2026-09-05: created as draft. Picks up the scope RDR-198 withdrew and named
   as belonging in its own RDR. Scoped to the run-record operation only; the
   read-side bundle is deliberately excluded.
+- 2026-09-05: round-2 plan audit folded in, the mirror of round 1. Deferring
+  the bump fixed the under-count and opened two over/under-count cases the
+  round-1 text could not see: a `plan_id`-only no-op double-bumps a D6 survivor
+  against a non-supporting engine, and an arm that re-reads the shared cached
+  flag can be sent down the plain path by a sibling's mid-call 404 after its own
+  early site already skipped. Both are answered by the auditor's amendment,
+  adopted here: the capability question is asked once, at the run-start site,
+  and its answer plus whether the early bump fired are carried in the call's
+  own state. Every arm and the helper key on that record. Rule 1 (early bump
+  fired means no arm bumps again) is enforced by routing rather than by a
+  `count_use` field, so the engine route stays stateless; the reason is stated
+  in D5. The exactly-one-bump argument is restated over four cases plus the
+  mid-call flip, two bump-count tests are named with falsifiers, and four more
+  DISCOVER residuals are appended.
 - 2026-09-05: round-1 plan audit folded in. Both BLOCKS-PLANNING findings are
   answered by one mechanism, `_nx_answer_ensure_run_started`: the early
   `run_start` is deferred rather than dropped when the probe reports support,
