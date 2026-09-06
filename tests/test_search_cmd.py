@@ -138,6 +138,64 @@ def test_corpus_csv_form_matches_repeat_form(
     assert "rdr__nexus" in target_names
 
 
+# ── nexus-d9xt2: skip GET /v1/vectors/stats for explicit collection names ──
+
+
+def test_explicit_conformant_collection_name_skips_list_collections(
+    runner: CliRunner, cloud_env,
+) -> None:
+    """--corpus <fully-qualified collection name> needs no prefix/floor
+    resolution against the tenant's collection list, so the CLI must not
+    pay the GET /v1/vectors/stats round trip (db.list_collections()) at
+    all -- unlike the long-lived MCP process, the CLI is a fresh process
+    every invocation and cannot amortize it via nexus.mcp_infra's cache."""
+    mock_t3 = _mock_t3(["knowledge__test__voyage-context-3__v1"])
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]) as ms:
+        result = runner.invoke(
+            main,
+            ["search", "query", "--corpus", "knowledge__test__voyage-context-3__v1"],
+        )
+    assert result.exit_code == 0, result.output
+    mock_t3.list_collections.assert_not_called()
+    call_kwargs = ms.call_args.kwargs if ms.call_args else {}
+    targets = call_kwargs.get("collections") or (ms.call_args.args[1] if ms.call_args else [])
+    assert list(targets) == ["knowledge__test__voyage-context-3__v1"]
+
+
+def test_prefix_corpus_still_pays_list_collections_once(
+    runner: CliRunner, cloud_env,
+) -> None:
+    """A wildcard/prefix/legacy-short-form --corpus value still needs the
+    tenant's collection list to resolve against, and pays for it exactly
+    once (not once per --corpus token)."""
+    mock_t3 = _mock_t3(["knowledge__test__voyage-context-3__v1", "rdr__nexus"])
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
+        result = runner.invoke(
+            main, ["search", "query", "--corpus", "knowledge,rdr"],
+        )
+    assert result.exit_code == 0, result.output
+    mock_t3.list_collections.assert_called_once()
+
+
+def test_mixed_explicit_and_prefix_corpus_pays_list_collections(
+    runner: CliRunner, cloud_env,
+) -> None:
+    """One non-conformant token in --corpus is enough to require the
+    fallback resolution path for the WHOLE call (never a partial skip)."""
+    mock_t3 = _mock_t3(["knowledge__test__voyage-context-3__v1", "rdr__nexus"])
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
+        result = runner.invoke(
+            main,
+            ["search", "query", "--corpus",
+             "knowledge__test__voyage-context-3__v1,rdr"],
+        )
+    assert result.exit_code == 0, result.output
+    mock_t3.list_collections.assert_called_once()
+
+
 def test_corpus_csv_and_repeat_forms_can_mix(
     runner: CliRunner, cloud_env,
 ) -> None:
