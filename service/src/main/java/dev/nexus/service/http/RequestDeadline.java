@@ -64,6 +64,25 @@ final class RequestDeadline {
     static final long DEFAULT_DEADLINE_MS = 300_000L;
 
     /**
+     * Spawn-env override for the HARD CEILING on any request's embed budget,
+     * in milliseconds (nexus-8hdg9 phase 3, phase-5 review carry-in T2 [24681]).
+     * Distinct from {@link #DEADLINE_MS_ENV}, the operator DEFAULT: the default
+     * is what an absent header gets; the ceiling is what no header, and no
+     * default, may exceed. Without it a client could declare an unbounded
+     * budget via {@link #REQUEST_DEADLINE_HEADER} and hold an admission permit
+     * for that whole budget now that the embed-loop check points exist.
+     */
+    static final String DEADLINE_MAX_MS_ENV = "NX_EMBED_DEADLINE_MAX_MS";
+
+    /**
+     * Default ceiling when {@link #DEADLINE_MAX_MS_ENV} is absent: 15 minutes,
+     * generous against the client's 540s header (its 600s socket timeout minus
+     * a margin) so a cooperating client is never clamped, while bounding a
+     * misbehaving one.
+     */
+    static final long DEFAULT_DEADLINE_MAX_MS = 900_000L;
+
+    /**
      * Advisory request header carrying the CLIENT's own embed budget in
      * milliseconds (nexus-8hdg9 phase 5). The Python client stamps it on
      * {@code /v1/vectors/upsert-chunks} from its socket timeout minus a
@@ -101,27 +120,69 @@ final class RequestDeadline {
      *       the client's own socket timeout (it is derived from it minus a
      *       margin), so a cooperating client cannot declare an unbounded
      *       budget.</li>
+     *   <li>Hard ceiling ({@link #DEADLINE_MAX_MS_ENV}, phase-5 review carry-in):
+     *       whichever of the two wins is then clamped to {@code maxMs}. A
+     *       header above the ceiling is clamped, not ignored -- the client
+     *       asked for "long", it gets "as long as this engine allows". The
+     *       env default is clamped the same way, so an operator default above
+     *       the ceiling cannot outrun it either.</li>
+     *   <li>Header syntax is ASCII digits only. {@code Long.parseLong} would
+     *       accept a leading {@code +} and non-ASCII digit scripts; both are
+     *       treated as malformed here (env default) so the accepted grammar is
+     *       exactly what the client stamps.</li>
      * </ul>
      */
-    static long resolveBudgetMs(String headerValue, long envDefaultMs) {
+    static long resolveBudgetMs(String headerValue, long envDefaultMs, long maxMs) {
+        long clampedDefault = Math.min(envDefaultMs, maxMs);
         if (headerValue == null || headerValue.isBlank()) {
-            return envDefaultMs;
+            return clampedDefault;
+        }
+        String trimmed = headerValue.trim();
+        if (!isAsciiDigits(trimmed)) {
+            return clampedDefault;
         }
         long requested;
         try {
-            requested = Long.parseLong(headerValue.trim());
+            requested = Long.parseLong(trimmed);
         } catch (NumberFormatException e) {
-            return envDefaultMs;
+            return clampedDefault;  // more than 19 digits
         }
         if (requested <= 0) {
-            return envDefaultMs;
+            return clampedDefault;
         }
-        return requested;
+        return Math.min(requested, maxMs);
+    }
+
+    /** {@link #resolveBudgetMs(String, long, long)} under the default ceiling. */
+    static long resolveBudgetMs(String headerValue, long envDefaultMs) {
+        return resolveBudgetMs(headerValue, envDefaultMs, DEFAULT_DEADLINE_MAX_MS);
+    }
+
+    private static boolean isAsciiDigits(String s) {
+        if (s.isEmpty()) return false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < '0' || c > '9') return false;
+        }
+        return true;
     }
 
     /** Production entry point: real env. */
     static long deadlineMsFromEnv() {
         return deadlineMsFromEnv(System::getenv);
+    }
+
+    /** Production entry point for the hard ceiling: real env. */
+    static long deadlineMaxMsFromEnv() {
+        return deadlineMaxMsFromEnv(System::getenv);
+    }
+
+    /**
+     * Env-injectable resolver for {@link #DEADLINE_MAX_MS_ENV}; same refuse-loud
+     * contract as {@link #deadlineMsFromEnv(Function)}.
+     */
+    static long deadlineMaxMsFromEnv(Function<String, String> env) {
+        return positiveMsFromEnv(env, DEADLINE_MAX_MS_ENV, DEFAULT_DEADLINE_MAX_MS);
     }
 
     /**
@@ -131,20 +192,24 @@ final class RequestDeadline {
      * loudly rather than silently coerced (no-silent-fallbacks-for-correctness).
      */
     static long deadlineMsFromEnv(Function<String, String> env) {
-        String raw = env.apply(DEADLINE_MS_ENV);
+        return positiveMsFromEnv(env, DEADLINE_MS_ENV, DEFAULT_DEADLINE_MS);
+    }
+
+    private static long positiveMsFromEnv(Function<String, String> env, String name, long defaultMs) {
+        String raw = env.apply(name);
         if (raw == null || raw.isBlank()) {
-            return DEFAULT_DEADLINE_MS;
+            return defaultMs;
         }
         long parsed;
         try {
             parsed = Long.parseLong(raw.trim());
         } catch (NumberFormatException e) {
             throw new IllegalArgumentException(
-                    DEADLINE_MS_ENV + " must be an integer, got: " + raw, e);
+                    name + " must be an integer, got: " + raw, e);
         }
         if (parsed <= 0) {
             throw new IllegalArgumentException(
-                    DEADLINE_MS_ENV + " must be positive, got: " + parsed);
+                    name + " must be positive, got: " + parsed);
         }
         return parsed;
     }

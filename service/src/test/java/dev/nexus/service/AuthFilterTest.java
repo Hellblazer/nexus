@@ -71,6 +71,9 @@ class AuthFilterTest {
      */
     private static final long EXPLICIT_DEADLINE_BUDGET_MS = 12_345L;
 
+    /** Explicit hard ceiling for the capped contexts (nexus-8hdg9 phase 3 carry-in). */
+    private static final long EXPLICIT_DEADLINE_MAX_MS = 20_000L;
+
     // Raw tokens (hashed before storage; AuthFilter hashes the presented token).
     private static final String TOK_A       = "raw-token-tenant-a";
     private static final String TOK_B       = "raw-token-tenant-b";
@@ -172,6 +175,16 @@ class AuthFilterTest {
         // deadline-echoing request must see deadlineNanos() as null, not a leaked
         // value from the prior request's ThreadLocal.
         server.createContext("/v1/echo-deadline-noauth", new DeadlineEchoHandler());
+        // nexus-8hdg9 phase 3 carry-in: an explicit hard ceiling (4-arg constructor),
+        // below the header a client may send and, on the second context, below the
+        // env default itself.
+        var deadlineCappedCtx = server.createContext("/v1/echo-deadline-capped", new DeadlineEchoHandler());
+        deadlineCappedCtx.getFilters().add(
+            new AuthFilter(cache, store, EXPLICIT_DEADLINE_BUDGET_MS, EXPLICIT_DEADLINE_MAX_MS));
+        var deadlineDefaultAboveCapCtx = server.createContext(
+            "/v1/echo-deadline-default-above-cap", new DeadlineEchoHandler());
+        deadlineDefaultAboveCapCtx.getFilters().add(
+            new AuthFilter(cache, store, EXPLICIT_DEADLINE_MAX_MS * 3, EXPLICIT_DEADLINE_MAX_MS));
 
         server.start();
         port = server.getAddress().getPort();
@@ -416,7 +429,11 @@ class AuthFilterTest {
     private static final long HEADER_BUDGET_ABOVE_DEFAULT_MS = 99_999L;
 
     private long echoedDeadlineWithHeader(String headerValue, long before, long[] afterOut) throws Exception {
-        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(base() + "/v1/echo-deadline"))
+        return echoedDeadlineWithHeader("/v1/echo-deadline", headerValue, afterOut);
+    }
+
+    private long echoedDeadlineWithHeader(String path, String headerValue, long[] afterOut) throws Exception {
+        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(base() + path))
             .header("Authorization", "Bearer " + TOK_A).GET();
         if (headerValue != null) {
             b.header(AuthFilter.REQUEST_DEADLINE_HEADER, headerValue);
@@ -476,6 +493,64 @@ class AuthFilterTest {
                 + " the env default is only the fallback")
             .isBetween(before + nanos(HEADER_BUDGET_ABOVE_DEFAULT_MS),
                        after[0] + nanos(HEADER_BUDGET_ABOVE_DEFAULT_MS));
+    }
+
+    // ── nexus-8hdg9 phase 3 carry-in: NX_EMBED_DEADLINE_MAX_MS hard ceiling ──
+
+    @Test
+    void headerAboveCeilingIsClampedToCeiling() throws Exception {
+        long before = System.nanoTime();
+        long[] after = new long[1];
+        long deadline = echoedDeadlineWithHeader("/v1/echo-deadline-capped",
+            Long.toString(HEADER_BUDGET_ABOVE_DEFAULT_MS), after);
+        assertThat(deadline)
+            .as("a 99.999s header against a 20s ceiling yields the ceiling, not the header")
+            .isBetween(before + nanos(EXPLICIT_DEADLINE_MAX_MS),
+                       after[0] + nanos(EXPLICIT_DEADLINE_MAX_MS));
+    }
+
+    @Test
+    void headerBelowCeilingIsNotClamped() throws Exception {
+        long before = System.nanoTime();
+        long[] after = new long[1];
+        long deadline = echoedDeadlineWithHeader("/v1/echo-deadline-capped",
+            Long.toString(HEADER_BUDGET_BELOW_DEFAULT_MS), after);
+        assertThat(deadline)
+            .isBetween(before + nanos(HEADER_BUDGET_BELOW_DEFAULT_MS),
+                       after[0] + nanos(HEADER_BUDGET_BELOW_DEFAULT_MS));
+    }
+
+    @Test
+    void envDefaultAboveCeilingIsClampedWhenHeaderAbsent() throws Exception {
+        long before = System.nanoTime();
+        long[] after = new long[1];
+        long deadline = echoedDeadlineWithHeader("/v1/echo-deadline-default-above-cap", null, after);
+        assertThat(deadline)
+            .as("an operator default (60s) above the ceiling (20s) is clamped to the ceiling")
+            .isBetween(before + nanos(EXPLICIT_DEADLINE_MAX_MS),
+                       after[0] + nanos(EXPLICIT_DEADLINE_MAX_MS));
+    }
+
+    @Test
+    void leadingPlusHeaderFallsBackToEnvDefault() throws Exception {
+        long before = System.nanoTime();
+        long[] after = new long[1];
+        long deadline = echoedDeadlineWithHeader("+" + HEADER_BUDGET_BELOW_DEFAULT_MS, before, after);
+        assertThat(deadline)
+            .as("'+5000' is not the client's grammar: ignored, env default applies")
+            .isBetween(before + nanos(EXPLICIT_DEADLINE_BUDGET_MS),
+                       after[0] + nanos(EXPLICIT_DEADLINE_BUDGET_MS));
+    }
+
+    @Test
+    void nonAsciiDigitHeaderFallsBackToEnvDefault() throws Exception {
+        long before = System.nanoTime();
+        long[] after = new long[1];
+        // Arabic-Indic "5000": Long.parseLong would accept it; the resolver must not.
+        long deadline = echoedDeadlineWithHeader("٥٠٠٠", before, after);
+        assertThat(deadline)
+            .isBetween(before + nanos(EXPLICIT_DEADLINE_BUDGET_MS),
+                       after[0] + nanos(EXPLICIT_DEADLINE_BUDGET_MS));
     }
 
     // ── Cache-level seam (fresh cache per test, mutable clock) ────────────────

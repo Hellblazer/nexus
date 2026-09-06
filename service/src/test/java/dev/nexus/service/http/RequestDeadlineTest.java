@@ -93,6 +93,76 @@ class RequestDeadlineTest {
         assertThat(RequestDeadline.resolveBudgetMs("300000", 300_000L)).isEqualTo(300_000L);
     }
 
+    // ── hard ceiling (nexus-8hdg9 phase 3 carry-in, T2 [24681]) ──────────
+
+    @Test
+    void resolveBudgetMs_headerAboveCeilingIsClampedToCeiling() {
+        assertThat(RequestDeadline.resolveBudgetMs("3600000", 300_000L, 900_000L)).isEqualTo(900_000L);
+        assertThat(RequestDeadline.resolveBudgetMs("900000", 300_000L, 900_000L)).isEqualTo(900_000L);
+        assertThat(RequestDeadline.resolveBudgetMs("540000", 300_000L, 900_000L)).isEqualTo(540_000L);
+        // 20+ digits overflow Long.parseLong: malformed, env default.
+        assertThat(RequestDeadline.resolveBudgetMs("99999999999999999999", 300_000L, 900_000L))
+                .isEqualTo(300_000L);
+    }
+
+    @Test
+    void resolveBudgetMs_envDefaultAboveCeilingIsClampedToo() {
+        assertThat(RequestDeadline.resolveBudgetMs(null, 2_000_000L, 900_000L)).isEqualTo(900_000L);
+        assertThat(RequestDeadline.resolveBudgetMs("junk", 2_000_000L, 900_000L)).isEqualTo(900_000L);
+    }
+
+    @Test
+    void resolveBudgetMs_twoArgOverloadUsesTheDefaultCeiling() {
+        assertThat(RequestDeadline.resolveBudgetMs(
+                Long.toString(RequestDeadline.DEFAULT_DEADLINE_MAX_MS + 1), 300_000L))
+                .isEqualTo(RequestDeadline.DEFAULT_DEADLINE_MAX_MS);
+    }
+
+    @Test
+    void resolveBudgetMs_leadingPlusAndNonAsciiDigitsAreMalformed() {
+        // Long.parseLong would accept both; the accepted grammar is ASCII digits only.
+        assertThat(RequestDeadline.resolveBudgetMs("+45000", 300_000L)).isEqualTo(300_000L);
+        assertThat(RequestDeadline.resolveBudgetMs("٤٥٠٠٠", 300_000L))
+                .as("Arabic-Indic digits are not the client's grammar")
+                .isEqualTo(300_000L);
+        assertThat(RequestDeadline.resolveBudgetMs("４５", 300_000L))
+                .as("fullwidth digits likewise")
+                .isEqualTo(300_000L);
+    }
+
+    @Test
+    void deadlineMaxMsFromEnv_defaultsWhenAbsent() {
+        assertThat(RequestDeadline.deadlineMaxMsFromEnv(Map.<String, String>of()::get))
+                .isEqualTo(RequestDeadline.DEFAULT_DEADLINE_MAX_MS)
+                .isEqualTo(900_000L);
+        assertThat(RequestDeadline.DEFAULT_DEADLINE_MAX_MS)
+                .as("the ceiling must sit above the operator default or it would clamp it")
+                .isGreaterThan(RequestDeadline.DEFAULT_DEADLINE_MS);
+    }
+
+    @Test
+    void deadlineMaxMsFromEnv_explicitOverrideWins() {
+        assertThat(RequestDeadline.deadlineMaxMsFromEnv(
+                Map.of(RequestDeadline.DEADLINE_MAX_MS_ENV, "1200000")::get)).isEqualTo(1_200_000L);
+    }
+
+    @Test
+    void deadlineMaxMsFromEnv_refusesNonPositiveOrNonNumeric() {
+        assertThatThrownBy(() -> RequestDeadline.deadlineMaxMsFromEnv(
+                Map.of(RequestDeadline.DEADLINE_MAX_MS_ENV, "0")::get))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(RequestDeadline.DEADLINE_MAX_MS_ENV);
+        assertThatThrownBy(() -> RequestDeadline.deadlineMaxMsFromEnv(
+                Map.of(RequestDeadline.DEADLINE_MAX_MS_ENV, "forever")::get))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(RequestDeadline.DEADLINE_MAX_MS_ENV);
+    }
+
+    @Test
+    void deadlineMaxMsFromEnv_realEntryPoint_returnsPositiveValue() {
+        assertThat(RequestDeadline.deadlineMaxMsFromEnv()).isPositive();
+    }
+
     // ── newDeadlineNanos ─────────────────────────────────────────────────
 
     @Test

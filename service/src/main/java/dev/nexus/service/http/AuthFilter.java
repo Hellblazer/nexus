@@ -90,8 +90,18 @@ public final class AuthFilter extends Filter {
      */
     private final long deadlineBudgetMs;
 
+    /**
+     * Hard ceiling on any request's embed budget (nexus-8hdg9 phase 3, review
+     * carry-in T2 [24681]): {@link RequestDeadline#DEADLINE_MAX_MS_ENV},
+     * resolved once at construction like {@link #deadlineBudgetMs}. Both the
+     * client's header budget and the env default are clamped to it in
+     * {@link RequestDeadline#resolveBudgetMs(String, long, long)}.
+     */
+    private final long deadlineMaxMs;
+
     public AuthFilter(TokenCache tokenCache, TokenStore tokenStore) {
-        this(tokenCache, tokenStore, RequestDeadline.deadlineMsFromEnv());
+        this(tokenCache, tokenStore, RequestDeadline.deadlineMsFromEnv(),
+             RequestDeadline.deadlineMaxMsFromEnv());
     }
 
     /**
@@ -119,9 +129,23 @@ public final class AuthFilter extends Filter {
      *                         NX_EMBED_DEADLINE_MS} value
      */
     public AuthFilter(TokenCache tokenCache, TokenStore tokenStore, long deadlineBudgetMs) {
+        this(tokenCache, tokenStore, deadlineBudgetMs, RequestDeadline.deadlineMaxMsFromEnv());
+    }
+
+    /**
+     * Test-support constructor with an explicit hard ceiling (nexus-8hdg9
+     * phase 3 carry-in); same rationale as the 3-arg form.
+     *
+     * @param deadlineMaxMs the ceiling in milliseconds -- what {@link
+     *                      RequestDeadline#deadlineMaxMsFromEnv()} would have
+     *                      returned for some {@code NX_EMBED_DEADLINE_MAX_MS}
+     */
+    public AuthFilter(TokenCache tokenCache, TokenStore tokenStore, long deadlineBudgetMs,
+                      long deadlineMaxMs) {
         this.tokenCache = Objects.requireNonNull(tokenCache, "tokenCache");
         this.tokenStore = Objects.requireNonNull(tokenStore, "tokenStore");
         this.deadlineBudgetMs = deadlineBudgetMs;
+        this.deadlineMaxMs = deadlineMaxMs;
     }
 
     @Override
@@ -235,11 +259,12 @@ public final class AuthFilter extends Filter {
         // principal, for EVERY route, from the budget resolved once at construction.
         // Phase 5: a client that declares its own budget via the advisory
         // X-Nexus-Request-Deadline-Ms header replaces the env default outright;
-        // absent or malformed falls back to the default.
+        // absent or malformed falls back to the default. Either is clamped to the
+        // NX_EMBED_DEADLINE_MAX_MS hard ceiling (phase 3 carry-in).
         // Cleared together with the principal in the finally below.
         long budgetMs = RequestDeadline.resolveBudgetMs(
             exchange.getRequestHeaders().getFirst(RequestDeadline.REQUEST_DEADLINE_HEADER),
-            deadlineBudgetMs);
+            deadlineBudgetMs, deadlineMaxMs);
         RequestContext.setDeadlineNanos(RequestDeadline.newDeadlineNanos(budgetMs));
         try {
             chain.doFilter(exchange);
