@@ -21,9 +21,9 @@ run() {
   if "$@"; then echo "   ok: $name"; else echo "   RED: $name"; reds+=("$name"); fi
 }
 lint_out="$(mktemp)"
-run "lint bucket" bash -c "uv run pytest -m lint -q -p no:cacheprovider 2>&1 | tee '$lint_out' | tail -3"
-if grep -qE '[0-9]+ errors?( |,)' "$lint_out"; then
-  echo "   RED: lint bucket had setup errors (stale gate jar? run scripts/build-gate-jar.sh first)"; reds+=("lint bucket errors")
+run "lint bucket" bash -o pipefail -c "uv run pytest -m lint -q -p no:cacheprovider 2>&1 | tee '$lint_out' | tail -3"
+if grep -qE '[0-9]+ (errors?|failed)( |,)' "$lint_out"; then
+  echo "   RED: lint bucket reported failures or setup errors (a stale gate jar errors every substrate test: scripts/build-gate-jar.sh)"; reds+=("lint bucket")
 elif ! grep -qE '[1-9][0-9]{2,} passed' "$lint_out"; then
   echo "   VACUOUS: lint bucket ran fewer than 100 tests"; rm -f "$lint_out"; exit 2
 fi
