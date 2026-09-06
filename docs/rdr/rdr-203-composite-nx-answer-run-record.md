@@ -44,10 +44,13 @@ them as pointers to be re-resolved, not as fixed addresses.
 
 ### Enumerated gaps to close
 
-Three gaps, in descending order of how well the evidence supports them. The
-first is measured and structural. The second and third are real mechanisms
-whose occurrence rate is zero in the only measurement anyone has taken, and
-they are labelled that way rather than dressed up.
+Three gaps, in descending order of how well the evidence supports them, each
+labelled with what is actually known about it. The first is structural and
+visible in the code. The second is a real mechanism that fires rarely: one
+orphan in 190 recorded uses, 0.5%. The third is a real mechanism with no
+occurrence rate at all, because nobody has measured how often a plan clears the
+promotion gate on abandoned attempts. Rare and unmeasured are different states
+and the gaps say which they are in.
 
 #### Gap 1: One operation costs three round trips
 
@@ -255,14 +258,28 @@ Body is the existing `/record` body plus one new required field:
 }
 ```
 
-`created_at` is the existing optional field on `/record`, and on this route the
-client always sends it. It is not decoration: it is the dedup key
+`created_at` is **required on `/complete`**, and missing, blank or unparsable
+is a 400 naming the field. It is the dedup key
 (`tenant_id, question, created_at`) that makes a retried composite idempotent,
-so a payload without it defeats D3 and the retry guard in Risks. The engine
-keeps `/record`'s lenient handling (absent means stamp `now()`), because the
-ETL path and the D6 survivors still rely on it. Named here rather than left to
-the client half, because P2 and P3 are different developers and the engine's
-contract has to say that the field carries weight on this route.
+so a payload without it defeats D3 and the retry guard in Risks: the engine
+would stamp `now()` on each attempt, the dedup index would never match, and a
+lost response would double-apply the plan counters. That is the failure the
+Risks section calls the sharpest edge in the design, and neither of the two
+tests pinning it would catch a missing field, because both assume the field is
+present and ask only whether it is stable.
+
+So the field gets the same treatment `outcome` gets on the same route, for the
+same stated reason: no silent fallback for a correctness-bearing field. This is
+a `/complete`-only rule. `handleNxAnswerRunComplete` is its own handler method
+and enforces presence itself; `/record` keeps its lenient handling (absent
+means stamp `now()`) untouched, because the ETL path, the D6 survivors and
+`nx_answer_report` all rely on it. An earlier draft called the field
+load-bearing and then left it defaultable, which is a contradiction rather than
+a trade-off.
+
+Named in the engine's contract rather than left to the client half, because P2
+and P3 are different developers: P2 makes the route refuse a payload without
+it, and P3 makes the client always send it.
 
 `outcome` is a closed vocabulary of two values, `"success"` and `"failure"`.
 A missing or unrecognized value is a 400 naming the field, never a default.
@@ -641,7 +658,13 @@ prose is required by `tests/test_wire_contract_pairing_lint.py`.
 > the lifted `insertRunAndSteps` and the new package-private static
 > `PlanRepository.incrementRunStartedIn` / `incrementRunOutcomeIn`),
 > `TelemetryHandler.handleNxAnswerRunComplete`, and the `VersionHandler`
-> flag. No existing route, request field or response field changed shape.
+> flag. The new route REQUIRES `outcome` and `created_at`, 400 on either
+> missing or unparsable; `created_at` is the dedup key that makes a retried
+> composite idempotent. That requirement is scoped to `/complete` alone:
+> `POST /v1/telemetry/nx_answer_runs/record` keeps its lenient handling
+> (absent `created_at` stamps `now()`) unchanged, which the ETL path and
+> three surviving client writers still rely on. No existing route, request
+> field or response field changed shape.
 > No DDL: the three tables already exist. Direction safety, both
 > directions: OLD client + NEW engine -- the route exists and the flag is
 > present in `/version`, but no released client posts to `/complete` or
@@ -689,6 +712,14 @@ falsifier, per the house rule that a gate which cannot go red proves nothing.
 `service/src/test/java/dev/nexus/service/http/TelemetryHandlerNxAnswerCompleteTest.java`
 
 - `missingOutcomeIs400`, `unknownOutcomeValueIs400`: the no-silent-default rule.
+- `missingCreatedAtOnCompleteIs400`, `malformedCreatedAtOnCompleteIs400`: the
+  same rule for the dedup key (D1). Falsifier: fall back to `/record`'s lenient
+  parsing on this route and both go green while the idempotency guarantee is
+  gone, which is exactly the state an earlier draft of D1 described.
+- `missingCreatedAtOnRecordStillStampsNow`: the other half of that pair, and
+  the one that keeps the fix from leaking. `/record` must keep its lenient
+  handling, because the ETL path, the D6 survivors and `nx_answer_report` all
+  depend on it. Falsifier: make the requirement global and this reds.
 - `stepsAbsentWritesParentOnly`: the existing `/record` degradation contract
   holds on the new route too.
 
@@ -744,6 +775,14 @@ falsifier, per the house rule that a gate which cannot go red proves nothing.
   actually declines to double-bump on that replay. Neither half is sufficient
   alone: the Python test proves the key is stable, the Java test proves a
   stable key is honoured.
+- `test_composite_payload_always_carries_created_at`: the client half of D1's
+  required-field rule, and the one that catches what stability cannot. The
+  retry test above assumes the field is present and asks only whether it stays
+  the same; this one asserts it is on the wire at all, stamped at the choke
+  point before the first attempt, on every composite POST including the 404
+  fallback's retry into the degradation path. Falsifier: drop the stamp and
+  this reds while the retry test stays green, which is the gap that made the
+  field worth requiring server side.
 - `test_handoff_arm_against_supporting_engine_keeps_use_count_equal_to_outcomes`:
   the invariant test for the D6 survivors, and the one test here that needs a
   real store rather than a stub. Against the self-provisioned engine substrate
@@ -819,10 +858,15 @@ above, and the wire-ledger entry. Also an edit to an existing test:
 `VersionHandlerReleaseVersionTest.java:121` asserts the capability fragment by
 exact equality, so a second flag on the same append path reds there and the fix
 belongs in this phase rather than being discovered by the next person to run
-the suite (residual 1). No Liquibase changeset. Exit: the full engine suite
-green via `scripts/mvnw-leased.sh`, the rollback falsifier red when the
-composite is split back into three transactions, and `RawSqlGateTest` green
-with no new sanctioned region.
+the suite (residual 1). P2 also owns D1's required-`created_at` rule: the
+handler refuses a `/complete` payload without a parsable `created_at` with a
+400 naming the field, and leaves `/record` lenient. No Liquibase changeset.
+Exit: the full engine suite green via `scripts/mvnw-leased.sh`, the rollback
+falsifier red when the composite is split back into three transactions,
+`missingCreatedAtOnCompleteIs400` and `malformedCreatedAtOnCompleteIs400` green
+with `missingCreatedAtOnRecordStillStampsNow` green beside them (so the
+requirement did not leak onto the old route), and `RawSqlGateTest` green with
+no new sanctioned region.
 
 **P3. Client half behind the probe.** The capabilities-dict refactor of the
 existing probe, including its cache-a-failed-probe behaviour (residual 10),
@@ -831,11 +875,13 @@ existing probe, including its cache-a-failed-probe behaviour (residual 10),
 run-start site, the new `_nx_answer_ensure_run_started` helper with its
 `early_bump_fired` guard and its calls at the two D6 survivors and on both
 degradation branches, and the 404 downgrade guard including its deferred
-`run_start`. P3 also owns idempotency: the composite payload stamps
-`created_at` once, at construction, before the first attempt, using the
-existing optional `created_at` field the `/record` handler already reads.
+`run_start`. P3 also owns idempotency: the choke point stamps `created_at` once,
+at construction, before the first attempt, on every composite payload. The
+engine now refuses a `/complete` without it (D1, P2), so this is not a
+convention the two halves each hope the other keeps.
 Ships the Python tests above including the budget test,
-`test_gateway_retry_reuses_one_created_at_stamp`, the 404 downgrade ordering
+`test_gateway_retry_reuses_one_created_at_stamp`,
+`test_composite_payload_always_carries_created_at`, the 404 downgrade ordering
 test, the handoff invariant test, the non-supporting-engine handoff test, the
 mid-call flip test, the planner-failure-arm test, and the census test's
 preceded-by clause (residual 13). It also edits
@@ -845,7 +891,8 @@ non-empty-`step_records` comment stops being true once the probe fires at the
 run-start site on every call (residual 16). Exit: the degradation test green against a
 non-supporting stub, the budget test green against a supporting stub, both red
 when the probe is forced the other way, the retry-stamp test green and red when
-`created_at` is recomputed inside the retry loop, the 404 test showing three
+`created_at` is recomputed inside the retry loop, the stamp-present test green
+and red when the stamp is dropped, the 404 test showing three
 POSTs in order then one composite, the handoff invariant test green and red
 when the survivor's deferred bump is removed, and both bump-count tests green
 and red under their own falsifiers (a `plan_id`-only no-op condition, and an
@@ -1093,6 +1140,21 @@ its own schedule, its own failure modes and its own tests.
 - 2026-09-05: created as draft. Picks up the scope RDR-198 withdrew and named
   as belonging in its own RDR. Scoped to the run-record operation only; the
   read-side bundle is deliberately excluded.
+- 2026-09-05: Layer 3 gate critique folded in (T2
+  `nexus/critique-rdr-203-gate-64c4802bc` [24700]), two Criticals, both
+  text-level. The gaps intro still said gaps 2 and 3 had an occurrence rate of
+  zero, contradicting Gap 2's own 1-in-190 a paragraph below and inventing a
+  measurement for Gap 3, which has none; it now says rare for one and
+  unmeasured for the other, and a grep confirms the only surviving "zero"
+  occurrence claims are the historical references to RDR-198's spike. Second,
+  D1 called `created_at` the dedup key and then left it defaultable through
+  `/record`'s lenient parsing, which is a contradiction rather than a
+  trade-off: `/complete` now REQUIRES it, 400 on missing or unparsable, exactly
+  as `outcome` is treated on the same route and scoped to that handler so
+  `/record` stays lenient for the ETL path and the surviving writers. Three
+  Java tests and one Python test are named for it, and both P2's and P3's exit
+  criteria carry their halves. The wire-ledger entry says the field is
+  required.
 - 2026-09-05: both pre-acceptance research items recorded, and a
   `## Research Findings` section added carrying them in the rdr-research
   entry format. The orphan re-measure changed a claim: one orphan in 190
@@ -1109,8 +1171,9 @@ its own schedule, its own failure modes and its own tests.
 - 2026-09-05: Problem Statement restructured into the `#### Gap N:` blocks the
   formal gate's Layer 1 requires, which had it BLOCKED before any other layer
   ran. Three gaps: the three round trips (verified), the client-composed
-  operation the engine cannot make atomic (mechanism verified, occurrence
-  measured at zero), and `use_count` counting attempts with no way to reconcile
+  operation the engine cannot make atomic (mechanism verified, and at that
+  point carrying only RDR-198's zero-in-29; corrected to 1 in 190 by the
+  research entry above), and `use_count` counting attempts with no way to reconcile
   it against outcomes (verified by reading, unmeasured in the field). No
   decision changed; the gaps state what the Decisions section already answers.
   The Residuals opener, which still said seven findings from round 1, now says
