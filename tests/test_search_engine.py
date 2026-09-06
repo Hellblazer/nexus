@@ -1401,6 +1401,134 @@ class TestThresholdGateServiceMode:
         assert {r.id for r in results} == {"a", "b"}
 
 
+# ── nexus-d9xt2: model-grouped fan-out request-count ─────────────────────────
+#
+# Recipe from the bead: patch ``nexus.db.http_vector_client._request`` (the
+# transport-level function every ``HttpVectorClient`` call funnels through)
+# and count POST /v1/vectors/search calls per corpus spec, through the REAL
+# ``HttpVectorClient.search()`` request-building/response-parsing code — not
+# a fake ``.search()`` that could hide a regression in how ``search_engine``
+# builds the combined call. FALSIFIER: reverting search_cross_corpus's
+# fan-out to one call per collection (the pre-nexus-d9xt2 ``_search_one``
+# loop) makes every case below see ``len(collections)`` calls instead of the
+# per-model-group count asserted here.
+
+
+def _conformant_collections(content_type: str, model: str, n: int) -> list[str]:
+    """*n* RDR-103-conformant collection names of one (content_type, model)."""
+    return [f"{content_type}__c{i}__{model}__v1" for i in range(n)]
+
+
+class _RequestCountingT3:
+    """Real ``HttpVectorClient`` wired to a fake transport (nexus-d9xt2).
+
+    Patches the module-level ``_request`` function that every ``_post``/
+    ``_get`` call funnels through, so ``HttpVectorClient.search()`` runs its
+    real request-building and response-parsing code end to end. Every
+    ``POST /v1/vectors/search`` call is recorded (collections + n_results);
+    the response tags each row with its collection via round-robin over the
+    call's own collection list, matching the engine's real combined-query
+    contract (RDR-155 P4: "returns the collection per row").
+    """
+
+    def __init__(self, monkeypatch, rows_per_call: int = 3):
+        from nexus.db import http_vector_client as hvc
+
+        self.search_calls: list[dict] = []
+        self._rows_per_call = rows_per_call
+        self.client = hvc.HttpVectorClient()
+
+        def _fake_request(method, path, *, tenant, timeout, body):
+            if method == "POST" and path == "/v1/vectors/search":
+                cols = body["collections"]
+                self.search_calls.append(
+                    {"collections": list(cols), "n_results": body["n_results"]},
+                )
+                rows = []
+                for i in range(min(self._rows_per_call, body["n_results"])):
+                    col = cols[i % len(cols)]
+                    rows.append({
+                        "id": f"{col}-{i}", "content": "x",
+                        "distance": 0.1 + i * 0.001, "collection": col,
+                    })
+                return rows
+            raise AssertionError(f"unexpected request in this test: {method} {path}")
+
+        monkeypatch.setattr(hvc, "_request", _fake_request)
+
+
+class TestModelGroupedFanOutRequestCount:
+    """nexus-d9xt2: one combined ``/v1/vectors/search`` call per embedding-
+    model group replaces the old one call per collection."""
+
+    @pytest.fixture(autouse=True)
+    def _disable_contradiction_check(self, monkeypatch):
+        # Keep this test scoped to the fan-out call count -- contradiction
+        # detection would add POST /v1/vectors/get-embeddings calls the fake
+        # transport above does not implement.
+        monkeypatch.setattr(
+            "nexus.search_engine.load_config",
+            lambda: {"search": {"contradiction_check": False}},
+        )
+
+    def test_knowledge_corpus_issues_one_call(self, monkeypatch):
+        """12 knowledge collections (one model) -> ONE combined call."""
+        cols = _conformant_collections("knowledge", "voyage-context-3", 12)
+        fake = _RequestCountingT3(monkeypatch)
+        search_cross_corpus(
+            "q", cols, 10, fake.client,
+            threshold_override=float("inf"), cluster_by=None,
+        )
+        assert len(fake.search_calls) == 1
+        assert sorted(fake.search_calls[0]["collections"]) == sorted(cols)
+
+    def test_code_corpus_issues_one_call(self, monkeypatch):
+        """20 code collections (one model) -> ONE combined call."""
+        cols = _conformant_collections("code", "voyage-code-3", 20)
+        fake = _RequestCountingT3(monkeypatch)
+        search_cross_corpus(
+            "q", cols, 10, fake.client,
+            threshold_override=float("inf"), cluster_by=None,
+        )
+        assert len(fake.search_calls) == 1
+        assert sorted(fake.search_calls[0]["collections"]) == sorted(cols)
+
+    def test_all_corpus_issues_one_call_per_model_group(self, monkeypatch):
+        """corpus=all spans two embedding models (voyage-code-3 for code,
+        voyage-context-3 for knowledge/docs/rdr) -> exactly TWO combined
+        calls, one per model, never one per collection."""
+        code_cols = _conformant_collections("code", "voyage-code-3", 20)
+        knowledge_cols = _conformant_collections("knowledge", "voyage-context-3", 12)
+        docs_cols = _conformant_collections("docs", "voyage-context-3", 23)
+        rdr_cols = _conformant_collections("rdr", "voyage-context-3", 9)
+        all_cols = code_cols + knowledge_cols + docs_cols + rdr_cols
+
+        fake = _RequestCountingT3(monkeypatch)
+        search_cross_corpus(
+            "q", all_cols, 10, fake.client,
+            threshold_override=float("inf"), cluster_by=None,
+        )
+        assert len(fake.search_calls) == 2
+        called_groups = [set(c["collections"]) for c in fake.search_calls]
+        assert set(code_cols) in called_groups
+        assert set(knowledge_cols + docs_cols + rdr_cols) in called_groups
+
+    def test_falsifier_documents_the_pre_fix_call_count(self, monkeypatch):
+        """Not a regression test on its own -- documents the count the OLD
+        one-call-per-collection fan-out would have produced, so a revert of
+        the nexus-d9xt2 grouping shows up as a call-count regression here
+        rather than only in wall-clock time."""
+        cols = _conformant_collections("knowledge", "voyage-context-3", 12)
+        fake = _RequestCountingT3(monkeypatch)
+        search_cross_corpus(
+            "q", cols, 10, fake.client,
+            threshold_override=float("inf"), cluster_by=None,
+        )
+        # The grouped fan-out issues 1 call, not len(cols) calls.
+        assert len(fake.search_calls) == 1
+        assert len(fake.search_calls) != len(cols)
+
+
 # ── apply_ranking_boosts ─────────────────────────────────────
 #
 # Single shared implementation of the CLI's post-retrieval ranking boosts

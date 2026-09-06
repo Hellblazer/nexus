@@ -10,6 +10,7 @@ from typing import Any
 import structlog
 
 from nexus.config import TuningConfig, get_telemetry_config, load_config
+from nexus.corpus import embedding_model_for_collection_name
 from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
 from nexus.types import SearchResult
 
@@ -337,6 +338,54 @@ def _overfetch_multiplier(collection_name: str) -> int:
     return 2
 
 
+def _group_collections_by_embedding_model(collections: list[str]) -> list[list[str]]:
+    """Group *collections* by embedding model (nexus-d9xt2 / nexus-3l6gz).
+
+    A combined ``/v1/vectors/search`` call embeds the query string ONCE and
+    ranks every listed collection's chunks against that single query
+    vector; the engine's plain-search route requires exact dimension
+    homogeneity within one call (``PgVectorRepository#searchWithTokens``:
+    "mixed dimensions in one search call"), and even same-DIMENSION
+    collections from two different models (``voyage-code-3`` vs
+    ``voyage-context-3``, both 1024-dim) would be mis-ranked against a
+    query embedded by only one of the two models. Grouping by model keeps
+    every combined call homogeneous.
+
+    A collection whose name does not parse a model token (the RDR-101
+    conformant 4-segment shape) is kept in its OWN singleton group keyed by
+    its raw name -- never guessed into an inferred model group and never
+    silently dropped. Mirrors ``nexus.mcp.core._group_collections_by_model``
+    (the same pattern for the catalog-routed combined-query tools); kept as
+    a separate copy here rather than a cross-module import to avoid pulling
+    the (heavy, MCP-server-shaped) ``nexus.mcp.core`` module into every
+    search-engine caller, including the CLI.
+
+    Preserves ``collections``' relative ordering both across and within
+    groups (insertion order of first-seen model).
+    """
+    groups: dict[str, list[str]] = {}
+    for name in collections:
+        key = embedding_model_for_collection_name(name) or name
+        groups.setdefault(key, []).append(name)
+    return list(groups.values())
+
+
+def _chunked_collections(collections: list[str], n: int) -> list[list[str]]:
+    """Split *collections* into *n* contiguous, near-equal-sized chunks.
+
+    Used only when a single embedding-model group would need more than
+    ``QUOTAS.MAX_QUERY_RESULTS`` candidates to give every collection in it
+    a fair per-collection floor (nexus-d9xt2) -- splits the group into as
+    few combined calls as the service cap allows, never all the way back
+    to one call per collection. Preserves relative order; the last chunk
+    absorbs any remainder. ``n <= 1`` or a single-item input is a no-op.
+    """
+    if n <= 1 or len(collections) <= 1:
+        return [collections]
+    size = -(-len(collections) // n)  # ceil division
+    return [collections[i:i + size] for i in range(0, len(collections), size)]
+
+
 # ── Cross-corpus search ───────────────────────────────────────────────────────
 
 _CLUSTER_DEFAULT = "semantic"
@@ -359,13 +408,33 @@ def search_cross_corpus(
     rerank: bool = False,
     rerank_meta_out: dict[str, dict] | None = None,
 ) -> list[SearchResult]:
-    """Query each collection independently, returning combined raw results.
+    """Query each collection, returning combined raw results.
 
-    Per-corpus over-fetch: each collection fetches ``max(5, n_results * mult)``
-    candidates where *mult* is ``_overfetch_multiplier(collection)`` — 4x for
-    knowledge/docs/rdr, 2x for code.  The larger pool compensates for the
-    distance-threshold filtering that follows, ensuring enough survivors reach
-    the caller's reranker.
+    Per-corpus over-fetch: each collection is fetched with a target of
+    ``max(5, n_results * mult)`` candidates where *mult* is
+    ``_overfetch_multiplier(collection)`` — 4x for knowledge/docs/rdr, 2x
+    for code.  The larger pool compensates for the distance-threshold
+    filtering that follows, ensuring enough survivors reach the caller's
+    reranker.
+
+    nexus-d9xt2: collections are grouped by embedding model
+    (:func:`_group_collections_by_embedding_model`) and each group is
+    fetched with ONE combined ``/v1/vectors/search`` call sized at
+    ``n_results * mult`` for the whole group (capped at
+    ``QUOTAS.MAX_QUERY_RESULTS``; a group that would need more than the
+    cap to give every collection a fair shot is split into as few calls as
+    the cap allows — see :func:`_chunked_collections`) rather than one call
+    per collection. Threshold filtering, per-collection diagnostics
+    (``diagnostics_out``), the nexus-9tsdf dimension-mismatch tolerance,
+    and rerank-meta attribution are all still resolved per collection, via
+    each row's own ``collection`` tag in the combined response (or,
+    for a batch of exactly one collection, without needing that tag at
+    all — see ``_search_batch``'s docstring). A collection whose name does
+    not parse a model token is never grouped with others, so nothing about
+    a non-conformant or test-fixture collection name changes. See the
+    inline comment ahead of the batching loop for the one observable
+    change: cross-GROUP result order is no longer strictly interleaved by
+    input order.
 
     When *cluster_by* is ``"semantic"`` (default), results are grouped by
     topic assignments from T2 taxonomy if >50% of results have assignments.
@@ -481,85 +550,169 @@ def search_cross_corpus(
     # RDR-188: only a capability-marked backend is asked to rerank.
     server_rerank = rerank and getattr(t3, "supports_server_rerank", False)
 
-    def _search_one(col: str) -> dict:
-        mult = _overfetch_multiplier(col)
-        # Search review I-3: cap per_k at MAX_QUERY_RESULTS=300. Without
-        # this, a large ``offset`` fed into ``fetch_n = offset + limit``
-        # upstream multiplies by ``mult`` (up to 4×) and the per-collection
-        # n_results punches through the ChromaDB Cloud quota.
+    def _search_batch(cols: list[str]) -> list[dict]:
+        """Search one embedding-model-homogeneous batch of collections in a
+        single combined ``/v1/vectors/search`` call, returning one result
+        dict per collection in *cols* -- the same per-collection shape the
+        old one-call-per-collection ``_search_one`` returned, so the merge
+        loop below is unchanged.
+
+        nexus-d9xt2: ``n_results`` is fetched ONCE for the whole batch, not
+        once per collection -- the fan-out this bead measured: 12 knowledge
+        collections at 120 candidates each (1440 raw rows total) cost 6.7s
+        through 12 separate HTTP round trips; one combined call fetching
+        120 total candidates across all 12 costs 0.8s. Threshold filtering,
+        diagnostics, and rerank-meta are still computed per COLLECTION,
+        keyed off each row's own ``collection`` tag in the combined
+        response.
+
+        A single-collection batch (``len(cols) == 1``) is the exact prior
+        per-collection call shape and does not require the response to
+        carry a ``collection`` tag per row (fakes/mocks that predate
+        nexus-d9xt2 never set one) -- every row is attributed to that one
+        collection directly, matching the old ``_search_one`` behaviour
+        byte for byte.
+        """
+        mult = max((_overfetch_multiplier(c) for c in cols), default=2)
+        # Search review I-3 (kept; now applied once per BATCH rather than
+        # once per collection): cap the requested count at
+        # MAX_QUERY_RESULTS=300. A large limit/offset feeding fetch_n
+        # upstream, multiplied by up to 4x, must not punch through the
+        # service quota.
         per_k = min(max(5, n_results * mult), QUOTAS.MAX_QUERY_RESULTS)
-        if not apply_thresholds:
-            threshold = None
-        elif threshold_override is not None:
-            threshold = threshold_override
-        else:
-            threshold = _threshold_for_collection(col, cfg)
         rerank_meta: dict = {}
         try:
             if server_rerank:
-                raw = t3.search(query, [col], n_results=per_k, where=effective_where,
+                raw = t3.search(query, cols, n_results=per_k, where=effective_where,
                                 rerank=True, rerank_meta_out=rerank_meta)
             else:
-                raw = t3.search(query, [col], n_results=per_k, where=effective_where)
+                raw = t3.search(query, cols, n_results=per_k, where=effective_where)
         except VectorServiceError as exc:
-            # nexus-pebfx.8: one unservable collection (embedding-space
-            # mismatch → service-side HTTP 400) must not sink the whole
-            # cross-corpus search. Skip it, keep the rest.
-            return {"col": col, "error": str(exc)}
-        results: list[SearchResult] = []
-        dropped = 0
-        # Minimum distance among dropped items — best-of-dropped, used by
-        # SearchDiagnostics.worst_offender() for the "threshold bump" hint.
-        min_dropped_distance: float | None = None
-        # Minimum distance across ALL raw candidates — stored in
-        # search_telemetry as ``top_distance`` (best-of-raw).
-        min_raw_distance: float | None = None
-        for r in raw:
-            distance = r["distance"]
-            if min_raw_distance is None or distance < min_raw_distance:
-                min_raw_distance = distance
-            # RDR-055 E2 quality_boost runs after hybrid scoring, via
-            # apply_ranking_boosts(), in every caller that applies it: the
-            # CLI (search_cmd.py) and the MCP search()/query() non-catalog
-            # paths (mcp/core.py). The catalog-routed combined-query paths
-            # (search_metadata_scoped, search_graph_hop, search_topic_scoped,
-            # query()'s catalog-param branch) never call it — see
-            # apply_ranking_boosts' docstring. Thresholds apply to raw
-            # distance here, before any of that.
-            if threshold is not None and distance > threshold:
-                dropped += 1
-                if min_dropped_distance is None or distance < min_dropped_distance:
-                    min_dropped_distance = distance
-                continue
-            results.append(SearchResult(
-                id=r["id"],
-                content=r["content"],
-                distance=distance,
-                collection=col,
-                metadata={k: v for k, v in r.items()
-                          if k not in {"id", "content", "distance"}},
-            ))
-        return {
-            "col": col,
-            "error": None,
-            "results": results,
-            "raw_count": len(raw),
-            "dropped": dropped,
-            "threshold": threshold,
-            "min_dropped_distance": min_dropped_distance,
-            "min_raw_distance": min_raw_distance,
-            "rerank_meta": rerank_meta,
-        }
+            # nexus-pebfx.8 / nexus-9tsdf (nexus-d9xt2 follow-on): one
+            # unservable collection in the batch (embedding-space mismatch,
+            # or a stale orphaned dimension-mismatched collection) fails
+            # the WHOLE combined call -- isolation the old per-collection
+            # fan-out gave for free by construction. Fall back to isolated
+            # per-collection calls for THIS batch only; the common
+            # (no-failure) case never reaches here.
+            if len(cols) == 1:
+                return [{"col": cols[0], "error": str(exc)}]
+            parts: list[dict] = []
+            for c in cols:
+                parts.extend(_search_batch([c]))
+            return parts
 
-    # ThreadPoolExecutor.map preserves input order and re-raises any
-    # non-``VectorServiceError`` from a worker (fail-loud, matching the prior
-    # serial behaviour where such errors bubbled out of the loop).
-    workers = min(8, len(collections))
+        if len(cols) == 1:
+            # Single-collection call: attribute every row to that
+            # collection without requiring a "collection" tag on the row
+            # (matches the pre-nexus-d9xt2 per-collection call contract).
+            by_col: dict[str, list[dict]] = {cols[0]: list(raw)}
+        else:
+            by_col = {c: [] for c in cols}
+            for r in raw:
+                by_col.setdefault(r.get("collection", ""), []).append(r)
+
+        parts = []
+        for col in cols:
+            if not apply_thresholds:
+                threshold = None
+            elif threshold_override is not None:
+                threshold = threshold_override
+            else:
+                threshold = _threshold_for_collection(col, cfg)
+            col_raw = by_col.get(col, [])
+            results: list[SearchResult] = []
+            dropped = 0
+            # Minimum distance among dropped items -- best-of-dropped, used
+            # by SearchDiagnostics.worst_offender() for the "threshold
+            # bump" hint.
+            min_dropped_distance: float | None = None
+            # Minimum distance across ALL raw candidates -- stored in
+            # search_telemetry as ``top_distance`` (best-of-raw).
+            min_raw_distance: float | None = None
+            for r in col_raw:
+                distance = r["distance"]
+                if min_raw_distance is None or distance < min_raw_distance:
+                    min_raw_distance = distance
+                # RDR-055 E2 quality_boost runs after hybrid scoring, via
+                # apply_ranking_boosts(), in every caller that applies it:
+                # the CLI (search_cmd.py) and the MCP search()/query()
+                # non-catalog paths (mcp/core.py). The catalog-routed
+                # combined-query paths (search_metadata_scoped,
+                # search_graph_hop, search_topic_scoped, query()'s
+                # catalog-param branch) never call it -- see
+                # apply_ranking_boosts' docstring. Thresholds apply to raw
+                # distance here, before any of that.
+                if threshold is not None and distance > threshold:
+                    dropped += 1
+                    if min_dropped_distance is None or distance < min_dropped_distance:
+                        min_dropped_distance = distance
+                    continue
+                results.append(SearchResult(
+                    id=r["id"],
+                    content=r["content"],
+                    distance=distance,
+                    collection=col,
+                    metadata={k: v for k, v in r.items()
+                              if k not in {"id", "content", "distance"}},
+                ))
+            parts.append({
+                "col": col,
+                "error": None,
+                "results": results,
+                "raw_count": len(col_raw),
+                "dropped": dropped,
+                "threshold": threshold,
+                "min_dropped_distance": min_dropped_distance,
+                "min_raw_distance": min_raw_distance,
+                "rerank_meta": rerank_meta,
+            })
+        return parts
+
+    # nexus-d9xt2: group the collection fan-out by embedding model (the
+    # RDR-155 P4 / nexus-3l6gz combined-query pattern) so collections
+    # sharing a model are ranked against ONE query embedding in ONE
+    # combined call instead of one call each. The engine's plain search
+    # route requires exact dimension homogeneity within a call
+    # (PgVectorRepository#searchWithTokens: "mixed dimensions in one
+    # search call"), so a name that doesn't parse a model token stays its
+    # own singleton group -- never guessed into an inferred group.
+    #
+    # Ordering note: cross-GROUP order in the final merge below is now by
+    # each model's first occurrence in *collections* (all of one group's
+    # collections, then all of the next), not strictly interleaved by
+    # input order as the old per-collection fan-out produced. WITHIN a
+    # group, and within a collection, order is unchanged (collections in
+    # their original relative order; each collection's own rows
+    # distance-ascending, as the service returns them). Every caller
+    # re-sorts by hybrid_score or cluster/topic order before display, so
+    # this only affects tie-breaking among otherwise-equal downstream
+    # scores, never overall relevance.
+    batches: list[list[str]] = []
+    for group in _group_collections_by_embedding_model(collections):
+        group_mult = max((_overfetch_multiplier(c) for c in group), default=2)
+        desired = n_results * group_mult
+        if desired > QUOTAS.MAX_QUERY_RESULTS and len(group) > 1:
+            # The group would need more than the service cap to give
+            # every collection a fair shot -- split into as few calls as
+            # the cap allows (never all the way back to one call per
+            # collection; see _chunked_collections).
+            n_batches = min(len(group), -(-desired // QUOTAS.MAX_QUERY_RESULTS))
+            batches.extend(_chunked_collections(group, n_batches))
+        else:
+            batches.append(group)
+
+    # ThreadPoolExecutor.map preserves batch order; the per-batch fallback
+    # inside _search_batch re-raises any non-``VectorServiceError`` (fail-
+    # loud, matching the prior serial behaviour where such errors bubbled
+    # out of the loop).
+    workers = min(8, len(batches))
     if workers <= 1:
-        partials = [_search_one(c) for c in collections]
+        batch_results = [_search_batch(b) for b in batches]
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            partials = list(pool.map(_search_one, collections))
+            batch_results = list(pool.map(_search_batch, batches))
+    partials = [part for batch in batch_results for part in batch]
 
     # nexus-9tsdf (GH #1113): a stale, orphaned dimension-mismatched
     # collection (leftover from a prior embedder generation) can never be
