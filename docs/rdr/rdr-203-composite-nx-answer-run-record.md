@@ -275,6 +275,17 @@ state:
   `increment_run_started`, which happens when the probe said no support and the
   plan id is usable.
 
+**Both booleans are initialised to `False` at `nx_answer`'s entry**, not at the
+run-start site, and the run-start site assigns rather than introduces them.
+This is not style. The planner-failure arm at `core.py:8570` executes upstream
+of the run-start site, so on that path the run-start site never runs, and a
+name first bound there would be unbound when the arm reads it. That arm's write
+sits inside a `try: with _t2_ctx() as db: ... except Exception: pass`
+(`core.py:8568-8577`), which would swallow the resulting `UnboundLocalError`
+and silently stop recording planner-failure runs. Nothing would raise, nothing
+would log, and the rows would simply stop appearing. Entry initialisation is
+what keeps that arm reading a defined record.
+
 Every terminating arm, and `_nx_answer_ensure_run_started` itself, keys on that
 record. Never on `plan_id` alone, and never on a fresh read of the shared
 cached flag. Two rules follow:
@@ -470,11 +481,23 @@ direct `_nx_answer_record_run` writes, by `_nx_answer_record_complete`'s
 degradation branch, and by its 404 fallback, in each case before the record
 write.
 
+At the survivors the call goes **inside** the arm's existing
+`with _t2_ctx() as db:` block, before the record write, because the helper
+needs the same `db`. That placement puts it under the arm's outer
+`except Exception: pass`, so the helper carries its own boundary catch logging
+`nx_answer_plan_use_increment_failed` and never re-raises: a `run_start`
+failure keeps the named warning the early site produces today
+(`core.py:8677-8681`) instead of vanishing into the arm's silent swallow, and
+the record write still proceeds. Opening a second context outside the arm's
+`with` would keep the logging too, but at the cost of a second T2 context on a
+path this RDR exists to keep to one.
+
 The run-start site at `core.py:8674` becomes the one place the capability
 question is asked. It reads the probe once, issues `increment_run_started` only
-when the answer is no support, and records `composite_supported_at_start` and
-`early_bump_fired` in the call's own state (D5). Every arm and the helper read
-that record. Nothing downstream re-reads the shared cached flag, which is what
+when the answer is no support, and assigns `composite_supported_at_start` and
+`early_bump_fired`, both of which are initialised to `False` at `nx_answer`'s
+entry so an arm upstream of this site still reads a defined record (D5). Every
+arm and the helper read that record. Nothing downstream re-reads the shared cached flag, which is what
 makes a sibling's mid-call downgrade unable to change this call's arithmetic.
 Read together, the rule is that the bump moves rather than disappearing or
 doubling, and the census test below is what holds it in place.
@@ -633,13 +656,25 @@ falsifier, per the house rule that a gate which cannot go red proves nothing.
   carries no deferred bump, and the assertion sees zero. This is the sibling
   interference case: the flip belongs to future calls, and this test is what
   says so in code rather than in prose.
+- `test_planner_failure_arm_upstream_of_run_start_still_records`: the falsifier
+  for the entry-initialisation rule in D5. Force the inline planner to raise so
+  the call terminates on the arm at `core.py:8570`, upstream of the run-start
+  site, and assert the planner-failure run row is still written. Falsifier:
+  bind the two booleans at the run-start site instead of at entry and the row
+  stops appearing, silently, because that arm's `except Exception: pass`
+  swallows the `UnboundLocalError`. Nothing else in the suite would notice,
+  which is the whole reason this test is named.
 
 `tests/test_nx_answer_t2_fanout_budget.py`
 
 - `test_supporting_engine_issues_exactly_one_run_record_post`: against a
-  supporting stub engine, exactly one POST across all three run-record routes
-  for one `nx_answer` call. Falsifier: point the client at a non-supporting
-  stub and the count is three.
+  supporting stub engine, exactly one POST across all **four** run-record
+  routes for one `nx_answer` call. Four, not three: the count has to include
+  `/v1/telemetry/nx_answer_runs/complete`, which is where that single POST
+  actually lands, alongside the three routes it replaces. A three-route
+  counter would read zero and pass while proving nothing. Falsifier: point the
+  client at a non-supporting stub and the count is three, spread across the
+  old routes.
 
 ## Phases
 
@@ -651,7 +686,10 @@ P3 depends on both; P4 depends on P3 and on an engine tag carrying P2.
 leaving the two D6 exclusions alone. It issues today's two calls in today's
 order. The run-start site is untouched. Ships the AST census test and the
 downstream-of-run-start test. Entirely client-side, no engine dependency, and
-it reduces the P3 edit to one branch in one function. Exit: the census test is
+it reduces the P3 edit to one branch in one function. P1 ships only the
+census test's survivor-count and survivor-naming clauses; the preceded-by
+clause names `_nx_answer_ensure_run_started`, which P3 introduces, so it ships
+with P3 (residual 13). Exit: the census test is
 green, names both D6 survivors, and reds when one converted arm is reverted;
 no route and no payload changes, and the only wire-visible difference is the
 POST order on the two reversed pairs `(9572, 9551)` and `(9709, 9591)`, where
@@ -684,8 +722,13 @@ degradation branches, and the 404 downgrade guard including its deferred
 existing optional `created_at` field the `/record` handler already reads.
 Ships the Python tests above including the budget test,
 `test_gateway_retry_reuses_one_created_at_stamp`, the 404 downgrade ordering
-test, the handoff invariant test, the non-supporting-engine handoff test and
-the mid-call flip test. Exit: the degradation test green against a
+test, the handoff invariant test, the non-supporting-engine handoff test, the
+mid-call flip test, the planner-failure-arm test, and the census test's
+preceded-by clause (residual 13). It also edits
+`tests/test_nx_answer_t2_fanout_budget.py`: the five-context enumeration in its
+construction assertion becomes three under a supporting engine, and its
+non-empty-`step_records` comment stops being true once the probe fires at the
+run-start site on every call (residual 16). Exit: the degradation test green against a
 non-supporting stub, the budget test green against a supporting stub, both red
 when the probe is forced the other way, the retry-stamp test green and red when
 `created_at` is recomputed inside the retry loop, the 404 test showing three
@@ -776,6 +819,43 @@ Four more from the round-2 audit, same classification:
     (`core.py:7256-7276`). Both have to survive the move into the choke point;
     losing the catch turns a best-effort telemetry failure into a crashed
     answer.
+
+Five more from the round-3 audit, which was residuals-only:
+
+12. **The two booleans are initialised at `nx_answer`'s entry, not at the
+    run-start site** (high). The planner-failure arm at `core.py:8570` runs
+    upstream of the run-start site at `core.py:8674`, so a name first bound at
+    that site is unbound on that path, and the arm's
+    `try: with _t2_ctx() as db: ... except Exception: pass`
+    (`core.py:8568-8577`) would swallow the `UnboundLocalError` and silently
+    stop writing planner-failure run rows. Folded into D5's text rather than
+    left as a note, and pinned by
+    `test_planner_failure_arm_upstream_of_run_start_still_records`.
+13. **P1 ships the census test, but its preceded-by clause names a P3
+    symbol** (medium). `_nx_answer_ensure_run_started` does not exist until P3,
+    so P1 cannot assert that each surviving record write is preceded by a call
+    to it. Split the test: P1 ships the survivor-count and survivor-naming
+    clauses, P3 adds the preceded-by clause when it adds the helper. Named in
+    both phases below.
+14. **The survivors' helper call needs a `db`, and its placement decides its
+    failure visibility** (medium). Inside the arm's existing
+    `with _t2_ctx() as db:`, before the record write, is the rule. That puts it
+    under the arm's `except Exception: pass`, so the helper owns a boundary
+    catch logging `nx_answer_plan_use_increment_failed` and never re-raises.
+    Written into the client-half design above.
+15. **The budget test must count four routes** (low).
+    `test_supporting_engine_issues_exactly_one_run_record_post` counts POSTs
+    across the three routes the composite replaces plus `/complete` itself,
+    which is where the one POST lands. Corrected in the test description above.
+16. **`tests/test_nx_answer_t2_fanout_budget.py` is a P3 edit** (low). Its
+    assertion enumerates the happy path's "five T2 contexts (plan_match,
+    price_table, run_start, record_run, run_outcome)", which becomes three
+    under a supporting engine. Its harness also reaches the `/version` probe
+    only because `step_records` is non-empty, a gate its own comment explains
+    ("a non-empty step_records is required to exercise the GET /version
+    capability probe at all"), and that gate disappears once the probe moves to
+    the run-start site and fires on every call. Both the enumeration and the
+    comment need updating with the behaviour, not after it.
 
 ## Risks
 
@@ -897,6 +977,20 @@ its own schedule, its own failure modes and its own tests.
 - 2026-09-05: created as draft. Picks up the scope RDR-198 withdrew and named
   as belonging in its own RDR. Scoped to the run-record operation only; the
   read-side bundle is deliberately excluded.
+- 2026-09-05: round-3 plan audit folded in. Residuals-only: the round-2 blocker
+  is closed and the gate is cleared, so items 12 to 16 are carried into
+  implementation rather than re-planned. One of them changed live text, because
+  it was a defect in the design and not only a note for the implementer: the
+  two capability booleans are initialised at `nx_answer`'s entry, since the
+  planner-failure arm runs upstream of the run-start site and its own
+  `except Exception: pass` would swallow the unbound-name error and silently
+  stop recording that arm's runs. D5 says so, and
+  `test_planner_failure_arm_upstream_of_run_start_still_records` is its
+  falsifier. Two smaller corrections came with the residuals: the budget test
+  counts four routes rather than three, since `/complete` is where the single
+  POST lands, and the survivors' helper call is placed inside the arm's
+  existing T2 context with its own boundary catch, so a `run_start` failure
+  keeps today's named warning.
 - 2026-09-05: round-2 plan audit folded in, the mirror of round 1. Deferring
   the bump fixed the under-count and opened two over/under-count cases the
   round-1 text could not see: a `plan_id`-only no-op double-bumps a D6 survivor
