@@ -542,16 +542,10 @@ class AuthFilterTest {
                        after[0] + nanos(EXPLICIT_DEADLINE_BUDGET_MS));
     }
 
-    @Test
-    void nonAsciiDigitHeaderFallsBackToEnvDefault() throws Exception {
-        long before = System.nanoTime();
-        long[] after = new long[1];
-        // Arabic-Indic "5000": Long.parseLong would accept it; the resolver must not.
-        long deadline = echoedDeadlineWithHeader("٥٠٠٠", before, after);
-        assertThat(deadline)
-            .isBetween(before + nanos(EXPLICIT_DEADLINE_BUDGET_MS),
-                       after[0] + nanos(EXPLICIT_DEADLINE_BUDGET_MS));
-    }
+    // Non-ASCII digit headers cannot be exercised at this layer: java.net.http
+    // refuses to SEND a non-ASCII header value ("invalid header value"), so the
+    // resolver-level case lives in RequestDeadlineTest
+    // .resolveBudgetMs_leadingPlusAndNonAsciiDigitsAreMalformed instead.
 
     // ── Cache-level seam (fresh cache per test, mutable clock) ────────────────
 
