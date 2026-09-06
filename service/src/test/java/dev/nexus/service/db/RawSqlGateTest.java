@@ -950,13 +950,21 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/RemapSchemaLiquibaseTest.java", 10),
         Map.entry("dev/nexus/service/RerankStageIntegrationTest.java", 2),
         Map.entry("dev/nexus/service/SchemaMigratorDateExecutedUtcTest.java", 2),
-        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): 88 -> 128.
-        // The extension-ownership-transfer dance (CREATE ROLE nx_ext_relocator
-        // SUPERUSER; SET ROLE; CREATE EXTENSION x2; REASSIGN OWNED BY; RESET
-        // ROLE; DROP ROLE) replaces a plain CREATE EXTENSION at 8 bootstrap
-        // sites in this file -- see search-path-001-relocate-vector-
-        // extensions.xml's header for why relocating the extension directly,
-        // here, before Liquibase ever runs, is unworkable.
+        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): 88 -> 79
+        // (net DOWN, not up -- stale comment fix, batch-9 gate pass,
+        // worktree-agent-ae864db44cc9fe82c). An earlier design pinned this
+        // entry at 128 via a throwaway-role/REASSIGN-OWNED-BY dance at 8
+        // bootstrap sites; that mechanism was deleted before merge (a
+        // pre-existing install has no relocator role to REASSIGN from --
+        // see search-path-001-relocate-vector-extensions.xml's header).
+        // The shipped mechanism instead consolidates all 8 sites' bootstrap
+        // into ONE shared helper, bootstrapVectorExtensionsForFreshWalk
+        // (plain CREATE EXTENSION x2 as the superuser, plus installing the
+        // SECURITY DEFINER nexus.ensure_vector_extensions_relocated() /
+        // _unrelocated() pair search-path-001's own guard calls mid-walk),
+        // which is why the final ceiling here is LOWER than the pre-batch
+        // baseline despite the new SECURITY DEFINER function bodies' own
+        // raw SQL.
         Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 79),
         // nexus-cbo4a batch 9 item 0: 32 -> 37 (extension-ownership-transfer dance).
         Map.entry("dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java", 37),
