@@ -6,7 +6,7 @@ A gate may reuse a prebuilt artifact only against a tree PROVEN identical to
 the one it was built from, never on age (nexus-mbeke: a stale binary satisfies
 a shakeout silently). ``tree_hash`` is a sha256 over every tracked and
 untracked-not-ignored file in the checkout: relative path plus git blob hash,
-in path order. HEAD's sha alone is not identity — a dirty tree builds
+in path order, plus the executable bit per file. HEAD's sha alone is not identity — a dirty tree builds
 different bytes from the same HEAD — so the dirty flag is reported but the
 hash is what the consumer compares.
 
@@ -52,9 +52,14 @@ def tree_identity(root: str) -> dict[str, object]:
         raise SystemExit(f"hash-object returned {len(hashes)} hashes for {len(paths)} paths")
     digest = hashlib.sha256()
     for path, blob in zip(paths, hashes):
+        # git hash-object hashes CONTENT only; the executable bit is part of
+        # what a wheel or a shell gate ships, so it is part of identity too
+        # (substantive-critic finding on nexus-mfage fix B, 2026-09-06).
+        mode = os.stat(os.path.join(root, path.decode("utf-8", "surrogateescape"))).st_mode
         digest.update(path)
         digest.update(b"\0")
         digest.update(blob)
+        digest.update(b"\0x" if mode & 0o111 else b"\0-")
         digest.update(b"\n")
     dirty = bool(_git(root, "status", "--porcelain", "--untracked-files=all").strip())
     return {
