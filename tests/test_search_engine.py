@@ -1457,6 +1457,7 @@ class _RequestCountingT3:
         monkeypatch.setattr(hvc, "_request", _fake_request)
 
 
+@pytest.mark.usefixtures("cloud_mode")
 class TestModelGroupedFanOutRequestCount:
     """nexus-d9xt2: one combined ``/v1/vectors/search`` call per embedding-
     model group replaces the old one call per collection."""
@@ -1567,6 +1568,7 @@ class TestModelGroupedFanOutRequestCount:
 # ── nexus-d9xt2 review/critique fold-in: per-group sizing formula ───────────
 
 
+@pytest.mark.usefixtures("cloud_mode")
 class TestDesiredCandidateCountSizing:
     """Code-review-nexus-d9xt2 Critical: per_k must scale with len(cols),
     not just n_results*mult -- a 44-collection group at n_results=10

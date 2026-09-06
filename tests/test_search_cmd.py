@@ -141,6 +141,7 @@ def test_corpus_csv_form_matches_repeat_form(
 # ── nexus-d9xt2: skip GET /v1/vectors/stats for explicit collection names ──
 
 
+@pytest.mark.usefixtures("cloud_mode")
 def test_explicit_conformant_collection_name_skips_list_collections(
     runner: CliRunner, cloud_env,
 ) -> None:
@@ -167,6 +168,7 @@ def test_explicit_conformant_collection_name_skips_list_collections(
     assert list(targets) == ["knowledge__test__voyage-context-3__v1"]
 
 
+@pytest.mark.usefixtures("cloud_mode")
 def test_nonexistent_conformant_collection_name_surfaces_named_warning(
     runner: CliRunner, cloud_env,
 ) -> None:
@@ -195,6 +197,7 @@ def test_nonexistent_conformant_collection_name_surfaces_named_warning(
     ms.assert_not_called()
 
 
+@pytest.mark.usefixtures("cloud_mode")
 def test_prefix_corpus_still_pays_list_collections_once(
     runner: CliRunner, cloud_env,
 ) -> None:
@@ -211,6 +214,7 @@ def test_prefix_corpus_still_pays_list_collections_once(
     mock_t3.list_collections.assert_called_once()
 
 
+@pytest.mark.usefixtures("cloud_mode")
 def test_mixed_explicit_and_prefix_corpus_pays_list_collections(
     runner: CliRunner, cloud_env,
 ) -> None:
