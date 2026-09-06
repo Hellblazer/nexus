@@ -399,12 +399,22 @@ safe: a new client against an old engine records everything it records today.
 
 **The capability decision is made once per call, and carried.** The run-start
 site reads the probe exactly once and records two booleans in the call's own
-state:
+state. The read and both assignments sit immediately **before** the
+`if best.plan_id:` guard at `core.py:8669`; only the `increment_run_started`
+call stays inside it. Putting the read inside the guard, which an earlier draft
+of this section implied by naming the site without naming the guard, would
+leave `composite_supported_at_start` at its entry default of `False` on every
+plan-miss call, so a `plan_id == 0` run would never take the composite no
+matter what the engine supports. That contradicts D1, which accepts a null or
+zero plan id on `/complete`, and P2's `zeroPlanIdWritesRunRowAndNoCounters`,
+which exists because that payload is expected to arrive. The two booleans are:
 
 - `composite_supported_at_start`, the probe's answer at that moment.
 - `early_bump_fired`, true when the early site actually issued
   `increment_run_started`, which happens when the probe said no support and the
-  plan id is usable.
+  plan id is usable. A plan-miss call leaves it `False` for the second reason
+  even on a non-supporting engine, which is correct: there is no plan row to
+  count against, so nothing downstream should bump one either.
 
 **Both booleans are initialised to `False` at `nx_answer`'s entry**, not at the
 run-start site, and the run-start site assigns rather than introduces them.
@@ -623,11 +633,12 @@ the record write still proceeds. Opening a second context outside the arm's
 `with` would keep the logging too, but at the cost of a second T2 context on a
 path this RDR exists to keep to one.
 
-The run-start site at `core.py:8674` becomes the one place the capability
-question is asked. It reads the probe once, issues `increment_run_started` only
-when the answer is no support, and assigns `composite_supported_at_start` and
-`early_bump_fired`, both of which are initialised to `False` at `nx_answer`'s
-entry so an arm upstream of this site still reads a defined record (D5). Every
+The run-start site at `core.py:8669-8681` becomes the one place the capability
+question is asked, with the probe read and both assignments placed immediately
+**before** the `if best.plan_id:` guard, not inside it (D5). Only the
+`increment_run_started` call stays inside the guard. Both booleans are
+initialised to `False` at `nx_answer`'s entry so an arm upstream of this site
+still reads a defined record (D5). Every
 arm and the helper read that record. Nothing downstream re-reads the shared cached flag, which is what
 makes a sibling's mid-call downgrade unable to change this call's arithmetic.
 Read together, the rule is that the bump moves rather than disappearing or
@@ -809,6 +820,16 @@ falsifier, per the house rule that a gate which cannot go red proves nothing.
   carries no deferred bump, and the assertion sees zero. This is the sibling
   interference case: the flip belongs to future calls, and this test is what
   says so in code rather than in prose.
+- `test_plan_miss_against_supporting_engine_takes_composite`: the falsifier for
+  D5's placement rule. Drive a plan-miss call (`plan_id == 0`, the synthetic
+  inline-planner match) against a supporting stub and assert it posts to
+  `/complete`, once, with `plan_id` null or zero and no counter routes touched.
+  Falsifier: move the probe read and the two assignments inside the
+  `if best.plan_id:` guard and this reds, because
+  `composite_supported_at_start` stays at its entry default and every plan-miss
+  call silently takes the degradation path. Nothing else would notice: the
+  three writes still land, the counters are correctly untouched, and the only
+  symptom is a route that quietly stops being used for a whole class of calls.
 - `test_planner_failure_arm_upstream_of_run_start_still_records`: the falsifier
   for the entry-initialisation rule in D5. Force the inline planner to raise so
   the call terminates on the arm at `core.py:8570`, upstream of the run-start
@@ -883,8 +904,8 @@ Ships the Python tests above including the budget test,
 `test_gateway_retry_reuses_one_created_at_stamp`,
 `test_composite_payload_always_carries_created_at`, the 404 downgrade ordering
 test, the handoff invariant test, the non-supporting-engine handoff test, the
-mid-call flip test, the planner-failure-arm test, and the census test's
-preceded-by clause (residual 13). It also edits
+mid-call flip test, the planner-failure-arm test, the plan-miss composite test,
+and the census test's preceded-by clause (residual 13). It also edits
 `tests/test_nx_answer_t2_fanout_budget.py`: the five-context enumeration in its
 construction assertion becomes three under a supporting engine, and its
 non-empty-`step_records` comment stops being true once the probe fires at the
@@ -894,9 +915,10 @@ when the probe is forced the other way, the retry-stamp test green and red when
 `created_at` is recomputed inside the retry loop, the stamp-present test green
 and red when the stamp is dropped, the 404 test showing three
 POSTs in order then one composite, the handoff invariant test green and red
-when the survivor's deferred bump is removed, and both bump-count tests green
+when the survivor's deferred bump is removed, both bump-count tests green
 and red under their own falsifiers (a `plan_id`-only no-op condition, and an
-arm that re-reads the shared flag).
+arm that re-reads the shared flag), and the plan-miss composite test green and
+red when the probe read is moved inside the `if best.plan_id:` guard.
 
 **P4. Pairing, cutover and documentation.** Bump
 `REQUIRED_ENGINE_VERSION` to the engine tag carrying P2 in the client release
@@ -909,11 +931,11 @@ paired-deploy exception, and the reconciliation recorded.
 
 ## Residuals carried into implementation
 
-Sixteen findings from three plan-audit rounds, all classified
+Twenty-one findings from four plan-audit rounds, all classified
 DISCOVER-AT-IMPLEMENTATION. They are recorded here so the implementer meets
 them on the page rather than in the first test run. None of them re-opens a
 decision, and none is re-planned. Items 1 to 7 came from round 1, 8 to 11 from
-round 2, and 12 to 16 from round 3.
+round 2, 12 to 16 from round 3, and 17 to 21 from the post-acceptance round.
 
 1. **`VersionHandlerReleaseVersionTest.java:121` asserts by exact equality.**
    `service/src/test/java/dev/nexus/service/http/VersionHandlerReleaseVersionTest.java`'s
@@ -1018,6 +1040,45 @@ Five more from the round-3 audit, which was residuals-only:
     capability probe at all"), and that gate disappears once the probe moves to
     the run-start site and fires on every call. Both the enumeration and the
     comment need updating with the behaviour, not after it.
+
+Five more from the post-acceptance audit round:
+
+17. **The new `/version` flag needs an edge-allowlist relay, owned by P4.** The
+    public edge trims `GET /version` to an allowlist of keys, which is how
+    nexus-bwulw silently disabled three client features that were green on
+    every engine-direct gate. `nx_answer_run_complete_supported` is a new key,
+    so a cloud client reads it as absent, the probe degrades, and the composite
+    route is never taken in cloud mode even against an engine that serves it.
+    Nothing in this repo can fix that: it is a conexus-side relay, surfaced
+    explicitly at deploy time, and it belongs with P4's pairing work rather
+    than with the engine half that adds the field.
+18. **The wire-ledger entry goes stale between P2 and P4.** P2 writes it under
+    `## Unshipped` naming a `TBD` engine tag; the entry's own lint fails a
+    stale `Unshipped` row once its commit is an ancestor of the newest
+    published client tag. Between the two phases the entry has to be updated
+    with the real tag when the engine is cut, then moved at P4. Neither phase
+    owns the middle step today, so P4 checks the entry names a real tag before
+    it moves it.
+19. **`tests/test_engine_version.py:495` is a P4 edit.** It pins
+    `REQUIRED_ENGINE_VERSION` by exact equality, currently `(0, 1, 104)`, with
+    a running comment log above it explaining each bump. P4 bumps the floor to
+    the tag carrying P2, so it edits both the assertion and the log, and the
+    log entry is the place to say what the tag carries and that it was gated
+    before the bump.
+20. **P3 flips this document's own Assumed research bullet.** The after half of
+    the round-trip count stays Assumed until P3's per-path assertion measures
+    it. When it does, the Research Findings entry moves from `❓ Assumed` to
+    `✅ Verified` with the measured numbers, and P3 is the phase that knows
+    them. Leaving it Assumed after the measurement exists would be its own
+    small dishonesty.
+21. **P1's downstream-of-run-start test has to be checkable.**
+    `test_recording_arms_are_downstream_of_run_start` pins a control-flow
+    property, and a naive AST reading of source order gets it wrong: the budget
+    arm is defined at `core.py:8239`, textually above the run-start site, and
+    is only ever called from below it. The test has to reason about call sites
+    rather than definition order, or assert the property dynamically by driving
+    each arm. Whichever way P1 takes, the test must be able to fail; a version
+    that cannot distinguish the two orders proves nothing.
 
 ## Risks
 
@@ -1140,6 +1201,24 @@ its own schedule, its own failure modes and its own tests.
 - 2026-09-05: created as draft. Picks up the scope RDR-198 withdrew and named
   as belonging in its own RDR. Scoped to the run-record operation only; the
   read-side bundle is deliberately excluded.
+- 2026-09-06: amendment to the accepted text, recorded as a revision rather
+  than a re-plan. The post-acceptance audit round found that D5 named the
+  run-start site as the one place the capability question is asked without
+  naming the `if best.plan_id:` guard the site sits inside (`core.py:8669`).
+  Read literally, that puts the probe read inside the guard, so every plan-miss
+  call would leave `composite_supported_at_start` at its entry default and
+  never take the composite, contradicting D1's acceptance of a null or zero
+  plan id and P2's `zeroPlanIdWritesRunRowAndNoCounters`. D5 now places the
+  read and both assignments immediately before the guard, with only
+  `increment_run_started` inside it, and
+  `test_plan_miss_against_supporting_engine_takes_composite` is its falsifier,
+  in P3's exit criteria. Five residuals appended as items 17 to 21: the
+  edge-allowlist relay for the new `/version` flag (P4), wire-ledger staleness
+  between P2 and P4, `tests/test_engine_version.py:495` as a P4 edit, P3
+  flipping this document's own Assumed research bullet once it measures the
+  after half, and P1's downstream-of-run-start test needing to reason about
+  call sites rather than definition order so it can actually fail. No decision
+  changed.
 - 2026-09-05: Layer 3 gate critique folded in (T2
   `nexus/critique-rdr-203-gate-64c4802bc` [24700]), two Criticals, both
   text-level. The gaps intro still said gaps 2 and 3 had an occurrence rate of
