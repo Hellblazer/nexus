@@ -233,6 +233,18 @@ _LIVEZ_TIMEOUT: float = 1.0
 #: DETECTION is retained but its action is now exit-for-OS-restart, not respawn.
 _MAX_UNHEALTHY_HEARTBEATS: int = 4
 
+#: nexus-59bah: a heartbeat tick that takes longer than this is logged as
+#: slow, naming its phases; one that takes at least the lease TTL is logged
+#: as an ERROR, because the lease has by then expired under a live service
+#: and every discoverer reads it as absent. Observed 2026-09-06 in the
+#: package-upgrade rehearsal: the supervisor stayed alive, the heartbeat
+#: stamp stopped for 17+ s during an in-place venv reinstall, and nothing
+#: was logged. The tick's own probes are bounded (health 2 s, livez 1 s,
+#: PG 0.5 s); the write goes through a blocking election flock and an
+#: os.replace on whatever filesystem holds the config dir, which is where an
+#: I/O stall lands. A stall must be VISIBLE, whatever its phase.
+_HEARTBEAT_SLOW_S: float = 3.0
+
 
 # ── Errors ─────────────────────────────────────────────────────────────────────
 
@@ -696,6 +708,7 @@ class StorageServiceSupervisor:
         lease_clock: Callable[[], float] = time.time,
         supervised: bool = False,
         engine_liveness_scan: Callable[[Path, Path], list[tuple[int, str]]] | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         # RDR-161: the cosign-verified native binary is the production launch
         # artifact. ``launch_kind="jar"`` is the explicit dev/test opt-in
@@ -722,6 +735,7 @@ class StorageServiceSupervisor:
         self._service_port = service_port
         self._creds = creds
         self._lease_clock = lease_clock
+        self._monotonic = monotonic  # nexus-59bah: tick timing, injectable for tests
         self._supervised = supervised
         # nexus-8vp0i review round 2 (substantive-critic Critical 1): the
         # liveness gate _release_stale_changelog_lock consults before ever
@@ -1770,6 +1784,51 @@ class StorageServiceSupervisor:
             _log.warning("storage_service_provision_backfill_failed", error=str(exc))
 
     def heartbeat_once(self) -> tuple[bool, bool]:
+        """Timed wrapper around :meth:`_heartbeat_once_untimed` (nexus-59bah).
+
+        Every tick records how long each phase took (poll, health, pg,
+        livez, stamp) and logs ``storage_service_heartbeat_slow`` past
+        ``_HEARTBEAT_SLOW_S`` or ``storage_service_heartbeat_missed_ttl``
+        (ERROR) once the tick took at least the lease TTL — the point at
+        which discoverers already read the lease as absent. The timing
+        never changes the verdict; it only makes a stall legible.
+        """
+        phases: dict[str, float] = {}
+        # getattr: tests build bare supervisors via object.__new__ (no __init__)
+        mono = getattr(self, "_monotonic", time.monotonic)
+        started = mono()
+        try:
+            return self._heartbeat_once_untimed(phases)
+        finally:
+            elapsed = mono() - started
+            ttl = ttl_for_tier(_REGISTRY_TIER)
+            if elapsed >= ttl:
+                _log.error(
+                    "storage_service_heartbeat_missed_ttl",
+                    elapsed_s=round(elapsed, 3),
+                    ttl_s=ttl,
+                    phases_s={k: round(v, 3) for k, v in phases.items()},
+                    msg="one heartbeat tick took at least the lease TTL: the lease "
+                        "expired under a live service and every client resolved "
+                        "'endpoint not resolvable' until the next stamp",
+                )
+            elif elapsed >= _HEARTBEAT_SLOW_S:
+                _log.warning(
+                    "storage_service_heartbeat_slow",
+                    elapsed_s=round(elapsed, 3),
+                    ttl_s=ttl,
+                    phases_s={k: round(v, 3) for k, v in phases.items()},
+                )
+
+    def _timed(self, phases: dict[str, float], name: str, fn: Callable[[], Any]) -> Any:
+        mono = getattr(self, "_monotonic", time.monotonic)
+        t0 = mono()
+        try:
+            return fn()
+        finally:
+            phases[name] = mono() - t0
+
+    def _heartbeat_once_untimed(self, phases: dict[str, float]) -> tuple[bool, bool]:
         """Re-stamp the lease iff service is alive AND healthy AND PG reachable.
 
         Returns (service_running, pg_ok) so the run loop can handle PG-only
@@ -1800,7 +1859,7 @@ class StorageServiceSupervisor:
         """
         if self._proc is None or self._supervisor is None:
             return False, False
-        if (rc := self._proc.poll()) is not None:
+        if (rc := self._timed(phases, "poll", self._proc.poll)) is not None:
             # nexus-ovbr7: the returncode is the single cheapest diagnostic a
             # dead service process leaves behind (137=SIGKILL/oom, 143=SIGTERM,
             # 1=error) — record it, plus where the process's own output went.
@@ -1813,11 +1872,11 @@ class StorageServiceSupervisor:
             return False, False  # process exited; signal the run loop to exit
 
         service_alive = _pid_is_alive(self._proc.pid)
-        probe = self._probe_service_health()
+        probe = self._timed(phases, "health", self._probe_service_health)
         # nexus-7f7gb: UNREADY (answered non-200) is NOT a wedge — only total
         # silence counts toward the restart threshold.
         service_ok = probe is HealthProbe.OK
-        pg_ok = self._pg_reachable()
+        pg_ok = self._timed(phases, "pg", self._pg_reachable)
 
         if not service_alive:
             self._consecutive_unhealthy_heartbeats = 0
@@ -1842,7 +1901,7 @@ class StorageServiceSupervisor:
             # wedge — it is also exactly what a saturated pool looks like, since
             # /health takes a HikariCP connection (30s connectionTimeout). Ask
             # the dependency-free endpoint before touching the restart counter.
-            if self._probe_service_liveness():
+            if self._timed(phases, "livez", self._probe_service_liveness):
                 self._consecutive_unhealthy_heartbeats = 0
                 _log.warning(
                     "storage_service_saturated",
@@ -1891,7 +1950,7 @@ class StorageServiceSupervisor:
 
         # Fully healthy path: reset unhealthy counter + re-stamp lease.
         self._consecutive_unhealthy_heartbeats = 0
-        self._supervisor.heartbeat_tick()
+        self._timed(phases, "stamp", self._supervisor.heartbeat_tick)
         if self._supervisor.fenced:
             _log.warning(
                 "storage_service_lease_fenced",
