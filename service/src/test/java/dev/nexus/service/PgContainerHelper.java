@@ -241,16 +241,19 @@ public final class PgContainerHelper {
         Database db = DatabaseFactory.getInstance().findCorrectDatabaseImplementation(new JdbcConnection(su));
         Liquibase liquibase = new Liquibase(
             "db/changelog/db.changelog-master.xml", new ClassLoaderResourceAccessor(), db);
-        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): the master
-        // changelog's own search-path-001-relocate-vector-extensions.xml relocates
-        // vector/pg_trgm into the nexus schema. The changeset is unconditional (no
-        // precondition): it succeeds either because the connecting role owns both
-        // extensions (transferred via a throwaway relocator role beforehand -- see
-        // that file's own header) or, as here, because `su` IS a superuser
+        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+        // nexus/critique-nexus-cbo4a-batch-9-search-path): the master changelog's own
+        // search-path-001-relocate-vector-extensions.xml GUARDS that vector/pg_trgm
+        // are relocated into the nexus schema, attempting the ALTER EXTENSION
+        // statements directly (its first-tier fallback) when they are not already
+        // relocated. That direct attempt succeeds here because `su` IS a superuser
         // connection and superuser bypasses ownership checks entirely (same as the
         // jOOQ codegen plugin's own Testcontainers bootstrap, which runs this exact
-        // changelog the same way). No separate Java-side relocation call needed here
-        // either way.
+        // changelog the same way) -- no separate Java-side relocation call, and no
+        // SECURITY DEFINER helper function, is needed for this superuser-driven
+        // walk. See that changeset's own header for the full three-tier derivation
+        // (the other two tiers exist for a NOSUPERUSER migrating role, which `su`
+        // here is not).
         liquibase.update(new Contexts());
         // Test-only schema objects (nexus_test.*), never part of the product changelog;
         // the codegen-time counterpart is db.changelog-test-master.xml (see the pom's

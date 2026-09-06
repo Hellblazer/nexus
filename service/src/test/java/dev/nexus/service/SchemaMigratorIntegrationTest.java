@@ -92,6 +92,72 @@ class SchemaMigratorIntegrationTest {
 
     private static final Set<String> EXPECTED_T1_TABLES = Set.of("scratch");
 
+    /**
+     * nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+     * nexus/critique-nexus-cbo4a-batch-9-search-path, a ship-blocker fix). Creates
+     * {@code vector}/{@code pg_trgm} directly as the connection's own superuser
+     * (no throwaway role, no REASSIGN OWNED BY — a superuser can relocate either
+     * extension regardless of ownership, so there is nothing to transfer), then
+     * installs {@code nexus.ensure_vector_extensions_relocated()} — a SECURITY
+     * DEFINER function owned by that same superuser — WITHOUT relocating the
+     * extensions itself. Mirrors {@code nexus.db.pg_provision.
+     * relocate_vector_extensions_to_nexus_schema(..., direct=False)} exactly,
+     * for exactly the same reason: every test in this file resumes through
+     * vectors-001-baseline.xml's bare {@code vector(N)}/{@code vector_cosine_ops}
+     * references AND search-path-001/002 in ONE continuous {@code
+     * SchemaMigrator.migrate()} call, so the extensions must stay resolvable via
+     * the migrating role's default (public-only) search_path through vectors-001,
+     * then get relocated MID-WALK — which the migrating role (NOSUPERUSER)
+     * cannot do itself, but CAN trigger by calling this function, since a
+     * SECURITY DEFINER function runs with its OWNER's privileges. search-path-
+     * 001's own guard changeset calls it, by qualified name, at exactly that
+     * point. See {@code relocate_vector_extensions_to_nexus_schema}'s own
+     * docstring ("FRESH-INSTALL SEQUENCING") and search-path-001-relocate-
+     * vector-extensions.xml's header for the full derivation.
+     *
+     * @param su the superuser connection (e.g. the embedded Postgres's own
+     *           bootstrap connection)
+     * @param migratingRole the NOSUPERUSER role that will run the Liquibase
+     *                      walk and therefore needs EXECUTE on the function
+     */
+    private static void bootstrapVectorExtensionsForFreshWalk(
+            Connection su, String migratingRole) throws Exception {
+        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
+        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+        su.createStatement().execute(
+            "CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION " + migratingRole);
+        su.createStatement().execute(
+            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_relocated() "
+            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $relofunc$ "
+            + "BEGIN "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "END; "
+            + "$relofunc$");
+        su.createStatement().execute(
+            "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO "
+            + migratingRole);
+        su.createStatement().execute(
+            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated() "
+            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $unrelofunc$ "
+            + "BEGIN "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'public' THEN "
+            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA public'; "
+            + "  END IF; "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'public' THEN "
+            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA public'; "
+            + "  END IF; "
+            + "END; "
+            + "$unrelofunc$");
+        su.createStatement().execute(
+            "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO "
+            + migratingRole);
+    }
+
     // ── Fixtures ─────────────────────────────────────────────────────────────
 
     PostgreSQLContainer<?> pg;
@@ -150,35 +216,17 @@ class SchemaMigratorIntegrationTest {
             // the falsification proof of this exact prerequisite.
             su.createStatement().execute("GRANT pg_monitor TO " + ADMIN_ROLE + " WITH ADMIN OPTION");
 
-            // Pre-create pgvector and pg_trgm extensions as superuser (DBA step).
-            // CREATE EXTENSION requires superuser in PostgreSQL; in production the DBA
-            // installs extensions before nexus_admin runs the Liquibase changelog.
-            // The vectors-001-baseline.xml changeset uses CREATE EXTENSION IF NOT EXISTS,
-            // so it is idempotent: if already installed here it becomes a no-op when
-            // Liquibase runs as nexus_admin_test.
-            //
-            // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): create them under
-            // a FRESH, throwaway superuser role -- never `su`'s own bootstrap superuser --
-            // then REASSIGN everything it owns to nexus_admin_test and drop it.
-            // REASSIGN OWNED BY unconditionally refuses the cluster's bootstrap-superuser
-            // role (always oid 10, which `su` connects as here); a fresh superuser role has
-            // no such restriction (verified against a live PG17 container before landing
-            // this). This makes nexus_admin_test the extensions' OWNER from the moment
-            // Liquibase first connects, so search-path-001's unconditional (no
-            // precondition) ALTER EXTENSION ... SET SCHEMA nexus changeset -- which must
-            // run LATE, after vectors-001-2/-3/-4's bare vector(N)/vector_cosine_ops
-            // references, not here before Liquibase even starts -- succeeds under ordinary
-            // ownership rather than needing superuser status itself. See
-            // search-path-001-relocate-vector-extensions.xml's header for the full
-            // derivation, including why an earlier "relocate right here in Phase A"
-            // version of this fix broke those same bare-reference changesets.
-            su.createStatement().execute("CREATE ROLE nx_ext_relocator SUPERUSER");
-            su.createStatement().execute("SET ROLE nx_ext_relocator");
-            su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-            su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
-            su.createStatement().execute("REASSIGN OWNED BY nx_ext_relocator TO " + ADMIN_ROLE);
-            su.createStatement().execute("RESET ROLE");
-            su.createStatement().execute("DROP ROLE nx_ext_relocator");
+            // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+            // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
+            // directly as `su` (superuser) and install the SECURITY DEFINER relocation
+            // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
+            // nexus_schema(..., direct=False) -- this walk resumes through vectors-001
+            // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
+            // below, so the extension must stay bare-resolvable in public through
+            // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
+            // own guard calling this function -- see that changeset's header for the
+            // full derivation.
+            bootstrapVectorExtensionsForFreshWalk(su, ADMIN_ROLE);
         }
 
         // ── Phase B: build connection pools ─────────────────────────────────────
@@ -504,26 +552,17 @@ class SchemaMigratorIntegrationTest {
                 su.createStatement().execute(
                     "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): create the
-                // extensions under a FRESH, throwaway superuser role -- never this
-                // connection's own bootstrap superuser -- then REASSIGN everything it owns
-                // to the migration role and drop it. REASSIGN OWNED BY unconditionally
-                // refuses the cluster's bootstrap-superuser role (always oid 10), which is
-                // exactly what `su` connects as here; a fresh superuser role has no such
-                // restriction (verified against a live PG17 container before landing this).
-                // This makes the migration role the extensions' OWNER from the moment
-                // Liquibase first connects, so search-path-001's unconditional (no
-                // precondition) ALTER EXTENSION ... SET SCHEMA nexus changeset -- which
-                // must run LATE, after vectors-001-2/-3/-4's bare vector(N)/vector_cosine_ops
-                // references, not here before Liquibase even starts -- succeeds under
-                // ordinary ownership rather than needing superuser status itself.
-                su.createStatement().execute("CREATE ROLE nx_ext_relocator SUPERUSER");
-                su.createStatement().execute("SET ROLE nx_ext_relocator");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
-                su.createStatement().execute("REASSIGN OWNED BY nx_ext_relocator TO " + role);
-                su.createStatement().execute("RESET ROLE");
-                su.createStatement().execute("DROP ROLE nx_ext_relocator");
+                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+                // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
+                // directly as `su` (superuser) and install the SECURITY DEFINER relocation
+                // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
+                // nexus_schema(..., direct=False) -- this walk resumes through vectors-001
+                // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
+                // below, so the extension must stay bare-resolvable in public through
+                // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
+                // own guard calling this function -- see that changeset's header for the
+                // full derivation.
+                bootstrapVectorExtensionsForFreshWalk(su, role);
             }
 
             var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -692,26 +731,17 @@ class SchemaMigratorIntegrationTest {
                 su.createStatement().execute(
                     "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): create the
-                // extensions under a FRESH, throwaway superuser role -- never this
-                // connection's own bootstrap superuser -- then REASSIGN everything it owns
-                // to the migration role and drop it. REASSIGN OWNED BY unconditionally
-                // refuses the cluster's bootstrap-superuser role (always oid 10), which is
-                // exactly what `su` connects as here; a fresh superuser role has no such
-                // restriction (verified against a live PG17 container before landing this).
-                // This makes the migration role the extensions' OWNER from the moment
-                // Liquibase first connects, so search-path-001's unconditional (no
-                // precondition) ALTER EXTENSION ... SET SCHEMA nexus changeset -- which
-                // must run LATE, after vectors-001-2/-3/-4's bare vector(N)/vector_cosine_ops
-                // references, not here before Liquibase even starts -- succeeds under
-                // ordinary ownership rather than needing superuser status itself.
-                su.createStatement().execute("CREATE ROLE nx_ext_relocator SUPERUSER");
-                su.createStatement().execute("SET ROLE nx_ext_relocator");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
-                su.createStatement().execute("REASSIGN OWNED BY nx_ext_relocator TO " + role);
-                su.createStatement().execute("RESET ROLE");
-                su.createStatement().execute("DROP ROLE nx_ext_relocator");
+                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+                // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
+                // directly as `su` (superuser) and install the SECURITY DEFINER relocation
+                // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
+                // nexus_schema(..., direct=False) -- this walk resumes through vectors-001
+                // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
+                // below, so the extension must stay bare-resolvable in public through
+                // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
+                // own guard calling this function -- see that changeset's header for the
+                // full derivation.
+                bootstrapVectorExtensionsForFreshWalk(su, role);
             }
 
             var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -913,26 +943,17 @@ class SchemaMigratorIntegrationTest {
                 su.createStatement().execute(
                     "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): create the
-                // extensions under a FRESH, throwaway superuser role -- never this
-                // connection's own bootstrap superuser -- then REASSIGN everything it owns
-                // to the migration role and drop it. REASSIGN OWNED BY unconditionally
-                // refuses the cluster's bootstrap-superuser role (always oid 10), which is
-                // exactly what `su` connects as here; a fresh superuser role has no such
-                // restriction (verified against a live PG17 container before landing this).
-                // This makes the migration role the extensions' OWNER from the moment
-                // Liquibase first connects, so search-path-001's unconditional (no
-                // precondition) ALTER EXTENSION ... SET SCHEMA nexus changeset -- which
-                // must run LATE, after vectors-001-2/-3/-4's bare vector(N)/vector_cosine_ops
-                // references, not here before Liquibase even starts -- succeeds under
-                // ordinary ownership rather than needing superuser status itself.
-                su.createStatement().execute("CREATE ROLE nx_ext_relocator SUPERUSER");
-                su.createStatement().execute("SET ROLE nx_ext_relocator");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
-                su.createStatement().execute("REASSIGN OWNED BY nx_ext_relocator TO " + role);
-                su.createStatement().execute("RESET ROLE");
-                su.createStatement().execute("DROP ROLE nx_ext_relocator");
+                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+                // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
+                // directly as `su` (superuser) and install the SECURITY DEFINER relocation
+                // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
+                // nexus_schema(..., direct=False) -- this walk resumes through vectors-001
+                // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
+                // below, so the extension must stay bare-resolvable in public through
+                // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
+                // own guard calling this function -- see that changeset's header for the
+                // full derivation.
+                bootstrapVectorExtensionsForFreshWalk(su, role);
             }
 
             var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -1146,26 +1167,17 @@ class SchemaMigratorIntegrationTest {
                 su.createStatement().execute(
                     "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): create the
-                // extensions under a FRESH, throwaway superuser role -- never this
-                // connection's own bootstrap superuser -- then REASSIGN everything it owns
-                // to the migration role and drop it. REASSIGN OWNED BY unconditionally
-                // refuses the cluster's bootstrap-superuser role (always oid 10), which is
-                // exactly what `su` connects as here; a fresh superuser role has no such
-                // restriction (verified against a live PG17 container before landing this).
-                // This makes the migration role the extensions' OWNER from the moment
-                // Liquibase first connects, so search-path-001's unconditional (no
-                // precondition) ALTER EXTENSION ... SET SCHEMA nexus changeset -- which
-                // must run LATE, after vectors-001-2/-3/-4's bare vector(N)/vector_cosine_ops
-                // references, not here before Liquibase even starts -- succeeds under
-                // ordinary ownership rather than needing superuser status itself.
-                su.createStatement().execute("CREATE ROLE nx_ext_relocator SUPERUSER");
-                su.createStatement().execute("SET ROLE nx_ext_relocator");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
-                su.createStatement().execute("REASSIGN OWNED BY nx_ext_relocator TO " + role);
-                su.createStatement().execute("RESET ROLE");
-                su.createStatement().execute("DROP ROLE nx_ext_relocator");
+                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+                // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
+                // directly as `su` (superuser) and install the SECURITY DEFINER relocation
+                // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
+                // nexus_schema(..., direct=False) -- this walk resumes through vectors-001
+                // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
+                // below, so the extension must stay bare-resolvable in public through
+                // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
+                // own guard calling this function -- see that changeset's header for the
+                // full derivation.
+                bootstrapVectorExtensionsForFreshWalk(su, role);
             }
 
             var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -1441,26 +1453,17 @@ class SchemaMigratorIntegrationTest {
                 su.createStatement().execute(
                     "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): create the
-                // extensions under a FRESH, throwaway superuser role -- never this
-                // connection's own bootstrap superuser -- then REASSIGN everything it owns
-                // to the migration role and drop it. REASSIGN OWNED BY unconditionally
-                // refuses the cluster's bootstrap-superuser role (always oid 10), which is
-                // exactly what `su` connects as here; a fresh superuser role has no such
-                // restriction (verified against a live PG17 container before landing this).
-                // This makes the migration role the extensions' OWNER from the moment
-                // Liquibase first connects, so search-path-001's unconditional (no
-                // precondition) ALTER EXTENSION ... SET SCHEMA nexus changeset -- which
-                // must run LATE, after vectors-001-2/-3/-4's bare vector(N)/vector_cosine_ops
-                // references, not here before Liquibase even starts -- succeeds under
-                // ordinary ownership rather than needing superuser status itself.
-                su.createStatement().execute("CREATE ROLE nx_ext_relocator SUPERUSER");
-                su.createStatement().execute("SET ROLE nx_ext_relocator");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
-                su.createStatement().execute("REASSIGN OWNED BY nx_ext_relocator TO " + role);
-                su.createStatement().execute("RESET ROLE");
-                su.createStatement().execute("DROP ROLE nx_ext_relocator");
+                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+                // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
+                // directly as `su` (superuser) and install the SECURITY DEFINER relocation
+                // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
+                // nexus_schema(..., direct=False) -- this walk resumes through vectors-001
+                // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
+                // below, so the extension must stay bare-resolvable in public through
+                // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
+                // own guard calling this function -- see that changeset's header for the
+                // full derivation.
+                bootstrapVectorExtensionsForFreshWalk(su, role);
             }
 
             var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -1632,26 +1635,17 @@ class SchemaMigratorIntegrationTest {
                 su.createStatement().execute(
                     "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): create the
-                // extensions under a FRESH, throwaway superuser role -- never this
-                // connection's own bootstrap superuser -- then REASSIGN everything it owns
-                // to the migration role and drop it. REASSIGN OWNED BY unconditionally
-                // refuses the cluster's bootstrap-superuser role (always oid 10), which is
-                // exactly what `su` connects as here; a fresh superuser role has no such
-                // restriction (verified against a live PG17 container before landing this).
-                // This makes the migration role the extensions' OWNER from the moment
-                // Liquibase first connects, so search-path-001's unconditional (no
-                // precondition) ALTER EXTENSION ... SET SCHEMA nexus changeset -- which
-                // must run LATE, after vectors-001-2/-3/-4's bare vector(N)/vector_cosine_ops
-                // references, not here before Liquibase even starts -- succeeds under
-                // ordinary ownership rather than needing superuser status itself.
-                su.createStatement().execute("CREATE ROLE nx_ext_relocator SUPERUSER");
-                su.createStatement().execute("SET ROLE nx_ext_relocator");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
-                su.createStatement().execute("REASSIGN OWNED BY nx_ext_relocator TO " + role);
-                su.createStatement().execute("RESET ROLE");
-                su.createStatement().execute("DROP ROLE nx_ext_relocator");
+                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+                // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
+                // directly as `su` (superuser) and install the SECURITY DEFINER relocation
+                // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
+                // nexus_schema(..., direct=False) -- this walk resumes through vectors-001
+                // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
+                // below, so the extension must stay bare-resolvable in public through
+                // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
+                // own guard calling this function -- see that changeset's header for the
+                // full derivation.
+                bootstrapVectorExtensionsForFreshWalk(su, role);
             }
 
             var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -1802,26 +1796,17 @@ class SchemaMigratorIntegrationTest {
                 su.createStatement().execute(
                     "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): create the
-                // extensions under a FRESH, throwaway superuser role -- never this
-                // connection's own bootstrap superuser -- then REASSIGN everything it owns
-                // to the migration role and drop it. REASSIGN OWNED BY unconditionally
-                // refuses the cluster's bootstrap-superuser role (always oid 10), which is
-                // exactly what `su` connects as here; a fresh superuser role has no such
-                // restriction (verified against a live PG17 container before landing this).
-                // This makes the migration role the extensions' OWNER from the moment
-                // Liquibase first connects, so search-path-001's unconditional (no
-                // precondition) ALTER EXTENSION ... SET SCHEMA nexus changeset -- which
-                // must run LATE, after vectors-001-2/-3/-4's bare vector(N)/vector_cosine_ops
-                // references, not here before Liquibase even starts -- succeeds under
-                // ordinary ownership rather than needing superuser status itself.
-                su.createStatement().execute("CREATE ROLE nx_ext_relocator SUPERUSER");
-                su.createStatement().execute("SET ROLE nx_ext_relocator");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
-                su.createStatement().execute("REASSIGN OWNED BY nx_ext_relocator TO " + role);
-                su.createStatement().execute("RESET ROLE");
-                su.createStatement().execute("DROP ROLE nx_ext_relocator");
+                // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+                // nexus/critique-nexus-cbo4a-batch-9-search-path): create both extensions
+                // directly as `su` (superuser) and install the SECURITY DEFINER relocation
+                // helper, mirroring nexus.db.pg_provision.relocate_vector_extensions_to_
+                // nexus_schema(..., direct=False) -- this walk resumes through vectors-001
+                // AND search-path-001/002 in one continuous SchemaMigrator.migrate() call
+                // below, so the extension must stay bare-resolvable in public through
+                // vectors-001-2/-3/-4, then get relocated mid-walk by search-path-001's
+                // own guard calling this function -- see that changeset's header for the
+                // full derivation.
+                bootstrapVectorExtensionsForFreshWalk(su, role);
             }
 
             var cfg = new com.zaxxer.hikari.HikariConfig();

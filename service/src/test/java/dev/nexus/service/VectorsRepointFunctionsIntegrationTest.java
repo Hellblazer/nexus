@@ -94,6 +94,42 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class VectorsRepointFunctionsIntegrationTest {
 
+    private static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
+        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
+        su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+        su.createStatement().execute(
+            "CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION " + migratingRole);
+        su.createStatement().execute(
+            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_relocated() "
+            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $relofunc$ "
+            + "BEGIN "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "END; "
+            + "$relofunc$");
+        su.createStatement().execute(
+            "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO " + migratingRole);
+            su.createStatement().execute(
+                "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated() "
+                + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $unrelofunc$ "
+                + "BEGIN "
+                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'public' THEN "
+                + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA public'; "
+                + "  END IF; "
+                + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'public' THEN "
+                + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA public'; "
+                + "  END IF; "
+                + "END; "
+                + "$unrelofunc$");
+            su.createStatement().execute(
+                "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO " + migratingRole);
+    }
+
+
     private static final String SVC_ROLE = "nexus_svc";
     private static final String SVC_PASS = "nexus_svc_pass";
     private static final String VECTORS_004 = "db/changelog/vectors-004-unify-chunks.xml";
@@ -126,17 +162,15 @@ class VectorsRepointFunctionsIntegrationTest {
             su.createStatement().execute(
                 "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                     + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-            // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): create under a
-            // FRESH, throwaway superuser role -- never `su`'s own bootstrap superuser --
-            // then REASSIGN to the migration role. See SchemaMigratorIntegrationTest's
-            // identical fix and search-path-001-relocate-vector-extensions.xml's header.
-            su.createStatement().execute("CREATE ROLE nx_ext_relocator SUPERUSER");
-            su.createStatement().execute("SET ROLE nx_ext_relocator");
-            su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
-            su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
-            su.createStatement().execute("REASSIGN OWNED BY nx_ext_relocator TO " + role);
-            su.createStatement().execute("RESET ROLE");
-            su.createStatement().execute("DROP ROLE nx_ext_relocator");
+            // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+            // nexus/critique-nexus-cbo4a-batch-9-search-path): see
+            // SchemaMigratorIntegrationTest.bootstrapVectorExtensionsForFreshWalk's own
+            // javadoc for the full derivation -- creates the extensions directly as
+            // `su` and installs a SECURITY DEFINER relocation helper for search-path-
+            // 001's guard to call mid-walk, since this walk resumes through both
+            // vectors-001-baseline.xml and search-path-001/002 in one continuous pass
+            // as a NOSUPERUSER role.
+            bootstrapVectorExtensionsForFreshWalk(su, role);
         }
         var cfg = new com.zaxxer.hikari.HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());

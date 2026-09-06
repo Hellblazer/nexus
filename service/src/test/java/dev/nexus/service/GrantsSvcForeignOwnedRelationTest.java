@@ -38,6 +38,39 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class GrantsSvcForeignOwnedRelationTest {
 
+    private static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
+        exec(su, "CREATE EXTENSION IF NOT EXISTS vector");
+        exec(su, "CREATE EXTENSION IF NOT EXISTS pg_trgm");
+        exec(su, "CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION " + migratingRole);
+        exec(su,
+            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_relocated() "
+            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $relofunc$ "
+            + "BEGIN "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "END; "
+            + "$relofunc$");
+        exec(su, "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO " + migratingRole);
+        exec(su,
+            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated() "
+            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $unrelofunc$ "
+            + "BEGIN "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'public' THEN "
+            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA public'; "
+            + "  END IF; "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'public' THEN "
+            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA public'; "
+            + "  END IF; "
+            + "END; "
+            + "$unrelofunc$");
+        exec(su, "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO " + migratingRole);
+    }
+
+
     private static final String ADMIN_ROLE = "nexus_admin_svcgrant_replay";
     private static final String ADMIN_PASS = "nexus_admin_svcgrant_replay_pw";
     private static final String SVC_ROLE = "nexus_svc";
@@ -69,20 +102,15 @@ class GrantsSvcForeignOwnedRelationTest {
             // pg_monitor WITH ADMIN OPTION (or is superuser). See GrantsPgMonitorTest for
             // the falsification proof of this exact prerequisite.
             exec(su, "GRANT pg_monitor TO " + ADMIN_ROLE + " WITH ADMIN OPTION");
-            // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): create the
-            // extensions under a FRESH, throwaway superuser role -- never `su`'s own
-            // bootstrap superuser -- then REASSIGN everything it owns to ADMIN_ROLE and
-            // drop it. See SchemaMigratorIntegrationTest's identical bootstrap fix and
-            // search-path-001-relocate-vector-extensions.xml's header for the full
-            // derivation (REASSIGN OWNED BY unconditionally refuses the cluster's
-            // bootstrap-superuser role, which is exactly what `su` connects as here).
-            exec(su, "CREATE ROLE nx_ext_relocator SUPERUSER");
-            exec(su, "SET ROLE nx_ext_relocator");
-            exec(su, "CREATE EXTENSION IF NOT EXISTS vector");
-            exec(su, "CREATE EXTENSION IF NOT EXISTS pg_trgm");
-            exec(su, "REASSIGN OWNED BY nx_ext_relocator TO " + ADMIN_ROLE);
-            exec(su, "RESET ROLE");
-            exec(su, "DROP ROLE nx_ext_relocator");
+            // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+            // nexus/critique-nexus-cbo4a-batch-9-search-path): see
+            // SchemaMigratorIntegrationTest.bootstrapVectorExtensionsForFreshWalk's own
+            // javadoc for the full derivation -- creates the extensions directly as
+            // `su` and installs a SECURITY DEFINER relocation helper for search-path-
+            // 001's guard to call mid-walk, since this walk resumes through both
+            // vectors-001-baseline.xml and search-path-001/002 in one continuous pass
+            // as a NOSUPERUSER role.
+            bootstrapVectorExtensionsForFreshWalk(su, ADMIN_ROLE);
 
             // 1. Full changelog AS THE NON-SUPERUSER ADMIN ROLE, from
             //    scratch. nexus_admin owns every relation it creates here —

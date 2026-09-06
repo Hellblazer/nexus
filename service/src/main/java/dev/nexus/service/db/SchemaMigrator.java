@@ -62,6 +62,12 @@ import java.util.Map;
  *       role below is NOSUPERUSER, so changeset {@code vectors-001-1} fails
  *       without this DBA pre-step (it becomes an idempotent no-op once the
  *       extensions exist).</li>
+ *   <li>RELOCATE both extensions into the {@code nexus} schema, also as
+ *       superuser, BEFORE the first migration run carrying nexus-cbo4a batch
+ *       9 item 0: {@code ALTER EXTENSION vector SET SCHEMA nexus; ALTER
+ *       EXTENSION pg_trgm SET SCHEMA nexus;} — see "Extension relocation"
+ *       below for why this is a superuser step rather than a Liquibase
+ *       changeset, and for the exact failure this DBA step prevents.</li>
  *   <li>Create the schema-owner role (e.g. {@code nexus_admin}) with
  *       {@code CREATE ON DATABASE nexus} and ownership of the {@code nexus}
  *       and {@code t1} schemas.</li>
@@ -74,43 +80,51 @@ import java.util.Map;
  * during the first migration run.
  *
  * <p><strong>Extension relocation (nexus-cbo4a batch 9 item 0, Sam's
- * directive, 2026-09-05).</strong> {@code vector} and {@code pg_trgm} are
- * both relocatable extensions and live in the {@code nexus} schema, not
- * {@code public} — every SQL function in the changelog references their
- * types/operators/functions as {@code nexus.*} rather than relying on the
- * calling session's search_path. The move changeset ({@code
- * search-path-001-relocate-vector-extensions.xml}) is UNCONDITIONAL — no
- * precondition — because {@code ALTER EXTENSION ... SET SCHEMA} succeeds for
- * whoever OWNS the extension (and every one of its member objects) or is
- * superuser; ownership, not superuser status, is the actual gate. Every
- * extension-creation site (the Phase-5 DBA pre-step, {@code
- * nexus.db.pg_provision}'s client-side local-install provisioning, and this
- * test tree's own bootstrap fixtures) therefore creates {@code vector} AND
- * {@code pg_trgm} under a FRESH, throwaway superuser role — never the
+ * directive, 2026-09-05; REDESIGNED per T2 nexus/critique-nexus-cbo4a-
+ * batch-9-search-path, a ship-blocker fix).</strong> {@code vector} and
+ * {@code pg_trgm} are both relocatable extensions and live in the {@code
+ * nexus} schema, not {@code public} — every SQL function in the changelog
+ * references their types/operators/functions as {@code nexus.*} rather than
+ * relying on the calling session's search_path. {@code
+ * search-path-001-relocate-vector-extensions.xml} GUARDS that this
+ * relocation already happened; it does not perform it unconditionally
+ * itself, because the schema-owner role (NOSUPERUSER) can never own or
+ * relocate an extension that predates this batch — created directly as the
  * cluster's bootstrap superuser, which {@code REASSIGN OWNED BY}
- * unconditionally refuses — and transfers ownership of both to the migrating
- * role before this changelog ever runs; a superuser-driven walk (this test
- * tree's own {@code PgContainerHelper#applyProductSchema}, the jOOQ codegen
- * plugin's Testcontainers bootstrap) needs no such transfer, since superuser
- * bypasses ownership checks entirely. An EARLIER version of this changeset
- * gated on {@code current_setting('is_superuser') = 'on'} and skipped
- * (MARK_RAN) for the non-superuser production shape — abandoned once
- * SchemaMigratorIntegrationTest's own aged-box fixtures, modeled on the real
- * non-superuser migration shape end to end, proved it produced a genuine
- * sequencing deadlock (relocating before Liquibase's first walk breaks
- * vectors-001-baseline.xml's own bare {@code vector(N)}/{@code
- * vector_cosine_ops} references) with no workable guard shape. See that
- * file's own header and this class's own integration test bootstrap for the
- * full derivation and the exact ownership-transfer sequence. Also note: a
- * first version of the ownership-transfer mechanism believed {@code pg_trgm}
- * (trusted since PG13) needed no relocator-role treatment at all — WRONG,
- * caught live by {@code tests/e2e/local-service-gate.sh}'s first real dev-jar
- * run: PostgreSQL stamps every one of pg_trgm's 31 LANGUAGE-C member
- * functions with bootstrap-superuser ownership regardless of who issues
- * CREATE EXTENSION, trusted or not, so it needs the identical treatment as
- * {@code vector}. conexus's PITR-fork walk rehearsal covers the move
- * changeset's relocation at deploy time (see the engine-service release
- * doc).
+ * unconditionally refuses to ever hand off. An EARLIER design instead had
+ * every extension-creation site transfer OWNERSHIP to the schema-owner role
+ * via a throwaway superuser role, then relocate unconditionally from an
+ * ordinary Liquibase changeset — this bricked every install that predated
+ * the batch, since the ownership-transfer backfill is a documented no-op for
+ * an extension the bootstrap superuser already owns, with nothing left able
+ * to move it. The current design instead relocates directly, as superuser,
+ * OUTSIDE Liquibase (this Phase-5 DBA step for production; {@code
+ * nexus.db.pg_provision}'s client-side provisioning, on every local daemon
+ * start, for a local install — safe for a pre-existing install regardless of
+ * timing, since its own {@code vectors-001-baseline.xml} bare {@code
+ * vector(N)}/{@code vector_cosine_ops} references already ran, in a PAST
+ * walk, long before relocation). The ONE case that cannot use this direct
+ * mechanism is a FRESH install's first-ever walk, which runs those same bare
+ * references in the SAME continuous walk as the guard changeset — for that
+ * case only, the guard calls a narrow SECURITY DEFINER helper function
+ * ({@code nexus.ensure_vector_extensions_relocated()}, installed by {@code
+ * nexus.db.pg_provision} at fresh-provision time, never by this DBA step)
+ * that performs the relocation with the function OWNER's (superuser's)
+ * privilege — see that changeset's own header for the full three-tier
+ * derivation (direct attempt, then the function, then a named-remedy
+ * failure) and {@code relocate_vector_extensions_to_nexus_schema}'s own
+ * docstring ("FRESH-INSTALL SEQUENCING") for why a from-scratch install
+ * needs this and a pre-existing one does not. conexus's PITR-fork walk
+ * rehearsal exercises this changelog directly against a production-shaped
+ * cluster, so a DBA who skips this Phase-5 step is caught there as the named
+ * FAIL LOUD case, never a silent no-op. Also note: an earlier draft believed
+ * {@code pg_trgm} (trusted since PG13) needed no special treatment relative
+ * to {@code vector} at all — WRONG, caught live by {@code
+ * tests/e2e/local-service-gate.sh}'s first real dev-jar run: PostgreSQL
+ * stamps every one of pg_trgm's 31 LANGUAGE-C member functions with
+ * bootstrap-superuser ownership regardless of who issues CREATE EXTENSION,
+ * trusted or not, so both extensions always relocate together, identically,
+ * everywhere this Phase-5 step or {@code nexus.db.pg_provision} runs.
  *
  * <p>RDR-152 bead nexus-net63.
  */

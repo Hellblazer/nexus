@@ -88,6 +88,39 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  */
 class GrantsNexusDiagViewAccessIntegrationTest {
 
+    private static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
+        exec(su, "CREATE EXTENSION IF NOT EXISTS vector");
+        exec(su, "CREATE EXTENSION IF NOT EXISTS pg_trgm");
+        exec(su, "CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION " + migratingRole);
+        exec(su,
+            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_relocated() "
+            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $relofunc$ "
+            + "BEGIN "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'nexus' THEN "
+            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA nexus'; "
+            + "  END IF; "
+            + "END; "
+            + "$relofunc$");
+        exec(su, "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO " + migratingRole);
+        exec(su,
+            "CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated() "
+            + "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $unrelofunc$ "
+            + "BEGIN "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') <> 'public' THEN "
+            + "    EXECUTE 'ALTER EXTENSION vector SET SCHEMA public'; "
+            + "  END IF; "
+            + "  IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') <> 'public' THEN "
+            + "    EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA public'; "
+            + "  END IF; "
+            + "END; "
+            + "$unrelofunc$");
+        exec(su, "GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO " + migratingRole);
+    }
+
+
     private static final String ADMIN_ROLE = "nexus_admin_diagview_replay";
     private static final String ADMIN_PASS = "nexus_admin_diagview_replay_pw";
     private static final String DIAG_ROLE = "nexus_diag";
@@ -201,17 +234,15 @@ class GrantsNexusDiagViewAccessIntegrationTest {
         // admin role here never gets CREATEROLE, matching production.
         exec(su, "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' "
             + "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): create under a
-        // FRESH, throwaway superuser role -- never `su`'s own bootstrap superuser --
-        // then REASSIGN to the migration role. See SchemaMigratorIntegrationTest's
-        // identical fix and search-path-001-relocate-vector-extensions.xml's header.
-        exec(su, "CREATE ROLE nx_ext_relocator SUPERUSER");
-        exec(su, "SET ROLE nx_ext_relocator");
-        exec(su, "CREATE EXTENSION IF NOT EXISTS vector");
-        exec(su, "CREATE EXTENSION IF NOT EXISTS pg_trgm");
-        exec(su, "REASSIGN OWNED BY nx_ext_relocator TO " + ADMIN_ROLE);
-        exec(su, "RESET ROLE");
-        exec(su, "DROP ROLE nx_ext_relocator");
+        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
+        // nexus/critique-nexus-cbo4a-batch-9-search-path): see
+        // SchemaMigratorIntegrationTest.bootstrapVectorExtensionsForFreshWalk's own
+        // javadoc for the full derivation -- creates the extensions directly as
+        // `su` and installs a SECURITY DEFINER relocation helper for search-path-
+        // 001's guard to call mid-walk, since this walk resumes through both
+        // vectors-001-baseline.xml and search-path-001/002 in one continuous pass
+        // as a NOSUPERUSER role.
+        bootstrapVectorExtensionsForFreshWalk(su, ADMIN_ROLE);
 
         // nexus_diag is superuser-created in production (BYPASSRLS
         // requires superuser, nexus-vounk) — never by Liquibase.
