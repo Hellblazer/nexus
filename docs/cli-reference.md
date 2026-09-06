@@ -3069,6 +3069,37 @@ process precisely so that inheritance happens.
 
 ---
 
+## nx agents
+
+```
+nx agents install worktree-developer [--check] [--dry-run] [--sn-dir DIR] [--conexus-dir DIR] [--dest FILE]
+```
+
+Generate a user-scope Claude Code agent from parts the installed plugins ship
+(nexus-uympf). `worktree-developer` is the conexus `developer` agent with a
+PRIVATE Serena MCP server (`serena-wt`) that the agent roots at its own
+worktree, so symbol-level editing is safe under `isolation: "worktree"` where
+the sn guard denies the shared server's write tools. Plugin-shipped agents
+cannot declare `mcpServers`, which is why the file has to live in
+`~/.claude/agents/` and why it is generated rather than copied: the
+frontmatter and activation preamble come from `sn/examples/worktree-developer.md`,
+the body is `conexus/agents/developer.md` verbatim with its `_shared/` links
+rewritten to the installed conexus directory, and the generated header names
+both source versions.
+
+| Flag | Effect |
+|------|--------|
+| `--check` | Write nothing; exit 1 if `~/.claude/agents/worktree-developer.md` is missing or differs from what the installed plugins would generate. Run it after a plugin update. |
+| `--dry-run` | Print the composed agent to stdout. |
+| `--sn-dir`, `--conexus-dir` | Read the parts from these directories instead of the paths in `~/.claude/plugins/installed_plugins.json` (a dev checkout, or tests). |
+| `--dest` | Write somewhere other than `~/.claude/agents/<name>.md`. |
+
+After installing, allow `mcp__serena-wt__*` in `~/.claude/settings.json`
+permissions; the sn auto-approve covers only the plugin's own server.
+`nx doctor` warns (non-fatal) when the generated file lags the installed
+plugins, so drift is caught without anyone remembering `--check`.
+`--check` and `--dry-run` are mutually exclusive.
+
 ## nx self install
 
 ```

@@ -14,8 +14,10 @@ Serena for this worktree is the `mcp__serena-wt__*` tool family. It starts with 
 
 Rules:
 - Serena read tools first: get_symbols_overview before reading a file, find_referencing_symbols before any signature change.
-- Edit with Serena's symbolic tools, or with Edit/Write using absolute paths under your worktree.
+- Edit with `mcp__serena-wt__*` symbolic tools, or with Edit/Write using absolute paths under your worktree. The sn hook's worktree section ("Serena writes are BLOCKED here") describes the SHARED `mcp__plugin_sn_serena__*` server; it does not apply to your private `serena-wt` server once it is activated on your worktree.
 - After every write, `git status --short`; an unchanged tree after a reported success means the write went elsewhere. Stop and report it.
-- Commit on the worktree branch only; never touch the primary checkout.
+- Never touch the primary checkout. Do not commit: the caller owns the review gate and the commit (Completion Protocol below).
 
-Report: what changed (files, symbols), the commit SHA if you committed, test results with the command that produced them, and anything left undone.
+Report: what changed (files, symbols), test results with the command that produced them, and anything left undone.
+
+The developer method below is the conexus `developer` agent verbatim; `nx agents install worktree-developer` splices it in from the installed plugin.

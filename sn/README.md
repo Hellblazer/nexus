@@ -61,13 +61,14 @@ Two measured facts shape it (nexus cc-validation scenario 30, 2026-09-05):
 - Claude Code spawns an agent's inline MCP server in the **parent's** directory, not the worktree. A server started with `--project-from-cwd` therefore roots itself at the primary checkout and writes there. The example starts Serena with **no project** and the agent's first action is `activate_project` on its own `pwd`; under the `claude-code` context, `activate_project` stays available exactly when no project was given at startup.
 - Plugin-shipped agents cannot declare `mcpServers` (Claude Code blocks it), so this file cannot ship as part of the plugin. It is a template to copy.
 
-Install:
+Install (nexus-uympf):
 
 ```bash
-cp ~/.claude/plugins/cache/nexus-plugins/sn/<version>/examples/worktree-developer.md ~/.claude/agents/
+nx agents install worktree-developer          # writes ~/.claude/agents/worktree-developer.md
+nx agents install worktree-developer --check  # exit 1 when the file lags the installed plugins
 ```
 
-(or copy it from this repo). Then add `mcp__serena-wt__*` to `permissions.allow` in `~/.claude/settings.json`; the sn auto-approve covers only the plugin's own server. Dispatch with `subagent_type: "worktree-developer"` and `isolation: "worktree"`. The sn guard still applies to the shared `mcp__plugin_sn_serena__*` tools in that agent, which is what you want.
+The command composes the file from the INSTALLED plugins: this template's frontmatter and activation preamble, then the full `conexus/agents/developer.md` body (pre-flight tier reads, test-first method, circuit breaker, completion protocol), with the developer's `_shared/` links rewritten to the installed conexus directory. Re-run it after a plugin update; the generated header names the source versions. Then add `mcp__serena-wt__*` to `permissions.allow` in `~/.claude/settings.json`; the sn auto-approve covers only the plugin's own server. Dispatch with `subagent_type: "worktree-developer"` and `isolation: "worktree"`. The sn guard still applies to the shared `mcp__plugin_sn_serena__*` tools in that agent, which is what you want.
 
 Cost: one Serena process plus its language servers per dispatched agent, so a 10 to 60 second startup depending on the language, and a cold `uvx` cache on first use.
 

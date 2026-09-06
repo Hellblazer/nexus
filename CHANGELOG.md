@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `nx agents install worktree-developer` (nexus-uympf): generates
+  `~/.claude/agents/worktree-developer.md` from the installed plugins, the
+  sn `examples/worktree-developer.md` frontmatter and activation preamble
+  (private `serena-wt` Serena rooted at the worktree) followed by the
+  conexus `developer` agent body verbatim, with `_shared/` links rewritten to
+  the installed conexus directory. `--check` exits 1 when the file lags the
+  plugins and `nx doctor` warns on the same drift. Replaces the hand-copy
+  install line in `sn/README.md`; the
+  previous template was a 25-line stub with none of the developer method.
+
 ### Removed
 
 - The JSONL rotation machinery behind `capability_census.jsonl` and
