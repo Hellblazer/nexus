@@ -72,17 +72,24 @@ The `nx` CLI provides direct access to all storage tiers, indexing, search, the 
 ## Updating
 
 ```bash
-nx self install                          # 1. update the code — PRESERVES your extras (e.g. [local])
+nx self install                          # 1. update the code (keeps your extras, e.g. [local])
 nx upgrade                               # 2. converge the data
 ```
 
-Upgrading nexus is: update the code, then run `nx upgrade`. That single trigger converges everything else — it brings the package, engine, and process preconditions current, then walks one ordered ladder. The T2-schema and ChromaDB→Postgres+pgvector substrate-move rungs (and the chunk-identity / embedder-era migrations that were co-resident inside the substrate move) retired with the Chroma + client-SQLite migration machinery at RDR-155 P4b; the RDR-180 chash rekey is the ladder's sole remaining data rung today, detecting, converging, and verifying before it records completion, resumable and idempotent, with your existing store left byte-untouched as a rollback target. There is nothing to sequence by hand and no era to know for any install that has already reached the PG substrate (6.0+): `nx doctor` reports the pending rung read-only, `nx upgrade` walks it, and a dormant-but-migrated install converges the same way a current one no-ops. A **pre-PG install** (5.x, or 6.x that never migrated off ChromaDB) is a separate two-hop — the Chroma-era migration machinery retired at RDR-155 P4b, so hop through `conexus==6.18.1` first (`nx upgrade` there migrates ChromaDB → Postgres+pgvector, copy-not-move), then upgrade forward to current; see [Getting Started § Upgrading an existing install](docs/getting-started.md#upgrading-an-existing-install-skip-this-if-this-is-your-first-install) for the exact commands. Rollback is always yours to invoke and never automatic.
+Both steps, every time. Step 1 installs a new generation beside the one you
+are running and repoints `current`; nothing is swapped under a live process,
+so it is safe with Claude Code sessions open and the service up. Step 2
+converges the package, engine, and service, then walks any pending data
+rung. `nx doctor` shows what is pending; `nx upgrade --dry-run` previews.
 
-**Step 1 installs a new generation; it does not replace the one you are running.** `nx self install` builds a fresh tree beside the existing ones under `~/.local/share/nexus/tools/`, repoints the `current` symlink and rewrites the `~/.local/bin` shims. Nothing is swapped underneath a live process, so it always succeeds with Claude Code sessions open, the storage service up, and an `nx index` in flight — those holders keep running from their own tree and converge at their next spawn. The install source and your extras travel in the generation's own receipt, so a `[local]` install stays a `[local]` install. Older generations are reaped once nothing is bound to them (the last three are kept by default; `--keep N` to change that).
+Do not upgrade with `uv tool install conexus` or `--force`: that resets the
+environment and drops `[local]`, which downgrades the embedder and makes
+search return nothing. If you did, `nx self install` repairs it.
 
-**On a box still using the older uv-tool layout, `nx self install` now CONVERGES it** (7.20.0, nexus-gu9zo). It builds a generation beside the existing uv tree, flips `current`, takes over the `~/.local/bin` shims, and registers the old tree so live holders keep running from it until nothing is bound to it. Your extras bridge across from the uv receipt, so a `[local]` install stays `[local]`. Before 7.20.0 the command refused here and pointed at a repo script most users do not have — no packaged install could reach the generation layout at all. `nx doctor`'s *Generation layout* row tells you which layout you are on. On either layout, **do not** upgrade with `uv tool install conexus --force` / `uv tool install conexus`: that *resets* the install and **drops `[local]`**, silently downgrading your embedder from 768-dim to 384-dim, which dimension-mismatches existing 768-dim collections and makes search return nothing. On a uv-tool box, recover with `uv tool install --reinstall "conexus[local]"`. On a generation box, that same command rebuilds a `[local]`-less uv tree beside your install (a plain `uv tool install` leaves the nexus shims alone — "Executable already exists"; `--force` takes them, and then every spawn resolves through uv's tree instead of `current`). Since 7.21.0 this is self-repairing: the next `nx upgrade` (the SessionStart hook runs it) or `nx self install` rewrites the shims back to `current`, registers uv's tree for reap, and — if uv's tree is the newer version, i.e. you meant to upgrade — builds a generation at that version from your own receipt, so `[local]` survives. Never run `uv tool uninstall conexus` on a generation box: it deletes the nexus shims at those paths; a reaped tree is what makes uv refuse to rebuild.
+After `/plugin update`, run both steps so the CLI matches the plugin.
 
-When you update the **Claude Code plugin** (`/plugin update`), run **both** upgrade steps above (`nx self install` then `nx upgrade`) so the CLI stays in lockstep with the plugin version.
+Installs that never left ChromaDB (5.x, or 6.x never migrated) take a
+different path: [Getting Started § Upgrading from a pre-PG install](docs/getting-started.md#upgrading-from-a-pre-pg-install).
 
 ### Something broken?
 

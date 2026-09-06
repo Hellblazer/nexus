@@ -239,105 +239,50 @@ nx taxonomy discover --all
 
 ## Upgrading an existing install (skip this if this is your first install)
 
-Upgrading nexus is **two steps — both required on every upgrade**: update the
-code, then converge the data.
-
 ```bash
-nx self install               # 1. update the code (preserves your extras, e.g. [local])
-nx upgrade                    # 2. converge the data — walks the upgrade ladder
+nx self install               # 1. update the code (keeps your extras, e.g. [local])
+nx upgrade                    # 2. converge the data
 ```
 
-Step 1 does not replace the install you are running. `nx self install` builds a
-new generation under `~/.local/share/nexus/tools/gen-<stamp>`, repoints the
-`current` symlink and rewrites the `~/.local/bin` shims — so it succeeds with
-Claude Code sessions open, the storage service up, and an `nx index` in flight.
-Live processes keep executing from the tree they resolved at spawn and converge
-at their next spawn; older generations are reaped once nothing is bound to them.
-The install source and any extras travel in the generation's receipt, which is
-what makes a `[local]` install stay `[local]`.
+Both steps, every time. Step 1 builds a new generation under
+`~/.local/share/nexus/tools/gen-<stamp>` and repoints `current`; running
+processes keep their old tree and converge at their next spawn, so it is safe
+with Claude Code sessions open, the service up, and an index in flight. Step 2
+converges the package, engine, and service, then walks any pending data rung.
+It is resumable and idempotent. `nx doctor` shows what is pending;
+`nx upgrade --dry-run` previews without changing anything.
 
-If `nx self install` reports that this nx is not running from a generation, the
-box is still on the older uv-tool layout and step 1 is `uv tool upgrade conexus`
-instead. `nx doctor`'s *Generation layout* row is the discriminator; the two
-steps are otherwise identical.
+If `nx self install` says this nx is not running from a generation, the box is
+on the older uv-tool layout and step 1 is `uv tool upgrade conexus`. `nx doctor`'s
+*Generation layout* row tells you which you have.
 
-`nx upgrade` is the single trigger that converges everything else — it brings the
-package, engine, and process preconditions current, then walks the upgrade
-ladder's remaining data rung (chunk-identity rekey) plus schema convergence via
-the engine's Liquibase changesets. The walk is resumable and idempotent; use
-`nx doctor` to see what is pending, and `nx upgrade --dry-run` to preview without
-changing anything.
+Do not upgrade with `uv tool install conexus` or `--force`. That resets the
+environment and drops `[local]`, which downgrades the embedder from 768 to 384
+dimensions and makes search over existing collections return nothing. On a
+uv-tool box recover with `uv tool install --reinstall "conexus[local]"`; on a
+generation box `nx self install` rewrites the shims. Never `uv tool uninstall
+conexus` on a generation box.
 
-**Upgrading from a pre-PG install (5.x, or 6.x that never migrated off
-ChromaDB) is a two-hop path** — the Chroma-era migration machinery was retired
-after its two-release deprecation window (RDR-155/158), and releases past
-6.18.1 no longer carry it. Current releases detect a stranded pre-PG footprint
-at startup and print this exact path, but do NOT block on it, so know it up
-front:
+`nx upgrade` asks you only what it cannot decide: billed re-embedding
+(estimate and confirm; `--yes` or `NX_ASSUME_YES=1` to pre-approve), a source
+collection that has vanished, and rollback, which is always yours to invoke.
+
+After `/plugin update`, run both steps so the CLI matches the plugin.
+
+### Upgrading from a pre-PG install
+
+An install still on ChromaDB (5.x, or 6.x that never migrated) must hop
+through the last release that carries the migration. Current releases detect
+this at startup and print the same path:
 
 ```bash
-nx self install --version 6.18.1  # 1. hop to the last migration-capable release
-nx upgrade                        # 2. migrate there: ChromaDB → Postgres+pgvector
-                                  #    (copy-not-move; Chroma left byte-untouched
-                                  #    — a relic afterwards, nothing reads it)
-nx self install                   # 3. hop forward to current and converge the rest
+nx self install --version 6.18.1  # 1. pin to the last migration-capable release
+nx upgrade                        # 2. migrate there (copy, not move; Chroma left untouched)
+nx self install                   # 3. forward to current
 nx upgrade
 ```
 
-Hop 1 is a deliberate version pin — an older client, on purpose, to run the
-migration it still carries — and under the generation layout that is safe by
-construction: it builds 6.18.1 as a new generation and flips to it, leaving the
-newer tree on disk for hop 3 rather than overwriting anything. Keep the
-`--version` pin — a bare `nx self install` installs the newest release, which is
-the hop this procedure exists to avoid.
-
-A box on the older uv-tool layout runs the same sequence in uv vocabulary —
-`uv tool install conexus==6.18.1` for hop 1 and `uv tool upgrade conexus` for
-hop 3, with `nx upgrade` unchanged in between and after. The startup banner picks
-hop 1's form to match the layout it finds, so the command it prints is the one to
-run; it describes hop 3 only as "upgrade back to this version", which is step 1
-of this section.
-
-Running plain `nx upgrade` on a current release over a pre-PG store migrates
-nothing — searches then look empty because reads target the (empty) PG
-substrate, not your untouched Chroma data. If that happens, nothing is lost:
-follow the two-hop above.
-
-You are asked to decide only what the product cannot derive: **billed
-re-embedding** (an estimate-and-confirm prompt before anything charges — silent
-when nothing bills; pass `nx upgrade --yes` or set `NX_ASSUME_YES=1` to
-pre-approve it unattended), a **source collection that has vanished** (re-acquire
-or drop; the walk defers rather than guessing), and **rollback**, which is always
-yours to invoke and never automatic. On a validation block the migration state is
-left `migrated-failed`, reads stay loudly degraded rather than silently empty, and
-the rollback command is printed as the remedy.
-
-**Use step 1's command for your layout and nothing else.** Both `nx self install`
-and `uv tool upgrade conexus` preserve the spec you installed with, so a `[local]`
-install stays `[local]`. **Do not** re-run `uv tool install conexus` (or
-`--force`) just to upgrade: that resets the environment and **drops `[local]`**,
-silently downgrading the embedder 768→384-dim, which dimension-mismatches existing
-768-dim collections and makes search return nothing. On a uv-tool box, recover
-with `uv tool install --reinstall "conexus[local]"`. On a generation box that
-command does a second kind of damage — it rebuilds the uv tree and re-symlinks
-over the nexus-owned shims, so `nx` resolves through uv instead of through
-`current`. `nx doctor` reports the reclaimed shims and `nx self install` rewrites
-them.
-
-Step 1 leaves running processes on their old code by design, so after it, restart
-the storage service to move it onto the new generation (step 2's `nx upgrade`
-then converges the data):
-
-```bash
-nx daemon service stop && nx daemon service start
-```
-
-`nx upgrade` also cycles a stale supervisor for you, so this is the manual form.
-Claude Code sessions and other holders need no intervention — they converge when
-they next spawn, and `nx doctor` lists any that are still bound to an older
-generation. (The T2 daemon that used to need its own restart here is retired.)
-
-When you update the Claude Code plugin (`/plugin update`), run **both** upgrade
-steps above so the CLI stays in lockstep with the plugin version.
-
-See [docs/migration-runbook.md](https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md) for the full migration details.
+On a uv-tool box use `uv tool install conexus==6.18.1` for step 1 and
+`uv tool upgrade conexus` for step 3. Running `nx upgrade` on a current release
+over a pre-PG store migrates nothing and searches look empty; nothing is lost,
+follow the hops above.
