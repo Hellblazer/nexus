@@ -116,8 +116,28 @@ class VersionHandlerReleaseVersionTest {
         // compile-time constant on any engine build carrying this handler —
         // always present, always true. The .p1d client-side capability probe
         // reads "field present and true" as "this engine accepts steps[]".
+        //
+        // RDR-203 P2 residual 1: this append path now also emits
+        // nx_answer_run_complete_supported in the same call (see
+        // VersionHandler.appendNxAnswerStepsCapabilityField's javadoc) — the
+        // exact-equality assertion below was updated to the two-field
+        // fragment rather than dropped, so it still proves the steps flag's
+        // own text is unchanged.
         var body = new StringBuilder();
         VersionHandler.appendNxAnswerStepsCapabilityField(body);
-        assertThat(body.toString()).isEqualTo(",\"nx_answer_steps_supported\":true");
+        assertThat(body.toString())
+            .isEqualTo(",\"nx_answer_steps_supported\":true,\"nx_answer_run_complete_supported\":true");
+    }
+
+    // ── RDR-203 P2: nx_answer_run_complete capability advertisement ─────────────
+
+    @Test
+    void versionAdvertisesRunCompleteSupport() {
+        // The new flag rides the same compile-time-constant append path as
+        // nx_answer_steps_supported — always present, always true on any
+        // engine build carrying TelemetryHandler.handleNxAnswerRunComplete.
+        var body = new StringBuilder();
+        VersionHandler.appendNxAnswerStepsCapabilityField(body);
+        assertThat(body.toString()).contains(",\"nx_answer_run_complete_supported\":true");
     }
 }

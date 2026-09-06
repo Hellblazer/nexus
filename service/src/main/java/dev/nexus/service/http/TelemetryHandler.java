@@ -15,10 +15,13 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * RDR-152 bead nexus-gmiaf.12 — Telemetry HTTP endpoints.
@@ -42,6 +45,7 @@ import java.util.Map;
  *                                              exact total (nexus-onjvy)
  *   GET  /v1/telemetry/retention/markers       cumulative-deletes retention markers (nexus-24p05)
  *   POST /v1/telemetry/nx_answer_runs/record   record an nx_answer run
+ *   POST /v1/telemetry/nx_answer_runs/complete one-transaction run+steps+plan-counters (RDR-203)
  *   GET  /v1/telemetry/nx_answer_runs/query     rows + exact aggregates (nexus-eho3u)
  *   POST /v1/telemetry/hook_failures/record    record a hook failure
  *   GET  /v1/telemetry/hook_failures/list      list hook failures + exact totals (nexus-onjvy)
@@ -158,6 +162,7 @@ public final class TelemetryHandler implements HttpHandler {
                 case "/tier_writes/list"       -> handleTierWritesList(exchange, tenant, method);
                 case "/retention/markers"      -> handleRetentionMarkers(exchange, tenant, method);
                 case "/nx_answer_runs/record"  -> handleNxAnswerRunRecord(exchange, tenant, method);
+                case "/nx_answer_runs/complete" -> handleNxAnswerRunComplete(exchange, tenant, method);
                 case "/nx_answer_runs/query"   -> handleNxAnswerRunsQuery(exchange, tenant, method);
                 case "/hook_failures/record"   -> handleHookFailureRecord(exchange, tenant, method);
                 case "/hook_failures/list"     -> handleHookFailureList(exchange, tenant, method);
@@ -404,6 +409,95 @@ public final class TelemetryHandler implements HttpHandler {
         repo.recordNxAnswerRun(tenant, question, planId, conf, stepCount, finalText, cost,
             durationMsV, createdAt, steps);
         HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    /**
+     * The closed vocabulary D1 (RDR-203) allows for {@code outcome} on
+     * {@code POST /v1/telemetry/nx_answer_runs/complete}.
+     */
+    private static final Set<String> VALID_NX_ANSWER_OUTCOMES = Set.of("success", "failure");
+
+    /**
+     * {@code POST /v1/telemetry/nx_answer_runs/complete} (RDR-203 D1/D2) — the
+     * one-transaction composite: {@code /record}'s body plus two additional
+     * REQUIRED fields, {@code outcome} and {@code created_at}, both enforced
+     * with a 400 naming the field rather than any silent default (D1's
+     * no-silent-fallback-for-correctness rule, the same reasoning already
+     * applied to a step's {@code ok} and {@code step_index}). This is a
+     * {@code /complete}-only rule: {@link #handleNxAnswerRunRecord} above
+     * keeps its exact lenient handling untouched (absent {@code created_at}
+     * stamps {@code now()} inside {@code TelemetryRepository.recordNxAnswerRun}),
+     * because the ETL path, the RDR-203 D6 survivors and {@code
+     * nx_answer_report} all rely on that leniency.
+     *
+     * <p>{@code created_at} is parsed here, in the handler, rather than being
+     * handed to the repository as a raw string and reparsed leniently there —
+     * the point of requiring it on this route is that a retried composite
+     * POST must carry the SAME {@code created_at} so the engine's dedup index
+     * {@code (tenant_id, question, created_at)} can recognise the replay (D3);
+     * a lenient reparse that could silently substitute {@code now()} on any
+     * edge case would defeat that.
+     */
+    private void handleNxAnswerRunComplete(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        String question = requireString(body, "question");
+        Long planId      = optLongNull(body, "plan_id");
+        Double conf      = optDoubleNull(body, "matched_confidence");
+        int stepCount    = optInt(body, "step_count", 0);
+        String finalText = optStr(body, "final_text");
+        Double cost      = optDoubleNull(body, "cost_usd");
+        Long durationMs  = optLongNull(body, "duration_ms");
+        long durationMsV = durationMs != null ? durationMs : 0L;
+        boolean success  = requireOutcome(body);
+        OffsetDateTime createdAt = requireCreatedAt(body);
+        List<TelemetryRepository.StepInput> steps = parseNxAnswerSteps(body.get("steps"));
+        repo.recordNxAnswerRunComplete(tenant, question, planId, conf, stepCount, finalText, cost,
+            durationMsV, createdAt, steps, success);
+        HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    /**
+     * D1 (RDR-203): {@code outcome} is a closed vocabulary of exactly
+     * {@code "success"} and {@code "failure"}. A missing or unrecognized
+     * value is a 400 naming the field, never a default — a string rather than
+     * a boolean because {@code success: false} on a request body invites
+     * being read as "the request itself failed" rather than "the run's
+     * outcome was a failure".
+     */
+    private boolean requireOutcome(Map<String, Object> body) {
+        String outcome = requireString(body, "outcome");
+        if (!VALID_NX_ANSWER_OUTCOMES.contains(outcome)) {
+            throw new IllegalArgumentException(
+                "Field 'outcome' must be one of \"success\", \"failure\": \"" + outcome + "\"");
+        }
+        return "success".equals(outcome);
+    }
+
+    /**
+     * D1 (RDR-203): {@code created_at} is REQUIRED on {@code /complete} —
+     * missing, blank or unparsable is a 400 naming the field. It is the dedup
+     * key that makes a retried composite POST idempotent (D3): stamping
+     * {@code now()} on each retry attempt, the way {@code /record} does when
+     * the field is absent, would mean the dedup index never matches and a
+     * lost response would double-apply the plan counters.
+     *
+     * <p>Accepts the same two ISO-8601 shapes {@code
+     * TelemetryRepository.parseTsStrict} accepts on the ETL path ({@code
+     * ...Z} or {@code ...+00:00}) — this method is not a call to that method
+     * (different package: {@code parseTsStrict} is package-private to {@code
+     * dev.nexus.service.db}), but the same parse strategy, so the two 400
+     * paths ({@code /complete}'s live-write requirement and the ETL import's
+     * fidelity requirement) read identically shaped input the same way.
+     */
+    private OffsetDateTime requireCreatedAt(Map<String, Object> body) {
+        String raw = requireString(body, "created_at");
+        try {
+            return OffsetDateTime.parse(raw.endsWith("Z") ? raw.replace("Z", "+00:00") : raw);
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException(
+                "Field 'created_at' is not a valid ISO-8601 timestamp: \"" + raw + "\"", e);
+        }
     }
 
     /**

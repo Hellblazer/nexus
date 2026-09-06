@@ -28,6 +28,7 @@ import java.util.Properties;
  *  "release_version":"0.1.6",
  *  "build_ref":"a1b2c3d+1690000000-4242",
  *  "nx_answer_steps_supported":true,
+ *  "nx_answer_run_complete_supported":true,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
@@ -246,9 +247,20 @@ public final class VersionHandler implements HttpHandler {
      * it as "field present and true" -> steps accepted, "field absent"
      * (pre-nexus-nyry9.9 engine) -> steps not accepted, kill the client-side
      * {@code cost_usd=0.0} literals only once this reads true.
+     *
+     * <p>RDR-203 P2 (residual 1) folds a second flag onto this same append
+     * path: {@code nx_answer_run_complete_supported} advertises {@code
+     * POST /v1/telemetry/nx_answer_runs/complete}, same compile-time-constant
+     * shape as the steps flag above — always present, always {@code true} on
+     * any engine build carrying {@code TelemetryHandler.handleNxAnswerRunComplete}.
+     * The two flags are emitted together from one call site because they are
+     * both unconditional constants with no independent on/off state to test
+     * in isolation; a caller wanting only one flag's fragment slices the
+     * combined string rather than getting a second append method.
      */
     static void appendNxAnswerStepsCapabilityField(StringBuilder body) {
         body.append(",\"nx_answer_steps_supported\":true");
+        body.append(",\"nx_answer_run_complete_supported\":true");
     }
 
     /** Immutable-for-the-process schema identity (nexus-hubc0). */
@@ -325,7 +337,8 @@ public final class VersionHandler implements HttpHandler {
             .append(releaseVersion == null ? "null" : HttpUtil.jsonString(releaseVersion));
         // nexus-308ph: OMITTED (not null/empty) when unset — see appendBuildRefField.
         appendBuildRefField(body, buildRef);
-        // nexus-nyry9.9: always present, always true on any engine carrying this handler.
+        // nexus-nyry9.9 / RDR-203 P2: both flags always present, always true on any
+        // engine carrying the corresponding handler.
         appendNxAnswerStepsCapabilityField(body);
         if (embedderRouter != null) {
             body.append(",\"embedding_mode\":")

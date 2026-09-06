@@ -977,48 +977,148 @@ public final class TelemetryRepository {
                                   String createdAtIso,
                                   List<StepInput> steps) {
         tenantScope.withTenant(tenant, ctx -> {
-            Long runId = ctx.insertInto(NX_ANSWER_RUNS)
-                .set(NX_ANSWER_RUNS.TENANT_ID, tenant)
-                .set(NX_ANSWER_RUNS.QUESTION, question)
-                .set(NX_ANSWER_RUNS.PLAN_ID, planId)
-                .set(NX_ANSWER_RUNS.MATCHED_CONFIDENCE, matchedConfidence)
-                .set(NX_ANSWER_RUNS.STEP_COUNT, stepCount)
-                .set(NX_ANSWER_RUNS.FINAL_TEXT, str(finalText))
-                .set(NX_ANSWER_RUNS.COST_USD, costUsd)
-                .set(NX_ANSWER_RUNS.DURATION_MS, durationMs)
-                .set(NX_ANSWER_RUNS.CREATED_AT,
-                    createdAtIso != null ? parseTs(createdAtIso) : OffsetDateTime.now(ZoneOffset.UTC))
-                .onConflictDoNothing()
-                .returning(NX_ANSWER_RUNS.ID)
-                .fetchOne(NX_ANSWER_RUNS.ID);
+            OffsetDateTime createdAt = createdAtIso != null
+                ? parseTs(createdAtIso) : OffsetDateTime.now(ZoneOffset.UTC);
+            insertRunAndSteps(ctx, tenant, question, planId, matchedConfidence, stepCount,
+                finalText, costUsd, durationMs, createdAt, steps);
+            return null;
+        });
+    }
 
-            if (runId != null && steps != null) {
-                for (StepInput s : steps) {
-                    Integer[] bundled = s.bundledSteps() == null
-                        ? new Integer[0]
-                        : s.bundledSteps().toArray(new Integer[0]);
-                    ctx.insertInto(NX_ANSWER_STEPS)
-                        .set(NX_ANSWER_STEPS.RUN_ID, runId)
-                        .set(NX_ANSWER_STEPS.TENANT_ID, tenant)
-                        .set(NX_ANSWER_STEPS.STEP_INDEX, s.stepIndex())
-                        .set(NX_ANSWER_STEPS.OPERATOR, s.operator())
-                        .set(NX_ANSWER_STEPS.SOURCE, s.source())
-                        .set(NX_ANSWER_STEPS.MODEL, s.model())
-                        .set(NX_ANSWER_STEPS.INPUT_TOKENS, s.inputTokens())
-                        .set(NX_ANSWER_STEPS.OUTPUT_TOKENS, s.outputTokens())
-                        // nexus-ndoke: input_tokens is 2 on a cached prompt — the
-                        // real size lives in one of these two. Without them every
-                        // per-plan cost aggregate mixes cache-warm and cache-cold
-                        // runs with nothing recorded that can separate them.
-                        .set(NX_ANSWER_STEPS.CACHE_READ_INPUT_TOKENS, s.cacheReadInputTokens())
-                        .set(NX_ANSWER_STEPS.CACHE_CREATION_INPUT_TOKENS, s.cacheCreationInputTokens())
-                        .set(NX_ANSWER_STEPS.COST_USD,
-                            s.costUsd() != null ? BigDecimal.valueOf(s.costUsd()) : null)
-                        .set(NX_ANSWER_STEPS.ELAPSED_MS, s.elapsedMs())
-                        .set(NX_ANSWER_STEPS.OK, s.ok())
-                        .set(NX_ANSWER_STEPS.BUNDLED_STEPS, bundled)
-                        .execute();
-                }
+    /**
+     * RDR-203 D2/technical-design — the parent-plus-children insert lifted out
+     * of {@link #recordNxAnswerRun} so {@link #recordNxAnswerRunComplete} can
+     * share the SAME DSL inside its own {@code withTenant} lambda rather than
+     * duplicating it. Returns the generated {@code nx_answer_runs.id}, or
+     * {@code null} when the parent insert's {@code onConflictDoNothing()}
+     * conflict-skips against the existing ETL dedup index
+     * {@code (tenant_id, question, created_at)} — in that case the step
+     * children are NOT written, matching {@link #recordNxAnswerRun}'s
+     * pre-existing dedup behaviour (D3 extends the same rule to the composite's
+     * plan-counter updates, applied by the caller).
+     *
+     * <p>Takes an already-resolved {@code createdAt} rather than a raw ISO
+     * string: {@link #recordNxAnswerRun} resolves it leniently ({@link
+     * #parseTs}, defaulting to {@code now()}) before calling this method, and
+     * {@link #recordNxAnswerRunComplete}'s caller ({@code
+     * TelemetryHandler.handleNxAnswerRunComplete}) has already enforced D1's
+     * required-{@code created_at} rule (400 on missing/blank/unparsable)
+     * before this is ever reached, so there is nothing left for this method to
+     * default.
+     */
+    private static Long insertRunAndSteps(DSLContext ctx,
+                                          String tenant,
+                                          String question,
+                                          Long planId,
+                                          Double matchedConfidence,
+                                          int stepCount,
+                                          String finalText,
+                                          Double costUsd,
+                                          long durationMs,
+                                          OffsetDateTime createdAt,
+                                          List<StepInput> steps) {
+        Long runId = ctx.insertInto(NX_ANSWER_RUNS)
+            .set(NX_ANSWER_RUNS.TENANT_ID, tenant)
+            .set(NX_ANSWER_RUNS.QUESTION, question)
+            .set(NX_ANSWER_RUNS.PLAN_ID, planId)
+            .set(NX_ANSWER_RUNS.MATCHED_CONFIDENCE, matchedConfidence)
+            .set(NX_ANSWER_RUNS.STEP_COUNT, stepCount)
+            .set(NX_ANSWER_RUNS.FINAL_TEXT, str(finalText))
+            .set(NX_ANSWER_RUNS.COST_USD, costUsd)
+            .set(NX_ANSWER_RUNS.DURATION_MS, durationMs)
+            .set(NX_ANSWER_RUNS.CREATED_AT, createdAt)
+            .onConflictDoNothing()
+            .returning(NX_ANSWER_RUNS.ID)
+            .fetchOne(NX_ANSWER_RUNS.ID);
+
+        if (runId != null && steps != null) {
+            for (StepInput s : steps) {
+                Integer[] bundled = s.bundledSteps() == null
+                    ? new Integer[0]
+                    : s.bundledSteps().toArray(new Integer[0]);
+                ctx.insertInto(NX_ANSWER_STEPS)
+                    .set(NX_ANSWER_STEPS.RUN_ID, runId)
+                    .set(NX_ANSWER_STEPS.TENANT_ID, tenant)
+                    .set(NX_ANSWER_STEPS.STEP_INDEX, s.stepIndex())
+                    .set(NX_ANSWER_STEPS.OPERATOR, s.operator())
+                    .set(NX_ANSWER_STEPS.SOURCE, s.source())
+                    .set(NX_ANSWER_STEPS.MODEL, s.model())
+                    .set(NX_ANSWER_STEPS.INPUT_TOKENS, s.inputTokens())
+                    .set(NX_ANSWER_STEPS.OUTPUT_TOKENS, s.outputTokens())
+                    // nexus-ndoke: input_tokens is 2 on a cached prompt — the
+                    // real size lives in one of these two. Without them every
+                    // per-plan cost aggregate mixes cache-warm and cache-cold
+                    // runs with nothing recorded that can separate them.
+                    .set(NX_ANSWER_STEPS.CACHE_READ_INPUT_TOKENS, s.cacheReadInputTokens())
+                    .set(NX_ANSWER_STEPS.CACHE_CREATION_INPUT_TOKENS, s.cacheCreationInputTokens())
+                    .set(NX_ANSWER_STEPS.COST_USD,
+                        s.costUsd() != null ? BigDecimal.valueOf(s.costUsd()) : null)
+                    .set(NX_ANSWER_STEPS.ELAPSED_MS, s.elapsedMs())
+                    .set(NX_ANSWER_STEPS.OK, s.ok())
+                    .set(NX_ANSWER_STEPS.BUNDLED_STEPS, bundled)
+                    .execute();
+            }
+        }
+        return runId;
+    }
+
+    /**
+     * RDR-203 D1/D2/D3 — the composite write behind
+     * {@code POST /v1/telemetry/nx_answer_runs/complete}: ONE {@link
+     * TenantScope#withTenant} transaction over {@code nx_answer_runs},
+     * {@code nx_answer_steps} and {@code plans}, replacing what used to be
+     * three client-composed round trips (one per table, effectively) with one
+     * connection, one {@code set_config} GUC stamp, one commit.
+     *
+     * <p>Order, per D2: (1) insert the parent row and its step children via
+     * {@link #insertRunAndSteps} — the SAME DSL {@link #recordNxAnswerRun}
+     * uses; (2) when that insert returns a real id AND {@code planId} names a
+     * usable plan row (non-null and {@code > 0} — D1 gives {@code null} and
+     * {@code 0} the same meaning, "no library row to count against", which is
+     * why the guard checks both), apply both plan-counter updates via the
+     * lifted {@link PlanRepository#incrementRunStartedIn} and {@link
+     * PlanRepository#incrementRunOutcomeIn} static helpers, in the SAME
+     * transaction. A step CHECK violation (e.g. {@code
+     * nx_answer_steps_source_chk}) or any other failure at any step throws out
+     * of this lambda and rolls back everything written so far, counters
+     * included.
+     *
+     * <p>D3: when the parent insert's {@code onConflictDoNothing()}
+     * conflict-skips (the {@code (tenant_id, question, created_at)} ETL dedup
+     * index), {@code insertRunAndSteps} returns {@code null} — the step
+     * children are already skipped (same as {@link #recordNxAnswerRun}) and
+     * this method additionally skips the plan-counter updates too: a dedup hit
+     * means this run is already recorded, and bumping counters again would
+     * double-count it.
+     *
+     * <p>{@code createdAt} arrives pre-validated: the caller ({@code
+     * TelemetryHandler.handleNxAnswerRunComplete}) enforces D1's
+     * required-{@code created_at} rule (missing, blank or unparsable is a 400
+     * naming the field) before this method is ever reached — unlike {@code
+     * /record}, which stays lenient via {@link #recordNxAnswerRun}'s own
+     * {@link #parseTs} fallback to {@code now()}.
+     *
+     * @param success the closed-vocabulary {@code outcome} field off the wire,
+     *                already resolved to a boolean by the handler ({@code
+     *                "success"} -> true, {@code "failure"} -> false)
+     */
+    public void recordNxAnswerRunComplete(String tenant,
+                                          String question,
+                                          Long planId,
+                                          Double matchedConfidence,
+                                          int stepCount,
+                                          String finalText,
+                                          Double costUsd,
+                                          long durationMs,
+                                          OffsetDateTime createdAt,
+                                          List<StepInput> steps,
+                                          boolean success) {
+        tenantScope.withTenant(tenant, ctx -> {
+            Long runId = insertRunAndSteps(ctx, tenant, question, planId, matchedConfidence,
+                stepCount, finalText, costUsd, durationMs, createdAt, steps);
+            if (runId != null && planId != null && planId > 0) {
+                PlanRepository.incrementRunStartedIn(ctx, planId);
+                PlanRepository.incrementRunOutcomeIn(ctx, planId, success);
             }
             return null;
         });
