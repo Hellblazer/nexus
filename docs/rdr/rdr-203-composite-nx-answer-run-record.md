@@ -135,10 +135,20 @@ Body is the existing `/record` body plus one new required field:
   "final_text": "...",
   "cost_usd": 0.0123,
   "duration_ms": 81422,
+  "created_at": "2026-09-05T18:22:31.481920+00:00",
   "steps": [ ... ],
   "outcome": "success"
 }
 ```
+
+`created_at` is the existing optional field on `/record`, and on this route the
+client always sends it. It is not decoration: it is the dedup key
+(`tenant_id, question, created_at`) that makes a retried composite idempotent,
+so a payload without it defeats D3 and the retry guard in Risks. The engine
+keeps `/record`'s lenient handling (absent means stamp `now()`), because the
+ETL path and the D6 survivors still rely on it. Named here rather than left to
+the client half, because P2 and P3 are different developers and the engine's
+contract has to say that the field carries weight on this route.
 
 `outcome` is a closed vocabulary of two values, `"success"` and `"failure"`.
 A missing or unrecognized value is a 400 naming the field, never a default.
@@ -197,7 +207,9 @@ This is a real semantic change and it is taken deliberately:
 
 - What is gained: `use_count == success_count + failure_count` becomes an
   invariant per plan rather than a property that happens to hold, and it is
-  checkable.
+  checkable. It holds on every path, not only the composite one: the D6
+  survivors and the 404 fallback issue a deferred `run_start` of their own
+  (D5), so no path records an outcome without having counted its use.
 - What is lost: the count of abandoned runs. That signal was never readable
   anyway, because an abandoned run writes no `nx_answer_runs` row either, so
   the only trace it left was a counter nobody could reconcile against anything.
@@ -254,15 +266,37 @@ path cheap to test: it is the current code path, reached through one branch.
 A probe that fails to reach `/version` reads as unsupported. The direction is
 safe: a new client against an old engine records everything it records today.
 
+**`run_start` is deferred, never dropped.** Skipping the early
+`increment_run_started` when the probe reports support is only sound if every
+path that does not terminate through `/complete` issues one itself. It does.
+One helper, `_nx_answer_ensure_run_started(db, plan_id)`, issues
+`increment_run_started` immediately before any direct `_nx_answer_record_run`
+write, and no-ops when `plan_id` is null or zero. Two kinds of path use it: the
+D6 survivors, which never route through `/complete` at all, and the 404
+downgrade below, which discovers mid-call that it cannot. The helper is what
+makes the early skip safe, and it is why the probe may flip under a call in
+flight without leaving anything uncounted.
+
+Exactly one bump per call, in every combination. A call reaches exactly one
+terminating arm. If that arm converts, the composite bumps once, server side.
+If it is a D6 survivor, the helper bumps once. If the composite 404s, nothing
+was applied server side (the route does not exist), and the fallback bumps
+once. There is no path on which both fire.
+
 **Downgrade guard.** The probe caches for the life of a process, and after
 nexus-m20mf P2 and P3 that is the life of the MCP host. If a supporting engine
 is replaced by a non-supporting one under a running client, the cached `true`
 would post to a route that 404s and the entire run record would be lost,
 including the outcome, which is worse than today. The client therefore treats a
 404 from `/complete` as a probe correction: it flips the cached flag to false,
-logs it once, and falls back to the three-call path for that call and every
-call after it in the process. A 404 is the only status treated this way; a 429
-or a 5xx is a transport failure and keeps today's drop-and-warn handling.
+logs it once, and then completes the tripping call on the degradation path,
+issuing `_nx_answer_ensure_run_started`, then the record, then the outcome, in
+that order. Three POSTs for that call, one composite POST for every call after
+it in the process. "Falls back to the three-call path for that call" is then
+literally true and testable, which an earlier draft asserted without making it
+so: it flipped the flag and left the tripping call's own record on the floor.
+A 404 is the only status treated this way; a 429 or a 5xx is a transport
+failure and keeps today's drop-and-warn handling.
 
 ### D6. What stays on the existing route
 
@@ -270,7 +304,10 @@ Three writers keep `POST /v1/telemetry/nx_answer_runs/record` and are out of
 scope:
 
 - The planner-failure arm (`core.py:8570`), which records a run with
-  `plan_id=None` and has no outcome to report.
+  `plan_id=None` and has no outcome to report. It calls
+  `_nx_answer_ensure_run_started` like every other direct writer, where the
+  call is a structural no-op because there is no plan id. It is written that
+  way so the census rule below has no exception to carve out.
 - The RDR-200 continuation handoff arm (`core.py:9378` for the row,
   `core.py:9387` for its outcome). This one is a genuine
   `(record, outcome)` pair and could convert on shape alone. It is excluded on
@@ -278,14 +315,24 @@ scope:
   the envelope is ever returned), and the handoff row plus the later
   `nx_answer_report` row are one paired construct that `nx answer-runs` joins
   at read time on the `continuation_id` embedded in both markers. RDR-203 does
-  not reopen that contract. The arm keeps **both** of today's writes, the
-  record and the outcome, exactly as they stand.
+  not reopen that contract. The arm keeps all three of today's writes in
+  today's order: `_nx_answer_ensure_run_started`, the record, the outcome.
+  Under a supporting engine the first of those is the deferred `run_start` from
+  D5, since the early site skipped it.
 - `nx_answer_report`, which appends a report event, not a run.
 
 This exclusion is the rule the rest of the document is counted against. The
 converting set is the **ten** remaining `(record, outcome)` pairs, not eleven.
 An earlier draft listed the handoff pair among the converting arms while also
 listing it here; the exclusion wins, and the counts below reflect it.
+
+The deferral is what keeps the exclusion cheap. A survivor that skipped
+`run_start` and then recorded an outcome would drive its plan's `use_count`
+below `success_count + failure_count`, breaking D4's invariant in the
+direction that matters: `promote.py`'s `use_count >= 3` gate would become
+unclearable for a plan whose runs mostly end in a continuation handoff. With
+the deferred call the invariant holds on every path, and a handoff-heavy plan
+promotes on the same evidence as any other.
 
 The old routes are not deprecated and not removed. They serve those three
 writers, they serve the ETL import path, and they are the degradation target.
@@ -309,13 +356,21 @@ DSL. The new `recordNxAnswerRunComplete(...)` opens one `withTenant`, calls
 plan helpers below.
 
 **`PlanRepository`**: the bodies of `incrementRunStarted` and
-`incrementRunOutcome` are lifted into package-private
+`incrementRunOutcome` are lifted into package-private **static**
 `incrementRunStartedIn(DSLContext ctx, long id)` and
 `incrementRunOutcomeIn(DSLContext ctx, long id, boolean success)`. The two
 public methods become `withTenant` wrappers over them and keep their exact
 current behaviour. `TelemetryRepository` is in the same package
 (`dev.nexus.service.db`) and calls the helpers directly, so the counter DSL
 exists once and both entry points execute the same statements.
+
+Static, not instance, and that is a constraint rather than a preference:
+`TelemetryRepository`'s constructor takes only a `TenantScope`
+(`TelemetryRepository.java:57`), and `NexusService` builds the two repositories
+independently (`NexusService.java:334-335`). An instance helper would mean
+handing `TelemetryRepository` a `PlanRepository`, which is a wiring change in
+`NexusService` for no gain: the helpers take their `DSLContext` as an argument
+and hold no state of their own.
 
 **No SQL strings anywhere.** Every statement is generated jOOQ DSL over the
 generated `NX_ANSWER_RUNS`, `NX_ANSWER_STEPS` and `PLANS` tables, which is what
@@ -341,10 +396,11 @@ work; it does not change the tenant contract.
 - `_supports_nx_answer_steps()`: unchanged contract, now a read of that dict.
 - `_supports_nx_answer_run_complete()`: the new flag, same shape.
 - `record_nx_answer_run_complete(*, question, plan_id, matched_confidence,
-  step_count, final_text, cost_usd, duration_ms, steps, success)`: one POST to
-  `/complete`. It is the wire call only. It does not branch on the probe,
-  because the fallback needs the plans store as well and that decision belongs
-  at the call site.
+  step_count, final_text, cost_usd, duration_ms, created_at, steps, success)`:
+  one POST to `/complete`. It is the wire call only. It does not branch on the
+  probe, because the fallback needs the plans store as well and that decision
+  belongs at the call site. A 404 propagates to the caller rather than being
+  swallowed here, since the caller is what turns it into a fallback.
 
 **`src/nexus/mcp/core.py`**
 
@@ -365,8 +421,14 @@ outcome; and `9378` with its outcome at `9387`, the RDR-200 continuation
 handoff, which keeps both of today's writes. Ten converting pairs, two
 surviving direct writers, and that is what the census test below asserts.
 
-The run-start site at `core.py:8674` becomes conditional: issue
-`increment_run_started` only when the probe reports no support.
+A second new helper, `_nx_answer_ensure_run_started(db, plan_id)`, issues
+`increment_run_started` and no-ops on a null or zero plan id. It is called
+immediately before each of the two surviving direct `_nx_answer_record_run`
+writes, and by `_nx_answer_record_complete`'s 404 fallback before its record
+write. The run-start site at `core.py:8674` becomes conditional in the other
+direction: issue `increment_run_started` only when the probe reports no
+support. Read together, the rule is that the bump moves rather than
+disappearing, and the census test below is what holds that rule in place.
 
 **Precondition this depends on, verified and pinned.** Every arm that carries a
 non-zero `plan_id` executes downstream of the run-start site, so the composite
@@ -390,7 +452,7 @@ prose is required by `tests/test_wire_contract_pairing_lint.py`.
 > `nx_answer_run_complete_supported`. Engine half in this commit:
 > `TelemetryRepository.recordNxAnswerRunComplete` (one `withTenant`
 > transaction over `nx_answer_runs`, `nx_answer_steps` and `plans`, reusing
-> the lifted `insertRunAndSteps` and the new package-private
+> the lifted `insertRunAndSteps` and the new package-private static
 > `PlanRepository.incrementRunStartedIn` / `incrementRunOutcomeIn`),
 > `TelemetryHandler.handleNxAnswerRunComplete`, and the `VersionHandler`
 > flag. No existing route, request field or response field changed shape.
@@ -414,7 +476,7 @@ falsifier, per the house rule that a gate which cannot go red proves nothing.
 
 ### Java
 
-`service/src/test/java/dev/nexus/service/db/NxAnswerRunCompleteTransactionTest.java`
+`service/src/test/java/dev/nexus/service/NxAnswerRunCompleteTransactionTest.java`
 
 - `runRowStepsAndPlanCountersLandInOneTransaction`: post a composite with steps
   and a real plan id; assert the run row, its step children, `use_count + 1`,
@@ -460,20 +522,29 @@ falsifier, per the house rule that a gate which cannot go red proves nothing.
   calls.
 - `test_supported_engine_skips_run_start`: no request to
   `/v1/plans/metrics/run_start` at all.
-- `test_404_on_complete_falls_back_and_flips_the_cached_flag`: first call falls
-  back to three writes, second call in the same process goes straight to three
-  writes with no further attempt on `/complete`.
+- `test_404_downgrade_issues_deferred_run_start_then_record_then_outcome`: the
+  tripping call issues exactly three POSTs, in that order,
+  `/v1/plans/metrics/run_start`, `/v1/telemetry/nx_answer_runs/record`,
+  `/v1/plans/metrics/run_outcome`, after the 404 from `/complete`; the next
+  call in the same process goes straight to those three with no further attempt
+  on `/complete`. Falsifier: drop the deferred `run_start` from the fallback
+  and the first assertion sees two POSTs, which is the shape the earlier draft
+  would have shipped.
 - `test_every_converting_arm_routes_through_the_choke_point`: an AST census
   over `src/nexus/mcp/core.py` asserting that exactly two direct
   `_nx_answer_record_run` calls survive outside the choke point, that they are
   the two D6 exclusions (the planner-failure arm and the RDR-200 continuation
   handoff), that exactly one direct `_nx_answer_record_outcome` call survives
-  and it is the handoff arm's, and that `increment_run_started` appears at
-  exactly one site. Naming the survivors rather than asserting zero is what
-  makes the census both true and useful: an eleventh converting arm added later
-  reds here, and so does an implementer who quietly folds a D6 exclusion in.
-  Falsifier: restore one converted arm's direct pair and the survivor count
-  goes to three.
+  and it is the handoff arm's, and that each surviving direct
+  `_nx_answer_record_run` is immediately preceded by an
+  `_nx_answer_ensure_run_started` call. Naming the survivors rather than
+  asserting zero is what makes the census both true and useful: an eleventh
+  converting arm added later reds here, and so does an implementer who quietly
+  folds a D6 exclusion in. The preceded-by clause is what catches the other
+  direction, a survivor that keeps its record write and loses its deferred
+  bump. Falsifier: restore one converted arm's direct pair and the survivor
+  count goes to three; delete one survivor's `_nx_answer_ensure_run_started`
+  and the ordering clause reds.
 - `test_recording_arms_are_downstream_of_run_start`: pins the D-section
   precondition, so a future refactor that hoists an arm above the run-start
   site fails here instead of double-counting `use_count` in production.
@@ -487,6 +558,17 @@ falsifier, per the house rule that a gate which cannot go red proves nothing.
   actually declines to double-bump on that replay. Neither half is sufficient
   alone: the Python test proves the key is stable, the Java test proves a
   stable key is honoured.
+- `test_handoff_arm_against_supporting_engine_keeps_use_count_equal_to_outcomes`:
+  the invariant test for the D6 survivors, and the one test here that needs a
+  real store rather than a stub. Against the self-provisioned engine substrate
+  (`ensure_engine` / `mint_test_tenant`) with `/complete` supported, drive an
+  `nx_answer` call that terminates on the RDR-200 continuation handoff arm,
+  then read the plan row back and assert
+  `use_count == success_count + failure_count`. Falsifier: remove the
+  survivor's `_nx_answer_ensure_run_started` and the read comes back with
+  `use_count` one short, which is the exact shape that would make
+  `promote.py`'s `use_count >= 3` gate unclearable for a handoff-heavy plan.
+  Never against the operator's live install.
 
 `tests/test_nx_answer_t2_fanout_budget.py`
 
@@ -510,23 +592,32 @@ green, names both D6 survivors, and reds when one converted arm is reverted;
 no behaviour change observable on the wire.
 
 **P2. Engine half.** The route, the handler, the repository composite, the two
-lifted `PlanRepository` helpers, the `/version` flag, the four Java test
-classes above, and the wire-ledger entry. No Liquibase changeset. Exit: the
-full engine suite green via `scripts/mvnw-leased.sh`, the rollback falsifier
-red when the composite is split back into three transactions, and
-`RawSqlGateTest` green with no new sanctioned region.
+lifted `PlanRepository` helpers, the `/version` flag, the Java test classes
+above, and the wire-ledger entry. Also an edit to an existing test:
+`VersionHandlerReleaseVersionTest.java:121` asserts the capability fragment by
+exact equality, so a second flag on the same append path reds there and the fix
+belongs in this phase rather than being discovered by the next person to run
+the suite (residual 1). No Liquibase changeset. Exit: the full engine suite
+green via `scripts/mvnw-leased.sh`, the rollback falsifier red when the
+composite is split back into three transactions, and `RawSqlGateTest` green
+with no new sanctioned region.
 
 **P3. Client half behind the probe.** The capabilities-dict refactor of the
 existing probe, `record_nx_answer_run_complete`, the branch inside
-`_nx_answer_record_complete`, the conditional run-start, and the 404 downgrade
-guard. P3 also owns idempotency: the composite payload stamps `created_at`
-once, at construction, before the first attempt, using the existing optional
-`created_at` field the `/record` handler already reads. Ships the Python tests
-above including the budget test and
-`test_gateway_retry_reuses_one_created_at_stamp`. Exit: the degradation test
-green against a non-supporting stub, the budget test green against a supporting
-stub, both red when the probe is forced the other way, and the retry-stamp test
-green and red when `created_at` is recomputed inside the retry loop.
+`_nx_answer_record_complete`, the conditional run-start, the new
+`_nx_answer_ensure_run_started` helper with its calls at the two D6 survivors,
+and the 404 downgrade guard including its deferred `run_start`. P3 also owns
+idempotency: the composite payload stamps `created_at` once, at construction,
+before the first attempt, using the existing optional `created_at` field the
+`/record` handler already reads. Ships the Python tests above including the
+budget test, `test_gateway_retry_reuses_one_created_at_stamp`, the 404
+downgrade ordering test, and the handoff invariant test. Exit: the degradation
+test green against a non-supporting stub, the budget test green against a
+supporting stub, both red when the probe is forced the other way, the
+retry-stamp test green and red when `created_at` is recomputed inside the retry
+loop, the 404 test showing three POSTs in order then one composite, and the
+handoff invariant test green and red when the survivor's deferred bump is
+removed.
 
 **P4. Pairing, cutover and documentation.** Bump
 `REQUIRED_ENGINE_VERSION` to the engine tag carrying P2 in the client release
@@ -536,6 +627,49 @@ module docstring for the `use_count` semantic change. After
 cutover, run the reconciliation read the research item below defines and record
 the result. Exit: `scripts/check_engine_release_floor.py` green without a
 paired-deploy exception, and the reconciliation recorded.
+
+## Residuals carried into implementation
+
+Seven findings from the round-1 plan audit, classified
+DISCOVER-AT-IMPLEMENTATION. They are recorded here so the implementer meets
+them on the page rather than in the first test run. None of them re-opens a
+decision, and none is re-planned.
+
+1. **`VersionHandlerReleaseVersionTest.java:121` asserts by exact equality.**
+   `service/src/test/java/dev/nexus/service/http/VersionHandlerReleaseVersionTest.java`'s
+   `appendNxAnswerStepsCapabilityFieldAlwaysEmitsTrue` compares the emitted
+   fragment to the literal `,"nx_answer_steps_supported":true`. Adding a second
+   capability field on the same append path reds it. Listed as a P2 edit above.
+2. **D1's route body must carry `created_at`.** P2 and P3 are different
+   developers, so the field's role as the dedup key is stated in the engine's
+   contract (D1) rather than left as a client-side implementation detail. An
+   engine developer reading only D1 would otherwise treat it as optional
+   decoration and a client developer might omit it.
+3. **`TelemetryRepository`'s constructor takes only `TenantScope`.** The lifted
+   `PlanRepository` helpers are therefore static, or `NexusService`'s wiring
+   changes to hand one repository to the other. This RDR takes the static form;
+   the note is here so the choice is not re-litigated at the keyboard.
+4. **The `(9709, 9591)` pair straddles the RDR-084 plan-grow block.** The
+   success outcome is recorded at `9591` and Step 6's record write is at
+   `9709`, with the plan-grow save between them. P1 chooses the merge site when
+   it collapses that pair into one choke-point call, and the choice is a
+   judgement about where the grow block should sit relative to the record, not
+   a mechanical move.
+5. **Nine of the ten converting arms still use `with _t2_ctx() as db:`, not
+   `_t2_index_write`.** Only the Step 6 site was converted by nexus-m20mf P2.
+   Moving the other nine changes which failures reach
+   `_service_t2_write_locked`'s eviction classifier, and `core.py:9695-9708`
+   already documents the one-way version of this for the Step 6 site: an
+   internal `_warn_telemetry_drop` swallow means a connectivity error there
+   never reaches the classifier. Widening the population of callers inside the
+   singleton is a behaviour change worth watching, not a refactor.
+6. **The capability probe fires at the run-start site on every call after P3.**
+   That is a cached-dict read, not a round trip, so the budget of one
+   `/version` probe per process still holds. Recorded because a reader of the
+   budget test could otherwise mistake the new early call for a regression.
+7. **`NxAnswerRunCompleteTransactionTest` sits beside `TelemetryRepositoryTest`.**
+   That is `service/src/test/java/dev/nexus/service/`, not a `db/`
+   subpackage. An earlier draft named the `db/` path, which does not exist.
 
 ## Risks
 
@@ -657,6 +791,17 @@ its own schedule, its own failure modes and its own tests.
 - 2026-09-05: created as draft. Picks up the scope RDR-198 withdrew and named
   as belonging in its own RDR. Scoped to the run-record operation only; the
   read-side bundle is deliberately excluded.
+- 2026-09-05: round-1 plan audit folded in. Both BLOCKS-PLANNING findings are
+  answered by one mechanism, `_nx_answer_ensure_run_started`: the early
+  `run_start` is deferred rather than dropped when the probe reports support,
+  and every path that does not terminate through `/complete` issues it before
+  its own record write. That keeps `use_count == success_count +
+  failure_count` on the D6 survivors, so `promote.py`'s gate stays clearable
+  for a handoff-heavy plan, and it makes the 404 downgrade complete its own
+  tripping call as three writes in order rather than dropping that call's
+  record. D5, D6, D4 and the affected tests are rewritten accordingly, and a
+  Residuals section records the seven DISCOVER-AT-IMPLEMENTATION findings
+  verbatim for the implementer to carry.
 - 2026-09-05: critique folded in (T2 `nexus/critique-nexus-m20mf-p5-rdr-203`
   [24680]). Five changes. The scope self-contradiction is resolved in favour of
   D6: the RDR-200 continuation handoff arm at `9378`/`9387` does not convert,
