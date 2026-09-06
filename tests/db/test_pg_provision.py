@@ -466,11 +466,30 @@ class TestIdempotency:
 
         NOTE: mutates the module-scoped ``provisioned`` cluster; restores the
         role via the very backfill under test, so sibling order is safe.
+
+        nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; batch-9
+        gate pass, worktree-agent-ae864db44cc9fe82c): provision() now
+        creates the nexus schema as part of EVERY provisioning path
+        (fresh AND fast-path re-provision), so by the time this test runs
+        nexus_diag already holds USAGE + SELECT ON ALL TABLES on schema
+        nexus (granted by an earlier sibling test's own re-provision call
+        hitting ``_backfill_diag_role``'s conditional grant, which now
+        fires on the very first re-provision since the schema already
+        exists from the module fixture's initial provision()). The bare
+        ``DROP ROLE`` precondition below failed the first time this test
+        ran against a real cluster ("privileges for schema nexus" DETAIL)
+        for exactly that reason — REVOKE the same two grants
+        ``TestHealDiagViewGrantsAndOwnership`` already has to strip for
+        the identical reason before its own role drop.
         """
         result, config_dir = provisioned
         os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
         creds_path = result.credentials_path
 
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "REVOKE ALL ON ALL TABLES IN SCHEMA nexus FROM nexus_diag")
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "REVOKE USAGE ON SCHEMA nexus FROM nexus_diag")
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
               "DROP ROLE IF EXISTS nexus_diag")
         assert _query(bins, result.port, NEXUS_DB_NAME, os_user,
@@ -813,21 +832,41 @@ class TestReassignDiagViewOwnerBeforeRestart:
 
         nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): the
         module-scoped ``provisioned`` fixture's own provision() call now
-        creates the nexus schema itself (nexus_admin-owned, for
+        creates the nexus schema itself, AUTHORIZATION nexus_admin (for
         relocate_vector_extensions_to_nexus_schema's SECURITY DEFINER
-        function to live in), so the CREATE SCHEMA and GRANT USAGE below are
-        idempotent no-ops by the time this fixture runs, not the
-        "unauthorized superuser CREATE SCHEMA" they were before this batch.
-        What still reproduces the legacy pre-P3c shape correctly regardless
-        is the explicit ALTER VIEW ... OWNER TO below — the ownership this
-        test actually exercises is the VIEW's, never the containing
-        schema's, so this fixture's behavior is unchanged for the test's own
-        purposes; only the reason the CREATE SCHEMA line is a no-op changed.
+        function to live in) — so the CREATE SCHEMA below is an idempotent
+        no-op, but landing on an ALREADY nexus_admin-OWNED schema, not a
+        superuser-owned one. That is a real behavioral difference, not
+        merely a different reason for the same no-op (an earlier version of
+        this comment claimed the latter and was wrong, caught by this gate
+        run: batch-9 gate pass, worktree-agent-ae864db44cc9fe82c):
+        PostgreSQL lets a SCHEMA's owner DROP any object inside it,
+        regardless of who owns that object directly (verified empirically —
+        nexus_admin, NOSUPERUSER, successfully dropped a view explicitly
+        OWNER'd to the superuser, once nexus_admin owned the containing
+        schema; a control role with no schema relationship got "permission
+        denied for schema nexus" as expected). Left un-reassigned, this
+        fixture would no longer reproduce the crash-loop precondition this
+        whole test class exists to prove: nexus_admin's own DROP VIEW
+        no longer needs the reassignment below AT ALL once it already owns
+        the schema, so the "PRECONDITION" pytest.raises block would report
+        DID NOT RAISE — not because the underlying fix stopped mattering,
+        but because this fixture stopped reproducing the shape the fix is
+        for (a real install where nexus_admin does NOT own the containing
+        schema at the point a superuser-created diagnostic view exists in
+        it — still the actual pre-taxonomy-011-8 / DBA-provisioned-schema
+        shape in production). The explicit ALTER SCHEMA below restores
+        that shape for this fixture's own purposes; ownership is handed
+        back to nexus_admin in teardown so later classes in this module
+        that depend on provision()'s own steady state (nexus_admin owning
+        nexus) are unaffected.
         """
         result, config_dir = provisioned
         os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
               "CREATE SCHEMA IF NOT EXISTS nexus")
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              f'ALTER SCHEMA nexus OWNER TO "{os_user}"')
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
               "GRANT USAGE ON SCHEMA nexus TO nexus_admin")
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
@@ -838,13 +877,16 @@ class TestReassignDiagViewOwnerBeforeRestart:
         yield result, config_dir, os_user
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
               "DROP VIEW IF EXISTS nexus.diag_chash_conformance")
-        # nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): the nexus
-        # schema is no longer this fixture's to drop — provision() itself now
-        # creates it (relocate_vector_extensions_to_nexus_schema's SECURITY
-        # DEFINER function lives there from the module-scoped provisioned
-        # fixture's own setup onward), so a schema-level DROP here would
-        # fail (non-empty, no CASCADE) or, with CASCADE, destroy state later
-        # tests in this module depend on.
+        # Hand schema ownership back to nexus_admin — provision()'s own
+        # steady state, which later classes in this module (relocate_vector_
+        # extensions_to_nexus_schema's SECURITY DEFINER functions live in
+        # nexus, owned by os_user but the SCHEMA itself is nexus_admin-owned
+        # per that function's own docstring) depend on. A schema-level DROP
+        # here would fail (non-empty, no CASCADE) or, with CASCADE, destroy
+        # state later tests in this module depend on — reassignment, not
+        # deletion, is the correct symmetric teardown.
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "ALTER SCHEMA nexus OWNER TO nexus_admin")
 
     def test_absent_view_is_a_noop(self, provisioned, bins):
         from nexus.db.pg_provision import reassign_diag_view_owner_before_restart
@@ -958,16 +1000,24 @@ class TestProvisionFastPathReassignsDiagView:
         ``TestReassignDiagViewOwnerBeforeRestart.superuser_owned_view``: a
         view created entirely by the superuser, exactly what every
         pre-taxonomy-011-8 local install's provisioning has produced. See
-        that fixture's own docstring for why the CREATE SCHEMA / GRANT USAGE
-        below are now idempotent no-ops (provision() itself creates the
-        nexus schema since nexus-cbo4a batch 9 item 0) and why that does not
-        affect this fixture's own correctness — the explicit ALTER VIEW ...
-        OWNER TO below is what actually reproduces the superuser-owned
-        legacy shape this test needs."""
+        that fixture's own docstring for why the CREATE SCHEMA below is now
+        an idempotent no-op landing on an ALREADY nexus_admin-owned schema
+        (provision() itself creates it, AUTHORIZATION nexus_admin, since
+        nexus-cbo4a batch 9 item 0) and why that DOES require the explicit
+        ALTER SCHEMA reassignment below, not merely the ALTER VIEW: a
+        NOSUPERUSER role that owns the containing schema can drop any
+        object inside it regardless of that object's own owner (verified
+        empirically, batch-9 gate pass) — left un-reassigned, nexus_admin
+        would already be able to drop the view via schema ownership alone,
+        before ``reassign_diag_view_owner_before_restart`` ever runs,
+        and this fixture would silently stop reproducing the crash-loop
+        shape it exists to prove."""
         result, config_dir = provisioned
         os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
               "CREATE SCHEMA IF NOT EXISTS nexus")
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              f'ALTER SCHEMA nexus OWNER TO "{os_user}"')
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
               "GRANT USAGE ON SCHEMA nexus TO nexus_admin")
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
@@ -978,13 +1028,12 @@ class TestProvisionFastPathReassignsDiagView:
         yield result, config_dir, os_user
         _psql(bins, result.port, NEXUS_DB_NAME, os_user,
               "DROP VIEW IF EXISTS nexus.diag_chash_conformance")
-        # nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): the nexus
-        # schema is no longer this fixture's to drop — provision() itself now
-        # creates it (relocate_vector_extensions_to_nexus_schema's SECURITY
-        # DEFINER function lives there from the module-scoped provisioned
-        # fixture's own setup onward), so a schema-level DROP here would
-        # fail (non-empty, no CASCADE) or, with CASCADE, destroy state later
-        # tests in this module depend on.
+        # Hand schema ownership back to nexus_admin — provision()'s own
+        # steady state (see the sibling fixture's teardown comment for the
+        # full reasoning; a schema-level DROP here would fail or destroy
+        # state later tests in this module depend on).
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "ALTER SCHEMA nexus OWNER TO nexus_admin")
 
     def test_daemon_start_path_reassigns_via_provision_fast_path(
         self, superuser_owned_view, bins,
@@ -1094,16 +1143,57 @@ class TestFreshProvisionCreatesVectorDirectly:
     transfer — and does NOT relocate either into the nexus schema itself
     (relocate_vector_extensions_to_nexus_schema is called with direct=False
     here); it only ensures the SECURITY DEFINER relocation function exists,
-    for Liquibase's search-path-001 guard to call later, mid-walk."""
+    for Liquibase's search-path-001 guard to call later, mid-walk.
+
+    OWN CLUSTER, not the module-scoped ``provisioned`` fixture (batch-9
+    gate pass, worktree-agent-ae864db44cc9fe82c): this class's whole point
+    is asserting what a cluster looks like IMMEDIATELY after a fresh
+    provision(), before anything else has touched it. ``TestIdempotency``
+    (earlier in this module) calls provision() again on the shared
+    module-scoped cluster, which hits the fast idempotency path and — by
+    design, as of this batch — actually relocates vector/pg_trgm to nexus
+    as part of that path's own "every daemon start" backfill. That is
+    correct production behavior, not a bug, but it means the module-scoped
+    cluster is no longer in its just-provisioned state by the time this
+    class runs — proven the first time this suite executed against a real
+    cluster: ``test_vector_stays_in_public_after_fresh_provision`` failed
+    with ``nexus`` where it expected ``public``. A dedicated cluster, never
+    shared with any test that re-invokes provision(), is what the class's
+    own docstring already claims to test.
+    """
 
     pytestmark = pytest.mark.no_service_jar
+
+    @pytest.fixture(scope="class")
+    def provisioned(self, bins: PgBinaries, tmp_path_factory) -> tuple[ProvisionResult, Path]:
+        """Shadows the module-scoped ``provisioned`` fixture for every test
+        in this class — same shape, but this class's OWN cluster, touched
+        by nothing except the fresh provision() call itself."""
+        config_dir = tmp_path_factory.mktemp("nexus_provision_test_fresh")
+        old_env = os.environ.get("NEXUS_CONFIG_DIR")
+        os.environ["NEXUS_CONFIG_DIR"] = str(config_dir)
+        try:
+            result = provision(config_dir, force_new_port=True)
+        finally:
+            if old_env is None:
+                os.environ.pop("NEXUS_CONFIG_DIR", None)
+            else:
+                os.environ["NEXUS_CONFIG_DIR"] = old_env
+        yield result, config_dir
+        _stop_pg(bins, config_dir / "postgres")
 
     def test_vector_is_owned_by_os_user_after_fresh_provision(self, provisioned, bins):
         result, _ = provisioned
         os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        # Bare pg_roles.rolname, not ::regrole::text — the latter double-quotes
+        # any role name that is not a valid unquoted SQL identifier (e.g. a
+        # macOS account name containing a dot, "hal.hildebrand"), which broke
+        # this exact assertion the first time it ran against a real cluster
+        # (batch-9 gate pass, worktree-agent-ae864db44cc9fe82c).
         owner = _query(
             bins, result.port, NEXUS_DB_NAME, os_user,
-            "SELECT extowner::regrole::text FROM pg_extension WHERE extname = 'vector'",
+            "SELECT r.rolname FROM pg_extension e JOIN pg_roles r ON r.oid = e.extowner "
+            "WHERE e.extname = 'vector'",
         )
         assert owner == os_user, (
             "a fresh provision creates vector directly as os_user now — there is no "
@@ -1115,7 +1205,8 @@ class TestFreshProvisionCreatesVectorDirectly:
         os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
         owner = _query(
             bins, result.port, NEXUS_DB_NAME, os_user,
-            "SELECT extowner::regrole::text FROM pg_extension WHERE extname = 'pg_trgm'",
+            "SELECT r.rolname FROM pg_extension e JOIN pg_roles r ON r.oid = e.extowner "
+            "WHERE e.extname = 'pg_trgm'",
         )
         assert owner == os_user
 
@@ -1197,10 +1288,14 @@ class TestFreshProvisionCreatesVectorDirectly:
         directly."""
         result, _ = provisioned
         os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        # Bare pg_roles.rolname via a join, not ::regrole::text — see
+        # test_vector_is_owned_by_os_user_after_fresh_provision's comment
+        # for why the cast form breaks on a dotted os_user.
         row = _query(
             bins, result.port, NEXUS_DB_NAME, os_user,
-            "SELECT p.prosecdef::text || ',' || p.proowner::regrole::text "
+            "SELECT p.prosecdef::text || ',' || r.rolname "
             "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "JOIN pg_roles r ON r.oid = p.proowner "
             "WHERE n.nspname = 'nexus' AND p.proname = 'ensure_vector_extensions_relocated'",
         )
         assert row == f"true,{os_user}"
