@@ -84,15 +84,15 @@ define_leg preflight  serial "PINS PREFLIGHT (PASSED|FAILED)"           scripts/
 # Group, longest first so the slots pack: shakedown is max(leg) on this box.
 define_leg shakedown  group  "SHAKEDOWN (PASSED|FAILED)"                env "NEXUS_SANDBOX_HOME=$WORK/sb-shakedown" tests/e2e/release-sandbox.sh shakedown
 define_leg lsg        group  "LOCAL-SERVICE GATE (PASSED|FAILED)"       env "NX_GATE_ARTIFACTS=$ARTIFACTS" tests/e2e/local-service-gate.sh
-define_leg pkgup      group  "PACKAGE-UPGRADE CONVERGENCE MVV PASSED"   tests/e2e/migration-rehearsal/run.sh --artifacts "$ARTIFACTS" --package-upgrade
+define_leg pkgup      group  "PACKAGE-UPGRADE CONVERGENCE MVV (PASSED|FAILED)"   tests/e2e/migration-rehearsal/run.sh --artifacts "$ARTIFACTS" --package-upgrade
 if [ "$CHANGESET_DELTA" = 1 ]; then
-define_leg candmig    group  "CANDIDATE-MIGRATION REHEARSAL PASSED"     tests/e2e/migration-rehearsal/run.sh --artifacts "$ARTIFACTS" --candidate-migration
+define_leg candmig    group  "CANDIDATE-MIGRATION REHEARSAL (PASSED|FAILED)"     tests/e2e/migration-rehearsal/run.sh --artifacts "$ARTIFACTS" --candidate-migration
 fi
 define_leg mvv        group  "FRESH-INSTALL MVV (PASSED|FAILED)"        tests/e2e/fresh-install-mvv.sh
 define_leg smoke      group  "SMOKE (PASSED|FAILED)"                    env "NEXUS_SANDBOX_HOME=$WORK/sb-smoke" tests/e2e/release-sandbox.sh smoke
 define_leg upshakeout group  "UPGRADE-SHAKEOUT PASSED"                  tests/e2e/upgrade-shakeout.sh run
 define_leg genflip    group  "GEN-FLIP LIVE-HOLDER (PASSED|FAILED)"     tests/e2e/gen-flip-live-holder.sh
-define_leg shakeout   alone  "CANDIDATE SHAKEOUT PASSED"                tests/e2e/migration-rehearsal/run.sh --artifacts "$ARTIFACTS" --shakeout
+define_leg shakeout   alone  "CANDIDATE SHAKEOUT (PASSED|FAILED)"                tests/e2e/migration-rehearsal/run.sh --artifacts "$ARTIFACTS" --shakeout
 
 if [ -n "$ONLY" ]; then
   keep=",$ONLY,"
