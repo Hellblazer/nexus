@@ -219,22 +219,26 @@ that changed a claim in this document, which is what the research step is for.
   record / run_outcome call sites in `src/nexus/mcp/core.py`; recorded as
   `nexus_rdr/203-research-2`.*
 
-- **❓ Assumed** (source search) — The after half of the round-trip count: one
-  `POST /v1/telemetry/nx_answer_runs/complete` per converting call against a
-  supporting engine, and three POSTs for a D6 survivor or a 404-downgrade call.
-  This is a prediction from the design, not a measurement, and it stays Assumed
-  until P3 lands.
-  **Risk:** P3 ships without the per-path assertion and the central claim of
-  this RDR is never actually measured, leaving a round-trip argument backed by
-  reading rather than counting. That is the same class of error the retracted
-  90% figure came from, so it is worth naming rather than assuming good
-  behaviour.
-  **Mitigation:** the per-path assertion is written into P3's exit criteria,
-  residual 15 fixes the route list it must count (four routes, including
-  `/complete`, not three), and residual 16 lists
-  `tests/test_nx_answer_t2_fanout_budget.py` as a P3 edit so the harness is
-  updated with the behaviour rather than after it.
-  *Source: this RDR's D1, D5 and D6, plus P3's exit criteria; recorded as the
+- **✅ Verified** (instrumented measurement) — The after half of the
+  round-trip count: one `POST /v1/telemetry/nx_answer_runs/complete` per
+  converting call against a supporting engine, and three POSTs for a D6
+  survivor or a 404-downgrade call. Measured, not read, at P3
+  (nexus-dt2tu.3), 2026-09-06:
+  `tests/test_nx_answer_t2_fanout_budget.py::test_supporting_engine_issues_exactly_one_run_record_post`
+  and `::test_non_supporting_engine_issues_three_run_record_posts`, both
+  green against the self-provisioned engine substrate, each wrapping
+  `httpx.Client.send` to count real outbound requests for one `nx_answer`
+  call. Supporting engine: exactly 1 POST across all four run-record
+  routes, landing on `/complete`, zero to the three routes it replaces.
+  Non-supporting engine (same substrate, `HttpTelemetryStore.
+  _supports_nx_answer_run_complete` monkeypatched False, no other change):
+  exactly 3 POSTs, one each to `run_start`, `record`, `run_outcome`, zero
+  to `/complete`. 3 POSTs down to 1 per converting call — the RDR's central
+  claim, counted rather than assumed. The D6-survivor and 404-downgrade
+  three-POST cases are pinned separately (unit-level) by
+  `tests/test_nx_answer_run_complete.py`'s
+  `TestFourOhFourDowngradeGuard`/`TestHandoffArmUseCountInvariant`.
+  *Source: `tests/test_nx_answer_t2_fanout_budget.py`; recorded as the
   second half of `nexus_rdr/203-research-2`.*
 
 ## Decisions

@@ -25,6 +25,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
 
+import httpx
 import pytest
 
 from nexus.db.t2.http_telemetry_store import DEFAULT_TENANT, HttpTelemetryStore
@@ -41,6 +42,17 @@ _search_telemetry: list[dict[str, Any]] = []
 _tier_writes: list[dict[str, Any]] = []
 _retention_markers: dict[str, int] = {}
 _nx_answer_runs: list[dict[str, Any]] = []
+#: RDR-203 P3 (nexus-dt2tu.3): every POST body this fake server received on
+#: ``/v1/telemetry/nx_answer_runs/complete``, in arrival order -- including
+#: attempts that were then answered with a forced failure below, so a
+#: retry test can compare the byte content of two attempts, not just count
+#: them.
+_nx_answer_run_complete_requests: list[dict[str, Any]] = []
+#: Queue of HTTP status codes to force on the NEXT N requests to
+#: ``/v1/telemetry/nx_answer_runs/complete`` (popped left-to-right, one per
+#: request); empty means "answer 200 normally". Mirrors
+#: ``tests/db/test_refreshable_client.py``'s ``_GATEWAY_FAIL_QUEUE`` pattern.
+_COMPLETE_FAIL_QUEUE: list[int] = []
 _hook_failures: list[dict[str, Any]] = []
 _frecency: dict[str, dict[str, Any]] = {}  # keyed by chunk_id
 _capability_census: dict[str, dict[str, Any]] = {}  # keyed by session_id (upsert)
@@ -82,6 +94,8 @@ def _clear_all() -> None:
         _VERSION_RESPONSE.update({"nx_answer_steps_supported": True})
         _REQUEST_COUNT["n"] = 0
         _VERSION_REQUEST_COUNT["n"] = 0
+        _nx_answer_run_complete_requests.clear()
+        _COMPLETE_FAIL_QUEUE.clear()
 
 
 class _FakeTelemetryHandler(FakeT2HandlerBase):
@@ -306,6 +320,36 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
                     # absent) so tests can assert whether the client sent
                     # per-step telemetry — never re-derived/defaulted here.
                     "steps":              body.get("steps"),
+                })
+            self._send(200, {"ok": True})
+
+        elif pp == "/v1/telemetry/nx_answer_runs/complete":
+            # RDR-203 P3 (nexus-dt2tu.3): the composite route. Captures
+            # every attempt's body verbatim (including one this fake
+            # server then forces to fail, per _COMPLETE_FAIL_QUEUE) so a
+            # retry test can compare byte content across attempts, and
+            # supports forcing a status code to exercise the client's
+            # retry/downgrade handling.
+            with _STORE_LOCK:
+                _nx_answer_run_complete_requests.append(dict(body))
+                forced = _COMPLETE_FAIL_QUEUE.pop(0) if _COMPLETE_FAIL_QUEUE else None
+            if forced is not None:
+                self._send(forced, {"error": f"forced {forced}"})
+                return
+            with _STORE_LOCK:
+                _ID_SEQ["nar"] += 1
+                _nx_answer_runs.append({
+                    "id":                 _ID_SEQ["nar"],
+                    "question":           body.get("question", ""),
+                    "plan_id":            body.get("plan_id"),
+                    "matched_confidence": body.get("matched_confidence"),
+                    "step_count":         int(body.get("step_count", 0) or 0),
+                    "final_text":         body.get("final_text", ""),
+                    "cost_usd":           body.get("cost_usd"),
+                    "duration_ms":        int(body.get("duration_ms", 0) or 0),
+                    "created_at":         body.get("created_at") or datetime.now(UTC).isoformat(),
+                    "steps":              body.get("steps"),
+                    "outcome":            body.get("outcome"),
                 })
             self._send(200, {"ok": True})
 
@@ -1185,6 +1229,156 @@ class TestNxAnswerStepsCapabilityProbe:
         ]
         assert warnings, f"expected a degradation warning, got: {captured}"
         assert warnings[0]["step_count"] == 1
+
+
+class TestNxAnswerRunCompleteCapabilityProbe:
+    """RDR-203 D5/P3 (nexus-dt2tu.3): the second ``/version`` flag,
+    ``nx_answer_run_complete_supported``, sharing the SAME cached body
+    :class:`TestNxAnswerStepsCapabilityProbe` already probes -- one GET
+    either way (residual 6)."""
+
+    def test_probe_true_when_engine_advertises_support(self, client):
+        _VERSION_RESPONSE.clear()
+        _VERSION_RESPONSE.update({"nx_answer_run_complete_supported": True})
+        assert client._supports_nx_answer_run_complete() is True
+
+    def test_probe_false_when_field_absent(self, client):
+        _VERSION_RESPONSE.clear()
+        _VERSION_RESPONSE.update({"nx_answer_steps_supported": True})
+        assert client._supports_nx_answer_run_complete() is False
+
+    def test_probe_shares_the_single_cached_version_call(self, client):
+        """Reading BOTH flags off one store instance costs exactly one
+        GET /version -- the capabilities-dict refactor's whole point."""
+        _VERSION_RESPONSE.clear()
+        _VERSION_RESPONSE.update({
+            "nx_answer_steps_supported": True,
+            "nx_answer_run_complete_supported": True,
+        })
+        before = _VERSION_REQUEST_COUNT["n"]
+        assert client._supports_nx_answer_steps() is True
+        assert client._supports_nx_answer_run_complete() is True
+        assert _VERSION_REQUEST_COUNT["n"] == before + 1
+
+    def test_probe_false_on_transport_failure_never_raises(self):
+        """nexus-moht0 vacuous-gate doctrine, mirroring the steps probe's
+        own test above: a real connection failure, not a stubbed 404."""
+        store = HttpTelemetryStore(
+            base_url="http://127.0.0.1:1", tenant=DEFAULT_TENANT, _token=TOKEN,
+        )
+        try:
+            assert store._supports_nx_answer_run_complete() is False
+        finally:
+            store.close()
+
+    def test_failed_probe_caches_empty_capabilities_not_none(self):
+        """Residual 10: a failed probe must cache the NEGATIVE result --
+        an unreachable engine costs one GET attempt per process, not one
+        per call. Falsifier: revert ``_version_capabilities`` to return
+        ``{}`` WITHOUT caching it and this test reds (the private cache
+        attribute stays ``None``, meaning the next call would re-probe)."""
+        store = HttpTelemetryStore(
+            base_url="http://127.0.0.1:1", tenant=DEFAULT_TENANT, _token=TOKEN,
+        )
+        try:
+            assert store._supports_nx_answer_run_complete() is False
+            assert store._version_capabilities_cache == {}, (
+                "a failed probe must cache an empty dict, not leave the "
+                "cache at None (which would re-probe on the next call)"
+            )
+        finally:
+            store.close()
+
+    def test_downgrade_flips_the_cached_flag_for_future_reads(self, client):
+        """D5's 404-downgrade guard's other half:
+        :meth:`HttpTelemetryStore._downgrade_nx_answer_run_complete_support`
+        flips the CACHED answer, not the wire -- a subsequent probe read
+        on this SAME instance must see the flip with no further GET."""
+        _VERSION_RESPONSE.clear()
+        _VERSION_RESPONSE.update({"nx_answer_run_complete_supported": True})
+        assert client._supports_nx_answer_run_complete() is True
+        before = _VERSION_REQUEST_COUNT["n"]
+        client._downgrade_nx_answer_run_complete_support()
+        assert client._supports_nx_answer_run_complete() is False
+        assert _VERSION_REQUEST_COUNT["n"] == before, (
+            "the downgrade must not trigger a fresh /version GET -- it "
+            "corrects the already-cached dict in place"
+        )
+
+
+class TestRecordNxAnswerRunComplete:
+    """RDR-203 D1/P3 (nexus-dt2tu.3): ``HttpTelemetryStore.
+    record_nx_answer_run_complete`` -- the wire call for
+    ``POST /v1/telemetry/nx_answer_runs/complete``."""
+
+    def test_happy_path_posts_outcome_and_created_at(self, client):
+        client.record_nx_answer_run_complete(
+            question="q", plan_id=5, matched_confidence=0.8, step_count=1,
+            final_text="answer", cost_usd=0.02, duration_ms=1200,
+            created_at="2026-09-05T18:22:31.481920+00:00", steps=None, success=True,
+        )
+        with _STORE_LOCK:
+            row = _nx_answer_run_complete_requests[-1]
+        assert row["outcome"] == "success"
+        assert row["created_at"] == "2026-09-05T18:22:31.481920+00:00"
+        assert row["plan_id"] == 5
+
+    def test_outcome_field_is_failure_for_success_false(self, client):
+        client.record_nx_answer_run_complete(
+            question="q", plan_id=0, matched_confidence=None, step_count=0,
+            final_text="err", cost_usd=None, duration_ms=10,
+            created_at="2026-09-05T18:22:31.481920+00:00", steps=None, success=False,
+        )
+        with _STORE_LOCK:
+            row = _nx_answer_run_complete_requests[-1]
+        assert row["outcome"] == "failure"
+
+    def test_404_propagates_to_the_caller(self, client):
+        """D1/D5: a 404 is NOT swallowed here -- the caller (core.py's
+        choke point) is what turns it into the deferred fallback."""
+        _COMPLETE_FAIL_QUEUE.clear()
+        _COMPLETE_FAIL_QUEUE.append(404)
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            client.record_nx_answer_run_complete(
+                question="q", plan_id=1, matched_confidence=0.5, step_count=0,
+                final_text="a", cost_usd=None, duration_ms=10,
+                created_at="2026-09-05T18:22:31.481920+00:00", steps=None, success=True,
+            )
+        assert exc_info.value.response.status_code == 404
+
+    def test_gateway_retry_reuses_one_created_at_stamp(self, client, monkeypatch):
+        """RDR-203 Tests section: drive one composite POST against a stub
+        that answers 503 then 200, and assert the two attempts carry a
+        byte-identical ``created_at``. Falsifier: pass a fresh
+        ``datetime.now(...).isoformat()`` per call instead of a single
+        caller-supplied stamp and this test reds on real clock resolution
+        (a rerun a microsecond apart mints a different string).
+        """
+        from nexus.db.t2 import _refreshable_client as _rc_mod
+
+        monkeypatch.setattr(_rc_mod, "_GATEWAY_RETRY_SLEEPS", (0.0, 0.0, 0.0))
+        _COMPLETE_FAIL_QUEUE.clear()
+        _COMPLETE_FAIL_QUEUE.append(503)
+
+        stamp = "2026-09-05T18:22:31.481920+00:00"
+        client.record_nx_answer_run_complete(
+            question="q", plan_id=5, matched_confidence=0.8, step_count=1,
+            final_text="answer", cost_usd=0.02, duration_ms=1200,
+            created_at=stamp, steps=None, success=True,
+        )
+        with _STORE_LOCK:
+            attempts = list(_nx_answer_run_complete_requests)
+        assert len(attempts) == 2, (
+            f"expected exactly two attempts (the forced 503, then the "
+            f"retry that lands); got {len(attempts)}"
+        )
+        assert attempts[0]["created_at"] == stamp
+        assert attempts[1]["created_at"] == stamp
+        assert attempts[0]["created_at"] == attempts[1]["created_at"], (
+            "the retry must reuse the SAME created_at stamp, not "
+            "recompute one -- a fresh value per attempt defeats the "
+            "engine's (tenant, question, created_at) dedup key"
+        )
 
 
 class TestQueryNxAnswerRuns:

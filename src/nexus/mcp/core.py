@@ -7276,6 +7276,44 @@ def _nx_answer_record_outcome(plan_id: int, *, success: bool) -> None:
         )
 
 
+def _nx_answer_ensure_run_started(db: Any, plan_id: int | None, early_bump_fired: bool) -> None:
+    """RDR-203 D5 (nexus-dt2tu.3): the deferred ``increment_run_started``
+    bump. Issued immediately before any direct ``_nx_answer_record_run``
+    write, so ``run_start`` is deferred rather than dropped when the
+    early run-start site (``nx_answer``'s ``if best.plan_id:`` guard)
+    skipped it — never doubled when it did not.
+
+    No-ops when *plan_id* is null or zero (no library row to count
+    against), **or** when *early_bump_fired* is already True. Both
+    halves of that condition are load bearing (round-2 plan-audit
+    finding): a ``plan_id``-only no-op double-counts the case round 2
+    found — a non-supporting engine, a D6-survivor arm, where the early
+    site already bumped ``use_count`` and this call would bump it again
+    for the same run.
+
+    Takes the CALLER's ``db`` directly (never a fresh
+    ``_t2_index_write`` context of its own) — the caller is expected to
+    invoke this INSIDE its own ``with _t2_ctx() as db:`` block, before
+    the record write, so this call needs no context of its own and a
+    failure here surfaces via THIS function's own catch rather than a
+    second T2 context on a path this RDR exists to keep to one. Owns its
+    own boundary catch (never re-raises) so a run_start failure keeps
+    the named warning the pre-P3 early site produced instead of
+    vanishing into the caller's outer silent swallow, and the record
+    write that follows still proceeds.
+    """
+    if not plan_id or early_bump_fired:
+        return
+    try:
+        db.plans.increment_run_started(plan_id)
+    except Exception:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
+        import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+        _slog.get_logger().warning(
+            "nx_answer_plan_use_increment_failed",
+            plan_id=plan_id, exc_info=True,
+        )
+
+
 def _nx_answer_record_complete(
     db: Any,
     *,
@@ -7288,24 +7326,72 @@ def _nx_answer_record_complete(
     duration_ms: int,
     trace: bool,
     success: bool,
+    composite_supported_at_start: bool,
+    early_bump_fired: bool,
 ) -> None:
-    """RDR-203 P1 choke point: the ``nx_answer_runs`` record and the plan
+    """RDR-203 P1/P3 choke point: the ``nx_answer_runs`` record and the plan
     outcome-counter bump for ONE converting arm, issued as ONE function
-    call instead of the two separate ``(_nx_answer_record_run,
-    _nx_answer_record_outcome)`` statements every converting arm used to
-    make. Replaces that pair at the ten converting arms; the two D6
-    survivors (the planner-failure arm, and the RDR-200 continuation
-    handoff) keep calling the two functions directly and do not route
-    through here.
+    call instead of the two (P1) or three (pre-P1) separate statements
+    every converting arm used to make. Replaces that pair/triple at the
+    ten converting arms; the two D6 survivors (the planner-failure arm,
+    and the RDR-200 continuation handoff) keep calling the lower-level
+    functions directly and do not route through here.
+
+    *composite_supported_at_start* and *early_bump_fired* are the D5
+    per-call capability record, read ONCE at ``nx_answer``'s run-start
+    site and passed down unchanged — this function never re-reads the
+    store's shared cached flag, which is what keeps a sibling call's
+    mid-call downgrade from changing THIS call's arithmetic
+    (`test_mid_call_flag_flip_does_not_change_this_calls_bump_count`).
+
+    **composite_supported_at_start == True**: one POST to
+    ``/v1/telemetry/nx_answer_runs/complete`` (D1/D2) replaces the
+    (record, outcome) pair entirely — the engine bumps ``use_count`` and
+    the outcome counter itself, in the same transaction as the run row,
+    when *plan_id* is usable. ``created_at`` is stamped ONCE here, at
+    payload construction, before the first attempt (RDR-203
+    Idempotency) — :meth:`HttpTelemetryStore.record_nx_answer_run_complete`
+    builds one payload dict from it and hands that SAME dict to
+    ``_post``, which reuses it verbatim across any gateway retry
+    (`test_gateway_retry_reuses_one_created_at_stamp`).
+
+    A **404** from that POST is D5's downgrade guard: the cached probe
+    said supported and the running engine now disagrees (a supporting
+    engine was replaced by a non-supporting one under this process).
+    The store's cache is flipped for FUTURE calls
+    (:meth:`HttpTelemetryStore._downgrade_nx_answer_run_complete_support`),
+    and THIS call completes from its own per-call record: the composite
+    route and an already-fired early bump are unreachable together by
+    construction (D5's routing argument), so *early_bump_fired* is
+    guaranteed False here and the deferred
+    ``_nx_answer_ensure_run_started`` genuinely bumps ``use_count`` —
+    then the record, then the outcome, in that order
+    (`test_404_downgrade_issues_deferred_run_start_then_record_then_outcome`).
+    Any OTHER failure (429, a 5xx that survives the gateway retry, a
+    transport error) is a transport failure, not a probe correction, and
+    keeps today's drop-and-warn handling — the whole composite write is
+    dropped, exactly as a single ``_nx_answer_record_run`` failure is
+    dropped today, never silently converted into the three-call
+    fallback.
+
+    **composite_supported_at_start == False** (the degradation path,
+    byte-for-byte today's behaviour plus one addition): the deferred
+    ``_nx_answer_ensure_run_started`` call is issued first (RDR-203
+    residual A1) — a structural no-op on the ordinary path, since the
+    early run-start site already fired it whenever *plan_id* was usable
+    (that is exactly what *composite_supported_at_start == False* meant
+    at the run-start site too) — then the record, then the independent
+    outcome bump, in that order.
 
     The record half uses the caller's already-open ``db`` (from
     ``with _t2_ctx() as db:`` or a ``_t2_index_write`` closure — residual
-    5 leaves each arm's choice of the two untouched). The outcome half
-    does NOT reuse that ``db``: it issues its own independent
-    ``_t2_index_write(op="run_outcome")`` call, byte-identical in shape
-    to ``_nx_answer_record_outcome``'s own body above. This is
-    deliberate, not an oversight (round-2 review finding, T2
-    nexus/code-review-nexus-dt2tu-1-p1 [24711] and
+    5 leaves each arm's choice of the two untouched); so does the
+    deferred run-start helper, by design (its own docstring). The
+    outcome half of the degradation path does NOT reuse that ``db``: it
+    issues its own independent ``_t2_index_write(op="run_outcome")``
+    call, byte-identical in shape to ``_nx_answer_record_outcome``'s own
+    body above. This is deliberate, not an oversight (P1 round-2 review
+    finding, T2 nexus/code-review-nexus-dt2tu-1-p1 [24711] and
     nexus/critique-nexus-dt2tu-1-p1 [24713]): a first cut of this
     function called ``db.plans.increment_run_outcome(...)`` directly
     against the passed-in ``db``, which silently removed the outcome
@@ -7324,10 +7410,11 @@ def _nx_answer_record_complete(
     wraps the whole ``_nx_answer_record_complete`` invocation) is safe:
     ``_service_t2_lock`` (mcp_infra.py) is released before ``write_fn``
     runs, so the inner call's brief re-acquisition never deadlocks
-    against the outer one.
+    against the outer one. The 404 fallback's own outcome bump reuses
+    this exact shape for the same reason.
 
-    This REPRODUCES both source functions' bodies rather than
-    delegating to them, so each keeps its own behaviour precisely:
+    This REPRODUCES the source functions' bodies rather than delegating
+    to them, so each keeps its own behaviour precisely:
 
     - redaction (residual 9): ``trace=False`` replaces both ``question``
       and ``final_text`` with ``"[redacted]"``, mirroring
@@ -7339,18 +7426,17 @@ def _nx_answer_record_complete(
       covering the synthetic inline-planner id ``0``, mirroring
       ``_nx_answer_record_outcome`` above.
 
-    The two writes keep INDEPENDENT boundary catches, exactly as today: a
-    run-record failure never blocks the outcome bump and vice versa, and
-    neither ever reaches the caller (residual 11 — losing either catch
+    Every write in this function keeps an INDEPENDENT boundary catch,
+    exactly as today: one failure never blocks a sibling write, and
+    nothing here ever reaches the caller (residual 11 — losing a catch
     would turn a best-effort telemetry failure into a crashed answer).
 
-    RDR-203 P1 issues today's two calls — this stays two POSTs, no wire
-    change, in this fixed record-then-outcome order. Eight of the ten
-    converting arms already post in this order; at the empty-retrieval
-    guard arm and the Step 6 success arm this order is a normalisation —
-    today those two arms POST the outcome BEFORE the record (residual 8),
-    the one wire-visible difference this phase makes. Collapsing the two
-    calls into one composite POST is RDR-203 P2/P3, not this function.
+    On the degradation path this stays two POSTs, no wire change, in
+    this fixed record-then-outcome order (RDR-203 P1). Eight of the ten
+    converting arms already posted in this order pre-P1; at the
+    empty-retrieval guard arm and the Step 6 success arm that order was
+    a normalisation — those two arms posted the outcome BEFORE the
+    record pre-P1 (residual 8), the one wire-visible difference P1 made.
     """
     q = question if trace else "[redacted]"
     text = final_text if trace else "[redacted]"
@@ -7358,6 +7444,52 @@ def _nx_answer_record_complete(
     _known_costs = [s.cost_usd for s in steps if s.cost_usd is not None]
     cost_usd = sum(_known_costs) if _known_costs else None
     wire_steps = [_step_record_to_wire(s) for s in steps] or None
+
+    if composite_supported_at_start:
+        import httpx  # noqa: PLC0415 — rare/branch-local path; only the composite route needs the 404-vs-other-failure distinction
+        from datetime import datetime, timezone  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
+
+        # RDR-203 Idempotency: stamped ONCE, here, before the first
+        # attempt — never inside a retry loop. See docstring.
+        created_at = datetime.now(timezone.utc).isoformat()
+        try:
+            db.telemetry.record_nx_answer_run_complete(
+                question=q, plan_id=plan_id, matched_confidence=matched_confidence,
+                step_count=step_count, final_text=text, cost_usd=cost_usd,
+                duration_ms=duration_ms, created_at=created_at, steps=wire_steps,
+                success=success,
+            )
+            return
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                # 429 / 5xx surviving the gateway retry / any other status:
+                # a transport failure, not a probe correction. Drop the
+                # whole composite write, exactly as a single
+                # _nx_answer_record_run failure is dropped today.
+                _warn_telemetry_drop("nx_answer_runs", exc)
+                return
+            # D5 404 downgrade guard: the cached probe said supported and
+            # the running engine now disagrees. Flip the cache for FUTURE
+            # calls, then complete THIS call from its own per-call
+            # record -- early_bump_fired is guaranteed False here (the
+            # composite route and an already-fired early bump are
+            # unreachable together, by construction), so the deferred
+            # run_start below genuinely bumps use_count.
+            try:
+                db.telemetry._downgrade_nx_answer_run_complete_support()
+            except Exception:  # noqa: BLE001 — best-effort cache flip, must not crash the fallback it enables
+                pass
+        except Exception as exc:  # noqa: BLE001 — best-effort telemetry, must not crash caller (warned once via _warn_telemetry_drop)
+            _warn_telemetry_drop("nx_answer_runs", exc)
+            return
+
+    # Degradation path: byte-for-byte today's (pre-composite) behaviour,
+    # plus the deferred run_start bump (RDR-203 D5/residual A1) -- a
+    # structural no-op in the ordinary case, since the early run-start
+    # site already fired it whenever plan_id was usable. Also the 404
+    # downgrade guard's fallback for THIS call, falling through from
+    # above with early_bump_fired == False.
+    _nx_answer_ensure_run_started(db, plan_id, early_bump_fired)
     try:
         db.telemetry.record_nx_answer_run(
             question=q, plan_id=plan_id, matched_confidence=matched_confidence,
@@ -8071,6 +8203,26 @@ async def nx_answer(
 
     _log = _slog.get_logger()
     start = time.monotonic()
+    # RDR-203 D5 (nexus-dt2tu.3): the per-call composite-capability record,
+    # initialised to False HERE, at call entry -- not at the run-start site
+    # further down, which assigns rather than introduces them. The
+    # planner-failure arm (below, well upstream of the run-start site)
+    # records a run on ITS OWN failure path and reads these two names; a
+    # name first bound at the run-start site would be unbound on that
+    # path, and the arm's own `try: ... except Exception: pass` would
+    # swallow the resulting UnboundLocalError and silently stop recording
+    # planner-failure runs. See `test_planner_failure_arm_upstream_of_run_start_still_records`.
+    # RDR-203 D5 (nexus-dt2tu.3): the per-call composite-capability record,
+    # initialised to False HERE, at call entry -- not at the run-start site
+    # further down, which assigns rather than introduces them. The
+    # planner-failure arm (below, well upstream of the run-start site)
+    # records a run on ITS OWN failure path and reads these two names; a
+    # name first bound at the run-start site would be unbound on that
+    # path, and the arm's own `try: ... except Exception: pass` would
+    # swallow the resulting UnboundLocalError and silently stop recording
+    # planner-failure runs. See `test_planner_failure_arm_upstream_of_run_start_still_records`.
+    composite_supported_at_start = False
+    early_bump_fired = False
     # RDR-196 Phase 3 Step 1 (nexus-nyry9.20, code-review round 1
     # dormancy item, T2 nyry9.20-code-review-2026-08-21): captured by
     # Step 1 below when it resolves a plan-match hit, read by `_result`'s
@@ -8475,6 +8627,8 @@ async def nx_answer(
                     final_text=budget_final_text[:2000], step_records=_step_records,
                     duration_ms=int((time.monotonic() - start) * 1000), trace=trace,
                     success=False,
+                    composite_supported_at_start=composite_supported_at_start,
+                    early_bump_fired=early_bump_fired,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
@@ -8674,6 +8828,10 @@ async def nx_answer(
             _log.warning("nx_answer_planner_failed", error=str(exc))
             try:
                 with _t2_ctx() as db:
+                    # RDR-203 D6: a structural no-op here (plan_id=None), but
+                    # called anyway so the census test's preceded-by clause
+                    # has no exception to carve out for this survivor.
+                    _nx_answer_ensure_run_started(db, None, early_bump_fired)
                     _nx_answer_record_run(
                         db.telemetry, question=question, plan_id=None,
                         matched_confidence=matches[0].confidence if matches else None,
@@ -8773,7 +8931,39 @@ async def nx_answer(
     # _plan_run). Skip plan_id=0 (synthetic inline-planner Match — no
     # library row to update). Downstream paths bump success/failure via
     # ``_nx_answer_record_outcome`` after their try/except completes.
-    if best.plan_id:
+    #
+    # RDR-203 D5 (amended, plan-audit round 2 BLOCKS-PLANNING finding): the
+    # capability question is asked ONCE per call, HERE, and the answer is
+    # carried in the two entry-initialised booleans above -- read by every
+    # terminating arm, NEVER re-read from the shared cached flag (that is
+    # what makes a sibling call's mid-call downgrade unable to change this
+    # call's arithmetic). The probe read and BOTH assignments sit OUTSIDE
+    # the ``if best.plan_id:`` guard below, so they run on every call
+    # INCLUDING a plan miss (``best.plan_id == 0``): a probe placed inside
+    # the guard would leave ``composite_supported_at_start`` at its entry
+    # default of False for every plan-miss call regardless of what the
+    # engine supports, contradicting D1's null-or-zero-plan_id contract
+    # and P2's ``zeroPlanIdWritesRunRowAndNoCounters``
+    # (see `test_plan_miss_against_supporting_engine_takes_composite`).
+    # Only the early ``increment_run_started`` bump stays inside the guard
+    # -- there is no library row to bump on a plan miss.
+    try:
+        composite_supported_at_start = bool(
+            _t2_index_write(
+                lambda db: db.telemetry._supports_nx_answer_run_complete(),
+                op="capability_probe",
+            )
+        )
+    except Exception:  # noqa: BLE001 — capability probe must never crash the call; degrade to the pre-composite three-write path
+        composite_supported_at_start = False
+    # ``early_bump_fired`` is true exactly when the early site below is
+    # about to issue ``increment_run_started``: a usable plan id AND an
+    # engine that does not support the composite. A plan-miss call leaves
+    # it False even against a non-supporting engine -- there is no
+    # library row to count against, so nothing downstream should bump one
+    # either.
+    early_bump_fired = bool(best.plan_id) and not composite_supported_at_start
+    if best.plan_id and not composite_supported_at_start:
         try:
             # nexus-m20mf P2: routed through the shared T2 singleton — a
             # single db.* method call, so it is safe whole in the closure.
@@ -8999,6 +9189,8 @@ async def nx_answer(
                             matched_confidence=best.confidence, step_count=0,
                             final_text=f"Error: {exc}", step_records=[],
                             duration_ms=elapsed_ms, trace=trace, success=False,
+                            composite_supported_at_start=composite_supported_at_start,
+                            early_bump_fired=early_bump_fired,
                         )
                 except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
                     pass
@@ -9038,6 +9230,8 @@ async def nx_answer(
                             matched_confidence=best.confidence, step_count=0,
                             final_text=f"Error: {exc}", step_records=[],
                             duration_ms=elapsed_ms, trace=trace, success=False,
+                            composite_supported_at_start=composite_supported_at_start,
+                            early_bump_fired=early_bump_fired,
                         )
                 except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
                     pass
@@ -9128,6 +9322,8 @@ async def nx_answer(
                         final_text=str(result_text)[:2000], step_records=[],
                         duration_ms=elapsed_ms, trace=trace,
                         success=not _nx_answer_text_is_empty(str(result_text)),
+                        composite_supported_at_start=composite_supported_at_start,
+                        early_bump_fired=early_bump_fired,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -9146,6 +9342,8 @@ async def nx_answer(
                         matched_confidence=best.confidence, step_count=1,
                         final_text=f"Error: {exc}", step_records=[],
                         duration_ms=elapsed_ms, trace=trace, success=False,
+                        composite_supported_at_start=composite_supported_at_start,
+                        early_bump_fired=early_bump_fired,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -9217,6 +9415,8 @@ async def nx_answer(
                     matched_confidence=best.confidence, step_count=0,
                     final_text=f"Error: {exc}", step_records=[],
                     duration_ms=elapsed_ms, trace=trace, success=False,
+                    composite_supported_at_start=composite_supported_at_start,
+                    early_bump_fired=early_bump_fired,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
             pass
@@ -9322,6 +9522,8 @@ async def nx_answer(
                     step_count=len(_exc_step_records),
                     final_text=f"Error: {exc}", step_records=_exc_step_records,
                     duration_ms=elapsed_ms, trace=trace, success=False,
+                    composite_supported_at_start=composite_supported_at_start,
+                    early_bump_fired=early_bump_fired,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
@@ -9476,6 +9678,14 @@ async def nx_answer(
             )
             try:
                 with _t2_ctx() as db:
+                    # RDR-203 D6 survivor 2 (the RDR-200 continuation
+                    # handoff): deferred run_start before the record write,
+                    # same db -- a no-op against a non-supporting engine
+                    # (the early site already bumped), and against a
+                    # supporting engine restores the bump the early site
+                    # skipped, so use_count stays == success_count +
+                    # failure_count for a handoff-heavy plan too (D4).
+                    _nx_answer_ensure_run_started(db, best.plan_id, early_bump_fired)
                     _nx_answer_record_run(
                         db.telemetry, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence,
@@ -9542,6 +9752,8 @@ async def nx_answer(
                         step_count=len(_exc_step_records),
                         final_text=f"Error: {exc}", step_records=_exc_step_records,
                         duration_ms=elapsed_ms, trace=trace, success=False,
+                        composite_supported_at_start=composite_supported_at_start,
+                        early_bump_fired=early_bump_fired,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -9680,6 +9892,8 @@ async def nx_answer(
                     step_count=len(result.steps),
                     final_text=no_match[:2000], step_records=_result_step_records,
                     duration_ms=elapsed_ms, trace=trace, success=False,
+                    composite_supported_at_start=composite_supported_at_start,
+                    early_bump_fired=early_bump_fired,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
@@ -9835,6 +10049,8 @@ async def nx_answer(
                 matched_confidence=best.confidence, step_count=len(result.steps),
                 final_text=final_text[:2000], step_records=_result_step_records,
                 duration_ms=elapsed_ms, trace=trace, success=True,
+                composite_supported_at_start=composite_supported_at_start,
+                early_bump_fired=early_bump_fired,
             ),
             op="record_run",
         )

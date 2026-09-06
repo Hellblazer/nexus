@@ -746,6 +746,16 @@ async def test_run_start_connectivity_error_evicts_mid_call_and_record_complete_
     def _make_counting_t2(*_a, **_kw) -> _CountingT2Database:
         db = _CountingT2Database()
         constructed.append(db)
+        # RDR-203 P3: the capability probe now fires at the run-start
+        # site on EVERY instance, before the `if best.plan_id and not
+        # composite_supported_at_start:` guard -- an unconfigured
+        # MagicMock `_supports_nx_answer_run_complete()` return is
+        # truthy, which would silently SKIP the run_start call this
+        # test arms to fail (the composite route takes over instead).
+        # Force the degradation path on every constructed instance so
+        # run_start still fires and this test's mid-call eviction story
+        # still holds.
+        db.telemetry._supports_nx_answer_run_complete.return_value = False
         if len(constructed) == 1:
             # Only the FIRST (run_start's) instance fails -- simulates
             # "the connection this singleton held just broke." Every

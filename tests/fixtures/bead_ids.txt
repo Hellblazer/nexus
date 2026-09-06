@@ -2347,6 +2347,11 @@ nexus-dst5h
 nexus-dst5h.1
 nexus-dsu5z
 nexus-dsxd
+nexus-dt2tu
+nexus-dt2tu.1
+nexus-dt2tu.2
+nexus-dt2tu.3
+nexus-dt2tu.4
 nexus-dtnpu
 nexus-du2dw
 nexus-du6d0

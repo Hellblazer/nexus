@@ -41,9 +41,11 @@ proves nothing").
 from __future__ import annotations
 
 import ast
+import json
 import pathlib
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 import nexus.mcp_infra as mi
@@ -198,6 +200,48 @@ class TestConvertingArmCensus:
             f"found {len(self.record_complete_calls)} at lines "
             f"{sorted(c.lineno for c in self.record_complete_calls)}"
         )
+
+    def test_survivors_preceded_by_ensure_run_started(self) -> None:
+        """RDR-203 P3 residual 13 (the second half of P1's split test):
+        each surviving direct ``_nx_answer_record_run`` call is
+        IMMEDIATELY preceded by an ``_nx_answer_ensure_run_started``
+        call. Catches a survivor that keeps its record write and loses
+        its deferred bump. Falsifier: delete one survivor's
+        ``_nx_answer_ensure_run_started`` call and this reds.
+        """
+        ensure_calls = _direct_calls(self.tree, "_nx_answer_ensure_run_started")
+        # Three call sites in the whole file: the choke point's own
+        # degradation-branch call (residual A1), and the two D6
+        # survivors' calls. Precise, not a lower bound: a fourth call
+        # site anywhere would be worth investigating on its own, not
+        # silently accepted by a `>=` check.
+        assert len(ensure_calls) == 3, (
+            f"expected exactly 3 _nx_answer_ensure_run_started call sites "
+            f"(the choke point's own degradation branch, plus the two D6 "
+            f"survivors), found {len(ensure_calls)} at lines "
+            f"{sorted(c.lineno for c in ensure_calls)}"
+        )
+        for record_call in self.record_run_calls:
+            preceding = [c for c in ensure_calls if c.lineno < record_call.lineno]
+            assert preceding, (
+                f"_nx_answer_record_run call at line {record_call.lineno} "
+                f"has no preceding _nx_answer_ensure_run_started call at all"
+            )
+            nearest = max(preceding, key=lambda c: c.lineno)
+            between = [
+                n for n in ast.walk(self.tree)
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Name)
+                and n.func.id in ("_nx_answer_record_run", "_nx_answer_ensure_run_started")
+                and nearest.lineno < n.lineno < record_call.lineno
+            ]
+            assert not between, (
+                f"expected the _nx_answer_ensure_run_started call at line "
+                f"{nearest.lineno} to be IMMEDIATELY before the "
+                f"_nx_answer_record_run call at line {record_call.lineno}, "
+                f"but found intervening calls at "
+                f"{[n.lineno for n in between]}"
+            )
 
 
 class TestRecordingArmsDownstreamOfRunStart:
@@ -367,6 +411,7 @@ class TestChokePointComposesRecordAndOutcome:
             db, question="what is the secret plan", plan_id=0,
             matched_confidence=None, step_count=0, final_text="the secret answer",
             step_records=[], duration_ms=10, trace=False, success=True,
+            composite_supported_at_start=False, early_bump_fired=False,
         )
         _, kwargs = db.telemetry.record_nx_answer_run.call_args
         assert kwargs["question"] == "[redacted]"
@@ -378,6 +423,7 @@ class TestChokePointComposesRecordAndOutcome:
             db, question="what is the secret plan", plan_id=0,
             matched_confidence=None, step_count=0, final_text="the secret answer",
             step_records=[], duration_ms=10, trace=True, success=True,
+            composite_supported_at_start=False, early_bump_fired=False,
         )
         _, kwargs = db.telemetry.record_nx_answer_run.call_args
         assert kwargs["question"] == "what is the secret plan"
@@ -397,6 +443,7 @@ class TestChokePointComposesRecordAndOutcome:
             db, question="q", plan_id=0, matched_confidence=None, step_count=3,
             final_text="a", step_records=steps, duration_ms=10, trace=True,
             success=True,
+            composite_supported_at_start=False, early_bump_fired=False,
         )
         _, kwargs = db.telemetry.record_nx_answer_run.call_args
         assert kwargs["cost_usd"] == pytest.approx(0.6)
@@ -413,6 +460,7 @@ class TestChokePointComposesRecordAndOutcome:
             db, question="q", plan_id=0, matched_confidence=None, step_count=2,
             final_text="a", step_records=steps, duration_ms=10, trace=True,
             success=True,
+            composite_supported_at_start=False, early_bump_fired=False,
         )
         _, kwargs = db.telemetry.record_nx_answer_run.call_args
         assert kwargs["cost_usd"] is None
@@ -431,6 +479,7 @@ class TestChokePointComposesRecordAndOutcome:
                 db, question="q", plan_id=0, matched_confidence=None, step_count=1,
                 final_text="a", step_records=[], duration_ms=10, trace=True,
                 success=True,
+                composite_supported_at_start=False, early_bump_fired=False,
             )
         assert ops == [], "the outcome half must not call _t2_index_write at all for plan_id=0"
         outcome_db.plans.increment_run_outcome.assert_not_called()
@@ -450,6 +499,7 @@ class TestChokePointComposesRecordAndOutcome:
                 db, question="q", plan_id=42, matched_confidence=0.9, step_count=1,
                 final_text="a", step_records=[], duration_ms=10, trace=True,
                 success=True,
+                composite_supported_at_start=False, early_bump_fired=False,
             )
         outcome_db.plans.increment_run_outcome.assert_called_once_with(42, success=True)
         assert ops == ["run_outcome"]
@@ -469,6 +519,7 @@ class TestChokePointComposesRecordAndOutcome:
                 db, question="q", plan_id=7, matched_confidence=0.5, step_count=1,
                 final_text="a", step_records=[], duration_ms=10, trace=True,
                 success=False,
+                composite_supported_at_start=False, early_bump_fired=False,
             )
         outcome_db.plans.increment_run_outcome.assert_called_once_with(7, success=False)
         assert ops == ["run_outcome"]
@@ -493,6 +544,7 @@ class TestChokePointComposesRecordAndOutcome:
                 db, question="q", plan_id=7, matched_confidence=0.5, step_count=1,
                 final_text="a", step_records=[], duration_ms=10, trace=True,
                 success=True,
+                composite_supported_at_start=False, early_bump_fired=False,
             )  # must not raise
         db.telemetry.record_nx_answer_run.assert_called_once()
         assert ops == ["run_outcome"]
@@ -591,6 +643,7 @@ class TestOutcomeBumpReachesEvictionClassifier:
             db, question="q", plan_id=99, matched_confidence=0.5, step_count=1,
             final_text="a", step_records=[], duration_ms=10, trace=True,
             success=True,
+            composite_supported_at_start=False, early_bump_fired=False,
         )  # must not raise -- the choke point's own catch absorbs it
 
         assert mi._service_t2_db is None, (
@@ -602,3 +655,425 @@ class TestOutcomeBumpReachesEvictionClassifier:
             "the evicted singleton must actually be closed once its "
             "refcount drains, not merely detached from _service_t2_db"
         )
+
+
+# ── RDR-203 P3 (nexus-dt2tu.3): the capability-probe branch at the ────────────
+# run-start site, and the choke point's composite/degradation routing.
+#
+# These tests drive nx_answer() END TO END with a controllable MagicMock
+# db_stub, exactly matching the pattern already established in
+# tests/test_nx_answer.py (patch plan_match + plan_run, patch _t2_ctx AND
+# _t2_index_write to route to the SAME db_stub) -- unit-testing
+# _nx_answer_record_complete alone cannot exercise the run-start site's own
+# branching (the capability probe read, the early-bump guard), which live in
+# nx_answer's own body, upstream of the choke point.
+
+
+async def _drive_success_path(
+    db_stub: MagicMock, *, question: str = "what is projection quality?",
+) -> str:
+    """Drive one nx_answer() call through the plan_run ("needs_operators")
+    happy path against *db_stub* -- a real library plan match (plan_id=1),
+    plan_run mocked to a trivial success. Callers pre-arm db_stub's
+    telemetry/plans mocks before calling this."""
+    from nexus.mcp.core import nx_answer
+    from tests.test_nx_answer import _make_match
+
+    match = _make_match(confidence=0.9)
+    plan_run_result = MagicMock()
+    plan_run_result.steps = [{"text": "The final answer."}]
+
+    with patch("nexus.plans.matcher.plan_match", return_value=[match]), \
+         patch("nexus.plans.runner.plan_run", AsyncMock(return_value=plan_run_result)), \
+         patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+         patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
+         patch("nexus.mcp.core.scratch", return_value="ok"), \
+         patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+        t2_ctx.return_value.__enter__.return_value = db_stub
+        return await nx_answer(question=question)
+
+
+def _make_ordered_db_stub() -> tuple[MagicMock, list[str]]:
+    """A db_stub whose plans/telemetry methods append to a shared, ordered
+    call log -- what the degradation-path ordering tests assert on."""
+    order: list[str] = []
+    db_stub = MagicMock()
+    db_stub.plans.increment_run_started.side_effect = (
+        lambda *_a, **_kw: order.append("run_start")
+    )
+    db_stub.telemetry.record_nx_answer_run.side_effect = (
+        lambda **_kw: order.append("record")
+    )
+    db_stub.plans.increment_run_outcome.side_effect = (
+        lambda *_a, **_kw: order.append("outcome")
+    )
+    db_stub.telemetry.record_nx_answer_run_complete.side_effect = (
+        lambda **_kw: order.append("complete")
+    )
+    return db_stub, order
+
+
+class TestCapabilityProbeAtRunStart:
+    """The D5 per-call capability record: read once at the run-start site,
+    outside the ``if best.plan_id:`` guard, carried by every terminating
+    arm -- never re-read."""
+
+    @pytest.mark.asyncio
+    async def test_unsupported_engine_degrades_to_three_calls(self) -> None:
+        """RDR Tests: a stub /version with no
+        nx_answer_run_complete_supported key; assert exactly run_start,
+        record, outcome, in that order, and no request to /complete.
+        Falsifier: force the flag true against the same stub and the
+        assertion reds (see test_supported_engine_skips_run_start below,
+        which is exactly that flip)."""
+        db_stub, order = _make_ordered_db_stub()
+        db_stub.telemetry._supports_nx_answer_run_complete.return_value = False
+
+        result = await _drive_success_path(db_stub)
+
+        assert "final answer" in result.lower()
+        assert order == ["run_start", "record", "outcome"]
+        db_stub.telemetry.record_nx_answer_run_complete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_probe_failure_reads_as_unsupported(self) -> None:
+        """``/version`` raises; same three calls, same order."""
+        db_stub, order = _make_ordered_db_stub()
+        db_stub.telemetry._supports_nx_answer_run_complete.side_effect = (
+            RuntimeError("engine unreachable")
+        )
+
+        result = await _drive_success_path(db_stub)
+
+        assert "final answer" in result.lower()
+        assert order == ["run_start", "record", "outcome"]
+        db_stub.telemetry.record_nx_answer_run_complete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_supported_engine_skips_run_start(self) -> None:
+        """No request to ``/v1/plans/metrics/run_start`` at all -- the
+        falsifier for the unsupported-degrades test above."""
+        db_stub, order = _make_ordered_db_stub()
+        db_stub.telemetry._supports_nx_answer_run_complete.return_value = True
+
+        result = await _drive_success_path(db_stub)
+
+        assert "final answer" in result.lower()
+        db_stub.plans.increment_run_started.assert_not_called()
+        assert "run_start" not in order
+        db_stub.telemetry.record_nx_answer_run_complete.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_mid_call_flag_flip_does_not_change_this_calls_bump_count(
+        self,
+    ) -> None:
+        """Flip the shared store's cached capability flag from true to
+        false between the run-start site's read and the terminating arm
+        -- simulated by a probe mock that would answer differently on a
+        SECOND call -- and assert exactly one bump for this call.
+        Falsifier: have the arm re-consult the flag instead of the
+        per-call record and this either double-reads the probe or takes
+        the wrong route; asserting call_count == 1 here catches the
+        re-read directly, which is the property under test.
+        """
+        db_stub, order = _make_ordered_db_stub()
+        db_stub.telemetry._supports_nx_answer_run_complete = MagicMock(
+            side_effect=[True, False, False, False],
+        )
+
+        result = await _drive_success_path(db_stub)
+
+        assert "final answer" in result.lower()
+        assert db_stub.telemetry._supports_nx_answer_run_complete.call_count == 1, (
+            "the probe must be read exactly once per call, even though it "
+            "is configured to answer differently if called again"
+        )
+        db_stub.telemetry.record_nx_answer_run_complete.assert_called_once()
+        db_stub.plans.increment_run_started.assert_not_called()
+        assert "run_start" not in order
+
+    @pytest.mark.asyncio
+    async def test_plan_miss_against_supporting_engine_takes_composite(self) -> None:
+        """The falsifier for D5's placement rule: a plan-miss call
+        (``plan_id == 0``, the synthetic inline-planner match) against a
+        supporting stub posts to ``/complete`` once, with plan_id null or
+        zero, and no counter routes touched. Falsifier: move the probe
+        read and the two assignments inside the ``if best.plan_id:``
+        guard and this reds, because ``composite_supported_at_start``
+        stays at its entry default and every plan-miss call silently
+        takes the degradation path."""
+        from nexus.plans.match import Match
+
+        db_stub, order = _make_ordered_db_stub()
+        db_stub.telemetry._supports_nx_answer_run_complete.return_value = True
+
+        ad_hoc_plan = json.dumps({
+            "steps": [
+                {"tool": "search", "args": {"query": "$intent", "corpus": "knowledge"}},
+            ],
+        })
+
+        async def fake_miss(question, scope="", max_steps=6, few_shot_matches=None):
+            return Match(
+                plan_id=0, name="ad-hoc", description="", confidence=None,
+                dimensions={}, tags="", plan_json=ad_hoc_plan,
+                required_bindings=[], optional_bindings=[],
+                default_bindings={}, parent_dims=None,
+            )
+
+        plan_run_result = MagicMock()
+        plan_run_result.steps = [{"text": "The final answer."}]
+
+        from nexus.mcp.core import nx_answer
+
+        with patch("nexus.plans.matcher.plan_match", return_value=[]), \
+             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(side_effect=fake_miss)), \
+             patch("nexus.plans.runner.plan_run", AsyncMock(return_value=plan_run_result)), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            result = await nx_answer(question="ad hoc question")
+
+        assert "final answer" in result.lower()
+        db_stub.telemetry.record_nx_answer_run_complete.assert_called_once()
+        _, kwargs = db_stub.telemetry.record_nx_answer_run_complete.call_args
+        assert not kwargs["plan_id"], "the ad-hoc plan_id (0) must ride the composite payload as-is"
+        db_stub.plans.increment_run_started.assert_not_called()
+        db_stub.plans.increment_run_outcome.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_planner_failure_arm_upstream_of_run_start_still_records(self) -> None:
+        """The falsifier for the entry-initialisation rule in D5: force
+        the inline planner to raise so the call terminates on the arm
+        upstream of the run-start site, and assert the planner-failure
+        run row is still written. Falsifier: bind the two booleans at
+        the run-start site instead of at entry and the row stops
+        appearing, silently, because that arm's
+        ``except Exception: pass`` swallows the resulting
+        ``UnboundLocalError``. Nothing else in the suite would notice."""
+        from nexus.mcp.core import nx_answer
+
+        db_stub = MagicMock()
+        recorded: list = []
+        db_stub.telemetry.record_nx_answer_run.side_effect = (
+            lambda **kw: recorded.append(kw)
+        )
+
+        async def failing_miss(question, scope="", max_steps=6, few_shot_matches=None):
+            raise RuntimeError("planner blew up")
+
+        with patch("nexus.plans.matcher.plan_match", return_value=[]), \
+             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(side_effect=failing_miss)), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            result = await nx_answer(question="will fail before run-start")
+
+        assert len(recorded) == 1, (
+            f"expected exactly one planner-failure run row, got {len(recorded)} "
+            f"-- an UnboundLocalError on composite_supported_at_start/"
+            f"early_bump_fired would silently drop this row instead"
+        )
+        assert recorded[0]["plan_id"] is None
+        assert "Planner error" in recorded[0]["final_text"]
+        assert "planner blew up" in recorded[0]["final_text"]
+        assert "No matching plan found" in result
+
+
+class TestFourOhFourDowngradeGuard:
+    """D5's downgrade guard: a 404 from ``/complete`` is a probe
+    correction, not a transport failure."""
+
+    @pytest.mark.asyncio
+    async def test_404_downgrade_issues_deferred_run_start_then_record_then_outcome(
+        self,
+    ) -> None:
+        """The tripping call issues exactly three calls, in order:
+        run_start, record, outcome, after the 404 from /complete.
+        Falsifier: drop the deferred run_start from the fallback and the
+        first assertion sees two calls instead of three."""
+        db_stub, order = _make_ordered_db_stub()
+        db_stub.telemetry._supports_nx_answer_run_complete.return_value = True
+        request = httpx.Request("POST", "http://fake/v1/telemetry/nx_answer_runs/complete")
+        response = httpx.Response(404, request=request)
+        db_stub.telemetry.record_nx_answer_run_complete.side_effect = (
+            httpx.HTTPStatusError("not found", request=request, response=response)
+        )
+
+        result = await _drive_success_path(db_stub)
+
+        assert "final answer" in result.lower()
+        assert order == ["run_start", "record", "outcome"], (
+            f"expected the deferred (run_start, record, outcome) fallback "
+            f"in that order after the 404; got {order}"
+        )
+        db_stub.telemetry._downgrade_nx_answer_run_complete_support.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_non_404_failure_drops_the_whole_composite_write(self) -> None:
+        """A 429/5xx is a transport failure, not a probe correction: the
+        whole composite write is dropped, exactly as a single
+        _nx_answer_record_run failure is dropped today -- never silently
+        converted into the three-call fallback."""
+        db_stub, order = _make_ordered_db_stub()
+        db_stub.telemetry._supports_nx_answer_run_complete.return_value = True
+        request = httpx.Request("POST", "http://fake/v1/telemetry/nx_answer_runs/complete")
+        response = httpx.Response(429, request=request)
+        db_stub.telemetry.record_nx_answer_run_complete.side_effect = (
+            httpx.HTTPStatusError("too many requests", request=request, response=response)
+        )
+
+        result = await _drive_success_path(db_stub)
+
+        assert "final answer" in result.lower()
+        assert order == [], "a non-404 failure must drop the write, not fall back"
+        db_stub.telemetry._downgrade_nx_answer_run_complete_support.assert_not_called()
+
+
+class TestCompositePayloadCreatedAt:
+    """D1's required field, from the client's side (unit-level, direct
+    choke-point call -- the store-level wire test is
+    tests/db/test_http_telemetry_store.py::TestRecordNxAnswerRunComplete)."""
+
+    def test_composite_payload_always_carries_created_at(self) -> None:
+        """The client half of D1's required-field rule: created_at is on
+        the wire at all, stamped at the choke point before the first
+        attempt. Falsifier: drop the stamp (pass ``created_at=None`` or
+        omit the kwarg) and this reds."""
+        db = MagicMock()
+        _nx_answer_record_complete(
+            db, question="q", plan_id=5, matched_confidence=0.5, step_count=1,
+            final_text="a", step_records=[], duration_ms=10, trace=True,
+            success=True, composite_supported_at_start=True, early_bump_fired=False,
+        )
+        _, kwargs = db.telemetry.record_nx_answer_run_complete.call_args
+        assert kwargs["created_at"], "created_at must be present and non-empty"
+        from datetime import datetime as _dt
+
+        _dt.fromisoformat(kwargs["created_at"])  # must parse as ISO-8601
+
+
+class TestHandoffArmUseCountInvariant:
+    """D4's invariant (use_count == success_count + failure_count) for the
+    RDR-200 continuation handoff, the one D6 survivor with a real outcome
+    to reconcile against."""
+
+    @pytest.mark.asyncio
+    async def test_non_supporting_engine_handoff_arm_bumps_use_count_exactly_once(
+        self,
+    ) -> None:
+        """Against a stub whose /version reports no support, drive a call
+        that terminates on the handoff arm and assert exactly one call to
+        increment_run_started: the early site fires it, and the
+        survivor's helper no-ops on early_bump_fired. Falsifier: make the
+        helper's no-op condition plan_id-only again and the assertion
+        sees two."""
+        from nexus.mcp import core as mcp_core
+        from nexus.mcp.core import nx_answer
+        from tests.test_nx_answer import _make_multi_step_match
+
+        db_stub = MagicMock()
+        db_stub.telemetry._supports_nx_answer_run_complete.return_value = False
+        db_stub.plans.save_plan = MagicMock(return_value=1)
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+
+        async def stub_search(**kwargs):
+            return {
+                "ids": ["a"], "tumblers": ["1.1"], "distances": [0.1],
+                "collections": ["knowledge"], "chunk_text_hash": ["h1"],
+                "chunk_collections": ["knowledge"],
+            }
+
+        async def stub_extract(**kwargs):
+            return {"extractions": []}
+
+        with patch("nexus.plans.matcher.plan_match",
+                    return_value=[_make_multi_step_match()]), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
+             patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", True), \
+             patch.object(mcp_core, "search", stub_search), \
+             patch.object(mcp_core, "operator_extract", stub_extract):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer(question="q", continuation=True)
+
+        db_stub.plans.increment_run_started.assert_called_once_with(1)
+
+    @pytest.mark.asyncio
+    async def test_handoff_arm_against_supporting_engine_keeps_use_count_equal_to_outcomes(
+        self,
+    ) -> None:
+        """Against the self-provisioned engine substrate (autouse
+        _pin_t2_substrate) with /complete supported, drive an nx_answer
+        call that terminates on the handoff arm, then read the plan row
+        back and assert use_count == success_count + failure_count.
+        Falsifier: remove the survivor's _nx_answer_ensure_run_started
+        and the read comes back with use_count one short. Never against
+        the operator's live install -- this is the self-provisioned test
+        tenant every test in this suite already runs against."""
+        from nexus.mcp import core as mcp_core
+        from nexus.mcp.core import nx_answer
+        from nexus.mcp_infra import t2_ctx
+        from nexus.plans.match import Match
+
+        plan_json = json.dumps({
+            "steps": [
+                {"tool": "search", "args": {"query": "$intent", "corpus": "knowledge"}},
+                {"tool": "extract", "args": {"inputs": "$step1.ids", "fields": "title,summary"}},
+            ],
+        })
+        with t2_ctx() as db:
+            plan_id = db.plans.save_plan(
+                "rdr-203 handoff invariant probe", plan_json, verb="research",
+            )
+
+        match = Match(
+            plan_id=plan_id, name="handoff-invariant-probe", description="test",
+            confidence=0.9, dimensions={}, tags="", plan_json=plan_json,
+            required_bindings=["intent"], optional_bindings=[],
+            default_bindings={"intent": "rdr-203 handoff invariant probe"},
+            parent_dims=None,
+        )
+
+        async def stub_search(**kwargs):
+            return {
+                "ids": ["a"], "tumblers": ["1.1"], "distances": [0.1],
+                "collections": ["knowledge"], "chunk_text_hash": ["h1"],
+                "chunk_collections": ["knowledge"],
+            }
+
+        async def stub_extract(**kwargs):
+            return {"extractions": []}
+
+        with patch("nexus.plans.matcher.plan_match", return_value=[match]), \
+             patch("nexus.mcp.core.scratch", MagicMock()), \
+             patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", True), \
+             patch.object(mcp_core, "search", stub_search), \
+             patch.object(mcp_core, "operator_extract", stub_extract):
+            result = await nx_answer(
+                question="rdr-203 handoff invariant probe", continuation=True,
+            )
+
+        assert "nx_answer_report" in result, (
+            f"expected the call to terminate on the RDR-200 handoff arm "
+            f"(a rendered continuation instruction naming nx_answer_report); "
+            f"got: {result!r}"
+        )
+
+        with t2_ctx() as db:
+            row = db.plans.get_plan(plan_id)
+
+        assert row is not None, f"plan {plan_id} must still exist"
+        assert row["use_count"] == row["success_count"] + row["failure_count"], (
+            f"D4 invariant violated: use_count={row['use_count']} but "
+            f"success_count={row['success_count']} + "
+            f"failure_count={row['failure_count']} = "
+            f"{row['success_count'] + row['failure_count']}"
+        )
+        assert row["use_count"] >= 1, "the handoff arm must have bumped use_count at all"

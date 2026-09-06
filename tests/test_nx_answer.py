@@ -1038,6 +1038,14 @@ class TestPlanRunTelemetry:
         library = MagicMock()
         db_stub = MagicMock(plans=library)
         db_stub.conn = MagicMock()
+        # RDR-203 P3: the run-start site now probes
+        # `_supports_nx_answer_run_complete` unconditionally, and an
+        # unconfigured MagicMock method returns a truthy MagicMock,
+        # which would silently route this call through the composite
+        # branch instead of the (increment_run_started,
+        # increment_run_outcome) pair this test pins. Force the
+        # degradation path explicitly.
+        db_stub.telemetry._supports_nx_answer_run_complete.return_value = False
 
         with patch("nexus.plans.matcher.plan_match", side_effect=fake_match), \
              patch("nexus.plans.runner.plan_run",
@@ -1109,6 +1117,9 @@ class TestPlanRunTelemetry:
         library = MagicMock()
         db_stub = MagicMock(plans=library)
         db_stub.conn = MagicMock()
+        # RDR-203 P3: force the degradation path -- see the sibling test
+        # above's identical comment.
+        db_stub.telemetry._supports_nx_answer_run_complete.return_value = False
 
         with patch("nexus.plans.matcher.plan_match", side_effect=fake_match), \
              patch("nexus.plans.runner.plan_run",
@@ -5013,6 +5024,12 @@ class TestContinuationGoLiveMidPrefixFailure:
         db_stub = MagicMock()
         db_stub.plans.save_plan = MagicMock(return_value=1)
         db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+        # RDR-203 P3: force the degradation path -- an unconfigured
+        # MagicMock `_supports_nx_answer_run_complete()` return is truthy,
+        # which would silently route this cut-short arm through the
+        # composite branch (`record_nx_answer_run_complete`) instead of
+        # the `record_nx_answer_run` call this test pins.
+        db_stub.telemetry._supports_nx_answer_run_complete.return_value = False
         db_stub.telemetry.record_nx_answer_run.side_effect = (
             lambda **kw: recorded_calls.append(kw)
         )
@@ -5084,6 +5101,12 @@ class TestContinuationGoLiveMidPrefixFailure:
         db_stub = MagicMock()
         db_stub.plans.save_plan = MagicMock(return_value=1)
         db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+        # RDR-203 P3: force the degradation path -- an unconfigured
+        # MagicMock `_supports_nx_answer_run_complete()` return is truthy,
+        # which would silently route this cut-short arm through the
+        # composite branch (`record_nx_answer_run_complete`) instead of
+        # the `record_nx_answer_run` call this test pins.
+        db_stub.telemetry._supports_nx_answer_run_complete.return_value = False
         db_stub.telemetry.record_nx_answer_run.side_effect = (
             lambda **kw: recorded_calls.append(kw)
         )
@@ -5149,6 +5172,12 @@ class TestContinuationGoLiveMidPrefixFailure:
         db_stub = MagicMock()
         db_stub.plans.save_plan = MagicMock(return_value=1)
         db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+        # RDR-203 P3: force the degradation path -- an unconfigured
+        # MagicMock `_supports_nx_answer_run_complete()` return is truthy,
+        # which would silently route this cut-short arm through the
+        # composite branch (`record_nx_answer_run_complete`) instead of
+        # the `record_nx_answer_run` call this test pins.
+        db_stub.telemetry._supports_nx_answer_run_complete.return_value = False
         db_stub.telemetry.record_nx_answer_run.side_effect = (
             lambda **kw: recorded_calls.append(kw)
         )
