@@ -1161,6 +1161,35 @@ class TestFreshProvisionCreatesVectorDirectly:
         )
         assert row == "t"
 
+    def test_public_has_no_execute_on_relocate_function(self, provisioned, bins):
+        """MINIMAL-GRANTS PROOF (batch-9 gate-pass review): PostgreSQL
+        grants EXECUTE on a newly created function to PUBLIC by default —
+        harmless for the codebase's ordinary SECURITY INVOKER functions
+        (RLS bounds the caller regardless), but this function is SECURITY
+        DEFINER: leaving the PUBLIC default would let ANY role with CONNECT
+        on this database (nexus_svc, nexus_diag, ...) relocate a critical
+        extension at will. Regression pin for the explicit REVOKE ... FROM
+        PUBLIC in relocate_vector_extensions_to_nexus_schema."""
+        result, _ = provisioned
+        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        row = _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT has_function_privilege('public', "
+            "'nexus.ensure_vector_extensions_relocated()', 'EXECUTE')",
+        )
+        assert row == "f"
+
+    def test_public_has_no_execute_on_unrelocate_function(self, provisioned, bins):
+        """Companion to the above for the rollback-direction function."""
+        result, _ = provisioned
+        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        row = _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT has_function_privilege('public', "
+            "'nexus.ensure_vector_extensions_unrelocated()', 'EXECUTE')",
+        )
+        assert row == "f"
+
     def test_relocate_function_is_security_definer_owned_by_os_user(self, provisioned, bins):
         """The elevation mechanism itself: the function must run as its
         OWNER (os_user, superuser), not its caller — that is what lets

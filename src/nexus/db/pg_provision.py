@@ -1123,6 +1123,29 @@ def relocate_vector_extensions_to_nexus_schema(
     none of the inlining cost that ruled out the same clause for the 33
     vector/pg_trgm SQL functions in search-path-002.
 
+    MINIMAL GRANTS (worktree-agent-ae864db44cc9fe82c review, batch-9 gate
+    pass — the search_path pin alone is not the whole hardening story for a
+    SECURITY DEFINER function): PostgreSQL grants EXECUTE on a newly created
+    function to PUBLIC by default, regardless of ``SECURITY DEFINER`` status
+    — the one PostgreSQL default this codebase's own combined-query
+    functions rely on deliberately (see e.g. catalog-006's "EXECUTE defaults
+    to PUBLIC for functions" comment), because those are ``SECURITY
+    INVOKER`` and RLS bounds what a caller can do with them regardless of
+    who is allowed to call. A ``SECURITY DEFINER`` function is the opposite
+    case: it runs with the OWNER's (superuser) privileges no matter who
+    calls it, so leaving the PUBLIC default in place would let ANY role
+    with CONNECT on this database — ``nexus_svc``, ``nexus_diag``, any
+    future low-privilege role — invoke ``ALTER EXTENSION ... SET SCHEMA``
+    at will (in the unrelocate direction, a self-inflicted denial of
+    service: moving ``vector`` back to ``public`` breaks every
+    ``nexus.vector``-qualified reference in search-path-002's 33
+    functions). Both functions therefore ``REVOKE EXECUTE ... FROM PUBLIC``
+    before the explicit ``GRANT ... TO nexus_admin`` — CREATE OR REPLACE
+    does not reset an existing grant, so this only has visible effect on
+    the function's first creation, but it costs nothing to state
+    unconditionally on every call, matching every other statement in this
+    function's body.
+
     Ensures ``CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION nexus_admin``
     first (both ``direct=True`` and ``direct=False`` — the function needs the
     schema to exist regardless) — agreeing with how Liquibase itself creates
@@ -1172,6 +1195,7 @@ def relocate_vector_extensions_to_nexus_schema(
         "  END IF; "
         "END; "
         "$relofunc$; "
+        f"REVOKE EXECUTE ON FUNCTION {RELOCATE_FUNCTION_QUALNAME}() FROM PUBLIC; "
         f"GRANT EXECUTE ON FUNCTION {RELOCATE_FUNCTION_QUALNAME}() TO nexus_admin; "
         f"CREATE OR REPLACE FUNCTION {UNRELOCATE_FUNCTION_QUALNAME}() "
         "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $unrelofunc$ "
@@ -1184,6 +1208,7 @@ def relocate_vector_extensions_to_nexus_schema(
         "  END IF; "
         "END; "
         "$unrelofunc$; "
+        f"REVOKE EXECUTE ON FUNCTION {UNRELOCATE_FUNCTION_QUALNAME}() FROM PUBLIC; "
         f"GRANT EXECUTE ON FUNCTION {UNRELOCATE_FUNCTION_QUALNAME}() TO nexus_admin;",
     )
     if not direct:
