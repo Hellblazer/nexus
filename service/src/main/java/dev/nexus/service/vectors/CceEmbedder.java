@@ -410,7 +410,31 @@ public final class CceEmbedder implements Embedder {
         // the progress line still needs the SAME rate limiting as Bge768/Voyage, since
         // a large bulk run is exactly N single-text completions in a tight loop.
         long callStartNanos = System.nanoTime();
+        // nexus-8hdg9 phase 4: the request's cooperative deadline, read ONCE per call
+        // (RequestDeadlineProbe.NONE outside a filtered request -> never aborts). The
+        // check before each collected future reuses the most recent nanoTime reading
+        // this loop already takes for its progress counters (callStartNanos before the
+        // first get), so the per-iteration cost is one long comparison.
+        long requestDeadlineNanos = RequestDeadlineProbe.currentDeadlineNanos();
+        long lastNanos = callStartNanos;
         for (int i = 0; i < n; i++) {
+            if (RequestDeadlineProbe.expired(requestDeadlineNanos, lastNanos)) {
+                // Stop every future not yet consumed, index i included -- its result will
+                // never be read. Siblings already dispatched to Voyage are still billed
+                // (the class javadoc's documented asymmetry); cancel(true) only prevents
+                // the NOT-YET-STARTED ones from ever acquiring a permit.
+                cancelFrom(futures, i);
+                long elapsedMs = (lastNanos - callStartNanos) / 1_000_000L;
+                long pastDeadlineMs = (lastNanos - requestDeadlineNanos) / 1_000_000L;
+                log.warn("event=embed_deadline_exceeded embedder=cce chunks_done={} chunks_total={} "
+                        + "elapsed_ms={} past_deadline_ms={} retry_after_s={}",
+                        i, n, elapsedMs, pastDeadlineMs,
+                        RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS);
+                throw new RequestDeadlineExceededException(
+                        "embed deadline exceeded after " + i + "/" + n + " chunks ("
+                                + elapsedMs + "ms elapsed, " + pastDeadlineMs + "ms past deadline)",
+                        RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS);
+            }
             try {
                 results.add(futures.get(i).get());
             } catch (ExecutionException e) {
@@ -425,6 +449,7 @@ public final class CceEmbedder implements Embedder {
             }
             int chunksDone = i + 1;
             long nowNanos = System.nanoTime();
+            lastNanos = nowNanos;
             double elapsedSecForTracker = (nowNanos - callStartNanos) / 1_000_000_000.0;
             double chunksPerSecForTracker = elapsedSecForTracker > 0.0 ? chunksDone / elapsedSecForTracker : 0.0;
             // Bead nexus-s71lr, pass 3: update the wire-visible activity counters on
@@ -442,6 +467,13 @@ public final class CceEmbedder implements Embedder {
             }
         }
         return results;
+    }
+
+    /** Test-only (nexus-8hdg9 phase 4): {@link #inFlight}'s free permits, so a test can
+     * assert the fan-out's permit count returns to the constructor's {@code parallelism}
+     * after a deadline abort, once the already-dispatched siblings drain. */
+    int inFlightAvailablePermits() {
+        return inFlight.availablePermits();
     }
 
     private static void cancelFrom(List<? extends Future<?>> futures, int fromIdx) {
