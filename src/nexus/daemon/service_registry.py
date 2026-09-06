@@ -101,6 +101,26 @@ class StaleOwnerError(ServiceRegistryError):
     """
 
 
+class ElectionBusyError(ServiceRegistryError):
+    """Raised when a BOUNDED election (``heartbeat``) could not take the
+    per-scope flock inside its budget (nexus-59bah). Not a fence: the caller
+    still owns its lease and simply skipped one stamp. The next tick retries.
+    """
+
+
+#: Fraction of the lease TTL a heartbeat may spend waiting for the election
+#: flock (nexus-59bah). One third: a tick that spends its whole budget still
+#: returns with two thirds of the TTL left, so a transient holder costs a
+#: skipped stamp and the next tick retries before discoverers read the lease
+#: as absent; a wedged holder can never keep the heartbeat loop itself blocked
+#: past the TTL (the 2026-09-06 skew-window shape). Two consecutive busy ticks
+#: do age the lease out; that is the visible failure, not a silent wedge.
+HEARTBEAT_ELECTION_BUDGET_FRACTION: float = 1.0 / 3.0
+
+#: LOCK_NB poll cadence for the bounded election.
+_ELECTION_POLL_INTERVAL: float = 0.05
+
+
 def mint_owner_token() -> str:
     """A server-unique owner identity. Never a pid (pid-reuse immunity)."""
     return uuid.uuid4().hex
@@ -172,6 +192,8 @@ class ServiceRegistry:
         clock: Clock = time.time,
         ttl: float = DEFAULT_TTL,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
+        monotonic: Clock = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         if ttl < heartbeat_interval:
             raise ValueError(
@@ -184,6 +206,8 @@ class ServiceRegistry:
         self._clock = clock
         self._ttl = ttl
         self._heartbeat_interval = heartbeat_interval
+        self._monotonic = monotonic
+        self._sleep = sleep
 
     # -- paths --------------------------------------------------------------
 
@@ -194,6 +218,11 @@ class ServiceRegistry:
     @property
     def heartbeat_interval(self) -> float:
         return self._heartbeat_interval
+
+    @property
+    def heartbeat_election_budget(self) -> float:
+        """Seconds a heartbeat may wait for the election flock (nexus-59bah)."""
+        return self._ttl * HEARTBEAT_ELECTION_BUDGET_FRACTION
 
     def _record_path(self, scope_key: str) -> Path:
         return self._dir / f"{self._tier}_addr.{scope_key}"
@@ -207,25 +236,50 @@ class ServiceRegistry:
     # -- election -----------------------------------------------------------
 
     @contextlib.contextmanager
-    def _elect(self, scope_key: str) -> Iterator[None]:
+    def _elect(self, scope_key: str, *, budget: Optional[float] = None) -> Iterator[None]:
         """Hold the per-scope election flock for a read-modify-write.
 
-        Blocking ``LOCK_EX``: the critical section (read current record,
-        increment generation, atomic write) is short, and a publisher
-        must wait its turn rather than fail, so concurrent siblings
-        serialize into strictly increasing generations.
+        ``budget=None`` (publish, relinquish, reap, shutdown marker): blocking
+        ``LOCK_EX``. The critical section (read current record, increment
+        generation, atomic write) is short, and a publisher must wait its
+        turn rather than fail, so concurrent siblings serialize into
+        strictly increasing generations.
+
+        ``budget=<seconds>`` (heartbeat, nexus-59bah): ``LOCK_NB`` polled
+        against the injected monotonic clock; raises ``ElectionBusyError``
+        once the budget is spent. A heartbeat already holds a lease, so a
+        skipped stamp is cheap and a blocked tick is not: the 2026-09-06
+        skew window had a live supervisor wedged in one tick past the TTL.
         """
         self._ensure_dir()
         path = self._election_path(scope_key)
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            if budget is None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            else:
+                self._flock_within(fd, scope_key, budget)
             yield
         finally:
             try:
                 fcntl.flock(fd, fcntl.LOCK_UN)
             finally:
                 os.close(fd)
+
+    def _flock_within(self, fd: int, scope_key: str, budget: float) -> None:
+        deadline = self._monotonic() + budget
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except BlockingIOError:
+                now = self._monotonic()
+                if now >= deadline:
+                    raise ElectionBusyError(
+                        f"scope {scope_key!r}: election flock still held after "
+                        f"{budget:.2f}s budget; heartbeat stamp skipped"
+                    ) from None
+                self._sleep(min(_ELECTION_POLL_INTERVAL, deadline - now))
 
     # -- atomic IO ----------------------------------------------------------
 
@@ -315,9 +369,16 @@ class ServiceRegistry:
         it at the SAME generation. Fencing (CA-4): if a newer owner has
         taken the scope (higher generation, or the same generation under
         a different ``owner_token``), raise ``StaleOwnerError`` and write
-        nothing.
+        nothing. Bounded election (nexus-59bah): raises ``ElectionBusyError``
+        if the flock is not free within ``heartbeat_election_budget``. The
+        flock is the target by elimination: every probe in the supervisor's
+        tick (health, livez, pg) is timeout-bounded below the TTL, so the
+        flock plus the record write were the only unbounded calls. The write
+        itself (``_read_record`` / ``_write_record_atomic``) stays unbounded
+        by decision: a filesystem stall long enough to age the lease out is
+        reported by the tier's missed-TTL log, not masked here.
         """
-        with self._elect(record.scope_key):
+        with self._elect(record.scope_key, budget=self.heartbeat_election_budget):
             current = self._read_record(record.scope_key)
             if current is not None:
                 if current.generation > record.generation:
@@ -533,6 +594,16 @@ class ServiceSupervisor:
                 "service_supervisor_fenced",
                 scope=self._scope_key,
                 owner_token=self._owner_token,
+            )
+        except ElectionBusyError as exc:
+            # nexus-59bah: not a fence. We still own the lease; one stamp is
+            # skipped and the next tick retries. Logged so a repeated holder
+            # is visible before the lease ages out.
+            _log.warning(
+                "service_supervisor_heartbeat_election_busy",
+                scope=self._scope_key,
+                budget_s=self._registry.heartbeat_election_budget,
+                error=str(exc),
             )
 
     def cycle_to_current(
