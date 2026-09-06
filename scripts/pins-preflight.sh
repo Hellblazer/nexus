@@ -11,7 +11,7 @@
 #      PG bundle parity, deadline ordering)
 #   3. scripts/check_wire_contract_pairing.py
 #   4. ruff over src (the CI lint job scope; tests are not ruff-gated)
-set -u
+set -u -o pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 2
 reds=()
@@ -22,7 +22,9 @@ run() {
 }
 lint_out="$(mktemp)"
 run "lint bucket" bash -c "uv run pytest -m lint -q -p no:cacheprovider 2>&1 | tee '$lint_out' | tail -3"
-if ! grep -qE '[1-9][0-9]{2,} passed' "$lint_out"; then
+if grep -qE '[0-9]+ errors?( |,)' "$lint_out"; then
+  echo "   RED: lint bucket had setup errors (stale gate jar? run scripts/build-gate-jar.sh first)"; reds+=("lint bucket errors")
+elif ! grep -qE '[1-9][0-9]{2,} passed' "$lint_out"; then
   echo "   VACUOUS: lint bucket ran fewer than 100 tests"; rm -f "$lint_out"; exit 2
 fi
 rm -f "$lint_out"
