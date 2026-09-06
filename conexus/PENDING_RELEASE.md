@@ -31,6 +31,11 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.32.0)
 
+- `conexus/agents/developer.md` (nexus-yhcxi): the Beads Integration section
+  no longer tells the agent to close beads and commit the beads file, which
+  contradicted its own Completion Protocol; the composed worktree-developer
+  inherits the fix at the next `nx agents install`.
+
 - `conexus/hooks/scripts/routing/_lib.py` (nexus-gjv9b PART 3): the dead
   JSONL append and rotation machinery (`_default_log_path`, `_log_path`,
   `_lock_file`/`_unlock_file`, `_rotate_log_if_oversized`) is deleted.
