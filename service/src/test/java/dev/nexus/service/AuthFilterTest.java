@@ -466,15 +466,16 @@ class AuthFilterTest {
     }
 
     @Test
-    void oversizedHeaderIsClampedToEnvDefault() throws Exception {
+    void oversizedHeaderWinsOverEnvDefault() throws Exception {
         long before = System.nanoTime();
         long[] after = new long[1];
         long deadline = echoedDeadlineWithHeader(
             Long.toString(HEADER_BUDGET_ABOVE_DEFAULT_MS), before, after);
         assertThat(deadline)
-            .as("a header above the env default is clamped to it -- the server bound is a ceiling")
-            .isBetween(before + nanos(EXPLICIT_DEADLINE_BUDGET_MS),
-                       after[0] + nanos(EXPLICIT_DEADLINE_BUDGET_MS));
+            .as("a header above the env default replaces it -- the client's own budget wins,"
+                + " the env default is only the fallback")
+            .isBetween(before + nanos(HEADER_BUDGET_ABOVE_DEFAULT_MS),
+                       after[0] + nanos(HEADER_BUDGET_ABOVE_DEFAULT_MS));
     }
 
     // ── Cache-level seam (fresh cache per test, mutable clock) ────────────────

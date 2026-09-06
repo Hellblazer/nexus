@@ -90,9 +90,17 @@ final class RequestDeadline {
      *       contrast {@link #deadlineMsFromEnv(Function)}, which refuses a bad
      *       OPERATOR setting loudly because that is a boot-time
      *       misconfiguration, not a per-request hint.</li>
-     *   <li>Header larger than {@code envDefaultMs}: clamped to {@code
-     *       envDefaultMs}. The server bound is a CEILING the operator set; a
-     *       client may ask for less, never more.</li>
+     *   <li>Present, positive, numeric header: WINS OUTRIGHT, larger than the
+     *       env default included. The design's reason for the header (T2
+     *       design-nexus-8hdg9-write-cancellation §2 Option C) is that a
+     *       server-guessed deadline "too tight kills healthy slow requests",
+     *       mitigated by sourcing the deadline from the client's own budget --
+     *       a client that will wait 540s must not be aborted at a 300s server
+     *       guess. The env default is the fallback for the absent/malformed
+     *       cases only, not a ceiling; the header value is itself bounded by
+     *       the client's own socket timeout (it is derived from it minus a
+     *       margin), so a cooperating client cannot declare an unbounded
+     *       budget.</li>
      * </ul>
      */
     static long resolveBudgetMs(String headerValue, long envDefaultMs) {
@@ -108,7 +116,7 @@ final class RequestDeadline {
         if (requested <= 0) {
             return envDefaultMs;
         }
-        return Math.min(requested, envDefaultMs);
+        return requested;
     }
 
     /** Production entry point: real env. */

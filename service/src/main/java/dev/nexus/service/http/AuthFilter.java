@@ -234,8 +234,8 @@ public final class AuthFilter extends Filter {
         // nexus-8hdg9 phase 2: mint the request's embed deadline alongside the
         // principal, for EVERY route, from the budget resolved once at construction.
         // Phase 5: a client that declares its own budget via the advisory
-        // X-Nexus-Request-Deadline-Ms header is preferred, clamped to the env
-        // default as a ceiling; absent or malformed falls back to the default.
+        // X-Nexus-Request-Deadline-Ms header replaces the env default outright;
+        // absent or malformed falls back to the default.
         // Cleared together with the principal in the finally below.
         long budgetMs = RequestDeadline.resolveBudgetMs(
             exchange.getRequestHeaders().getFirst(RequestDeadline.REQUEST_DEADLINE_HEADER),

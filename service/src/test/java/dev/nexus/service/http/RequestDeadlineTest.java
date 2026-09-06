@@ -88,8 +88,8 @@ class RequestDeadlineTest {
     }
 
     @Test
-    void resolveBudgetMs_oversizedHeaderIsClampedToEnvDefault() {
-        assertThat(RequestDeadline.resolveBudgetMs("540000", 300_000L)).isEqualTo(300_000L);
+    void resolveBudgetMs_oversizedHeaderWinsOverEnvDefault() {
+        assertThat(RequestDeadline.resolveBudgetMs("540000", 300_000L)).isEqualTo(540_000L);
         assertThat(RequestDeadline.resolveBudgetMs("300000", 300_000L)).isEqualTo(300_000L);
     }
 
