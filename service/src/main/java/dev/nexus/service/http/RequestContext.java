@@ -72,11 +72,19 @@ public final class RequestContext {
         CURRENT.remove();
     }
 
-    static void setDeadlineNanos(long deadlineNanos) {
+    /**
+     * Park the current request's embed deadline. Public (not package-private
+     * like {@link #set(Principal)}) because the phase-3/4 check points live in
+     * {@code dev.nexus.service.vectors} and their tests need to mint an
+     * already-expired deadline on the calling thread without standing up an
+     * {@link AuthFilter}; production callers are {@link AuthFilter} only.
+     */
+    public static void setDeadlineNanos(long deadlineNanos) {
         DEADLINE_NANOS.set(deadlineNanos);
     }
 
-    static void clearDeadline() {
+    /** Counterpart of {@link #setDeadlineNanos(long)}; same visibility rationale. */
+    public static void clearDeadline() {
         DEADLINE_NANOS.remove();
     }
 
@@ -135,8 +143,9 @@ public final class RequestContext {
      *         {@link System#nanoTime()} value, or null outside a filtered request.
      *         Minted by {@link AuthFilter} from {@link RequestDeadline#deadlineMsFromEnv()}
      *         for every route, not just a write -- see the class javadoc's "Embed
-     *         deadline" section. No embed-loop check point reads this yet (phases
-     *         3/4, nexus-8hdg9.3/.4).
+     *         deadline" section. Read by the phase-3/4 check points
+     *         ({@code Bge768Embedder.embedSubBatched}, {@code CceEmbedder.embedParallel})
+     *         through {@code RequestDeadlineProbe}; null means "never abort".
      */
     public static Long deadlineNanos() {
         return DEADLINE_NANOS.get();

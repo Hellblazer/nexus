@@ -292,6 +292,10 @@ public final class Bge768Embedder implements Embedder {
         if (texts == null || texts.isEmpty()) return List.of();
         try {
             return embedSubBatched(texts);
+        } catch (RequestDeadlineExceededException e) {
+            // nexus-8hdg9 phase 3: rethrown UNWRAPPED so VectorHandler's typed 503 +
+            // Retry-After arm sees it rather than the generic 500 arm.
+            throw e;
         } catch (Exception e) {
             throw new RuntimeException("Bge768Embedder.embed failed: " + e.getMessage(), e);
         }
@@ -353,6 +357,9 @@ public final class Bge768Embedder implements Embedder {
         long callStartNanos = System.nanoTime();
         int chunksDone = 0;
         int subBatchIndex = 0;
+        // nexus-8hdg9 phase 3: the request's cooperative deadline, read ONCE per call
+        // (RequestDeadlineProbe.NONE outside a filtered request -> never aborts).
+        long deadlineNanos = RequestDeadlineProbe.currentDeadlineNanos();
 
         List<float[]> results = new ArrayList<>(n);
         int start = 0;
@@ -407,6 +414,27 @@ public final class Bge768Embedder implements Embedder {
             }
             subBatchIndex++;
             start = end;
+
+            // nexus-8hdg9 phase 3: cooperative deadline check BETWEEN sub-batches, before
+            // the next runOnnxSubBatch. Reuses this iteration's nowNanos (design record §4:
+            // no second clock read; the added cost is one long comparison). Only when more
+            // work remains -- a request whose last sub-batch just completed is never
+            // aborted after doing all its work. The admission permit is released by
+            // AdmissionControlledEmbedder's finally; the session.run() that just returned
+            // is the granularity floor (a native ONNX call cannot be interrupted).
+            if (start < n && RequestDeadlineProbe.expired(deadlineNanos, nowNanos)) {
+                long elapsedMs = (nowNanos - callStartNanos) / 1_000_000L;
+                long pastDeadlineMs = (nowNanos - deadlineNanos) / 1_000_000L;
+                log.warn("event=embed_deadline_exceeded embedder=bge768 chunks_done={} chunks_total={} "
+                        + "sub_batches_done={} elapsed_ms={} past_deadline_ms={} retry_after_s={}",
+                        chunksDone, n, subBatchIndex, elapsedMs, pastDeadlineMs,
+                        RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS);
+                throw new RequestDeadlineExceededException(
+                        "embed deadline exceeded after " + chunksDone + "/" + n + " chunks ("
+                                + subBatchIndex + " sub-batches, " + elapsedMs + "ms elapsed, "
+                                + pastDeadlineMs + "ms past deadline)",
+                        RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS);
+            }
         }
         return results;
     }
