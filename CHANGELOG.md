@@ -6,6 +6,49 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.33.0] - 2026-09-06
+
+Paired with engine-service-v0.1.105 (`REQUIRED_ENGINE_VERSION` 0.1.105).
+
+### Changed
+
+- Search fan-out (nexus-d9xt2): `search_cross_corpus` issues one combined
+  `/v1/vectors/search` per embedding-model group instead of one call per
+  collection, with a per-collection candidate floor of `n_results` times
+  the corpus overfetch multiplier, capped at 300 and split into sub-batches
+  above it. A 71-collection `corpus=all` search drops from 13 to 19 s to
+  about 6 s at shipped defaults; `--corpus knowledge` from 6.7 s to under
+  1 s. A collection whose combined call fails with a dimension mismatch is
+  retried alone and then excluded for the process; transient errors are
+  retried per call. The CLI skips the collection-stats round trip for
+  conformant `--corpus` names and existence-checks them via the cheap
+  collections endpoint, keeping the named "no collections match" warning.
+  Known residual: a group that splits can swap near-tied results at ranks
+  7 to 10 (rdr, 9 collections); tracked as nexus-atylb.
+- Local PG provisioning (nexus-cbo4a batch 9): the provisioner ensures the
+  `nexus` schema and two SECURITY DEFINER functions
+  (`nexus.ensure_vector_extensions_relocated()` and its unrelocate
+  companion, EXECUTE granted to `nexus_admin` only) on every provision and
+  daemon start; the engine's `search-path-001` changeset calls the function
+  mid-walk to move `vector` and `pg_trgm` into the `nexus` schema exactly
+  once. Nothing in the client relies on the PostgreSQL session
+  `search_path` any more.
+- Storage-service supervisor (nexus-59bah): every heartbeat tick is timed;
+  a tick slower than 3 s logs `storage_service_heartbeat_slow` and a tick
+  past the lease TTL logs `storage_service_heartbeat_missed_ttl` at ERROR
+  naming the stalled phase, instead of the lease silently lapsing.
+- Engine launch (nexus-9gaj7): every JVM launch line carries
+  `-Duser.timezone=UTC`; the engine also pins and asserts UTC in-process at
+  boot.
+- Doctor `--check-engine-activity` sends the resolved bearer token on
+  `GET /v1/status` (nexus-grzai).
+- RDR-203 P3: `nx_answer` records its run, steps and outcome in one
+  `POST /v1/telemetry/nx_answer_runs/complete` when the engine advertises
+  `nx_answer_run_complete_supported`, falling back to the three legacy
+  writes otherwise; `use_count` on a plan now bumps exactly once per call.
+- `nx doctor` and the T2 telemetry client record the capability census
+  split by orchestrator and subagent scope (nexus-gjv9b PART 3).
+
 ### Added
 
 - `nx agents install worktree-developer` (nexus-uympf): generates
@@ -14,9 +57,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (private `serena-wt` Serena rooted at the worktree) followed by the
   conexus `developer` agent body verbatim, with `_shared/` links rewritten to
   the installed conexus directory. `--check` exits 1 when the file lags the
-  plugins and `nx doctor` warns on the same drift. Replaces the hand-copy
-  install line in `sn/README.md`; the
-  previous template was a 25-line stub with none of the developer method.
+  plugins and `nx doctor` warns on the same drift.
+- Release tooling: `scripts/pins-preflight.sh` (every cheap ratchet, ledger,
+  parity and reference-rot check in one pass before any long gate) and
+  `tests/e2e/release-battery.sh` (nexus-mfage: artifacts built once by tree
+  identity, the E2E gates run concurrently with per-leg logs and a verdict
+  table; the gate group measured 25 min wall against 71 min serial).
 
 ### Removed
 
@@ -26,6 +72,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   files, including an already-rotated `.1` generation, stay readable by
   `nx hook routing-stats` without `--from-store`; nothing writes to them any
   more.
+- `scripts/collapse_rdr_registrations.py`, never run (nexus-ph718).
 
 ## [7.32.0] - 2026-09-05
 
