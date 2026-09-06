@@ -67,27 +67,6 @@ if TYPE_CHECKING:
 DEFAULT_IGNORE: list[str] = _DEFAULT_IGNORE
 
 
-# Pipeline version: bump when indexing changes invalidate existing embeddings.
-# History:
-#   v1-v3: pre-versioning (no version stamp in collection metadata)
-#   v4:    RDR-028 language registry + RDR-014 CCE prefixes
-#   v5:    RDR-200 Phase 1c evidence hygiene, nexus-4jj40 -- code chunk
-#          classification gained section_type="imports". This bump has NO
-#          operational effect on any real (service-backed) install: every
-#          T3 collection handle is a _ServiceCollectionStub
-#          (http_vector_client.py) with no `metadata`/`modify` surface, so
-#          get_collection_pipeline_version() always returns None and
-#          check_pipeline_staleness() is always False -- --force-stale can
-#          structurally never detect this version change (T2 critique
-#          [24618]). The ONLY way to reclassify already-indexed code is an
-#          explicit `nx index repo --force` (bypasses per-file
-#          check_staleness); pass `--re-embed` too only for a genuine
-#          embedding-model recompute -- plain reclassification (this bump)
-#          does not need it, since the server's existence-partition
-#          refreshes chunk metadata for free when the chash is unchanged
-#          (nexus-4jj40 round 5).
-PIPELINE_VERSION: str = "5"
-
 # Concurrent ChunkBatcher flush workers during a repo index run. 3 is the
 # empirical choice from the 3midv sweep (sequential flushes cost 76-112s of
 # wall vs. the concurrent path); ``min(...)`` with QUOTAS.MAX_CONCURRENT_WRITES
@@ -96,49 +75,6 @@ PIPELINE_VERSION: str = "5"
 # 3 is caught by the pinning test in test_indexer_flush_concurrency.py rather
 # than silently indexing outside the quota (nexus-dimrz).
 FLUSH_CONCURRENCY: int = min(3, QUOTAS.MAX_CONCURRENT_WRITES)
-
-
-def stamp_collection_version(col: object) -> None:
-    """Write PIPELINE_VERSION to collection metadata, preserving existing keys.
-
-    nexus-kwkkz: collection-level metadata via ``modify`` is Chroma-specific;
-    service-backed collections (``_ServiceCollectionStub``) do not expose it, so
-    pipeline-version stamping is a no-op there. This is a staleness optimization,
-    not a correctness input — the read side (``get_collection_pipeline_version``)
-    already degrades to ``None`` (treated as a fresh collection) for these.
-    """
-    modify = getattr(col, "modify", None)
-    if not callable(modify):
-        return
-    existing = getattr(col, "metadata", None) or {}
-    modify(metadata={**existing, "pipeline_version": PIPELINE_VERSION})
-
-
-def get_collection_pipeline_version(col: object) -> str | None:
-    """Return the pipeline_version from collection metadata, or None."""
-    meta = getattr(col, "metadata", None) or {}
-    return meta.get("pipeline_version")
-
-
-def check_pipeline_staleness(col: object, collection_name: str) -> bool:
-    """Check if collection has a stale pipeline version.
-
-    Returns True if the stored version differs from PIPELINE_VERSION.
-    Returns False for new collections (stored version is None) or matching versions.
-    """
-    stored = get_collection_pipeline_version(col)
-    if stored is None:
-        return False
-    if stored != PIPELINE_VERSION:
-        _log.warning(
-            "collection_pipeline_stale",
-            collection=collection_name,
-            stored_version=stored,
-            current_version=PIPELINE_VERSION,
-            hint="Run with --force-stale to re-index stale collections, or --force to re-index all.",
-        )
-        return True
-    return False
 
 
 def _git_metadata(repo: Path) -> dict:
@@ -2115,7 +2051,6 @@ def index_repository(
     chunk_lines: int | None = None,
     force: bool = False,
     force_re_embed: bool = False,
-    force_stale: bool = False,
     since_head: bool = False,
     on_locked: str = "wait",
     on_start: Callable[[int], None] | None = None,
@@ -2230,7 +2165,7 @@ def index_repository(
                 _run_index_frecency_only(repo, registry)
                 stats: dict[str, int] = {}
             else:
-                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_re_embed=force_re_embed, force_stale=force_stale, since_head=since_head, on_locked=on_locked, on_start=on_start, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks, fence_run_state=_fence_run_state)
+                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_re_embed=force_re_embed, since_head=since_head, on_locked=on_locked, on_start=on_start, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks, fence_run_state=_fence_run_state)
                 _set_owner_head_hash(repo, _current_head(repo))
             return stats
         finally:
@@ -4137,7 +4072,6 @@ def _run_index(
     *,
     force: bool = False,
     force_re_embed: bool = False,
-    force_stale: bool = False,
     since_head: bool = False,
     on_locked: str = "wait",
     on_start: Callable[[int], None] | None = None,
@@ -4245,7 +4179,7 @@ def _run_index(
     # cache rebuild) is skipped. Any doubt about the delta -> full index.
     delta_changed: "set[str] | None" = None
     delta_deleted: list[str] = []
-    if since_head and not force and not force_stale:
+    if since_head and not force:
         _base = _get_owner_head_hash(repo)
         _delta = _git_changed_since(repo, _base) if _base else None
         if _delta is None:
@@ -4276,7 +4210,7 @@ def _run_index(
     elif since_head:
         _log.info(
             "since_head_ignored_with_force",
-            reason="force/force_stale requests a full pass by definition",
+            reason="force requests a full pass by definition",
         )
 
     # Compute frecency scores in a single git log pass
@@ -4667,7 +4601,7 @@ def _run_index(
     #
     # Downstream call sites already handle ``code_col is None`` /
     # ``docs_col is None`` (frecency reads at indexer.py:1676,
-    # build_staleness_cache below, stamp_collection_version below);
+    # build_staleness_cache below);
     # the missing piece was the gate here.
     have_code_files = bool(code_files)
     have_docs_files = bool(prose_files or pdf_files)
@@ -4698,27 +4632,6 @@ def _run_index(
         if rdr_col_name is not None else None
     )
     _log.debug("collections ready")
-
-    # Check pipeline version staleness (informational warning only)
-    if code_col is not None:
-        check_pipeline_staleness(code_col, code_collection)
-    if docs_col is not None:
-        check_pipeline_staleness(docs_col, docs_collection)
-    if rdr_col is not None:
-        check_pipeline_staleness(rdr_col, rdr_col_name)
-
-    # --force-stale: escalate to force if any collection is stale
-    if force_stale:
-        any_stale = (
-            (code_col is not None and get_collection_pipeline_version(code_col) not in (None, PIPELINE_VERSION))
-            or (docs_col is not None and get_collection_pipeline_version(docs_col) not in (None, PIPELINE_VERSION))
-            or (rdr_col is not None and get_collection_pipeline_version(rdr_col) not in (None, PIPELINE_VERSION))
-        )
-        if any_stale:
-            _log.info("force_stale_escalating", reason="stale collection detected")
-            force = True
-        else:
-            _log.info("force_stale_skipped", reason="all collections current")
 
     # ── Pre-index catalog registration (RDR-101 Phase 3 PR δ Stage B) ───────
     # Register catalog entries BEFORE per-file indexing so the prose
@@ -5887,29 +5800,6 @@ def _run_index(
                 rdr_collection=rdr_col_name, on_phase=on_phase,
             )
         _phase(f"Pruning deleted files done ({time.monotonic() - _t:.1f}s)")
-
-        # Stamp pipeline version after all work completes (nexus-7yfm).
-        # Stamps on every successful run, not just --force: the stamp asserts
-        # "these embeddings were produced by PIPELINE_VERSION code", and that
-        # is true regardless of whether --force was used. Gating the stamp on
-        # --force forced operators to re-pay for full re-embedding to repair
-        # a state that should never have existed.
-        _phase("Stamping pipeline version…")
-        _t = time.monotonic()
-        # nexus-27u7: stamp only when the collection was created.
-        if code_col is not None:
-            stamp_collection_version(code_col)
-        if docs_col is not None:
-            stamp_collection_version(docs_col)
-        # nexus-3lswy: rdr_col is already the real object built alongside
-        # code_col/docs_col above — no need to recompute the name or
-        # re-fetch the collection here.
-        if rdr_col is not None:
-            try:
-                stamp_collection_version(rdr_col)
-            except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
-                _log.debug("rdr_stamp_skipped", collection=rdr_col_name)
-        _phase(f"Pipeline version stamped ({time.monotonic() - _t:.1f}s)")
 
         # Catalog registration ran upfront (RDR-101 Phase 3 PR δ Stage B)
         # so prose chunks could carry ``doc_id`` at chunk-write time.

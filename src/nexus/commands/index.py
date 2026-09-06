@@ -897,12 +897,6 @@ class _PhaseHeartbeat:
 @click.option("--monitor", is_flag=True, default=False,
               help="Print per-file progress lines. Auto-enabled when stdout is not a TTY.")
 @click.option(
-    "--force-stale",
-    is_flag=True,
-    default=False,
-    help="Re-index only if collection pipeline version is outdated (smart force).",
-)
-@click.option(
     "--on-locked",
     type=click.Choice(["skip", "wait"]),
     default="wait",
@@ -914,7 +908,7 @@ class _PhaseHeartbeat:
     help="Index only the git delta since the last indexed commit "
          "(owners.head_hash): changed files are (re)indexed, deleted files' "
          "docs pruned, full-tree passes skipped. Falls back to a full index "
-         "when no usable base exists. Ignored with --force/--force-stale.",
+         "when no usable base exists. Ignored with --force.",
 )
 @click.option("--no-taxonomy", is_flag=True, default=False,
               help="Skip automatic topic discovery after indexing.")
@@ -938,7 +932,7 @@ class _PhaseHeartbeat:
 )
 def index_repo_cmd(
     path: Path, frecency_only: bool, force: bool, re_embed: bool, monitor: bool,
-    force_stale: bool, since_head: bool, on_locked: str, no_taxonomy: bool,
+    since_head: bool, on_locked: str, no_taxonomy: bool,
     debug_timing: bool, corpus_choice: str,
 ) -> None:
     """Register and immediately index a code repository at PATH.
@@ -953,10 +947,6 @@ def index_repo_cmd(
 
     if force and frecency_only:
         raise click.UsageError("--force and --frecency-only are mutually exclusive.")
-    if force_stale and force:
-        raise click.UsageError("--force-stale and --force are mutually exclusive.")
-    if force_stale and frecency_only:
-        raise click.UsageError("--force-stale and --frecency-only are mutually exclusive.")
     if re_embed and not force:
         raise click.UsageError(
             "--re-embed requires --force -- a file the staleness check "
@@ -1058,8 +1048,6 @@ def index_repo_cmd(
 
         if force:
             label = "Force-indexing"
-        elif force_stale:
-            label = "Force-indexing stale"
         elif frecency_only:
             label = "Updating frecency scores"
         else:
@@ -1339,7 +1327,7 @@ def index_repo_cmd(
         try:
             stats = index_repository(path, reg, frecency_only=frecency_only, force=force,
                                      force_re_embed=re_embed,
-                                     force_stale=force_stale, since_head=since_head,
+                                     since_head=since_head,
                                      on_locked=on_locked, on_start=on_start, on_file=on_file,
                                      on_phase=on_phase,
                                      on_flush=on_flush_progress if monitor else None,

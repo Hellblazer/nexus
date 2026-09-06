@@ -224,28 +224,6 @@ SKIP files are cleaned automatically on the next `nx index repo` run.
 Git hooks (`post-commit`, `post-merge`, `post-rewrite`) trigger automatic re-indexing
 in the background after each qualifying git operation. Install them with `nx hooks install`.
 
-## Pipeline Versioning
-
-Every indexed collection stores a `PIPELINE_VERSION` stamp in its T3 chunk metadata. When
-the indexing pipeline changes (new chunking logic, updated context prefixes, etc.), the
-version is bumped. This enables targeted re-indexing:
-
-- **`--force`** — re-index all files unconditionally (ignores staleness and pipeline version)
-- **`--force-stale`** — re-index only collections whose stored pipeline version is older
-  than the current version. Files within those collections still use hash-based staleness
-  checks, so only changed files are re-embedded. This is the recommended flag after upgrading
-  Nexus to a version with pipeline changes.
-
-In cloud mode, `nx doctor` reports the pipeline version status of each collection. In local mode, pipeline version is not checked — run `nx index repo --force-stale` after an upgrade to refresh any outdated collections.
-
-```
-✓ pipeline (code__nexus-1-1__voyage-code-3__v1): v4
-✓ pipeline (code__myrepo-1-1__voyage-code-3__v1): no version stamp (index with --force to stamp)
-```
-
-Collections without a version stamp were indexed before pipeline versioning was introduced.
-Run `nx index repo --force` once to stamp them.
-
 ## Unchunkable Sources and Completion Fencing (7.8/7.9)
 
 The indexer never registers a catalog document for a file it will not chunk. `repo`

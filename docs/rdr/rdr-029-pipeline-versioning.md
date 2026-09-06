@@ -14,6 +14,8 @@ implementation_notes: ""
 
 # RDR-029: Pipeline Versioning — Force Reindex and Collection Version Stamping
 
+> **MACHINERY RETIRED (2026-09-06, nexus-ebu0c):** the collection version stamp, `check_pipeline_staleness`, and `nx index repo --force-stale` were deleted. Since RDR-155 P4b every collection handle is a service stub with no metadata, so the stamp had been a silent no-op; since nexus-4jj40 the server's existence partition skips embedding for unchanged chunk text, so `--force` after a chunker change re-embeds only what the chunker changed, which is the selection `--force-stale` existed to make. The decision below is historical record.
+
 ## Problem Statement
 
 When the indexing pipeline changes (new context prefixes, new chunking logic, new embedding model), `nx index repo` without `--force` silently skips unchanged files because `content_hash` and `embedding_model` match. There is no mechanism to:
