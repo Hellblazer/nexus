@@ -387,13 +387,25 @@ def _chunked_collections(collections: list[str], n: int) -> list[list[str]]:
     return [collections[i:i + size] for i in range(0, len(collections), size)]
 
 
-def _per_collection_floor(n_results: int) -> int:
+def _per_collection_floor(n_results: int, mult: int) -> int:
     """The minimum candidate share a single collection should get from a
-    batch request (nexus-d9xt2 review/critique fold-in): ``max(5, n_results)``
-    -- the same floor the pre-batching ``_search_one`` gave every collection
-    unconditionally (its own top ``n_results`` at minimum, 5 as an absolute
-    floor for a very small ``n_results``)."""
-    return max(5, n_results)
+    batch request: ``max(5, n_results * mult)`` -- this IS the exact
+    pre-batching per-collection budget (nexus-d9xt2 critique round 2):
+    the pre-batching ``_search_one`` computed ``per_k = min(max(5,
+    n_results * mult), CAP)`` for every collection it queried,
+    unconditionally, where *mult* is that collection's own
+    ``_overfetch_multiplier`` (4x for knowledge/docs/rdr, 2x for code).
+    An earlier version of this floor (nexus-d9xt2 review/critique
+    fold-in round 1) used ``max(5, n_results)`` -- dropping the
+    multiplier entirely -- which silently defeated ``mult``'s own
+    purpose (a larger noise-tolerant candidate pool for knowledge/docs/
+    rdr) for any group past a small handful of collections (breakeven at
+    ``len(cols) > mult``: 5 collections for mult=4, 3 for mult=2) --
+    including plain ``--corpus knowledge`` on a real tenant, not just
+    ``--corpus all``. This version restores true parity: a collection's
+    share of a batch's requested pool never falls below what it would
+    have received as its own isolated call."""
+    return max(5, n_results * mult)
 
 
 def _desired_candidate_count(cols: list[str], n_results: int) -> int:
@@ -409,7 +421,13 @@ def _desired_candidate_count(cols: list[str], n_results: int) -> int:
     indistinguishable from "genuinely no close match." Scaling by
     ``len(cols)`` restores the guarantee the pre-batching per-collection
     fan-out gave for free (every collection got its own ``per_k``-sized
-    budget).
+    budget). *mult* here is the GROUP's own multiplier (every collection
+    in a group shares one embedding model, and in practice one corpus
+    class, so one multiplier applies to the whole group; a name that
+    doesn't parse a model token is its own singleton group of one, so
+    this never blends multipliers across genuinely different corpora) --
+    used for BOTH terms, so the floor no longer silently drops it past
+    breakeven group size (critique round 2 Critical).
 
     CAVEAT the caller must not lose sight of: the engine's combined
     ``plain_search_<dim>`` SQL function runs ONE flat ``ORDER BY
@@ -432,7 +450,7 @@ def _desired_candidate_count(cols: list[str], n_results: int) -> int:
     to split a group via :func:`_chunked_collections`).
     """
     mult = max((_overfetch_multiplier(c) for c in cols), default=2)
-    return max(n_results * mult, len(cols) * _per_collection_floor(n_results))
+    return max(n_results * mult, len(cols) * _per_collection_floor(n_results, mult))
 
 
 #: Collections a prior call in THIS PROCESS has already proven unservable in
@@ -442,6 +460,30 @@ def _desired_candidate_count(cols: list[str], n_results: int) -> int:
 #: :func:`_record_poisoned_collection`.
 _poisoned_collections: set[str] = set()
 _poisoned_collections_lock = threading.Lock()
+
+
+def _is_permanent_poisoning_error(exc: VectorServiceError) -> bool:
+    """True when *exc* is the nexus-9tsdf / nexus-pebfx.8 permanent class
+    (a stale, orphaned, dimension-mismatched collection) this module's
+    poisoning memo exists for -- False for a transient failure (a 429/503
+    blip, an edge-WAF hiccup, a transport-level timeout) that deserves a
+    normal per-call retry, not a process-lifetime memo (critique round 2
+    Significant: the memo previously fired on ANY ``VectorServiceError``,
+    so one transient failure on a collection's first isolated retry
+    permanently downgraded it to singleton-only batching for the rest of
+    the process, with no re-validation).
+
+    Reuses the exact same ``"dim"`` substring check the merge loop below
+    already applies to classify a failed collection's log severity (the
+    engine's dimension-mismatch error text names the offending width,
+    e.g. "...produced a 1024-dim vector but the collections dispatch to
+    embedding_384...") -- one discriminator, not two independently
+    maintained ones. ``VectorServiceError.code`` alone can't carry this
+    distinction: the engine returns the same generic HTTP 400 for a
+    dimension mismatch as for other bad-request shapes, and ``code`` is
+    ``None`` for every transport-level failure regardless of cause.
+    """
+    return "dim" in str(exc).lower()
 
 
 def _record_poisoned_collection(name: str, exc: Exception) -> None:
@@ -707,7 +749,14 @@ def search_cross_corpus(
             # per-collection calls for THIS batch only; the common
             # (no-failure) case never reaches here.
             if len(cols) == 1:
-                _record_poisoned_collection(cols[0], exc)
+                # critique round 2 Significant: only the permanent
+                # (dimension-mismatch/orphan) class is memoized -- a
+                # transient failure (429/503, edge-WAF blip, transport
+                # timeout) is retried normally on the next call instead
+                # of being permanently downgraded to singleton-only
+                # batching.
+                if _is_permanent_poisoning_error(exc):
+                    _record_poisoned_collection(cols[0], exc)
                 return [{"col": cols[0], "error": str(exc)}]
             # nexus-d9xt2 review/critique fold-in: resubmit the per-
             # collection fallback to a bounded worker pool instead of a
@@ -717,9 +766,12 @@ def search_cross_corpus(
             # pre-fix design (N fully-sequential round trips in one
             # thread vs ceil(N/8) parallel waves) -- worse than doing
             # nothing, not merely equal to it.
+            #
+            # Note: len(cols) > 1 is guaranteed here (the len(cols) == 1
+            # case already returned above), so
+            # fallback_workers = min(8, len(cols)) is always >= 2 -- no
+            # "<= 1" branch is reachable and none is written.
             fallback_workers = min(8, len(cols))
-            if fallback_workers <= 1:
-                return [p for c in cols for p in _search_batch([c])]
             with ThreadPoolExecutor(max_workers=fallback_workers) as fallback_pool:
                 return [
                     p for sub in fallback_pool.map(lambda c: _search_batch([c]), cols)  # noqa: B023 — _search_batch is the enclosing function itself, not a loop variable; safe to close over
