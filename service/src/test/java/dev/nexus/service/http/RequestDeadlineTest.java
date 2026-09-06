@@ -65,6 +65,34 @@ class RequestDeadlineTest {
         assertThat(RequestDeadline.deadlineMsFromEnv()).isPositive();
     }
 
+    // ── resolveBudgetMs (nexus-8hdg9 phase 5: advisory client header) ────
+
+    @Test
+    void resolveBudgetMs_absentHeaderFallsBackToEnvDefault() {
+        assertThat(RequestDeadline.resolveBudgetMs(null, 300_000L)).isEqualTo(300_000L);
+        assertThat(RequestDeadline.resolveBudgetMs("   ", 300_000L)).isEqualTo(300_000L);
+    }
+
+    @Test
+    void resolveBudgetMs_presentPositiveHeaderBelowDefaultWins() {
+        assertThat(RequestDeadline.resolveBudgetMs("45000", 300_000L)).isEqualTo(45_000L);
+        assertThat(RequestDeadline.resolveBudgetMs(" 45000 ", 300_000L)).isEqualTo(45_000L);
+    }
+
+    @Test
+    void resolveBudgetMs_malformedOrNonPositiveHeaderIsIgnoredNotRefused() {
+        assertThat(RequestDeadline.resolveBudgetMs("soon", 300_000L)).isEqualTo(300_000L);
+        assertThat(RequestDeadline.resolveBudgetMs("12.5", 300_000L)).isEqualTo(300_000L);
+        assertThat(RequestDeadline.resolveBudgetMs("0", 300_000L)).isEqualTo(300_000L);
+        assertThat(RequestDeadline.resolveBudgetMs("-7", 300_000L)).isEqualTo(300_000L);
+    }
+
+    @Test
+    void resolveBudgetMs_oversizedHeaderIsClampedToEnvDefault() {
+        assertThat(RequestDeadline.resolveBudgetMs("540000", 300_000L)).isEqualTo(300_000L);
+        assertThat(RequestDeadline.resolveBudgetMs("300000", 300_000L)).isEqualTo(300_000L);
+    }
+
     // ── newDeadlineNanos ─────────────────────────────────────────────────
 
     @Test

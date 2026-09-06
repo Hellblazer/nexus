@@ -63,7 +63,52 @@ final class RequestDeadline {
      */
     static final long DEFAULT_DEADLINE_MS = 300_000L;
 
+    /**
+     * Advisory request header carrying the CLIENT's own embed budget in
+     * milliseconds (nexus-8hdg9 phase 5). The Python client stamps it on
+     * {@code /v1/vectors/upsert-chunks} from its socket timeout minus a
+     * margin ({@code _UPSERT_CHUNKS_DEADLINE_MS} in {@code
+     * http_vector_client.py}), so the server's deadline is sourced from the
+     * budget the caller will actually wait rather than a server guess.
+     * Wire-additive both directions: absent on an old client, the env
+     * default applies unchanged; an old engine ignores an unknown header.
+     */
+    public static final String REQUEST_DEADLINE_HEADER = "X-Nexus-Request-Deadline-Ms";
+
     private RequestDeadline() {
+    }
+
+    /**
+     * Resolve ONE request's budget from the advisory header against the
+     * env-resolved default (nexus-8hdg9 phase 5).
+     *
+     * <ul>
+     *   <li>Absent or blank header: {@code envDefaultMs}, unchanged.</li>
+     *   <li>Malformed (non-numeric) or non-positive header: {@code
+     *       envDefaultMs}. IGNORED, not a 400 -- the header is advisory and a
+     *       bad value must never turn a valid write into a client error;
+     *       contrast {@link #deadlineMsFromEnv(Function)}, which refuses a bad
+     *       OPERATOR setting loudly because that is a boot-time
+     *       misconfiguration, not a per-request hint.</li>
+     *   <li>Header larger than {@code envDefaultMs}: clamped to {@code
+     *       envDefaultMs}. The server bound is a CEILING the operator set; a
+     *       client may ask for less, never more.</li>
+     * </ul>
+     */
+    static long resolveBudgetMs(String headerValue, long envDefaultMs) {
+        if (headerValue == null || headerValue.isBlank()) {
+            return envDefaultMs;
+        }
+        long requested;
+        try {
+            requested = Long.parseLong(headerValue.trim());
+        } catch (NumberFormatException e) {
+            return envDefaultMs;
+        }
+        if (requested <= 0) {
+            return envDefaultMs;
+        }
+        return Math.min(requested, envDefaultMs);
     }
 
     /** Production entry point: real env. */

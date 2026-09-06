@@ -405,6 +405,78 @@ class AuthFilterTest {
         return http.send(req, HttpResponse.BodyHandlers.ofString());
     }
 
+    // ── nexus-8hdg9 phase 5: X-Nexus-Request-Deadline-Ms advisory header ──────
+    //
+    // All four run against /v1/echo-deadline (EXPLICIT_DEADLINE_BUDGET_MS = 12.345s
+    // as the env-default stand-in) and bracket the echoed deadline between
+    // before/after + the EXPECTED budget, the same shape as the phase-2 test above.
+    // 5s vs 12.345s vs 99.999s differ enough that a wrong budget cannot false-pass.
+
+    private static final long HEADER_BUDGET_BELOW_DEFAULT_MS = 5_000L;
+    private static final long HEADER_BUDGET_ABOVE_DEFAULT_MS = 99_999L;
+
+    private long echoedDeadlineWithHeader(String headerValue, long before, long[] afterOut) throws Exception {
+        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(base() + "/v1/echo-deadline"))
+            .header("Authorization", "Bearer " + TOK_A).GET();
+        if (headerValue != null) {
+            b.header(AuthFilter.REQUEST_DEADLINE_HEADER, headerValue);
+        }
+        HttpResponse<String> r = http.send(b.build(), HttpResponse.BodyHandlers.ofString());
+        afterOut[0] = System.nanoTime();
+        assertThat(r.statusCode()).isEqualTo(200);
+        return Long.parseLong(r.body());
+    }
+
+    private static long nanos(long ms) {
+        return java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(ms);
+    }
+
+    @Test
+    void deadlineHeaderOverridesEnvDefault() throws Exception {
+        long before = System.nanoTime();
+        long[] after = new long[1];
+        long deadline = echoedDeadlineWithHeader(
+            Long.toString(HEADER_BUDGET_BELOW_DEFAULT_MS), before, after);
+        assertThat(deadline)
+            .as("a present, positive header below the env default must be the budget used")
+            .isBetween(before + nanos(HEADER_BUDGET_BELOW_DEFAULT_MS),
+                       after[0] + nanos(HEADER_BUDGET_BELOW_DEFAULT_MS));
+    }
+
+    @Test
+    void absentHeaderFallsBackToEnvDefault() throws Exception {
+        long before = System.nanoTime();
+        long[] after = new long[1];
+        long deadline = echoedDeadlineWithHeader(null, before, after);
+        assertThat(deadline)
+            .as("no header: the constructor (env-default stand-in) budget applies unchanged")
+            .isBetween(before + nanos(EXPLICIT_DEADLINE_BUDGET_MS),
+                       after[0] + nanos(EXPLICIT_DEADLINE_BUDGET_MS));
+    }
+
+    @Test
+    void malformedHeaderFallsBackToEnvDefault() throws Exception {
+        long before = System.nanoTime();
+        long[] after = new long[1];
+        long deadline = echoedDeadlineWithHeader("soon-ish", before, after);
+        assertThat(deadline)
+            .as("a malformed advisory header is ignored (200, env default), never a 400")
+            .isBetween(before + nanos(EXPLICIT_DEADLINE_BUDGET_MS),
+                       after[0] + nanos(EXPLICIT_DEADLINE_BUDGET_MS));
+    }
+
+    @Test
+    void oversizedHeaderIsClampedToEnvDefault() throws Exception {
+        long before = System.nanoTime();
+        long[] after = new long[1];
+        long deadline = echoedDeadlineWithHeader(
+            Long.toString(HEADER_BUDGET_ABOVE_DEFAULT_MS), before, after);
+        assertThat(deadline)
+            .as("a header above the env default is clamped to it -- the server bound is a ceiling")
+            .isBetween(before + nanos(EXPLICIT_DEADLINE_BUDGET_MS),
+                       after[0] + nanos(EXPLICIT_DEADLINE_BUDGET_MS));
+    }
+
     // ── Cache-level seam (fresh cache per test, mutable clock) ────────────────
 
     @Test

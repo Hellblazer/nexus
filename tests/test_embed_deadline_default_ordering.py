@@ -21,7 +21,11 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from nexus.db.http_vector_client import _UPSERT_CHUNKS_TIMEOUT_S
+from nexus.db.http_vector_client import (
+    _UPSERT_CHUNKS_DEADLINE_MARGIN_S,
+    _UPSERT_CHUNKS_DEADLINE_MS,
+    _UPSERT_CHUNKS_TIMEOUT_S,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REQUEST_DEADLINE_JAVA = (
@@ -61,4 +65,21 @@ def test_java_default_embed_deadline_stays_below_python_upsert_socket_timeout():
         f"({python_timeout_ms}ms) -- otherwise the client's own socket read "
         "would time out first, and the server's honest 503 would never be "
         "reachable"
+    )
+
+
+def test_client_declared_deadline_header_stays_below_python_upsert_socket_timeout():
+    """nexus-8hdg9 phase 5: the budget the client DECLARES to the engine
+    (``X-Nexus-Request-Deadline-Ms``) must sit strictly below its own socket
+    timeout by a positive margin -- a declared deadline at or past the socket
+    timeout is unreachable, the same inversion the env-default test above
+    guards against."""
+    python_timeout_ms = _UPSERT_CHUNKS_TIMEOUT_S * 1000
+    assert _UPSERT_CHUNKS_DEADLINE_MARGIN_S > 0
+    assert _UPSERT_CHUNKS_DEADLINE_MS == (
+        (_UPSERT_CHUNKS_TIMEOUT_S - _UPSERT_CHUNKS_DEADLINE_MARGIN_S) * 1000
+    )
+    assert 0 < _UPSERT_CHUNKS_DEADLINE_MS < python_timeout_ms, (
+        f"_UPSERT_CHUNKS_DEADLINE_MS ({_UPSERT_CHUNKS_DEADLINE_MS}ms) must stay "
+        f"strictly below the upsert-chunks socket timeout ({python_timeout_ms}ms)"
     )

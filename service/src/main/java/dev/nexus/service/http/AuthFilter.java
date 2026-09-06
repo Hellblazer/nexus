@@ -69,6 +69,13 @@ public final class AuthFilter extends Filter {
     private static final String TENANT_HEADER = "X-Nexus-Tenant";
     private static final String SESSION_HEADER = "X-Nexus-T1-Session";
 
+    /**
+     * Public alias of {@link RequestDeadline#REQUEST_DEADLINE_HEADER} (nexus-8hdg9
+     * phase 5): {@code RequestDeadline} is package-private, and {@code
+     * AuthFilterTest} lives one package up.
+     */
+    public static final String REQUEST_DEADLINE_HEADER = RequestDeadline.REQUEST_DEADLINE_HEADER;
+
     private final TokenCache tokenCache;
     private final TokenStore tokenStore;
 
@@ -226,8 +233,14 @@ public final class AuthFilter extends Filter {
             tenant, sessionId, mintedSession, isOperator, scope, credentialHash));
         // nexus-8hdg9 phase 2: mint the request's embed deadline alongside the
         // principal, for EVERY route, from the budget resolved once at construction.
+        // Phase 5: a client that declares its own budget via the advisory
+        // X-Nexus-Request-Deadline-Ms header is preferred, clamped to the env
+        // default as a ceiling; absent or malformed falls back to the default.
         // Cleared together with the principal in the finally below.
-        RequestContext.setDeadlineNanos(RequestDeadline.newDeadlineNanos(deadlineBudgetMs));
+        long budgetMs = RequestDeadline.resolveBudgetMs(
+            exchange.getRequestHeaders().getFirst(RequestDeadline.REQUEST_DEADLINE_HEADER),
+            deadlineBudgetMs);
+        RequestContext.setDeadlineNanos(RequestDeadline.newDeadlineNanos(budgetMs));
         try {
             chain.doFilter(exchange);
         } finally {
