@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import itertools
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -386,6 +387,108 @@ def _chunked_collections(collections: list[str], n: int) -> list[list[str]]:
     return [collections[i:i + size] for i in range(0, len(collections), size)]
 
 
+def _per_collection_floor(n_results: int) -> int:
+    """The minimum candidate share a single collection should get from a
+    batch request (nexus-d9xt2 review/critique fold-in): ``max(5, n_results)``
+    -- the same floor the pre-batching ``_search_one`` gave every collection
+    unconditionally (its own top ``n_results`` at minimum, 5 as an absolute
+    floor for a very small ``n_results``)."""
+    return max(5, n_results)
+
+
+def _desired_candidate_count(cols: list[str], n_results: int) -> int:
+    """Uncapped per-batch candidate-count target for *cols* (nexus-d9xt2
+    review/critique fold-in, T2 code-review-nexus-d9xt2 / critique-nexus-d9xt2).
+
+    ``max(n_results * overfetch_multiplier, len(cols) * per_collection_floor)``
+    -- the ORIGINAL formula (``n_results * mult`` alone) sized the batch
+    request independent of how many collections were in it, so a 44-
+    collection group at n_results=10 requested only 40 total candidates
+    (0.9 per collection, before threshold filtering even runs): by
+    pigeonhole, most member collections silently returned zero rows,
+    indistinguishable from "genuinely no close match." Scaling by
+    ``len(cols)`` restores the guarantee the pre-batching per-collection
+    fan-out gave for free (every collection got its own ``per_k``-sized
+    budget).
+
+    CAVEAT the caller must not lose sight of: the engine's combined
+    ``plain_search_<dim>`` SQL function runs ONE flat ``ORDER BY
+    (embedding <=> query) LIMIT p_n`` across the WHOLE requested
+    collection list -- there is no per-collection partition or floor
+    enforced on the engine side (unlike, say, a UNION ALL of per-
+    collection top-K subqueries). This function's ``len(cols) * floor``
+    term is therefore a CLIENT-SIDE REQUEST-SIZE HEURISTIC, not an
+    engine-enforced guarantee: it makes the pool big enough that under a
+    roughly uniform relevance distribution no single dominant collection
+    can crowd every sibling down to zero before filtering runs, but a
+    collection with genuinely fewer than ``floor`` truly-close matches
+    still legitimately contributes fewer (or zero) rows -- correct
+    behaviour, not crowd-out, and not something any sizing formula can
+    or should paper over.
+
+    Not capped here -- callers cap at ``QUOTAS.MAX_QUERY_RESULTS``
+    themselves (:func:`_search_batch` for the actual request size; the
+    batching loop uses the UNCAPPED value to decide whether/how many ways
+    to split a group via :func:`_chunked_collections`).
+    """
+    mult = max((_overfetch_multiplier(c) for c in cols), default=2)
+    return max(n_results * mult, len(cols) * _per_collection_floor(n_results))
+
+
+#: Collections a prior call in THIS PROCESS has already proven unservable in
+#: a combined batch (nexus-9tsdf-class: a stale, orphaned dimension-
+#: mismatched collection). Guarded by :data:`_poisoned_collections_lock`.
+#: Deliberately module-level, process-lifetime state -- see
+#: :func:`_record_poisoned_collection`.
+_poisoned_collections: set[str] = set()
+_poisoned_collections_lock = threading.Lock()
+
+
+def _record_poisoned_collection(name: str, exc: Exception) -> None:
+    """Remember *name* as unservable in a combined batch, for the rest of
+    this process (nexus-d9xt2 review/critique fold-in).
+
+    Without this, a single persistently-orphaned collection (the
+    nexus-9tsdf / nexus-pebfx.8 stale-dimension-mismatch scenario) sitting
+    inside an otherwise-batchable embedding-model group would permanently
+    downgrade EVERY future search touching that whole group back to N
+    round trips -- the fallback in :func:`search_cross_corpus`'s
+    ``_search_batch`` exists to isolate the ONE bad collection, not to
+    keep silently re-discovering (and re-paying for) it on every
+    subsequent call. The batching loop consults this set to route a
+    known-poisoned collection straight to its own singleton batch, never
+    bundling it with healthy siblings again.
+
+    Logged ONCE, at WARNING, on first insertion only -- a persistently
+    poisoned collection is retried (as its own singleton, cheaply) on
+    every call thereafter by design (nexus-9tsdf isolation), so re-
+    logging at WARNING on every one of those retries would reintroduce
+    exactly the log-spam problem nexus-9tsdf's own dim-mismatch-fraction
+    classifier (below, in the merge loop) already solved once for the
+    unmemoized case. That classifier still runs on every call regardless
+    of this memo -- this is a separate, one-time event.
+
+    Never cleared within a process (no TTL, no eviction): a collection
+    that starts failing stays failing until an operator re-indexes or
+    prunes it, and the memo's whole purpose is to stop re-learning that
+    fact on every call.
+    """
+    with _poisoned_collections_lock:
+        if name in _poisoned_collections:
+            return
+        _poisoned_collections.add(name)
+    _log.warning(
+        "collection_poisoned_excluded_from_batching",
+        collection=name,
+        error=str(exc),
+        consequence=(
+            "excluded from combined-call batching for the rest of this "
+            "process -- always searched as its own singleton call from "
+            "now on, until the process restarts"
+        ),
+    )
+
+
 # ── Cross-corpus search ───────────────────────────────────────────────────────
 
 _CLUSTER_DEFAULT = "semantic"
@@ -420,21 +523,29 @@ def search_cross_corpus(
     nexus-d9xt2: collections are grouped by embedding model
     (:func:`_group_collections_by_embedding_model`) and each group is
     fetched with ONE combined ``/v1/vectors/search`` call sized at
-    ``n_results * mult`` for the whole group (capped at
-    ``QUOTAS.MAX_QUERY_RESULTS``; a group that would need more than the
-    cap to give every collection a fair shot is split into as few calls as
-    the cap allows — see :func:`_chunked_collections`) rather than one call
-    per collection. Threshold filtering, per-collection diagnostics
-    (``diagnostics_out``), the nexus-9tsdf dimension-mismatch tolerance,
-    and rerank-meta attribution are all still resolved per collection, via
-    each row's own ``collection`` tag in the combined response (or,
-    for a batch of exactly one collection, without needing that tag at
-    all — see ``_search_batch``'s docstring). A collection whose name does
-    not parse a model token is never grouped with others, so nothing about
-    a non-conformant or test-fixture collection name changes. See the
-    inline comment ahead of the batching loop for the one observable
-    change: cross-GROUP result order is no longer strictly interleaved by
-    input order.
+    ``max(n_results * mult, len(group) * per_collection_floor)`` for the
+    whole group (see :func:`_desired_candidate_count`; capped at
+    ``QUOTAS.MAX_QUERY_RESULTS``, and a group that would need more than
+    the cap to give every collection its floor is split into as few
+    calls as the cap allows — see :func:`_chunked_collections`) rather
+    than one call per collection. The ``len(group)`` term is a CLIENT-
+    SIDE request-size budget, not an engine guarantee — the engine's
+    combined search does one flat ``ORDER BY distance LIMIT p_n`` across
+    the whole batch with no per-collection partition; see
+    :func:`_desired_candidate_count`'s docstring for the full caveat.
+    Threshold filtering, per-collection diagnostics (``diagnostics_out``),
+    the nexus-9tsdf dimension-mismatch tolerance (now with a per-process
+    memo — see :func:`_record_poisoned_collection` — so one persistently
+    orphaned collection cannot keep downgrading its whole model group
+    back to N round trips), and rerank-meta attribution are all still
+    resolved per collection, via each row's own ``collection`` tag in the
+    combined response (or, for a batch of exactly one collection, without
+    needing that tag at all — see ``_search_batch``'s docstring). A
+    collection whose name does not parse a model token is never grouped
+    with others, so nothing about a non-conformant or test-fixture
+    collection name changes. See the inline comment ahead of the batching
+    loop for the one observable ordering change: cross-GROUP result order
+    is no longer strictly interleaved by input order.
 
     When *cluster_by* is ``"semantic"`` (default), results are grouped by
     topic assignments from T2 taxonomy if >50% of results have assignments.
@@ -573,13 +684,13 @@ def search_cross_corpus(
         collection directly, matching the old ``_search_one`` behaviour
         byte for byte.
         """
-        mult = max((_overfetch_multiplier(c) for c in cols), default=2)
-        # Search review I-3 (kept; now applied once per BATCH rather than
-        # once per collection): cap the requested count at
+        # Search review I-3 (kept; now scaled by len(cols) too -- see
+        # _desired_candidate_count's docstring for why n_results*mult
+        # alone starved large groups): cap the requested count at
         # MAX_QUERY_RESULTS=300. A large limit/offset feeding fetch_n
         # upstream, multiplied by up to 4x, must not punch through the
         # service quota.
-        per_k = min(max(5, n_results * mult), QUOTAS.MAX_QUERY_RESULTS)
+        per_k = min(_desired_candidate_count(cols, n_results), QUOTAS.MAX_QUERY_RESULTS)
         rerank_meta: dict = {}
         try:
             if server_rerank:
@@ -596,11 +707,24 @@ def search_cross_corpus(
             # per-collection calls for THIS batch only; the common
             # (no-failure) case never reaches here.
             if len(cols) == 1:
+                _record_poisoned_collection(cols[0], exc)
                 return [{"col": cols[0], "error": str(exc)}]
-            parts: list[dict] = []
-            for c in cols:
-                parts.extend(_search_batch([c]))
-            return parts
+            # nexus-d9xt2 review/critique fold-in: resubmit the per-
+            # collection fallback to a bounded worker pool instead of a
+            # plain serial loop. A serial loop here runs INSIDE the one
+            # outer-pool worker thread already assigned to this batch, so
+            # a >1-collection batch failure was costing MORE than the
+            # pre-fix design (N fully-sequential round trips in one
+            # thread vs ceil(N/8) parallel waves) -- worse than doing
+            # nothing, not merely equal to it.
+            fallback_workers = min(8, len(cols))
+            if fallback_workers <= 1:
+                return [p for c in cols for p in _search_batch([c])]
+            with ThreadPoolExecutor(max_workers=fallback_workers) as fallback_pool:
+                return [
+                    p for sub in fallback_pool.map(lambda c: _search_batch([c]), cols)  # noqa: B023 — _search_batch is the enclosing function itself, not a loop variable; safe to close over
+                    for p in sub
+                ]
 
         if len(cols) == 1:
             # Single-collection call: attribute every row to that
@@ -688,10 +812,25 @@ def search_cross_corpus(
     # re-sorts by hybrid_score or cluster/topic order before display, so
     # this only affects tie-breaking among otherwise-equal downstream
     # scores, never overall relevance.
-    batches: list[list[str]] = []
-    for group in _group_collections_by_embedding_model(collections):
-        group_mult = max((_overfetch_multiplier(c) for c in group), default=2)
-        desired = n_results * group_mult
+    #
+    # nexus-d9xt2 review/critique fold-in: a collection a PRIOR call in
+    # this process proved unservable in a combined batch (recorded by
+    # _record_poisoned_collection) is pulled out here, before grouping,
+    # into its own permanent singleton batch -- it never rejoins a
+    # multi-collection group again, so one persistently-orphaned
+    # collection cannot keep downgrading its whole healthy model group
+    # back to N round trips on every subsequent search.
+    with _poisoned_collections_lock:
+        poisoned_snapshot = set(_poisoned_collections)
+    batches: list[list[str]] = [[c] for c in collections if c in poisoned_snapshot]
+    healthy_collections = [c for c in collections if c not in poisoned_snapshot]
+
+    for group in _group_collections_by_embedding_model(healthy_collections):
+        # Sizing (nexus-d9xt2 review/critique fold-in): see
+        # _desired_candidate_count's docstring -- scaled by len(group) as
+        # well as n_results*mult, so a large group is no longer starved
+        # to a handful of total candidates shared across every member.
+        desired = _desired_candidate_count(group, n_results)
         if desired > QUOTAS.MAX_QUERY_RESULTS and len(group) > 1:
             # The group would need more than the service cap to give
             # every collection a fair shot -- split into as few calls as
