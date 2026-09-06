@@ -118,21 +118,23 @@ def _spawn_capture(monkeypatch, *, launch_kind, artifact, max_heap=None):
 def test_native_argv_is_the_binary(monkeypatch):
     binary = Path("/opt/nexus/nexus-service")
     argv = _spawn_capture(monkeypatch, launch_kind="native", artifact=binary)
-    assert argv == [str(binary)]
+    # nexus-9gaj7: -Duser.timezone=UTC on every launch path, defense-in-depth
+    # alongside Main.main's in-process TimeZone.setDefault(UTC) pin.
+    assert argv == [str(binary), "-Duser.timezone=UTC"]
 
 
 def test_jar_argv_is_java_dash_jar(monkeypatch):
     monkeypatch.setattr(ssd, "_resolve_java_executable", lambda: "/usr/bin/java")
     jar = Path("/build/nexus-service.jar")
     argv = _spawn_capture(monkeypatch, launch_kind="jar", artifact=jar)
-    assert argv == ["/usr/bin/java", "-jar", str(jar)]
+    assert argv == ["/usr/bin/java", "-Duser.timezone=UTC", "-jar", str(jar)]
 
 
 def test_jar_argv_with_heap_orders_xmx_before_jar(monkeypatch):
     monkeypatch.setattr(ssd, "_resolve_java_executable", lambda: "/usr/bin/java")
     jar = Path("/build/nexus-service.jar")
     argv = _spawn_capture(monkeypatch, launch_kind="jar", artifact=jar, max_heap="1g")
-    assert argv == ["/usr/bin/java", "-Xmx1g", "-jar", str(jar)]
+    assert argv == ["/usr/bin/java", "-Duser.timezone=UTC", "-Xmx1g", "-jar", str(jar)]
 
 
 # ── nx init --service honours the JAR opt-in (no native binary required) ─────

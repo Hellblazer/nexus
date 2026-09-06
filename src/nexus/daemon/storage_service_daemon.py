@@ -958,6 +958,14 @@ class StorageServiceSupervisor:
             argv = [java_exe]
         else:
             argv = [str(self._binary_path)]
+        # nexus-9gaj7: defense-in-depth alongside Main.main's in-process
+        # TimeZone.setDefault(UTC) pin (SchemaMigrator.pinJvmTimeZoneToUtc,
+        # asserted at boot — a non-UTC zone here now fails the engine's own
+        # startup loudly rather than silently, but a launch-line pin still
+        # closes the window before that first line of Java runs). -D options
+        # are accepted at runtime by both GraalVM native-image and the JVM,
+        # the same as -Xmx below.
+        argv.append("-Duser.timezone=UTC")
         # nexus-lz3f2: optional max-heap bound for memory-constrained hosts
         # (e.g. the migration-rehearsal container, where an unbounded native-image
         # heap peak during bge-768 ONNX load + PG + the Python supervisor tripped

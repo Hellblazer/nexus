@@ -963,14 +963,17 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # lines and shifted every site below the first extraction point
         # (:107 in the pre-edit file). Numbers regenerated from the
         # detector itself (_early_exit_consumer_hits), not arithmetic.
-        "service/native-smoke.sh:89",
-        "service/native-smoke.sh:142",
-        "service/native-smoke.sh:203",
-        "service/native-smoke.sh:255",
-        "service/native-smoke.sh:347",
-        "service/native-smoke.sh:385",
-        "service/native-smoke.sh:391",
-        "service/native-smoke.sh:394",
+        # Retargeted again (nexus-9gaj7): a 2-line comment landed ahead
+        # of the "$BIN" launch line (-Duser.timezone=UTC defense-in-depth),
+        # shifting every site below it by +2.
+        "service/native-smoke.sh:91",
+        "service/native-smoke.sh:144",
+        "service/native-smoke.sh:205",
+        "service/native-smoke.sh:257",
+        "service/native-smoke.sh:349",
+        "service/native-smoke.sh:387",
+        "service/native-smoke.sh:393",
+        "service/native-smoke.sh:396",
         # --- service/linux-native-verify.sh:43 (1 entry): a GENUINE
         # FALSE POSITIVE, not a "needs live infra" deferral -- the
         # matched pipe (`native-image --version | head -1`) sits inside a

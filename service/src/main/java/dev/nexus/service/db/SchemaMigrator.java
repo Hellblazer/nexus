@@ -22,6 +22,8 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.TimeZone;
 import java.sql.Statement;
 import java.util.ArrayList;
@@ -229,7 +231,11 @@ public final class SchemaMigrator {
      */
     public static MigrationOutcome migrate(DataSource ds) {
         log.info("event=schema_migration_start changelog={}", MASTER_CHANGELOG);
-        pinJvmTimeZoneToUtc();
+        try {
+            pinJvmTimeZoneToUtc();
+        } catch (TimeZonePinFailedException e) {
+            throw new MigrationException("JVM timezone pin failed", e);
+        }
 
         try (Connection conn = ds.getConnection()) {
             // nexus-rph82: Liquibase stamps databasechangelog.dateexecuted with the
@@ -607,6 +613,65 @@ public final class SchemaMigrator {
             TimeZone.setDefault(TimeZone.getTimeZone(UTC_ID));
             System.setProperty("user.timezone", UTC_ID);
             log.info("event=schema_migration_jvm_timezone_pinned from={} to={}", before.getID(), UTC_ID);
+        }
+        assertJvmTimeZoneIsUtc();
+    }
+
+    /**
+     * Boot-time verification that the pin above actually took (nexus-9gaj7).
+     *
+     * <p>{@code pinJvmTimeZoneToUtc()} unconditionally calls
+     * {@link TimeZone#setDefault(TimeZone)}, but that call is a plain static
+     * field write with no return signal — a platform that ignores it (a
+     * {@code SecurityManager} rejecting the mutation, a native-image
+     * runtime-init ordering surprise, or a later, un-reviewed
+     * {@code TimeZone.setDefault} call racing this one on a JVM that does
+     * spawn a second thread before {@code main()} finishes) would otherwise
+     * fail SILENTLY: every caller downstream keeps assuming UTC (Liquibase's
+     * {@code dateexecuted} stamp, {@link CatalogRepository#tsOrNull}, the
+     * {@code SET TIME ZONE 'UTC'} session pin below) while the JVM's actual
+     * clock reads local time. That is exactly
+     * the nexus-rph82 failure shape one layer up: wrong-direction silence
+     * that surfaces as "nothing was applied" hours after the fact, not as a
+     * boot failure at the one moment it is cheap to diagnose.
+     *
+     * <p>Compares zone RULES rather than the zone ID string: {@code "UTC"},
+     * {@code "Etc/UTC"}, {@code "GMT"}, and {@code "Z"} are all zero-offset,
+     * no-DST zones that satisfy the actual requirement (every instant reads
+     * the same wall-clock value system-wide) even though their IDs differ —
+     * an ID-string compare would false-positive-fail a platform that
+     * legitimately resolves the pin to one of those aliases.
+     *
+     * <p>Package-private for direct unit testing (SchemaMigratorTimeZoneAssertTest),
+     * matching the {@link CatalogRepository#tsOrNull}-style test-seam
+     * convention already established in this package.
+     */
+    static void assertJvmTimeZoneIsUtc() {
+        ZoneId zone = ZoneId.systemDefault();
+        if (!zone.getRules().equals(ZoneOffset.UTC.getRules())) {
+            log.error("event=jvm_timezone_pin_failed observed_zone={} remedy=\"pass "
+                    + "-Duser.timezone=UTC on the JVM/native-image launch command line "
+                    + "and check for a later TimeZone.setDefault(...) call overriding "
+                    + "the pin\"", zone.getId());
+            throw new TimeZonePinFailedException(
+                "JVM default zone is " + zone.getId() + " after pinJvmTimeZoneToUtc(); "
+                + "expected UTC (or a zero-offset, no-DST alias). Pass "
+                + "-Duser.timezone=UTC on the launch command line.");
+        }
+    }
+
+    /**
+     * Unchecked exception thrown when {@link #assertJvmTimeZoneIsUtc()} finds
+     * the JVM's default zone is not UTC after {@link #pinJvmTimeZoneToUtc()}
+     * attempted to pin it (nexus-9gaj7). {@code Main.java} catches this at its
+     * own top-of-{@code main} pin call and calls {@code System.exit(1)}; inside
+     * {@link #migrate(DataSource)} it is wrapped as a {@link MigrationException}
+     * so that method's throws-contract stays uniform for its other callers
+     * (migration rehearsals, the test suite).
+     */
+    public static final class TimeZonePinFailedException extends RuntimeException {
+        public TimeZonePinFailedException(String message) {
+            super(message);
         }
     }
 

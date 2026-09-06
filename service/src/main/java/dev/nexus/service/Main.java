@@ -47,7 +47,16 @@ public final class Main {
     public static void main(String[] args) throws Exception {
         // nexus-rph82: one clock for the whole process, pinned before any
         // datasource negotiates a session zone. See SchemaMigrator.pinJvmTimeZoneToUtc.
-        SchemaMigrator.pinJvmTimeZoneToUtc();
+        // nexus-9gaj7: the pin asserts itself and fails loud (System.exit(1))
+        // rather than let a silently-ignored TimeZone.setDefault leave every
+        // downstream UTC assumption (Liquibase's dateexecuted stamp, tsOrNull,
+        // the SET TIME ZONE session pin) quietly wrong.
+        try {
+            SchemaMigrator.pinJvmTimeZoneToUtc();
+        } catch (SchemaMigrator.TimeZonePinFailedException e) {
+            log.error("event=jvm_timezone_pin_failed_at_boot error=\"{}\"", e.getMessage(), e);
+            System.exit(1);
+        }
         int port   = intEnv("NX_SERVICE_PORT", 8080);
         // RDR-152 bead nexus-gmiaf.32.5: NX_SERVICE_TOKEN is the persistent random
         // root bearer token (minted + persisted by `nx init --service`). Auth resolves
