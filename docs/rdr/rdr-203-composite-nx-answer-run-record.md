@@ -2,12 +2,12 @@
 title: "One Composite Run Record: Collapse nx_answer's Three Telemetry Writes into a Single Engine Operation"
 id: RDR-203
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Sam
 reviewed-by: self
 created: 2026-09-05
-accepted_date:
+accepted_date: 2026-09-06
 related_issues: [nexus-m20mf, RDR-193, RDR-196, RDR-198]
 ---
 
