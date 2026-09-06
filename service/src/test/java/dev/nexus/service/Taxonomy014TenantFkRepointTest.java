@@ -491,7 +491,7 @@ class Taxonomy014TenantFkRepointTest {
             st.execute(
                 "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_" + dim + ") "
                 + "VALUES ('" + tenant + "', '" + collection + "', decode('" + chashHex + "', 'hex'), "
-                + "'doc-count-trigger-test chunk', ('[" + "0.1,".repeat(dim - 1) + "0.1]')::vector) "
+                + "'doc-count-trigger-test chunk', ('[" + "0.1,".repeat(dim - 1) + "0.1]')::nexus.vector) "
                 + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
         }
     }

@@ -85,7 +85,7 @@ class ManifestCollectionStampTest {
                 + "VALUES ('" + TENANT + "', '" + COLL + "') ON CONFLICT DO NOTHING");
             st.execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
                 + "VALUES ('" + TENANT + "', '" + COLL + "', decode('" + CH_A + "', 'hex'), 'alpha text', "
-                + "('[' || repeat('0.1,', 1023) || '0.1]')::vector)");
+                + "('[' || repeat('0.1,', 1023) || '0.1]')::nexus.vector)");
         }
     }
 
@@ -107,7 +107,7 @@ class ManifestCollectionStampTest {
                 + "VALUES ('" + TENANT + "', '" + coll + "') ON CONFLICT DO NOTHING");
             st.execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
                 + "VALUES ('" + TENANT + "', '" + coll + "', decode('" + chash + "', 'hex'), '"
-                + text + "', ('[' || repeat('0.1,', 1023) || '0.1]')::vector) "
+                + text + "', ('[' || repeat('0.1,', 1023) || '0.1]')::nexus.vector) "
                 + "ON CONFLICT DO NOTHING");
         }
     }
@@ -172,7 +172,7 @@ class ManifestCollectionStampTest {
         try (Connection su = pg.createConnection(""); Statement st = su.createStatement();
              ResultSet rs = st.executeQuery(
                  "SELECT count(*) FROM nexus.search_metadata_scoped_1024("
-                 + "('[' || repeat('0.1,', 1023) || '0.1]')::vector, "
+                 + "('[' || repeat('0.1,', 1023) || '0.1]')::nexus.vector, "
                  + "ARRAY['" + COLL + "'], NULL::text, NULL::text, NULL::int, "
                  + "NULL::text, NULL::text, NULL::jsonb, 10)")) {
             rs.next();
@@ -553,7 +553,7 @@ class ManifestCollectionStampTest {
         try (Connection su = pg.createConnection(""); Statement st = su.createStatement();
              ResultSet rs = st.executeQuery(
                  "SELECT count(*) FROM nexus.search_metadata_scoped_1024("
-                 + "('[' || repeat('0.1,', 1023) || '0.1]')::vector, "
+                 + "('[' || repeat('0.1,', 1023) || '0.1]')::nexus.vector, "
                  + "ARRAY['" + renamed + "'], NULL::text, NULL::text, NULL::int, "
                  + "NULL::text, NULL::text, NULL::jsonb, 10)")) {
             rs.next();

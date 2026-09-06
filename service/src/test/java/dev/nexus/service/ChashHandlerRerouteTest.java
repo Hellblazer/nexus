@@ -307,7 +307,7 @@ class ChashHandlerRerouteTest {
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
             " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ", created_at) VALUES " +
             "('" + TENANT + "', '" + collection + "', decode('" + chash.toHex() + "', 'hex'), " +
-            "'wire chunk " + chash.toHex().substring(0, 8) + "', " + vec + "::vector, " +
+            "'wire chunk " + chash.toHex().substring(0, 8) + "', " + vec + "::nexus.vector, " +
             "TIMESTAMPTZ '" + createdAt + "')");
     }
 

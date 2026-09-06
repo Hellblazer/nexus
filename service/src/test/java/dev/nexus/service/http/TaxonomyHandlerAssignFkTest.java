@@ -234,7 +234,7 @@ class TaxonomyHandlerAssignFkTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, " + embeddingCol + ") VALUES " +
                 "('" + tenant + "', '" + collection + "', decode('" + chashHex + "', 'hex'), 'fk-assign-test chunk', " +
-                "('[" + "0.1,".repeat(dim - 1) + "0.1]')::vector) " +
+                "('[" + "0.1,".repeat(dim - 1) + "0.1]')::nexus.vector) " +
                 "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
         }
     }

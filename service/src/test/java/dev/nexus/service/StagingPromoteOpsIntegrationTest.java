@@ -160,7 +160,7 @@ class StagingPromoteOpsIntegrationTest {
         scope.withTenant(T1, ctx -> {
             ctx.execute("INSERT INTO staging.chunks "
                 + "(tenant_id, collection, dim, legacy_ref, chunk_text, embedding, model) "
-                + "VALUES (?, ?, ?, ?, ?, " + (vecLit == null ? "NULL" : "'" + vecLit + "'::vector") + ", 'bge-768') "
+                + "VALUES (?, ?, ?, ?, ?, " + (vecLit == null ? "NULL" : "'" + vecLit + "'::nexus.vector") + ", 'bge-768') "
                 + "ON CONFLICT (tenant_id, collection, legacy_ref) DO UPDATE SET chunk_text = excluded.chunk_text",
                 T1, coll, dim, ref, text);
             return null;
@@ -1216,7 +1216,7 @@ class StagingPromoteOpsIntegrationTest {
         scope.withTenant(T_DIM, ctx -> {
             ctx.execute("INSERT INTO staging.chunks "
                 + "(tenant_id, collection, dim, legacy_ref, chunk_text, embedding, model) "
-                + "VALUES (?, ?, ?, ?, '', '" + vec(dim) + "'::vector, 'model-" + dim + "') "
+                + "VALUES (?, ?, ?, ?, '', '" + vec(dim) + "'::nexus.vector, 'model-" + dim + "') "
                 + "ON CONFLICT (tenant_id, collection, legacy_ref) DO NOTHING",
                 T_DIM, coll, dim, legacyRef);
             return null;
@@ -1504,7 +1504,7 @@ class StagingPromoteOpsIntegrationTest {
                .execute();
             ctx.execute("INSERT INTO staging.chunks "
                 + "(tenant_id, collection, dim, legacy_ref, chunk_text, embedding, model) "
-                + "VALUES (?, ?, 768, ?, ?, '" + vec(768) + "'::vector, 'bge-768') "
+                + "VALUES (?, ?, 768, ?, ?, '" + vec(768) + "'::nexus.vector, 'bge-768') "
                 + "ON CONFLICT (tenant_id, collection, legacy_ref) DO UPDATE SET chunk_text = excluded.chunk_text",
                 T_REJECT, COLL_A, goodChash, goodText);
             ctx.execute("INSERT INTO staging.topic_assignments "

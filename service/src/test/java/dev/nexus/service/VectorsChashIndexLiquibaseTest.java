@@ -144,7 +144,7 @@ class VectorsChashIndexLiquibaseTest {
             "INSERT INTO nexus.chunks" +
             " (tenant_id, collection, chash, chunk_text, embedding_" + dim + ") VALUES " +
             "('" + TENANT + "', '" + collection + "', decode('" + chashHex + "', 'hex'), " +
-            "'chunk " + chashHex.substring(0, 8) + "', " + zeroVec(dim) + "::vector)" +
+            "'chunk " + chashHex.substring(0, 8) + "', " + zeroVec(dim) + "::nexus.vector)" +
             " ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
     }
 

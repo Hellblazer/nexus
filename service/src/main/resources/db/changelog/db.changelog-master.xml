@@ -1125,6 +1125,36 @@
     <include file="db/changelog/search-path-001-relocate-vector-extensions.xml"/>
 
     <!--
+        nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): qualifies every
+        pgvector/pg_trgm extension-object reference (the cosine-distance operator,
+        the vector parameter type, and — for hybrid_search/text_gate_probe/
+        text_gated_search_hnsw_first — the bare word_similarity() call and/or
+        &lt;% threshold operator) as nexus.* in every function that used it bare
+        (search_metadata_scoped/search_graph_hop/search_topic_scoped/
+        assign_from_chashes/hybrid_search/search_aspect_scoped/plain_search/
+        text_gate_probe/text_gated_search_hnsw_first/text_gated_search_by_chash/
+        taxonomy_ann_query, x3 dims each — 33 functions total; text_gate_probe is
+        text-only, no vector operand, just the &lt;% operator). Must run AFTER the
+        relocation above — these bodies reference nexus.vector, which does not
+        exist as a name until the extension actually lives there.
+
+        DELIBERATELY NOT a SET search_path pin (tried first, reverted): Postgres
+        disqualifies a LANGUAGE sql function from planner INLINING the instant
+        it carries a function-level SET clause, and every one of these
+        functions is inlined by design so the ORDER BY/LIMIT pushes into the
+        HNSW index (CombinedQueryParityTest/PlainSearchTextGatedSearchExplainTest/
+        TaxonomyCentroidAnnPlanShapeTest's EXPLAIN-plan assertions caught the
+        regression to a bare Function Scan immediately). OPERATOR(schema.op) /
+        schema.type / schema.function are ordinary expression-level syntax, not a
+        function attribute, so none of them touch inlining eligibility at all.
+        Placed last among function-defining changelogs (after every file that
+        currently owns one of these functions) so the CREATE OR REPLACE always
+        applies to the truly live body, but before the two grants files below
+        since grants target the function name, unaffected by this repoint.
+    -->
+    <include file="db/changelog/search-path-002-qualify-vector-operator-functions.xml"/>
+
+    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when

@@ -131,11 +131,11 @@ class StagingSchemaLiquibaseTest {
         tenantScope.withTenant(T_A, ctx -> {
             ctx.execute("INSERT INTO staging.chunks "
                 + "(tenant_id, collection, dim, legacy_ref, chunk_text, embedding, model) VALUES "
-                + "(?, 'knowledge__k__bge-base-en-v15-768__v1', 768, ?, 'sixteen char era', '[1,0,0]'::vector, 'bge-768')",
+                + "(?, 'knowledge__k__bge-base-en-v15-768__v1', 768, ?, 'sixteen char era', '[1,0,0]'::nexus.vector, 'bge-768')",
                 T_A, "b46c7915c303245f");
             ctx.execute("INSERT INTO staging.chunks "
                 + "(tenant_id, collection, dim, legacy_ref, chunk_text, embedding, model) VALUES "
-                + "(?, 'knowledge__k__bge-base-en-v15-768__v1', 768, ?, 'thirty-two hex era', '[1,0,0,0,0]'::vector, 'bge-768')",
+                + "(?, 'knowledge__k__bge-base-en-v15-768__v1', 768, ?, 'thirty-two hex era', '[1,0,0,0,0]'::nexus.vector, 'bge-768')",
                 T_A, "0123456789abcdef0123456789abcdef");
             ctx.execute("INSERT INTO staging.chunks "
                 + "(tenant_id, collection, dim, legacy_ref, chunk_text, embedding, model) VALUES "
@@ -144,7 +144,7 @@ class StagingSchemaLiquibaseTest {
             return null;
         });
         Integer distinctDims = tenantScope.withTenant(T_A, ctx ->
-            ctx.fetchOne("SELECT count(DISTINCT vector_dims(embedding)) FROM staging.chunks "
+            ctx.fetchOne("SELECT count(DISTINCT nexus.vector_dims(embedding)) FROM staging.chunks "
                 + "WHERE embedding IS NOT NULL").get(0, Integer.class));
         assertThat(distinctDims)
             .as("the untyped vector column must hold MIXED dims (3 and 5 here) — "

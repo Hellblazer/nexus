@@ -225,7 +225,7 @@ class ChunksRlsBehavioralTest {
                 ctx.execute(
                     "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
                     " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ") " +
-                    "VALUES (?, ?, decode(?, 'hex'), ?, ?::vector)",
+                    "VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector)",
                     TENANT_B, col, padChash("chash-wc-cross-" + dim), "cross-tenant inject", vec);
                 return null;
             })
@@ -447,7 +447,7 @@ class ChunksRlsBehavioralTest {
             ctx.execute(
                 "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
                 " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ")" +
-                " VALUES (?, ?, decode(?, 'hex'), ?, ?::vector)" +
+                " VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector)" +
                 " ON CONFLICT (tenant_id, collection, chash) DO NOTHING",
                 tenant, collection, paddedChash, chunkText, vec);
             return null;

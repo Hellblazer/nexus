@@ -271,9 +271,18 @@ public final class SchemaMigrator {
     }
 
     // ── nexus-x0s52: truthful walk counts ────────────────────────────────────
-    // Unqualified table references, deliberately: these run on the SAME
-    // connection Liquibase itself uses, so they resolve to exactly the
-    // databasechangelog Liquibase reads and writes.
+    // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): databasechangelog
+    // is explicitly schema-qualified as "public" below (DSL.name("public",
+    // "databasechangelog") / to_regclass('public.databasechangelog')), matching
+    // VersionHandler's own DATABASECHANGELOG constant -- this table is Liquibase's
+    // own bookkeeping table, created via a migration connection that carries no
+    // search_path override, so it lands in Postgres's own default schema
+    // ("$user", public) resolving to public. Previously unqualified and relying on
+    // the calling session's search_path (the SAME connection Liquibase itself just
+    // used, which happened to still resolve correctly) -- exactly the silent
+    // reliance Sam's directive retires; the table's actual location is fixed and
+    // known, so naming it explicitly costs nothing and removes any dependency on
+    // resolution order.
     //
     // nexus-zrcj7 step 4 review follow-up (critic, T2 [24235]): the three methods
     // below used to carry raw JDBC Statement/PreparedStatement calls, EXEMPTED with
@@ -283,11 +292,11 @@ public final class SchemaMigrator {
     // is a plain java.sql.Connection like any other, and jOOQ's DSL.using(Connection,
     // SQLDialect) wraps ANY such connection -- so the architectural constraint does
     // NOT actually preclude typed DSL here. Converted: DSL.table(DSL.name(
-    // "databasechangelog")) / DSL.field(DSL.name("dateexecuted"), ...) for Liquibase's
-    // own bookkeeping table (outside jOOQ codegen's modeled schemata, but nameable via
-    // the same safe quoted-identifier idiom ChashCensus.java/StagingPromoteOps.java/
-    // this bead's own TaxonomyRepository#advanceTopicsIdSequence conversion already
-    // use), DSL.function("to_regclass", ...) for the existence probe, and
+    // "public", "databasechangelog")) / DSL.field(DSL.name("dateexecuted"), ...) for
+    // Liquibase's own bookkeeping table (outside jOOQ codegen's modeled schemata, but
+    // nameable via the same safe quoted-identifier idiom ChashCensus.java/
+    // StagingPromoteOps.java/this bead's own TaxonomyRepository#advanceTopicsIdSequence
+    // conversion already use), DSL.function("to_regclass", ...) for the existence probe, and
     // DSL.currentTimestamp() -- which jOOQ's own Postgres dialect renders as
     // CAST(CURRENT_TIMESTAMP AS timestamp without time zone), the EXACT semantic
     // equivalent of the retired "now()::timestamp" (session-zone wall clock, tz
@@ -304,7 +313,7 @@ public final class SchemaMigrator {
         try {
             DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
             String regclass = ctx.select(DSL.function(
-                    "to_regclass", SQLDataType.VARCHAR, DSL.val("databasechangelog")))
+                    "to_regclass", SQLDataType.VARCHAR, DSL.val("public.databasechangelog")))
                 .fetchOne(0, String.class);
             if (regclass == null) {
                 return -1L;
@@ -314,7 +323,7 @@ public final class SchemaMigrator {
             // keep this method's own long return type without narrowing anywhere.
             Field<Long> cnt = DSL.count().cast(SQLDataType.BIGINT);
             return ctx.select(cnt)
-                .from(DSL.table(DSL.name("databasechangelog")))
+                .from(DSL.table(DSL.name("public", "databasechangelog")))
                 .fetchOne(cnt);
         } catch (DataAccessException e) {
             throw new SQLException("countChangelogRows failed", e);
@@ -333,7 +342,7 @@ public final class SchemaMigrator {
                 DSL.field(DSL.name("dateexecuted"), java.sql.Timestamp.class);
             Field<Long> cnt = DSL.count().cast(SQLDataType.BIGINT);
             return ctx.select(cnt)
-                .from(DSL.table(DSL.name("databasechangelog")))
+                .from(DSL.table(DSL.name("public", "databasechangelog")))
                 .where(dateExecuted.greaterOrEqual(since))
                 .fetchOne(cnt);
         } catch (DataAccessException e) {

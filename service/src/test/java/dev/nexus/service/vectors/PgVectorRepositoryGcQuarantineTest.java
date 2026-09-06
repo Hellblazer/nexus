@@ -312,7 +312,7 @@ class PgVectorRepositoryGcQuarantineTest {
                 st.execute(
                     "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
                     + "VALUES ('" + TENANT_A + "', '" + originCol + "', NULL, 'x', "
-                    + "('[' || repeat('0,', 1023) || '0]')::vector)");
+                    + "('[' || repeat('0,', 1023) || '0]')::nexus.vector)");
             }
         }).isInstanceOf(SQLException.class);
     }

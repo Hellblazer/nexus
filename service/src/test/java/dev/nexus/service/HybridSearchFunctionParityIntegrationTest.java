@@ -387,7 +387,7 @@ class HybridSearchFunctionParityIntegrationTest {
             String queryText, List<String> collections, double trgmThreshold, int n) {
         float[] vec = embedQuery(collections.get(0), queryText);
         String sql = "SELECT id, content, collection, score FROM nexus.hybrid_search_" + dim
-            + "(?::vector, ?, ARRAY[" + placeholders(collections.size()) + "]::text[], NULL::jsonb, ?)";
+            + "(?::nexus.vector, ?, ARRAY[" + placeholders(collections.size()) + "]::text[], NULL::jsonb, ?)";
         List<Object> binds = new ArrayList<>();
         binds.add(vectorLiteral(vec));
         binds.add(queryText);

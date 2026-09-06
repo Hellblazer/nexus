@@ -275,6 +275,13 @@ class Rdr71gw2CollectionNotNullTest {
     private static void insertChunk(Connection su, int dim, String tenantId,
                                      String collection, String chashHex, int vecLen) throws Exception {
         insertCollection(su, tenantId, collection);
+        // Bare (unqualified) ::vector, deliberately NOT ::nexus.vector: this class's
+        // startAll() stops the migration walk BEFORE vectors-004-1, permanently --
+        // it never resumes to a full migrate() call, so search-path-001 (placed even
+        // later in the changelog) never runs and the extension is never relocated
+        // out of `public` for the lifetime of this test class (nexus-cbo4a batch 9
+        // item 0 discovery, same class as SchemaMigratorIntegrationTest's
+        // lateUpgradingDeployment... test).
         su.createStatement().execute(
             "INSERT INTO nexus.chunks_" + dim + " (tenant_id, collection, chash, chunk_text, embedding) "
             + "VALUES ('" + tenantId + "', '" + collection + "', decode('" + chashHex + "', 'hex'), "

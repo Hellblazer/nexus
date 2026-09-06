@@ -1085,7 +1085,7 @@ class SoftDeleteTest {
         su.createStatement().execute(
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
             "VALUES ('" + tenantId + "', '" + collection + "', decode('" + chash + "', 'hex'), " +
-            "'" + chunkText + "', " + vectorLiteral(384) + "::vector) " +
+            "'" + chunkText + "', " + vectorLiteral(384) + "::nexus.vector) " +
             "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
     }
 
@@ -1128,7 +1128,7 @@ class SoftDeleteTest {
 
     /**
      * Generate a pgvector literal string of {@code dim} uniform 0.1 components.
-     * Format: {@code '[0.1,0.1,...,0.1]'} — safe for inline {@code ::vector} cast.
+     * Format: {@code '[0.1,0.1,...,0.1]'} — safe for inline {@code ::nexus.vector} cast.
      * Matches the pattern from CollectionRegistryFkTest.vectorLiteral().
      */
     private static String vectorLiteral(int dim) {

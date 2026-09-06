@@ -633,7 +633,7 @@ class ManifestVerifyTest {
         su.createStatement().execute(
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
             "VALUES ('" + tenantId + "', '" + collection + "', decode('" + chashHex + "', 'hex'), " +
-            "'chunk text', ('[1" + ",0".repeat(1023) + "]')::vector) " +
+            "'chunk text', ('[1" + ",0".repeat(1023) + "]')::nexus.vector) " +
             "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
     }
 
@@ -648,7 +648,7 @@ class ManifestVerifyTest {
         su.createStatement().execute(
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
             "VALUES ('" + tenantId + "', '" + collection + "', decode('" + chashHex + "', 'hex'), " +
-            "'chunk text', ('[1" + ",0".repeat(383) + "]')::vector) " +
+            "'chunk text', ('[1" + ",0".repeat(383) + "]')::nexus.vector) " +
             "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
     }
 }

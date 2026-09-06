@@ -64,12 +64,19 @@ public class VectorBinding implements Binding<Object, Vector> {
 
     @Override
     public void sql(BindingSQLContext<Vector> ctx) {
+        // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): schema-qualified
+        // as ::nexus.vector, not bare ::vector -- the pgvector extension now lives in
+        // the nexus schema (search-path-001-relocate-vector-extensions.xml), so a
+        // bare cast here would silently depend on the CALLING session's search_path
+        // containing nexus, exactly the reliance this directive retires. This
+        // binding renders EVERY production vector bind (nexus-xtmtf), so this one
+        // fix covers every INSERT/UPDATE/WHERE clause across the whole engine.
         if (ctx.render().paramType() == ParamType.INLINED) {
             Vector v = ctx.value();
             ctx.render().visit(DSL.inline(v == null ? null : v.toString()))
-               .sql("::vector");
+               .sql("::nexus.vector");
         } else {
-            ctx.render().sql(ctx.variable()).sql("::vector");
+            ctx.render().sql(ctx.variable()).sql("::nexus.vector");
         }
     }
 

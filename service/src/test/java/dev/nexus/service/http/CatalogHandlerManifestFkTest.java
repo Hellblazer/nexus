@@ -316,7 +316,7 @@ class CatalogHandlerManifestFkTest {
             }
             try (var ps = su.prepareStatement(
                     "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-                    + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::vector) "
+                    + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::nexus.vector) "
                     + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING")) {
                 ps.setString(1, TENANT);
                 ps.setString(2, collection);

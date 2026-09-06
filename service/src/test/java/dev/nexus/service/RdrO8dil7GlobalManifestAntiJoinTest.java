@@ -282,7 +282,7 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
     }
 
     /** Returns a QUOTED vector literal, e.g. {@code '[0.1,0.1]'} — ready to
-     *  splice directly before {@code ::vector} with no extra quoting needed
+     *  splice directly before {@code ::nexus.vector} with no extra quoting needed
      *  at call sites. */
     private static String vec(int dim) {
         return IntStream.range(0, dim).mapToObj(i -> "0.1").collect(Collectors.joining(",", "'[", "]'"));
@@ -362,7 +362,7 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         scope.withTenant(TENANT, ctx -> {
             ctx.execute("INSERT INTO staging.chunks "
                 + "(tenant_id, collection, dim, legacy_ref, chunk_text, embedding, model) "
-                + "VALUES (?, ?, 768, ?, ?, " + vec(768) + "::vector, 'bge-768')",
+                + "VALUES (?, ?, 768, ?, ?, " + vec(768) + "::nexus.vector, 'bge-768')",
                 TENANT, coll, canonical, text);
             return null;
         });
@@ -419,7 +419,7 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
             su.createStatement().execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " "
                 + "(tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
                 + "VALUES ('" + TENANT + "', '" + collDel + "', '" + chash + "', 'text', "
-                + vec(1024) + "::vector)");
+                + vec(1024) + "::nexus.vector)");
             su.createStatement().execute("INSERT INTO nexus.catalog_document_chunks "
                 + "(tenant_id, doc_id, position, chash, collection) "
                 + "VALUES ('" + TENANT + "', 'gate2-del-doc', 0, '" + chash + "', '" + collDel + "')");
@@ -704,7 +704,7 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
                 su.createStatement().execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " "
                     + "(tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ", metadata) VALUES ('"
                     + TENANT + "', '" + quarantineColl + "', decode('" + pair.getKey() + "', 'hex'), '"
-                    + pair.getValue() + "', " + vec(1024) + "::vector, jsonb_build_object("
+                    + pair.getValue() + "', " + vec(1024) + "::nexus.vector, jsonb_build_object("
                     + "'origin_collection', '" + coll + "', 'quarantined_at', '" + pastCutoff + "'))");
             }
         }
@@ -932,13 +932,13 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
             // be empty".
             su.createStatement().execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " "
                 + "(tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") VALUES "
-                + "('" + TENANT + "', '" + coll + "', '" + pin384 + "', 'pin', " + vec(384) + "::vector)");
+                + "('" + TENANT + "', '" + coll + "', '" + pin384 + "', 'pin', " + vec(384) + "::nexus.vector)");
             su.createStatement().execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " "
                 + "(tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(768) + ") VALUES "
-                + "('" + TENANT + "', '" + coll + "', '" + pin768 + "', 'pin', " + vec(768) + "::vector)");
+                + "('" + TENANT + "', '" + coll + "', '" + pin768 + "', 'pin', " + vec(768) + "::nexus.vector)");
             su.createStatement().execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " "
                 + "(tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") VALUES "
-                + "('" + TENANT + "', '" + coll + "', '" + pin1024 + "', 'pin', " + vec(1024) + "::vector)");
+                + "('" + TENANT + "', '" + coll + "', '" + pin1024 + "', 'pin', " + vec(1024) + "::nexus.vector)");
             su.createStatement().execute("INSERT INTO nexus.catalog_documents "
                 + "(tenant_id, tumbler, title, physical_collection) VALUES "
                 + "('" + TENANT + "', 'gate2-control-doc', 'control doc', '" + coll + "')");

@@ -125,7 +125,7 @@ class DenseGateScanBudgetIntegrationTest {
                 + "  sha256(convert_to('noise doc ' || g, 'UTF8')), "
                 + "  'filler noise document number ' || g, "
                 + "  ('[' || (SELECT string_agg(random()::text, ',') "
-                + "            FROM generate_series(1, 384 + (g - g))) || ']')::vector "
+                + "            FROM generate_series(1, 384 + (g - g))) || ']')::nexus.vector "
                 + "FROM generate_series(1, " + NOISE + ") g");
             // Gate-matching rows: text passes the tsv gate; vectors
             // DISPERSED at random through the same space as the noise —
@@ -138,7 +138,7 @@ class DenseGateScanBudgetIntegrationTest {
                 + "  sha256(convert_to('gpu batch row ' || g, 'UTF8')), "
                 + "  'gpu batch scheduling design row ' || g, "
                 + "  ('[' || (SELECT string_agg(random()::text, ',') "
-                + "            FROM generate_series(1, 384 + (g - g))) || ']')::vector "
+                + "            FROM generate_series(1, 384 + (g - g))) || ']')::nexus.vector "
                 + "FROM generate_series(1, " + MATCHING + ") g");
             // Calibrate the scan budget to the CLOUD's ratio at test scale:
             // their failing queries sit at ~329 gate matches in a table where
@@ -154,7 +154,7 @@ class DenseGateScanBudgetIntegrationTest {
             // The cloud's post-conversion state: a freshly REBUILT graph.
             su.createStatement().execute(
                 "CREATE INDEX idx_chunks_embedding_384 ON " + DimTables.CHUNKS_TABLE_NAME + " "
-                + "USING hnsw (" + DimTables.embeddingColumn(384) + " vector_cosine_ops)");
+                + "USING hnsw (" + DimTables.embeddingColumn(384) + " nexus.vector_cosine_ops)");
             PgContainerHelper.analyzeTable(su, CHUNKS);
         }
     }
@@ -175,7 +175,7 @@ class DenseGateScanBudgetIntegrationTest {
             "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " "
             + "WHERE collection = '" + COL_TARGET + "' "
             + "AND (chunk_tsv @@ plainto_tsquery('english', '" + QUERY + "') "
-            + "     OR '" + QUERY + "' <% chunk_text)").get(0, Integer.class));
+            + "     OR '" + QUERY + "' OPERATOR(nexus.<%) chunk_text)").get(0, Integer.class));
         assertThat(gateMatches).isGreaterThanOrEqualTo(MATCHING);
 
         List<Map<String, Object>> rows =

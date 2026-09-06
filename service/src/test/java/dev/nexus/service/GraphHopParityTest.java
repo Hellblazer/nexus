@@ -198,7 +198,7 @@ class GraphHopParityTest {
         su.createStatement().execute(
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
             "SELECT '" + TENANT_A + "', '" + COLL_EXPLAIN + "', decode(lpad(g::text, 64, '0'), 'hex'), 'ex'||g, " +
-            "('[' || ((g % 100)::float8 / 100.0) || ',1' || repeat(',0', 1022) || ']')::vector " +
+            "('[' || ((g % 100)::float8 / 100.0) || ',1' || repeat(',0', 1022) || ']')::nexus.vector " +
             "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
@@ -228,7 +228,7 @@ class GraphHopParityTest {
             String args = rs.getString("args");
             assertThat(args)
                 .as("query vector must be the FIRST argument, typed `vector` (Finding 5a)")
-                .startsWith("p_query vector");
+                .startsWith("p_query nexus.vector");
             assertThat(args)
                 .as("graph-hop signature pins seeds[], collections[], link_type, depth, direction, n")
                 .contains("p_seeds text[]")
@@ -553,7 +553,7 @@ class GraphHopParityTest {
             // unified table) was never updated post-repoint, so `c.embedding` no longer
             // resolves (PSQLException: column c.embedding does not exist). The assertion
             // below already targets idx_chunks_embedding_1024, so name that dim's column.
-            " ORDER BY c.embedding_1024 <=> " + queryVecLiteral(1024) + " LIMIT 10";
+            " ORDER BY c.embedding_1024 OPERATOR(nexus.<=>) " + queryVecLiteral(1024) + " LIMIT 10";
         String plan = explain(inner);
         assertThat(plan)
             .as("materialize-reached-then-rank must use the HNSW index "
@@ -662,7 +662,7 @@ class GraphHopParityTest {
             "    ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id " +
             "  JOIN reached rd ON rd.tumbler = d.tumbler " +
             " WHERE c.collection = '" + collection + "' AND d.deleted_at IS NULL " +
-            " ORDER BY c." + DimTables.embeddingColumn(dim) + " <=> " + queryVecLiteral(dim) + " ASC";
+            " ORDER BY c." + DimTables.embeddingColumn(dim) + " OPERATOR(nexus.<=>) " + queryVecLiteral(dim) + " ASC";
         return runIds(conn, sql);
     }
 
@@ -686,7 +686,7 @@ class GraphHopParityTest {
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
             " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ") VALUES ('" +
             tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), '" + tumbler + "', " +
-            vec2(dim, x, y) + "::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+            vec2(dim, x, y) + "::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
             "VALUES ('" + tenant + "', '" + tumbler + "', 0, decode('" + chash + "', 'hex'), '" + collection + "') " +
@@ -723,7 +723,7 @@ class GraphHopParityTest {
     // ── value helpers ────────────────────────────────────────────────────────
 
     private static String queryVecLiteral(int dim) {
-        return vec2(dim, 1.0, 0.0) + "::vector";
+        return vec2(dim, 1.0, 0.0) + "::nexus.vector";
     }
 
     private static String vec2(int dim, double x, double y) {

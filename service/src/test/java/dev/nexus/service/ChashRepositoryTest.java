@@ -443,7 +443,7 @@ class ChashRepositoryTest {
             "INSERT INTO nexus.chunks" +
             " (tenant_id, collection, chash, chunk_text, embedding_" + dim + ", created_at) VALUES " +
             "('" + tenant + "', '" + collection + "', decode('" + chash.toHex() + "', 'hex'), " +
-            "'chunk " + chash.toHex().substring(0, 8) + "', " + unitVec(dim) + "::vector, " +
+            "'chunk " + chash.toHex().substring(0, 8) + "', " + unitVec(dim) + "::nexus.vector, " +
             "TIMESTAMPTZ '" + createdAt + "')");
     }
 

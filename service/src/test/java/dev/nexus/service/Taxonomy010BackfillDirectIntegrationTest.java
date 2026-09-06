@@ -411,7 +411,7 @@ class Taxonomy010BackfillDirectIntegrationTest {
         String embeddingCol = "embedding_" + dim;
         try (var ps = c.prepareStatement(
             "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, " + embeddingCol + ") "
-            + "VALUES (?, ?, decode(?, 'hex'), ?, ?::vector) "
+            + "VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector) "
             + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING")) {
             ps.setString(1, tenant);
             ps.setString(2, collection);

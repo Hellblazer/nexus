@@ -198,14 +198,14 @@ class TaxonomyCentroidAnnPlanShapeTest {
                     + embCol + ", label, doc_count) "
                     + "SELECT '" + TENANT + "', '" + coll + "', i, v.vec, 'filler', 1 "
                     + "FROM generate_series(1, " + CENTROIDS_PER_DIM + ") i "
-                    + "CROSS JOIN LATERAL (SELECT (array_agg(random() * 2 - 1))::vector AS vec"
+                    + "CROSS JOIN LATERAL (SELECT (array_agg(random() * 2 - 1))::nexus.vector AS vec"
                     + "                    FROM generate_series(1, " + dim + ")) v");
                 // The single nearest row: unit vector along the first axis.
                 st.execute(
                     "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, "
                     + embCol + ", label, doc_count) VALUES ('"
                     + TENANT + "', '" + coll + "', " + (CENTROIDS_PER_DIM + dim) + ", "
-                    + "('[1' || repeat(',0', " + (dim - 1) + ") || ']')::vector, 'nearest', 1)");
+                    + "('[1' || repeat(',0', " + (dim - 1) + ") || ']')::nexus.vector, 'nearest', 1)");
                 PgContainerHelper.analyzeTable(su, TAXONOMY_CENTROIDS);
             }
 
@@ -215,11 +215,11 @@ class TaxonomyCentroidAnnPlanShapeTest {
             st.execute(
                 "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, embedding_384, label, doc_count) "
                 + "VALUES ('" + TENANT + "', '" + COL_MIXED + "', 1, "
-                + "('[1' || repeat(',0', 383) || ']')::vector, 'mixed-384', 1)");
+                + "('[1' || repeat(',0', 383) || ']')::nexus.vector, 'mixed-384', 1)");
             st.execute(
                 "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, embedding_768, label, doc_count) "
                 + "VALUES ('" + TENANT + "', '" + COL_MIXED + "', 2, "
-                + "('[1' || repeat(',0', 767) || ']')::vector, 'mixed-768', 1)");
+                + "('[1' || repeat(',0', 767) || ']')::nexus.vector, 'mixed-768', 1)");
             PgContainerHelper.analyzeTable(su, TAXONOMY_CENTROIDS);
         }
     }

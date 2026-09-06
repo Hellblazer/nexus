@@ -500,7 +500,7 @@ class ManifestFunctionsTest {
         su.createStatement().execute(
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
             "VALUES ('" + tenantId + "', '" + collection + "', '" + chash + "', " +
-            "'" + chunkText.replace("'", "''") + "', " + vectorLiteral(384) + "::vector) " +
+            "'" + chunkText.replace("'", "''") + "', " + vectorLiteral(384) + "::nexus.vector) " +
             "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
     }
 
@@ -531,7 +531,7 @@ class ManifestFunctionsTest {
 
     /**
      * Generate a pgvector literal string of {@code dim} uniform 0.1 components.
-     * Format: {@code '[0.1,0.1,...,0.1]'} — safe for inline {@code ::vector} cast.
+     * Format: {@code '[0.1,0.1,...,0.1]'} — safe for inline {@code ::nexus.vector} cast.
      */
     private static String vectorLiteral(int dim) {
         return IntStream.range(0, dim)

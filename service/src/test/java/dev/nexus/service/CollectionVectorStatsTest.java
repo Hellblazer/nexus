@@ -553,7 +553,7 @@ class CollectionVectorStatsTest {
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
             " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ", created_at) " +
             "VALUES ('" + tenantId + "', '" + collection + "', '" + chash + "', " +
-            "'" + chunkText.replace("'", "''") + "', " + vectorLiteral(dim) + "::vector, " +
+            "'" + chunkText.replace("'", "''") + "', " + vectorLiteral(dim) + "::nexus.vector, " +
             "'" + createdAt + "'::timestamptz) " +
             "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
     }

@@ -317,7 +317,7 @@ class CombinedQueryParityTest {
         su.createStatement().execute(
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
             "SELECT '" + TENANT_A + "', '" + COLL_EXPLAIN + "', decode(lpad(g::text, 64, '0'), 'hex'), 'ex'||g, " +
-            "('[' || ((g % 100)::float8 / 100.0) || ',1' || repeat(',0', 1022) || ']')::vector " +
+            "('[' || ((g % 100)::float8 / 100.0) || ',1' || repeat(',0', 1022) || ']')::nexus.vector " +
             "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
@@ -425,7 +425,7 @@ class CombinedQueryParityTest {
         su.createStatement().execute(
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
             "SELECT '" + TENANT_A + "', '" + COLL_ASPECT_EXPLAIN + "', decode(lpad((g+1000000)::text, 64, '0'), 'hex'), 'asx'||g, " +
-            "('[' || ((g % 100)::float8 / 100.0) || ',1' || repeat(',0', 1022) || ']')::vector " +
+            "('[' || ((g % 100)::float8 / 100.0) || ',1' || repeat(',0', 1022) || ']')::nexus.vector " +
             "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
@@ -464,7 +464,7 @@ class CombinedQueryParityTest {
                 .as("query vector must be the FIRST argument, typed `vector` — never "
                     + "join-sourced (Finding 5a: a join-sourced vector forces a 340ms "
                     + "Seq Scan instead of the 2ms HNSW Index Scan)")
-                .startsWith("p_query vector");
+                .startsWith("p_query nexus.vector");
             assertThat(args)
                 .as("metadata-scoped signature pins the catalog dimensions the query "
                     + "tool routes on: collections[], content_type, author, year, corpus, "
@@ -558,7 +558,7 @@ class CombinedQueryParityTest {
             String args = sig.arguments();
             assertThat(args)
                 .as("topic-scoped query vector must be the FIRST argument, typed `vector`")
-                .startsWith("p_query vector");
+                .startsWith("p_query nexus.vector");
             assertThat(args)
                 .as("topic-scoped signature: topic_label, collection, n")
                 .contains("p_topic_label text")
@@ -922,7 +922,7 @@ class CombinedQueryParityTest {
             String args = sig.arguments();
             assertThat(args)
                 .as("aspect-scoped query vector must be the FIRST argument, typed `vector`")
-                .startsWith("p_query vector");
+                .startsWith("p_query nexus.vector");
             assertThat(args)
                 .as("aspect-scoped signature: collections[], field, pattern, "
                     + "min_confidence, where, n")
@@ -1270,7 +1270,7 @@ class CombinedQueryParityTest {
             "   AND d.deleted_at IS NULL " +
             (contentType == null ? "" : "   AND d.content_type = " + sqlText(contentType) + " ") +
             (author == null ? "" : "   AND d.author ILIKE '%' || " + sqlText(author) + " || '%' ") +
-            " ORDER BY c." + DimTables.embeddingColumn(dim) + " <=> " + queryVecLiteral(dim) + " ASC";
+            " ORDER BY c." + DimTables.embeddingColumn(dim) + " OPERATOR(nexus.<=>) " + queryVecLiteral(dim) + " ASC";
         return runIds(conn, sql);
     }
 
@@ -1296,7 +1296,7 @@ class CombinedQueryParityTest {
             "                       ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id " +
             "                    WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash " +
             "                      AND d.deleted_at IS NULL)) " +
-            " ORDER BY c." + DimTables.embeddingColumn(dim) + " <=> " + queryVecLiteral(dim) + " ASC";
+            " ORDER BY c." + DimTables.embeddingColumn(dim) + " OPERATOR(nexus.<=>) " + queryVecLiteral(dim) + " ASC";
         return runIds(conn, sql);
     }
 
@@ -1321,7 +1321,7 @@ class CombinedQueryParityTest {
             "   AND c.chash = m.chash " +
             " WHERE m.collection = '" + collection + "' " +
             "   AND d.deleted_at IS NULL " +
-            " ORDER BY c." + DimTables.embeddingColumn(dim) + " <=> " + queryVecLiteral(dim) + " ASC " +
+            " ORDER BY c." + DimTables.embeddingColumn(dim) + " OPERATOR(nexus.<=>) " + queryVecLiteral(dim) + " ASC " +
             " LIMIT " + topK;
         List<String> topKIds = runIds(conn, topKSql);
         List<String> matched = new ArrayList<>();
@@ -1373,7 +1373,7 @@ class CombinedQueryParityTest {
         su.createStatement().execute(
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ", metadata)"
             + " VALUES ('" + tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), '" + tumbler + "', "
-            + vec2(1024, x, y) + "::vector, '" + metaJson.replace("'", "''") + "'::jsonb)"
+            + vec2(1024, x, y) + "::nexus.vector, '" + metaJson.replace("'", "''") + "'::jsonb)"
             + " ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
         insertManifestRow(su, tenant, tumbler, 0, chash, collection);
     }
@@ -1464,7 +1464,7 @@ class CombinedQueryParityTest {
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
             " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ") VALUES ('" +
             tenantId + "', '" + collection + "', decode('" + chash + "', 'hex'), '" +
-            chunkText.replace("'", "''") + "', " + vec2(dim, x, y) + "::vector) " +
+            chunkText.replace("'", "''") + "', " + vec2(dim, x, y) + "::nexus.vector) " +
             "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
     }
 
@@ -1490,9 +1490,9 @@ class CombinedQueryParityTest {
 
     // ── value helpers ────────────────────────────────────────────────────────
 
-    /** The probe query vector literal: 2-D direction (1,0) padded to dim, ::vector. */
+    /** The probe query vector literal: 2-D direction (1,0) padded to dim, ::nexus.vector. */
     private static String queryVecLiteral(int dim) {
-        return vec2(dim, 1.0, 0.0) + "::vector";
+        return vec2(dim, 1.0, 0.0) + "::nexus.vector";
     }
 
     /** A length-{@code dim} pgvector literal with first two components (x,y), rest 0. */
