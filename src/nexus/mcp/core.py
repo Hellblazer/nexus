@@ -8212,15 +8212,6 @@ async def nx_answer(
     # path, and the arm's own `try: ... except Exception: pass` would
     # swallow the resulting UnboundLocalError and silently stop recording
     # planner-failure runs. See `test_planner_failure_arm_upstream_of_run_start_still_records`.
-    # RDR-203 D5 (nexus-dt2tu.3): the per-call composite-capability record,
-    # initialised to False HERE, at call entry -- not at the run-start site
-    # further down, which assigns rather than introduces them. The
-    # planner-failure arm (below, well upstream of the run-start site)
-    # records a run on ITS OWN failure path and reads these two names; a
-    # name first bound at the run-start site would be unbound on that
-    # path, and the arm's own `try: ... except Exception: pass` would
-    # swallow the resulting UnboundLocalError and silently stop recording
-    # planner-failure runs. See `test_planner_failure_arm_upstream_of_run_start_still_records`.
     composite_supported_at_start = False
     early_bump_fired = False
     # RDR-196 Phase 3 Step 1 (nexus-nyry9.20, code-review round 1
