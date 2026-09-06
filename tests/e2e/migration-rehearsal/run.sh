@@ -4,6 +4,7 @@
 #   tests/e2e/migration-rehearsal/run.sh              # ONNX leg only (secret-free)
 #   tests/e2e/migration-rehearsal/run.sh --with-cloud # + Voyage leg (reads .env)
 #   tests/e2e/migration-rehearsal/run.sh --no-build   # reuse existing wheel/JAR
+#   tests/e2e/migration-rehearsal/run.sh --artifacts <dir> <leg>  # nexus-mfage: consume build-artifacts.sh's prebuilt wheel/native (manifest tree identity must equal this checkout's, else refuse)
 #   tests/e2e/migration-rehearsal/run.sh --hole-punch # verify-fill delta-fill proof (nexus-s3dd4.7)
 #   tests/e2e/migration-rehearsal/run.sh --era-hop    # RDR-185 era-spanning hop: ancient install -> current via `nx upgrade` ALONE (nexus-n7u38.30)
 #   tests/e2e/migration-rehearsal/run.sh --stranded    # nexus-8nlj4 two-hop stranded-redirect: ancient Chroma artifacts + package-upgrade straight to current must trip the LAST_MIGRATION_CAPABLE detector; downgrading to the pin must be able to migrate them for real
@@ -84,6 +85,14 @@ PACKAGE_UPGRADE=0
 ERA_HOP=0
 STRANDED=0
 CANDIDATE_MIGRATION=0
+# nexus-mfage fix B: consume the artifacts tests/e2e/migration-rehearsal/
+# build-artifacts.sh produced ONCE for a whole battery. Empty = build here,
+# byte-for-byte the pre-mfage behaviour. Set = no wheel build, no native
+# build, no release.properties stamp in this process; the manifest's tree
+# identity must equal this checkout's (verified before the first mutation),
+# and every native-consuming leg asserts the manifest's build_ref against
+# the served /version (nexus-308ph, per-build rather than per-run).
+ARTIFACTS=""
 # RDR-002 ez5.13: the release_version the guided MVV stamps into the binary so
 # its /version reports >= the guided-upgrade version-pin floor and PASSES.
 # Derived from the product constant (engine_version.REQUIRED_ENGINE_VERSION —
@@ -259,8 +268,12 @@ ERA_ENGINE_TAG="${NEXUS_ERA_ENGINE_TAG:-engine-service-v0.1.11}"
 # default and GUIDED_STAMP_VERSION are, so this leg tracks a floor bump
 # automatically (nexus-b6qlf: one source of truth).
 NEW_ENGINE_TAG="engine-service-v${GUIDED_STAMP_VERSION}"
+_pending_artifacts=0
 for a in "$@"; do
+  if [ "$_pending_artifacts" = 1 ]; then ARTIFACTS="$a"; _pending_artifacts=0; continue; fi
   case "$a" in
+    --artifacts)   _pending_artifacts=1 ;;
+    --artifacts=*) ARTIFACTS="${a#--artifacts=}" ;;
     --with-cloud) WITH_CLOUD=1 ;;
     --no-build)   DO_BUILD=0 ;;
     --guided)     GUIDED=1 ;;   # RDR-002 ez5.13: drive nx guided-upgrade
@@ -279,6 +292,7 @@ for a in "$@"; do
     *) echo "unknown arg: $a" >&2; exit 2 ;;
   esac
 done
+[ "$_pending_artifacts" = 1 ] && { echo "--artifacts needs a directory" >&2; exit 2; }
 # nexus-8nlj4 (post-P4b acceptance-harness reshape): the two-hop
 # stranded-redirect leg's pin release — derived from the working tree's own
 # LAST_MIGRATION_CAPABLE constant (src/nexus/stranded_install.py), so this
@@ -445,6 +459,39 @@ fi
 # with another flow flag.
 [ "$SHAKEOUT_E2E" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ] || [ "$FULLSTACK" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$SHAKEOUT" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "$ERA_HOP" = 1 ] || [ "$ACQUIRE" = 1 ] || [ "$STRANDED" = 1 ] || [ "$CANDIDATE_MIGRATION" = 1 ]; } && { echo "--shakeout-e2e is a standalone daily-driver shakeout (its own entrypoint); do not combine with other legs" >&2; exit 2; }
 
+# nexus-mfage: --artifacts verification. Sits AFTER every arg-conflict guard
+# (usage errors need no artifacts) and BEFORE the lock and the first mutation.
+# Refuses (exit 3) unless the manifest's tree identity equals THIS checkout's
+# — reuse against a proven-identical tree, never against age (nexus-mbeke).
+LEG="default"
+[ "$SHAKEOUT" = 1 ] && LEG="shakeout"
+[ "$SHAKEOUT_E2E" = 1 ] && LEG="shakeout-e2e"
+[ "$FULLSTACK" = 1 ] && LEG="fullstack"
+[ "$PACKAGE_UPGRADE" = 1 ] && LEG="package-upgrade"
+[ "$CANDIDATE_MIGRATION" = 1 ] && LEG="candidate-migration"
+[ "$ERA_HOP" = 1 ] && LEG="era-hop"
+[ "$STRANDED" = 1 ] && LEG="stranded"
+[ "$COLD" = 1 ] && LEG="cold"
+[ "$HOLE_PUNCH" = 1 ] && LEG="hole-punch"
+[ "$ACQUIRE" = 1 ] && LEG="acquire"
+MANIFEST_BUILD_REF=""
+MANIFEST_TREE=""
+if [ -n "$ARTIFACTS" ]; then
+  [ "$DO_BUILD" = 1 ] || { echo "--artifacts already means 'do not build here'; --no-build is contradictory (drop one)" >&2; exit 2; }
+  ARTIFACTS="$(cd "$ARTIFACTS" 2>/dev/null && pwd)" || { echo "--artifacts: no such directory" >&2; exit 3; }
+  MANIFEST_JSON="$(python3 "$SCRIPT_DIR/../lib/artifact_manifest.py" verify "$ARTIFACTS" "$PWD")" || exit 3
+  MANIFEST_BUILD_REF="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["build_ref"])' "$MANIFEST_JSON")"
+  MANIFEST_TREE="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["tree_hash"][:12])' "$MANIFEST_JSON")"
+  MANIFEST_RELEASE_VERSION="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["release_version"])' "$MANIFEST_JSON")"
+  [ "$MANIFEST_RELEASE_VERSION" = "$GUIDED_STAMP_VERSION" ] || { echo "ARTIFACTS REFUSED (exit 3): manifest release_version=$MANIFEST_RELEASE_VERSION but this tree's REQUIRED_ENGINE_VERSION is $GUIDED_STAMP_VERSION" >&2; exit 3; }
+  ARTIFACT_WHEEL="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"]["wheel"]["path"])' "$MANIFEST_JSON")"
+  ARTIFACT_WHEEL="$ARTIFACTS/$ARTIFACT_WHEEL"
+  if [ "$COLD" = 0 ] && [ "$HOLE_PUNCH" = 0 ] && [ "$PACKAGE_UPGRADE" = 0 ] && [ "$ERA_HOP" = 0 ] && [ "$STRANDED" = 0 ] && [ "$ACQUIRE" = 0 ]; then
+    [ -x "$ARTIFACTS/native/nexus-service" ] || { echo "ARTIFACTS REFUSED (exit 3): --$LEG consumes the native candidate but $ARTIFACTS has none (built with --no-native?)" >&2; exit 3; }
+  fi
+  echo "[artifacts] $LEG consuming $ARTIFACTS (tree $MANIFEST_TREE, build_ref $MANIFEST_BUILD_REF)"
+fi
+
 # RDR-184 P0.2 (nexus-ccs9v.2): serialize on the machine-global fixed
 # resources this harness mutates — the fixed docker tag ($IMAGE) and the
 # shared dist/ wheel output (the near-miss that motivated this bead: two
@@ -518,16 +565,29 @@ if [ "$GUIDED" = 1 ] || [ "$SHAKEOUT_E2E" = 1 ] || [ "$CANDIDATE_MIGRATION" = 1 
   # AND the release dependency. Same unstamped-forever problem as
   # shakeout-e2e otherwise (release_version is blank in source).
   [ "$DO_BUILD" = 0 ] && { echo "--guided/--shakeout-e2e/--candidate-migration require a fresh native build; drop --no-build" >&2; exit 2; }
+  if [ -n "$ARTIFACTS" ]; then
+    # nexus-mfage: the artifact candidate was built under the same stamp
+    # (release_version = REQUIRED_ENGINE_VERSION, asserted against the
+    # manifest above); nothing in this tree is touched.
+    echo "[stamp] artifacts already carry release_version=$GUIDED_STAMP_VERSION — no stamp, no rebuild"
+  else
   echo "[stamp] stamping $RELEASE_PROPS release_version=$GUIDED_STAMP_VERSION (restored on exit)…"
   grep -v '^release_version=' "$RELEASE_PROPS" > "$RELEASE_PROPS.tmp"
   printf 'release_version=%s\n' "$GUIDED_STAMP_VERSION" >> "$RELEASE_PROPS.tmp"
   mv "$RELEASE_PROPS.tmp" "$RELEASE_PROPS"
   # Force a fresh native build so the stamp is baked in.
   rm -f service/target/nexus-service
+  fi
 fi
 
 GRAAL_IMAGE="container-registry.oracle.com/graalvm/native-image-community:25"
-if [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "$ERA_HOP" = 1 ] || [ "$ACQUIRE" = 1 ] || [ "$STRANDED" = 1 ]; then
+if [ -n "$ARTIFACTS" ]; then
+  # nexus-mfage: nothing is built in this process; the manifest-verified
+  # wheel (and native candidate, for the legs that consume one) come from
+  # $ARTIFACTS. The freshness question run.sh's own build answers below
+  # (nexus-ndve9) is answered here by tree identity instead of mtimes.
+  echo "[1-2/3] --artifacts: reusing the manifest-verified wheel + native candidate from $ARTIFACTS"
+elif [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "$ERA_HOP" = 1 ] || [ "$ACQUIRE" = 1 ] || [ "$STRANDED" = 1 ]; then
   # nexus-4mm24 / nexus-s3dd4.7 / nexus-cfgo9 / nexus-n7u38.30 / nexus-8nlj4 /
   # nexus-eo3qv: these boxes acquire every engine binary at runtime
   # (PUBLISHED release) — NO local native build, NO stamping. Just the wheel.
@@ -607,10 +667,25 @@ fi
 # excluded here exactly like the other runtime-acquire legs. Without this, the
 # published-artifact gate demanded service/target/nexus-service on any box that
 # had not happened to leave a stale one behind, and failed before testing anything.
-if [ "$COLD" = 0 ] && [ "$HOLE_PUNCH" = 0 ] && [ "$PACKAGE_UPGRADE" = 0 ] && [ "$ERA_HOP" = 0 ] && [ "$STRANDED" = 0 ] && [ "$ACQUIRE" = 0 ]; then
+if [ -z "$ARTIFACTS" ] && [ "$COLD" = 0 ] && [ "$HOLE_PUNCH" = 0 ] && [ "$PACKAGE_UPGRADE" = 0 ] && [ "$ERA_HOP" = 0 ] && [ "$STRANDED" = 0 ] && [ "$ACQUIRE" = 0 ]; then
   ls dist/conexus-*.whl >/dev/null 2>&1 || { echo "no wheel in dist/ — drop --no-build" >&2; exit 1; }
   [ -x service/target/nexus-service ] || { echo "no native binary at service/target/nexus-service — drop --no-build" >&2; exit 1; }
 fi
+
+# nexus-mfage: the two artifact-staging seams. Every leg below stages its
+# wheel and (where it consumes one) its native candidate through these, so
+# the artifacts/dist choice is made in exactly one place each.
+stage_wheel() {  # stage_wheel <dest-dir>
+  if [ -n "$ARTIFACTS" ]; then cp "$ARTIFACT_WHEEL" "$1/"
+  else cp "$(ls -t dist/conexus-*.whl | head -1)" "$1/"; fi   # keep real PEP 427 name
+}
+stage_native() {  # stage_native <dest-dir>: the binary + its native-image .so siblings
+  local src="service/target"
+  [ -n "$ARTIFACTS" ] && src="$ARTIFACTS/native"
+  mkdir -p "$1"
+  cp "$src/nexus-service" "$1/"
+  if compgen -G "$src/*.so" > /dev/null; then cp "$src"/*.so "$1/"; fi
+}
 
 # ── Pre-flight Docker disk-pressure check (nexus-h8rf6.13) ────────────────────
 # The recurring barf is Docker Desktop's capped VM disk, not the host:
@@ -651,7 +726,7 @@ echo "[stage] Staging a minimal build context + building image (COLD=$COLD HOLE_
 # trees — staging sidesteps both without touching the shared .dockerignore.
 STAGE="$(mktemp -d)"
 trap 'diag_exit_guard; _guided_restore; rm -rf "$STAGE"; build_lease_release service 2>/dev/null || true; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
-cp "$(ls -t dist/conexus-*.whl | head -1)"            "$STAGE/"   # keep real PEP 427 name
+stage_wheel "$STAGE"
 # Lock-derived dependency manifest for the split install layer (Dockerfile /
 # .cold / .fullstack): the wheel's bytes churn every build (embedded mtimes),
 # so a deps-install layer keyed on the wheel re-ran its full 5-7 min closure
@@ -689,7 +764,7 @@ if [ "$ERA_HOP" = 1 ]; then
   # the seeder, which writes the ancient Chroma/T2/catalog state under the ERA
   # release's own libraries.
   mkdir -p "$STAGE/worktree-wheel"
-  cp "$(ls -t dist/conexus-*.whl | head -1)" "$STAGE/worktree-wheel/"
+  stage_wheel "$STAGE/worktree-wheel"
   cp "$HERE/Dockerfile.era-hop" "$STAGE/Dockerfile"
   cp "$HERE/rehearse_era_hop.sh" "$HERE/seed_legacy.py" "$STAGE/"
 elif [ "$PACKAGE_UPGRADE" = 1 ]; then
@@ -744,7 +819,7 @@ print(h.hexdigest())
       || { echo "FATAL: downloaded wheel sha256 mismatch for conexus==$NEXUS_TARGET_RELEASE: got $GOT_SHA256, PyPI JSON API says $TARGET_WHEEL_SHA256" >&2; exit 1; }
     echo "[run.sh] verified $TARGET_WHEEL_NAME sha256=$TARGET_WHEEL_SHA256 (matches PyPI JSON API digest)"
   else
-    cp "$(ls -t dist/conexus-*.whl | head -1)" "$STAGE/worktree-wheel/"
+    stage_wheel "$STAGE/worktree-wheel"
   fi
   cp "$HERE/Dockerfile.package-upgrade" "$STAGE/Dockerfile"
   cp "$HERE/rehearse_package_upgrade.sh" "$STAGE/"
@@ -761,7 +836,7 @@ elif [ "$STRANDED" = 1 ]; then
   # working tree's required engine are acquired at runtime by the product's
   # own code).
   mkdir -p "$STAGE/worktree-wheel"
-  cp "$(ls -t dist/conexus-*.whl | head -1)" "$STAGE/worktree-wheel/"
+  stage_wheel "$STAGE/worktree-wheel"
   cp "$HERE/Dockerfile.stranded" "$STAGE/Dockerfile"
   cp "$HERE/rehearse_stranded.sh" "$HERE/seed_legacy.py" "$STAGE/"
 elif [ "$ACQUIRE" = 1 ]; then
@@ -785,11 +860,7 @@ elif [ "$FULLSTACK" = 1 ] || [ "$SHAKEOUT_E2E" = 1 ]; then
   # regardless of which flag triggered this build; the entrypoint override
   # below picks the right one to actually RUN). Same native-binary staging
   # as the default path.
-  mkdir -p "$STAGE/native"
-  cp service/target/nexus-service "$STAGE/native/"
-  if compgen -G "service/target/*.so" > /dev/null; then
-    cp service/target/*.so "$STAGE/native/"
-  fi
+  stage_native "$STAGE/native"
   cp "$HERE/Dockerfile.fullstack" "$STAGE/Dockerfile"
   cp "$HERE/rehearse_fullstack.sh" "$HERE/rehearse_shakeout_e2e.sh" "$HERE/seed_legacy.py" "$STAGE/"
 elif [ "$CANDIDATE_MIGRATION" = 1 ]; then
@@ -804,25 +875,19 @@ elif [ "$CANDIDATE_MIGRATION" = 1 ]; then
   # No engine artifact of any kind travels in — the FLOOR engine is
   # acquired for real by `nx daemon service install-binary` inside the
   # container (Stage 2).
-  mkdir -p "$STAGE/native" "$STAGE/worktree-wheel"
-  cp service/target/nexus-service "$STAGE/native/"
-  if compgen -G "service/target/*.so" > /dev/null; then
-    cp service/target/*.so "$STAGE/native/"
-  fi
-  cp "$(ls -t dist/conexus-*.whl | head -1)" "$STAGE/worktree-wheel/"
+  mkdir -p "$STAGE/worktree-wheel"
+  stage_native "$STAGE/native"
+  stage_wheel "$STAGE/worktree-wheel"
   cp "$HERE/Dockerfile.candidate-migration" "$STAGE/Dockerfile"
   cp "$HERE/rehearse_candidate_migration.sh" "$STAGE/"
+  cp -R "$HERE/lib" "$STAGE/lib"   # assert_build_ref.sh (nexus-mfage)
 else
   # The native binary travels into the image. A LOCAL -Pnative -Ob quick build also
   # emits native-image .so siblings (libjvm/libawt/liblcms/...) that must be
   # co-located (native-image dlopen's JDK libs from the executable's own dir); a
   # RELEASE binary (engine-service-v*) is self-contained with NO .so siblings. So
   # the .so copy is best-effort — present them when they exist, skip when they don't.
-  mkdir -p "$STAGE/native"
-  cp service/target/nexus-service "$STAGE/native/"
-  if compgen -G "service/target/*.so" > /dev/null; then
-    cp service/target/*.so "$STAGE/native/"
-  fi
+  stage_native "$STAGE/native"
   cp "$HERE/Dockerfile" "$HERE/rehearse.sh" "$HERE/rehearse_shakeout.sh" "$HERE/seed_legacy.py" "$STAGE/"
   # nexus-l8xnz: the SAME service/native-smoke.sh the release workflow runs
   # (byte-for-byte -- callers are adapted, never the script). rehearse_
@@ -863,6 +928,11 @@ BUILD_ARGS=()
 docker build ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} -f "$STAGE/Dockerfile" -t "$IMAGE" "$STAGE"
 
 run_env=(-e "WITH_CLOUD=$WITH_CLOUD" -e "COMPREHENSIVE=$COMPREHENSIVE" -e "STRESS=$STRESS")
+# nexus-mfage: every leg that boots the artifact candidate asserts the
+# manifest's build_ref against the served /version (lib/assert_build_ref.sh
+# in the container). Unset without --artifacts, so the assertion is a no-op
+# there — a locally-built candidate carries no manifest to compare against.
+[ -n "$MANIFEST_BUILD_REF" ] && run_env+=(-e "EXPECT_BUILD_REF=$MANIFEST_BUILD_REF")
 # nexus-8hdg9: forward the client-side per-POST onnx-local upsert chunk cap
 # (src/nexus/db/http_vector_client.py, same read-at-import mechanism
 # tests/e2e/local-index-memory-gate.sh already uses) only when the operator

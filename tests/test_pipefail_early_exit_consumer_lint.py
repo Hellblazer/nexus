@@ -931,16 +931,17 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # truncate a producer still doing work. This list is line-pinned, so
         # ANY edit to run.sh restale-izes it; that fragility is the lint's
         # own known shape, not a defect introduced here.
-        "tests/e2e/migration-rehearsal/run.sh:181",
-        "tests/e2e/migration-rehearsal/run.sh:199",
-        "tests/e2e/migration-rehearsal/run.sh:200",
-        "tests/e2e/migration-rehearsal/run.sh:213",
-        "tests/e2e/migration-rehearsal/run.sh:224",
-        "tests/e2e/migration-rehearsal/run.sh:654",
-        "tests/e2e/migration-rehearsal/run.sh:692",
-        "tests/e2e/migration-rehearsal/run.sh:747",
-        "tests/e2e/migration-rehearsal/run.sh:764",
-        "tests/e2e/migration-rehearsal/run.sh:812",
+        # Retargeted 2026-09-06 (nexus-mfage fix B): the --artifacts
+        # option block shifted the version extractions +9, and the five
+        # `cp "$(ls -t dist/conexus-*.whl | head -1)"` wheel picks collapsed
+        # into ONE site inside the stage_wheel() seam (:680). Four entries
+        # retired with the four duplicate sites; ceiling 136 -> 132.
+        "tests/e2e/migration-rehearsal/run.sh:190",
+        "tests/e2e/migration-rehearsal/run.sh:208",
+        "tests/e2e/migration-rehearsal/run.sh:209",
+        "tests/e2e/migration-rehearsal/run.sh:222",
+        "tests/e2e/migration-rehearsal/run.sh:233",
+        "tests/e2e/migration-rehearsal/run.sh:680",
         # --- tests/e2e/mac-signed-binary-gate.sh (7 entries): needs an
         # actually-signed macOS binary + `spctl`/`codesign` on real macOS
         # to safely verify a rewrite of the signature-inspection logic.
@@ -1062,7 +1063,7 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
 # `head -1` site, deleted with the leg) removed entries wholesale:
 # 169 - 21 - 15 - 1 = 132. The remaining 5 run.sh sites were retargeted in
 # place, not counted as a change.
-_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 136
+_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 132
 
 
 def test_pipefail_early_exit_exempt_ratchet() -> None:

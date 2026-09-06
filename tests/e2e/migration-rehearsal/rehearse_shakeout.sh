@@ -187,6 +187,11 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 [ "$healthy" = 1 ] && ok "candidate serving (healthy)" || { bad "service never healthy"; exit 1; }
+# nexus-mfage: under run.sh --artifacts the served binary must be the
+# manifest's candidate (build_ref), not whatever else could be listening.
+# shellcheck source=lib/assert_build_ref.sh disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert_build_ref.sh"
+assert_build_ref "candidate identity" || exit 1
 
 # ── Phase B: CLI verb matrix ─────────────────────────────────────────────────
 say "Phase B — CLI verb matrix (every verb against the served candidate)"
