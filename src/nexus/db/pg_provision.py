@@ -1213,6 +1213,53 @@ def relocate_vector_extensions_to_nexus_schema(
     )
     if not direct:
         return actions
+    # SAFETY DOWNGRADE (batch-9 gate pass, worktree-agent-ae864db44cc9fe82c —
+    # a real ship-blocker found live by tests/e2e/local-service-gate.sh, the
+    # FIRST end-to-end exercise of this redesign): a genuinely fresh
+    # `nx init --service` calls provision() TWICE in quick succession -- once
+    # directly (direct=False, correctly, per the FRESH-INSTALL SEQUENCING
+    # section above), and AGAIN moments later from
+    # storage_service_daemon._backfill_provision_grants, called from
+    # _ensure_pg_running at Step 1 of _start_locked, BEFORE Step 2 spawns the
+    # service binary that runs Liquibase for the FIRST TIME. That second call
+    # sees the credentials file the FIRST call just wrote and takes
+    # provision()'s fast idempotency path, which calls this function with its
+    # default direct=True -- relocating the extension BEFORE the walk this
+    # very daemon start is about to spawn has ever run vectors-001-2/-3/-4,
+    # reproducing the EXACT fresh-install-sequencing failure ("type vector
+    # does not exist" on `CREATE TABLE nexus.chunks_384 (... vector(384) ...)`)
+    # this whole SECURITY DEFINER mechanism exists to prevent -- just via a
+    # call path (a second provision() call within the same `nx init --service`
+    # invocation) the original design reasoning did not account for. A
+    # caller-supplied `direct=True` is therefore honored only once it is safe:
+    # at least one of the vectors-001-2/-3/-4 tables must already exist,
+    # proving THIS cluster's Liquibase walk has already run past the bare
+    # vector(N)/vector_cosine_ops references that need the extension resolvable
+    # via the default (public-only) search_path at THAT point. Absent that
+    # proof, downgrade silently to the direct=False behavior above (the
+    # SECURITY DEFINER function is already ensured either way) -- exactly the
+    # posture a walk that has not started yet needs, and a correct no-op for
+    # every steady-state daemon restart after the first, where at least one of
+    # these tables has always existed for as long as vectors-001-baseline.xml
+    # has shipped.
+    walk_has_passed_vectors_001 = bool(_psql_tuples(
+        bins, port, NEXUS_DB_NAME, os_user,
+        "SELECT 1 WHERE to_regclass('nexus.chunks_384') IS NOT NULL "
+        "OR to_regclass('nexus.chunks_768') IS NOT NULL "
+        "OR to_regclass('nexus.chunks_1024') IS NOT NULL",
+    ))
+    if not walk_has_passed_vectors_001:
+        _log.info(
+            "pg_vector_extension_relocation_deferred_walk_not_started",
+            note="direct=True downgraded: no chunks_<dim> table exists yet, "
+                 "so this cluster's Liquibase walk has not run past "
+                 "vectors-001-2/-3/-4 -- relocating now would break those "
+                 "bare vector(N)/vector_cosine_ops references on the walk "
+                 "about to run. The SECURITY DEFINER function is already "
+                 "ensured above; search-path-001's own guard will relocate "
+                 "safely, mid-walk, once it is reached.",
+        )
+        return actions
     for extname in ("vector", "pg_trgm"):
         current_schema = _psql_tuples(
             bins, port, NEXUS_DB_NAME, os_user,
