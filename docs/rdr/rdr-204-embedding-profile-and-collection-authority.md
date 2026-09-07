@@ -243,14 +243,16 @@ per-collection chunk counts from `nx collection list`. Full numbers in T2
   the name it has just rendered (`indexer.py:785-800`), and one path
   hardcodes `embedding_model="voyage-context-3"` (`commands/index.py:100`).
   Phase 1 replaces both with a profile read.
-- **Verified**: seven tables carry `ON DELETE RESTRICT` FKs into
-  `catalog_collections` on develop (`fk-002/003/004`, grep of the
-  changelogs): `chunks`, `document_aspects`, `document_highlights`,
-  `aspect_extraction_queue`, `taxonomy_meta`, `topics`,
-  `topic_assignments`. Two earlier hand lists each missed one, so the
-  ghost sweep derives the set from `information_schema` at run time
-  rather than naming it; documents reference a collection through
-  `physical_collection`, not an FK, and are checked separately.
+- **Verified**: the engine already has the referenced-anywhere predicate.
+  `CatalogRepository.COLLECTION_SCOPED_TABLES` lists every table holding a
+  denormalised collection name, including the seven `ON DELETE RESTRICT`
+  FK tables (`chunks`, `document_aspects`, `document_highlights`,
+  `aspect_extraction_queue`, `taxonomy_meta`, `topics`, `topic_assignments`),
+  the manifest, and four audit-only tables with no FK (`relevance_log`,
+  `search_telemetry`, `hook_failures`, `gc_audit`); `collectionIsEmpty`
+  reads it and `deleteCollectionTxn` refuses on it. Three drafts of this
+  RDR tried to restate that set (two hand lists, then an FK derivation) and
+  each was narrower than the engine's; the sweep now calls the predicate.
 - **Verified**: the model token vocabulary is five tokens on the engine
   (`MODEL_DIMS`: the three Voyage tokens at 1024, `bge-base-en-v15-768`,
   `minilm-l6-v2-384`) and four on the client (no `voyage-3`). The
@@ -389,20 +391,24 @@ the cloud is the single live environment and on a laptop is a bricked
 warn loudly, delete garbage, constrain after, never abort. An earlier
 cut of this design refused on disagreement; that was wrong.
 
-The first changeset sweeps ghosts. A row is a ghost when no
-`catalog_documents` row names it as `physical_collection` and no row in
-ANY table with a foreign key into `catalog_collections` references it. The
-referencing set is not a hand-written list: the changeset derives it at
-run time from `information_schema.referential_constraints` (every
-`ON DELETE RESTRICT` FK whose target is `catalog_collections`), so a table
-added later, or one this document forgot, cannot make the DELETE abort.
-Two hand lists in earlier drafts each missed a table (`taxonomy_meta`, then
-`topic_assignments`, gate critiques [24806] and [24809]); that is the
-evidence for deriving it. For the reader, the set on develop today is
-seven tables: `chunks`, `document_aspects`, `document_highlights`,
-`aspect_extraction_queue`, `taxonomy_meta`, `topics`,
-`topic_assignments`; RDR-164's `deleteCollectionTxn` deletes the same set
-in dependency order. Ghosts are deleted with counts reported
+The first step sweeps ghosts, and it reuses the engine's own definition
+of "referenced anywhere" rather than inventing one. `CatalogRepository`
+already carries `COLLECTION_SCOPED_TABLES`, the single list of every table
+that holds a denormalised collection name (the FK tables, the manifest, and
+four audit-only tables with no FK at all), and `collectionIsEmpty` asks that
+list whether any row names the collection; `deleteCollectionTxn` refuses on
+it. That list exists because two earlier operations kept separate table
+lists and drifted (nexus-v6za0). This RDR drafted its own list twice and
+missed a table each time ([24806], [24809]), then proposed deriving the set
+from foreign keys, which the fourth gate showed is narrower than the
+engine's list ([24812]). So the sweep is not Liquibase SQL: it is an
+engine-side job run once after the changesets in the same boot, in jOOQ,
+that walks `catalog_collections` and deletes every row for which
+`collectionIsEmpty` is true and no `catalog_documents` row names it as
+`physical_collection`, guarded by a `catalog_meta` marker so it runs once.
+A row `collectionIsEmpty` refuses on is kept and becomes `dormant` (below).
+The Liquibase changesets that follow add columns and constraints only.
+Ghosts are deleted with counts reported
 with `RAISE NOTICE`. The live census counted chunk-emptiness only (153 of
 223 rows on this tenant); the sweep's condition is stricter, so the
 deleted count will be at most 153 and the difference is the next class.
@@ -580,10 +586,12 @@ walks the tree's own changeset over a populated store.
 
 ### Phase 1: Schema and backfill (engine)
 
-1. Changesets: `embedding_models`, `embedding_profile`, new columns and
-   constraints on `catalog_collections`, the ghost sweep, the walk with
-   its disputed and dormant outcomes, constraints added last. Liquibase
-   only; no Python DDL; no failing precondition anywhere.
+1. Engine boot job (jOOQ, once, `catalog_meta`-marked): the ghost sweep
+   through `collectionIsEmpty` plus the `physical_collection` check, then
+   the walk with its disputed and dormant outcomes. Then changesets:
+   `embedding_models`, `embedding_profile`, new columns and constraints on
+   `catalog_collections`, constraints added last. No Python DDL; no failing
+   precondition anywhere; no SQL strings in the job.
 2. Engine boot writes the profile from its mode decision in `Main.java`
    (local tenant at boot; cloud tenants lazily at first registration),
    idempotent upsert, and `CollectionRegistry` evicts on that write.
@@ -592,9 +600,10 @@ walks the tree's own changeset over a populated store.
    model in the request is a 422 naming the profile's value. `nx config
    set` does not write the profile; the restart the GH #1461 recipe already
    requires is the write (the client-side hint is Phase 3 item 4).
-5. Engine suite, each against a real PG: the sweep's derived referencing
-   set equals the set of RESTRICT FKs in the test schema (a pin that fails
-   if a hand list ever creeps back in); boot in ONNX mode yields the
+5. Engine suite, each against a real PG: the sweep keeps a row that
+   `collectionIsEmpty` refuses on for EACH table in
+   `COLLECTION_SCOPED_TABLES` (parametrised over the list, so a table added
+   there is covered without editing the test); boot in ONNX mode yields the
    bge rows and boot with a Voyage key yields the Voyage rows; a second
    boot changes nothing; refused register; backfill agree, disputed
    (a fixture collection whose stored dimension disagrees with its name)
