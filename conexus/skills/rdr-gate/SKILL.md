@@ -198,10 +198,13 @@ If no collections found: "No prior RDRs indexed. Cross-project prior-art search 
 
 ### Gate Aggregation
 
-The round number comes from the preamble (the larger of the `{id}-gate-critique-*`
-record count and the latest record plus its `prior:` chain, plus one; it never
-resets for the RDR's life). The critic's Verdict supplies `critical_count`,
-`significant_count` and `ship_blockers`.
+The outcome is computed in code, never by hand: after storing the critique, run
+`nx rdr preamble rdr-verdict -- <id> <critique-title>` and write the gate record
+it prints. It counts the issue blocks and the `Ship-blocker: yes` marks, reads
+the Verdict, takes the larger of each self-reported and counted number, derives
+the round, applies the rule below from `review-rounds.toml` (the one statement
+of every review bound; `nexus.tables.review_rounds`), and prints the record
+with the `prior:` chain pre-filled. The rules it applies:
 
 - Rounds 1 and 2: BLOCKED iff `critical_count > 0`. Significants never block.
 - Round 3 onward: BLOCKED iff `ship_blockers > 0`. Every other Critical and
@@ -274,7 +277,7 @@ For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/REL
 - [ ] High-risk items flagged (classification=assumed AND verification_method=docs_only)
 - [ ] Layer 3 AI critique dispatched and results aggregated
 - [ ] Fix check run on the diff since the gated commit, verdict stored as `{id}-fix-check-<sha>`, before Layer 1
-- [ ] Gate result determined by the Gate Aggregation rules for this round (any Critical in rounds 1-2; ship_blockers only from round 3)
+- [ ] Gate outcome computed by `nx rdr preamble rdr-verdict -- <id> <critique-title>`, never by hand
 - [ ] Gate result written to T2 as `{id}-gate-latest` (both pass and fail), with `prior:` chain, `fix_check:` and `residuals:`
 - [ ] On pass: gate findings appended to Revision History, accept prompt displayed
 - [ ] On fail: specific sections to address displayed to user

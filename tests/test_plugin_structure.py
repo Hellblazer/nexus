@@ -1453,3 +1453,28 @@ class TestRdrGateLoopRemedies:
         assert "residuals:" in text
         assert "disposition" in text
         assert "bead" in text and "commit" in text
+
+
+class TestReviewRoundContracts:
+    """nexus-dv7gw: every skill that states a round number states the table's."""
+
+    def test_skills_quote_the_table(self) -> None:
+        from nexus.tables.review_rounds import blocking_rounds, rule_for
+
+        gate = (SKILLS_DIR / "rdr-gate" / "SKILL.md").read_text()
+        n = blocking_rounds("rdr-gate", "any-critical")
+        assert f"Rounds 1 and {n}: BLOCKED iff `critical_count > 0`" in gate
+        assert f"Round {n + 1} onward: BLOCKED iff `ship_blockers > 0`" in gate
+        assert "review-rounds.toml" in gate
+
+        review = (SKILLS_DIR / "code-review" / "SKILL.md").read_text()
+        first_human = next(r for r in (1, 2, 3) if rule_for("code-review", r).next_round_by == "human")
+        assert f"Round {first_human + 1}+: requires the human" in review
+        assert "review-rounds.toml" in review
+
+        orchestration = (SKILLS_DIR / "orchestration" / "SKILL.md").read_text()
+        assert f"round N of at most {first_human}" in orchestration
+        assert "review-rounds.toml" in orchestration
+
+        planner = (PLUGIN_DIR / "agents" / "strategic-planner.md").read_text()
+        assert "review-rounds.toml" in planner

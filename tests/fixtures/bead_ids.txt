@@ -2399,6 +2399,7 @@ nexus-duoak.8.1
 nexus-duoak.9
 nexus-dv14k
 nexus-dv708
+nexus-dv7gw
 nexus-dvom6
 nexus-dvom6.1
 nexus-dxap
@@ -6085,6 +6086,7 @@ nexus-yx5gq
 nexus-yx75p
 nexus-yx9i
 nexus-yxdt
+nexus-yxo2l
 nexus-yxywl
 nexus-yy1m
 nexus-yyev
@@ -6124,6 +6126,7 @@ nexus-za6e6
 nexus-zbci5
 nexus-zbci5.1
 nexus-zbdm0
+nexus-zbdm0.1
 nexus-zbl0
 nexus-zblru
 nexus-zbne

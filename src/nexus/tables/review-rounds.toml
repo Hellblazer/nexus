@@ -1,0 +1,80 @@
+# The review round contracts (nexus-dv7gw). One table for the three bounds
+# that used to be stated separately: code-review (conexus/skills/code-review),
+# plan-audit (nexus.plans.audit_rounds), rdr-gate (nexus.commands.rdr and
+# conexus/skills/rdr-gate). Each contract's constant derives from this
+# table through nexus.tables.review_rounds, and tests/test_plugin_structure.py
+# pins the numbers the skills quote to it.
+#
+# blocks_on     what can hold the work back in that round:
+#   any-critical      any Critical finding
+#   ship-blocker      a finding the reviewer marked Ship-blocker: yes
+#   blocks-planning   a finding classified BLOCKS-PLANNING
+#   nothing           the round cannot block; findings are residuals
+# next_round_by who may open the round after this one:
+#   orchestrator      the session that dispatched the review
+#   human             the user, by name, in this session
+#   nobody            there is no next round; residuals are carried
+
+[table]
+id = "review-rounds"
+kind = "decision-table"
+version = 1
+
+[dimensions.contract]
+domain = ["code-review", "plan-audit", "rdr-gate"]
+[dimensions.round]
+domain = ["1", "2", "3+"]
+
+[[row]]
+id = "code-review::1"
+match = { contract = "code-review" }
+guard = { round = "1" }
+emit = { blocks_on = "ship-blocker", next_round_by = "orchestrator" }
+
+[[row]]
+id = "code-review::2"
+match = { contract = "code-review" }
+guard = { round = "2" }
+emit = { blocks_on = "ship-blocker", next_round_by = "human" }
+
+[[row]]
+id = "code-review::3+"
+match = { contract = "code-review" }
+guard = { round = "3+" }
+emit = { blocks_on = "ship-blocker", next_round_by = "human" }
+
+[[row]]
+id = "plan-audit::1"
+match = { contract = "plan-audit" }
+guard = { round = "1" }
+emit = { blocks_on = "blocks-planning", next_round_by = "orchestrator" }
+
+[[row]]
+id = "plan-audit::2"
+match = { contract = "plan-audit" }
+guard = { round = "2" }
+emit = { blocks_on = "blocks-planning", next_round_by = "orchestrator" }
+
+[[row]]
+id = "plan-audit::3+"
+match = { contract = "plan-audit" }
+guard = { round = "3+" }
+emit = { blocks_on = "nothing", next_round_by = "nobody" }
+
+[[row]]
+id = "rdr-gate::1"
+match = { contract = "rdr-gate" }
+guard = { round = "1" }
+emit = { blocks_on = "any-critical", next_round_by = "human" }
+
+[[row]]
+id = "rdr-gate::2"
+match = { contract = "rdr-gate" }
+guard = { round = "2" }
+emit = { blocks_on = "any-critical", next_round_by = "human" }
+
+[[row]]
+id = "rdr-gate::3+"
+match = { contract = "rdr-gate" }
+guard = { round = "3+" }
+emit = { blocks_on = "ship-blocker", next_round_by = "human" }

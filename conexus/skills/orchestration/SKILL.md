@@ -108,7 +108,7 @@ Before each reviewer dispatch, write the round marker:
 nx scratch put "review-round bead=<id> n=<N> bar=<the acceptance bar, one line>" --tags "review,<id>"
 ```
 
-Include `round N of at most 2` in the reviewer's brief. A reviewer that knows
+Include `round N of at most 2` in the reviewer's brief (the cap is `review-rounds.toml`'s, contract `code-review`; plan audits and RDR gates have their own rows there). A reviewer that knows
 it is a confirmation pass behaves like one (see `/conexus:code-review` §
 Confirmation Pass). N >= 3 requires the human to have asked for it in this
 session, by name; record the ask in the marker (`asked-by=human`). An

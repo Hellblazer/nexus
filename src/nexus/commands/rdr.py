@@ -14,6 +14,7 @@ import sys
 import tomllib
 from collections import Counter
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,6 +23,7 @@ import yaml
 
 from nexus.tables.load import Table, TableLoadError, load_packaged_table
 from nexus.tables.resolve import resolve
+from nexus.tables.review_rounds import blocking_rounds, rule_for
 
 
 # ---------------------------------------------------------------------------
@@ -1939,8 +1941,9 @@ _REGATE_MAX_FINDINGS: int = 12
 
 #: Gate rounds that may block on any Critical. From the next round on only
 #: a ship-blocker blocks and everything else is a residual recorded for
-#: accept (nexus-g7zgw.2; the shape of ``nexus.plans.audit_rounds``).
-GATE_MAX_ANY_CRITICAL_ROUNDS: int = 2
+#: accept (nexus-g7zgw.2). Derived from the review-rounds table
+#: (nexus-dv7gw), the one statement of every review bound in this project.
+GATE_MAX_ANY_CRITICAL_ROUNDS: int = blocking_rounds("rdr-gate", "any-critical")
 
 
 def _t2_field_block(content: str, field: str) -> str:
@@ -3012,6 +3015,235 @@ def _gate_loop_health_lines(rows: list[dict]) -> list[str]:
             f"{len(since)} since); it needs both sides."
         )
     return out
+
+
+# ---------------------------------------------------------------------------
+# preamble rdr-verdict — the gate outcome computed from the critique (nexus-yxo2l)
+# ---------------------------------------------------------------------------
+
+_VERDICT_FIELD_RE = re.compile(r"^\s*-\s*\*\*(outcome|critical_count|significant_count|ship_blockers)\*\*\s*:\s*(\S+)", re.IGNORECASE | re.MULTILINE)
+_VERDICT_INLINE_RE = re.compile(r"\b(critical_count|significant_count|ship_blockers)\s*=\s*(\d+)", re.IGNORECASE)
+_SHIP_BLOCKER_RE = re.compile(r"^\s*(?:-\s*)?\*{0,2}Ship-blocker\*{0,2}\s*:\s*\*{0,2}(yes|no)\b", re.IGNORECASE | re.MULTILINE)
+
+
+@dataclass(frozen=True)
+class CritiqueTally:
+    """What a critique says and what it contains, side by side."""
+
+    criticals: list[str]
+    significants: list[str]
+    ship_blocker_titles: list[str]
+    reported_critical: int | None
+    reported_significant: int | None
+    reported_ship_blockers: int | None
+
+
+def _critique_tally(text: str) -> CritiqueTally:
+    """Count the issues in a critique and read its Verdict.
+
+    Canonical shape: ``## Critical Issues`` / ``## Significant Issues``
+    sections holding ``### Issue: <title>`` blocks, each with a
+    ``- **Ship-blocker**: yes|no`` line. Free-form shape (the RDR-204
+    seventh gate): paragraphs opening ``CRITICAL — <title>`` /
+    ``SIGNIFICANT — <title>`` with a bare ``Ship-blocker: yes`` line, and
+    a ``VERDICT: ... critical_count=N ... ship_blockers=N`` line.
+    """
+    criticals: list[str] = []
+    significants: list[str] = []
+    blockers: list[str] = []
+    section: str | None = None
+    current: str | None = None
+    current_kind: str | None = None
+
+    def _mark(kind: str | None, title: str | None, yes: bool) -> None:
+        if yes and title is not None and kind in ("critical", "significant"):
+            blockers.append(title)
+
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            continue
+        sec = re.match(r"^\s*#{1,3}\s*(critical|significant|observation|verification|verdict)", line, re.IGNORECASE)
+        if sec and not _CRITIQUE_ISSUE_RE.match(line):
+            word = sec.group(1).lower()
+            section = word if word in ("critical", "significant") else None
+            current = None
+            continue
+        issue = _CRITIQUE_ISSUE_RE.match(line)
+        if issue and section:
+            current = issue.group(1).strip()
+            current_kind = section
+            (criticals if section == "critical" else significants).append(current)
+            continue
+        free = re.match(r"^\s*(CRITICAL|SIGNIFICANT)\s*[—-]+\s*(.+)$", stripped)
+        if free and section is None and not sec:
+            current = free.group(2).strip()
+            current_kind = free.group(1).lower()
+            (criticals if current_kind == "critical" else significants).append(current)
+            continue
+        sb = _SHIP_BLOCKER_RE.match(line)
+        if sb:
+            _mark(current_kind, current, sb.group(1).lower() == "yes")
+    reported: dict[str, str] = {k.lower(): v for k, v in _VERDICT_FIELD_RE.findall(text)}
+    for k, v in _VERDICT_INLINE_RE.findall(text):
+        reported.setdefault(k.lower(), v)
+
+    def _int(key: str) -> int | None:
+        v = reported.get(key, "").strip().rstrip(".,")
+        return int(v) if v.isdigit() else None
+
+    return CritiqueTally(
+        criticals=criticals,
+        significants=significants,
+        ship_blocker_titles=blockers,
+        reported_critical=_int("critical_count"),
+        reported_significant=_int("significant_count"),
+        reported_ship_blockers=_int("ship_blockers"),
+    )
+
+
+def _gate_round_number(gate_record: str, critique_count: int) -> int:
+    """The round the NEXT gate is: gate records so far plus one."""
+    if not gate_record:
+        return max(1, critique_count + 1) if critique_count else 1
+    prior = _t2_field_block(gate_record, "prior")
+    n_prior = max(1 + len(re.findall(r"\[\d+\]", prior)), critique_count)
+    return n_prior + 1
+
+
+@preamble.command("rdr-verdict")
+@click.argument("args", nargs=-1)
+def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
+    """Compute a gate's outcome from its critique and its round, and print
+    the gate record to write. The critic reports; this decides."""
+    repo_root, repo_name = _preamble_resolve_repo()
+    rdr_dir = _preamble_rdr_dir(repo_root)
+    rdr_path = Path(repo_root) / rdr_dir
+    tokens = [a for a in args if a.strip()]
+    if len(tokens) < 2 or not re.search(r"\d+", tokens[0]):
+        print("> **Usage**: `nx rdr preamble rdr-verdict <id> <critique-title>`")
+        return
+    id_match = re.search(r"\d+", tokens[0])
+    critique_title = tokens[1].strip()
+    critique_title = re.sub(r"\s*\[\d+\]\s*$", "", critique_title).rsplit("/", 1)[-1]
+    rdr_file = _preamble_find_rdr_file(rdr_path, id_match.group(0))
+    if not rdr_file:
+        print(f"> RDR not found for ID: `{id_match.group(0)}`")
+        return
+    rdr_num = re.search(r"\d+", rdr_file.stem)
+    t2_key = rdr_num.group(0) if rdr_num else rdr_file.stem
+    rel = os.path.relpath(str(rdr_file), repo_root)
+    project = f"{repo_name}_rdr"
+
+    try:
+        with _t2_client_factory() as client:
+            critique = client.get(project=project, title=critique_title)
+            if not critique:
+                print(f"> The critique `{project}/{critique_title}` names no such T2 record; store the critique first.")
+                return
+            latest = client.get(project=project, title=f"{t2_key}-gate-latest")
+            latest_content = latest.get("content", "") if isinstance(latest, dict) else ""
+            latest_id = latest.get("id") if isinstance(latest, dict) else None
+            rows = client.get_all(project=project) or [] if callable(getattr(client, "get_all", None)) else []
+            prefix = f"{t2_key}-gate-critique-"
+            critique_count = sum(
+                1 for r in rows if isinstance(r, dict) and str(r.get("title", "")).startswith(prefix)
+                and str(r.get("title", "")) != critique_title
+            )
+    except Exception as exc:  # noqa: BLE001 — T2 unreachable must be a visible note, never silence
+        print(f"> T2 unreachable ({type(exc).__name__}: {exc}); the verdict cannot be computed.")
+        return
+
+    tally = _critique_tally(str(critique.get("content", "")))
+    round_no = _gate_round_number(latest_content, critique_count)
+    rule = rule_for("rdr-gate", round_no)
+
+    notes: list[str] = []
+    critical_count = len(tally.criticals)
+    if tally.reported_critical is not None and tally.reported_critical != critical_count:
+        notes.append(
+            f"critical_count: self-reported {tally.reported_critical}, counted {critical_count} "
+            f"Critical issue block(s); the larger is used."
+        )
+        critical_count = max(critical_count, tally.reported_critical)
+    significant_count = len(tally.significants)
+    if tally.reported_significant is not None and tally.reported_significant != significant_count:
+        notes.append(
+            f"significant_count: self-reported {tally.reported_significant}, counted {significant_count}; the larger is used."
+        )
+        significant_count = max(significant_count, tally.reported_significant)
+    counted_sb = len(tally.ship_blocker_titles)
+    if tally.reported_ship_blockers is None:
+        ship_blockers = max(counted_sb, critical_count)
+        notes.append(
+            f"ship_blockers: the Verdict has no ship_blockers line; read as critical_count ({critical_count}), never zero."
+        )
+    else:
+        ship_blockers = max(counted_sb, tally.reported_ship_blockers)
+        if tally.reported_ship_blockers != counted_sb:
+            notes.append(
+                f"ship_blockers: self-reported {tally.reported_ship_blockers}, counted {counted_sb} "
+                f"issue(s) marked Ship-blocker: yes; the larger is used."
+            )
+
+    if rule.blocks_on == "any-critical":
+        blocked = critical_count > 0
+    elif rule.blocks_on == "ship-blocker":
+        blocked = ship_blockers > 0
+    else:
+        blocked = False
+    outcome = "BLOCKED" if blocked else "PASSED"
+    residuals: list[str] = []
+    if rule.blocks_on == "ship-blocker":
+        residuals = [t for t in tally.criticals + tally.significants if t not in tally.ship_blocker_titles]
+
+    commit = (_git_out(repo_root, "log", "-1", "--format=%h", "--", rel) or "").strip()
+    prev_outcome = (_preamble_parse_t2_field(latest_content, "outcome") or "").strip().upper()
+    prev_c = (_preamble_parse_t2_field(latest_content, "critical_count") or "?").strip()
+    prev_s = (_preamble_parse_t2_field(latest_content, "significant_count") or "?").strip()
+    prev_chain = _t2_field_block(latest_content, "prior")
+    prior_parts: list[str] = []
+    if latest_content:
+        prior_parts.append(f"[{latest_id if latest_id is not None else '?'}] ({prev_outcome or '?'} {prev_c}C {prev_s}S)")
+    if prev_chain:
+        prior_parts.append(prev_chain)
+
+    print(f"### Gate verdict for RDR-{t2_key} from `{project}/{critique_title}`")
+    print()
+    print(f"**Gate round {round_no}**; rule: {rule.blocks_on} (review-rounds.toml, rdr-gate); next round by: {rule.next_round_by}.")
+    print(f"Counted: {len(tally.criticals)} Critical, {len(tally.significants)} Significant, {counted_sb} marked Ship-blocker: yes.")
+    for n in notes:
+        print(f"- {n}")
+    print()
+    print(f"**Outcome: {outcome}**")
+    if residuals:
+        print(f"Residuals ({len(residuals)}), recorded for accept to disposition:")
+        for r in residuals:
+            print(f"- {r}")
+    print()
+    print("Gate record to write (memory_put project=\"" + project + f"\", title=\"{t2_key}-gate-latest\", ttl=\"permanent\", tags=\"rdr,gate\"):")
+    print()
+    print("```")
+    print(f'outcome: "{outcome}"')
+    print(f'date: "{datetime.now(timezone.utc).date().isoformat()}"')
+    print(f"critical_count: {critical_count}")
+    print(f"significant_count: {significant_count}")
+    print(f"ship_blockers: {ship_blockers}")
+    print(f"round: {round_no}")
+    print("summary: <one sentence>")
+    print(f"critique: {project}/{critique_title}")
+    print(f"commit: {commit or '<git log -1 --format=%h -- ' + rel + '>'}")
+    print(f"fix_check: {'<' + project + '/' + t2_key + '-fix-check-' + (commit or '<sha>') + ', or none (no change since <sha>)>' if latest_content else 'none (first gate)'}")
+    if residuals:
+        print("residuals:")
+        for r in residuals:
+            print(f"  - {r}")
+    if prior_parts:
+        print("prior: " + ", ".join(prior_parts))
+    print("```")
+    print()
+    print("Write these fields as printed; the outcome is not recomputed by hand.")
 
 
 # ---------------------------------------------------------------------------

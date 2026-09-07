@@ -2144,6 +2144,107 @@ class TestRdrAuditGateLoopHealth:
         assert "Gate loop health: T2 unreachable" in out
 
 
+FIXTURES = Path(__file__).parent / "fixtures" / "rdr_gate_critiques"
+
+
+class TestRdrVerdictPreamble:
+    """nexus-yxo2l: the gate outcome is computed in code from the critique
+    and the round, never in the gating model's head (audit_rounds design
+    decision 1). Real RDR-204 critiques are the fixtures."""
+
+    _BODY = "## Problem Statement\n\n#### Gap 1: a gap\nText.\n\n## Proposed Solution\n\nSix sites.\n"
+
+    def _commit(self, rdr_env) -> str:
+        path = _write_rdr(
+            rdr_env["rdr_dir"], "rdr-204-example.md",
+            {"title": "Example", "status": "draft", "type": "Architecture", "priority": "medium"},
+            body=self._BODY,
+        )
+        root = str(rdr_env["repo_root"])
+        subprocess.run(["git", "-C", root, "add", str(path)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "gated"], check=True, capture_output=True)
+        return subprocess.run(["git", "-C", root, "log", "-1", "--format=%h"], check=True, capture_output=True, text=True).stdout.strip()
+
+    def _run(self, rdr_env, monkeypatch, store: dict[str, str], critique: str):
+        import nexus.commands.rdr as rdr_mod
+
+        fake = _FakeT2ResearchClient(store)
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        return _runner().invoke(rdr, ["preamble", "rdr-verdict", "--", "204", critique])
+
+    def test_round_one_blocks_on_any_critical(self, rdr_env, monkeypatch):
+        """-07h: 3 Criticals, ship_blockers 0; a first gate blocks."""
+        self._commit(rdr_env)
+        crit = (FIXTURES / "204-gate-critique-2026-09-07h.md").read_text()
+        out = self._run(rdr_env, monkeypatch, {"204-gate-critique-2026-09-07h": crit}, "204-gate-critique-2026-09-07h").output
+        assert "Gate round 1" in out
+        assert "critical_count: 3" in out and "ship_blockers: 0" in out
+        assert "outcome: \"BLOCKED\"" in out, out
+        assert "rule: any-critical" in out
+
+    def test_round_three_passes_with_residuals_when_no_ship_blocker(self, rdr_env, monkeypatch):
+        """The same critique at round 10 (204's real position): PASSED with
+        three residuals, which is what would have ended the loop at pass 5."""
+        sha = self._commit(rdr_env)
+        crit = (FIXTURES / "204-gate-critique-2026-09-07h.md").read_text()
+        store = {
+            "204-gate-critique-2026-09-07h": crit,
+            "204-gate-latest": (
+                f"outcome: \"PASSED\"\ndate: \"2026-09-07\"\ncritical_count: 0\nsignificant_count: 2\ncommit: {sha}\n"
+                "prior: [24844] (BLOCKED 1C 2S 2O), [24841] (PASSED 0C 3S 4O), [24812] (1C), [24809] (2C), [24806] (2C 2S), [24800] (1C 2S), [24789] (2C)\n"
+            ),
+        }
+        out = self._run(rdr_env, monkeypatch, store, "204-gate-critique-2026-09-07h").output
+        assert "Gate round 9" in out, out
+        assert "rule: ship-blocker" in out
+        assert "outcome: \"PASSED\"" in out
+        assert out.count("residuals:") >= 1 and "model_version" in out
+        assert "prior: [" in out and "[24844] (BLOCKED 1C 2S 2O)" in out, "the chain is pre-filled from the current record"
+        assert f"commit: {sha}" in out
+
+    def test_free_form_critique_with_a_ship_blocker_blocks_at_any_round(self, rdr_env, monkeypatch):
+        """-07f: free-form layout, `Ship-blocker: yes` on the Critical and a
+        `VERDICT: ... ship_blockers=1` line; round 7 in the real loop."""
+        self._commit(rdr_env)
+        crit = (FIXTURES / "204-gate-critique-2026-09-07f.md").read_text()
+        store = {
+            "204-gate-critique-2026-09-07f": crit,
+            "204-gate-latest": "outcome: \"PASSED\"\nprior: [1] (1C), [2] (2C), [3] (2C), [4] (1C), [5] (0C)\n",
+        }
+        out = self._run(rdr_env, monkeypatch, store, "204-gate-critique-2026-09-07f").output
+        assert "Gate round 7" in out, out
+        assert "critical_count: 1" in out and "ship_blockers: 1" in out
+        assert "outcome: \"BLOCKED\"" in out
+
+    def test_self_report_below_the_count_is_overridden(self, rdr_env, monkeypatch):
+        """Two issues marked Ship-blocker: yes but a Verdict saying 0: the
+        counted value wins, and the discrepancy is named."""
+        self._commit(rdr_env)
+        crit = (
+            "## Critical Issues\n\n### Issue: one\n- **Location**: L1\n- **Ship-blocker**: yes\n\n"
+            "### Issue: two\n- **Location**: L2\n- **Ship-blocker**: yes\n\n## Significant Issues\nNone.\n\n"
+            "## Verdict\n\n- **outcome**: not-justified\n- **critical_count**: 1\n- **significant_count**: 0\n- **ship_blockers**: 0\n"
+        )
+        store = {"c": crit, "204-gate-latest": "outcome: \"PASSED\"\nprior: [1] (1C), [2] (1C)\n"}
+        out = self._run(rdr_env, monkeypatch, store, "c").output
+        assert "critical_count: 2" in out and "ship_blockers: 2" in out
+        assert "self-reported" in out and "counted" in out
+        assert "outcome: \"BLOCKED\"" in out
+
+    def test_missing_ship_blockers_line_reads_as_critical_count(self, rdr_env, monkeypatch):
+        self._commit(rdr_env)
+        crit = "## Critical Issues\n\n### Issue: one\n- **Location**: L1\n\n## Verdict\n\n- **outcome**: not-justified\n- **critical_count**: 1\n"
+        store = {"c": crit, "204-gate-latest": "outcome: \"PASSED\"\nprior: [1] (1C), [2] (1C)\n"}
+        out = self._run(rdr_env, monkeypatch, store, "c").output
+        assert "ship_blockers: 1" in out and "outcome: \"BLOCKED\"" in out
+        assert "no ship_blockers line" in out
+
+    def test_missing_critique_is_named(self, rdr_env, monkeypatch):
+        self._commit(rdr_env)
+        out = self._run(rdr_env, monkeypatch, {}, "204-gate-critique-nope").output
+        assert "no such T2 record" in out
+
+
 class TestCritiqueFindings:
     """nexus-7vdf9 (critique [24815] Critical 2): the extractor must read the
     substantive-critic's canonical format, a free-form critique, and the shape
