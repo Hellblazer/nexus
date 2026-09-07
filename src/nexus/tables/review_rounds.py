@@ -26,6 +26,8 @@ class RoundRule:
     round_label: str
     blocks_on: str
     next_round_by: str
+    budget_tightens: bool
+    extension: str
 
 
 @lru_cache(maxsize=1)
@@ -34,7 +36,8 @@ def load_review_rounds() -> Table:
 
 
 def _one(value: object) -> str | None:
-    """A match/guard value, which the loader stores as a one-tuple."""
+    """A match or guard value: the loader stores guard values as one-tuples
+    and match values as scalars; both read as one string here."""
     if isinstance(value, tuple):
         return str(value[0]) if len(value) == 1 else None
     return None if value is None else str(value)
@@ -55,7 +58,10 @@ def rule_for(contract: str, round_no: int) -> RoundRule:
     for row in load_review_rounds().rows:
         if _one(row.match.get("contract")) == contract and _one(row.guard.get("round")) == label:
             emit = row.outcome if isinstance(row.outcome, dict) else {}
-            return RoundRule(contract, label, str(emit["blocks_on"]), str(emit["next_round_by"]))
+            return RoundRule(
+                contract, label, str(emit["blocks_on"]), str(emit["next_round_by"]),
+                str(emit.get("budget_tightens", "no")) == "yes", str(emit.get("extension", "none")),
+            )
     raise KeyError((contract, label))
 
 

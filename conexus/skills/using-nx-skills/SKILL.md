@@ -113,3 +113,5 @@ Thoughts that mean STOP, because you are rationalizing past a tier check:
 | "I'll just answer this quickly" | Fine when the answer is local and you can point at it. If it has to be reduced from many documents, that is `nx_answer`, and it costs minutes. |
 | "I know what that means" | Knowing the concept is not knowing this project's history with it. Check T2/T3. |
 | "This finding isn't worth storing" | Findings not stored are findings lost. The next session will redo your work. |
+| "I'll file a bead for that and move on" | Filing is deferral that reads as progress. A gap in the work in hand is closed in this session; file only what cannot finish here (blocked on the user, another instance, or evidence that does not exist yet), and a filed bead is the next thing worked. |
+| "One more pass would tighten this" | The plan was laid once; execute it to done. No new round on finished work, no hop to an adjacent item mid-plan. Rounds are bounded by `review-rounds.toml`. |

@@ -198,13 +198,9 @@ If no collections found: "No prior RDRs indexed. Cross-project prior-art search 
 
 ### Gate Aggregation
 
-The outcome is computed in code, never by hand: after storing the critique, run
-`nx rdr preamble rdr-verdict -- <id> <critique-title>` and write the gate record
-it prints. It counts the issue blocks and the `Ship-blocker: yes` marks, reads
-the Verdict, takes the larger of each self-reported and counted number, derives
-the round, applies the rule below from `review-rounds.toml` (the one statement
-of every review bound; `nexus.tables.review_rounds`), and prints the record
-with the `prior:` chain pre-filled. The rules it applies:
+After storing the critique, run `nx rdr preamble rdr-verdict -- <id> <critique-title>`
+and write the gate record it prints, field for field. Never compute the outcome
+by hand. The rules it applies (`review-rounds.toml`, contract `rdr-gate`):
 
 - Rounds 1 and 2: BLOCKED iff `critical_count > 0`. Significants never block.
 - Round 3 onward: BLOCKED iff `ship_blockers > 0`. Every other Critical and

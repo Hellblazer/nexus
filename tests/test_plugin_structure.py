@@ -1478,3 +1478,16 @@ class TestReviewRoundContracts:
 
         planner = (PLUGIN_DIR / "agents" / "strategic-planner.md").read_text()
         assert "review-rounds.toml" in planner
+
+
+class TestCompletionOverDeferral:
+    """Sam, 2026-09-07: a strong preference for completing work over filing
+    it, and for executing the laid plan over opening another round. The
+    rule lives in the skill every session loads."""
+
+    def test_red_flags_name_both_pathologies(self) -> None:
+        text = (SKILLS_DIR / "using-nx-skills" / "SKILL.md").read_text()
+        assert "I'll file a bead for that and move on" in text
+        assert "Filing is deferral that reads as progress" in text
+        assert "One more pass would tighten this" in text
+        assert "review-rounds.toml" in text

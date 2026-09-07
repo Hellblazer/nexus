@@ -39,7 +39,7 @@ mechanize, it matters enough to ship.
 - `conexus/agents/substantive-critic.md` — nexus-g7zgw.4: the canonical Issue format carries a `Sites:` line.
 - `conexus/commands/rdr-fix.md` — nexus-zbdm0: the fix step's command (`nx rdr preamble rdr-fix`).
 - `conexus/skills/rdr-fix/SKILL.md` — nexus-zbdm0: the fix step's skill; rdr-gate's Fixing findings points at it.
-- `conexus/skills/using-nx-skills/SKILL.md` — nexus-zbdm0: rdr-fix in the lifecycle line.
+- `conexus/skills/using-nx-skills/SKILL.md` — nexus-zbdm0: rdr-fix in the lifecycle line; Red Flags rows for filing-as-deferral and one-more-pass (Sam, 2026-09-07).
 - `conexus/skills/code-review/SKILL.md` — nexus-dv7gw: round numbers cite `review-rounds.toml`.
 - `conexus/skills/orchestration/SKILL.md` — nexus-dv7gw: the round cap cites `review-rounds.toml`.
 - `conexus/agents/strategic-planner.md` — nexus-dv7gw: the plan-audit cap cites `review-rounds.toml`.

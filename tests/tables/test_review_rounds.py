@@ -60,3 +60,12 @@ def test_unknown_contract_or_round_is_refused() -> None:
         rule_for("nope", 1)
     with pytest.raises(ValueError):
         rule_for("rdr-gate", 0)
+
+
+def test_dynamic_dimensions_are_in_the_table_too() -> None:
+    """Critique [24898] S1: budget_rounds tightening and the fix-introduced
+    extension are contract terms, not prose."""
+    assert rule_for("plan-audit", 1).budget_tightens and rule_for("plan-audit", 2).budget_tightens
+    assert not rule_for("rdr-gate", 1).budget_tightens and not rule_for("code-review", 1).budget_tightens
+    assert rule_for("code-review", 2).extension == "fix-introduced"
+    assert all(rule_for(c, r).extension == "none" for c in ("plan-audit", "rdr-gate") for r in (1, 2, 3))

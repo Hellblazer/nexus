@@ -1988,10 +1988,10 @@ def _gate_round_lines(gate_record: str, critique_count: int = 0) -> list[str]:
     elif this_outcome == "PASSED":
         passed += 1
     n_chain = 1 + len(ids)
-    n_prior = max(n_chain, critique_count)
+    round_no = _gate_round_number(gate_record, critique_count)
+    n_prior = round_no - 1
     unlabelled = n_prior - blocked - passed
     source = "critique records" if critique_count > n_chain else "prior chain"
-    round_no = n_prior + 1
     lines = [
         f"**Gate round {round_no}** (prior rounds: {n_prior} ({blocked} BLOCKED, {passed} PASSED, "
         f"{unlabelled} unlabelled; from the {source}); the count never resets for this RDR)."
@@ -3056,8 +3056,16 @@ def _critique_tally(text: str) -> CritiqueTally:
     current_kind: str | None = None
 
     def _mark(kind: str | None, title: str | None, yes: bool) -> None:
-        if yes and title is not None and kind in ("critical", "significant"):
+        # One mark per issue: a second Ship-blocker line under the same
+        # block must not count twice (code review [24900] finding 2).
+        if yes and title is not None and kind in ("critical", "significant") and title not in blockers:
             blockers.append(title)
+
+    # Canonical critiques carry section headings; free-form ones do not.
+    # A ``CRITICAL —`` paragraph counts only in a free-form critique and
+    # never inside its OBSERVATIONS block (code review [24900] finding 3).
+    canonical = bool(re.search(r"^\s*#{1,3}\s*(critical|significant)", text, re.IGNORECASE | re.MULTILINE))
+    freeform_off = False
 
     for raw in text.splitlines():
         line = raw.rstrip()
@@ -3076,8 +3084,14 @@ def _critique_tally(text: str) -> CritiqueTally:
             current_kind = section
             (criticals if section == "critical" else significants).append(current)
             continue
+        if not canonical and re.match(r"^[A-Z][A-Z0-9 ,()'/-]+$", stripped):
+            # An all-caps free-form heading: OBSERVATIONS (and anything after
+            # it until the next heading) is not a findings block.
+            freeform_off = stripped.startswith("OBSERVATION") or stripped.startswith("VERIFICATION")
+            current = None
+            continue
         free = re.match(r"^\s*(CRITICAL|SIGNIFICANT)\s*[—-]+\s*(.+)$", stripped)
-        if free and section is None and not sec:
+        if free and not canonical and not freeform_off:
             current = free.group(2).strip()
             current_kind = free.group(1).lower()
             (criticals if current_kind == "critical" else significants).append(current)
@@ -3085,8 +3099,21 @@ def _critique_tally(text: str) -> CritiqueTally:
         sb = _SHIP_BLOCKER_RE.match(line)
         if sb:
             _mark(current_kind, current, sb.group(1).lower() == "yes")
-    reported: dict[str, str] = {k.lower(): v for k, v in _VERDICT_FIELD_RE.findall(text)}
-    for k, v in _VERDICT_INLINE_RE.findall(text):
+    # The Verdict is read from the LAST ``## Verdict`` section (or the last
+    # ``VERDICT:`` line), with fenced code stripped first, so a quoted or
+    # example verdict earlier in the text cannot poison the counts (code
+    # review [24900] finding 1).
+    unfenced = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+    verdict_slice = ""
+    heads = list(re.finditer(r"^\s*#{1,3}\s*Verdict\b.*$", unfenced, re.IGNORECASE | re.MULTILINE))
+    if heads:
+        verdict_slice = unfenced[heads[-1].end():]
+    else:
+        inline = list(re.finditer(r"^\s*VERDICT\s*:.*$", unfenced, re.IGNORECASE | re.MULTILINE))
+        if inline:
+            verdict_slice = inline[-1].group(0)
+    reported: dict[str, str] = {k.lower(): v for k, v in _VERDICT_FIELD_RE.findall(verdict_slice)}
+    for k, v in _VERDICT_INLINE_RE.findall(verdict_slice):
         reported.setdefault(k.lower(), v)
 
     def _int(key: str) -> int | None:
@@ -3155,9 +3182,26 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
         print(f"> T2 unreachable ({type(exc).__name__}: {exc}); the verdict cannot be computed.")
         return
 
-    tally = _critique_tally(str(critique.get("content", "")))
+    critique_text = str(critique.get("content", ""))
+    tally = _critique_tally(critique_text)
+    recognised = bool(
+        re.search(r"^\s*#{1,3}\s*(critical|significant)", critique_text, re.IGNORECASE | re.MULTILINE)
+        or re.search(r"^\s*(CRITICAL|SIGNIFICANT)\s*[—-]", critique_text, re.MULTILINE)
+        or tally.reported_critical is not None
+    )
+    if not recognised:
+        print(
+            f"> The critique `{critique_title}` is in neither recognised shape (no `## Critical Issues` / "
+            "`## Significant Issues` sections, no `CRITICAL —` paragraphs, no Verdict counts), so its "
+            "findings cannot be counted. No outcome is computed. Re-store it in the canonical format "
+            "(conexus/agents/substantive-critic.md § Output Format) and run this again."
+        )
+        return
     round_no = _gate_round_number(latest_content, critique_count)
     rule = rule_for("rdr-gate", round_no)
+    already_gated = (
+        critique_title in (_preamble_parse_t2_field(latest_content, "critique") or "")
+    )
 
     notes: list[str] = []
     critical_count = len(tally.criticals)
@@ -3212,6 +3256,14 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
     print(f"### Gate verdict for RDR-{t2_key} from `{project}/{critique_title}`")
     print()
     print(f"**Gate round {round_no}**; rule: {rule.blocks_on} (review-rounds.toml, rdr-gate); next round by: {rule.next_round_by}.")
+    if already_gated:
+        print(
+            f"This critique is already the one `{t2_key}-gate-latest` records, so the round above is the "
+            "NEXT gate's, not this critique's historical round; the outcome below is a recomputation, "
+            "not a new gate."
+        )
+    else:
+        print("The round assumes this critique is the new, not yet recorded, gate.")
     print(f"Counted: {len(tally.criticals)} Critical, {len(tally.significants)} Significant, {counted_sb} marked Ship-blocker: yes.")
     for n in notes:
         print(f"- {n}")

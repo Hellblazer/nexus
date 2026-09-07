@@ -2239,6 +2239,54 @@ class TestRdrVerdictPreamble:
         assert "ship_blockers: 1" in out and "outcome: \"BLOCKED\"" in out
         assert "no ship_blockers line" in out
 
+    def test_unrecognised_shape_refuses_instead_of_passing(self, rdr_env, monkeypatch):
+        """Critique [24898] Critical 1: zero counts from an unparsed critique
+        must never print PASSED."""
+        self._commit(rdr_env)
+        crit = "Some free prose about the RDR with no sections, no markers, no verdict.\n"
+        out = self._run(rdr_env, monkeypatch, {"c": crit}, "c").output
+        assert "neither recognised shape" in out
+        assert "Outcome:" not in out
+
+    def test_already_gated_critique_is_named_as_a_recomputation(self, rdr_env, monkeypatch):
+        """Critique [24898] Critical 2: the round is the next gate's; say so
+        when the critique is already the recorded one."""
+        sha = self._commit(rdr_env)
+        crit = (FIXTURES / "204-gate-critique-2026-09-07i.md").read_text()
+        store = {
+            "204-gate-critique-2026-09-07i": crit,
+            "204-gate-latest": f"outcome: \"PASSED\"\ncritique: nexus_rdr/204-gate-critique-2026-09-07i\ncommit: {sha}\nprior: [1] (1C)\n",
+        }
+        out = self._run(rdr_env, monkeypatch, store, "204-gate-critique-2026-09-07i").output
+        assert "already the one `204-gate-latest` records" in out
+        crit_new = (FIXTURES / "204-gate-critique-2026-09-07h.md").read_text()
+        store["204-gate-critique-2026-09-07h"] = crit_new
+        out = self._run(rdr_env, monkeypatch, store, "204-gate-critique-2026-09-07h").output
+        assert "assumes this critique is the new" in out
+
+    def test_tally_is_not_poisoned_by_earlier_verdict_shaped_text(self):
+        """Code review [24900] 1-3: a fenced example verdict, a duplicate
+        Ship-blocker line, and a CRITICAL aside inside OBSERVATIONS."""
+        from nexus.commands.rdr import _critique_tally
+
+        canonical = (
+            "Example of the block:\n```\n## Verdict\n- **critical_count**: 9\n- **ship_blockers**: 9\n```\n"
+            "## Critical Issues\n\n### Issue: one\n- **Ship-blocker**: yes\n- **Ship-blocker**: yes\n\n"
+            "## Observations\n- CRITICAL — historically this recurred, no action\n\n"
+            "## Verdict\n\n- **critical_count**: 1\n- **significant_count**: 0\n- **ship_blockers**: 1\n"
+        )
+        t = _critique_tally(canonical)
+        assert (t.reported_critical, t.reported_ship_blockers) == (1, 1)
+        assert t.criticals == ["one"] and t.ship_blocker_titles == ["one"]
+        free = (
+            "CRITICAL — a real one.\nShip-blocker: yes\n\nOBSERVATIONS\n\n"
+            "CRITICAL — historically this recurred, no action.\nShip-blocker: yes\n\n"
+            "VERDICT: not-justified. critical_count=1, ship_blockers=1.\n"
+        )
+        t = _critique_tally(free)
+        assert t.criticals == ["a real one."] and t.ship_blocker_titles == ["a real one."]
+        assert t.reported_critical == 1
+
     def test_missing_critique_is_named(self, rdr_env, monkeypatch):
         self._commit(rdr_env)
         out = self._run(rdr_env, monkeypatch, {}, "204-gate-critique-nope").output
