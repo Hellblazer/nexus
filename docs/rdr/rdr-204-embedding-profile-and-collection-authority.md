@@ -66,7 +66,9 @@ RDR-155) had no collection metadata worth relying on and constrained
 names to a regex; the name was the only durable place. Postgres is the
 store now, the table exists, and the FK is in place
 (`fk-004-chunks-collection-registry.xml`, the changeset that added the
-chunks-to-registry foreign key; `fk-002` created the registry table).
+chunks-to-registry foreign key; the registry table itself dates from
+`catalog-001-5` in `catalog-001-baseline.xml`, as the RDR-101 row below
+records).
 
 The premise this RDR rests on, and the thing that keeps it small: **no
 installation today chooses an embedding model per collection.** Local
@@ -164,7 +166,8 @@ statement this paragraph is.
 
 ### Technical Environment
 
-- Engine: Java service, jOOQ generated DSL only (no SQL strings; nexus-zrcj7),
+- Engine: Java service, jOOQ generated DSL only (no SQL strings;
+  nexus-zrcj7, the raw-SQL retirement bead),
   Liquibase changelog under `service/src/main/resources/db/changelog`.
 - `nexus.catalog_collections(tenant_id, name, content_type, owner_id,
   embedding_model, model_version, display_name, legacy_grandfathered,
@@ -282,7 +285,8 @@ per-collection chunk counts from `nx collection list`. Full numbers in T2
   the canonical branch of rename. Holding the row instead of a boolean is
   an additive change to the same class with the same invalidation points,
   plus one new eviction on profile write.
-- **Verified**: `_group_collections_by_model` (nexus-3l6gz) groups a corpus
+- **Verified**: `_group_collections_by_model` (nexus-3l6gz, the
+  multi-model corpus fan-out bead) groups a corpus
   fan-out by parsed model so a mixed-model query is embedded once per
   model. It needs the model per collection, not the name.
 - **Documented**: RDR-160 fixed local mode to bge-768 for all content types;
@@ -419,7 +423,8 @@ that walks `catalog_collections` and deletes every row for which
 `collectionIsEmpty` is true (`catalog_documents.physical_collection` is one
 of the fourteen entries that predicate checks, so it needs no separate
 clause), guarded by a `catalog_meta` marker so it runs once.
-A row `collectionIsEmpty` refuses on is kept and becomes `dormant` (below).
+A row `collectionIsEmpty` reports non-empty is kept and becomes `dormant`
+(below); the predicate answers, it does not refuse.
 The Liquibase changesets that follow add columns and constraints only.
 Ghosts are deleted with counts reported
 with `RAISE NOTICE`. The live census counted chunk-emptiness only (153 of
@@ -590,7 +595,8 @@ the fact and lets the constraint refuse the lie.
 ### Prerequisites
 
 - Cloud grouping query run and recorded in T2 (assumption 1).
-- Engine tip at or past `4fa8eb03c` (peer's nexus-hxrcm changes) so the
+- Engine tip at or past `4fa8eb03c` (nexus-hxrcm, the write_many deadlock
+  fix that shipped in engine v0.1.106) so the
   changeset numbering does not collide.
 
 ### Minimum Viable Validation
@@ -606,7 +612,8 @@ walks the tree's own changeset over a populated store.
 ### Phase 1: Schema and backfill (engine)
 
 1. Engine boot job (jOOQ, once, `catalog_meta`-marked): the ghost sweep
-   through `collectionIsEmpty` plus the `physical_collection` check, then
+   through `collectionIsEmpty` alone (its list already covers
+   `catalog_documents.physical_collection`), then
    the walk with its disputed and dormant outcomes. Then changesets:
    `embedding_models`, `embedding_profile`, new columns and constraints on
    `catalog_collections`, constraints added last. No Python DDL; no failing
@@ -620,7 +627,7 @@ walks the tree's own changeset over a populated store.
    set` does not write the profile; the restart the GH #1461 recipe already
    requires is the write (the client-side hint is Phase 3 item 4).
 5. Engine suite, each against a real PG: the sweep keeps a row that
-   `collectionIsEmpty` refuses on for EACH table in
+   `collectionIsEmpty` reports non-empty for EACH table in
    `COLLECTION_SCOPED_TABLES` (parametrised over the list, so a table added
    there is covered without editing the test); boot in ONNX mode yields the
    bge rows and boot with a Voyage key yields the Voyage rows; a second
@@ -719,13 +726,18 @@ split a string; corpus resolution reads fields of a list already fetched.
 
 ### Contradiction Check
 
-Pending gate.
+Six gate passes so far (T2 `204-gate-critique-2026-09-06` through
+`-2026-09-07f`); the latest verdict is in T2 `204-gate-latest`. Every
+contradiction a pass named is closed at the commit the next pass gated.
 
 ### Assumption Verification
 
-Pending gate. Assumption 1 requires the cloud grouping query; assumption 2
-is the backfill precondition itself; assumption 4 is a Phase 2 source
-search.
+All five Critical Assumptions carry a Verified status with the T2
+research entry that verified each cited inline: the cloud grouping query
+(assumption 1, `204-research-6`), the dimension ground truth (2,
+`204-research-3`), the parse-site census (3, `204-research-4`), the
+two-segment rows (4, `204-research-1`), and the registry eviction (5,
+`204-research-2`).
 
 #### API Verification
 
