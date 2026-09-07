@@ -973,7 +973,31 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 81),
         // nexus-cbo4a batch 9 item 0: 32 -> 37 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 37 -> 39 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
-        Map.entry("dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java", 39),
+        // nexus-cbo4a batch 12: 39 -> 16. Converted seed inserts (10 sites: HEAD-schema
+        // generated jOOQ tables), databasechangelog reads (rollbackDepthThrough/
+        // executionTail/duplicateChangelogRows/changelogRowCount, schema-agnostic
+        // DSL.table(DSL.name("databasechangelog"))/DSL.field(DSL.name(...), Class) --
+        // Liquibase's own bookkeeping table carries no jOOQ codegen), the jsonb/
+        // timestamptz cast oracles (canonicalJsonbText/defaultTimestamptzText, typed
+        // DSL.cast chains), one DROP VIEW (typed DSLContext#dropView), and the five
+        // mid-rollback column-probe wrappers (queryOneNullableString/queryOneInt/
+        // queryOneNullableBoolean/assertNullColumn/assertTimestampEquals, now
+        // DSL.field(DSL.name(column), Class)-typed against a caller-supplied Class --
+        // the column's ACTUAL Postgres type varies by rollback depth, so a fixed
+        // generated-table Field would be WRONG at half this file's call sites; this is
+        // the ladder-file mid-walk CAUTION the task brief names, applied to reads
+        // rather than DDL). Kept raw with reasons, all documented inline at their site:
+        // bootstrapVectorExtensionsForFreshWalk's 9-site CREATE EXTENSION/CREATE SCHEMA
+        // AUTHORIZATION/CREATE OR REPLACE FUNCTION block (DBA/superuser provisioning
+        // DDL mirroring nexus.db.pg_provision.py, no jOOQ typed form for any of the
+        // three shapes -- same class as SchemaMigratorIntegrationTest's own kept-raw
+        // admin/svc bootstrap), the CREATE ROLE nexus_diag BYPASSRLS bootstrap (cluster-
+        // level DDL, no typed form), one execute(sql) that replays grants-nexus-diag-1's
+        // own <sql> body verbatim (extractChangesetSql -- a re-expression would no
+        // longer be the SAME statement Liquibase executes), and dbaBootstrap's 5-site
+        // admin/svc role bootstrap against a dedicated container (same exclusion class,
+        // already named in this file's own javadoc history above).
+        Map.entry("dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java", 16),
         // nexus-cbo4a batch 9 item 0: 98 -> 103 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 103 -> 105 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         Map.entry("dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java", 105),
@@ -1351,7 +1375,7 @@ class RawSqlGateTest {
      * but the new function is available for a future batch to rewire them
      * onto.
      */
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1245;
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1222;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

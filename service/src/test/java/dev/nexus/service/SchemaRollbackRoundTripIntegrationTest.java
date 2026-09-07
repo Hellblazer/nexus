@@ -2,8 +2,12 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.Condition;
 import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.JSONB;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.jooq.SQLDialect;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
@@ -21,16 +25,21 @@ import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.Statement;
-import java.sql.Types;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.ASPECT_PROMOTION_LOG;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
+import static dev.nexus.service.jooq.nexus.Tables.HOOK_FAILURES;
+import static dev.nexus.service.jooq.nexus.Tables.PLANS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_LINKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
@@ -190,6 +199,15 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  */
 class SchemaRollbackRoundTripIntegrationTest {
 
+    // SANCTIONED RAW (nexus-cbo4a): mirrors SchemaMigratorIntegrationTest's own
+    // bootstrapVectorExtensionsForFreshWalk (see that method's javadoc for the full
+    // derivation) -- DBA/superuser provisioning DDL simulating nexus.db.pg_provision.py's
+    // real bootstrap step: CREATE EXTENSION (no jOOQ typed form for extension DDL),
+    // CREATE SCHEMA ... AUTHORIZATION (no typed AUTHORIZATION clause in jOOQ's fluent
+    // schema DSL), and CREATE OR REPLACE FUNCTION with a plpgsql SECURITY DEFINER body
+    // (jOOQ has no typed DSL for authoring an arbitrary function body). Same class as
+    // SchemaMigratorIntegrationTest's admin/svc role bootstrap, kept raw by decision
+    // per RawSqlGateTest's own javadoc.
     private static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
         su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
         su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
@@ -447,6 +465,10 @@ class SchemaRollbackRoundTripIntegrationTest {
                 // BYPASSRLS is why this role is superuser-created and never
                 // created by the changelog (nexus-vounk): a policy-subject
                 // session with no nexus.tenant GUC counts ZERO rows.
+                // SANCTIONED RAW: CREATE ROLE is cluster-level DDL with no jOOQ typed-DSL
+                // form (same category as role-001-1's own declared-irreversible role
+                // bootstrap and SchemaMigratorIntegrationTest's admin/svc role bootstrap,
+                // kept raw by decision per RawSqlGateTest's own javadoc).
                 su.createStatement().execute(
                     "CREATE ROLE nexus_diag LOGIN PASSWORD 'nexus_diag_pass' "
                         + "NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS");
@@ -521,7 +543,12 @@ class SchemaRollbackRoundTripIntegrationTest {
             // extractChangesetSql technique.
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                su.createStatement().execute("DROP VIEW nexus.diag_chash_conformance");
+                dsl(su).dropView(DSL.table(DSL.name("nexus", "diag_chash_conformance"))).execute();
+                // SANCTIONED RAW: replays grants-nexus-diag-1's own <sql> body verbatim
+                // (extractChangesetSql), byte-for-byte, to prove its LEGACY BRANCH logic is
+                // still correct even though it is now practically unreachable via a live
+                // walk (see this test's own javadoc above) -- a typed-DSL re-expression
+                // would no longer be the SAME statement Liquibase itself executes.
                 String sql = extractChangesetSql(
                     "db/changelog/grants-nexus-diag.xml", "grants-nexus-diag-1");
                 su.createStatement().execute(sql);
@@ -1040,119 +1067,67 @@ class SchemaRollbackRoundTripIntegrationTest {
      */
     private static void seedTypeHygieneFixtures(Connection su) throws Exception {
         su.setAutoCommit(true);
+        DSLContext ctx = dsl(su);
 
-        try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.catalog_documents "
-                    + "(tenant_id, tumbler, title, indexed_at, bib_enriched_at, index_started_at) "
-                    + "VALUES (?, ?, ?, ?, ?, ?)")) {
-            ps.setString(1, FIXTURE_TENANT);
-            ps.setString(2, "cck6z.doc.1");
-            ps.setString(3, "cck6z doc: zero-micros indexed_at, never bib-enriched");
-            ps.setObject(4, TS_ZERO_MICROS);
-            ps.setNull(5, Types.TIMESTAMP_WITH_TIMEZONE);
-            ps.setObject(6, TS_NONZERO_MICROS_A);
-            ps.executeUpdate();
+        ctx.insertInto(CATALOG_DOCUMENTS,
+                CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
+                CATALOG_DOCUMENTS.INDEXED_AT, CATALOG_DOCUMENTS.BIB_ENRICHED_AT,
+                CATALOG_DOCUMENTS.INDEX_STARTED_AT)
+            .values(FIXTURE_TENANT, "cck6z.doc.1", "cck6z doc: zero-micros indexed_at, never bib-enriched",
+                TS_ZERO_MICROS, null, TS_NONZERO_MICROS_A)
+            .values(FIXTURE_TENANT, "cck6z.doc.2", "cck6z doc: never indexed, nonzero-micros bib_enriched_at",
+                null, TS_NONZERO_MICROS_B, null)
+            .execute();
 
-            ps.setString(1, FIXTURE_TENANT);
-            ps.setString(2, "cck6z.doc.2");
-            ps.setString(3, "cck6z doc: never indexed, nonzero-micros bib_enriched_at");
-            ps.setNull(4, Types.TIMESTAMP_WITH_TIMEZONE);
-            ps.setObject(5, TS_NONZERO_MICROS_B);
-            ps.setNull(6, Types.TIMESTAMP_WITH_TIMEZONE);
-            ps.executeUpdate();
-        }
+        // hygiene-001-7 (nexus-tk070.p6a follow-on) SUPERSEDES this row's
+        // original NULL-created_at seed: catalog_links.created_at is
+        // NOT NULL now, so the "NULL survives a catalog-031-2 rollback,
+        // does not get COALESCEd to ''" scenario this row used to probe
+        // is permanently unreachable (a real timestamp is required at
+        // seed time, and stays required through the whole test's
+        // migrate/rollback/re-migrate cycle). Seeded with a real
+        // zero-microsecond value instead -- the round-trip assertions
+        // below now check ITS fidelity through rollback/re-migrate,
+        // same mechanism the second row (cck6z.doc.2/cites-back)
+        // already exercised.
+        ctx.insertInto(CATALOG_LINKS,
+                CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER,
+                CATALOG_LINKS.LINK_TYPE, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT)
+            .values(FIXTURE_TENANT, "cck6z.doc.1", "cck6z.doc.2", "cites", "cck6z-test", TS_ZERO_MICROS)
+            .values(FIXTURE_TENANT, "cck6z.doc.2", "cck6z.doc.1", "cites-back", "cck6z-test",
+                TS_LINKS_ZERO_MICROS)
+            .execute();
 
-        try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.catalog_links "
-                    + "(tenant_id, from_tumbler, to_tumbler, link_type, created_by, created_at) "
-                    + "VALUES (?, ?, ?, ?, ?, ?)")) {
-            // hygiene-001-7 (nexus-tk070.p6a follow-on) SUPERSEDES this row's
-            // original NULL-created_at seed: catalog_links.created_at is
-            // NOT NULL now, so the "NULL survives a catalog-031-2 rollback,
-            // does not get COALESCEd to ''" scenario this row used to probe
-            // is permanently unreachable (a real timestamp is required at
-            // seed time, and stays required through the whole test's
-            // migrate/rollback/re-migrate cycle). Seeded with a real
-            // zero-microsecond value instead -- the round-trip assertions
-            // below now check ITS fidelity through rollback/re-migrate,
-            // same mechanism the second row (cck6z.doc.2/cites-back)
-            // already exercised.
-            ps.setString(1, FIXTURE_TENANT);
-            ps.setString(2, "cck6z.doc.1");
-            ps.setString(3, "cck6z.doc.2");
-            ps.setString(4, "cites");
-            ps.setString(5, "cck6z-test");
-            ps.setObject(6, TS_ZERO_MICROS);
-            ps.executeUpdate();
+        // catalog-002-1-temporal-typing (RDR-156 template, nexus-70r3c.2): created_at
+        // populated, nonzero micros; superseded_at NULL — the common case (a
+        // collection that has never been superseded). Second row: created_at NULL
+        // (never set), superseded_at populated, nonzero micros — the complementary
+        // branch. hygiene-001-6 (nexus-tk070.p6a follow-on) SUPERSEDES this row's
+        // original NULL-created_at seed: catalog_collections.created_at is
+        // NOT NULL now (backfilled + DEFAULT now()), so "a NULL created_at
+        // COALESCEs to '' through the catalog-002-1 rollback" is
+        // permanently unreachable. Seeded with a real zero-microsecond
+        // value instead; the assertions below now check ITS round-trip
+        // fidelity through the SAME rollback path. Third row: fk-003-1 / fk-003-3
+        // (nexus-dcqml) — document_aspects.collection and topics.collection both FK
+        // to catalog_collections(tenant_id, name) — registers the collection those
+        // two families' fixtures below use; neither created_at/superseded_at value
+        // is asserted for it, but hygiene-001-6 requires a real created_at.
+        ctx.insertInto(CATALOG_COLLECTIONS,
+                CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, CATALOG_COLLECTIONS.CREATED_AT,
+                CATALOG_COLLECTIONS.SUPERSEDED_AT)
+            .values(FIXTURE_TENANT, "cck6z-legacy-true", true, TS_COLLECTIONS_CREATED_AT, null)
+            .values(FIXTURE_TENANT, "cck6z-legacy-false", false, TS_ZERO_MICROS, TS_COLLECTIONS_SUPERSEDED_AT)
+            .values(FIXTURE_TENANT, "cck6z-coll", false, TS_ZERO_MICROS, null)
+            .execute();
 
-            ps.setString(1, FIXTURE_TENANT);
-            ps.setString(2, "cck6z.doc.2");
-            ps.setString(3, "cck6z.doc.1");
-            ps.setString(4, "cites-back");
-            ps.setString(5, "cck6z-test");
-            ps.setObject(6, TS_LINKS_ZERO_MICROS);
-            ps.executeUpdate();
-        }
-
-        try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.catalog_collections "
-                    + "(tenant_id, name, legacy_grandfathered, created_at, superseded_at) "
-                    + "VALUES (?, ?, ?, ?, ?)")) {
-            // catalog-002-1-temporal-typing (RDR-156 template, nexus-70r3c.2): created_at
-            // populated, nonzero micros; superseded_at NULL — the common case (a
-            // collection that has never been superseded).
-            ps.setString(1, FIXTURE_TENANT);
-            ps.setString(2, "cck6z-legacy-true");
-            ps.setBoolean(3, true);
-            ps.setObject(4, TS_COLLECTIONS_CREATED_AT);
-            ps.setNull(5, Types.TIMESTAMP_WITH_TIMEZONE);
-            ps.executeUpdate();
-
-            // catalog-002-1-temporal-typing: created_at NULL (never set), superseded_at
-            // populated, nonzero micros — the complementary branch.
-            // hygiene-001-6 (nexus-tk070.p6a follow-on) SUPERSEDES this row's
-            // original NULL-created_at seed: catalog_collections.created_at is
-            // NOT NULL now (backfilled + DEFAULT now()), so "a NULL created_at
-            // COALESCEs to '' through the catalog-002-1 rollback" is
-            // permanently unreachable. Seeded with a real zero-microsecond
-            // value instead; the assertions below now check ITS round-trip
-            // fidelity through the SAME rollback path.
-            ps.setString(1, FIXTURE_TENANT);
-            ps.setString(2, "cck6z-legacy-false");
-            ps.setBoolean(3, false);
-            ps.setObject(4, TS_ZERO_MICROS);
-            ps.setObject(5, TS_COLLECTIONS_SUPERSEDED_AT);
-            ps.executeUpdate();
-
-            // fk-003-1 / fk-003-3 (nexus-dcqml): document_aspects.collection and
-            // topics.collection both FK to catalog_collections(tenant_id, name) —
-            // register the collection those two families' fixtures below use.
-            // Neither created_at/superseded_at value is asserted for this row.
-            // hygiene-001-6: created_at is NOT NULL now -- a real value is
-            // required even though nothing asserts on it.
-            ps.setString(1, FIXTURE_TENANT);
-            ps.setString(2, "cck6z-coll");
-            ps.setBoolean(3, false);
-            ps.setObject(4, TS_ZERO_MICROS);
-            ps.setNull(5, Types.TIMESTAMP_WITH_TIMEZONE);
-            ps.executeUpdate();
-        }
-
-        try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.hook_failures (tenant_id, hook_name, is_batch, batch_doc_ids) "
-                    + "VALUES (?, ?, ?, ?::jsonb)")) {
-            ps.setString(1, FIXTURE_TENANT);
-            ps.setString(2, "cck6z-hook-a");
-            ps.setBoolean(3, true);
-            ps.setString(4, HOOK_BATCH_DOC_IDS_JSON);
-            ps.executeUpdate();
-
-            ps.setString(1, FIXTURE_TENANT);
-            ps.setString(2, "cck6z-hook-b");
-            ps.setBoolean(3, false);
-            ps.setString(4, null);
-            ps.executeUpdate();
-        }
+        ctx.insertInto(HOOK_FAILURES,
+                HOOK_FAILURES.TENANT_ID, HOOK_FAILURES.HOOK_NAME, HOOK_FAILURES.IS_BATCH,
+                HOOK_FAILURES.BATCH_DOC_IDS)
+            .values(FIXTURE_TENANT, "cck6z-hook-a", true, JSONB.valueOf(HOOK_BATCH_DOC_IDS_JSON))
+            .values(FIXTURE_TENANT, "cck6z-hook-b", false, (JSONB) null)
+            .execute();
 
         // hygiene-001-1 (nexus-tk070.p6a follow-on): document_aspects.doc_id
         // and .source_uri are NOT NULL now (reverses fk-001-2's nullable
@@ -1160,131 +1135,84 @@ class SchemaRollbackRoundTripIntegrationTest {
         // (it exists to probe extras/salient_sentences jsonb round-trip,
         // unrelated to doc_id/source_uri), so it needs a real catalog
         // document to attribute to now.
-        try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) "
-                    + "VALUES (?, ?, ?) ON CONFLICT (tenant_id, tumbler) DO NOTHING")) {
-            ps.setString(1, FIXTURE_TENANT);
-            ps.setString(2, "cck6z.aspects.doc");
-            ps.setString(3, "cck6z aspects fixture doc");
-            ps.executeUpdate();
-        }
-        try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.document_aspects "
-                    + "(tenant_id, collection, source_path, extracted_at, model_version, "
-                    + " extractor_name, extras, salient_sentences, source_uri, doc_id) "
-                    + "VALUES (?, ?, ?, now(), ?, ?, ?::jsonb, ?::jsonb, ?, ?)")) {
-            ps.setString(1, FIXTURE_TENANT);
-            ps.setString(2, "cck6z-coll");
-            ps.setString(3, "cck6z/doc1");
-            ps.setString(4, "v1");
-            ps.setString(5, "cck6z-extractor");
-            ps.setString(6, ASPECTS_EXTRAS_JSON);
-            ps.setString(7, null);
-            ps.setString(8, "file:///cck6z/doc1");
-            ps.setString(9, "cck6z.aspects.doc");
-            ps.executeUpdate();
+        ctx.insertInto(CATALOG_DOCUMENTS,
+                CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE)
+            .values(FIXTURE_TENANT, "cck6z.aspects.doc", "cck6z aspects fixture doc")
+            .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
+            .doNothing()
+            .execute();
+        ctx.insertInto(DOCUMENT_ASPECTS,
+                DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.SOURCE_PATH,
+                DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.EXTRAS,
+                DOCUMENT_ASPECTS.SALIENT_SENTENCES, DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.DOC_ID)
+            .values(FIXTURE_TENANT, "cck6z-coll", "cck6z/doc1", OffsetDateTime.now(), "v1",
+                "cck6z-extractor", JSONB.valueOf(ASPECTS_EXTRAS_JSON), (JSONB) null,
+                "file:///cck6z/doc1", "cck6z.aspects.doc")
+            .values(FIXTURE_TENANT, "cck6z-coll", "cck6z/doc2", OffsetDateTime.now(), "v1",
+                "cck6z-extractor", (JSONB) null, JSONB.valueOf(ASPECTS_SALIENT_JSON),
+                "file:///cck6z/doc2", "cck6z.aspects.doc")
+            .execute();
 
-            ps.setString(1, FIXTURE_TENANT);
-            ps.setString(2, "cck6z-coll");
-            ps.setString(3, "cck6z/doc2");
-            ps.setString(4, "v1");
-            ps.setString(5, "cck6z-extractor");
-            ps.setString(6, null);
-            ps.setString(7, ASPECTS_SALIENT_JSON);
-            ps.setString(8, "file:///cck6z/doc2");
-            ps.setString(9, "cck6z.aspects.doc");
-            ps.executeUpdate();
-        }
-
-        try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.aspect_promotion_log "
-                    + "(tenant_id, field_name, sql_type, column_added, pruned, promoted_at) "
-                    + "VALUES (?, ?, ?, ?, ?, now())")) {
-            ps.setString(1, FIXTURE_TENANT);
-            ps.setString(2, "cck6z_field_a");
-            ps.setString(3, "text");
-            ps.setBoolean(4, true);
-            ps.setBoolean(5, false);
-            ps.executeUpdate();
-
-            ps.setString(1, FIXTURE_TENANT);
-            ps.setString(2, "cck6z_field_b");
-            ps.setString(3, "text");
-            ps.setBoolean(4, false);
-            ps.setBoolean(5, true);
-            ps.executeUpdate();
-        }
+        ctx.insertInto(ASPECT_PROMOTION_LOG,
+                ASPECT_PROMOTION_LOG.TENANT_ID, ASPECT_PROMOTION_LOG.FIELD_NAME,
+                ASPECT_PROMOTION_LOG.SQL_TYPE, ASPECT_PROMOTION_LOG.COLUMN_ADDED,
+                ASPECT_PROMOTION_LOG.PRUNED, ASPECT_PROMOTION_LOG.PROMOTED_AT)
+            .values(FIXTURE_TENANT, "cck6z_field_a", "text", true, false, OffsetDateTime.now())
+            .values(FIXTURE_TENANT, "cck6z_field_b", "text", false, true, OffsetDateTime.now())
+            .execute();
 
         // hygiene-001-11 (nexus-tk070.p6a follow-on): plans.verb is NOT NULL
         // now -- this fixture exists to probe plan_json/default_bindings
         // jsonb round-trip, unrelated to verb, so a real verb is required.
-        try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.plans "
-                    + "(tenant_id, project, query, plan_json, created_at, default_bindings, verb) "
-                    + "VALUES (?, ?, ?, ?::jsonb, now(), ?::jsonb, 'research')")) {
-            ps.setString(1, FIXTURE_TENANT);
-            ps.setString(2, "cck6z-proj");
-            ps.setString(3, "cck6z plan query 1");
-            ps.setString(4, PLAN_JSON_A);
-            ps.setString(5, null);
-            ps.executeUpdate();
-
-            ps.setString(1, FIXTURE_TENANT);
-            ps.setString(2, "cck6z-proj");
-            ps.setString(3, "cck6z plan query 2");
-            ps.setString(4, PLAN_JSON_B);
-            ps.setString(5, PLAN_DEFAULT_BINDINGS_B);
-            ps.executeUpdate();
-        }
+        ctx.insertInto(PLANS,
+                PLANS.TENANT_ID, PLANS.PROJECT, PLANS.QUERY, PLANS.PLAN_JSON, PLANS.CREATED_AT,
+                PLANS.DEFAULT_BINDINGS, PLANS.VERB)
+            .values(FIXTURE_TENANT, "cck6z-proj", "cck6z plan query 1", JSONB.valueOf(PLAN_JSON_A),
+                OffsetDateTime.now(), (JSONB) null, "research")
+            .values(FIXTURE_TENANT, "cck6z-proj", "cck6z plan query 2", JSONB.valueOf(PLAN_JSON_B),
+                OffsetDateTime.now(), JSONB.valueOf(PLAN_DEFAULT_BINDINGS_B), "research")
+            .execute();
     }
 
     /** Seeds two {@code topics} parents (the FK topic_links requires) plus one link row. */
     private static long[] seedTopicLinksFixture(Connection su) throws Exception {
-        long topicA;
-        long topicB;
-        try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
-                    + "VALUES (?, ?, ?, now()) RETURNING id")) {
-            ps.setString(1, FIXTURE_TENANT);
-            ps.setString(2, "cck6z-topic-a");
-            ps.setString(3, "cck6z-coll");
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                topicA = rs.getLong(1);
-            }
+        DSLContext ctx = dsl(su);
+        long topicA = ctx.insertInto(TOPICS,
+                TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.CREATED_AT)
+            .values(FIXTURE_TENANT, "cck6z-topic-a", "cck6z-coll", OffsetDateTime.now())
+            .returning(TOPICS.ID)
+            .fetchOne(TOPICS.ID);
+        long topicB = ctx.insertInto(TOPICS,
+                TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.CREATED_AT)
+            .values(FIXTURE_TENANT, "cck6z-topic-b", "cck6z-coll", OffsetDateTime.now())
+            .returning(TOPICS.ID)
+            .fetchOne(TOPICS.ID);
 
-            ps.setString(1, FIXTURE_TENANT);
-            ps.setString(2, "cck6z-topic-b");
-            ps.setString(3, "cck6z-coll");
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                topicB = rs.getLong(1);
-            }
-        }
-
-        try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.topic_links (tenant_id, from_topic_id, to_topic_id, link_types) "
-                    + "VALUES (?, ?, ?, ?::jsonb)")) {
-            ps.setString(1, FIXTURE_TENANT);
-            ps.setLong(2, topicA);
-            ps.setLong(3, topicB);
-            ps.setString(4, TOPIC_LINK_TYPES_JSON);
-            ps.executeUpdate();
-        }
+        ctx.insertInto(TOPIC_LINKS,
+                TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID,
+                TOPIC_LINKS.LINK_TYPES)
+            .values(FIXTURE_TENANT, topicA, topicB, JSONB.valueOf(TOPIC_LINK_TYPES_JSON))
+            .execute();
         return new long[] {topicA, topicB};
+    }
+
+    /** Liquibase's own bookkeeping table -- not jOOQ-generated (outside the nexus/t1
+     * application schemas codegen covers), so every reference is the schema-agnostic
+     * typed form: {@code DSL.table(DSL.name(...))} / {@code DSL.field(DSL.name(...), Class)}. */
+    private static org.jooq.Table<?> databaseChangeLog() {
+        return DSL.table(DSL.name("databasechangelog"));
     }
 
     /** How many trailing (by execution order) DATABASECHANGELOG rows reach {@code changesetId}. */
     private static int rollbackDepthThrough(Connection c, String changesetId) throws Exception {
-        try (PreparedStatement ps = c.prepareStatement(
-                "SELECT count(*) FROM databasechangelog WHERE orderexecuted >= "
-                    + "(SELECT orderexecuted FROM databasechangelog WHERE id = ?)")) {
-            ps.setString(1, changesetId);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getInt(1);
-            }
-        }
+        Field<Integer> orderExecuted = DSL.field(DSL.name("orderexecuted"), Integer.class);
+        Field<String> id = DSL.field(DSL.name("id"), String.class);
+        var targetOrder = dsl(c).select(orderExecuted).from(databaseChangeLog()).where(id.eq(changesetId));
+        return dsl(c).selectCount()
+            .from(databaseChangeLog())
+            .where(orderExecuted.ge(targetOrder))
+            .fetchOne(0, int.class);
     }
 
     /**
@@ -1292,13 +1220,9 @@ class SchemaRollbackRoundTripIntegrationTest {
      * hand-typed guess (see class-level javadoc on the round-trip test above).
      */
     private static String canonicalJsonbText(Connection c, String jsonLiteral) throws Exception {
-        try (PreparedStatement ps = c.prepareStatement("SELECT (?::jsonb)::text")) {
-            ps.setString(1, jsonLiteral);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getString(1);
-            }
-        }
+        Field<JSONB> asJsonb = DSL.cast(DSL.val(jsonLiteral), SQLDataType.JSONB);
+        Field<String> asText = DSL.cast(asJsonb, SQLDataType.VARCHAR);
+        return dsl(c).select(asText).fetchOne(asText);
     }
 
     /**
@@ -1311,78 +1235,74 @@ class SchemaRollbackRoundTripIntegrationTest {
      * never hand-typed, for the same reason as {@link #canonicalJsonbText}.
      */
     private static String defaultTimestamptzText(Connection c, OffsetDateTime instant) throws Exception {
-        try (PreparedStatement ps = c.prepareStatement("SELECT (?::timestamptz)::text")) {
-            ps.setObject(1, instant);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getString(1);
-            }
-        }
+        Field<OffsetDateTime> asTz = DSL.cast(DSL.val(instant), SQLDataType.TIMESTAMPWITHTIMEZONE);
+        Field<String> asText = DSL.cast(asTz, SQLDataType.VARCHAR);
+        return dsl(c).select(asText).fetchOne(asText);
     }
 
-    private static void bind(PreparedStatement ps, Object... params) throws Exception {
-        for (int i = 0; i < params.length; i++) {
-            ps.setObject(i + 1, params[i]);
-        }
+    /** Equality condition against a column by NAME, never a generated Field — the mid-rollback
+     * reads below query columns whose TYPE varies by depth (TEXT/INTEGER post-rollback,
+     * TIMESTAMPTZ/JSONB/BOOLEAN post-reapply), so the table-shape-agnostic form is mandatory. */
+    private static Condition eq(String column, Object value) {
+        return DSL.field(DSL.name(column)).eq(value);
     }
 
-    private static String queryOneNullableString(Connection c, String sql, Object... params)
+    /** Reads exactly one row's single column, typed dynamically by {@code type} — the
+     * column's ACTUAL Postgres type varies by rollback depth, so callers pass the type
+     * they expect AT THAT DEPTH, never a fixed generated-table Field. */
+    private static <T> T fetchColumn(Connection c, String table, String column, Class<T> type,
+            Condition where) throws Exception {
+        Field<T> field = DSL.field(DSL.name(column), type);
+        List<T> rows = dsl(c).select(field)
+            .from(DSL.table(DSL.name("nexus", table)))
+            .where(where)
+            .fetch(field);
+        assertThat(rows).as("expected exactly one row: nexus.%s.%s", table, column).hasSize(1);
+        return rows.get(0);
+    }
+
+    private static String queryOneNullableString(Connection c, String table, String column, Condition where)
             throws Exception {
-        try (PreparedStatement ps = c.prepareStatement(sql)) {
-            bind(ps, params);
-            try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next()).as("expected exactly one row: " + sql).isTrue();
-                return rs.getString(1);
-            }
-        }
+        return fetchColumn(c, table, column, String.class, where);
     }
 
-    private static int queryOneInt(Connection c, String sql, Object... params) throws Exception {
-        try (PreparedStatement ps = c.prepareStatement(sql)) {
-            bind(ps, params);
-            try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next()).as("expected exactly one row: " + sql).isTrue();
-                return rs.getInt(1);
-            }
-        }
-    }
-
-    private static Boolean queryOneNullableBoolean(Connection c, String sql, Object... params)
+    private static int queryOneInt(Connection c, String table, String column, Condition where)
             throws Exception {
-        try (PreparedStatement ps = c.prepareStatement(sql)) {
-            bind(ps, params);
-            try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next()).as("expected exactly one row: " + sql).isTrue();
-                boolean v = rs.getBoolean(1);
-                return rs.wasNull() ? null : v;
-            }
-        }
+        return fetchColumn(c, table, column, Integer.class, where);
     }
 
-    private static void assertNullColumn(Connection c, String sql, Object... params) throws Exception {
-        try (PreparedStatement ps = c.prepareStatement(sql)) {
-            bind(ps, params);
-            try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next()).as("expected exactly one row: " + sql).isTrue();
-                rs.getObject(1);
-                assertThat(rs.wasNull()).as("expected NULL: " + sql).isTrue();
-            }
-        }
+    private static Boolean queryOneNullableBoolean(Connection c, String table, String column, Condition where)
+            throws Exception {
+        return fetchColumn(c, table, column, Boolean.class, where);
     }
 
-    private static void assertTimestampEquals(Connection c, String sql, OffsetDateTime expected,
-            Object... params) throws Exception {
-        try (PreparedStatement ps = c.prepareStatement(sql)) {
-            bind(ps, params);
-            try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next()).as("expected exactly one row: " + sql).isTrue();
-                OffsetDateTime actual = rs.getObject(1, OffsetDateTime.class);
-                assertThat(actual).as("expected instant %s: %s", expected, sql).isNotNull();
-                assertThat(actual.toInstant())
-                    .as("expected instant %s: %s", expected, sql)
-                    .isEqualTo(expected.toInstant());
-            }
-        }
+    /** {@code (column = expectedJson::jsonb)} — a computed boolean expression, not a plain
+     * column read, so it does not fit {@link #fetchColumn}'s single-field shape. */
+    private static boolean jsonbEquals(Connection c, String table, String column, String expectedJson,
+            Condition where) throws Exception {
+        Field<JSONB> field = DSL.field(DSL.name(column), JSONB.class);
+        Field<Boolean> expr = DSL.field(field.eq(JSONB.valueOf(expectedJson)));
+        List<Boolean> rows = dsl(c).select(expr)
+            .from(DSL.table(DSL.name("nexus", table)))
+            .where(where)
+            .fetch(expr);
+        assertThat(rows).as("expected exactly one row: nexus.%s.%s", table, column).hasSize(1);
+        return Boolean.TRUE.equals(rows.get(0));
+    }
+
+    private static void assertNullColumn(Connection c, String table, String column, Condition where)
+            throws Exception {
+        Object v = fetchColumn(c, table, column, Object.class, where);
+        assertThat(v).as("expected NULL: nexus.%s.%s", table, column).isNull();
+    }
+
+    private static void assertTimestampEquals(Connection c, String table, String column,
+            OffsetDateTime expected, Condition where) throws Exception {
+        OffsetDateTime actual = fetchColumn(c, table, column, OffsetDateTime.class, where);
+        assertThat(actual).as("expected instant %s: nexus.%s.%s", expected, table, column).isNotNull();
+        assertThat(actual.toInstant())
+            .as("expected instant %s: nexus.%s.%s", expected, table, column)
+            .isEqualTo(expected.toInstant());
     }
 
     /** information_schema shape check post-rollback: TEXT/INTEGER, NOT NULL/DEFAULT restored. */
@@ -1433,46 +1353,40 @@ class SchemaRollbackRoundTripIntegrationTest {
     private static void assertRolledBackColumnShapesAndValues(Connection su, long topicA, long topicB)
             throws Exception {
         // ── catalog-031-1: catalog_documents.indexed_at / bib_enriched_at / index_started_at ──
-        assertThat(queryOneNullableString(su,
-            "SELECT indexed_at FROM nexus.catalog_documents WHERE tenant_id=? AND tumbler=?",
-            FIXTURE_TENANT, "cck6z.doc.1"))
+        assertThat(queryOneNullableString(su, "catalog_documents", "indexed_at",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("tumbler", "cck6z.doc.1"))))
             .as("catalog-031-1 indexed_at rollback: to_char(indexed_at AT TIME ZONE 'UTC', "
                 + "'YYYY-MM-DD\"T\"HH24:MI:SS.US\"+00:00\"'), NO COALESCE — a zero-microsecond "
                 + "instant must render with 6 zero digits; swapping the 'US' token for 'MS' "
                 + "(millis) or dropping the zero-pad would turn this red")
             .isEqualTo(EXPECTED_TEXT_ZERO_MICROS);
-        assertThat(queryOneNullableString(su,
-            "SELECT indexed_at FROM nexus.catalog_documents WHERE tenant_id=? AND tumbler=?",
-            FIXTURE_TENANT, "cck6z.doc.2"))
+        assertThat(queryOneNullableString(su, "catalog_documents", "indexed_at",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("tumbler", "cck6z.doc.2"))))
             .as("catalog-031-1 indexed_at rollback has NO COALESCE(...,'') — unlike "
                 + "bib_enriched_at/index_started_at below, a NULL indexed_at must STAY NULL "
                 + "after rollback, not become ''. Adding a COALESCE here would turn this red")
             .isNull();
 
-        assertThat(queryOneNullableString(su,
-            "SELECT bib_enriched_at FROM nexus.catalog_documents WHERE tenant_id=? AND tumbler=?",
-            FIXTURE_TENANT, "cck6z.doc.1"))
+        assertThat(queryOneNullableString(su, "catalog_documents", "bib_enriched_at",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("tumbler", "cck6z.doc.1"))))
             .as("catalog-031-1 bib_enriched_at rollback: COALESCE(to_char(...),'') plus SET NOT "
                 + "NULL SET DEFAULT '' — a NULL bib_enriched_at (the 99.86%%-of-rows case per "
                 + "this changeset's own header) must restore to '' exactly, not NULL. Dropping "
                 + "the COALESCE would turn this red")
             .isEqualTo("");
-        assertThat(queryOneNullableString(su,
-            "SELECT bib_enriched_at FROM nexus.catalog_documents WHERE tenant_id=? AND tumbler=?",
-            FIXTURE_TENANT, "cck6z.doc.2"))
+        assertThat(queryOneNullableString(su, "catalog_documents", "bib_enriched_at",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("tumbler", "cck6z.doc.2"))))
             .as("catalog-031-1 bib_enriched_at rollback: a populated value must round-trip "
                 + "exactly, including nonzero microseconds")
             .isEqualTo(EXPECTED_TEXT_NONZERO_MICROS_B);
 
-        assertThat(queryOneNullableString(su,
-            "SELECT index_started_at FROM nexus.catalog_documents WHERE tenant_id=? AND tumbler=?",
-            FIXTURE_TENANT, "cck6z.doc.1"))
+        assertThat(queryOneNullableString(su, "catalog_documents", "index_started_at",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("tumbler", "cck6z.doc.1"))))
             .as("catalog-031-1 index_started_at rollback: same COALESCE-to-'' shape as "
                 + "bib_enriched_at; a populated nonzero-microsecond value must round-trip exactly")
             .isEqualTo(EXPECTED_TEXT_NONZERO_MICROS_A);
-        assertThat(queryOneNullableString(su,
-            "SELECT index_started_at FROM nexus.catalog_documents WHERE tenant_id=? AND tumbler=?",
-            FIXTURE_TENANT, "cck6z.doc.2"))
+        assertThat(queryOneNullableString(su, "catalog_documents", "index_started_at",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("tumbler", "cck6z.doc.2"))))
             .as("catalog-031-1 index_started_at rollback: NULL must COALESCE to '' (this column "
                 + "had NOT NULL DEFAULT '' before the arc) — dropping the COALESCE would leave "
                 + "this NULL instead of ''")
@@ -1484,144 +1398,116 @@ class SchemaRollbackRoundTripIntegrationTest {
         // row): created_at is NOT NULL now, so this now checks the same
         // fixed-width zero-microsecond rollback fidelity the second row
         // (cck6z.doc.2/cites-back) already covers.
-        assertThat(queryOneNullableString(su,
-            "SELECT created_at FROM nexus.catalog_links "
-                + "WHERE tenant_id=? AND from_tumbler=? AND link_type=?",
-            FIXTURE_TENANT, "cck6z.doc.1", "cites"))
+        assertThat(queryOneNullableString(su, "catalog_links", "created_at",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("from_tumbler", "cck6z.doc.1")).and(eq("link_type", "cites"))))
             .as("catalog-031-2 created_at rollback: a populated zero-microsecond value must "
                 + "render with 6 zero digits")
             .isEqualTo(EXPECTED_TEXT_ZERO_MICROS);
-        assertThat(queryOneNullableString(su,
-            "SELECT created_at FROM nexus.catalog_links "
-                + "WHERE tenant_id=? AND from_tumbler=? AND link_type=?",
-            FIXTURE_TENANT, "cck6z.doc.2", "cites-back"))
+        assertThat(queryOneNullableString(su, "catalog_links", "created_at",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("from_tumbler", "cck6z.doc.2")).and(eq("link_type", "cites-back"))))
             .as("catalog-031-2 created_at rollback: a populated zero-microsecond value must "
                 + "render with 6 zero digits, same format as catalog-031-1")
             .isEqualTo(EXPECTED_TEXT_LINKS_ZERO_MICROS);
 
         // ── catalog-031-3: catalog_collections.legacy_grandfathered ──
-        assertThat(queryOneInt(su,
-            "SELECT legacy_grandfathered FROM nexus.catalog_collections WHERE tenant_id=? AND name=?",
-            FIXTURE_TENANT, "cck6z-legacy-true"))
+        assertThat(queryOneInt(su, "catalog_collections", "legacy_grandfathered",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("name", "cck6z-legacy-true"))))
             .as("catalog-031-3 rollback: CASE WHEN legacy_grandfathered THEN 1 ELSE 0 END — true "
                 + "must restore to exactly 1")
             .isEqualTo(1);
-        assertThat(queryOneInt(su,
-            "SELECT legacy_grandfathered FROM nexus.catalog_collections WHERE tenant_id=? AND name=?",
-            FIXTURE_TENANT, "cck6z-legacy-false"))
+        assertThat(queryOneInt(su, "catalog_collections", "legacy_grandfathered",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("name", "cck6z-legacy-false"))))
             .as("catalog-031-3 rollback: false must restore to exactly 0")
             .isEqualTo(0);
 
         // ── telemetry-004-1: hook_failures.is_batch / .batch_doc_ids ──
-        assertThat(queryOneInt(su,
-            "SELECT is_batch FROM nexus.hook_failures WHERE tenant_id=? AND hook_name=?",
-            FIXTURE_TENANT, "cck6z-hook-a"))
+        assertThat(queryOneInt(su, "hook_failures", "is_batch",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("hook_name", "cck6z-hook-a"))))
             .as("telemetry-004-1 is_batch rollback: CASE WHEN ... THEN 1 ELSE 0 END — true -> 1")
             .isEqualTo(1);
-        assertThat(queryOneInt(su,
-            "SELECT is_batch FROM nexus.hook_failures WHERE tenant_id=? AND hook_name=?",
-            FIXTURE_TENANT, "cck6z-hook-b"))
+        assertThat(queryOneInt(su, "hook_failures", "is_batch",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("hook_name", "cck6z-hook-b"))))
             .as("telemetry-004-1 is_batch rollback: false -> 0")
             .isEqualTo(0);
         String expectedBatchDocIds = canonicalJsonbText(su, HOOK_BATCH_DOC_IDS_JSON);
-        assertThat(queryOneNullableString(su,
-            "SELECT batch_doc_ids FROM nexus.hook_failures WHERE tenant_id=? AND hook_name=?",
-            FIXTURE_TENANT, "cck6z-hook-a"))
+        assertThat(queryOneNullableString(su, "hook_failures", "batch_doc_ids",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("hook_name", "cck6z-hook-a"))))
             .as("telemetry-004-1 batch_doc_ids rollback: plain USING batch_doc_ids::text (no "
                 + "COALESCE — nullable, no-default column pre-migration) — the restored TEXT "
                 + "must equal the ORIGINAL array's canonical jsonb text, computed live via a "
                 + "scratch ::jsonb::text cast rather than hand-typed. Casting the wrong column, "
                 + "or substituting a hardcoded literal for batch_doc_ids::text, would turn this red")
             .isEqualTo(expectedBatchDocIds);
-        assertThat(queryOneNullableString(su,
-            "SELECT batch_doc_ids FROM nexus.hook_failures WHERE tenant_id=? AND hook_name=?",
-            FIXTURE_TENANT, "cck6z-hook-b"))
+        assertThat(queryOneNullableString(su, "hook_failures", "batch_doc_ids",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("hook_name", "cck6z-hook-b"))))
             .as("telemetry-004-1 batch_doc_ids rollback: jsonb NULL must cast back to TEXT NULL, "
                 + "never ''")
             .isNull();
 
         // ── aspects-003-1: document_aspects.extras / .salient_sentences ──
         String expectedExtras = canonicalJsonbText(su, ASPECTS_EXTRAS_JSON);
-        assertThat(queryOneNullableString(su,
-            "SELECT extras FROM nexus.document_aspects "
-                + "WHERE tenant_id=? AND collection=? AND source_path=?",
-            FIXTURE_TENANT, "cck6z-coll", "cck6z/doc1"))
+        assertThat(queryOneNullableString(su, "document_aspects", "extras",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("collection", "cck6z-coll")).and(eq("source_path", "cck6z/doc1"))))
             .as("aspects-003-1 extras rollback: plain USING extras::text — restored TEXT must "
                 + "equal the original object's canonical jsonb text (key reorder + whitespace "
                 + "verified live, not guessed)")
             .isEqualTo(expectedExtras);
-        assertThat(queryOneNullableString(su,
-            "SELECT salient_sentences FROM nexus.document_aspects "
-                + "WHERE tenant_id=? AND collection=? AND source_path=?",
-            FIXTURE_TENANT, "cck6z-coll", "cck6z/doc1"))
+        assertThat(queryOneNullableString(su, "document_aspects", "salient_sentences",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("collection", "cck6z-coll")).and(eq("source_path", "cck6z/doc1"))))
             .as("aspects-003-1 salient_sentences rollback: jsonb NULL -> TEXT NULL, never ''")
             .isNull();
-        assertThat(queryOneNullableString(su,
-            "SELECT extras FROM nexus.document_aspects "
-                + "WHERE tenant_id=? AND collection=? AND source_path=?",
-            FIXTURE_TENANT, "cck6z-coll", "cck6z/doc2"))
+        assertThat(queryOneNullableString(su, "document_aspects", "extras",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("collection", "cck6z-coll")).and(eq("source_path", "cck6z/doc2"))))
             .as("aspects-003-1 extras rollback: jsonb NULL -> TEXT NULL, never ''")
             .isNull();
         String expectedSalient = canonicalJsonbText(su, ASPECTS_SALIENT_JSON);
-        assertThat(queryOneNullableString(su,
-            "SELECT salient_sentences FROM nexus.document_aspects "
-                + "WHERE tenant_id=? AND collection=? AND source_path=?",
-            FIXTURE_TENANT, "cck6z-coll", "cck6z/doc2"))
+        assertThat(queryOneNullableString(su, "document_aspects", "salient_sentences",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("collection", "cck6z-coll")).and(eq("source_path", "cck6z/doc2"))))
             .as("aspects-003-1 salient_sentences rollback: array element ORDER must survive — "
                 + "jsonb does not reorder array elements the way it reorders object keys")
             .isEqualTo(expectedSalient);
 
         // ── aspects-003-2: aspect_promotion_log.column_added / .pruned ──
-        assertThat(queryOneInt(su,
-            "SELECT column_added FROM nexus.aspect_promotion_log WHERE tenant_id=? AND field_name=?",
-            FIXTURE_TENANT, "cck6z_field_a"))
+        assertThat(queryOneInt(su, "aspect_promotion_log", "column_added",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("field_name", "cck6z_field_a"))))
             .as("aspects-003-2 column_added rollback: true -> 1").isEqualTo(1);
-        assertThat(queryOneInt(su,
-            "SELECT pruned FROM nexus.aspect_promotion_log WHERE tenant_id=? AND field_name=?",
-            FIXTURE_TENANT, "cck6z_field_a"))
+        assertThat(queryOneInt(su, "aspect_promotion_log", "pruned",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("field_name", "cck6z_field_a"))))
             .as("aspects-003-2 pruned rollback: false -> 0").isEqualTo(0);
-        assertThat(queryOneInt(su,
-            "SELECT column_added FROM nexus.aspect_promotion_log WHERE tenant_id=? AND field_name=?",
-            FIXTURE_TENANT, "cck6z_field_b"))
+        assertThat(queryOneInt(su, "aspect_promotion_log", "column_added",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("field_name", "cck6z_field_b"))))
             .as("aspects-003-2 column_added rollback: false -> 0").isEqualTo(0);
-        assertThat(queryOneInt(su,
-            "SELECT pruned FROM nexus.aspect_promotion_log WHERE tenant_id=? AND field_name=?",
-            FIXTURE_TENANT, "cck6z_field_b"))
+        assertThat(queryOneInt(su, "aspect_promotion_log", "pruned",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("field_name", "cck6z_field_b"))))
             .as("aspects-003-2 pruned rollback: true -> 1").isEqualTo(1);
 
         // ── plans-002-1: plans.plan_json / .default_bindings ──
         String expectedPlanJsonA = canonicalJsonbText(su, PLAN_JSON_A);
-        assertThat(queryOneNullableString(su,
-            "SELECT plan_json FROM nexus.plans WHERE tenant_id=? AND project=? AND query=?",
-            FIXTURE_TENANT, "cck6z-proj", "cck6z plan query 1"))
+        assertThat(queryOneNullableString(su, "plans", "plan_json",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("project", "cck6z-proj")).and(eq("query", "cck6z plan query 1"))))
             .as("plans-002-1 plan_json rollback: plain USING plan_json::text — nested-object "
                 + "canonicalization (key reorder inside 'meta') must survive")
             .isEqualTo(expectedPlanJsonA);
-        assertThat(queryOneNullableString(su,
-            "SELECT default_bindings FROM nexus.plans WHERE tenant_id=? AND project=? AND query=?",
-            FIXTURE_TENANT, "cck6z-proj", "cck6z plan query 1"))
+        assertThat(queryOneNullableString(su, "plans", "default_bindings",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("project", "cck6z-proj")).and(eq("query", "cck6z plan query 1"))))
             .as("plans-002-1 default_bindings rollback: jsonb NULL -> TEXT NULL, never ''")
             .isNull();
         String expectedPlanJsonB = canonicalJsonbText(su, PLAN_JSON_B);
-        assertThat(queryOneNullableString(su,
-            "SELECT plan_json FROM nexus.plans WHERE tenant_id=? AND project=? AND query=?",
-            FIXTURE_TENANT, "cck6z-proj", "cck6z plan query 2"))
+        assertThat(queryOneNullableString(su, "plans", "plan_json",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("project", "cck6z-proj")).and(eq("query", "cck6z plan query 2"))))
             .as("plans-002-1 plan_json rollback: minimal object must also round-trip exactly")
             .isEqualTo(expectedPlanJsonB);
         String expectedDefaultBindingsB = canonicalJsonbText(su, PLAN_DEFAULT_BINDINGS_B);
-        assertThat(queryOneNullableString(su,
-            "SELECT default_bindings FROM nexus.plans WHERE tenant_id=? AND project=? AND query=?",
-            FIXTURE_TENANT, "cck6z-proj", "cck6z plan query 2"))
+        assertThat(queryOneNullableString(su, "plans", "default_bindings",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("project", "cck6z-proj")).and(eq("query", "cck6z plan query 2"))))
             .as("plans-002-1 default_bindings rollback: a populated value must equal the "
                 + "canonical jsonb text of the original object")
             .isEqualTo(expectedDefaultBindingsB);
 
         // ── taxonomy-008-1: topic_links.link_types ──
         String expectedLinkTypes = canonicalJsonbText(su, TOPIC_LINK_TYPES_JSON);
-        assertThat(queryOneNullableString(su,
-            "SELECT link_types FROM nexus.topic_links "
-                + "WHERE tenant_id=? AND from_topic_id=? AND to_topic_id=?",
-            FIXTURE_TENANT, topicA, topicB))
+        assertThat(queryOneNullableString(su, "topic_links", "link_types",
+            eq("tenant_id", FIXTURE_TENANT).and(eq("from_topic_id", topicA)).and(eq("to_topic_id", topicB))))
             .as("taxonomy-008-1 link_types rollback: DROP DEFAULT -> TYPE TEXT USING "
                 + "link_types::text -> SET DEFAULT '[]' — array element order must survive")
             .isEqualTo(expectedLinkTypes);
@@ -1658,36 +1544,31 @@ class SchemaRollbackRoundTripIntegrationTest {
      * rendering, computed live — see {@link #defaultTimestamptzText}.
      */
     private static void assertCatalog002ColumnShapesAndValues(Connection su) throws Exception {
+        Condition legacyTrue = eq("tenant_id", FIXTURE_TENANT).and(eq("name", "cck6z-legacy-true"));
+        Condition legacyFalse = eq("tenant_id", FIXTURE_TENANT).and(eq("name", "cck6z-legacy-false"));
+
         String expectedCollectionsCreatedAt = defaultTimestamptzText(su, TS_COLLECTIONS_CREATED_AT);
-        assertThat(queryOneNullableString(su,
-            "SELECT created_at FROM nexus.catalog_collections WHERE tenant_id=? AND name=?",
-            FIXTURE_TENANT, "cck6z-legacy-true"))
+        assertThat(queryOneNullableString(su, "catalog_collections", "created_at", legacyTrue))
             .as("catalog-002-1 created_at rollback: COALESCE(created_at::text, '') — a populated "
                 + "value must round-trip to Postgres's DEFAULT timestamptz-to-text rendering "
                 + "(trailing-zero-trimmed microseconds, bare '+00' offset) — NOT the arc's "
                 + "fixed-width to_char format used elsewhere in this test. Swapping the bare "
                 + "col::text cast for a to_char(...) call would turn this red")
             .isEqualTo(expectedCollectionsCreatedAt);
-        assertThat(queryOneNullableString(su,
-            "SELECT superseded_at FROM nexus.catalog_collections WHERE tenant_id=? AND name=?",
-            FIXTURE_TENANT, "cck6z-legacy-true"))
+        assertThat(queryOneNullableString(su, "catalog_collections", "superseded_at", legacyTrue))
             .as("catalog-002-1 superseded_at rollback: COALESCE(superseded_at::text, '') — a NULL "
                 + "superseded_at (the common case: a collection never superseded) must restore to "
                 + "'' exactly, not NULL. Dropping the COALESCE would turn this red")
             .isEqualTo("");
 
         String expectedCollectionsCreatedAtFalse = defaultTimestamptzText(su, TS_ZERO_MICROS);
-        assertThat(queryOneNullableString(su,
-            "SELECT created_at FROM nexus.catalog_collections WHERE tenant_id=? AND name=?",
-            FIXTURE_TENANT, "cck6z-legacy-false"))
+        assertThat(queryOneNullableString(su, "catalog_collections", "created_at", legacyFalse))
             .as("catalog-002-1 created_at rollback: a populated value must round-trip to "
                 + "Postgres's DEFAULT timestamptz-to-text rendering, same oracle as the "
                 + "cck6z-legacy-true row above")
             .isEqualTo(expectedCollectionsCreatedAtFalse);
         String expectedCollectionsSupersededAt = defaultTimestamptzText(su, TS_COLLECTIONS_SUPERSEDED_AT);
-        assertThat(queryOneNullableString(su,
-            "SELECT superseded_at FROM nexus.catalog_collections WHERE tenant_id=? AND name=?",
-            FIXTURE_TENANT, "cck6z-legacy-false"))
+        assertThat(queryOneNullableString(su, "catalog_collections", "superseded_at", legacyFalse))
             .as("catalog-002-1 superseded_at rollback: a populated value must round-trip to "
                 + "Postgres's DEFAULT timestamptz-to-text rendering, same oracle as created_at above")
             .isEqualTo(expectedCollectionsSupersededAt);
@@ -1705,18 +1586,13 @@ class SchemaRollbackRoundTripIntegrationTest {
         assertColumnForwardShape(su, "catalog_collections", "created_at", "timestamp with time zone");
         assertColumnForwardShape(su, "catalog_collections", "superseded_at", "timestamp with time zone");
 
-        assertTimestampEquals(su,
-            "SELECT created_at FROM nexus.catalog_collections WHERE tenant_id=? AND name=?",
-            TS_COLLECTIONS_CREATED_AT, FIXTURE_TENANT, "cck6z-legacy-true");
-        assertNullColumn(su,
-            "SELECT superseded_at FROM nexus.catalog_collections WHERE tenant_id=? AND name=?",
-            FIXTURE_TENANT, "cck6z-legacy-true");
-        assertTimestampEquals(su,
-            "SELECT created_at FROM nexus.catalog_collections WHERE tenant_id=? AND name=?",
-            TS_ZERO_MICROS, FIXTURE_TENANT, "cck6z-legacy-false");
-        assertTimestampEquals(su,
-            "SELECT superseded_at FROM nexus.catalog_collections WHERE tenant_id=? AND name=?",
-            TS_COLLECTIONS_SUPERSEDED_AT, FIXTURE_TENANT, "cck6z-legacy-false");
+        Condition legacyTrue = eq("tenant_id", FIXTURE_TENANT).and(eq("name", "cck6z-legacy-true"));
+        Condition legacyFalse = eq("tenant_id", FIXTURE_TENANT).and(eq("name", "cck6z-legacy-false"));
+        assertTimestampEquals(su, "catalog_collections", "created_at", TS_COLLECTIONS_CREATED_AT, legacyTrue);
+        assertNullColumn(su, "catalog_collections", "superseded_at", legacyTrue);
+        assertTimestampEquals(su, "catalog_collections", "created_at", TS_ZERO_MICROS, legacyFalse);
+        assertTimestampEquals(su, "catalog_collections", "superseded_at",
+            TS_COLLECTIONS_SUPERSEDED_AT, legacyFalse);
     }
 
     /**
@@ -1740,117 +1616,70 @@ class SchemaRollbackRoundTripIntegrationTest {
         assertColumnForwardShape(su, "plans", "default_bindings", "jsonb");
         assertColumnForwardShape(su, "topic_links", "link_types", "jsonb");
 
-        assertTimestampEquals(su,
-            "SELECT indexed_at FROM nexus.catalog_documents WHERE tenant_id=? AND tumbler=?",
-            TS_ZERO_MICROS, FIXTURE_TENANT, "cck6z.doc.1");
-        assertNullColumn(su,
-            "SELECT indexed_at FROM nexus.catalog_documents WHERE tenant_id=? AND tumbler=?",
-            FIXTURE_TENANT, "cck6z.doc.2");
+        Condition doc1 = eq("tenant_id", FIXTURE_TENANT).and(eq("tumbler", "cck6z.doc.1"));
+        Condition doc2 = eq("tenant_id", FIXTURE_TENANT).and(eq("tumbler", "cck6z.doc.2"));
+        assertTimestampEquals(su, "catalog_documents", "indexed_at", TS_ZERO_MICROS, doc1);
+        assertNullColumn(su, "catalog_documents", "indexed_at", doc2);
 
-        assertNullColumn(su,
-            "SELECT bib_enriched_at FROM nexus.catalog_documents WHERE tenant_id=? AND tumbler=?",
-            FIXTURE_TENANT, "cck6z.doc.1");
-        assertTimestampEquals(su,
-            "SELECT bib_enriched_at FROM nexus.catalog_documents WHERE tenant_id=? AND tumbler=?",
-            TS_NONZERO_MICROS_B, FIXTURE_TENANT, "cck6z.doc.2");
+        assertNullColumn(su, "catalog_documents", "bib_enriched_at", doc1);
+        assertTimestampEquals(su, "catalog_documents", "bib_enriched_at", TS_NONZERO_MICROS_B, doc2);
 
-        assertTimestampEquals(su,
-            "SELECT index_started_at FROM nexus.catalog_documents WHERE tenant_id=? AND tumbler=?",
-            TS_NONZERO_MICROS_A, FIXTURE_TENANT, "cck6z.doc.1");
-        assertNullColumn(su,
-            "SELECT index_started_at FROM nexus.catalog_documents WHERE tenant_id=? AND tumbler=?",
-            FIXTURE_TENANT, "cck6z.doc.2");
+        assertTimestampEquals(su, "catalog_documents", "index_started_at", TS_NONZERO_MICROS_A, doc1);
+        assertNullColumn(su, "catalog_documents", "index_started_at", doc2);
 
-        assertTimestampEquals(su,
-            "SELECT created_at FROM nexus.catalog_links "
-                + "WHERE tenant_id=? AND from_tumbler=? AND link_type=?",
-            TS_ZERO_MICROS, FIXTURE_TENANT, "cck6z.doc.1", "cites");
-        assertTimestampEquals(su,
-            "SELECT created_at FROM nexus.catalog_links "
-                + "WHERE tenant_id=? AND from_tumbler=? AND link_type=?",
-            TS_LINKS_ZERO_MICROS, FIXTURE_TENANT, "cck6z.doc.2", "cites-back");
+        assertTimestampEquals(su, "catalog_links", "created_at", TS_ZERO_MICROS,
+            eq("tenant_id", FIXTURE_TENANT).and(eq("from_tumbler", "cck6z.doc.1")).and(eq("link_type", "cites")));
+        assertTimestampEquals(su, "catalog_links", "created_at", TS_LINKS_ZERO_MICROS,
+            eq("tenant_id", FIXTURE_TENANT).and(eq("from_tumbler", "cck6z.doc.2")).and(eq("link_type", "cites-back")));
 
-        assertThat(queryOneNullableBoolean(su,
-            "SELECT legacy_grandfathered FROM nexus.catalog_collections WHERE tenant_id=? AND name=?",
-            FIXTURE_TENANT, "cck6z-legacy-true")).isTrue();
-        assertThat(queryOneNullableBoolean(su,
-            "SELECT legacy_grandfathered FROM nexus.catalog_collections WHERE tenant_id=? AND name=?",
-            FIXTURE_TENANT, "cck6z-legacy-false")).isFalse();
+        Condition legacyTrue = eq("tenant_id", FIXTURE_TENANT).and(eq("name", "cck6z-legacy-true"));
+        Condition legacyFalse = eq("tenant_id", FIXTURE_TENANT).and(eq("name", "cck6z-legacy-false"));
+        assertThat(queryOneNullableBoolean(su, "catalog_collections", "legacy_grandfathered", legacyTrue)).isTrue();
+        assertThat(queryOneNullableBoolean(su, "catalog_collections", "legacy_grandfathered", legacyFalse)).isFalse();
 
-        assertThat(queryOneNullableBoolean(su,
-            "SELECT is_batch FROM nexus.hook_failures WHERE tenant_id=? AND hook_name=?",
-            FIXTURE_TENANT, "cck6z-hook-a")).isTrue();
-        assertThat(queryOneNullableBoolean(su,
-            "SELECT is_batch FROM nexus.hook_failures WHERE tenant_id=? AND hook_name=?",
-            FIXTURE_TENANT, "cck6z-hook-b")).isFalse();
-        assertThat(queryOneNullableBoolean(su,
-            "SELECT (batch_doc_ids = ?::jsonb) FROM nexus.hook_failures "
-                + "WHERE tenant_id=? AND hook_name=?",
-            HOOK_BATCH_DOC_IDS_JSON, FIXTURE_TENANT, "cck6z-hook-a"))
+        Condition hookA = eq("tenant_id", FIXTURE_TENANT).and(eq("hook_name", "cck6z-hook-a"));
+        Condition hookB = eq("tenant_id", FIXTURE_TENANT).and(eq("hook_name", "cck6z-hook-b"));
+        assertThat(queryOneNullableBoolean(su, "hook_failures", "is_batch", hookA)).isTrue();
+        assertThat(queryOneNullableBoolean(su, "hook_failures", "is_batch", hookB)).isFalse();
+        assertThat(jsonbEquals(su, "hook_failures", "batch_doc_ids", HOOK_BATCH_DOC_IDS_JSON, hookA))
             .as("hook_failures.batch_doc_ids must round-trip forward to the same JSON content")
             .isTrue();
-        assertNullColumn(su,
-            "SELECT batch_doc_ids FROM nexus.hook_failures WHERE tenant_id=? AND hook_name=?",
-            FIXTURE_TENANT, "cck6z-hook-b");
+        assertNullColumn(su, "hook_failures", "batch_doc_ids", hookB);
 
-        assertThat(queryOneNullableBoolean(su,
-            "SELECT (extras = ?::jsonb) FROM nexus.document_aspects "
-                + "WHERE tenant_id=? AND collection=? AND source_path=?",
-            ASPECTS_EXTRAS_JSON, FIXTURE_TENANT, "cck6z-coll", "cck6z/doc1"))
+        Condition aspectsDoc1 =
+            eq("tenant_id", FIXTURE_TENANT).and(eq("collection", "cck6z-coll")).and(eq("source_path", "cck6z/doc1"));
+        Condition aspectsDoc2 =
+            eq("tenant_id", FIXTURE_TENANT).and(eq("collection", "cck6z-coll")).and(eq("source_path", "cck6z/doc2"));
+        assertThat(jsonbEquals(su, "document_aspects", "extras", ASPECTS_EXTRAS_JSON, aspectsDoc1))
             .as("document_aspects.extras must round-trip forward to the same JSON content")
             .isTrue();
-        assertNullColumn(su,
-            "SELECT salient_sentences FROM nexus.document_aspects "
-                + "WHERE tenant_id=? AND collection=? AND source_path=?",
-            FIXTURE_TENANT, "cck6z-coll", "cck6z/doc1");
-        assertNullColumn(su,
-            "SELECT extras FROM nexus.document_aspects "
-                + "WHERE tenant_id=? AND collection=? AND source_path=?",
-            FIXTURE_TENANT, "cck6z-coll", "cck6z/doc2");
-        assertThat(queryOneNullableBoolean(su,
-            "SELECT (salient_sentences = ?::jsonb) FROM nexus.document_aspects "
-                + "WHERE tenant_id=? AND collection=? AND source_path=?",
-            ASPECTS_SALIENT_JSON, FIXTURE_TENANT, "cck6z-coll", "cck6z/doc2"))
+        assertNullColumn(su, "document_aspects", "salient_sentences", aspectsDoc1);
+        assertNullColumn(su, "document_aspects", "extras", aspectsDoc2);
+        assertThat(jsonbEquals(su, "document_aspects", "salient_sentences", ASPECTS_SALIENT_JSON, aspectsDoc2))
             .as("document_aspects.salient_sentences must round-trip forward, array order intact")
             .isTrue();
 
-        assertThat(queryOneNullableBoolean(su,
-            "SELECT column_added FROM nexus.aspect_promotion_log WHERE tenant_id=? AND field_name=?",
-            FIXTURE_TENANT, "cck6z_field_a")).isTrue();
-        assertThat(queryOneNullableBoolean(su,
-            "SELECT pruned FROM nexus.aspect_promotion_log WHERE tenant_id=? AND field_name=?",
-            FIXTURE_TENANT, "cck6z_field_a")).isFalse();
-        assertThat(queryOneNullableBoolean(su,
-            "SELECT column_added FROM nexus.aspect_promotion_log WHERE tenant_id=? AND field_name=?",
-            FIXTURE_TENANT, "cck6z_field_b")).isFalse();
-        assertThat(queryOneNullableBoolean(su,
-            "SELECT pruned FROM nexus.aspect_promotion_log WHERE tenant_id=? AND field_name=?",
-            FIXTURE_TENANT, "cck6z_field_b")).isTrue();
+        Condition fieldA = eq("tenant_id", FIXTURE_TENANT).and(eq("field_name", "cck6z_field_a"));
+        Condition fieldB = eq("tenant_id", FIXTURE_TENANT).and(eq("field_name", "cck6z_field_b"));
+        assertThat(queryOneNullableBoolean(su, "aspect_promotion_log", "column_added", fieldA)).isTrue();
+        assertThat(queryOneNullableBoolean(su, "aspect_promotion_log", "pruned", fieldA)).isFalse();
+        assertThat(queryOneNullableBoolean(su, "aspect_promotion_log", "column_added", fieldB)).isFalse();
+        assertThat(queryOneNullableBoolean(su, "aspect_promotion_log", "pruned", fieldB)).isTrue();
 
-        assertThat(queryOneNullableBoolean(su,
-            "SELECT (plan_json = ?::jsonb) FROM nexus.plans "
-                + "WHERE tenant_id=? AND project=? AND query=?",
-            PLAN_JSON_A, FIXTURE_TENANT, "cck6z-proj", "cck6z plan query 1"))
+        Condition plan1 =
+            eq("tenant_id", FIXTURE_TENANT).and(eq("project", "cck6z-proj")).and(eq("query", "cck6z plan query 1"));
+        Condition plan2 =
+            eq("tenant_id", FIXTURE_TENANT).and(eq("project", "cck6z-proj")).and(eq("query", "cck6z plan query 2"));
+        assertThat(jsonbEquals(su, "plans", "plan_json", PLAN_JSON_A, plan1))
             .as("plans.plan_json must round-trip forward to the same JSON content").isTrue();
-        assertNullColumn(su,
-            "SELECT default_bindings FROM nexus.plans WHERE tenant_id=? AND project=? AND query=?",
-            FIXTURE_TENANT, "cck6z-proj", "cck6z plan query 1");
-        assertThat(queryOneNullableBoolean(su,
-            "SELECT (plan_json = ?::jsonb) FROM nexus.plans "
-                + "WHERE tenant_id=? AND project=? AND query=?",
-            PLAN_JSON_B, FIXTURE_TENANT, "cck6z-proj", "cck6z plan query 2"))
-            .isTrue();
-        assertThat(queryOneNullableBoolean(su,
-            "SELECT (default_bindings = ?::jsonb) FROM nexus.plans "
-                + "WHERE tenant_id=? AND project=? AND query=?",
-            PLAN_DEFAULT_BINDINGS_B, FIXTURE_TENANT, "cck6z-proj", "cck6z plan query 2"))
+        assertNullColumn(su, "plans", "default_bindings", plan1);
+        assertThat(jsonbEquals(su, "plans", "plan_json", PLAN_JSON_B, plan2)).isTrue();
+        assertThat(jsonbEquals(su, "plans", "default_bindings", PLAN_DEFAULT_BINDINGS_B, plan2))
             .as("plans.default_bindings must round-trip forward to the same JSON content")
             .isTrue();
 
-        assertThat(queryOneNullableBoolean(su,
-            "SELECT (link_types = ?::jsonb) FROM nexus.topic_links "
-                + "WHERE tenant_id=? AND from_topic_id=? AND to_topic_id=?",
-            TOPIC_LINK_TYPES_JSON, FIXTURE_TENANT, topicA, topicB))
+        assertThat(jsonbEquals(su, "topic_links", "link_types", TOPIC_LINK_TYPES_JSON,
+                eq("tenant_id", FIXTURE_TENANT).and(eq("from_topic_id", topicA)).and(eq("to_topic_id", topicB))))
             .as("topic_links.link_types must round-trip forward, array order intact")
             .isTrue();
     }
@@ -1982,20 +1811,15 @@ class SchemaRollbackRoundTripIntegrationTest {
         return out;
     }
 
-    private static List<String> query(Connection c, String sql) throws Exception {
-        List<String> out = new ArrayList<>();
-        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            while (rs.next()) {
-                out.add(rs.getString(1));
-            }
-        }
-        return out;
-    }
-
     /** The last {@code n} changeset ids by execution order (newest first). */
     private static List<String> executionTail(Connection c, int n) throws Exception {
-        return query(c,
-            "SELECT id FROM databasechangelog ORDER BY orderexecuted DESC LIMIT " + n);
+        Field<String> id = DSL.field(DSL.name("id"), String.class);
+        Field<Integer> orderExecuted = DSL.field(DSL.name("orderexecuted"), Integer.class);
+        return dsl(c).select(id)
+            .from(databaseChangeLog())
+            .orderBy(orderExecuted.desc())
+            .limit(n)
+            .fetch(id);
     }
 
     /**
@@ -2003,9 +1827,16 @@ class SchemaRollbackRoundTripIntegrationTest {
      * row counts — the direct signal for nexus-ixsxa. Empty is the invariant.
      */
     private static List<String> duplicateChangelogRows(Connection c) throws Exception {
-        return query(c,
-            "SELECT id || ' (' || author || ') x' || count(*) FROM databasechangelog "
-                + "GROUP BY id, author HAVING count(*) > 1 ORDER BY 1");
+        Field<String> id = DSL.field(DSL.name("id"), String.class);
+        Field<String> author = DSL.field(DSL.name("author"), String.class);
+        Field<String> label = DSL.concat(id, DSL.val(" ("), author, DSL.val(") x"),
+            DSL.count().cast(String.class));
+        return dsl(c).select(label)
+            .from(databaseChangeLog())
+            .groupBy(id, author)
+            .having(DSL.count().gt(1))
+            .orderBy(label)
+            .fetch(label);
     }
 
     /**
@@ -2023,12 +1854,7 @@ class SchemaRollbackRoundTripIntegrationTest {
     }
 
     private static int changelogRowCount(Connection c) throws Exception {
-        try (Statement st = c.createStatement();
-             ResultSet rs = st.executeQuery(
-                 "SELECT count(*) FROM databasechangelog")) {
-            rs.next();
-            return rs.getInt(1);
-        }
+        return dsl(c).selectCount().from(databaseChangeLog()).fetchOne(0, int.class);
     }
 
     private static List<String> tablesInSchema(Connection c, String schema) throws Exception {
@@ -2037,6 +1863,13 @@ class SchemaRollbackRoundTripIntegrationTest {
 
     // ── Container bootstrap (mirrors SchemaUpgradeRehearsalIntegrationTest) ──
 
+    // SANCTIONED RAW: bespoke admin/svc role bootstrap against a DEDICATED container
+    // (PgContainerHelper.startDedicated(), never applyProductSchema's role-001-created
+    // nexus_admin) -- CREATE ROLE / GRANT CREATE ON DATABASE|SCHEMA / GRANT pg_monitor
+    // WITH ADMIN OPTION are cluster-level DDL with no jOOQ typed-DSL form. Same class,
+    // same exclusion as SchemaMigratorIntegrationTest's own admin/svc role bootstrap
+    // (RawSqlGateTest's own javadoc names both as kept-raw-by-decision; batch 8's
+    // role-bootstrap fold explicitly excluded this file for the same reason).
     private static void dbaBootstrap(Connection su) throws Exception {
         su.setAutoCommit(true);
         su.createStatement().execute(
