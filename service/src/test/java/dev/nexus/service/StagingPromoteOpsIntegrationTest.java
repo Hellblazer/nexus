@@ -6,8 +6,16 @@ import dev.nexus.service.db.StagingPromoteOps;
 import dev.nexus.service.db.StagingPromoteOps.PromotePreconditionException;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
+import dev.nexus.service.jooq.binding.VectorBinding;
+import dev.nexus.service.vectors.DimTables;
+import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.JSONB;
 import org.jooq.SQLDialect;
+import org.jooq.Table;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
@@ -25,6 +33,7 @@ import java.time.OffsetDateTime;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -35,6 +44,9 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
+import static dev.nexus.service.jooq.nexus.Tables.FRECENCY;
+import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -130,6 +142,61 @@ class StagingPromoteOpsIntegrationTest {
         return Vector.of(new float[dim]);
     }
 
+    // ── staging.* fixed-shape typed handles (nexus-cbo4a batch 11) ───────────
+    // staging.* carries no generated jOOQ Table -- jOOQ codegen's <schemata>
+    // only covers nexus/t1 (staging is a typeless landing area, never a
+    // serving-path table) -- so every column below is a plain
+    // DSL.field(DSL.name(colName), ...) handle, the same house pattern
+    // StagingHandler/StagingPromoteOps/CatalogRepository already use for
+    // staging.* access (nexus-t76bp).
+
+    private static final Table<?> STAGING_CHUNKS = DSL.table(DSL.name("staging", "chunks"));
+    private static final Field<String> SC_TENANT_ID = DSL.field(DSL.name("tenant_id"), String.class);
+    private static final Field<String> SC_COLLECTION = DSL.field(DSL.name("collection"), String.class);
+    private static final Field<Integer> SC_DIM = DSL.field(DSL.name("dim"), Integer.class);
+    private static final Field<String> SC_LEGACY_REF = DSL.field(DSL.name("legacy_ref"), String.class);
+    private static final Field<String> SC_CHUNK_TEXT = DSL.field(DSL.name("chunk_text"), String.class);
+    private static final Field<Vector> SC_EMBEDDING = DSL.field(DSL.name("embedding"),
+        SQLDataType.OTHER.asConvertedDataType(new VectorBinding()));
+    private static final Field<String> SC_MODEL = DSL.field(DSL.name("model"), String.class);
+
+    private static final Table<?> STAGING_DOCUMENT_CHUNKS = DSL.table(DSL.name("staging", "document_chunks"));
+    private static final Field<String> SDC_TENANT_ID = DSL.field(DSL.name("tenant_id"), String.class);
+    private static final Field<String> SDC_DOC_ID = DSL.field(DSL.name("doc_id"), String.class);
+    private static final Field<Integer> SDC_POSITION = DSL.field(DSL.name("position"), Integer.class);
+    private static final Field<String> SDC_CHASH = DSL.field(DSL.name("chash"), String.class);
+
+    private static final Table<?> STAGING_FRECENCY = DSL.table(DSL.name("staging", "frecency"));
+    private static final Field<String> SF_TENANT_ID = DSL.field(DSL.name("tenant_id"), String.class);
+    private static final Field<String> SF_CHUNK_ID = DSL.field(DSL.name("chunk_id"), String.class);
+    private static final Field<Double> SF_FRECENCY_SCORE = DSL.field(DSL.name("frecency_score"), Double.class);
+
+    private static final Table<?> STAGING_DOCUMENT_ASPECTS = DSL.table(DSL.name("staging", "document_aspects"));
+    private static final Field<String> SDA_TENANT_ID = DSL.field(DSL.name("tenant_id"), String.class);
+    private static final Field<String> SDA_DOC_ID = DSL.field(DSL.name("doc_id"), String.class);
+    private static final Field<String> SDA_COLLECTION = DSL.field(DSL.name("collection"), String.class);
+    private static final Field<String> SDA_SOURCE_PATH = DSL.field(DSL.name("source_path"), String.class);
+    private static final Field<String> SDA_EXTRACTED_AT = DSL.field(DSL.name("extracted_at"), String.class);
+    private static final Field<String> SDA_MODEL_VERSION = DSL.field(DSL.name("model_version"), String.class);
+    private static final Field<String> SDA_EXTRACTOR_NAME = DSL.field(DSL.name("extractor_name"), String.class);
+    private static final Field<String> SDA_SOURCE_URI = DSL.field(DSL.name("source_uri"), String.class);
+    private static final Field<String> SDA_EXTRAS = DSL.field(DSL.name("extras"), String.class);
+
+    private static final Table<?> STAGING_TOPIC_ASSIGNMENTS = DSL.table(DSL.name("staging", "topic_assignments"));
+    private static final Field<String> STA_TENANT_ID = DSL.field(DSL.name("tenant_id"), String.class);
+    private static final Field<String> STA_DOC_ID = DSL.field(DSL.name("doc_id"), String.class);
+    private static final Field<Long> STA_TOPIC_ID = DSL.field(DSL.name("topic_id"), Long.class);
+    private static final Field<String> STA_TOPIC_LABEL = DSL.field(DSL.name("topic_label"), String.class);
+    private static final Field<String> STA_TOPIC_COLLECTION = DSL.field(DSL.name("topic_collection"), String.class);
+
+    /** {@code CHUNKS.embedding_<dim>} resolved by name (nexus-cbo4a batch 11) -- the
+     *  same {@code DimTables.embeddingColumn}-driven lookup {@code StagingPromoteOps}
+     *  itself uses to pick the dim-correct generated column. */
+    @SuppressWarnings("unchecked")
+    private static Field<Vector> embeddingColumn(int dim) {
+        return (Field<Vector>) CHUNKS.field(DimTables.embeddingColumn(dim));
+    }
+
     @BeforeAll
     void startAll() throws Exception {
         pg = PgContainerHelper.start();
@@ -157,18 +224,28 @@ class StagingPromoteOpsIntegrationTest {
     }
 
     private void landChunk(String coll, int dim, String ref, String text, String vecLit) {
+        Vector v = vecLit == null ? null : Vector.parse(vecLit);
         scope.withTenant(T1, ctx -> {
-            ctx.execute("INSERT INTO staging.chunks "
-                + "(tenant_id, collection, dim, legacy_ref, chunk_text, embedding, model) "
-                + "VALUES (?, ?, ?, ?, ?, " + (vecLit == null ? "NULL" : "'" + vecLit + "'::nexus.vector") + ", 'bge-768') "
-                + "ON CONFLICT (tenant_id, collection, legacy_ref) DO UPDATE SET chunk_text = excluded.chunk_text",
-                T1, coll, dim, ref, text);
+            ctx.insertInto(STAGING_CHUNKS, SC_TENANT_ID, SC_COLLECTION, SC_DIM, SC_LEGACY_REF, SC_CHUNK_TEXT,
+                           SC_EMBEDDING, SC_MODEL)
+               .values(T1, coll, dim, ref, text, v, "bge-768")
+               .onConflict(SC_TENANT_ID, SC_COLLECTION, SC_LEGACY_REF)
+               .doUpdate()
+               .set(SC_CHUNK_TEXT, DSL.excluded(SC_CHUNK_TEXT))
+               .execute();
             return null;
         });
     }
 
-    private int count(String sql) {
-        return scope.withTenant(T1, ctx -> ctx.fetchOne(sql).get(0, Integer.class));
+    /**
+     * Runs {@code query} against a T1-scoped {@link DSLContext} and returns its
+     * {@code int} result (nexus-cbo4a batch 11 -- retires the {@code count(String
+     * sql)} raw-SQL wrapper the same way {@code CatalogRenameCollectionTest}'s
+     * {@code rows(Connection, String)} was retired in batch 10: every call site now
+     * builds its own typed jOOQ query rather than a SQL-string literal).
+     */
+    private int count(Function<DSLContext, ? extends Number> query) {
+        return scope.withTenant(T1, ctx -> query.apply(ctx).intValue());
     }
 
     // nexus-o8dil.50: count() above is hardcoded to T1 -- every nexus.* table
@@ -178,8 +255,8 @@ class StagingPromoteOpsIntegrationTest {
     // (RLS filters before the WHERE clause is evaluated against visible
     // rows). The dim-coverage tests below run under T_DIM and need this
     // tenant-parameterized twin.
-    private int countAs(String tenant, String sql) {
-        return scope.withTenant(tenant, ctx -> ctx.fetchOne(sql).get(0, Integer.class));
+    private int countAs(String tenant, Function<DSLContext, ? extends Number> query) {
+        return scope.withTenant(tenant, ctx -> query.apply(ctx).intValue());
     }
 
     // ── Order 1: the full happy path, all three legacy widths ────────────────
@@ -205,15 +282,23 @@ class StagingPromoteOpsIntegrationTest {
         Map<String, Object> counts = ops.promoteCollection(T1, COLL_A, 768);
         assertThat(counts.get("promoted")).isEqualTo(3);
 
-        assertThat(count("SELECT count(*) FROM nexus.chunks "
-            + "WHERE collection = '" + COLL_A + "' AND octet_length(chash) = 32"))
+        assertThat(count(ctx -> ctx.selectCount().from(CHUNKS)
+            .where(CHUNKS.COLLECTION.eq(COLL_A))
+            // Field#octetLength() is a deprecated STRING-oriented convenience
+            // (casts to varchar first, per AbstractField#varchar()/#octetLength()) --
+            // wrong for a byte[]/bytea column. octet_length(bytea) needs the
+            // built-in Postgres function invoked directly against the raw field.
+            .and(DSL.function("octet_length", SQLDataType.INTEGER, CHUNKS.CHASH).eq(32))
+            .fetchOne(0, Integer.class)))
             .isEqualTo(3);
-        assertThat(count("SELECT count(*) FROM nexus.chunks "
-            + "WHERE collection = '" + COLL_A + "' AND encode(chash,'hex') = '"
-            + digestHex("sixteen char content") + "'")).isEqualTo(1);
-        assertThat(count("SELECT count(*) FROM nexus.chunks "
-            + "WHERE collection = '" + COLL_A + "' AND encode(chash,'hex') = '"
-            + digestHex(TEXT_1) + "'")).isEqualTo(1);
+        assertThat(count(ctx -> ctx.selectCount().from(CHUNKS)
+            .where(CHUNKS.COLLECTION.eq(COLL_A))
+            .and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(digestHex("sixteen char content"))))
+            .fetchOne(0, Integer.class))).isEqualTo(1);
+        assertThat(count(ctx -> ctx.selectCount().from(CHUNKS)
+            .where(CHUNKS.COLLECTION.eq(COLL_A))
+            .and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(digestHex(TEXT_1))))
+            .fetchOne(0, Integer.class))).isEqualTo(1);
         // RDR-086 metadata parity (--guided gate run 3 catch, nexus-
         // jxizy.10.10): serving-path writes stamp chunk_text_hash into
         // metadata client-side; the citation resolver's final hop
@@ -222,9 +307,11 @@ class StagingPromoteOpsIntegrationTest {
         // so promote stamps the digest hex at INSERT — a verbatim
         // chunk_meta copy leaves every migrated chunk invisible to
         // citations.
-        assertThat(count("SELECT count(*) FROM nexus.chunks "
-            + "WHERE collection = '" + COLL_A + "' "
-            + "AND metadata->>'chunk_text_hash' IS DISTINCT FROM encode(chash,'hex')"))
+        assertThat(count(ctx -> ctx.selectCount().from(CHUNKS)
+            .where(CHUNKS.COLLECTION.eq(COLL_A))
+            .and(DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "chunk_text_hash")
+                .isDistinctFrom(DSL.function("encode", String.class, CHUNKS.CHASH, DSL.val("hex"))))
+            .fetchOne(0, Integer.class)))
             .as("every promoted row's metadata chunk_text_hash mirrors its chash")
             .isEqualTo(0);
     }
@@ -245,8 +332,9 @@ class StagingPromoteOpsIntegrationTest {
         landChunk(COLL_A, 768, refY, TEXT_DUP, vec(768));
 
         ops.promoteCollection(T1, COLL_A, 768);
-        assertThat(count("SELECT count(*) FROM nexus.chunks "
-            + "WHERE encode(chash,'hex') = '" + digestHex(TEXT_DUP) + "'"))
+        assertThat(count(ctx -> ctx.selectCount().from(CHUNKS)
+            .where(CHUNKS.CHASH.eq(HexFormat.of().parseHex(digestHex(TEXT_DUP))))
+            .fetchOne(0, Integer.class)))
             .as("identical text collapses to ONE content row").isEqualTo(1);
     }
 
@@ -267,7 +355,7 @@ class StagingPromoteOpsIntegrationTest {
             .isInstanceOf(PromotePreconditionException.class)
             .hasMessageContaining("dim");
         scope.withTenant(T1, ctx -> {
-            ctx.execute("DELETE FROM staging.chunks WHERE collection = ?", COLL_B);
+            ctx.deleteFrom(STAGING_CHUNKS).where(SC_COLLECTION.eq(COLL_B)).execute();
             return null;
         });
     }
@@ -282,7 +370,7 @@ class StagingPromoteOpsIntegrationTest {
             .isInstanceOf(PromotePreconditionException.class)
             .hasMessageContaining("embedding");
         scope.withTenant(T1, ctx -> {
-            ctx.execute("DELETE FROM staging.chunks WHERE collection = ?", COLL_B);
+            ctx.deleteFrom(STAGING_CHUNKS).where(SC_COLLECTION.eq(COLL_B)).execute();
             return null;
         });
     }
@@ -303,17 +391,18 @@ class StagingPromoteOpsIntegrationTest {
     @Test
     @Order(7)
     void rePromoteAndReFinalize_convergeNeverDuplicate() {
-        int chunksBefore = count("SELECT count(*) FROM nexus.chunks");
-        int manifestBefore = count("SELECT count(*) FROM nexus.catalog_document_chunks");
-        int relevanceBefore = count("SELECT count(*) FROM nexus.relevance_log");
+        int chunksBefore = count(ctx -> ctx.selectCount().from(CHUNKS).fetchOne(0, Integer.class));
+        int manifestBefore = count(ctx -> ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS).fetchOne(0, Integer.class));
+        int relevanceBefore = count(ctx -> ctx.selectCount().from(RELEVANCE_LOG).fetchOne(0, Integer.class));
 
         Map<String, Object> again = ops.promoteCollection(T1, COLL_A, 768);
         assertThat(again.get("promoted")).as("re-promote inserts nothing").isEqualTo(0);
         ops.finalizeTenant(T1, false);
 
-        assertThat(count("SELECT count(*) FROM nexus.chunks")).isEqualTo(chunksBefore);
-        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks")).isEqualTo(manifestBefore);
-        assertThat(count("SELECT count(*) FROM nexus.relevance_log"))
+        assertThat(count(ctx -> ctx.selectCount().from(CHUNKS).fetchOne(0, Integer.class))).isEqualTo(chunksBefore);
+        assertThat(count(ctx -> ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS).fetchOne(0, Integer.class)))
+            .isEqualTo(manifestBefore);
+        assertThat(count(ctx -> ctx.selectCount().from(RELEVANCE_LOG).fetchOne(0, Integer.class)))
             .as("the anti-join dedupe holds for the BIGSERIAL store").isEqualTo(relevanceBefore);
     }
 
@@ -329,9 +418,10 @@ class StagingPromoteOpsIntegrationTest {
         // row cannot be created by finalize.
         String ghost = digestHex("content that never landed anywhere");
         scope.withTenant(T1, ctx -> {
-            ctx.execute("INSERT INTO staging.document_chunks "
-                + "(tenant_id, doc_id, position, chash) VALUES (?, '1.1.1', 7, ?) "
-                + "ON CONFLICT DO NOTHING", T1, ghost);
+            ctx.insertInto(STAGING_DOCUMENT_CHUNKS, SDC_TENANT_ID, SDC_DOC_ID, SDC_POSITION, SDC_CHASH)
+               .values(T1, "1.1.1", 7, ghost)
+               .onConflictDoNothing()
+               .execute();
             return null;
         });
         Map<String, Object> fin = ops.finalizeTenant(T1, false);
@@ -339,11 +429,12 @@ class StagingPromoteOpsIntegrationTest {
             .as("the ghost pointer is counted unresolved, not promoted")
             .isGreaterThanOrEqualTo(1);
         assertThat(fin.get("dangling_manifest")).isEqualTo(0);
-        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
-            + "WHERE encode(chash,'hex') = '" + ghost + "'"))
+        assertThat(count(ctx -> ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+            .where(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(HexFormat.of().parseHex(ghost)))
+            .fetchOne(0, Integer.class)))
             .as("no dangling manifest row was created").isEqualTo(0);
         scope.withTenant(T1, ctx -> {
-            ctx.execute("DELETE FROM staging.document_chunks WHERE position = 7");
+            ctx.deleteFrom(STAGING_DOCUMENT_CHUNKS).where(SDC_POSITION.eq(7)).execute();
             return null;
         });
     }
@@ -365,17 +456,19 @@ class StagingPromoteOpsIntegrationTest {
                .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
                .doNothing()
                .execute();
-            ctx.execute("INSERT INTO staging.document_chunks "
-                + "(tenant_id, doc_id, position, chash) VALUES (?, '5.5.5', 0, ?) "
-                + "ON CONFLICT DO NOTHING", T1, ghost);
+            ctx.insertInto(STAGING_DOCUMENT_CHUNKS, SDC_TENANT_ID, SDC_DOC_ID, SDC_POSITION, SDC_CHASH)
+               .values(T1, "5.5.5", 0, ghost)
+               .onConflictDoNothing()
+               .execute();
             return null;
         });
         Map<String, Object> fin = ops.finalizeTenant(T1, false);
         assertThat(((Number) fin.get("chunk_count_resynced")).intValue())
             .as("the verbatim-imported count (3) must resync to the promoted rows (0)")
             .isGreaterThanOrEqualTo(1);
-        assertThat(count("SELECT chunk_count FROM nexus.catalog_documents "
-            + "WHERE tumbler = '5.5.5'"))
+        assertThat(count(ctx -> ctx.select(CATALOG_DOCUMENTS.CHUNK_COUNT).from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TUMBLER.eq("5.5.5"))
+            .fetchOne(0, Integer.class)))
             .as("never trust the verbatim-imported count").isEqualTo(0);
         @SuppressWarnings("unchecked")
         List<String> titles = (List<String>) fin.get("unresolved_knowledge_titles");
@@ -383,8 +476,8 @@ class StagingPromoteOpsIntegrationTest {
             .as("the store_put-origin doc must be surfaced BY TITLE")
             .contains("orphaned-note-title");
         scope.withTenant(T1, ctx -> {
-            ctx.execute("DELETE FROM staging.document_chunks WHERE doc_id = '5.5.5'");
-            ctx.execute("DELETE FROM nexus.catalog_documents WHERE tumbler = '5.5.5'");
+            ctx.deleteFrom(STAGING_DOCUMENT_CHUNKS).where(SDC_DOC_ID.eq("5.5.5")).execute();
+            ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.TUMBLER.eq("5.5.5")).execute();
             return null;
         });
     }
@@ -422,19 +515,16 @@ class StagingPromoteOpsIntegrationTest {
         // again (unvalidated) afterward.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+            PgContainerHelper.dropConstraint(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk");
             DSL.using(su, SQLDialect.POSTGRES)
                .insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                            CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
                            CATALOG_DOCUMENT_CHUNKS.COLLECTION)
                .values(T1, "1.1.1", 88, HexFormat.of().parseHex(ghost), COLL_A)
                .execute();
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks "
-                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
-                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+            PgContainerHelper.addFkNotValidComposite3(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk",
+                "collection", "chash", CHUNKS, "collection", "chash",
+                "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
         }
         try {
             org.assertj.core.api.Assertions.assertThatThrownBy(() -> ops.finalizeTenant(T1, false))
@@ -443,26 +533,23 @@ class StagingPromoteOpsIntegrationTest {
         } finally {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                su.createStatement().execute(
-                    "DELETE FROM nexus.catalog_document_chunks WHERE position = 88");
+                DSL.using(su, SQLDialect.POSTGRES)
+                   .deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.POSITION.eq(88)).execute();
             }
         }
         // And the census backstop sees the same class independently.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+            PgContainerHelper.dropConstraint(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk");
             DSL.using(su, SQLDialect.POSTGRES)
                .insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                            CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
                            CATALOG_DOCUMENT_CHUNKS.COLLECTION)
                .values(T1, "1.1.1", 89, HexFormat.of().parseHex(ghost), COLL_A)
                .execute();
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks "
-                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
-                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+            PgContainerHelper.addFkNotValidComposite3(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk",
+                "collection", "chash", CHUNKS, "collection", "chash",
+                "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
         }
         try {
             Map<String, Integer> residue = scope.withTenant(T1, ctx ->
@@ -471,8 +558,8 @@ class StagingPromoteOpsIntegrationTest {
         } finally {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                su.createStatement().execute(
-                    "DELETE FROM nexus.catalog_document_chunks WHERE position = 89");
+                DSL.using(su, SQLDialect.POSTGRES)
+                   .deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.POSITION.eq(89)).execute();
             }
         }
     }
@@ -490,20 +577,25 @@ class StagingPromoteOpsIntegrationTest {
         // THE missed-leg killer proof (Hal directive): seed legacy residue in
         // a NOVEL column no hand list has ever named — the census must find
         // it with zero code changes.
+        // nexus.census_canary: CREATEd ad hoc by this test method (immediately below)
+        // and DROPped again below; it is not part of the real product schema and so,
+        // like the staging.* tables, carries no generated jOOQ Table -- built via
+        // jOOQ's typed CREATE TABLE/GRANT/DROP TABLE DDL API instead (nexus-cbo4a
+        // batch 11), never a raw SQL string.
+        Table<?> censusCanary = DSL.table(DSL.name("nexus", "census_canary"));
+        Field<String> ccTenantId = DSL.field(DSL.name("tenant_id"), String.class);
+        Field<String> ccMysteryRef = DSL.field(DSL.name("mystery_ref"), String.class);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "CREATE TABLE nexus.census_canary (tenant_id TEXT NOT NULL DEFAULT '', "
-                + "mystery_ref TEXT)");
-            su.createStatement().execute(
-                "GRANT SELECT ON nexus.census_canary TO " + SVC_ROLE);
-            // nexus.census_canary: SANCTIONED RAW (nexus-cbo4a batch 4) -- this table is
-            // CREATEd ad hoc by this test method (immediately above) and DROPped again
-            // below; it is not part of the real product schema and so, like the staging.*
-            // tables, carries no generated jOOQ Table to build a typed insert from.
-            su.createStatement().execute(
-                "INSERT INTO nexus.census_canary (tenant_id, mystery_ref) "
-                + "VALUES ('" + T1 + "', '0123456789abcdef0123456789abcdef')");
+            DSLContext suCtx = DSL.using(su, SQLDialect.POSTGRES);
+            suCtx.createTable(censusCanary)
+                 .column(ccTenantId, SQLDataType.CLOB.nullable(false).defaultValue(""))
+                 .column(ccMysteryRef, SQLDataType.CLOB)
+                 .execute();
+            suCtx.grant(DSL.privilege("SELECT")).on(censusCanary).to(DSL.role(SVC_ROLE)).execute();
+            suCtx.insertInto(censusCanary, ccTenantId, ccMysteryRef)
+                 .values(T1, "0123456789abcdef0123456789abcdef")
+                 .execute();
         }
         try {
             Map<String, Integer> residue = scope.withTenant(T1, ctx ->
@@ -515,7 +607,7 @@ class StagingPromoteOpsIntegrationTest {
         } finally {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                su.createStatement().execute("DROP TABLE nexus.census_canary");
+                DSL.using(su, SQLDialect.POSTGRES).dropTable(censusCanary).execute();
             }
         }
         // Post-cleanup the migrated store scans clean.
@@ -541,17 +633,22 @@ class StagingPromoteOpsIntegrationTest {
         String lateCanon = digestHex(lateText);
         landChunk(COLL_LATE, 768, lateRef, lateText, vec(768));
         scope.withTenant(T1, ctx -> {
-            ctx.execute("INSERT INTO staging.frecency (tenant_id, chunk_id, frecency_score) "
-                + "VALUES (?, ?, 3.25) ON CONFLICT DO NOTHING", T1, lateCanon);
+            ctx.insertInto(STAGING_FRECENCY, SF_TENANT_ID, SF_CHUNK_ID, SF_FRECENCY_SCORE)
+               .values(T1, lateCanon, 3.25)
+               .onConflictDoNothing()
+               .execute();
             return null;
         });
 
         ops.promoteCollection(T1, COLL_LATE, 768);
         Map<String, Object> fin = ops.finalizeTenant(T1, false);
 
-        assertThat(count("SELECT count(*) FROM nexus.chunks "
-            + "WHERE encode(chash,'hex') = '" + lateCanon + "'")).isEqualTo(1);
-        assertThat(count("SELECT count(*) FROM nexus.frecency WHERE chunk_id = '" + lateCanon + "'"))
+        assertThat(count(ctx -> ctx.selectCount().from(CHUNKS)
+            .where(CHUNKS.CHASH.eq(HexFormat.of().parseHex(lateCanon)))
+            .fetchOne(0, Integer.class))).isEqualTo(1);
+        assertThat(count(ctx -> ctx.selectCount().from(FRECENCY)
+            .where(FRECENCY.CHUNK_ID.eq(lateCanon))
+            .fetchOne(0, Integer.class)))
             .as("the late collection's pointer promoted on the RE-run — 'exactly once' is dead (C2)")
             .isEqualTo(1);
         assertThat(fin.get("residual_mismatched")).isEqualTo(0);
@@ -611,17 +708,22 @@ class StagingPromoteOpsIntegrationTest {
     }
 
     /** Hand-drives {@code CatalogRepository.acquireSweepGateExclusive}'s exact
-     *  SQL shape on a raw connection, for tests needing manual transaction control. */
-    private static void acquireGateExclusive(Connection conn, String tenant, String collection, int lockTimeoutMs)
-            throws SQLException {
-        try (var ps = conn.prepareStatement("SELECT set_config('lock_timeout', ?, true)")) {
-            ps.setString(1, String.valueOf(lockTimeoutMs));
-            ps.execute();
-        }
-        try (var ps = conn.prepareStatement("SELECT pg_advisory_xact_lock(hashtext(?))")) {
-            ps.setString(1, "sweepgate:" + tenant + "/" + collection);
-            ps.execute();
-        }
+     *  advisory-lock shape on a raw connection (nexus-cbo4a batch 11: the same
+     *  {@code DSL.function("pg_advisory_xact_lock"/"hashtext"/"set_config", ...)}
+     *  idiom {@code StagingPromoteOps.promoteCollection}/{@code PgContainerHelper
+     *  .setTenant} already use for these built-in Postgres functions), for tests
+     *  needing manual transaction control. A blocked acquire surfaces as jOOQ's
+     *  {@link DataAccessException} wrapping the driver's {@link SQLException}
+     *  (unwrap via {@code getCause()}), never a bare {@link SQLException} -- the
+     *  same wrapper shape {@code addFkNotValid}'s callers already accept. */
+    private static void acquireGateExclusive(Connection conn, String tenant, String collection, int lockTimeoutMs) {
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        ctx.select(DSL.function("set_config", SQLDataType.VARCHAR,
+                DSL.val("lock_timeout"), DSL.val(String.valueOf(lockTimeoutMs)), DSL.val(true)))
+           .fetch();
+        ctx.select(DSL.function("pg_advisory_xact_lock", Object.class,
+                DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + tenant + "/" + collection))))
+           .fetch();
     }
 
     @Test
@@ -642,9 +744,10 @@ class StagingPromoteOpsIntegrationTest {
                .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
                .doNothing()
                .execute();
-            ctx.execute("INSERT INTO staging.document_chunks "
-                + "(tenant_id, doc_id, position, chash) VALUES (?, 'gate-doc-1', 0, ?) "
-                + "ON CONFLICT DO NOTHING", T1, canonical);
+            ctx.insertInto(STAGING_DOCUMENT_CHUNKS, SDC_TENANT_ID, SDC_DOC_ID, SDC_POSITION, SDC_CHASH)
+               .values(T1, "gate-doc-1", 0, canonical)
+               .onConflictDoNothing()
+               .execute();
             return null;
         });
 
@@ -676,8 +779,10 @@ class StagingPromoteOpsIntegrationTest {
             }
         }
 
-        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
-            + "WHERE doc_id = 'gate-doc-1' AND encode(chash,'hex') = '" + canonical + "'"))
+        assertThat(count(ctx -> ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+            .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("gate-doc-1"))
+            .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(HexFormat.of().parseHex(canonical)))
+            .fetchOne(0, Integer.class)))
             .as("the manifest row landed once the gate was released").isEqualTo(1);
     }
 
@@ -689,12 +794,14 @@ class StagingPromoteOpsIntegrationTest {
     private static final String COLL_GATE2 = "knowledge__kgate2__bge-base-en-v15-768__v1";
 
     /** Hand-drives {@code CatalogRepository.acquireSweepGateShared}'s exact
-     *  SQL shape on a raw connection, for tests needing manual transaction control. */
-    private static void acquireGateShared(Connection conn, String tenant, String collection) throws SQLException {
-        try (var ps = conn.prepareStatement("SELECT pg_advisory_xact_lock_shared(hashtext(?))")) {
-            ps.setString(1, "sweepgate:" + tenant + "/" + collection);
-            ps.execute();
-        }
+     *  advisory-lock shape on a raw connection (nexus-cbo4a batch 11 -- same
+     *  {@code DSL.function} idiom as {@link #acquireGateExclusive}), for tests
+     *  needing manual transaction control. */
+    private static void acquireGateShared(Connection conn, String tenant, String collection) {
+        DSL.using(conn, SQLDialect.POSTGRES)
+           .select(DSL.function("pg_advisory_xact_lock_shared", Object.class,
+               DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + tenant + "/" + collection))))
+           .fetch();
     }
 
     @Test
@@ -773,15 +880,17 @@ class StagingPromoteOpsIntegrationTest {
             assertThatThrownBy(() -> acquireGateExclusive(connB, T1, col, 1000))
                 .as("a concurrent unrelated document's sweep must be refused the gate while "
                     + "promoteCollection's content-insert transaction holds it SHARED")
-                .isInstanceOf(SQLException.class)
-                .satisfies(e -> assertThat(((SQLException) e).getSQLState()).isEqualTo("55P03"));
+                .isInstanceOf(DataAccessException.class)
+                .satisfies(e -> assertThat(((SQLException) e.getCause()).getSQLState()).isEqualTo("55P03"));
             connB.rollback();
 
             connA.commit();
         }
 
-        assertThat(count("SELECT count(*) FROM nexus.chunks WHERE collection = '" + col
-            + "' AND encode(chash,'hex') = '" + chash + "'"))
+        assertThat(count(ctx -> ctx.selectCount().from(CHUNKS)
+            .where(CHUNKS.COLLECTION.eq(col))
+            .and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(chash)))
+            .fetchOne(0, Integer.class)))
             .as("the freshly-landed row survives the race and is ready for finalizeTenant "
                 + "to manifest later").isEqualTo(1);
     }
@@ -819,12 +928,14 @@ class StagingPromoteOpsIntegrationTest {
                .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
                .doNothing()
                .execute();
-            ctx.execute("INSERT INTO staging.document_chunks "
-                + "(tenant_id, doc_id, position, chash) VALUES (?, 'multi-doc-a', 0, ?) "
-                + "ON CONFLICT DO NOTHING", T1, chashA);
-            ctx.execute("INSERT INTO staging.document_chunks "
-                + "(tenant_id, doc_id, position, chash) VALUES (?, 'multi-doc-b', 0, ?) "
-                + "ON CONFLICT DO NOTHING", T1, chashB);
+            ctx.insertInto(STAGING_DOCUMENT_CHUNKS, SDC_TENANT_ID, SDC_DOC_ID, SDC_POSITION, SDC_CHASH)
+               .values(T1, "multi-doc-a", 0, chashA)
+               .onConflictDoNothing()
+               .execute();
+            ctx.insertInto(STAGING_DOCUMENT_CHUNKS, SDC_TENANT_ID, SDC_DOC_ID, SDC_POSITION, SDC_CHASH)
+               .values(T1, "multi-doc-b", 0, chashB)
+               .onConflictDoNothing()
+               .execute();
             return null;
         });
 
@@ -854,10 +965,14 @@ class StagingPromoteOpsIntegrationTest {
             }
         }
 
-        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
-            + "WHERE doc_id = 'multi-doc-a' AND encode(chash,'hex') = '" + chashA + "'")).isEqualTo(1);
-        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
-            + "WHERE doc_id = 'multi-doc-b' AND encode(chash,'hex') = '" + chashB + "'")).isEqualTo(1);
+        assertThat(count(ctx -> ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+            .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("multi-doc-a"))
+            .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(HexFormat.of().parseHex(chashA)))
+            .fetchOne(0, Integer.class))).isEqualTo(1);
+        assertThat(count(ctx -> ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+            .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("multi-doc-b"))
+            .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(HexFormat.of().parseHex(chashB)))
+            .fetchOne(0, Integer.class))).isEqualTo(1);
     }
 
     // nexus-lgdel.l1: Order 24
@@ -903,8 +1018,10 @@ class StagingPromoteOpsIntegrationTest {
         // The CONTENT insert's own stamp — this is the "same source the
         // content insert uses" the bead's acceptance criterion names; a
         // regression pin that promoteCollection's content leg still sets it.
-        assertThat(count("SELECT count(*) FROM nexus.chunks "
-            + "WHERE collection = '" + COLL_F12B + "' AND encode(chash,'hex') = '" + canonical + "'"))
+        assertThat(count(ctx -> ctx.selectCount().from(CHUNKS)
+            .where(CHUNKS.COLLECTION.eq(COLL_F12B))
+            .and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(canonical)))
+            .fetchOne(0, Integer.class)))
             .as("regression pin: the CONTENT insert (StagingPromoteOps :410-435) "
                 + "must be left untouched by this fix — it already stamps collection")
             .isEqualTo(1);
@@ -916,18 +1033,21 @@ class StagingPromoteOpsIntegrationTest {
                .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
                .doNothing()
                .execute();
-            ctx.execute("INSERT INTO staging.document_chunks "
-                + "(tenant_id, doc_id, position, chash) VALUES (?, 'f12b-doc', 0, ?) "
-                + "ON CONFLICT DO NOTHING", T1, canonical);
+            ctx.insertInto(STAGING_DOCUMENT_CHUNKS, SDC_TENANT_ID, SDC_DOC_ID, SDC_POSITION, SDC_CHASH)
+               .values(T1, "f12b-doc", 0, canonical)
+               .onConflictDoNothing()
+               .execute();
             return null;
         });
 
         Map<String, Object> fin = ops.finalizeTenant(T1, false);
         assertThat(fin.get("manifest_promoted")).isEqualTo(1);
 
-        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
-            + "WHERE doc_id = 'f12b-doc' AND encode(chash,'hex') = '" + canonical + "' "
-            + "AND collection = '" + COLL_F12B + "'"))
+        assertThat(count(ctx -> ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+            .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("f12b-doc"))
+            .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(HexFormat.of().parseHex(canonical)))
+            .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(COLL_F12B))
+            .fetchOne(0, Integer.class)))
             .as("F12b: the finalize manifest INSERT must stamp collection from the "
                 + "owning document's physical_collection, the same caller-supplied-"
                 + "collection contract every live writer now follows — a partial-"
@@ -957,9 +1077,10 @@ class StagingPromoteOpsIntegrationTest {
         String doc = "g6-not-registered";
         String chash = digestHex("g6 unregistered doc content " + System.nanoTime());
         scope.withTenant(T1, ctx -> {
-            ctx.execute("INSERT INTO staging.document_chunks "
-                + "(tenant_id, doc_id, position, chash) VALUES (?, ?, 0, ?) "
-                + "ON CONFLICT DO NOTHING", T1, doc, chash);
+            ctx.insertInto(STAGING_DOCUMENT_CHUNKS, SDC_TENANT_ID, SDC_DOC_ID, SDC_POSITION, SDC_CHASH)
+               .values(T1, doc, 0, chash)
+               .onConflictDoNothing()
+               .execute();
             return null;
         });
 
@@ -981,7 +1102,9 @@ class StagingPromoteOpsIntegrationTest {
         assertThat(((Number) fin.get("manifest_doc_not_registered")).intValue())
             .as("the unregistered doc_id is counted")
             .isGreaterThanOrEqualTo(1);
-        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks WHERE doc_id = '" + doc + "'"))
+        assertThat(count(ctx -> ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+            .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(doc))
+            .fetchOne(0, Integer.class)))
             .as("no manifest row is fabricated for a doc that was never registered")
             .isEqualTo(0);
 
@@ -998,7 +1121,9 @@ class StagingPromoteOpsIntegrationTest {
             .contains("count=" + fin.get("manifest_doc_not_registered"));
 
         scope.withTenant(T1, ctx -> {
-            ctx.execute("DELETE FROM staging.document_chunks WHERE tenant_id = ? AND doc_id = ?", T1, doc);
+            ctx.deleteFrom(STAGING_DOCUMENT_CHUNKS)
+               .where(SDC_TENANT_ID.eq(T1)).and(SDC_DOC_ID.eq(doc))
+               .execute();
             return null;
         });
     }
@@ -1037,16 +1162,19 @@ class StagingPromoteOpsIntegrationTest {
         assertThat(ops.promoteCollection(T1, COLL_G6, 768).get("promoted")).isEqualTo(1);
 
         scope.withTenant(T1, ctx -> {
-            ctx.execute("INSERT INTO staging.document_chunks "
-                + "(tenant_id, doc_id, position, chash) VALUES (?, ?, 0, ?) "
-                + "ON CONFLICT DO NOTHING", T1, doc, newCanonical);
+            ctx.insertInto(STAGING_DOCUMENT_CHUNKS, SDC_TENANT_ID, SDC_DOC_ID, SDC_POSITION, SDC_CHASH)
+               .values(T1, doc, 0, newCanonical)
+               .onConflictDoNothing()
+               .execute();
             return null;
         });
 
         ops.finalizeTenant(T1, false);
-        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
-            + "WHERE doc_id = '" + doc + "' AND encode(chash,'hex') = '" + newCanonical + "' "
-            + "AND collection = '" + COLL_G6 + "'"))
+        assertThat(count(ctx -> ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+            .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(doc))
+            .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(HexFormat.of().parseHex(newCanonical)))
+            .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(COLL_G6))
+            .fetchOne(0, Integer.class)))
             .as("RDR-191: the manifest row is stamped from the document's own "
                 + "physical_collection, unconditionally")
             .isEqualTo(1);
@@ -1101,9 +1229,10 @@ class StagingPromoteOpsIntegrationTest {
         assertThat(ops.promoteCollection(T1, collZ, 768).get("promoted")).isEqualTo(1);
 
         scope.withTenant(T1, ctx -> {
-            ctx.execute("INSERT INTO staging.document_chunks "
-                + "(tenant_id, doc_id, position, chash) VALUES (?, ?, 1, ?) "
-                + "ON CONFLICT DO NOTHING", T1, doc, canonical);
+            ctx.insertInto(STAGING_DOCUMENT_CHUNKS, SDC_TENANT_ID, SDC_DOC_ID, SDC_POSITION, SDC_CHASH)
+               .values(T1, doc, 1, canonical)
+               .onConflictDoNothing()
+               .execute();
             return null;
         });
 
@@ -1122,14 +1251,17 @@ class StagingPromoteOpsIntegrationTest {
             logs.stop();
         }
 
-        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
-            + "WHERE doc_id = '" + doc + "' AND encode(chash,'hex') = '" + canonical + "'"))
+        assertThat(count(ctx -> ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+            .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(doc))
+            .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(HexFormat.of().parseHex(canonical)))
+            .fetchOne(0, Integer.class)))
             .as("RDR-191: an empty physical_collection blocks the manifest "
                 + "row even though the chash is genuinely resolvable -- "
                 + "resolvability was never the gate")
             .isEqualTo(0);
-        assertThat(count("SELECT count(*) FROM staging.document_chunks "
-            + "WHERE tenant_id = '" + T1 + "' AND doc_id = '" + doc + "' AND position = 1"))
+        assertThat(count(ctx -> ctx.selectCount().from(STAGING_DOCUMENT_CHUNKS)
+            .where(SDC_TENANT_ID.eq(T1)).and(SDC_DOC_ID.eq(doc)).and(SDC_POSITION.eq(1))
+            .fetchOne(0, Integer.class)))
             .as("an unresolved row is never consumed from staging -- it stays "
                 + "available for a future finalize")
             .isEqualTo(1);
@@ -1153,7 +1285,9 @@ class StagingPromoteOpsIntegrationTest {
             .contains("count=" + fin.get("manifest_doc_no_collection"));
 
         scope.withTenant(T1, ctx -> {
-            ctx.execute("DELETE FROM staging.document_chunks WHERE tenant_id = ? AND doc_id = ?", T1, doc);
+            ctx.deleteFrom(STAGING_DOCUMENT_CHUNKS)
+               .where(SDC_TENANT_ID.eq(T1)).and(SDC_DOC_ID.eq(doc))
+               .execute();
             return null;
         });
     }
@@ -1214,11 +1348,12 @@ class StagingPromoteOpsIntegrationTest {
         // orphanCond requires no non-empty sibling row sharing the ref
         // (fresh ref here, so it holds).
         scope.withTenant(T_DIM, ctx -> {
-            ctx.execute("INSERT INTO staging.chunks "
-                + "(tenant_id, collection, dim, legacy_ref, chunk_text, embedding, model) "
-                + "VALUES (?, ?, ?, ?, '', '" + vec(dim) + "'::nexus.vector, 'model-" + dim + "') "
-                + "ON CONFLICT (tenant_id, collection, legacy_ref) DO NOTHING",
-                T_DIM, coll, dim, legacyRef);
+            ctx.insertInto(STAGING_CHUNKS, SC_TENANT_ID, SC_COLLECTION, SC_DIM, SC_LEGACY_REF, SC_CHUNK_TEXT,
+                           SC_EMBEDDING, SC_MODEL)
+               .values(T_DIM, coll, dim, legacyRef, "", zeroVector(dim), "model-" + dim)
+               .onConflict(SC_TENANT_ID, SC_COLLECTION, SC_LEGACY_REF)
+               .doNothing()
+               .execute();
             return null;
         });
 
@@ -1250,19 +1385,23 @@ class StagingPromoteOpsIntegrationTest {
         // this is the actual regression a09e6b486 fixed: the orphan-
         // synthesize INSERT choosing the wrong embedding column, not the
         // wrong physical table).
-        assertThat(countAs(T_DIM, "SELECT count(*) FROM nexus.chunks c "
-            + "WHERE c.tenant_id = '" + T_DIM + "' AND encode(c.chash, 'hex') = '" + synthChashHex + "' "
-            + "AND c.chunk_text = '' "
-            + "AND c.metadata->>'chash_origin' = 'synthetic' "
-            + "AND c.embedding_" + dim + " IS NOT NULL"))
+        assertThat(countAs(T_DIM, ctx -> ctx.selectCount().from(CHUNKS)
+            .where(CHUNKS.TENANT_ID.eq(T_DIM))
+            .and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(synthChashHex)))
+            .and(CHUNKS.CHUNK_TEXT.eq(""))
+            .and(DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "chash_origin").eq("synthetic"))
+            .and(embeddingColumn(dim).isNotNull())
+            .fetchOne(0, Integer.class)))
             .as("dim " + dim + ": the surrogate content row landed with the "
                 + "synthetic stamp AND its vector in the dim-correct column")
             .isEqualTo(1);
         for (int other : new int[] {384, 768, 1024}) {
             if (other == dim) continue;
-            assertThat(countAs(T_DIM, "SELECT count(*) FROM nexus.chunks c "
-                + "WHERE c.tenant_id = '" + T_DIM + "' AND encode(c.chash, 'hex') = '" + synthChashHex + "' "
-                + "AND c.embedding_" + other + " IS NOT NULL"))
+            assertThat(countAs(T_DIM, ctx -> ctx.selectCount().from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(T_DIM))
+                .and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(synthChashHex)))
+                .and(embeddingColumn(other).isNotNull())
+                .fetchOne(0, Integer.class)))
                 .as("dim " + dim + ": no cross-dim leakage into embedding_" + other)
                 .isEqualTo(0);
         }
@@ -1335,11 +1474,11 @@ class StagingPromoteOpsIntegrationTest {
                .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
                .doNothing()
                .execute();
-            ctx.execute("INSERT INTO staging.document_aspects "
-                + "(tenant_id, doc_id, collection, source_path, extracted_at, model_version, "
-                + "extractor_name, source_uri, extras) VALUES (?, ?, ?, ?, '', 'v1', 'ex', ?, ?)",
-                T1, doc, ASPECTS_PROMOTE_COLL, "aspects-promote-json.pdf",
-                "file:///aspects-promote-json.pdf", "{\"venue\": \"VLDB\", \"year\": \"2023\"}");
+            ctx.insertInto(STAGING_DOCUMENT_ASPECTS, SDA_TENANT_ID, SDA_DOC_ID, SDA_COLLECTION, SDA_SOURCE_PATH,
+                           SDA_EXTRACTED_AT, SDA_MODEL_VERSION, SDA_EXTRACTOR_NAME, SDA_SOURCE_URI, SDA_EXTRAS)
+               .values(T1, doc, ASPECTS_PROMOTE_COLL, "aspects-promote-json.pdf", "", "v1", "ex",
+                       "file:///aspects-promote-json.pdf", "{\"venue\": \"VLDB\", \"year\": \"2023\"}")
+               .execute();
             return null;
         });
 
@@ -1348,10 +1487,13 @@ class StagingPromoteOpsIntegrationTest {
             .as("the staged document_aspects row must promote (anti-join sees a new row)")
             .isEqualTo(1);
 
-        String extrasText = scope.withTenant(T1, ctx -> ctx.fetchOne(
-            "SELECT extras::text FROM nexus.document_aspects "
-            + "WHERE tenant_id = ? AND collection = ? AND source_path = ?",
-            T1, ASPECTS_PROMOTE_COLL, "aspects-promote-json.pdf").get(0, String.class));
+        JSONB extrasJsonb = scope.withTenant(T1, ctx -> ctx.select(DOCUMENT_ASPECTS.EXTRAS)
+            .from(DOCUMENT_ASPECTS)
+            .where(DOCUMENT_ASPECTS.TENANT_ID.eq(T1))
+            .and(DOCUMENT_ASPECTS.COLLECTION.eq(ASPECTS_PROMOTE_COLL))
+            .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq("aspects-promote-json.pdf"))
+            .fetchOne(DOCUMENT_ASPECTS.EXTRAS));
+        String extrasText = extrasJsonb.data();
         try {
             var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
             @SuppressWarnings("unchecked")
@@ -1388,10 +1530,10 @@ class StagingPromoteOpsIntegrationTest {
                .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
                .doNothing()
                .execute();
-            ctx.execute("INSERT INTO staging.document_aspects "
-                + "(tenant_id, doc_id, collection, source_path, extracted_at, model_version, "
-                + "extractor_name, extras) VALUES (?, ?, ?, ?, '', 'v1', 'ex', ?)",
-                T1, doc, coll, "aspects-promote-malformed.pdf", "not-json-at-all");
+            ctx.insertInto(STAGING_DOCUMENT_ASPECTS, SDA_TENANT_ID, SDA_DOC_ID, SDA_COLLECTION, SDA_SOURCE_PATH,
+                           SDA_EXTRACTED_AT, SDA_MODEL_VERSION, SDA_EXTRACTOR_NAME, SDA_EXTRAS)
+               .values(T1, doc, coll, "aspects-promote-malformed.pdf", "", "v1", "ex", "not-json-at-all")
+               .execute();
             return null;
         });
 
@@ -1400,8 +1542,10 @@ class StagingPromoteOpsIntegrationTest {
             .isInstanceOf(RuntimeException.class)
             .hasMessageContaining("json");
 
-        int landed = count("SELECT count(*) FROM nexus.document_aspects "
-            + "WHERE collection = '" + coll + "' AND source_path = 'aspects-promote-malformed.pdf'");
+        int landed = count(ctx -> ctx.selectCount().from(DOCUMENT_ASPECTS)
+            .where(DOCUMENT_ASPECTS.COLLECTION.eq(coll))
+            .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq("aspects-promote-malformed.pdf"))
+            .fetchOne(0, Integer.class));
         assertThat(landed).as("the malformed row must NOT have landed in nexus.document_aspects")
             .isEqualTo(0);
 
@@ -1410,7 +1554,7 @@ class StagingPromoteOpsIntegrationTest {
         // scenario's staged row so no later finalize run would keep re-attempting
         // (and re-failing on) it.
         scope.withTenant(T1, ctx -> {
-            ctx.execute("DELETE FROM staging.document_aspects WHERE collection = ?", coll);
+            ctx.deleteFrom(STAGING_DOCUMENT_ASPECTS).where(SDA_COLLECTION.eq(coll)).execute();
             return null;
         });
     }
@@ -1439,10 +1583,11 @@ class StagingPromoteOpsIntegrationTest {
                .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
                .doNothing()
                .execute();
-            ctx.execute("INSERT INTO staging.topic_assignments "
-                + "(tenant_id, doc_id, topic_id, topic_label, topic_collection) "
-                + "VALUES (?, ?, 999999, 'reject-topic', ?) ON CONFLICT DO NOTHING",
-                T_REJECT, badDocId, COLL_A);
+            ctx.insertInto(STAGING_TOPIC_ASSIGNMENTS, STA_TENANT_ID, STA_DOC_ID, STA_TOPIC_ID, STA_TOPIC_LABEL,
+                           STA_TOPIC_COLLECTION)
+               .values(T_REJECT, badDocId, 999999L, "reject-topic", COLL_A)
+               .onConflictDoNothing()
+               .execute();
             return null;
         });
 
@@ -1455,8 +1600,9 @@ class StagingPromoteOpsIntegrationTest {
                 + "exclusion logic runs at all (cncue analysis's own vacuity "
                 + "finding against the prior throw-based version of this test)")
             .isEqualTo(1);
-        assertThat(countAs(T_REJECT, "SELECT count(*) FROM nexus.topic_assignments "
-            + "WHERE tenant_id = '" + T_REJECT + "'"))
+        assertThat(countAs(T_REJECT, ctx -> ctx.selectCount().from(TOPIC_ASSIGNMENTS)
+            .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(T_REJECT))
+            .fetchOne(0, Integer.class)))
             .as("the excluded row must never reach nexus.topic_assignments")
             .isEqualTo(0);
         // Re-running finalize over the same excluded row must not throw —
@@ -1468,7 +1614,7 @@ class StagingPromoteOpsIntegrationTest {
         // wedge), but leaving it staged forever would pollute the counts
         // map for the sibling @Order tests below that share this tenant.
         scope.withTenant(T_REJECT, ctx -> {
-            ctx.execute("DELETE FROM staging.topic_assignments WHERE doc_id = ?", badDocId);
+            ctx.deleteFrom(STAGING_TOPIC_ASSIGNMENTS).where(STA_DOC_ID.eq(badDocId)).execute();
             return null;
         });
     }
@@ -1502,19 +1648,23 @@ class StagingPromoteOpsIntegrationTest {
             ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.CREATED_AT)
                .values(T_REJECT, "reject-topic-resolvable", COLL_A, OffsetDateTime.now())
                .execute();
-            ctx.execute("INSERT INTO staging.chunks "
-                + "(tenant_id, collection, dim, legacy_ref, chunk_text, embedding, model) "
-                + "VALUES (?, ?, 768, ?, ?, '" + vec(768) + "'::nexus.vector, 'bge-768') "
-                + "ON CONFLICT (tenant_id, collection, legacy_ref) DO UPDATE SET chunk_text = excluded.chunk_text",
-                T_REJECT, COLL_A, goodChash, goodText);
-            ctx.execute("INSERT INTO staging.topic_assignments "
-                + "(tenant_id, doc_id, topic_id, topic_label, topic_collection) "
-                + "VALUES (?, ?, 999999, 'reject-topic-resolvable', ?) ON CONFLICT DO NOTHING",
-                T_REJECT, badDocId, COLL_A);
-            ctx.execute("INSERT INTO staging.topic_assignments "
-                + "(tenant_id, doc_id, topic_id, topic_label, topic_collection) "
-                + "VALUES (?, ?, 999999, 'reject-topic-resolvable', ?) ON CONFLICT DO NOTHING",
-                T_REJECT, goodChash, COLL_A);
+            ctx.insertInto(STAGING_CHUNKS, SC_TENANT_ID, SC_COLLECTION, SC_DIM, SC_LEGACY_REF, SC_CHUNK_TEXT,
+                           SC_EMBEDDING, SC_MODEL)
+               .values(T_REJECT, COLL_A, 768, goodChash, goodText, zeroVector(768), "bge-768")
+               .onConflict(SC_TENANT_ID, SC_COLLECTION, SC_LEGACY_REF)
+               .doUpdate()
+               .set(SC_CHUNK_TEXT, DSL.excluded(SC_CHUNK_TEXT))
+               .execute();
+            ctx.insertInto(STAGING_TOPIC_ASSIGNMENTS, STA_TENANT_ID, STA_DOC_ID, STA_TOPIC_ID, STA_TOPIC_LABEL,
+                           STA_TOPIC_COLLECTION)
+               .values(T_REJECT, badDocId, 999999L, "reject-topic-resolvable", COLL_A)
+               .onConflictDoNothing()
+               .execute();
+            ctx.insertInto(STAGING_TOPIC_ASSIGNMENTS, STA_TENANT_ID, STA_DOC_ID, STA_TOPIC_ID, STA_TOPIC_LABEL,
+                           STA_TOPIC_COLLECTION)
+               .values(T_REJECT, goodChash, 999999L, "reject-topic-resolvable", COLL_A)
+               .onConflictDoNothing()
+               .execute();
             return null;
         });
         ops.promoteCollection(T_REJECT, COLL_A, 768);
@@ -1524,16 +1674,17 @@ class StagingPromoteOpsIntegrationTest {
         assertThat(((Number) fin.get("topic_assignments_non_conformant")).intValue())
             .as("the non-conformant row is still excluded and counted")
             .isEqualTo(1);
-        assertThat(countAs(T_REJECT, "SELECT count(*) FROM nexus.topic_assignments "
-            + "WHERE tenant_id = '" + T_REJECT + "' AND encode(doc_id, 'hex') = '" + goodChash + "'"))
+        assertThat(countAs(T_REJECT, ctx -> ctx.selectCount().from(TOPIC_ASSIGNMENTS)
+            .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(T_REJECT))
+            .and(TOPIC_ASSIGNMENTS.DOC_ID.eq(HexFormat.of().parseHex(goodChash)))
+            .fetchOne(0, Integer.class)))
             .as("the CONFORMANT, fully-resolvable row must promote in the SAME "
                 + "finalize call despite the non-conformant row's presence in "
                 + "the same staged batch")
             .isEqualTo(1);
 
         scope.withTenant(T_REJECT, ctx -> {
-            ctx.execute("DELETE FROM staging.topic_assignments WHERE doc_id IN (?, ?)",
-                badDocId, goodChash);
+            ctx.deleteFrom(STAGING_TOPIC_ASSIGNMENTS).where(STA_DOC_ID.in(badDocId, goodChash)).execute();
             return null;
         });
     }
@@ -1567,10 +1718,11 @@ class StagingPromoteOpsIntegrationTest {
             ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.CREATED_AT)
                .values(T_REJECT, "reject-topic-pending", COLL_A, OffsetDateTime.now())
                .execute();
-            ctx.execute("INSERT INTO staging.topic_assignments "
-                + "(tenant_id, doc_id, topic_id, topic_label, topic_collection) "
-                + "VALUES (?, ?, 999999, 'reject-topic-pending', ?) ON CONFLICT DO NOTHING",
-                T_REJECT, pendingChash, COLL_A);
+            ctx.insertInto(STAGING_TOPIC_ASSIGNMENTS, STA_TENANT_ID, STA_DOC_ID, STA_TOPIC_ID, STA_TOPIC_LABEL,
+                           STA_TOPIC_COLLECTION)
+               .values(T_REJECT, pendingChash, 999999L, "reject-topic-pending", COLL_A)
+               .onConflictDoNothing()
+               .execute();
             return null;
         });
 
@@ -1581,13 +1733,15 @@ class StagingPromoteOpsIntegrationTest {
                 + "pending, not silently dropped, not promoted, and not the "
                 + "trigger for a tenant-wide FK abort")
             .isEqualTo(1);
-        assertThat(countAs(T_REJECT, "SELECT count(*) FROM nexus.topic_assignments "
-            + "WHERE tenant_id = '" + T_REJECT + "' AND encode(doc_id, 'hex') = '" + pendingChash + "'"))
+        assertThat(countAs(T_REJECT, ctx -> ctx.selectCount().from(TOPIC_ASSIGNMENTS)
+            .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(T_REJECT))
+            .and(TOPIC_ASSIGNMENTS.DOC_ID.eq(HexFormat.of().parseHex(pendingChash)))
+            .fetchOne(0, Integer.class)))
             .as("the row must stay staged, never promoted")
             .isEqualTo(0);
 
         scope.withTenant(T_REJECT, ctx -> {
-            ctx.execute("DELETE FROM staging.topic_assignments WHERE doc_id = ?", pendingChash);
+            ctx.deleteFrom(STAGING_TOPIC_ASSIGNMENTS).where(STA_DOC_ID.eq(pendingChash)).execute();
             return null;
         });
     }
@@ -1623,31 +1777,23 @@ class StagingPromoteOpsIntegrationTest {
                        .fetchOne()
                        .getValue(TOPICS.ID);
             long finalTopicId = topicId;
-            // Kept as a raw JDBC PreparedStatement (nexus-cbo4a batch 4, SANCTIONED RAW):
-            // the assertion below checks java.sql.SQLException.getSQLState() directly --
-            // jOOQ wraps every SQLException in its own DataAccessException (a
-            // RuntimeException, not a SQLException), which would fail
-            // isInstanceOf(SQLException.class) regardless of the real cause. Proving the
-            // FK is VALIDATEd via its raw JDBC SQLSTATE is this test's actual subject
-            // (see its javadoc), so the raw JDBC path is the correct tool here, not a
-            // shortcut around the DSL.
-            assertThatThrownBy(() -> {
-                    try (var ps = conn.prepareStatement(
-                            "INSERT INTO nexus.topic_assignments "
-                            + "(tenant_id, doc_id, topic_id, source_collection) "
-                            + "VALUES (?, decode(?, 'hex'), ?, ?)")) {
-                        ps.setString(1, T_REJECT);
-                        ps.setString(2, orphanChash);
-                        ps.setLong(3, finalTopicId);
-                        ps.setString(4, COLL_A);
-                        ps.executeUpdate();
-                    }
-                })
+            // jOOQ wraps the driver's SQLException in its own DataAccessException
+            // (nexus-cbo4a batch 11 -- unwrap via getCause() to reach the real
+            // java.sql.SQLException/getSQLState(), the same shape every other
+            // FK/constraint-violation assertion in this file now uses since the
+            // whole insert moved off raw JDBC onto typed DSL). Proving the FK is
+            // VALIDATEd via its SQLSTATE is this test's actual subject (see its
+            // javadoc).
+            assertThatThrownBy(() ->
+                    c.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                                 TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
+                     .values(T_REJECT, HexFormat.of().parseHex(orphanChash), finalTopicId, COLL_A)
+                     .execute())
                 .as("topic_assignments_chunk_fk must reject an assignment whose "
                     + "(source_collection, doc_id) has no matching nexus.chunks "
                     + "row — proves the FK is VALIDATEd and enforced")
-                .isInstanceOf(SQLException.class)
-                .satisfies(e -> assertThat(((SQLException) e).getSQLState()).isEqualTo("23503"));
+                .isInstanceOf(DataAccessException.class)
+                .satisfies(e -> assertThat(((SQLException) e.getCause()).getSQLState()).isEqualTo("23503"));
         }
     }
 

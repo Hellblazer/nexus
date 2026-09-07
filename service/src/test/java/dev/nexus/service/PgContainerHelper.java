@@ -646,4 +646,57 @@ public final class PgContainerHelper {
         DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
         Routines.setForceRls(ctx.configuration(), ctx.render(table), force);
     }
+
+    /**
+     * {@code ALTER TABLE .. DROP CONSTRAINT IF EXISTS ..} (nexus-cbo4a batch 11) --
+     * a genuinely dangling manifest row can only be seeded by momentarily dropping its
+     * FK, inserting the dangling row, then re-adding the constraint NOT VALID (see
+     * {@link #addFkNotValidComposite3}) -- the insert happens BETWEEN this call and
+     * that one, so the two are separate methods rather than one combined drop-then-add.
+     * {@code table} is a generated jOOQ {@link Table}, rendered through
+     * {@code ctx.render(...)} into the function's {@code regclass} argument -- never a
+     * hand-typed schema-qualified string.
+     *
+     * @param conn           the connection to run the ALTER TABLE on (superuser/table owner)
+     * @param table          the table whose constraint is being dropped
+     * @param constraintName the constraint name
+     */
+    public static void dropConstraint(Connection conn, Table<?> table, String constraintName) throws SQLException {
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        Routines.dropConstraint(ctx.configuration(), ctx.render(table), constraintName);
+    }
+
+    /**
+     * {@code ALTER TABLE .. ADD CONSTRAINT .. FOREIGN KEY (tenant_id, col2, col3)
+     * REFERENCES .. (tenant_id, refCol2, refCol3) extraClause NOT VALID} (nexus-cbo4a
+     * batch 11) -- the THREE-column composite-FK sibling of {@link #addFkNotValid},
+     * which only covers a {@code (tenant_id, X) -> (tenant_id, Y)} shape. A
+     * dangling-manifest-row test needs to re-add {@code fk_catalog_chunks_chunk}'s real
+     * {@code (tenant_id, collection, chash)} composite after {@link #dropConstraint} and
+     * an intervening dangling-row insert -- moved server-side into {@code
+     * nexus_test.add_fk_not_valid_composite3} (db.changelog-test-objects.xml).
+     * {@code table}/{@code refTable} are generated jOOQ {@link Table}s, rendered
+     * through {@code ctx.render(...)} into the function's {@code regclass} arguments --
+     * never a hand-typed schema-qualified string.
+     *
+     * @param conn        the connection to run the ALTER TABLE on (superuser/table owner)
+     * @param table       the table gaining the FK (e.g. {@code Tables.CATALOG_DOCUMENT_CHUNKS})
+     * @param constraintName the FK constraint name
+     * @param column2     the second FK column (after {@code tenant_id})
+     * @param column3     the third FK column
+     * @param refTable    the referenced table (e.g. {@code Tables.CHUNKS})
+     * @param refColumn2  the second referenced column (after {@code tenant_id})
+     * @param refColumn3  the third referenced column
+     * @param extraClause the {@code ON UPDATE}/{@code ON DELETE} clause fragment
+     *                    (e.g. {@code "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE"}),
+     *                    or {@code ""} for none
+     */
+    public static void addFkNotValidComposite3(Connection conn, Table<?> table, String constraintName,
+                                                String column2, String column3, Table<?> refTable,
+                                                String refColumn2, String refColumn3, String extraClause)
+            throws SQLException {
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        Routines.addFkNotValidComposite3(ctx.configuration(), ctx.render(table), constraintName, column2, column3,
+            ctx.render(refTable), refColumn2, refColumn3, extraClause);
+    }
 }

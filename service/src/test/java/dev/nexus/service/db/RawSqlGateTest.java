@@ -990,7 +990,6 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/SharedDatabaseHandle.java", 1),
         Map.entry("dev/nexus/service/StagingHandlerJourneyTest.java", 4),
         Map.entry("dev/nexus/service/StagingPromoteFrecencyTtlCheckRegressionTest.java", 3),
-        Map.entry("dev/nexus/service/StagingPromoteOpsIntegrationTest.java", 47),
         Map.entry("dev/nexus/service/StagingSchemaLiquibaseTest.java", 11),
         Map.entry("dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java", 20),
         Map.entry("dev/nexus/service/Taxonomy011ForeignOwnedDiagViewTest.java", 11),
@@ -1266,8 +1265,55 @@ class RawSqlGateTest {
      * never assumed from a sibling file's convention -- see {@code
      * CollectionRegistryFkTest}'s {@code hexChashAscii} javadoc for the full
      * distinction from {@code hexChashBytes}-style genuine hex-decode).
+     *
+     * <p><b>nexus-cbo4a batch 11:</b> 1330 -&gt; 1283 (-47), {@code
+     * StagingPromoteOpsIntegrationTest.java} 47 -&gt; 0, its {@link
+     * #TEST_TREE_RAW_SQL_CEILING} entry REMOVED outright. {@code staging.*}
+     * (chunks/document_chunks/frecency/document_aspects/topic_assignments)
+     * carries no generated jOOQ Table at all (codegen's {@code <schemata>}
+     * covers only {@code nexus}/{@code t1}), so every staging read/write goes
+     * through the {@code DSL.field(DSL.name(colName), Type.class)} plain-column
+     * house pattern {@code StagingHandler}/{@code StagingPromoteOps}/{@code
+     * CatalogRepository} already use in production code, including the vector
+     * embedding column via {@code SQLDataType.OTHER.asConvertedDataType(new
+     * VectorBinding())} (the same idiom {@code StagingHandler.SC_EMBEDDING}
+     * uses). The {@code count(String sql)}/{@code countAs(String, String)}
+     * local wrappers (the LOCAL_SQL_WRAPPER_DECL shape batch 8's gate widening
+     * made visible) are retired onto {@code count(Function&lt;DSLContext, ?
+     * extends Number&gt;)}/{@code countAs(String, Function&lt;...&gt;)}, so
+     * every call site now builds its own typed query rather than passing a SQL
+     * string -- the same retirement {@code CatalogRenameCollectionTest}'s
+     * {@code rows(Connection, String)} went through in batch 10. The two
+     * {@code pg_advisory_xact_lock}/{@code pg_advisory_xact_lock_shared}/{@code
+     * set_config} advisory-lock helpers move onto {@code DSL.function(...)}
+     * calls over a {@code DSL.using(conn, ...)} context, the identical idiom
+     * {@code StagingPromoteOps.promoteCollection}'s own per-tenant advisory
+     * lock and {@code PgContainerHelper#setTenant} already use for these
+     * built-in Postgres functions -- a blocked acquire now surfaces as jOOQ's
+     * {@code DataAccessException} wrapping the driver {@code SQLException}
+     * (unwrap via {@code getCause()}), so the two assertions pinning the
+     * refused-lock SQLSTATE ({@code 55P03}) and the {@code
+     * topic_assignments_chunk_fk} violation ({@code 23503}, the file's one
+     * former raw-JDBC-PreparedStatement site) switch accordingly, the same
+     * wrapper-shape change batch 10's {@code VALIDATE CONSTRAINT} assertions
+     * went through. The {@code nexus.census_canary} ad hoc table (create,
+     * grant, seed, drop, all inside one test method) converts onto jOOQ's
+     * typed DDL API ({@code DSLContext#createTable/#grant/#dropTable}) instead
+     * of staying SANCTIONED RAW as batch 4 first left it -- jOOQ has full
+     * typed CREATE TABLE/GRANT/DROP TABLE support, so there was no genuine
+     * gap to sanction. The one dangling-manifest-row test's {@code
+     * fk_catalog_chunks_chunk} DROP/re-ADD NOT VALID needed a THREE-column
+     * composite FK shape ({@code (tenant_id, collection, chash)}) batch 10's
+     * two-column {@code add_fk_not_valid} cannot express: two new {@code
+     * nexus_test} plpgsql functions (db.changelog-test-objects.xml changesets
+     * test-objects-6/7, {@code drop_constraint}/{@code
+     * add_fk_not_valid_composite3}, kept as separate calls rather than one
+     * combined drop-then-add since the dangling row's INSERT must run BETWEEN
+     * them) plus matching {@code PgContainerHelper#dropConstraint}/{@code
+     * #addFkNotValidComposite3} wrappers, following the exact test-lifecycle-
+     * function pattern batch 10's review fold-in established.
      */
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1330;
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1283;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
