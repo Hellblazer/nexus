@@ -238,7 +238,7 @@ per-collection chunk counts from `nx collection list`. Full numbers in T2
   `repo.listCollections(tenant)` unconditionally); the `content_type` and
   `lifecycle_state` filters are new work in Phase 3.
 - **Verified**: the vector dimension ground truth already exists as a view.
-  `nexus.collection_vector_stats` (vectors-005-1) derives `dim` per
+  `nexus.collection_vector_stats` (catalog-005-1) derives `dim` per
   `(tenant, collection)` from the stored column (`CASE WHEN embedding_384 IS
   NOT NULL THEN 384 ...`) and groups by `(collection, dim)`. Read live
   through `GET /v1/vectors/collections`: 70 rows for 70 collections, every
@@ -318,9 +318,9 @@ per-collection chunk counts from `nx collection list`. Full numbers in T2
 - [x] No consumer needs a fact from the name that the table cannot carry.
   **Status**: Verified by the parse-site census: every extracted value is
   one of content_type, owner_id, embedding_model, the quarantine prefix,
-  or, at the five registration sites that call
-  `parse_conformant_collection_name` (`indexer.py` and four catalog and
-  collection commands, enumerated in `204-research-15`), the `v<n>`
+  or, at the six registration sites that call
+  `parse_conformant_collection_name` (`indexer.py`, `commands/index.py` and
+  four catalog and collection commands, enumerated in `204-research-17`), the `v<n>`
   segment the table already stores as `model_version` (`204-research-4`
   counted those callers but not that value). **Method**: Source Search.
 - [x] No two-segment (model-less) collection carries vectors on either
@@ -433,15 +433,21 @@ lists and drifted (nexus-v6za0). This RDR drafted its own list twice and
 missed a table each time ([24806], [24809]), then proposed deriving the set
 from foreign keys, which the fourth gate showed is narrower than the
 engine's list ([24812]). So the sweep is not Liquibase SQL: it is an
-engine-side job run once after the changesets in the same boot, in jOOQ,
-that walks `catalog_collections` and deletes every row for which
+engine-side job, in jOOQ, run once per tenant at that tenant's first
+request after boot (Liquibase finishes at `Main.java:108` before any
+repository exists, and no engine primitive enumerates tenants under
+FORCE RLS), that walks `catalog_collections` and deletes every row for which
 `collectionIsEmpty` is true (`catalog_documents.physical_collection` is one
 of the fourteen entries that predicate checks, so it needs no separate
 clause), guarded by a marker row in `nexus.catalog_meta` (the catalog's
-per-tenant key/value table from the baseline changeset) so it runs once.
+per-tenant key/value table from the baseline changeset) so it runs once
+per tenant.
 A row `collectionIsEmpty` reports non-empty is kept and becomes `dormant`
 (below); the predicate answers, it does not refuse.
-The Liquibase changesets that follow add columns and constraints only.
+The attribute walk below and the constraints are one Liquibase changeset
+on the `hygiene-001-6` shape (backfill under the RLS toggle, then the
+constraints in the same changeset), so the constraints never meet a blank
+row, and the sweep's delete and the dormant marking run after them.
 Ghosts are deleted with counts reported
 with `RAISE NOTICE`. The live census counted chunk-emptiness only (153 of
 223 rows on this tenant); the sweep's condition is stricter, so the
@@ -454,7 +460,7 @@ vectors to read), and is reported by notice and by `nx doctor` as
 rows are outside the disputed rule by construction, since there is no
 stored dimension to disagree with.
 
-The second walks every surviving row. `content_type` and `owner_id` come
+The walk, in the changeset, fills every row. `content_type` and `owner_id` come
 from the name, the last parse this codebase performs. `embedding_model`
 comes from the name's token when that token's dimension equals the
 collection's stored dimension in `nexus.collection_vector_stats` (one row
@@ -466,9 +472,10 @@ disputed collection is excluded from bare-prefix corpus fan-out and shown
 red by `nx doctor` with the remedy (re-index under the current profile).
 `display_name`, `superseded_by` and `superseded_at` are left exactly as
 registered. So is `model_version`: it is the name's `v<n>` segment, parsed
-from the rendered name at the five registration sites (`indexer.py` and
-four catalog and collection commands, `204-research-15`) and upserted by
-the engine as sent; the walk does not touch it, and those five parses are
+from the rendered name at the six registration sites (`indexer.py`,
+`commands/index.py` and four catalog and collection commands,
+`204-research-17`) and upserted by
+the engine as sent; the walk does not touch it, and those six parses are
 retired by Phase 3's census like every other parse site.
 Measured today, zero live rows would be disputed. NOT NULL, the FK to
 `embedding_models`, and the CHECKs are added after this rewrite, so the
@@ -486,10 +493,10 @@ has an answer for every row rather than an assumption.
 
 **4. Engine reads the row.** `CollectionRegistry` caches the row. The eight
 engine parse sites resolve model, dimension, and content type from it.
-`EmbedderRouter` resolves by content type through the profile; the
+`EmbedderRouter` resolves by the row's `embedding_model`; the
 "unavailable model" 422 becomes "this install's profile names a model this
-mode cannot serve", which is the true condition. The stub-insert paths in
-`AspectRepository` and `TaxonomyRepository` are deleted; a write against an
+mode cannot serve", which is the true condition. The seven stub-insert paths
+(enumerated in `204-research-17`) are deleted; a write against an
 unregistered collection fails loud.
 
 **5. Client resolves through the catalog, in two moves.** The client's
@@ -627,30 +634,33 @@ the fact and lets the constraint refuse the lie.
 A local-mode install with a `code` and a `docs` collection, after the
 changeset: both rows carry `bge-768`/`768` from the profile; a register
 call naming `voyage-code-3` is refused with a 422; `nx search
---corpus code` resolves through the catalog with the parse census at zero
-on the client; the engine parse census is at zero. This runs inside
+--corpus code` resolves through the catalog. The engine parse census
+reaches zero in Phase 2 and the client parse census in Phase 3; each is
+that phase's validation, not deferred. This runs inside
 `tests/e2e/migration-rehearsal/run.sh --candidate-migration`, because it
 walks the tree's own changeset over a populated store.
 
 ### Phase 1: Schema and backfill (engine)
 
-1. Engine boot job (jOOQ, once, `catalog_meta`-marked): the ghost sweep
-   through `collectionIsEmpty` alone (its list already covers
-   `catalog_documents.physical_collection`), then
-   the walk with its disputed and dormant outcomes. Then changesets:
-   `embedding_models`, `embedding_profile`, new columns and constraints on
-   `catalog_collections`, constraints added last. No Python DDL; no failing
-   precondition anywhere; no SQL strings in the job.
+1. One Liquibase changeset on the `hygiene-001-6` shape: `embedding_models`
+   (seeded with the four known models), `embedding_profile`, the new columns
+   on `catalog_collections`, the attribute walk with its disputed and
+   quarantine outcomes under the RLS toggle, then the constraints, all in
+   that changeset. Then the engine job (jOOQ, once per tenant at first
+   request, `catalog_meta`-marked): the ghost sweep through
+   `collectionIsEmpty` alone (its list already covers
+   `catalog_documents.physical_collection`) and the dormant marking. No
+   Python DDL; no failing precondition anywhere; no SQL strings in the job.
 2. Engine boot writes the profile from its mode decision in `Main.java`
    (local tenant at boot; cloud tenants lazily at first registration),
    idempotent upsert, and `CollectionRegistry` evicts on that write.
-3. Delete the stub inserts in `AspectRepository` and `TaxonomyRepository`.
+3. Delete the seven stub inserts (`204-research-17`).
 4. `register_collection` writes the model from the profile and keeps
-   storing the `model_version` it is sent (the five registration parses
+   storing the `model_version` it is sent (the six registration parses
    go with Phase 3's census, not here); a different model in the request
    is a 422 naming the profile's value. `nx config
    set` does not write the profile; the restart the GH #1461 recipe already
-   requires is the write (the client-side hint is Phase 3 item 4).
+   requires is the write (the client-side hint is Phase 3 item 3).
 5. Engine suite, each against a real PG: the sweep keeps a row that
    `collectionIsEmpty` reports non-empty for EACH table in
    `COLLECTION_SCOPED_TABLES` (parametrised over the list, so a table added
@@ -676,6 +686,9 @@ walks the tree's own changeset over a populated store.
    `resolveEmbedderStrict` read the registry.
 3. `CollectionParseGateTest` in the RawSqlGateTest style: pins the count
    of `split("__")` on collection names; only shrinks.
+4. `list` route gains `content_type` and `lifecycle_state` filters; the
+   stats route gains the joined catalog attributes; a read route for
+   `embedding_profile`.
 
 Phases 1 and 2 ride one engine cut.
 
@@ -688,14 +701,12 @@ Phases 1 and 2 ride one engine cut.
    measured count. Every later step lowers the pin.
 2. Funnel: rewrite the raw sites to the three helpers, file by file,
    behaviour unchanged; the gate falls to the helpers' own internals.
-3. `list` route gains `content_type` and `lifecycle_state` filters; the
-   stats route gains the joined catalog attributes.
-4. `nx config set` prints the restart hint for `local.embed_model` and
+3. `nx config set` prints the restart hint for `local.embed_model` and
    `voyage_api_key` (the client's only touch on the profile story).
-5. Repoint the three helpers and `resolve_corpus` / `_resolve_corpus_target`
+4. Repoint the three helpers and `resolve_corpus` / `_resolve_corpus_target`
    / `_group_collections_by_model` at the row; the gate falls to zero
    outside the backfill.
-6. `CollectionName.parse` callers reduce to the census gate and the
+5. `CollectionName.parse` callers reduce to the census gate and the
    backfill.
 
 Client-only release.
@@ -793,7 +804,7 @@ is not deferred.
   counts before they run live; the walk itself cannot fail.
 - **IDE compatibility**: N/A.
 - **Incremental adoption**: phases are independently shippable; Phase 3
-  tolerates a pre-Phase-1 engine by failing loud on the missing filter.
+  tolerates a pre-Phase-2 engine by failing loud on the missing filter.
 - **Secret/credential lifecycle**: N/A.
 - **Memory management**: N/A.
 
