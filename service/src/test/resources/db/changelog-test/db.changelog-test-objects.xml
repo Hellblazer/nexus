@@ -127,4 +127,32 @@ $$;
         <rollback>DROP FUNCTION IF EXISTS nexus_test.add_fk_not_valid_composite3(regclass, text, text, text, regclass, text, text, text)</rollback>
     </changeSet>
 
+    <changeSet id="test-objects-8-grant-execute-on-function" author="nexus-cbo4a">
+        <comment>nexus_test.grant_execute_on_function(text, text): plpgsql wrapper for GRANT
+        EXECUTE ON FUNCTION p_signature TO p_role (nexus-cbo4a batch 11). GRANT EXECUTE
+        ON FUNCTION has no jOOQ typed-DSL form -- jOOQ's GRANT DSL (DSLContext#grant/
+        GrantOnStep#on) targets tables (Table&lt;?&gt;/Name/String identifiers), not a
+        function's parenthesized argument-type signature, which is what Postgres's
+        GRANT ... ON FUNCTION syntax actually requires after the function name.
+        p_signature is the caller-supplied function-name-plus-arg-types fragment (e.g.
+        "nexus.gc_quarantine_orphans(int, text, text, text, text, int)"), inserted via
+        %s since it is not a single identifier -- always a fixed literal from Java call
+        sites, never end-user input, exactly the same shape add_fk_not_valid_composite3's
+        p_extra clause already uses; p_role is %I-quoted. SECURITY INVOKER so the
+        caller's own (superuser, in every test) privilege authorizes the GRANT. This
+        pattern recurs raw across ~15 other test files today (out of nexus-cbo4a batch
+        11's scope) -- a follow-up batch can rewire them onto this same function.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.grant_execute_on_function(p_signature text, p_role text) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+BEGIN
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', p_signature, p_role);
+END;
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.grant_execute_on_function(text, text)</rollback>
+    </changeSet>
+
 </databaseChangeLog>

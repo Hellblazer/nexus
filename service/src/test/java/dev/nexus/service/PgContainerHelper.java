@@ -699,4 +699,25 @@ public final class PgContainerHelper {
         Routines.addFkNotValidComposite3(ctx.configuration(), ctx.render(table), constraintName, column2, column3,
             ctx.render(refTable), refColumn2, refColumn3, extraClause);
     }
+
+    /**
+     * {@code GRANT EXECUTE ON FUNCTION functionSignature TO role} (nexus-cbo4a
+     * batch 11) -- jOOQ's typed GRANT DSL ({@link DSLContext#grant}/{@code
+     * GrantOnStep#on}) targets tables, not a function's parenthesized
+     * argument-type signature, which Postgres's {@code GRANT ... ON FUNCTION}
+     * syntax requires -- moved server-side into {@code
+     * nexus_test.grant_execute_on_function} (db.changelog-test-objects.xml).
+     *
+     * @param conn              the connection to run the GRANT on (superuser)
+     * @param functionSignature the function name plus its argument-type list
+     *                          (e.g. {@code "nexus.gc_quarantine_orphans(int, text,
+     *                          text, text, text, int)"}) -- a fixed Java literal,
+     *                          never end-user input
+     * @param role              the role to grant EXECUTE to
+     */
+    public static void grantExecuteOnFunction(Connection conn, String functionSignature, String role)
+            throws SQLException {
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        Routines.grantExecuteOnFunction(ctx.configuration(), functionSignature, role);
+    }
 }

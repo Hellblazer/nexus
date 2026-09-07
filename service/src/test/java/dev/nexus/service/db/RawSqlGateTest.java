@@ -948,7 +948,6 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/PlanRepositoryTest.java", 2),
         Map.entry("dev/nexus/service/PlansSchemaLiquibaseTest.java", 13),
         Map.entry("dev/nexus/service/Rdr71gw2CollectionNotNullTest.java", 21),
-        Map.entry("dev/nexus/service/RdrO8dil7GlobalManifestAntiJoinTest.java", 38),
         Map.entry("dev/nexus/service/RemapHandlerTest.java", 5),
         Map.entry("dev/nexus/service/RemapSchemaLiquibaseTest.java", 10),
         Map.entry("dev/nexus/service/SchemaMigratorDateExecutedUtcTest.java", 2),
@@ -1312,8 +1311,47 @@ class RawSqlGateTest {
      * them) plus matching {@code PgContainerHelper#dropConstraint}/{@code
      * #addFkNotValidComposite3} wrappers, following the exact test-lifecycle-
      * function pattern batch 10's review fold-in established.
+     *
+     * <p><b>nexus-cbo4a batch 11, file 2:</b> 1283 -&gt; 1245 (-38), {@code
+     * RdrO8dil7GlobalManifestAntiJoinTest.java} 38 -&gt; 0, its {@link
+     * #TEST_TREE_RAW_SQL_CEILING} entry REMOVED outright. The two hand-rolled
+     * anti-join counters ({@code globalDanglingCount}/{@code
+     * globalDanglingCountAnyOwnerState}) convert onto a typed jOOQ join over
+     * {@code CATALOG_DOCUMENT_CHUNKS.as("m")}/{@code CATALOG_DOCUMENTS.as("d")}
+     * with {@code .andNotExists(...)}/{@code .whereNotExists(...)} against
+     * {@code CHUNKS.as("c")} -- every table this query touches has a generated
+     * jOOQ {@code Table}, unlike {@code staging.*}. The {@code rows(Connection,
+     * String)} local wrapper retires onto {@code rows(Connection,
+     * Function&lt;DSLContext, ? extends Number&gt;)}, the same {@code
+     * Function}-typed retirement {@code count}/{@code countAs} went through in
+     * {@code StagingPromoteOpsIntegrationTest} this same batch. {@code
+     * chashLiteral}'s ASCII-escape convention (a bare string literal with NO
+     * {@code decode(..., 'hex')} in the pre-batch raw SQL, verified per site)
+     * converts to {@code chashLiteral(seed).getBytes(StandardCharsets
+     * .US_ASCII)} against the generated {@code byte[]}-typed {@code CHASH}
+     * fields; {@code digestHex}/{@code Chash.ofText(...).toHex()} values that
+     * WERE wrapped in {@code decode(..., 'hex')} convert to genuine {@code
+     * HexFormat.of().parseHex(...)} bytes instead -- the same per-site,
+     * never-assumed-from-a-sibling distinction batch 10's review fold-in
+     * established for this exact encoding choice. The {@code
+     * jsonb_build_object(...)} metadata literal in the GC-expire fixture
+     * converts to {@code DSL.jsonbObject(DSL.jsonEntry(...), ...)}. The two
+     * {@code fk_catalog_chunks_chunk} DROP/re-ADD NOT VALID pairs reuse the
+     * SAME {@code PgContainerHelper#dropConstraint}/{@code
+     * #addFkNotValidComposite3} wrappers this batch's file 1 added (no new
+     * database objects for this file). The two bootstrap-time {@code GRANT
+     * EXECUTE ON FUNCTION} statements move onto a NEW {@code
+     * nexus_test.grant_execute_on_function(text, text)} plpgsql wrapper
+     * (db.changelog-test-objects.xml changeset test-objects-8) plus a matching
+     * {@code PgContainerHelper#grantExecuteOnFunction} -- jOOQ's typed GRANT
+     * DSL targets tables, not a function's parenthesized argument-type
+     * signature, which Postgres's {@code GRANT ... ON FUNCTION} syntax
+     * requires. This same {@code GRANT EXECUTE ON FUNCTION} shape recurs raw
+     * across roughly 15 OTHER test files today -- out of this batch's scope,
+     * but the new function is available for a future batch to rewire them
+     * onto.
      */
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1283;
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1245;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
