@@ -751,9 +751,10 @@ split a string; corpus resolution reads fields of a list already fetched.
 
 ### Contradiction Check
 
-Eight gate critiques so far (T2 `204-gate-critique-2026-09-06` through
-`-2026-09-07g`); the latest verdict is in T2 `204-gate-latest`. Every
-contradiction a pass named is closed at the commit the next pass gated.
+The gate critiques are recorded in T2 under the title prefix
+`204-gate-critique-` and the latest verdict in `204-gate-latest`; the
+count lives there, not here. Every contradiction a pass named is closed at
+the commit the next pass gated.
 
 ### Assumption Verification
 
