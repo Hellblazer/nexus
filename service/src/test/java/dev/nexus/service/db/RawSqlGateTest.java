@@ -970,7 +970,6 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/PlansSchemaLiquibaseTest.java", 13),
         Map.entry("dev/nexus/service/Rdr71gw2CollectionNotNullTest.java", 21),
         Map.entry("dev/nexus/service/RdrO8dil7GlobalManifestAntiJoinTest.java", 38),
-        Map.entry("dev/nexus/service/ReadShapeViewsTest.java", 32),
         Map.entry("dev/nexus/service/RemapHandlerTest.java", 5),
         Map.entry("dev/nexus/service/RemapSchemaLiquibaseTest.java", 10),
         Map.entry("dev/nexus/service/SchemaMigratorDateExecutedUtcTest.java", 2),
@@ -1230,8 +1229,20 @@ class RawSqlGateTest {
      * onto typed jOOQ DSL. {@code decode(chash, 'hex')} sites convert to a shared
      * {@code chashBytes(seed)} helper (genuine hex-decoded bytes), distinct from the
      * ASCII-escape form other files' {@code chashAscii} produces.
+     *
+     * <p><b>nexus-cbo4a batch 10, file 6:</b> 1370 -&gt; 1338 (-32), {@code
+     * ReadShapeViewsTest.java} 32 -&gt; 0, its {@link #TEST_TREE_RAW_SQL_CEILING} entry
+     * REMOVED outright. Every seed insert/update and every view read (across the six
+     * {@code security_invoker} read-shape views: {@code catalog_stats}, {@code
+     * collection_doc_counts}, {@code coverage_by_content_type}, {@code
+     * collection_health_meta}, {@code topics_with_counts}, {@code
+     * links_by_type_counts}) onto typed jOOQ DSL over their generated Tables. The
+     * {@code GROUPED_VIEWS} loop (five views sharing a {@code tenant_id} column, no
+     * common generated-Tables supertype) resolves generically via a name-to-Table map
+     * plus {@code Table#field(String, Class)}, same idiom as {@code
+     * CatalogRenameCollectionTest}'s nine-table loop.
      */
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1370;
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1338;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
