@@ -3218,8 +3218,14 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 out[input_form] = list(doc_ids)
         return out
 
-    def chashes_for_collection(self, physical_collection: str) -> set[str]:
-        """Referenced-chash alive-set for a collection, count-reconciled.
+    def _manifest_chashes_reconciled(
+        self, physical_collection: str, result: dict,
+    ) -> set[str]:
+        """Shared count-reconciliation body for the ``/manifest/chashes``
+        response, factored out of :meth:`chashes_for_collection` (nexus-zewg3)
+        so :meth:`chashes_for_collection_with_tombstone_protected` can share
+        ONE HTTP round trip with it instead of re-deriving the alive-set with
+        a second call.
 
         nexus-ir6eh: this list is the indexer GC's alive-set — chunks
         absent from it are classified orphan and DELETED, so a
@@ -3233,8 +3239,6 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         field-stripping hop interposed (the nexus-znwc2 class) and is
         itself a contract violation, never treated as optional.
         """
-        result = self._get("/manifest/chashes", collection=physical_collection)
-        result = result if isinstance(result, dict) else {}
         chashes = result.get("chashes") or []
         if "count" not in result:
             _log.error(
@@ -3266,6 +3270,43 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 "delete live chunks; refusing"
             )
         return set(chashes)
+
+    def chashes_for_collection(self, physical_collection: str) -> set[str]:
+        """Referenced-chash alive-set for a collection, count-reconciled.
+
+        See :meth:`_manifest_chashes_reconciled` for the reconciliation
+        contract this delegates to.
+        """
+        result = self._get("/manifest/chashes", collection=physical_collection)
+        result = result if isinstance(result, dict) else {}
+        return self._manifest_chashes_reconciled(physical_collection, result)
+
+    def chashes_for_collection_with_tombstone_protected(
+        self, physical_collection: str,
+    ) -> tuple[set[str], int | None]:
+        """``chashes_for_collection`` plus ``tombstone_protected_count``, in
+        ONE round trip (nexus-zewg3).
+
+        Returns ``(chashes, tombstone_protected_count)``. The engine's
+        ``GET /manifest/chashes`` envelope carries ``tombstone_protected_count``
+        (of *chashes*, how many are referenced by a tombstoned document only,
+        tenant-wide — see ``CatalogRepository.tombstoneProtectedChunkCount``)
+        as an ADDITIVE field; an engine older than the one that shipped it
+        simply omits the key. The second element is ``None`` in that case —
+        NEVER coerced to ``0`` — so a caller (``nx t3 gc``) can tell "verified
+        zero" from "this engine cannot answer that question" and report the
+        difference honestly instead of printing a confident zero that is
+        actually unknown.
+        """
+        result = self._get("/manifest/chashes", collection=physical_collection)
+        result = result if isinstance(result, dict) else {}
+        chashes = self._manifest_chashes_reconciled(physical_collection, result)
+        tombstone_protected = (
+            int(result["tombstone_protected_count"])
+            if "tombstone_protected_count" in result
+            else None
+        )
+        return chashes, tombstone_protected
 
     def purge_manifest_for_doc(self, doc_id: str) -> None:
         self._post("/manifest/purge", {"doc_id": doc_id})

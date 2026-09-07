@@ -1133,7 +1133,7 @@ def test_gc_refuses_when_manifest_references_nothing_but_chunks_exist(
 
     # A catalog whose manifest knows nothing about this collection.
     empty_cat = MagicMock()
-    empty_cat.chashes_for_collection.return_value = set()
+    empty_cat.chashes_for_collection_with_tombstone_protected.return_value = (set(), None)
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
          patch("nexus.commands.t3._make_catalog", return_value=empty_cat):
@@ -1162,7 +1162,7 @@ def test_gc_allow_empty_manifest_set_overrides_the_refusal(
     )
 
     empty_cat = MagicMock()
-    empty_cat.chashes_for_collection.return_value = set()
+    empty_cat.chashes_for_collection_with_tombstone_protected.return_value = (set(), None)
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
          patch("nexus.commands.t3._make_catalog", return_value=empty_cat):
@@ -1188,7 +1188,7 @@ def test_gc_empty_collection_and_empty_alive_set_is_a_clean_noop(
     coll = "code__jqrtp-guard-empty__stub-code-1024__v1"
 
     empty_cat = MagicMock()
-    empty_cat.chashes_for_collection.return_value = set()
+    empty_cat.chashes_for_collection_with_tombstone_protected.return_value = (set(), None)
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
          patch("nexus.commands.t3._make_catalog", return_value=empty_cat):
@@ -1199,3 +1199,186 @@ def test_gc_empty_collection_and_empty_alive_set_is_a_clean_noop(
     assert result.exit_code == 0, result.output
     assert "REFUSING" not in result.output
     assert "0 orphan(s)" in result.output
+
+
+# ── nexus-zewg3: chunks protected ONLY by a pending tombstone ─────────────
+#
+# Since nexus-dkymw's fix, chashes_for_collection() folds a tombstoned
+# document's chashes into the SAME alive-set as a live document's, with no
+# signal telling the two apart. The engine now computes the distinction
+# itself (CatalogRepository.tombstoneProtectedChunkCount) and returns it
+# alongside the alive-set in ONE round trip via
+# HttpCatalogClient.chashes_for_collection_with_tombstone_protected, which
+# `nx t3 gc` calls instead of the plain chashes_for_collection. These tests
+# mock that single call directly (the same MagicMock-``_make_catalog``
+# pattern the nexus-jqrtp tests above use) — no live engine substrate
+# needed, and no list_trash/get_manifests calls to mock, since the
+# derivation is entirely engine-side now.
+
+
+def test_gc_reports_zero_tombstone_protected_when_none_pending(
+    t3_db, runner: CliRunner,
+) -> None:
+    """The engine reports tombstone_protected_count=0: the new report line
+    reads zero, and the pre-existing orphan-detection behavior is
+    unaffected."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    coll = "code__zewg3-zero__stub-code-1024__v1"
+    long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
+    live_chash = "1" * 64
+    orphan_chash = "2" * 64
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="alive1", content="a",
+        chunk_text_hash=live_chash, indexed_at=long_ago,
+    )
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="orphan1", content="o",
+        chunk_text_hash=orphan_chash, indexed_at=long_ago,
+    )
+
+    live_doc = SimpleNamespace(
+        tumbler="1.1.1", title=f"doc-{coll}", file_path=f"/tmp/{coll}.md",
+        meta={}, index_state="complete", index_state_reported=True,
+    )
+    cat = MagicMock()
+    cat.chashes_for_collection_with_tombstone_protected.return_value = (
+        {live_chash}, 0,
+    )
+    cat.list_by_collection.return_value = [live_doc]
+
+    with patch("nexus.db.make_t3", return_value=t3_db), \
+         patch("nexus.commands.t3._make_catalog", return_value=cat):
+        result = runner.invoke(main, ["t3", "gc", "-c", coll, "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "Protected by pending tombstones: 0 chunk(s)" in result.output
+    assert "1 orphan chunk(s) eligible" in result.output
+
+
+def test_gc_reports_some_tombstone_protected_chunks_and_still_deletes_the_genuine_orphan(
+    t3_db, runner: CliRunner,
+) -> None:
+    """Three chunks: one live-referenced, one referenced ONLY by a
+    pending tombstone, one a genuine orphan. Only the genuine orphan is
+    deleted — the tombstone-only chunk stays in the alive-set exactly like
+    the live one (the engine's count is a REPORTING signal, not a second
+    deletion gate) — and the report line names the count separately. Also
+    asserts the count lands in the gc_audit ``details``."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    coll = "code__zewg3-some__stub-code-1024__v1"
+    long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
+    live_chash = "3" * 64
+    tombstone_chash = "4" * 64
+    orphan_chash = "5" * 64
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="alive1", content="a",
+        chunk_text_hash=live_chash, indexed_at=long_ago,
+    )
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="tombstoned1", content="t",
+        chunk_text_hash=tombstone_chash, indexed_at=long_ago,
+    )
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="orphan1", content="o",
+        chunk_text_hash=orphan_chash, indexed_at=long_ago,
+    )
+
+    live_doc = SimpleNamespace(
+        tumbler="1.1.1", title=f"doc-{coll}", file_path=f"/tmp/{coll}.md",
+        meta={}, index_state="complete", index_state_reported=True,
+    )
+    cat = MagicMock()
+    # Post-dkymw alive-set: union of live AND tombstoned docs' manifests --
+    # both live_chash and tombstone_chash referenced; the engine separately
+    # reports 1 of them as tombstone-protected.
+    cat.chashes_for_collection_with_tombstone_protected.return_value = (
+        {live_chash, tombstone_chash}, 1,
+    )
+    cat.list_by_collection.return_value = [live_doc]
+
+    audit_calls: list[dict] = []
+
+    class _Writer:
+        def record_gc_audit(self, **kw):
+            audit_calls.append(kw)
+            return 1
+
+        def close(self):
+            pass
+
+    with patch("nexus.db.make_t3", return_value=t3_db), \
+         patch("nexus.commands.t3._make_catalog", return_value=cat), \
+         patch("nexus.commands.t3._make_catalog_writer", return_value=_Writer()):
+        result = runner.invoke(
+            main, ["t3", "gc", "-c", coll, "--no-dry-run", "--yes"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "Protected by pending tombstones: 1 chunk(s)" in result.output
+    assert "deleted 1 chunk(s)" in result.output
+    surviving = set(t3_db._client.get_collection(coll).get()["ids"])
+    assert surviving == {"alive1", "tombstoned1"}
+    assert len(audit_calls) == 1
+    assert audit_calls[0]["details"]["tombstone_protected"] == 1
+
+
+def test_gc_reports_tombstone_protected_as_unavailable_on_an_older_engine(
+    t3_db, runner: CliRunner,
+) -> None:
+    """An engine whose ``/manifest/chashes`` response carries no
+    ``tombstone_protected_count`` field (pre-nexus-zewg3) makes
+    ``chashes_for_collection_with_tombstone_protected`` return ``None`` for
+    that half — the report line must say "unavailable", NEVER a confident
+    "0 chunk(s)", and the audit/log fields must carry ``None``, not ``0``."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    coll = "code__zewg3-unavailable__stub-code-1024__v1"
+    long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
+    live_chash = "6" * 64
+    orphan_chash = "7" * 64
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="alive1", content="a",
+        chunk_text_hash=live_chash, indexed_at=long_ago,
+    )
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="orphan1", content="o",
+        chunk_text_hash=orphan_chash, indexed_at=long_ago,
+    )
+
+    live_doc = SimpleNamespace(
+        tumbler="1.1.1", title=f"doc-{coll}", file_path=f"/tmp/{coll}.md",
+        meta={}, index_state="complete", index_state_reported=True,
+    )
+    cat = MagicMock()
+    cat.chashes_for_collection_with_tombstone_protected.return_value = (
+        {live_chash}, None,
+    )
+    cat.list_by_collection.return_value = [live_doc]
+
+    audit_calls: list[dict] = []
+
+    class _Writer:
+        def record_gc_audit(self, **kw):
+            audit_calls.append(kw)
+            return 1
+
+        def close(self):
+            pass
+
+    with patch("nexus.db.make_t3", return_value=t3_db), \
+         patch("nexus.commands.t3._make_catalog", return_value=cat), \
+         patch("nexus.commands.t3._make_catalog_writer", return_value=_Writer()):
+        result = runner.invoke(
+            main, ["t3", "gc", "-c", coll, "--no-dry-run", "--yes"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "Protected by pending tombstones: unavailable on this engine" in result.output
+    assert "Protected by pending tombstones: 0" not in result.output
+    assert len(audit_calls) == 1
+    assert audit_calls[0]["details"]["tombstone_protected"] is None
