@@ -424,7 +424,8 @@ The second walks every surviving row. `content_type` and `owner_id` come
 from the name, the last parse this codebase performs. `embedding_model`
 comes from the name's token when that token's dimension equals the
 collection's stored dimension in `nexus.collection_vector_stats` (one row
-per collection, derived from the non-null vector column). When they
+per collection, derived from the non-null vector column); on agreement
+the row is written and its `lifecycle_state` is `live`. When they
 disagree, or a collection has two dimensions, the row keeps the name's
 attributes, gets `lifecycle_state = 'disputed'`, and is reported; a
 disputed collection is excluded from bare-prefix corpus fan-out and shown
@@ -544,9 +545,12 @@ the fact and lets the constraint refuse the lie.
   doctor with the re-index remedy; it never guesses a model from a
   dimension (1024 maps to three Voyage tokens) and never wedges the walk.
 - **Cloud estate has a tenant with two models for one content type.**
-  Would falsify the premise. Mitigation: the read-only grouping query in
-  Critical Assumptions runs against the cloud before the changeset is
-  cut; a violation stops the RDR at the gate, not in production.
+  Would falsify the premise. It was checked: the read-only grouping query
+  in Critical Assumptions ran against both production tenants on
+  2026-09-07 (T2 `204-research-6`) with zero exceptions among collections
+  carrying vectors. A future tenant that falsifies it is caught by the
+  registration 422 and the doctor row, not by the backfill, which never
+  refuses.
 - **A user changes `local.embed_model` after init.** An earlier cut of this
   design froze the profile and would have refused every later registration
   with a 422 (gate critique, Critical 2). Mitigation is structural (1a): the
