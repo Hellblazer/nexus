@@ -7,6 +7,8 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -15,6 +17,7 @@ import org.junit.jupiter.api.TestInstance;
 import java.sql.Connection;
 import java.sql.ResultSet;
 
+import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -63,10 +66,17 @@ class ServiceTokenScopeBackfillTest {
                 "CREATE UNIQUE INDEX idx_service_tokens_single_root "
                 + "ON nexus.service_tokens (label) WHERE label = 'bootstrap-legacy-token'");
             // A live cluster's rows: the operator credential + an ordinary tenant token.
-            su.createStatement().execute(
-                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES "
-                + "('upgrade-root-hash', 'default', 'bootstrap-legacy-token'), "
-                + "('upgrade-plain-hash', 'tenant-a', 'ci')");
+            // Literal (fake) hashes, not a real token's sha256 -- this test asserts on
+            // the exact hash string, so it inserts via the typed jOOQ DSL directly
+            // rather than PgContainerHelper.seedServiceToken (which always hashes its
+            // token argument). Only the three PRE-003 columns are referenced; the table
+            // built above genuinely has no scope column yet at this point in the test.
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            dsl.insertInto(SERVICE_TOKENS)
+                .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.LABEL)
+                .values("upgrade-root-hash", "default", "bootstrap-legacy-token")
+                .values("upgrade-plain-hash", "tenant-a", "ci")
+                .execute();
         }
     }
 

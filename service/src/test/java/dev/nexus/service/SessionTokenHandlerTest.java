@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TokenHashing;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -47,14 +49,8 @@ class SessionTokenHandlerTest {
         }
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES (?, ?, 'boot') "
-                + "ON CONFLICT (token_hash) DO NOTHING")) {
-                ps.setString(1, TokenHashing.sha256Hex(BOOT));
-                // Phase E (nexus-gmiaf.32.5): BOOT is a BOUND token (wildcard retired).
-                ps.setString(2, TENANT);
-                ps.executeUpdate();
-            }
+            // Phase E (nexus-gmiaf.32.5): BOOT is a BOUND token (wildcard retired).
+            PgContainerHelper.seedServiceToken(DSL.using(su, SQLDialect.POSTGRES), BOOT, TENANT, "boot");
         }
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());

@@ -338,6 +338,51 @@ public final class PgContainerHelper {
     }
 
     /**
+     * Seed one {@code nexus.service_tokens} row with {@code scope}/{@code
+     * expires_at}/{@code revoked_at} set (nexus-cbo4a batch 9 item 1) — the overload
+     * {@link #seedServiceToken(DSLContext, String, String, String)} does not cover,
+     * for the sites that previously hand-rolled a wider column list via {@code
+     * prepareStatement}/{@code createStatement().execute}. {@code scope}/{@code
+     * expiresAt}/{@code revokedAt} are OMITTED from the insert (never set to a SQL
+     * NULL) when the argument is {@code null} — {@code scope} carries a {@code NOT
+     * NULL DEFAULT 'tenant'} CHECK constraint (service-tokens-003-scope-column.xml)
+     * that a literal null would violate, and the two timestamp columns are simply
+     * nullable-and-unset in that case, matching how a caller who never mentioned
+     * them in a hand-rolled column list behaved.
+     *
+     * @param dsl       a {@link DSLContext} over the same connection/role the schema
+     *                  was migrated under
+     * @param token     the raw bearer token to hash and store
+     * @param tenant    the tenant id to bind the token to
+     * @param label     the token's {@code service_tokens.label} value
+     * @param scope     {@code service_tokens.scope} ({@code root}/{@code tenant}/
+     *                  {@code mint}/{@code data}), or {@code null} to take the
+     *                  column default ({@code tenant})
+     * @param expiresAt {@code service_tokens.expires_at}, or {@code null} to leave
+     *                  it unset
+     * @param revokedAt {@code service_tokens.revoked_at}, or {@code null} to leave
+     *                  it unset
+     */
+    public static void seedServiceToken(DSLContext dsl, String token, String tenant, String label,
+                                         String scope, java.time.OffsetDateTime expiresAt,
+                                         java.time.OffsetDateTime revokedAt) {
+        var step = dsl.insertInto(SERVICE_TOKENS)
+            .set(SERVICE_TOKENS.TOKEN_HASH, TokenHashing.sha256Hex(token))
+            .set(SERVICE_TOKENS.TENANT_ID, tenant)
+            .set(SERVICE_TOKENS.LABEL, label);
+        if (scope != null) {
+            step = step.set(SERVICE_TOKENS.SCOPE, scope);
+        }
+        if (expiresAt != null) {
+            step = step.set(SERVICE_TOKENS.EXPIRES_AT, expiresAt);
+        }
+        if (revokedAt != null) {
+            step = step.set(SERVICE_TOKENS.REVOKED_AT, revokedAt);
+        }
+        step.onConflictDoNothing().execute();
+    }
+
+    /**
      * Allowlist of GUC names {@link #setTenant} may stamp — the same two names {@link
      * TenantScope#PERMITTED_GUCS} enforces (that field is package-private inside {@code
      * dev.nexus.service.db}, unreachable from this package, so this is a second copy of

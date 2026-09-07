@@ -10,6 +10,8 @@ import dev.nexus.service.db.TokenHashing;
 import dev.nexus.service.db.TokenStore;
 import dev.nexus.service.http.AuthFilter;
 import dev.nexus.service.http.RequestContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -205,29 +207,14 @@ class AuthFilterTest {
 
     private void insertScopedToken(Connection su, String raw, String tenant, String scope)
             throws Exception {
-        try (var ps = su.prepareStatement(
-            "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label, scope) "
-            + "VALUES (?, ?, ?, ?) ON CONFLICT (token_hash) DO NOTHING")) {
-            ps.setString(1, TokenHashing.sha256Hex(raw));
-            ps.setString(2, tenant);
-            ps.setString(3, "test-scoped");
-            ps.setString(4, scope);
-            ps.executeUpdate();
-        }
+        PgContainerHelper.seedServiceToken(
+            DSL.using(su, SQLDialect.POSTGRES), raw, tenant, "test-scoped", scope, null, null);
     }
 
     private void insertServiceToken(Connection su, String raw, String tenant,
                                     OffsetDateTime expiresAt, OffsetDateTime revokedAt) throws Exception {
-        try (var ps = su.prepareStatement(
-            "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label, expires_at, revoked_at) "
-            + "VALUES (?, ?, ?, ?, ?) ON CONFLICT (token_hash) DO NOTHING")) {
-            ps.setString(1, TokenHashing.sha256Hex(raw));
-            ps.setString(2, tenant);
-            ps.setString(3, "test");
-            if (expiresAt == null) ps.setNull(4, java.sql.Types.TIMESTAMP_WITH_TIMEZONE); else ps.setObject(4, expiresAt);
-            if (revokedAt == null) ps.setNull(5, java.sql.Types.TIMESTAMP_WITH_TIMEZONE); else ps.setObject(5, revokedAt);
-            ps.executeUpdate();
-        }
+        PgContainerHelper.seedServiceToken(
+            DSL.using(su, SQLDialect.POSTGRES), raw, tenant, "test", null, expiresAt, revokedAt);
     }
 
     private void insertSessionToken(Connection su, String raw, String tenant,

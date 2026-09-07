@@ -12,6 +12,8 @@ import dev.nexus.service.db.TokenHashing;
 import dev.nexus.service.db.TokenStore;
 import dev.nexus.service.http.AuthFilter;
 import dev.nexus.service.http.RequestContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -133,13 +135,11 @@ class TokenBoundaryAdversarialTest {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
             // t1 is a separate schema bootstrapServiceRole never touches (it covers
             // nexus/staging only) -- kept as explicit grants (nexus-cbo4a batch 1b).
-            // search_path is re-set here to ADD t1 alongside what the helper already
-            // set (nexus, public).
+            // No session search_path is set (Sam's directive, nexus-zrcj7): every
+            // raw statement this class issues already qualifies its target by hand.
             su.createStatement().execute("GRANT USAGE ON SCHEMA t1 TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON t1.scratch TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, t1, public");
 
             // Bound service tokens (Phase E: every token is strictly tenant-bound).
             insertServiceToken(su, TOK_A, TENANT_A, null, null);
@@ -589,16 +589,8 @@ class TokenBoundaryAdversarialTest {
 
     private static void insertServiceToken(Connection su, String raw, String tenant,
                                            OffsetDateTime expiresAt, OffsetDateTime revokedAt) throws Exception {
-        try (var ps = su.prepareStatement(
-            "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label, expires_at, revoked_at) "
-            + "VALUES (?, ?, ?, ?, ?) ON CONFLICT (token_hash) DO NOTHING")) {
-            ps.setString(1, TokenHashing.sha256Hex(raw));
-            ps.setString(2, tenant);
-            ps.setString(3, "adv-test");
-            if (expiresAt == null) ps.setNull(4, java.sql.Types.TIMESTAMP_WITH_TIMEZONE); else ps.setObject(4, expiresAt);
-            if (revokedAt == null) ps.setNull(5, java.sql.Types.TIMESTAMP_WITH_TIMEZONE); else ps.setObject(5, revokedAt);
-            ps.executeUpdate();
-        }
+        PgContainerHelper.seedServiceToken(
+            DSL.using(su, SQLDialect.POSTGRES), raw, tenant, "adv-test", null, expiresAt, revokedAt);
     }
 
     private static void insertSessionToken(Connection su, String raw, String tenant,

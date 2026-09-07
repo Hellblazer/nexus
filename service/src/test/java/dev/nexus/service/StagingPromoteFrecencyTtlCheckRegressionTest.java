@@ -7,9 +7,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.db.TokenHashing;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -79,19 +80,10 @@ class StagingPromoteFrecencyTtlCheckRegressionTest {
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
         }
-        try (Connection su = pg.createConnection("");
-             var ps = su.prepareStatement(
-                 "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label)"
-                 + " VALUES (?, ?, 'staging-frecency-check') ON CONFLICT (token_hash) DO NOTHING")) {
-            su.setAutoCommit(true);
-            ps.setString(1, TokenHashing.sha256Hex(TOKEN));
-            ps.setString(2, TENANT);
-            ps.executeUpdate();
-        }
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "ALTER ROLE nexus_svc SET search_path TO nexus, public");
+            PgContainerHelper.seedServiceToken(
+                DSL.using(su, SQLDialect.POSTGRES), TOKEN, TENANT, "staging-frecency-check");
         }
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());

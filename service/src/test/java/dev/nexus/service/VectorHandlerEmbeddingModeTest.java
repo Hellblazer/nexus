@@ -6,11 +6,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.db.TokenHashing;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.OnnxEmbedder;
 import dev.nexus.service.vectors.PgVectorRepository;
 import liquibase.Liquibase;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -67,18 +68,8 @@ class VectorHandlerEmbeddingModeTest {
         }
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "ALTER ROLE nexus_svc SET search_path TO nexus, public");
-        }
-        try (Connection su = pg.createConnection("");
-             var ps = su.prepareStatement(
-                 "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label)"
-                 + " VALUES (?, ?, ?) ON CONFLICT (token_hash) DO NOTHING")) {
-            su.setAutoCommit(true);
-            ps.setString(1, TokenHashing.sha256Hex(TOKEN));
-            ps.setString(2, TENANT);
-            ps.setString(3, "pebfx2-mode-test");
-            ps.executeUpdate();
+            PgContainerHelper.seedServiceToken(
+                DSL.using(su, SQLDialect.POSTGRES), TOKEN, TENANT, "pebfx2-mode-test");
         }
 
         var cfg = new HikariConfig();

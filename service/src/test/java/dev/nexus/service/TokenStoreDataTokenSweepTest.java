@@ -2,10 +2,11 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
-import dev.nexus.service.db.TokenHashing;
 import dev.nexus.service.db.SweepBounds;
 import dev.nexus.service.db.TokenStore;
 import liquibase.Liquibase;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -19,7 +20,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
-import java.sql.Types;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -88,20 +88,10 @@ class TokenStoreDataTokenSweepTest {
     /** @param expiresAt may be null, which is how root and mint-locked rows are stored. */
     private void insertToken(String tenant, String label, String scope, Instant expiresAt)
             throws Exception {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label, scope, expires_at) "
-                 + "VALUES (?, ?, ?, ?, ?)")) {
-            ps.setString(1, TokenHashing.sha256Hex(tenant + ":" + label + ":" + scope + ":" + expiresAt));
-            ps.setString(2, tenant);
-            ps.setString(3, label);
-            ps.setString(4, scope);
-            if (expiresAt == null) {
-                ps.setNull(5, Types.TIMESTAMP_WITH_TIMEZONE);
-            } else {
-                ps.setObject(5, OffsetDateTime.ofInstant(expiresAt, ZoneOffset.UTC));
-            }
-            ps.executeUpdate();
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.seedServiceToken(DSL.using(su, SQLDialect.POSTGRES),
+                tenant + ":" + label + ":" + scope + ":" + expiresAt, tenant, label, scope,
+                expiresAt == null ? null : OffsetDateTime.ofInstant(expiresAt, ZoneOffset.UTC), null);
         }
     }
 

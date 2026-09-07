@@ -6,9 +6,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.db.TokenHashing;
 import dev.nexus.service.vectors.PgVectorRepository;
 import liquibase.Liquibase;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -81,17 +82,13 @@ class VectorHybridHttpTest {
             PgContainerHelper.applyProductSchema(su);
         }
         // Bind one token per tenant (server-side tenant resolution under test).
-        try (Connection su = pg.createConnection("");
-             var ps = su.prepareStatement(
-                 "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label)"
-                 + " VALUES (?, ?, ?) ON CONFLICT (token_hash) DO NOTHING")) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
             for (var bound : List.of(Map.entry(TOKEN_A, TENANT_A),
                                      Map.entry(TOKEN_B, TENANT_B))) {
-                ps.setString(1, TokenHashing.sha256Hex(bound.getKey()));
-                ps.setString(2, bound.getValue());
-                ps.setString(3, "hybrid-http-test");
-                ps.executeUpdate();
+                PgContainerHelper.seedServiceToken(
+                    dsl, bound.getKey(), bound.getValue(), "hybrid-http-test");
             }
         }
 
