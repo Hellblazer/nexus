@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-h5olw — anonymous install ping (active-install count).
+
+    One row per daily ping from a client whose telemetry opt-out is not set.
+    The payload is deliberately minimal: a random install UUID minted by the
+    client, the client version, the install mode, OS, CPU arch, and the Python
+    major.minor. No tenant, no hostname, no paths, no collection names.
+
+    WHY NO RLS: the route that writes here is unauthenticated (local-mode
+    installs have no tenant and no token — they are exactly the population
+    this table exists to count), so there is no tenant GUC to scope by. The
+    table holds nothing tenant-owned. Same posture as service_tokens /
+    session_tokens (service-tokens-001), for the mirror-image reason.
+
+    Grants: nexus_svc gets DML via grants-nexus-svc.xml's ALL TABLES IN SCHEMA
+    nexus grant (runAlways, LAST in the master order); no per-table grant here.
+
+    The read this table serves is one query:
+        SELECT count(DISTINCT install_id) FROM nexus.install_pings
+         WHERE received_at >= now() - interval '28 days';
+    idx_install_pings_received orders it. Retention is a later sweep; rows are
+    ~100 bytes and the population is small.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="telemetry-014-1" author="nexus-h5olw">
+        <comment>Create install_pings (anonymous daily client ping; no RLS, see file header)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.install_pings (
+    id             BIGSERIAL    NOT NULL,
+    install_id     UUID         NOT NULL,
+    client_version TEXT         NOT NULL,
+    mode           TEXT         NOT NULL,
+    os             TEXT         NOT NULL,
+    arch           TEXT         NOT NULL,
+    python         TEXT         NOT NULL,
+    received_at    TIMESTAMPTZ  NOT NULL,
+    CONSTRAINT install_pings_pk PRIMARY KEY (id),
+    CONSTRAINT install_pings_mode_chk CHECK (mode IN ('local', 'cloud'))
+);
+
+CREATE INDEX idx_install_pings_received
+    ON nexus.install_pings (received_at, install_id);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.install_pings CASCADE</rollback>
+    </changeSet>
+</databaseChangeLog>

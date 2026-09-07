@@ -91,6 +91,23 @@ After `/plugin update`, run both steps so the CLI matches the plugin.
 Installs that never left ChromaDB (5.x, or 6.x never migrated) take a
 different path: [Getting Started § Upgrading from a pre-PG install](docs/getting-started.md#upgrading-from-a-pre-pg-install).
 
+### Telemetry
+
+Once a day the MCP server sends one anonymous ping to the managed service so
+the project can count active installs. It carries exactly six fields: a random
+install id (a UUID minted on first use, stored in `~/.config/nexus/install_id`),
+the conexus version, the install mode (`local` or `cloud`), OS, CPU
+architecture, and Python major.minor. No hostname, no paths, no collection
+names, no content. It runs on a background thread with a two second timeout
+and never blocks or retries. Turn it off with either:
+
+```bash
+nx telemetry off            # writes telemetry.enabled: false to config.yml
+export NX_NO_TELEMETRY=1    # or per environment
+```
+
+`nx telemetry status` shows the current setting and the last ping time.
+
 ### Something broken?
 
 [nexus-recovery-runbook](https://gist.github.com/Hellblazer/08f0a615e3d73e47d8062bce4829b611) is a

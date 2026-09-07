@@ -505,7 +505,13 @@ class TestRequiredEngineVersion:
         # deadlock fix (metadata UPDATE batch ordered by chash, DeadlockRetry on
         # the combined-write refresh, shared sweep gate on the metadata-only
         # UPDATE surface on both paths). No changeset; a v0.1.105 store walks 0.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 106)
+        # ->(0,1,107) 2026-09-07: v0.1.107 carries nexus-h5olw, the anonymous
+        # install ping: unauthenticated POST /v1/install-ping into the global
+        # nexus.install_pings table (telemetry-014, one changeset; a v0.1.106
+        # store walks 1) with NX_INSTALL_PING_TRUSTED_PROXIES keying. The
+        # client half (daily ping from the MCP lifespan, nx telemetry
+        # status/off/on) ships in 7.35.0, paired with this engine.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 107)
 
 
 class TestParseEngineVersion:

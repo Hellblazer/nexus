@@ -6,6 +6,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.35.0] - 2026-09-07
+
+Paired with engine-service-v0.1.107 (`REQUIRED_ENGINE_VERSION` 0.1.107,
+one changeset over a v0.1.106 store).
+
+### Added
+
+- Anonymous daily install ping (nexus-h5olw). Once every 24 hours the MCP
+  server sends six fields to the managed service so active installs can be
+  counted across local and cloud mode: a random install id kept in
+  `~/.config/nexus/install_id`, the conexus version, the install mode, OS,
+  CPU architecture, and Python major.minor. Nothing else. Daemon thread,
+  2 s timeout, every failure swallowed. Opt-out, default on:
+  `nx telemetry off` (writes `telemetry.enabled: false`) or
+  `NX_NO_TELEMETRY=1`; `nx telemetry status` shows the setting, the
+  install id, and the last ping. README § Telemetry states exactly what is
+  sent.
+- Engine: `POST /v1/install-ping`, unauthenticated, outside the `/v1/*`
+  auth block; `nexus.install_pings` (telemetry-014, global, no RLS); rate
+  limiting keyed by a trusted-proxy count (`NX_INSTALL_PING_TRUSTED_PROXIES`,
+  default 0 = socket peer; the managed edge runs 1). The active-install
+  read is an operator query on the conexus side; there is no `nx` verb.
+
 ## [7.34.1] - 2026-09-07
 
 Client-only patch. Engine unchanged at engine-service-v0.1.106

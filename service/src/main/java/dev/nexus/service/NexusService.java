@@ -365,6 +365,15 @@ public final class NexusService {
         server.createContext("/v1/status",
                 new dev.nexus.service.http.StatusHandler(docEmbedderRouter, localEmbedActivitySupplier));
 
+        // /v1/install-ping — unauthenticated anonymous daily client beacon
+        // (nexus-h5olw). Local-mode installs have no tenant or token, and they
+        // are the population this exists to count, so it sits OUTSIDE the
+        // /v1/* auth-filter block with /v1/status. Global table, no RLS.
+        server.createContext("/v1/install-ping",
+                dev.nexus.service.http.InstallPingHandler.fromEnv(
+                        new dev.nexus.service.db.InstallPingRepository(dataSource, java.time.Clock.systemUTC()),
+                        java.time.Clock.systemUTC()));
+
         // /v1/* — auth filter applied
         var authFilter = List.of(new AuthFilter(tokenCache, tokenStore));
 
