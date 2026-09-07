@@ -126,6 +126,23 @@ Do not create a second collection to change embedding model. The model is
 an install-level fact, and switching it mints the sibling for you at the
 next write (see "Local mode with Voyage" in the CLI reference).
 
+## Checking the rules
+
+```bash
+nx collection shape            # every rule above, one finding per violation, read-only
+nx collection shape --json
+```
+
+`shape` reads the catalog rows, the vector stats, and the document counts,
+and reports each violation with a proposed action. It never renames,
+merges, or deletes; those stay yours. For a suspected duplicate it names
+`nx collection merge-candidates`, which ranks pairs by shared-topic
+overlap, as the evidence to confirm with, and for one collection's depth
+`nx collection audit NAME` and `nx collection health` are the RDR-087
+views. Run `shape` before and after any curation pass; a clean run says how
+many collections it examined, so an empty result is never mistaken for a
+skipped one.
+
 ## Reading is different from writing
 
 `--collection` and the `collection` parameter are write-side choices. For
