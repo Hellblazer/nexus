@@ -21,6 +21,7 @@ Accepts an RDR after it passes the gate. This is the author/reviewer decision po
 ## Behavior
 
 1. **Verify gate result** — read `{id}-gate-latest` from T2. Block if outcome is not PASSED.
+1b. **Disposition residuals** — for every `residuals:` line in the gate record (findings a round-3-or-later gate recorded instead of blocking), name a disposition: the commit sha that fixed it, or the bead id that carries it. Record the dispositions in Revision History. A residual with no disposition blocks accept.
 2. **Update T2** (process authority) — set `status: "accepted"`, `accepted_date: "YYYY-MM-DD"`.
 3. **Flip the file frontmatter + README via the CLI (do NOT hand-edit):**
    ```bash
@@ -61,6 +62,7 @@ The accept skill writes a T1 scratch entry tagged `rdr-planning-context` before 
 ## Success Criteria
 
 - [ ] T2 gate result verified as PASSED before accepting
+- [ ] Every `residuals:` line in the gate record has a disposition (commit sha or bead id)
 - [ ] T2 metadata updated with status=accepted and accepted_date
 - [ ] File frontmatter updated to match T2
 - [ ] README index regenerated

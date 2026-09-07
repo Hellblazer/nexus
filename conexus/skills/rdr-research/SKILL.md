@@ -85,6 +85,25 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 3. Update T2 record (overwrite with updated content)
 4. Update the emoji marker in the RDR markdown file (e.g., ❓ → ✅)
 
+## Pre-edit capture for gate fixes
+
+A research entry that records a gate fix is written BEFORE the edit, never
+transcribed from it (RDR-204's `204-research-13` named commits that already
+existed and inherited their errors; nexus-g7zgw.5):
+
+1. Record the entry first: `nx rdr preamble rdr-research -- add <id> ...`.
+   Its `commits:` field is filled in after the commit exists.
+2. Every clause the fix will add carries a tool-produced quote from its
+   source (`sed -n`, `grep -n`, a T2 read) or the explicit marker
+   "inferred, not read". A quote read at sentence granularity does not cover
+   a clause welded on beside it.
+3. A count or a universal (never / always / only / nothing / every / the one /
+   all) requires a census of the whole surface, captured in the entry as an
+   enumeration; two sites that happen to agree are not a source.
+4. The fix commit changes the fact the critic named and nothing else. A gloss,
+   rationale, attribution or count is derived from this entry and lands in a
+   separate commit, gated by its own fix check.
+
 ## Agent Dispatch
 
 When the user asks to *investigate* something (not just record a finding):

@@ -1769,10 +1769,16 @@ def _preamble_regate_block(
     the RDR file since the gated commit (when the record carries
     ``commit:``), and the Layer 0 survivor-sweep instruction.
 
-    Returns ``[]`` when there is no gate record or it is not BLOCKED (a
-    first gate, or a re-gate after a pass, prints nothing extra). A T2 read
-    failure returns a single named note rather than nothing, so an
-    unreachable T2 is visible and never mistaken for "no prior round".
+    Returns ``[]`` only when there is no gate record (a first gate). The
+    block fires after a PASSED gate too (nexus-g7zgw.4): both RDR-204
+    rounds that introduced new Criticals were fixes authored against a
+    PASSED gate's Significants, and the sweep was structurally off for
+    them. It also carries the gate round number, derived from the record's
+    ``prior:`` chain (nexus-g7zgw.2), and the Fix check section naming the
+    exact diff range whenever the file changed since the gated commit
+    (nexus-g7zgw.1). A T2 read failure returns a single named note rather
+    than nothing, so an unreachable T2 is visible and never mistaken for
+    "no prior round".
     """
     project = f"{repo_name}_rdr"
     try:
@@ -1781,9 +1787,7 @@ def _preamble_regate_block(
             if not latest:
                 return []
             content = latest.get("content", "") if isinstance(latest, dict) else ""
-            outcome = (_preamble_parse_t2_field(content, "outcome") or "").strip().upper()
-            if outcome != "BLOCKED":
-                return []
+            outcome = (_preamble_parse_t2_field(content, "outcome") or "").strip().upper() or "?"
             critique_title = (_preamble_parse_t2_field(content, "critique") or "").strip()
             # Tolerate the "project/title [id]" form the skill writes into the pointer.
             critique_title = re.sub(r"\s*\[\d+\]\s*$", "", critique_title)
@@ -1810,13 +1814,14 @@ def _preamble_regate_block(
             "",
         ]
 
-    lines = ["### Re-gate: the previous gate was BLOCKED", ""]
+    lines = [f"### Re-gate: the previous gate was {outcome}", ""]
     date = _preamble_parse_t2_field(content, "date") or "?"
     summary = _preamble_parse_t2_field(content, "summary") or ""
-    lines.append(f"Prior gate {date}: BLOCKED. {summary}".rstrip())
+    lines.append(f"Prior gate {date}: {outcome}. {summary}".rstrip())
     if critique_title:
         lines.append(f"Critique: `{project}/{critique_title}`")
     lines.append("")
+    lines.extend(_gate_round_lines(content))
 
     findings = _critique_findings(str(critique.get("content", ""))) if isinstance(critique, dict) else []
     if findings:
@@ -1848,12 +1853,23 @@ def _preamble_regate_block(
                     f"Changed since the gated commit `{gated_commit}`: unknown "
                     f"(git diff exited {diff.returncode}: {diff.stderr.strip()[:160]})"
                 )
+                lines.append("")
+                lines.append(
+                    f"Fix check: the gated commit `{gated_commit}` does not resolve, so the "
+                    "diff to verify is unknown. Find the gated tree by hand (the critique "
+                    "names its commit) before Layer 3."
+                )
             else:
                 stat = diff.stdout.strip().splitlines()
                 lines.append(
                     f"Changed since the gated commit `{gated_commit}`: "
                     + (stat[-1].strip() if stat else "no changes to the RDR file")
                 )
+                lines.append("")
+                lines.extend(_fix_check_lines(
+                    repo_root=repo_root, t2_key=t2_key, rel=rel,
+                    gated_commit=gated_commit, changed=bool(stat),
+                ))
         except (OSError, subprocess.SubprocessError) as exc:
             lines.append(f"Changed since the gated commit `{gated_commit}`: (git diff failed: {exc})")
         lines.append("")
@@ -1866,6 +1882,103 @@ def _preamble_regate_block(
         "the critic to verify each prior finding closed everywhere, then run a full-document "
         "consistency pass; re-read related RDRs only if the Relationship section changed.",
         "",
+    ])
+    return lines
+
+
+#: Gate rounds that may block on any Critical. From the next round on only
+#: a ship-blocker blocks and everything else is a residual recorded for
+#: accept (nexus-g7zgw.2; the shape of ``nexus.plans.audit_rounds``).
+GATE_MAX_ANY_CRITICAL_ROUNDS: int = 2
+
+
+def _gate_round_lines(gate_record: str) -> list[str]:
+    """The gate round number and its rule, from the record's ``prior:`` chain.
+
+    The chain is the skill's own format, ``[id] (OUTCOME ...), [id] (...)``;
+    each bracketed T2 id is one prior round, and the record itself is one
+    more, so a record with no ``prior:`` field is round 2's predecessor.
+    The count never resets for the RDR's life.
+    """
+    prior = _preamble_parse_t2_field(gate_record, "prior") or ""
+    entries = re.findall(r"\[\d+\]\s*\(([^)]*)\)", prior)
+    n_prior = 1 + len(entries)
+    blocked = sum(1 for e in entries if "BLOCKED" in e.upper())
+    passed = sum(1 for e in entries if "PASSED" in e.upper())
+    this_outcome = (_preamble_parse_t2_field(gate_record, "outcome") or "").strip().upper()
+    if this_outcome == "BLOCKED":
+        blocked += 1
+    elif this_outcome == "PASSED":
+        passed += 1
+    round_no = n_prior + 1
+    lines = [
+        f"**Gate round {round_no}** (prior rounds: {n_prior} ({blocked} BLOCKED, {passed} PASSED); "
+        "the count never resets for this RDR)."
+    ]
+    if round_no > GATE_MAX_ANY_CRITICAL_ROUNDS:
+        lines.append(
+            f"From round {GATE_MAX_ANY_CRITICAL_ROUNDS + 1} only a ship-blocker blocks "
+            "(`ship_blockers > 0` in the critic's Verdict); every other Critical and "
+            "Significant is a residual: record it in the gate record's `residuals:` lines "
+            "and in Revision History, and disposition it at accept."
+        )
+    else:
+        lines.append(
+            f"Rounds 1 to {GATE_MAX_ANY_CRITICAL_ROUNDS} block on any Critical "
+            "(`critical_count > 0`); Significants never block."
+        )
+    lines.append("")
+    return lines
+
+
+def _fix_check_lines(
+    *, repo_root: str, t2_key: str, rel: str, gated_commit: str, changed: bool,
+) -> list[str]:
+    """The Fix check section (nexus-g7zgw.1): the exact diff range, the fix
+    commits, the T2 title the verdict goes under, and the obligation.
+
+    The T2 title carries the RDR file's tip sha, which is the sha the next
+    gate record's ``commit:`` field will name, so a gate can never cite a
+    fix check of an older tree.
+    """
+    if not changed:
+        return [
+            f"Fix check: not required (no change to the RDR file since `{gated_commit}`).",
+        ]
+    try:
+        log = subprocess.run(
+            ["git", "-C", repo_root, "log", "--format=%h %s", f"{gated_commit}..HEAD", "--", rel],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        tip = subprocess.run(
+            ["git", "-C", repo_root, "log", "-1", "--format=%h", "--", rel],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return [f"Fix check: git log failed ({exc}); list the fix commits by hand."]
+    commits = [ln for ln in log.stdout.strip().splitlines() if ln.strip()]
+    tip_sha = tip.stdout.strip() or "HEAD"
+    lines = [
+        "### Fix check (required before Layer 3)",
+        "",
+        f"Range: `git diff {gated_commit}..HEAD -- {rel}`",
+        "Fix commits:",
+    ]
+    lines.extend(f"- {c}" for c in commits)
+    lines.extend([
+        "",
+        "Dispatch substantive-critic with ONLY that diff and the RDR file. For every ADDED "
+        "or CHANGED clause (a parenthetical or a trailing 'and X' is its own item):",
+        "1. Is it contradicted by any other line in this file? Cite both lines.",
+        "2. Is it an attribution (X created / set / owns / defines Y), a count, or a universal "
+        "(never / always / only / nothing / every / the one / all)? Then it needs an "
+        "enumeration or the artifact's own text, quoted; two sites that agree are not a "
+        "source. The same enumeration requirement applies to the research entry the fix cites.",
+        "3. Does its cited source (changeset, file:line, RDR, T2 entry) contain the claim as stated?",
+        "",
+        f"Verdict goes to T2 `{t2_key}-fix-check-{tip_sha}` (project `<repo>_rdr`); the gate "
+        f"record's `fix_check:` must name `{tip_sha}`, equal to its `commit:`. Any FAIL: fix, "
+        "re-run the fix check on the new diff. Do not enter Layer 3 with a FAIL open.",
     ])
     return lines
 
@@ -1964,6 +2077,11 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
     )
     print(
         f"   If no gate record exists, run `nx rdr preamble rdr-gate -- {t2_key}` first."
+    )
+    print(
+        "   Every `residuals:` line in that record needs a disposition (the commit sha "
+        "that fixed it, or the bead id that carries it) recorded in Revision History "
+        "before the T2 write; a residual with no disposition blocks accept (nexus-g7zgw.2)."
     )
     print()
     print(f"**RDR file path:** `{rdr_file}`")

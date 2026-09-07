@@ -31,4 +31,7 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.35.0)
 
-(none)
+- `conexus/skills/rdr-gate/SKILL.md` — nexus-g7zgw: Layer 0 fires after PASSED gates too and sweeps the critic's `Sites:` list; the diff-scoped Fix check layer; round-numbered Gate Aggregation (any Critical in rounds 1-2, `ship_blockers` only from round 3, residuals recorded); the fix-commit rule.
+- `conexus/commands/rdr-gate.md` — nexus-g7zgw: the same Layer 0, Fix check and aggregation rules; gate record gains `ship_blockers:`, `fix_check:`, `residuals:`, `prior:`.
+- `conexus/skills/rdr-research/SKILL.md` — nexus-g7zgw.5: pre-edit capture for gate fixes (entry before the edit, quote or "inferred, not read" per clause, census for universals).
+- `conexus/skills/rdr-accept/SKILL.md` — nexus-g7zgw.2: residuals in the gate record are dispositioned (commit sha or bead id) before accept.

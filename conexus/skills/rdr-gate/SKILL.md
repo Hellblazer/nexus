@@ -26,14 +26,17 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 
 ## Three Validation Layers (run in sequence)
 
-### Layer 0 — Re-gate survivor sweep (only when the prior gate was BLOCKED)
+### Layer 0 — Re-gate survivor sweep (whenever a prior gate record exists)
 
-`nx rdr preamble rdr-gate <id>` prints a **Re-gate** block when the RDR's
-`{id}-gate-latest` record is BLOCKED: the prior outcome, the critique's
-Critical and Significant lines verbatim, and the diff of the RDR file since the
-gated commit. Do this before anything else:
+`nx rdr preamble rdr-gate <id>` prints a **Re-gate** block whenever the RDR
+has a `{id}-gate-latest` record, PASSED or BLOCKED: the prior outcome, the
+gate round number (derived from the record's `prior:` chain), the critique's
+Critical and Significant lines verbatim, the diff of the RDR file since the
+gated commit, and the Fix check section. Do this before anything else:
 
-1. For every prior finding, grep the RDR file for the refuted phrasing AND the
+1. For every prior finding, sweep every site in its `Sites:` list (the critic
+   emits one per finding; see the Layer 3 brief). Where a prior critique has
+   no `Sites:` list, grep the RDR file for the refuted phrasing AND the
    corrected one. Every occurrence must agree. A fact lives in the Problem
    Statement, Research Findings, Technical Design and the Implementation Plan
    at once; the last two paraphrase the design and are where survivors hide.
@@ -46,7 +49,49 @@ gated commit. Do this before anything else:
    RDRs only if the diff touched the Relationship section; otherwise the prior
    round's P7 check stands.
 
-A first gate, or a re-gate after a PASSED result, has no Layer 0.
+A first gate has no Layer 0. A re-gate after a PASSED result has one: both
+RDR-204 rounds that introduced new Criticals were fixes authored against a
+PASSED gate's Significants (nexus-g7zgw.4).
+
+### Fix check — diff-scoped verification (whenever the RDR changed since the gated commit)
+
+The Re-gate block prints `Fix check: not required` when the file is unchanged.
+Otherwise it prints the exact range (`git diff <commit>..HEAD -- <file>`), the
+fix commits, and the T2 title for the verdict. Then:
+
+1. Dispatch `substantive-critic` with ONLY that diff and the RDR file as input.
+   Brief, for every ADDED or CHANGED clause (a parenthetical or a trailing
+   "and X" is its own item):
+   1. Is it contradicted by any other line in this file? Cite both lines.
+   2. Is it an attribution ("X created / set / owns / defines Y"), a count, or a
+      universal (never / always / only / nothing / every / the one / all)? Then
+      it needs an enumeration or the artifact's own text, quoted. Two sites that
+      agree are not a source. The enumeration requirement applies equally to
+      counts and universals in the research entry the fix cites.
+   3. Does its cited source (changeset, file:line, RDR, T2 entry) contain the
+      claim as stated?
+2. Deliverable: one row per clause, PASS or FAIL with line numbers, plus the
+   standard Verdict block.
+3. Store the verdict in T2: mcp__plugin_conexus_nexus__memory_put(project="{repo}_rdr", title="{id}-fix-check-<sha>", ttl="permanent", tags="rdr,gate,fix-check"), where `<sha>` is the RDR file's tip commit as printed by the preamble.
+4. Any FAIL: fix it, re-run the fix check on the new diff. Do not enter Layer 1
+   or Layer 3 with a FAIL open. Zero FAIL: proceed.
+
+The gate record written at the end carries `fix_check: <sha>`, and that sha must
+equal the record's `commit:`; a gate cannot cite a fix check of an older tree.
+The fix check is a precondition and never counts toward the round cap.
+
+### Fixing findings
+
+- A fix changes the fact the critic named and nothing else. New glosses,
+  rationales, parentheticals and counts are a separate commit, gated separately.
+- Every clause a fix adds carries either a tool-produced quote from its source
+  or an explicit "inferred, not read" marker.
+- Write the research entry BEFORE the edit (rdr-research skill § Pre-edit
+  capture): the quote or enumeration lives there first; the RDR sentence is
+  derived from it.
+- A universal claim (never / always / only / nothing / every / the one / all)
+  or a count needs a census of the surface, not a spot read of two sites.
+- A Criterion 6 readability WARN is never closed inside a fix commit.
 
 ### Layer 1 — Structural Validation (no AI)
 
@@ -124,10 +169,15 @@ Structured critique with pass/warn/fail per finalization gate criterion:
 3. Scope Verification — pass/warn/fail
 4. Cross-Cutting Concerns — pass/warn/fail
 5. Proportionality — pass/warn/fail
-6. Register Readability — pass/warn ONLY (never fail, never blocks): could a smart reader who does not know this project's jargon follow the problem and the decision from this RDR alone? List each undefined term and each sentence assuming tribal knowledge (see resources/rdr/REGISTER.md). A warn here is guidance to the author, not a gate outcome.
+6. Register Readability — pass/warn ONLY (never fail, never blocks): could a smart reader who does not know this project's jargon follow the problem and the decision from this RDR alone? List each undefined term and each sentence assuming tribal knowledge (see resources/rdr/REGISTER.md). A warn here is guidance to the author, not a gate outcome. A term listed here never appears as a Critical or Significant.
+
+Gate round: N (from the preamble). Ship-blocker for an RDR gate: "yes" iff an implementer executing the plan as written would build the wrong thing, or the decision rests on a refuted assumption. A documentation-accuracy defect (wrong attribution, wrong citation, a wrong count that changes no decision) is never a ship-blocker.
+
+Every Critical and Significant carries a `Sites:` line listing every file:line where the fact lives, so the author sweeps an enumerated set rather than a remembered phrase.
 
 ### Quality Criteria
 - [ ] Every fail has a specific section reference and fix suggestion
+- [ ] Every Critical and Significant has a Sites: list
 - [ ] Warns are actionable but non-blocking
 - [ ] Prior RDR search attempted (may return empty on cold-start)
 ```
@@ -142,16 +192,24 @@ If no collections found: "No prior RDRs indexed. Cross-project prior-art search 
 
 ### Gate Aggregation
 
-- Any **fail** → gate fails. Status remains Draft.
-- **Warns only** → gate passes. Warns surfaced to user but do not block.
-- All **pass** → gate passes.
+The round number comes from the preamble (`1 + len(prior chain)`; it never
+resets for the RDR's life). The critic's Verdict supplies `critical_count`,
+`significant_count` and `ship_blockers`.
+
+- Rounds 1 and 2: BLOCKED iff `critical_count > 0`. Significants never block.
+- Round 3 onward: BLOCKED iff `ship_blockers > 0`. Every other Critical and
+  Significant is a residual: the gate writes `outcome: PASSED` with one
+  `residuals:` line per finding in the gate record, appends "Gate N residuals"
+  to Revision History, and accept dispositions each one (rdr-accept skill).
+- Criterion 6 output is never a finding and never counted.
+- Warns only, or all pass → PASSED. Status remains Draft.
 
 **Important**: The AI critique *supplements* but does not *replace* the author completing the Finalization Gate section with written responses. The gate should verify that the Finalization Gate section contains substantive written responses, not just "N/A" or placeholder text.
 
 ### On Pass
 
 1. Store the critique in T2 FIRST: mcp__plugin_conexus_nexus__memory_put(content="{critique}", project="{repo}_rdr", title="{id}-gate-critique-{date}", ttl="permanent", tags="rdr,gate,critique"). Same-day re-gates append a letter (`{date}b`, `{date}c`). T2 is where the preamble reads; a T3 copy (collection="knowledge", title="gate-rdr-NNN-{date}") is optional and never the only copy.
-2. Write gate result to T2: mcp__plugin_conexus_nexus__memory_put(content="outcome: PASSED\ndate: YYYY-MM-DD\ncritical_count: 0\nsignificant_count: N\nobservation_count: N\nsummary: One-sentence summary\ncritique: {repo}_rdr/{id}-gate-critique-{date}\ncommit: <git log -1 --format=%h -- <rdr file>>", project="{repo}_rdr", title="{id}-gate-latest", ttl="permanent", tags="rdr,gate"). `critique:` and `commit:` are what the re-gate block reads.
+2. Write gate result to T2: mcp__plugin_conexus_nexus__memory_put(content="outcome: PASSED\ndate: YYYY-MM-DD\ncritical_count: 0\nsignificant_count: N\nobservation_count: N\nship_blockers: 0\nsummary: One-sentence summary\ncritique: {repo}_rdr/{id}-gate-critique-{date}\ncommit: <git log -1 --format=%h -- <rdr file>>\nfix_check: <same sha, when a fix check ran>\nresiduals: <one line per residual finding, round 3+>\nprior: [<previous record id>] (<OUTCOME> <nC> <nS>), <the previous record's own prior chain>", project="{repo}_rdr", title="{id}-gate-latest", ttl="permanent", tags="rdr,gate"). `critique:`, `commit:` and `prior:` are what the re-gate block reads; `fix_check:` must equal `commit:`.
 3. Append gate findings to the RDR's Revision History section
 4. Print: `> Run '/conexus:rdr-accept <id>' to accept this RDR.`
 
@@ -206,8 +264,9 @@ For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/REL
 - [ ] Layer 2 assumption audit completed (findings counted by classification and method)
 - [ ] High-risk items flagged (classification=assumed AND verification_method=docs_only)
 - [ ] Layer 3 AI critique dispatched and results aggregated
-- [ ] Gate result determined: pass (all pass or warns only) or fail (any fail)
-- [ ] Gate result written to T2 as `{id}-gate-latest` (both pass and fail)
+- [ ] Fix check run on the diff since the gated commit, verdict stored as `{id}-fix-check-<sha>`, before Layer 1
+- [ ] Gate result determined by the Gate Aggregation rules for this round (any Critical in rounds 1-2; ship_blockers only from round 3)
+- [ ] Gate result written to T2 as `{id}-gate-latest` (both pass and fail), with `prior:` chain, `fix_check:` and `residuals:`
 - [ ] On pass: gate findings appended to Revision History, accept prompt displayed
 - [ ] On fail: specific sections to address displayed to user
 
