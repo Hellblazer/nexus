@@ -172,7 +172,9 @@ class JooqRecordReflectionFeatureTest {
     // type each: nexus.index_failures (telemetry-009, nexus-nukn3),
     // nexus.capability_census (telemetry-010) and nexus.routing_events
     // (telemetry-011, both nexus-gjv9b). telemetry-012 only added a column.
-    private static final int EXPECTED_RECORD_TYPES = 87;
+    // 87 -> 88: nexus.install_pings (telemetry-014, nexus-h5olw), the
+    // anonymous install-ping table, one generated Record type.
+    private static final int EXPECTED_RECORD_TYPES = 88;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {
