@@ -57,6 +57,91 @@ def list_cmd() -> None:
         click.echo(f"{c['name']:<{width}}  {c['count']:>6} chunks")
 
 
+def _shape_catalog() -> Any:
+    """Read-facing catalog for the audit; a separate seam so tests can swap it."""
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    cat = make_catalog_reader()
+    if cat is None:
+        raise click.ClickException("catalog is not available; the audit needs it (nx catalog setup)")
+    return cat
+
+
+def _shape_write_model() -> Callable[[str], str | None]:
+    """The install's model per content type (the RDR-204 profile, as code today).
+
+    Read-shaped on purpose: ``effective_embedding_model_for_writes`` is
+    documented as unsafe on a read path (it raises when ``local.embed_model``
+    is voyage-shaped and no key is configured, nexus-35ok4), and the shape
+    audit never writes. ``resolve_read_embedding_model`` is the credential-
+    free counterpart and never raises.
+    """
+    from nexus.corpus import resolve_read_embedding_model  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    return resolve_read_embedding_model
+
+
+#: Human output lists at most this many collections per check before
+#: summarising the rest; ``--full`` or ``--json`` lifts the cap. 151 ghost
+#: rows on the first live run buried the six findings that needed a human.
+_SHAPE_MAX_LISTED_PER_CHECK: int = 10
+
+
+@collection.command("shape")
+@click.option("--json", "as_json", is_flag=True, help="Emit the report as JSON.")
+@click.option("--full", is_flag=True, help=f"List every collection per check instead of the first {_SHAPE_MAX_LISTED_PER_CHECK}.")
+def shape_cmd(as_json: bool, full: bool) -> None:
+    """Read-only shape audit of the whole collection SET against docs/collections.md.
+
+    Distinct from ``nx collection audit NAME`` (the RDR-087 deep dive of one
+    collection).
+
+    One finding per rule violation with a proposed action; never writes,
+    never calls a model. Exit code is 0 whenever the tenant could be read,
+    findings or not; a read failure is an error, never an empty report.
+    """
+    from nexus.collection_shape import audit  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    try:
+        report = audit(catalog=_shape_catalog(), t3=_t3(), write_model_for=_shape_write_model())
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — boundary: surface the read failure loudly, never a clean-looking report
+        raise click.ClickException(f"collection shape could not read the tenant: {exc}") from exc
+
+    if as_json:
+        import json as _json  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+        click.echo(_json.dumps(report.to_dict(), indent=2, sort_keys=True))
+        return
+
+    click.echo(
+        f"collection shape: examined {report.collections_examined} collection(s)"
+        + (f", skipped {report.collections_skipped_quarantine} quarantine" if report.collections_skipped_quarantine else "")
+        + f"; {len(report.findings)} finding(s)"
+    )
+    if not report.findings:
+        click.echo("  no findings against docs/collections.md")
+        return
+    by_check: dict[str, list] = {}
+    for f in report.findings:
+        by_check.setdefault(f.check, []).append(f)
+    for check in sorted(by_check, key=lambda c: (by_check[c][0].rule, c)):
+        items = by_check[check]
+        click.echo(f"\n[rule {items[0].rule}] {check} ({len(items)})")
+        shown = items if full else items[:_SHAPE_MAX_LISTED_PER_CHECK]
+        for f in shown:
+            target = f.collection or "(install)"
+            rel = f" <> {f.related}" if f.related else ""
+            click.echo(f"  {f.severity:<4} {target}{rel}")
+            click.echo(f"       {f.message}")
+            click.echo(f"       action: {f.action}")
+        hidden = len(items) - len(shown)
+        if hidden > 0:
+            click.echo(f"  ... and {hidden} more (--full or --json to list all)")
+    click.echo("\nrules: docs/collections.md  (this command never writes)")
+
+
 @collection.command("info")
 @click.argument("name")
 def info_cmd(name: str) -> None:

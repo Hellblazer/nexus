@@ -36,7 +36,9 @@ def store() -> None:
 @store.command("put")
 @click.argument("source")
 @click.option("--collection", "-c", default="knowledge", show_default=True,
-              help="Collection name or prefix (default: knowledge)")
+              help="Collection: a bare subject such as distributed-systems (default: "
+                   "knowledge). Never a model token or version; see "
+                   "docs/collections.md.")
 @click.option("--title", "-t", default="", help="Document title (required when SOURCE is -)")
 @click.option("--tags", default="", help="Comma-separated tags")
 @click.option("--category", default="", help="Category label")
@@ -61,8 +63,8 @@ def put_cmd(
 
     \b
     Examples:
-      nx store put ./notes.md --collection knowledge --tags "arch,decision"
-      echo "key insight" | nx store put - --title "finding-01" --collection knowledge
+      nx store put ./notes.md --collection distributed-systems --tags "arch,decision"
+      echo "key insight" | nx store put - --title "finding-01" --collection vector-search
       nx store put ./doc.md --ttl 30d --title "sprint-notes"
     """
     if source == "-":
@@ -302,7 +304,9 @@ from nexus.catalog.store_hook import raise_if_oversized as _raise_if_oversized  
 
 @store.command("list")
 @click.option("--collection", "-c", default="knowledge", show_default=True,
-              help="Collection name or prefix (default: knowledge)")
+              help="Collection: a bare subject such as distributed-systems (default: "
+                   "knowledge). Never a model token or version; see "
+                   "docs/collections.md.")
 @click.option("--limit", "-n", default=200, show_default=True,
               help="Maximum entries to show")
 @click.option("--offset", default=0, show_default=True,
@@ -402,7 +406,9 @@ def _list_documents(db: T3Database, col_name: str) -> None:
 @store.command("get")
 @click.argument("doc_id")
 @click.option("--collection", "-c", default="knowledge", show_default=True,
-              help="Collection name or prefix (default: knowledge)")
+              help="Collection: a bare subject such as distributed-systems (default: "
+                   "knowledge). Never a model token or version; see "
+                   "docs/collections.md.")
 @click.option("--json", "json_out", is_flag=True, default=False,
               help="Output as JSON")
 def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:

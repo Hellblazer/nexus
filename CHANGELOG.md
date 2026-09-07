@@ -6,6 +6,79 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.34.1] - 2026-09-07
+
+Client-only patch. Engine unchanged at engine-service-v0.1.106
+(`REQUIRED_ENGINE_VERSION` 0.1.106); no `service/` change since 7.34.0.
+
+### RDR gate: re-gates surface the prior round (nexus-7vdf9)
+
+- `nx rdr preamble rdr-gate <id>` prints a **Re-gate** block when the RDR's
+  `<id>-gate-latest` record is BLOCKED: the prior outcome and date, every
+  Critical and Significant finding from the stored critique (a section-aware
+  parser for the substantive-critic's canonical `## Critical Issues` /
+  `### Issue:` format plus a free-form fallback, verified against the four
+  real RDR-204 critiques), the RDR file's `git diff --stat` since the gated
+  commit (a bad or unknown commit is reported as unknown, never rendered as
+  "no changes"), and the Layer 0 survivor-sweep instruction. A missing
+  `critique:` pointer, a pointer to an absent record, and an unreachable T2
+  are each named distinctly. A first gate, or a re-gate after PASSED, prints
+  nothing extra. Origin: RDR-204 took four gate rounds; rounds three and four
+  were blocked on sentences restating facts already fixed elsewhere in the
+  same file, because nothing surfaced the prior round's findings.
+- The `/conexus:rdr-gate` command and the `rdr-gate` skill now store the
+  critique in T2 as `{id}-gate-critique-{date}` BEFORE writing the gate
+  result, and the result carries `critique:` and `commit:`; the preamble
+  reads both. A T3 copy under the old `gate-rdr-NNN-{date}` title is
+  optional and never the only copy. Both gain a Layer 0 section.
+- `conexus/resources/rdr/TEMPLATE.md` Technical Design guidance: state each
+  measured value once in Research Findings and cite it elsewhere; a set the
+  implementation can derive (tables with a foreign key into X, call sites
+  of Y) is derived at run time and pinned by a test, never typed into the
+  RDR as the condition.
+
+### Collections: guidance and a shape audit (nexus-ger23)
+
+- New `docs/collections.md`: the rules for choosing and naming a
+  collection. `code`/`docs`/`rdr` collections are minted only by
+  `nx index repo`; a `knowledge` collection is a durable subject area,
+  never a document, session, task, source application, or placeholder;
+  reuse an existing subject before creating one; type the bare subject and
+  never a model token or version; a collection holds many documents; where
+  each source kind goes; lifecycle only through the `nx collection` verbs.
+  Wired into AGENTS.md, Storage Tiers, the docs index, the CLI reference,
+  and the `store_put` / `nx_tidy` MCP docstrings; the `--collection` help
+  on `nx store put|list|delete` and `nx index md|pdf` states the rule, and
+  the CLI examples that taught `--collection knowledge` now show subjects.
+- `nx collection shape [--json] [--full]`: read-only audit of the whole
+  collection set against those rules. Fifteen checks over the six rules,
+  pinned to the rule headings by test: placeholder, date-like,
+  task-or-document-shaped, and source-app subjects; the `default` corpus;
+  likely duplicate subjects (name evidence, with `merge-candidates` named
+  as the confirmation); a model the install no longer writes with; a stored
+  dimension disagreeing with the name's model (the GH #667 class); thin,
+  one-document, and below-fan-out-floor collections; test residue; ghost
+  rows; grandfathered relics; blank catalog attributes; superseded-but-live;
+  chunks with no catalog row. One finding per violation with a proposed
+  action; never writes, never calls a model; a read failure is an error,
+  never an empty report. Distinct from the RDR-087 per-collection
+  `nx collection audit NAME`. The single attribute accessor
+  (`collection_attributes`) is the RDR-204 repoint seam.
+- `nx doctor --check-collection-shape`: one row per check with its count
+  and an examined count; findings never fail doctor, an unreadable tenant
+  exits 1.
+
+### Documentation
+
+- RDR-204 (draft, in gate): an install-scoped embedding profile and
+  `catalog_collections` as the authority for a collection's attributes.
+- RDR-203 closed as implemented with post-mortem (nexus-dt2tu).
+
+### Plugin surface becoming live at this pin
+
+- `conexus/commands/rdr-gate.md`, `conexus/skills/rdr-gate/SKILL.md`,
+  `conexus/resources/rdr/TEMPLATE.md` (nexus-7vdf9, above).
+
 ## [7.34.0] - 2026-09-06
 
 Paired with engine-service-v0.1.106 (`REQUIRED_ENGINE_VERSION` 0.1.106).

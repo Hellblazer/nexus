@@ -1757,7 +1757,7 @@ taxonomy:
 Manage T3 knowledge entries.
 
 ```
-echo "# Cache Strategy" | nx store put - --collection knowledge --title "decision-cache" --tags "decision,arch"
+echo "# Cache Strategy" | nx store put - --collection distributed-systems --title "decision-cache" --tags "decision,arch"
 ```
 
 | Subcommand | Description |
@@ -1986,6 +1986,7 @@ nx collection list
 | `re-embed NAME --to MODEL` | In-place re-embed for non-CCE Voyage models (nexus-bw65). Service mode: same-model only — the computed vectors ride the verbatim passthrough; a cross-model `--to` fails loud (server-side embedding routes by the collection NAME's model segment; cross-model moves are the migration pipeline's job). `--no-dry-run --yes` to apply (6.3.1, nexus-c9xr2/u37lw) |
 | `rewrite-metadata [NAME]` | Rewrite/repair chunk metadata in place; `--all` for every collection, `--source-path` to scope to one source, `--dry-run` to report counts only |
 | `audit NAME` | Deep-dive per-collection report: distance histogram, top-5 cross-projections, orphan chunks, hub topics (RDR-087 Phase 4) |
+| `shape [--json] [--full]` | Read-only audit of the whole collection SET against the rules in [docs/collections.md](collections.md): placeholder, date-like, task-or-document-shaped, and source-app subjects, the `default` corpus, likely duplicate subjects (name evidence; confirm with `merge-candidates`), a model the install no longer writes with, a stored dimension that disagrees with the name's model (the GH #667 class), thin and one-document collections, fan-out-floor casualties, test residue, ghost rows, grandfathered relics, blank catalog attributes, superseded-but-live, chunks with no catalog row. One finding per violation with a proposed action; the human view lists at most 10 collections per check, `--full` lists every one, `--json` always carries all; never writes, never calls a model; a read failure is an error, never an empty report (nexus-ger23) |
 | `health` | Composite per-collection health table — chunk counts (T3-sourced), staleness, hub score (RDR-087 Phase 3.4) |
 | `merge-candidates` | Pair-wise cross-collection overlap ranking — surfaces collection pairs with high shared-topic similarity as merge/bridge candidates (RDR-087 Phase 4.3) |
 | `delete NAME` | Delete collection (irreversible) |
@@ -2454,7 +2455,8 @@ change. Each runs isolated, so one crashing cannot hide the rest, and the
 section ends by naming the flags a default run still does NOT cover
 (`--check-schema`, `--check-search`, `--check-quotas`, `--check-mcp-logs`,
 `--check-tier-discipline`, `--check-storage-boundary`,
-`--check-post-store-hooks`, `--check-mineru`, `--check-wal-retention`) so the
+`--check-post-store-hooks`, `--check-mineru`, `--check-wal-retention`,
+`--check-collection-shape`) so the
 blind spots stay explicit. The section is printed on the human-readable path
 only; `--json` output shape is unchanged.
 
@@ -2500,6 +2502,7 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 | `--check-t1` | Diagnose T1 session lease presence + freshness. Checks `~/.config/nexus/t1_session_lease.<session_id>`. Exits 1 only when a session-id resolves AND a lease file exists AND it is expired/corrupt; a resolved session with no lease file at all is informational (a bare CLI legitimately has none — the MCP lifespan mints its own) |
 | `--check-mineru` | Verify MinerU is importable — surfaces a corrupt install at doctor-time instead of waiting for the first math-heavy PDF index to fail |
 | `--check-wal-retention` | Sample retained WAL bytes (local service only) via `pg_ls_waldir()`, escalating a `nexus_svc` session to `pg_monitor` with `SET ROLE` first — unconditionally, since `nexus_svc` is `NOINHERIT` in every deployment posture, so `pg_monitor`'s privileges are never ambient without it. Purely informational (RDR-191 Phase 4 trough-window context, not a pass/fail gate): **always exits 0**. Reports UNMEASURED (never a false clean) when the sample can't be taken |
+| `--check-collection-shape` | Read-only shape audit of the collection set against [docs/collections.md](collections.md), the doctor surface of `nx collection shape`: one row per check with its finding count and an examined count so a clean tenant is never confused with an audit that saw nothing. Findings are curation input and never fail doctor; **exit 1 only when the tenant cannot be read** (nexus-ger23) |
 | `--git-hooks-scope PATH` | Restrict the git-hooks stanza-drift check (part of the default sweep, not a `--check-*` flag) to repos registered at or under `PATH`; repos elsewhere are excluded from the walk rather than reported. The registered-repo catalog is shared machine-wide, not scoped to `$HOME`, so an unscoped sweep run from an isolated automation sandbox also sees (and can be reddened by) every other repo ever indexed on the same machine. Default: unscoped, walks every registered repo (nexus-jds59) |
 | `--json` | Emit machine-parseable JSON. On the MAIN sweep (no mode flag) this emits `{"checks": [{name, ok, status: ok\|warn\|fail, detail, fatal, fix_suggestions}], "summary": {total, ok, warn, fail}, "local_mode"}` (nexus-0vycz — previously the flag was silently ignored there). Also honored by `--check-search`, `--check-quotas`, `--check-mcp-logs`. Combining `--json` with any other mode flag that cannot honor it is a usage error, never a silent ignore. |
 

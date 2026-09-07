@@ -1848,6 +1848,10 @@ def _run_check_mineru() -> None:
 #                                          | reaps expired leases across ALL
 #                                          | sessions, this one reports
 #                                          | freshness for THIS session.
+#   --check-collection-shape      | NO        | findings are curation input,
+#                                          | never a health failure; exit 1
+#                                          | only when the tenant cannot be
+#                                          | read (nexus-ger23).
 #   --check-wal-retention         | NO        | explicitly "Always exit 0:
 #                                          | this is informational" by its
 #                                          | own docstring -- no failure
@@ -1909,7 +1913,7 @@ _OPT_IN_ONLY_CHECKS: tuple[str, ...] = (
     "--check-schema", "--check-search", "--check-quotas",
     "--check-mcp-logs", "--check-tier-discipline",
     "--check-storage-boundary", "--check-post-store-hooks",
-    "--check-mineru", "--check-wal-retention",
+    "--check-mineru", "--check-wal-retention", "--check-collection-shape",
 )
 
 
@@ -2179,6 +2183,16 @@ def _run_supplementary_checks() -> None:
          "is informational (a bare CLI legitimately has none).",
 )
 @click.option(
+    "--check-collection-shape",
+    "check_collection_shape",
+    is_flag=True,
+    default=False,
+    help="Read-only shape audit of the collection set against "
+         "docs/collections.md (nx collection shape): one row per check "
+         "with a count. Findings never fail doctor; only an unreadable "
+         "tenant does (exit 1).",
+)
+@click.option(
     "--check-wal-retention",
     "check_wal_retention",
     is_flag=True,
@@ -2249,6 +2263,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_post_store_hooks: bool,
                check_aspect_queue: bool,
                check_t1: bool,
+               check_collection_shape: bool,
                check_wal_retention: bool,
                check_engine_activity: bool,
                check_index_failures: bool,
@@ -2275,6 +2290,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             "--check-mineru": check_mineru,
             "--check-aspect-queue": check_aspect_queue,
             "--check-t1": check_t1,
+            "--check-collection-shape": check_collection_shape,
             "--check-wal-retention": check_wal_retention,
             "--check-engine-activity": check_engine_activity,
             "--check-index-failures": check_index_failures,
@@ -2347,6 +2363,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if check_t1:
         _run_check_t1()
+        return
+
+    if check_collection_shape:
+        _run_check_collection_shape()
         return
 
     if check_wal_retention:
@@ -2788,6 +2808,37 @@ def _run_check_t1() -> None:
         f"rm {lease_path}"
     )
     raise click.exceptions.Exit(1)
+
+
+def _run_check_collection_shape() -> None:
+    """Doctor surface for ``nx collection shape`` (nexus-ger23).
+
+    One row per check with its finding count, sorted by rule, and an
+    examined count so a clean tenant is distinguishable from an audit that
+    saw nothing. Findings are curation input, not health: exit 0. A read
+    failure exits 1 with the error, never an empty report that reads as
+    clean (the nexus-moht0 vacuous-gate doctrine).
+    """
+    from nexus.collection_shape import CHECKS_BY_RULE, audit  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.commands.collection import _shape_catalog, _shape_write_model, _t3  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    try:
+        report = audit(catalog=_shape_catalog(), t3=_t3(), write_model_for=_shape_write_model())
+    except Exception as exc:  # noqa: BLE001 — boundary: an unreadable tenant is the one hard failure here
+        click.echo(f"[✗] Collections shape: UNREADABLE ({exc})")
+        raise SystemExit(1) from exc
+    warn = sum(1 for f in report.findings if f.severity == "warn")
+    info = len(report.findings) - warn
+    mark = "✓" if not report.findings else "!"
+    click.echo(
+        f"[{mark}] Collections shape: examined {report.collections_examined}, "
+        f"{warn} warning(s), {info} informational; rules docs/collections.md"
+    )
+    rule_of = {c: r for r, cs in CHECKS_BY_RULE.items() for c in cs}
+    for check, n in sorted(report.by_check.items(), key=lambda kv: (rule_of[kv[0]], kv[0])):
+        click.echo(f"      rule {rule_of[check]}  {check:<28} {n}")
+    if report.findings:
+        click.echo("      details: nx collection shape  (curation input; never fails doctor)")
 
 
 def _run_check_wal_retention() -> None:

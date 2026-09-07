@@ -1580,3 +1580,170 @@ class TestSkillFileGapCoverage:
         ).read_text()
         assert "## Problem Statement" in skill
         assert "## Problem" in skill
+
+
+class TestRdrGateRegateBlock:
+    """nexus-7vdf9: after a BLOCKED round, ``rdr-gate`` leads with the prior
+    critique's findings and the survivor-sweep instruction; a first gate or a
+    re-gate after a pass prints nothing extra; an unreachable T2 is a named
+    note, never silence."""
+
+    _BODY = (
+        "## Problem Statement\n\n#### Gap 1: a gap\nText.\n\n"
+        "## Proposed Solution\n\nSix parse sites.\n"
+    )
+
+    def _write(self, rdr_env):
+        _write_rdr(
+            rdr_env["rdr_dir"], "rdr-204-example.md",
+            {"title": "Example", "status": "draft", "type": "Architecture", "priority": "medium"},
+            body=self._BODY,
+        )
+
+    def test_blocked_prior_gate_prints_findings_and_layer_zero(self, rdr_env, monkeypatch):
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                "outcome: \"BLOCKED\"\ndate: \"2026-09-07\"\ncritical_count: 2\n"
+                "summary: \"two survivors\"\ncritique: nexus_rdr/204-gate-critique-2026-09-07c [24809]\n"
+            ),
+            "204-gate-critique-2026-09-07c": (
+                "# Critique\n\n**Critical 1**: ghost sweep omits topic_assignments.\n"
+                "- Significant: Phase 1 item 4 still says nx config set reminds the user.\n"
+                "NEW CRITICAL\n\nIssue: the sweep is narrower than collectionIsEmpty.\n"
+                "Observation: fine.\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"])
+        assert result.exit_code == 0, result.output
+        out = result.output
+        assert "Re-gate: the previous gate was BLOCKED" in out
+        assert "204-gate-critique-2026-09-07c" in out
+        assert "ghost sweep omits topic_assignments" in out
+        assert "nx config set reminds the user" in out
+        assert "NEW CRITICAL" in out and "narrower than collectionIsEmpty" in out
+        assert "Prior findings" in out
+        assert "Observation: fine" not in out, "observations are not survivors to sweep"
+        assert "Layer 0 (survivor sweep" in out
+        assert out.index("Re-gate:") < out.index("Section Structure")
+
+    def test_passed_or_absent_prior_gate_prints_nothing_extra(self, rdr_env, monkeypatch):
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        for store in ({}, {"204-gate-latest": "outcome: \"PASSED\"\ndate: \"2026-09-07\"\n"}):
+            fake = _FakeT2ResearchClient(store)
+            monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda fake=fake: fake)
+            result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"])
+            assert result.exit_code == 0, result.output
+            assert "Re-gate" not in result.output
+
+    def test_missing_critique_pointer_says_so(self, rdr_env, monkeypatch):
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient({"204-gate-latest": "outcome: \"BLOCKED\"\ndate: \"2026-09-07\"\n"})
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"])
+        assert "No `critique:` pointer" in result.output
+        assert "Layer 0 (survivor sweep" in result.output
+
+    def test_missing_critique_record_is_named_not_mislabelled(self, rdr_env, monkeypatch):
+        """A pointer to a record that does not exist must say so, never
+        'loaded but nothing recognised' (critique [24815] Significant 1)."""
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient({"204-gate-latest": (
+            "outcome: \"BLOCKED\"\ndate: \"2026-09-07\"\ncritique: nexus_rdr/204-gate-critique-missing\n")})
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"])
+        assert "no such T2 record was found" in result.output
+        assert "nothing recognised" not in result.output
+
+    def test_bad_gated_commit_is_reported_not_rendered_as_no_changes(self, rdr_env, monkeypatch):
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient({"204-gate-latest": (
+            "outcome: \"BLOCKED\"\ndate: \"2026-09-07\"\ncommit: deadbeef0\n")})
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"])
+        assert "Changed since the gated commit `deadbeef0`: unknown" in result.output
+        assert "no changes to the RDR file" not in result.output
+
+    def test_unreachable_t2_is_a_named_note(self, rdr_env, monkeypatch):
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+
+        class _Boom:
+            def __enter__(self):
+                raise ConnectionError("engine down")
+
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: _Boom())
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"])
+        assert result.exit_code == 0, result.output
+        assert "T2 unreachable" in result.output and "engine down" in result.output
+        assert "Section Structure" in result.output, "the rest of the preamble still prints"
+
+
+class TestCritiqueFindings:
+    """nexus-7vdf9 (critique [24815] Critical 2): the extractor must read the
+    substantive-critic's canonical format, a free-form critique, and the shape
+    the real RDR-204 fourth-gate critique used, dropping Observations."""
+
+    CANONICAL = (
+        "## Critique Summary\nFine overall.\n\n"
+        "## Critical Issues\n\n"
+        "### Issue: Ghost sweep narrower than collectionIsEmpty\n"
+        "- **Location**: Technical Design step 3\n"
+        "- **Problem**: audit-only tables are not FK-constrained\n"
+        "- **Recommendation**: reuse COLLECTION_SCOPED_TABLES\n"
+        "- **Ship-blocker**: no\n\n"
+        "## Significant Issues\n\n"
+        "### Issue: Phase 1 item 4 stale sentence\n"
+        "- **Location**: Implementation Plan\n\n"
+        "## Observations\n\n### Issue: bare bead ids\n- **Location**: everywhere\n\n"
+        "## Verification Performed\ngrepped.\n"
+    )
+
+    def test_canonical_format_yields_titles_locations_and_recommendations(self) -> None:
+        from nexus.commands.rdr import _critique_findings
+
+        f = _critique_findings(self.CANONICAL)
+        assert "Issue: Ghost sweep narrower than collectionIsEmpty" in f
+        assert "  Location: Technical Design step 3" in f
+        assert "  Recommendation: reuse COLLECTION_SCOPED_TABLES" in f
+        assert "Issue: Phase 1 item 4 stale sentence" in f
+        assert not any("bare bead ids" in x for x in f), "observations are not findings"
+        assert not any("Ship-blocker" in x for x in f)
+
+    def test_none_sections_yield_nothing(self) -> None:
+        from nexus.commands.rdr import _critique_findings
+
+        assert _critique_findings("## Critical Issues\nNone.\n\n## Significant Issues\nNone.\n") == []
+
+    def test_free_form_critique(self) -> None:
+        from nexus.commands.rdr import _critique_findings
+
+        text = ("Prior gate ...\n\nNEW CRITICAL\n\nIssue: the sweep is narrower.\n"
+                "Location: step 3\n\n**Critical 1**: ghost sweep omits topic_assignments.\n"
+                "- Significant: Phase 1 item 4 stale.\nObservation: fine.\n")
+        f = _critique_findings(text)
+        assert any("NEW CRITICAL" in x for x in f)
+        assert any("the sweep is narrower" in x for x in f)
+        assert any("omits topic_assignments" in x for x in f)
+        assert any("Phase 1 item 4 stale" in x for x in f)
+        assert not any("Observation: fine" in x for x in f)
+
+    def test_empty(self) -> None:
+        from nexus.commands.rdr import _critique_findings
+
+        assert _critique_findings("") == []

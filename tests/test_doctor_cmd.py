@@ -200,6 +200,7 @@ class TestSupplementaryChecks:
             "--check-mcp-logs", "--check-tier-discipline",
             "--check-storage-boundary", "--check-post-store-hooks",
             "--check-mineru", "--check-wal-retention",
+            "--check-collection-shape",
         ):
             assert flag in result.output
 
@@ -1566,3 +1567,54 @@ class TestCheckDanglingLinksFlagIsRetired:
         assert "no such option" in result.output.lower(), (
             f"expected a 'no such option' usage error for {flag}, got: {result.output!r}"
         )
+
+
+# ── --check-collection-shape (nexus-ger23) ───────────────────────────────────
+
+
+class TestCheckCollectionShape:
+    """Doctor surface for ``nx collection shape``: one row per check with a
+    count, exit 0 on findings, exit 1 only when the tenant cannot be read."""
+
+    def _patch(self, monkeypatch, rows, stats, docs):
+        import nexus.commands.collection as col  # noqa: PLC0415 — test-local import keeps the module's import graph unchanged
+
+        t3 = MagicMock(); t3.collection_stats.return_value = stats
+        cat = MagicMock(); cat.list_collections.return_value = rows
+        cat.collection_doc_counts.return_value = docs
+        monkeypatch.setattr(col, "_t3", lambda: t3)
+        monkeypatch.setattr(col, "_shape_catalog", lambda: cat)
+        monkeypatch.setattr(col, "_shape_write_model",
+                            lambda: (lambda ct: "voyage-code-3" if ct == "code" else "voyage-context-3"))
+
+    def test_findings_render_rows_and_exit_zero(self, runner, monkeypatch):
+        name = "knowledge__knowledge__voyage-context-3__v1"
+        row = {"name": name, "content_type": "knowledge", "owner_id": "knowledge",
+               "embedding_model": "voyage-context-3", "model_version": "v1",
+               "legacy_grandfathered": False, "superseded_by": ""}
+        self._patch(monkeypatch, [row], [{"name": name, "dim": 1024, "count": 1464}], {name: 90})
+        result = runner.invoke(main, ["doctor", "--check-collection-shape"])
+        assert result.exit_code == 0, result.output
+        assert "[!] Collections shape: examined 1, 1 warning(s)" in result.output
+        assert "placeholder-subject" in result.output and "rule 1" in result.output
+
+    def test_clean_tenant_is_a_check_with_an_examined_count(self, runner, monkeypatch):
+        name = "code__1-1__voyage-code-3__v1"
+        row = {"name": name, "content_type": "code", "owner_id": "1-1",
+               "embedding_model": "voyage-code-3", "model_version": "v1",
+               "legacy_grandfathered": False, "superseded_by": ""}
+        self._patch(monkeypatch, [row], [{"name": name, "dim": 1024, "count": 39981}], {name: 900})
+        result = runner.invoke(main, ["doctor", "--check-collection-shape"])
+        assert result.exit_code == 0, result.output
+        assert "[✓] Collections shape: examined 1, 0 warning(s), 0 informational" in result.output
+
+    def test_unreadable_tenant_exits_one(self, runner, monkeypatch):
+        import nexus.commands.collection as col  # noqa: PLC0415 — test-local import keeps the module's import graph unchanged
+
+        t3 = MagicMock(); t3.collection_stats.side_effect = RuntimeError("engine down")
+        monkeypatch.setattr(col, "_t3", lambda: t3)
+        monkeypatch.setattr(col, "_shape_catalog", lambda: MagicMock())
+        monkeypatch.setattr(col, "_shape_write_model", lambda: (lambda ct: "voyage-context-3"))
+        result = runner.invoke(main, ["doctor", "--check-collection-shape"])
+        assert result.exit_code == 1
+        assert "UNREADABLE" in result.output and "engine down" in result.output
