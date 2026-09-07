@@ -12,6 +12,8 @@ layer — no real catalog/engine substrate — plus direct
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import httpx
 import pytest
 from click.testing import CliRunner
@@ -233,6 +235,51 @@ class TestRestoreCmd:
         assert result.exit_code == 0, result.output
         assert "Restored: 1.2.9" in result.output
         assert writer.calls == ["1.2.9"]
+
+    def test_restore_by_title_matching_both_live_and_trash_is_ambiguous(self, monkeypatch):
+        # nexus-dkymw review round 2 (T2 [24833]): a title present BOTH live
+        # and in the trash must never silently resolve to the live doc —
+        # that would report "already live" with no hint that a restorable
+        # tombstoned copy exists under the same title.
+        class _CollisionReader(_FakeReader):
+            def find(self, query, *, content_type=None):
+                if query == "Collide":
+                    return [SimpleNamespace(tumbler="1.2.1", title="Collide")]
+                return []
+
+        reader = _CollisionReader([{"tumbler": "1.2.9", "title": "Collide", "deleted_at": "x"}])
+        _patch_reader(monkeypatch, reader)
+        writer = _FakeWriter()
+        _patch_writer(monkeypatch, writer)
+
+        result = CliRunner().invoke(main, ["catalog", "restore", "Collide"])
+        assert result.exit_code != 0
+        assert "1.2.1" in result.output
+        assert "1.2.9" in result.output
+        assert "ambiguous" in result.output.lower()
+        assert "live" in result.output.lower()
+        assert writer.calls == []  # never reached restore_document
+
+    def test_restore_by_title_only_live_match_mentions_nothing_in_trash(self, monkeypatch):
+        # The refined "already live" no-op: when the title matches ONLY a
+        # live document (no trash collision), the message must say so
+        # explicitly rather than the generic unknown/live/purged catch-all.
+        class _LiveOnlyReader(_FakeReader):
+            def find(self, query, *, content_type=None):
+                if query == "Solo Live":
+                    return [SimpleNamespace(tumbler="1.2.1", title="Solo Live")]
+                return []
+
+        reader = _LiveOnlyReader([])
+        _patch_reader(monkeypatch, reader)
+        writer = _FakeWriter(restored=0)
+        _patch_writer(monkeypatch, writer)
+
+        result = CliRunner().invoke(main, ["catalog", "restore", "Solo Live"])
+        assert result.exit_code == 0, result.output
+        assert "already live" in result.output.lower()
+        assert "trash" in result.output.lower()
+        assert writer.calls == ["1.2.1"]
 
     def test_restore_by_ambiguous_trash_title_raises(self, monkeypatch):
         reader = _FakeReader([

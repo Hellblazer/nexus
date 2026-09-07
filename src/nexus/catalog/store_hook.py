@@ -750,11 +750,20 @@ def store_delete_catalog_cleanup(
     this caveat stated the earlier not-age-gated behaviour for two weeks
     after the engine retired it, nexus-kcm6c) the chunk sweep protects
     every tombstone still inside the ``--older-than-days`` grace window:
-    row, manifest, and chunks stay TOGETHER until the window passes, so
-    restore stays possible for the whole window, even across purge runs
-    (once that window passes, ``nx catalog restore`` returns 0 — nothing
-    left to restore; recovery becomes re-indexing). Until the engine ships
-    the RDR-156 read-side tombstone
+    row, manifest, and chunks stay TOGETHER until the window passes. THIS
+    IS THE GENERIC ``delete_document`` CONTRACT, NOT WHAT THIS FUNCTION
+    ITSELF PRODUCES (review round 2, T2 [24834]): the ``delete_document``
+    call this function makes runs AFTER the MCP ``store_delete`` tool has
+    already hard-deleted the T3 chunk in the same call (see this
+    function's own docstring above — the T3 chunk was already gone before
+    this tombstone was ever taken). ``nx catalog restore`` on a tumbler
+    tombstoned via THIS path still clears ``deleted_at`` and reports
+    success on the ROW, but the chunk it would need to restore CONTENT is
+    already gone regardless of the purge-trash window — restore cannot
+    undo that; recovery is a re-index. (Once the window above passes for a
+    genuinely `nx catalog delete`-originated tombstone, ``nx catalog
+    restore`` returns 0 — nothing left to restore; recovery becomes
+    re-indexing there too.) Until the engine ships the RDR-156 read-side tombstone
     filter (also nexus-3ck2g), the deleted content also stays fully
     searchable in the interim — this cleanup only stops the CATALOG ROW
     from resolving.
