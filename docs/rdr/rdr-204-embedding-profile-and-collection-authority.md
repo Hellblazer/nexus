@@ -253,9 +253,11 @@ per-collection chunk counts from `nx collection list`. Full numbers in T2
   pure-Voyage or pure-ONNX router. The profile table is that function as
   data; the GH #1461 opt-in becomes a profile write.
 - **Verified**: registration derives a collection's attributes by parsing
-  the name it has just rendered (`indexer.py:785-800`), and one path
-  hardcodes `embedding_model="voyage-context-3"` (`commands/index.py:100`).
-  Phase 1 replaces both with a profile read.
+  the name it has just rendered (`indexer.py:785-800` and four catalog and
+  collection commands, `204-research-15`), and one path hardcodes
+  `embedding_model="voyage-context-3"` (`commands/index.py:110`). Phase 1
+  replaces the model in both with a profile read; the name parse itself is
+  retired with the other parse sites in Phase 3.
 - **Verified**: the engine already has the referenced-anywhere predicate.
   `CatalogRepository.COLLECTION_SCOPED_TABLES` lists every table holding a
   denormalised collection name, including the seven `ON DELETE RESTRICT`
