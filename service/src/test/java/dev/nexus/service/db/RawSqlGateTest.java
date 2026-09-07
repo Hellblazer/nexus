@@ -1010,7 +1010,6 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/SharedCluster.java", 3),
         Map.entry("dev/nexus/service/SharedClusterMutationFalsifyTest.java", 4),
         Map.entry("dev/nexus/service/SharedDatabaseHandle.java", 1),
-        Map.entry("dev/nexus/service/SoftDeleteTest.java", 42),
         Map.entry("dev/nexus/service/StagingHandlerJourneyTest.java", 4),
         Map.entry("dev/nexus/service/StagingPromoteFrecencyTtlCheckRegressionTest.java", 3),
         Map.entry("dev/nexus/service/StagingPromoteOpsIntegrationTest.java", 47),
@@ -1220,8 +1219,19 @@ class RawSqlGateTest {
      * The one 32-hex-char legacy chash literal this file's own {@code hexChash}
      * javadoc already documented as a "half-digest" oddity is preserved verbatim per
      * this batch's no-value-change rule.
+     *
+     * <p><b>nexus-cbo4a batch 10, file 5:</b> 1412 -&gt; 1370 (-42), {@code
+     * SoftDeleteTest.java} 42 -&gt; 0, its {@link #TEST_TREE_RAW_SQL_CEILING} entry
+     * REMOVED outright. {@code document_trash}/{@code document_restore}/{@code
+     * purge_trash} calls onto the generated jOOQ {@code Routines} (typed function-call
+     * bindings), the {@code nexus.live_chunks} view onto the generated {@code
+     * LIVE_CHUNKS} Table, {@code purge_trash}'s {@code interval} argument built via
+     * {@code YearToSecond.valueOf(Duration...)}, and every seed insert/row-count read
+     * onto typed jOOQ DSL. {@code decode(chash, 'hex')} sites convert to a shared
+     * {@code chashBytes(seed)} helper (genuine hex-decoded bytes), distinct from the
+     * ASCII-escape form other files' {@code chashAscii} produces.
      */
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1412;
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1370;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
