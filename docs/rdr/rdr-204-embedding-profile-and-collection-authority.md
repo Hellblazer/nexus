@@ -243,12 +243,14 @@ per-collection chunk counts from `nx collection list`. Full numbers in T2
   the name it has just rendered (`indexer.py:785-800`), and one path
   hardcodes `embedding_model="voyage-context-3"` (`commands/index.py:100`).
   Phase 1 replaces both with a profile read.
-- **Verified**: six tables carry FKs into `catalog_collections`
-  (`fk-002/003/004`): `chunks`, `document_aspects`, `document_highlights`,
-  `aspect_extraction_queue`, `taxonomy_meta`, `topics`, plus the
-  `document_chunks` manifest by collection column. The ghost sweep checks
-  all of them; the `chunks` FK is `ON DELETE RESTRICT`, so a mistaken
-  delete fails loud regardless.
+- **Verified**: seven tables carry `ON DELETE RESTRICT` FKs into
+  `catalog_collections` on develop (`fk-002/003/004`, grep of the
+  changelogs): `chunks`, `document_aspects`, `document_highlights`,
+  `aspect_extraction_queue`, `taxonomy_meta`, `topics`,
+  `topic_assignments`. Two earlier hand lists each missed one, so the
+  ghost sweep derives the set from `information_schema` at run time
+  rather than naming it; documents reference a collection through
+  `physical_collection`, not an FK, and are checked separately.
 - **Verified**: the model token vocabulary is five tokens on the engine
   (`MODEL_DIMS`: the three Voyage tokens at 1024, `bge-base-en-v15-768`,
   `minilm-l6-v2-384`) and four on the client (no `voyage-3`). The
@@ -387,12 +389,20 @@ the cloud is the single live environment and on a laptop is a bricked
 warn loudly, delete garbage, constrain after, never abort. An earlier
 cut of this design refused on disagreement; that was wrong.
 
-The first changeset sweeps ghosts: a `catalog_collections` row with zero
-`nexus.chunks` rows, zero `document_chunks` manifest rows, and zero rows in
-each of `document_aspects`, `document_highlights`,
-`aspect_extraction_queue`, `taxonomy_meta`, and `topics` (the six tables
-whose `ON DELETE RESTRICT` FKs point at it, `fk-002/003/004`; the same set
-RDR-164's `deleteCollectionTxn` deletes in order) is deleted, counts reported
+The first changeset sweeps ghosts. A row is a ghost when no
+`catalog_documents` row names it as `physical_collection` and no row in
+ANY table with a foreign key into `catalog_collections` references it. The
+referencing set is not a hand-written list: the changeset derives it at
+run time from `information_schema.referential_constraints` (every
+`ON DELETE RESTRICT` FK whose target is `catalog_collections`), so a table
+added later, or one this document forgot, cannot make the DELETE abort.
+Two hand lists in earlier drafts each missed a table (`taxonomy_meta`, then
+`topic_assignments`, gate critiques [24806] and [24809]); that is the
+evidence for deriving it. For the reader, the set on develop today is
+seven tables: `chunks`, `document_aspects`, `document_highlights`,
+`aspect_extraction_queue`, `taxonomy_meta`, `topics`,
+`topic_assignments`; RDR-164's `deleteCollectionTxn` deletes the same set
+in dependency order. Ghosts are deleted with counts reported
 with `RAISE NOTICE`. The live census counted chunk-emptiness only (153 of
 223 rows on this tenant); the sweep's condition is stricter, so the
 deleted count will be at most 153 and the difference is the next class.
@@ -580,9 +590,11 @@ walks the tree's own changeset over a populated store.
 3. Delete the stub inserts in `AspectRepository` and `TaxonomyRepository`.
 4. `register_collection` writes the model from the profile; a different
    model in the request is a 422 naming the profile's value. `nx config
-   set` is unchanged: it does not write the profile, it reminds the user
-   to restart, which is the write.
-5. Engine suite, each against a real PG: boot in ONNX mode yields the
+   set` does not write the profile; the restart the GH #1461 recipe already
+   requires is the write (the client-side hint is Phase 3 item 4).
+5. Engine suite, each against a real PG: the sweep's derived referencing
+   set equals the set of RESTRICT FKs in the test schema (a pin that fails
+   if a hand list ever creeps back in); boot in ONNX mode yields the
    bge rows and boot with a Voyage key yields the Voyage rows; a second
    boot changes nothing; refused register; backfill agree, disputed
    (a fixture collection whose stored dimension disagrees with its name)
