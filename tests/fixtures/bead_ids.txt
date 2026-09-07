@@ -22,6 +22,7 @@ nexus-04sff.1
 nexus-04zd
 nexus-05bfd
 nexus-05bfd.1
+nexus-05ege
 nexus-05i
 nexus-05i.1
 nexus-05i.1.1
@@ -1338,6 +1339,8 @@ nexus-7u2zi
 nexus-7ujg
 nexus-7v08a
 nexus-7v8ag
+nexus-7vdf9
+nexus-7vdf9.1
 nexus-7vt30
 nexus-7vuw
 nexus-7wk2
@@ -2760,6 +2763,7 @@ nexus-gcx2r
 nexus-gdb3
 nexus-gednd
 nexus-ger23
+nexus-ger23.1
 nexus-gete7
 nexus-gev
 nexus-gev.1
@@ -2945,6 +2949,7 @@ nexus-h3ked.1
 nexus-h3ui8
 nexus-h3ui8.1
 nexus-h56qk
+nexus-h5olw
 nexus-h5s
 nexus-h5y
 nexus-h74
@@ -2994,6 +2999,7 @@ nexus-hc8qw
 nexus-hcdk3
 nexus-hcdk3.1
 nexus-hcw0g
+nexus-hcy4w
 nexus-hd0gb
 nexus-hdumg
 nexus-hdx2u
