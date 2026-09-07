@@ -68,10 +68,17 @@ def _shape_catalog() -> Any:
 
 
 def _shape_write_model() -> Callable[[str], str | None]:
-    """The install's write model per content type (the RDR-204 profile, as code today)."""
-    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    """The install's model per content type (the RDR-204 profile, as code today).
 
-    return effective_embedding_model_for_writes
+    Read-shaped on purpose: ``effective_embedding_model_for_writes`` is
+    documented as unsafe on a read path (it raises when ``local.embed_model``
+    is voyage-shaped and no key is configured, nexus-35ok4), and the shape
+    audit never writes. ``resolve_read_embedding_model`` is the credential-
+    free counterpart and never raises.
+    """
+    from nexus.corpus import resolve_read_embedding_model  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    return resolve_read_embedding_model
 
 
 #: Human output lists at most this many collections per check before

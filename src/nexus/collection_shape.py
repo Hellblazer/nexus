@@ -42,6 +42,7 @@ _log = structlog.get_logger(__name__)
 __all__ = [
     "CHECKS_BY_RULE",
     "FANOUT_FLOOR",
+    "GENERIC_SUBJECT_TOKENS",
     "PLACEHOLDER_SUBJECTS",
     "TEST_RESIDUE_TOKENS",
     "THIN_CHUNK_FLOOR",
@@ -90,6 +91,14 @@ FANOUT_FLOOR: int = 3
 #: Rule 2. difflib ratio at or above which two knowledge subjects are
 #: reported as likely duplicates. Name-only evidence; the finding says so.
 DUP_NAME_SIMILARITY: float = 0.80
+
+#: Rule 2. Tokens too generic to carry a subject on their own. Removed before
+#: the token-subset comparison so ``search`` does not pair with
+#: ``vector-search`` while ``consensus`` still pairs with ``consensus-papers``.
+GENERIC_SUBJECT_TOKENS: frozenset[str] = frozenset({
+    "search", "papers", "paper", "notes", "docs", "doc", "data", "systems",
+    "system", "dev", "development", "research", "misc", "general", "and", "the",
+})
 
 _DATE_LIKE = re.compile(r"(?:^|-)(?:20\d{2}(?:-?\d{2}){0,2}|\d{8})(?:-|$)")
 
@@ -349,8 +358,10 @@ def run_checks(
                                "add the other documents on this subject, or move this one into "
                                "the broader subject it belongs to"))
 
-        # Rule 5: residue.
-        if a.content_type == "knowledge" and _has_residue_token(a.owner_id):
+        # Rule 5: residue. A subject already reported as a placeholder is not
+        # reported a second time here (the two token lists overlap on purpose).
+        if (a.content_type == "knowledge" and _has_residue_token(a.owner_id)
+                and not _is_placeholder_subject(a.owner_id)):
             out.append(Finding(f.name, "test-residue", "warn",
                                f"subject {a.owner_id!r} looks like test or rehearsal residue",
                                "delete it, or re-put its documents with a TTL"))
@@ -368,7 +379,8 @@ def run_checks(
             sx, sy = x.attrs.owner_id.lower(), y.attrs.owner_id.lower()
             if sx == sy:
                 continue
-            tx, ty = set(_subject_tokens(sx)), set(_subject_tokens(sy))
+            tx = set(_subject_tokens(sx)) - GENERIC_SUBJECT_TOKENS
+            ty = set(_subject_tokens(sy)) - GENERIC_SUBJECT_TOKENS
             ratio = difflib.SequenceMatcher(None, sx, sy).ratio()
             token_subset = bool(tx and ty) and (tx <= ty or ty <= tx)
             if ratio >= DUP_NAME_SIMILARITY or token_subset:
@@ -437,7 +449,7 @@ def audit(
     rows = catalog.list_collections()
     stats = t3.collection_stats()
     docs = catalog.collection_doc_counts()
-    _log.info("collection_audit_read", catalog_rows=len(rows), stats_rows=len(stats),
+    _log.info("collection_shape_read", catalog_rows=len(rows), stats_rows=len(stats),
               doc_counted=len(docs))
     facts = gather_facts(catalog_rows=rows, stats_rows=stats, doc_counts=docs)
     return AuditReport.build(facts, write_model_for=write_model_for)

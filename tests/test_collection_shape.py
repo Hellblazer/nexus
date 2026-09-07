@@ -20,6 +20,7 @@ from unittest.mock import MagicMock
 
 from nexus.commands import collection as _collection_mod
 from nexus.commands.collection import _SHAPE_MAX_LISTED_PER_CHECK
+from nexus.corpus import resolve_read_embedding_model
 from nexus.mcp.core import _FANOUT_MIN_COLLECTION_CHUNK_COUNT
 
 from nexus.collection_shape import (
@@ -175,6 +176,16 @@ class TestRule2Duplicates:
                        write_model_for=_cloud_write_model)
         assert not _checks(f, "duplicate-subject")
 
+    def test_generic_token_alone_does_not_pair(self) -> None:
+        """Code review: "search" is a lexical subset of "vector-search" but
+        not the same subject; generic tokens are stripped before the
+        subset test."""
+        a = "knowledge__search__voyage-context-3__v1"
+        b = "knowledge__vector-search__voyage-context-3__v1"
+        f = run_checks(_facts([_filled(a), _filled(b)], [_stats(a, 50), _stats(b, 40)], {a: 3, b: 2}),
+                       write_model_for=_cloud_write_model)
+        assert not _checks(f, "duplicate-subject")
+
     def test_same_subject_under_two_models_is_a_sibling_not_a_duplicate(self) -> None:
         """A model switch mints a sibling on purpose (RDR-103 rationale kept
         by RDR-204); the audit must not call that a duplicate."""
@@ -224,6 +235,11 @@ class TestRule4Size:
 
 
 class TestRule5Residue:
+    def test_placeholder_that_is_also_residue_is_reported_once(self) -> None:
+        name = "knowledge__test__voyage-context-3__v1"
+        f = run_checks(_facts([_filled(name)], [_stats(name, 10)], {name: 1}), write_model_for=_cloud_write_model)
+        assert _checks(f, "placeholder-subject") and not _checks(f, "test-residue")
+
     @pytest.mark.parametrize("subject", ["shakedown", "smoke-run", "fixture-probe"])
     def test_test_residue_is_flagged(self, subject) -> None:
         name = f"knowledge__{subject}__voyage-context-3__v1"
@@ -303,6 +319,14 @@ class TestRulePin:
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────
+
+
+class TestWriteModelSeam:
+    def test_shape_uses_the_read_shaped_resolver(self) -> None:
+        """Code review Critical: the write-shaped resolver raises on a keyless
+        local install with a voyage-shaped local.embed_model; a read-only
+        audit must use the credential-free counterpart."""
+        assert _collection_mod._shape_write_model() is resolve_read_embedding_model
 
 
 class TestCli:
