@@ -654,6 +654,11 @@ def _registered_mineru_outside_generation(
         return None
     if not is_process_alive(pid):
         return None
+    # Liveness is not identity: a pid file left by an unclean death can name
+    # a pid the OS has since handed to something else, and this row feeds an
+    # automatic SIGTERM. Judge the live command, as the marker regime does.
+    if _classify(process_command(pid)) != "mineru":
+        return None
     try:
         Path(python).relative_to(current)
         return None
@@ -780,6 +785,12 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                     "off (pdf.mineru_autostart / NX_MINERU_AUTOSTART) — cycle "
                     "it yourself: `nx mineru stop && nx mineru start`"
                 )
+                continue
+            # Same pid-recycle re-check as the aspect-worker branch: the
+            # stop verb kills the pid file's process group, so confirm the
+            # pid is still a mineru-api immediately before asking it to.
+            if _classify(process_command(proc.pid)) != "mineru":
+                actions.append(f"{proc.kind} pid {proc.pid}: gone or recycled; skipped")
                 continue
             try:
                 subprocess.run(["nx", "mineru", "stop"], capture_output=True,

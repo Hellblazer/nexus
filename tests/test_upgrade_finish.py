@@ -160,7 +160,8 @@ class TestRegisteredMineruOutsideGeneration:
     _GEN = "/Users/u/.local/share/nexus/tools/gen-01"
     _PS_HEADER = "  PID ELAPSED COMMAND\n"
 
-    def _detect(self, pid_info, *, alive=True, current=_GEN, ps_rows="", pairs=None):
+    def _detect(self, pid_info, *, alive=True, current=_GEN, ps_rows="", pairs=None,
+                live_command="python3 mineru-api --host 127.0.0.1"):
         from pathlib import Path as _P  # noqa: PLC0415
 
         pairs = pairs if pairs is not None else [(self._GEN, _P(self._GEN))]
@@ -176,6 +177,8 @@ class TestRegisteredMineruOutsideGeneration:
             "nexus._mineru_pid.read_pid_file", return_value=pid_info,
         ), patch(
             "nexus._mineru_pid.is_process_alive", return_value=alive,
+        ), patch(
+            "nexus.upgrade_finish.process_command", return_value=live_command,
         ):
             return detect_stale_processes(
                 self._PS_HEADER + ps_rows, now=1_000_000.0 + 10 * 86400,
@@ -228,6 +231,13 @@ class TestRegisteredMineruOutsideGeneration:
         # the age regime on the marker rows is the only evidence there.
         info = {"pid": 64778, "port": 1, "python": "/Users/u/git/nexus/.venv/bin/python3"}
         assert self._detect(info, current=None).stale == []
+
+    def test_recycled_pid_is_ignored(self):
+        # The pid file outlived its server and the OS reused the pid: the
+        # live command is not a mineru-api, so no SIGTERM row is produced.
+        info = {"pid": 64778, "port": 1, "python": "/Users/u/git/nexus/.venv/bin/python3"}
+        report = self._detect(info, live_command="/usr/bin/vim unrelated.txt")
+        assert report.stale == []
 
     def test_pid_file_without_interpreter_is_ignored(self):
         info = {"pid": 64778, "port": 1}
@@ -327,11 +337,27 @@ class TestRestartStale:
 
         with patch("nexus.daemon.mineru_lifecycle.spawn_policy_allows",
                    return_value=True), \
+                patch("nexus.upgrade_finish.process_command",
+                      return_value="mineru-api --host 127.0.0.1"), \
                 patch("nexus.upgrade_finish.subprocess.run",
                       return_value=MagicMock(returncode=0)) as sp:
             actions = restart_stale(r)
         assert sp.call_count == 2  # stop && start
         assert any("cycled MinerU" in a for a in actions)
+
+    def test_mineru_cycle_skips_recycled_pid(self):
+        """nexus-ho9d2: the stop verb kills the pid file's process group, so
+        a pid the OS has reused since the scan must not be signalled."""
+        r = SkewReport(installed_version="6.7.1")
+        r.stale = [StaleProcess(pid=300, kind="mineru", command="mineru-api", age_s=99)]
+        with patch("nexus.daemon.mineru_lifecycle.spawn_policy_allows",
+                   return_value=True), \
+                patch("nexus.upgrade_finish.process_command",
+                      return_value="/usr/bin/vim unrelated.txt"), \
+                patch("nexus.upgrade_finish.subprocess.run") as sp:
+            actions = restart_stale(r)
+        sp.assert_not_called()
+        assert any("gone or recycled" in a for a in actions)
 
 
 class TestVersionTransition:
