@@ -47,6 +47,8 @@ import yaml
 
 from nexus.corpus import resolve_corpus
 from nexus.db.http_vector_client import HttpVectorClient
+from nexus.db.limits import QUOTAS
+from nexus.search_engine import _group_collections_by_embedding_model
 from nexus.search_engine import search_cross_corpus as new_search_cross_corpus
 
 pytestmark = pytest.mark.integration
@@ -140,7 +142,30 @@ _QUERIES: list[tuple[str, str]] = [
 ]
 
 _JACCARD_FLOOR = 0.9
+# Floor for a corpus whose collection group SPLITS into combined sub-batches
+# (desired candidates > QUOTAS.MAX_QUERY_RESULTS). nexus-atylb, Sam's ruling
+# 2026-09-07 (accepted, revisit later): a split partitions which collections
+# share one filtered HNSW call, and near-tied tail candidates can rank
+# differently per partition. Measured live on the 9-collection rdr group:
+# 0.667 reproducibly (8 shared ids of a 12-id union, all four differences at
+# ranks 7-10 within a 0.005 distance band). 0.6 admits exactly that measured
+# state and fails on one more swap (7 shared of 13 = 0.538).
+_JACCARD_FLOOR_SPLIT = 0.6
 _LIMIT = 10
+
+
+def _floor_for(cols: list[str]) -> float:
+    """The floor a corpus is held to: the split floor when its batching
+    would divide any embedding-model group into sub-batches, else the
+    strict one. Mirrors search_engine's own split decision so the
+    tolerance tracks the code, not a hand-kept corpus list."""
+    import nexus.search_engine as _se  # noqa: PLC0415 -- resolve at call time so tests can patch it
+
+    _desired = _se._desired_candidate_count
+    for group in _group_collections_by_embedding_model(cols):
+        if len(group) > 1 and _desired(group, _LIMIT) > QUOTAS.MAX_QUERY_RESULTS:
+            return _JACCARD_FLOOR_SPLIT
+    return _JACCARD_FLOOR
 
 
 def _jaccard(a: set, b: set) -> float:
@@ -218,7 +243,9 @@ def _one_comparison(old_search_cross_corpus, client, query, cols):
     return _jaccard(old_ids, new_ids), old_ids, new_ids
 
 
-def _is_confirmed_regression(first_overlap: float, retry_overlap: float | None) -> bool:
+def _is_confirmed_regression(
+    first_overlap: float, retry_overlap: float | None, floor: float = _JACCARD_FLOOR,
+) -> bool:
     """Decide whether a below-floor measurement is a REAL regression that
     must fail this test, or unreproduced jitter (nexus-d9xt2 critique
     round 2 Significant).
@@ -249,11 +276,11 @@ def _is_confirmed_regression(first_overlap: float, retry_overlap: float | None) 
       whichever value came back, win or lose, is what previously let a
       genuinely intermittent regression report green most of the time).
     """
-    if first_overlap >= _JACCARD_FLOOR:
+    if first_overlap >= floor:
         return False
     if retry_overlap is None:
         return True
-    return retry_overlap < _JACCARD_FLOOR
+    return retry_overlap < floor
 
 
 def test_recall_parity_old_vs_batched_fan_out(
@@ -264,40 +291,55 @@ def test_recall_parity_old_vs_batched_fan_out(
     rows = []
     for query, corpus_name in _QUERIES:
         cols = _corpus_collections[corpus_name]
+        floor = _floor_for(cols)
         overlap, old_ids, new_ids = _one_comparison(
             old_search_cross_corpus, _live_client, query, cols,
         )
         retried = False
         retry_overlap = None
-        if overlap < _JACCARD_FLOOR:
+        if overlap < floor:
             retry_overlap, old_ids, new_ids = _one_comparison(
                 old_search_cross_corpus, _live_client, query, cols,
             )
             retried = True
-        confirmed_regression = _is_confirmed_regression(overlap, retry_overlap)
+        confirmed_regression = _is_confirmed_regression(overlap, retry_overlap, floor)
         reported_overlap = retry_overlap if retried else overlap
         rows.append((
             query, corpus_name, len(cols), reported_overlap, retried,
-            confirmed_regression, old_ids, new_ids,
+            confirmed_regression, old_ids, new_ids, floor,
         ))
 
     report_lines = [
         "\nnexus-d9xt2 recall parity (old fan-out vs batched fan-out):",
-        f"{'corpus':<10} {'#cols':>5} {'jaccard':>8}  {'retried':>7}  query",
+        f"{'corpus':<10} {'#cols':>5} {'jaccard':>8} {'floor':>6}  {'retried':>7}  query",
     ]
-    for query, corpus_name, n_cols, overlap, retried, _confirmed, _old_ids, _new_ids in rows:
+    for query, corpus_name, n_cols, overlap, retried, _confirmed, _old_ids, _new_ids, floor in rows:
         report_lines.append(
-            f"{corpus_name:<10} {n_cols:>5} {overlap:>8.3f}  {str(retried):>7}  {query!r}",
+            f"{corpus_name:<10} {n_cols:>5} {overlap:>8.3f} {floor:>6.2f}  {str(retried):>7}  {query!r}",
         )
     report = "\n".join(report_lines)
     print(report)  # noqa: T201 — explicit ask: "print the per-query numbers"
 
     failures = [
-        (query, corpus_name, overlap)
-        for query, corpus_name, _n_cols, overlap, _retried, confirmed_regression, _old_ids, _new_ids in rows
+        (query, corpus_name, overlap, floor)
+        for query, corpus_name, _n_cols, overlap, _retried, confirmed_regression, _old_ids, _new_ids, floor in rows
         if confirmed_regression
     ]
     assert not failures, (
-        f"{len(failures)}/{len(rows)} queries fell below the {_JACCARD_FLOOR} "
-        f"Jaccard floor: {failures}\n{report}"
+        f"{len(failures)}/{len(rows)} queries fell below their Jaccard floor "
+        f"({_JACCARD_FLOOR} unsplit, {_JACCARD_FLOOR_SPLIT} split, nexus-atylb): "
+        f"{failures}\n{report}"
+    )
+    # Every corpus on the live tenant splits today (13+ collections exceed the
+    # cap once the floor is multiplier-scaled), so the per-query split floor
+    # alone would hold nothing to 0.9. The strict floor is kept in AGGREGATE:
+    # one accepted tail swap (measured 2026-09-07: nine queries at 1.000, rdr at
+    # 0.667, mean 0.967) passes; a batching regression that drags several
+    # queries into the 0.6-0.9 band fails here even though no single query
+    # breaches its own floor.
+    mean_overlap = sum(r[3] for r in rows) / len(rows)
+    assert mean_overlap >= _JACCARD_FLOOR, (
+        f"mean Jaccard {mean_overlap:.3f} across {len(rows)} queries fell below "
+        f"{_JACCARD_FLOOR} (nexus-atylb accepts isolated tail swaps, not a broad "
+        f"drift)\n{report}"
     )

@@ -14,8 +14,11 @@ opt-in required.
 """
 from __future__ import annotations
 
+from nexus.db.limits import QUOTAS
 from tests.test_search_fanout_recall_parity import (
     _JACCARD_FLOOR,
+    _JACCARD_FLOOR_SPLIT,
+    _floor_for,
     _is_confirmed_regression,
 )
 
@@ -49,3 +52,33 @@ def test_below_floor_first_measurement_with_no_retry_recorded_is_a_confirmed_fai
     jitter -- the function has no way to know the dip didn't reproduce
     if nothing checked."""
     assert _is_confirmed_regression(0.5, None) is True
+
+
+def test_floor_for_unsplit_group_is_strict(monkeypatch):
+    """A group whose desired candidate count fits under the engine cap is
+    held to the strict floor (nexus-atylb)."""
+    monkeypatch.setattr(
+        "nexus.search_engine._desired_candidate_count", lambda cols, n: 90,
+    )
+    cols = [f"rdr__o-{i}__voyage-context-3__v1" for i in range(3)]
+    assert _floor_for(cols) == _JACCARD_FLOOR
+
+
+def test_floor_for_split_group_uses_split_floor(monkeypatch):
+    """A group that would exceed QUOTAS.MAX_QUERY_RESULTS splits into
+    sub-batches and is held to the evidence-based split floor (nexus-atylb,
+    Sam's ruling 2026-09-07)."""
+    monkeypatch.setattr(
+        "nexus.search_engine._desired_candidate_count",
+        lambda cols, n: QUOTAS.MAX_QUERY_RESULTS + 60,
+    )
+    cols = [f"rdr__o-{i}__voyage-context-3__v1" for i in range(9)]
+    assert _floor_for(cols) == _JACCARD_FLOOR_SPLIT
+
+
+def test_floor_for_singleton_never_splits(monkeypatch):
+    """A one-collection group is never split, whatever its desired count."""
+    monkeypatch.setattr(
+        "nexus.search_engine._desired_candidate_count", lambda cols, n: 10_000,
+    )
+    assert _floor_for(["rdr__o-1__voyage-context-3__v1"]) == _JACCARD_FLOOR
