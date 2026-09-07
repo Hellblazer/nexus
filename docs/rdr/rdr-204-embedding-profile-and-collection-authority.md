@@ -316,11 +316,17 @@ per-collection chunk counts from `nx collection list`. Full numbers in T2
   **Status**: Verified by the parse-site census: every extracted value is
   one of content_type, owner_id, embedding_model, or the quarantine prefix.
   **Method**: Source Search.
-- [x] No two-segment (model-less) collection carries vectors on any
-  censused tenant. **Status**: Verified on both tenants: all 106 two-segment
-  rows have zero chunks. **Method**: Spike. The walk still has a rule for
-  the case (Technical Design step 3) so a future tenant that falsifies this
-  gets `disputed` or a profile-derived model, never a wedge.
+- [x] No two-segment (model-less) collection carries vectors on either
+  active tenant. **Status**: Verified on both tenants by a segment census
+  run 2026-09-07T17:26:57Z (T2 `204-research-13`): tenant `nexus` has 106
+  two-segment rows, none with a chunk or a `collection_vector_stats` row;
+  tenant `gate-xr789` has no two-segment rows at all (43 four-segment rows,
+  42 carrying chunks, plus one one-segment row with none). The earlier
+  wording "verified on both tenants" rested on the `nexus` census alone
+  (`204-research-1`) and was corrected here. **Method**: Spike. The walk
+  still has a rule for the case (Technical Design step 3) so a future
+  tenant that falsifies this gets `disputed` or a profile-derived model,
+  never a wedge.
 - [x] `CollectionRegistry`'s cache can hold the row, not only the name,
   without a correctness change to its invalidation. **Status**: Verified by
   reading the class: its invalidation points are delete and rename, both
@@ -744,7 +750,7 @@ and evidence stated inline: the one-model-per-content-type premise
 (assumption 1, both production tenants, `204-research-6`), the dimension
 ground truth (2, `collection_vector_stats`, `204-research-3`), the
 parse-site census (3, `204-research-4`), the two-segment rows (4, the
-live censuses of both tenants, `204-research-1` and `-6`), and the
+segment census of both tenants, `204-research-13`), and the
 registry cache (5, a read of `CollectionRegistry`'s invalidation points).
 
 #### API Verification
