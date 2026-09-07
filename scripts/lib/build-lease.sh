@@ -18,8 +18,21 @@
 # marker needs nothing but the filesystem, so it works before, during, and
 # after any engine state, with no substrate to bootstrap.
 #
-# LEASE LOCATION IS service/.build-lease/<name>, DELIBERATELY *NOT* UNDER
-# service/target (review finding, same day as first cut): `mvn clean`
+# LEASE LOCATION (nexus-g6xpa, 2026-09-07): the lease lives in the git
+# COMMON dir (`git rev-parse --git-common-dir`, i.e. the primary checkout's
+# .git/) under nexus-build-lease/<name>, so EVERY worktree of the repo
+# shares one lease. Measured before this change: three worktree agents ran
+# three full engine suites at once (twelve surefire JVMs on one box)
+# because each worktree had its own service/.build-lease. The Maven build
+# and the engine suite are one box-wide resource — the cores, the test
+# Postgres instances, and the wall clock every other suite pays. Override
+# with NX_BUILD_LEASE_ROOT=<dir> (tests, or a box that wants a different
+# scope); outside a git repo the fallback stays <repo>/service/.build-lease.
+# tests/db/_service_fixture.py resolves the same path the same way — keep
+# the two in step.
+#
+# The original location was service/.build-lease/<name>, DELIBERATELY *NOT*
+# UNDER service/target (review finding, same day as first cut): `mvn clean`
 # deletes the entire `target/` directory wholesale. A lease living inside
 # it would be destroyed by any `./mvnw clean ...` invocation the CURRENT
 # holder itself runs mid-build — silently releasing the lease out from
@@ -67,15 +80,18 @@
 # RECLAIM below) — a rename onto a nonexistent destination is a true,
 # unambiguous, atomic POSIX rename, not the nesting case.
 #
-# This does leave a narrow, HONEST residual: `mkdir` claims the path
-# atomically, but the four files are then written into it in place,
-# non-atomically, one `printf` at a time — a racing reader could observe
-# the lease directory between mkdir and the last write. Accepted here:
-# contention is low (the orchestrator plus at most one sibling build), the
-# window is a handful of tiny `printf`s, and an empty/partial `pid` file is
-# already treated as "not alive" by `_build_lease_pid_alive` (see below),
-# so the worst case is a spurious-but-safe stale-reclaim retry, never a
-# false "still held".
+# `mkdir` claims the path atomically, but the four files are then written
+# into it in place, one `printf` at a time — a racing acquirer can observe
+# the directory before `pid` exists. That used to be accepted as a
+# "spurious stale reclaim" residual; with the lease shared across worktrees
+# and build_lease_acquire_wait polling every 5s (nexus-g6xpa) the odds
+# stopped being negligible, and the failure direction was the wrong one: a
+# reclaim of a lease whose holder is alive and about to build. So a lease
+# directory with NO readable pid is treated as HELD (rc 75, "being
+# populated") while it is younger than _BUILD_LEASE_POPULATE_GRACE_S, and
+# stale only once it is older than that — a half-written lease from a
+# crashed acquirer is reclaimed a few seconds later than before, a live one
+# is never reclaimed at all.
 #
 # STALE RECLAIM. A lease directory whose pid is no longer alive is taken
 # over with a WARNING on stderr — never silently. Liveness probe order (no
@@ -100,8 +116,15 @@
 #       live holder's pid/ts/label/command when the lease is held by a live
 #       process. A stale lease (dead pid) is reclaimed with a WARNING line
 #       on stderr, not silently.
+#   build_lease_acquire_wait <name> <max-seconds> [command args]
+#       Like build_lease_acquire, but a live holder is WAITED FOR (polled
+#       every 5s, one "waiting" line on stderr at the first refusal and one
+#       per minute after) instead of refused; rc 75 only once max-seconds
+#       have elapsed with the lease still held. max-seconds 0 is a single
+#       attempt (the old refuse-immediately behaviour). Filesystem errors
+#       (rc 74) are never retried.
 #   build_lease_release <name>
-#       Release service/.build-lease/<name>. Only the holding pid may
+#       Release the lease. Only the holding pid may
 #       release; releasing a lease this process does not hold (never
 #       acquired, already released, or held by someone else) is a silent
 #       no-op — safe to call unconditionally from an EXIT trap.
@@ -118,13 +141,47 @@ _build_lease_repo_root() {
     (cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 }
 
+# _build_lease_root — where the lease directories live (see LEASE LOCATION
+# above): $NX_BUILD_LEASE_ROOT if set, else <git common dir>/nexus-build-lease
+# (shared by every worktree of this repo), else <repo>/service/.build-lease.
+_build_lease_root() {
+    if [[ -n "${NX_BUILD_LEASE_ROOT:-}" ]]; then
+        printf '%s\n' "$NX_BUILD_LEASE_ROOT"
+        return 0
+    fi
+    local repo common
+    repo="$(_build_lease_repo_root)"
+    if common="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" && [[ -n "$common" ]]; then
+        printf '%s/nexus-build-lease\n' "$common"
+        return 0
+    fi
+    printf '%s/service/.build-lease\n' "$repo"
+}
+
 _build_lease_dir() {
     local name="$1"
-    printf '%s/service/.build-lease/%s\n' "$(_build_lease_repo_root)" "$name"
+    printf '%s/%s\n' "$(_build_lease_root)" "$name"
 }
 
 _build_lease_ts() {
     date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+# Seconds a pid-less lease directory counts as "being populated" (held)
+# rather than stale — see ACQUIRE-PATH ATOMICITY above.
+_BUILD_LEASE_POPULATE_GRACE_S="${_BUILD_LEASE_POPULATE_GRACE_S:-10}"
+
+# _build_lease_dir_age_s <dir> — seconds since the directory's mtime;
+# prints a large number when the mtime is unreadable (so the caller treats
+# it as old, i.e. reclaimable, never as freshly held forever).
+_build_lease_dir_age_s() {
+    local dir="$1" mtime now
+    if mtime="$(stat -f %m "$dir" 2>/dev/null)" || mtime="$(stat -c %Y "$dir" 2>/dev/null)"; then
+        now="$(date +%s)"
+        printf '%s\n' "$(( now - mtime ))"
+    else
+        printf '%s\n' 999999
+    fi
 }
 
 # _build_lease_pid_alive <pid> — portable SINGLE-PROCESS existence probe,
@@ -249,10 +306,16 @@ build_lease_acquire() {
         _build_lease_group_alive "$existing_pgid" && is_live=0
     elif [[ -n "$existing_pid" ]]; then
         _build_lease_pid_alive "$existing_pid" && is_live=0
+    elif (( $(_build_lease_dir_age_s "$dir") < _BUILD_LEASE_POPULATE_GRACE_S )); then
+        # No pid yet and the directory is seconds old: another acquirer is
+        # between its mkdir and its populate. Held, not stale.
+        is_live=0
+        existing_label="${existing_label:-being populated}"
+        existing_cmd="${existing_cmd:-not yet recorded}"
     fi
 
     if [[ $is_live -eq 0 ]]; then
-        local who="pid $existing_pid"
+        local who="pid ${existing_pid:-<being populated>}"
         [[ -n "$existing_pgid" ]] && who="pid $existing_pid or its process group $existing_pgid"
         echo "build_lease_acquire: REFUSED — service build lease '$name' is held by $who (label=$existing_label, acquired=$existing_ts, command: $existing_cmd). Wait for it to finish, or run \`build_lease_release $name\` if that pid is dead." >&2
         return 75
@@ -282,6 +345,44 @@ build_lease_acquire() {
     fi
     echo "build_lease_acquire: REFUSED — lost the race re-creating build lease '$name' after reclaiming it; another process claimed it first. Retry." >&2
     return 75
+}
+
+# build_lease_acquire_wait <name> <max-seconds> [command args]
+build_lease_acquire_wait() {
+    local name="${1:?build_lease_acquire_wait: usage: build_lease_acquire_wait <name> <max-seconds> [command args]}"
+    local max="${2:?build_lease_acquire_wait: usage: build_lease_acquire_wait <name> <max-seconds> [command args]}"
+    shift 2 || true
+    [[ "$max" =~ ^[0-9]+$ ]] || { echo "build_lease_acquire_wait: max-seconds must be a non-negative integer, got '$max'" >&2; return 64; }
+    local waited=0 rc err announced=0
+    while :; do
+        # `|| rc=$?`: callers run under `set -e` (both wrapper scripts), and
+        # a bare failing command substitution in an assignment would exit
+        # the caller before the retry loop ever ran.
+        rc=0
+        err="$(build_lease_acquire "$name" "$@" 2>&1)" || rc=$?
+        if [[ $rc -eq 0 ]]; then
+            [[ -n "$err" ]] && printf '%s\n' "$err" >&2   # a stale-reclaim WARNING, never swallowed
+            if [[ $announced -eq 1 ]]; then
+                echo "build_lease_acquire_wait: acquired build lease '$name' after ${waited}s." >&2
+            fi
+            return 0
+        fi
+        if [[ $rc -ne 75 ]]; then
+            printf '%s\n' "$err" >&2
+            return $rc
+        fi
+        if (( waited >= max )); then
+            printf '%s\n' "$err" >&2
+            echo "build_lease_acquire_wait: gave up on build lease '$name' after ${waited}s (NX_BUILD_LEASE_WAIT)." >&2
+            return 75
+        fi
+        if [[ $announced -eq 0 ]] || (( waited % 60 == 0 )); then
+            echo "build_lease_acquire_wait: build lease '$name' is held — waiting (${waited}s of ${max}s). $err" >&2
+            announced=1
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
 }
 
 # build_lease_release <name>

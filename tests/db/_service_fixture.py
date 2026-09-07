@@ -357,7 +357,30 @@ def unstamped_jar_skip_reason(jar: Path = _SERVICE_JAR) -> str | None:
 #: service/target, deliberately: `mvn clean` deletes target/ wholesale and
 #: would destroy a lease out from under its own holder (see that script's
 #: header). Readers must look here, not under target/.
-_BUILD_LEASE_ROOT = _REPO_ROOT / "service" / ".build-lease"
+def _build_lease_root() -> Path:
+    """Resolve the build-lease root the way scripts/lib/build-lease.sh does
+    (nexus-g6xpa): ``NX_BUILD_LEASE_ROOT`` if set, else
+    ``<git common dir>/nexus-build-lease`` (one lease shared by every
+    worktree of this repo), else ``<repo>/service/.build-lease``. Keep the
+    two resolutions in step; a reader looking at a different path than the
+    writer is exactly the asymmetry nexus-06fu4 closed.
+    """
+    override = os.environ.get("NX_BUILD_LEASE_ROOT")
+    if override:
+        return Path(override)
+    try:
+        common = subprocess.run(
+            ["git", "-C", str(_REPO_ROOT), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, check=True, timeout=10,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        common = ""
+    if common:
+        return Path(common) / "nexus-build-lease"
+    return _REPO_ROOT / "service" / ".build-lease"
+
+
+_BUILD_LEASE_ROOT = _build_lease_root()
 
 
 def build_in_progress_reason(lease_root: Path = _BUILD_LEASE_ROOT) -> str | None:

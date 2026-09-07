@@ -175,6 +175,88 @@ fi
 kill -9 "$holder5" 2>/dev/null
 wait "$holder5" 2>/dev/null
 
+# ── Test 6: worktrees of one repo share the lease (nexus-g6xpa) ──────────
+# Before: each worktree had its own service/.build-lease, so three worktree
+# agents ran three engine suites at once. Now the lease lives in the git
+# common dir; a holder in the primary blocks an acquire from a worktree.
+echo "Test 6: a worktree and its primary share one lease"
+repo6="$WORKDIR/repo6"
+_fake_repo "$repo6"
+git -C "$repo6" init -q && git -C "$repo6" config user.email t@t && git -C "$repo6" config user.name t
+git -C "$repo6" add scripts && git -C "$repo6" commit -qm base
+git -C "$repo6" worktree add -q "$WORKDIR/repo6-wt" -b wt
+common6="$(cd "$repo6/.git" && pwd -P)"
+root6="$(bash -c "source '$repo6/scripts/lib/build-lease.sh'; _build_lease_root")"
+if [[ "$(cd "$(dirname "$root6")" && pwd -P)/$(basename "$root6")" == "$common6/nexus-build-lease" ]]; then ok "lease root is <git common dir>/nexus-build-lease"; else bad "lease root is $root6"; fi
+root6wt="$(bash -c "source '$WORKDIR/repo6-wt/scripts/lib/build-lease.sh'; _build_lease_root")"
+if [[ "$root6wt" == "$root6" ]]; then ok "worktree resolves the same lease root as the primary"; else bad "worktree root $root6wt != primary root $root6"; fi
+bash -c "source '$repo6/scripts/lib/build-lease.sh'; NX_AGENT=primary-holder build_lease_acquire shared || exit 9; sleep 10" &
+holder6=$!
+for _ in $(seq 1 50); do
+    [[ -f "$root6/shared/pid" ]] && break
+    sleep 0.1
+done
+if [[ ! -f "$root6/shared/pid" ]]; then
+    bad "primary holder never acquired (setup failure)"
+else
+    out6="$(bash -c "source '$WORKDIR/repo6-wt/scripts/lib/build-lease.sh'; build_lease_acquire shared" 2>&1)"
+    rc6=$?
+    if [[ $rc6 -eq 75 ]]; then ok "acquire from the worktree refuses (rc 75) while the primary holds"; else bad "worktree acquire rc $rc6 (expected 75): $out6"; fi
+    if [[ "$out6" == *"primary-holder"* ]]; then ok "refusal names the primary's holder label"; else bad "refusal missing holder label: $out6"; fi
+fi
+kill -9 "$holder6" 2>/dev/null
+wait "$holder6" 2>/dev/null
+outo="$(bash -c "export NX_BUILD_LEASE_ROOT='$WORKDIR/override'; source '$repo6/scripts/lib/build-lease.sh'; _build_lease_root")"
+if [[ "$outo" == "$WORKDIR/override" ]]; then ok "NX_BUILD_LEASE_ROOT overrides the resolution"; else bad "override ignored: $outo"; fi
+
+# ── Test 7: build_lease_acquire_wait waits for a live holder ─────────────
+echo "Test 7: acquire_wait waits out a live holder, then acquires; 0 is a single attempt"
+repo7="$WORKDIR/repo7"
+_fake_repo "$repo7"
+bash -c "source '$repo7/scripts/lib/build-lease.sh'; NX_AGENT=short-holder build_lease_acquire w || exit 9; trap 'build_lease_release w' EXIT; sleep 7" &
+holder7=$!
+for _ in $(seq 1 50); do
+    [[ -f "$repo7/service/.build-lease/w/pid" ]] && break
+    sleep 0.1
+done
+out7="$(bash -c "source '$repo7/scripts/lib/build-lease.sh'; build_lease_acquire_wait w 0" 2>&1)"
+rc7=$?
+if [[ $rc7 -eq 75 ]]; then ok "max-seconds 0 refuses immediately (rc 75)"; else bad "wait 0 returned rc $rc7: $out7"; fi
+start7=$SECONDS
+out7b="$(bash -c "source '$repo7/scripts/lib/build-lease.sh'; build_lease_acquire_wait w 60 && echo HELD" 2>&1)"
+rc7b=$?
+took7=$((SECONDS - start7))
+if [[ $rc7b -eq 0 && "$out7b" == *HELD* ]]; then ok "acquire_wait acquired after the holder released (${took7}s)"; else bad "acquire_wait rc $rc7b: $out7b"; fi
+if [[ "$out7b" == *"waiting"* ]]; then ok "the wait was announced on stderr"; else bad "no waiting line: $out7b"; fi
+if (( took7 >= 3 )); then ok "it actually waited (${took7}s), not a stale reclaim"; else bad "returned too fast (${took7}s) — reclaimed a live holder?"; fi
+wait "$holder7" 2>/dev/null
+bash -c "source '$repo7/scripts/lib/build-lease.sh'; NX_AGENT=long-holder build_lease_acquire w2 || exit 9; sleep 30" &
+holder7b=$!
+for _ in $(seq 1 50); do
+    [[ -f "$repo7/service/.build-lease/w2/pid" ]] && break
+    sleep 0.1
+done
+out7c="$(bash -c "source '$repo7/scripts/lib/build-lease.sh'; build_lease_acquire_wait w2 5" 2>&1)"
+rc7c=$?
+if [[ $rc7c -eq 75 && "$out7c" == *"gave up"* ]]; then ok "bounded wait gives up with rc 75 naming the bound"; else bad "bounded wait rc $rc7c: $out7c"; fi
+kill -9 "$holder7b" 2>/dev/null
+wait "$holder7b" 2>/dev/null
+
+# ── Test 8: a pid-less lease dir is HELD while young, stale once old ─────
+echo "Test 8: mid-populate window — a fresh pid-less lease is held, an old one is stale"
+repo8="$WORKDIR/repo8"
+_fake_repo "$repo8"
+leasedir8="$repo8/service/.build-lease/pop"
+mkdir -p "$leasedir8"     # mkdir done, populate not yet — the racing acquirer's view
+out8="$(bash -c "source '$repo8/scripts/lib/build-lease.sh'; build_lease_acquire pop" 2>&1)"
+rc8=$?
+if [[ $rc8 -eq 75 ]]; then ok "a seconds-old pid-less lease dir is treated as held (rc 75)"; else bad "young pid-less dir rc $rc8 (expected 75): $out8"; fi
+if [[ "$out8" == *"populated"* ]]; then ok "the refusal says it is being populated"; else bad "refusal text: $out8"; fi
+touch -t 202001010000 "$leasedir8"
+out8b="$(bash -c "source '$repo8/scripts/lib/build-lease.sh'; build_lease_acquire pop" 2>&1)"
+rc8b=$?
+if [[ $rc8b -eq 0 && "$out8b" == *WARNING* ]]; then ok "an old pid-less lease dir is reclaimed with a WARNING"; else bad "old pid-less dir rc $rc8b: $out8b"; fi
+
 echo
 echo "build-lease_test.sh: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

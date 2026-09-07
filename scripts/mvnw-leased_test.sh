@@ -104,7 +104,10 @@ if [[ ! -f "$leasedir/pid" ]]; then
 else
     marker2="$WORKDIR/stub-invocation-2.txt"
     rm -f "$marker2"
-    out2="$(MVNW_STUB_MARKER="$marker2" "$repo/scripts/mvnw-leased.sh" -q package 2>&1)"
+    # NX_BUILD_LEASE_WAIT=0: the wrapper WAITS for a live holder by default
+    # (nexus-g6xpa); 0 is the single-attempt, refuse-immediately contract
+    # this test pins.
+    out2="$(NX_BUILD_LEASE_WAIT=0 MVNW_STUB_MARKER="$marker2" "$repo/scripts/mvnw-leased.sh" -q package 2>&1)"
     rc2=$?
     if [[ $rc2 -eq 75 ]]; then ok "wrapper refused with rc 75"; else bad "wrapper returned rc $rc2 (expected 75): $out2"; fi
     if [[ ! -f "$marker2" ]]; then ok "fake mvnw was never invoked while lease was held"; else bad "fake mvnw ran despite the lease being held"; fi
@@ -114,6 +117,27 @@ wait "$holder_pid" 2>/dev/null
 
 # ── Test 3: SIGKILLing just the wrapper does NOT free the lease while its
 # real build child (tracked via build_lease_track_pid / process group) is
+
+# ── Test 2b: the wrapper WAITS for a live holder (nexus-g6xpa) ────────────
+echo "Test 2b: mvnw-leased.sh waits out a live holder, then runs mvnw"
+rm -rf "$leasedir"   # Test 2's holder was killed -9 and left a stale lease behind
+bash -c "source '$repo/scripts/lib/build-lease.sh'; build_lease_acquire service || exit 9; trap 'build_lease_release service' EXIT; sleep 6" &
+holder2b=$!
+for _ in $(seq 1 50); do
+    [[ "$(cat "$leasedir/pid" 2>/dev/null)" == "$holder2b" ]] && break
+    sleep 0.1
+done
+marker2b="$WORKDIR/marker2b"
+start2b=$SECONDS
+out2b="$(NX_BUILD_LEASE_WAIT=60 MVNW_STUB_MARKER="$marker2b" "$repo/scripts/mvnw-leased.sh" -q package 2>&1)"
+rc2b=$?
+took2b=$((SECONDS - start2b))
+if [[ $rc2b -eq 0 ]]; then ok "wrapper ran after the holder released (rc 0, ${took2b}s)"; else bad "wrapper rc $rc2b: $out2b"; fi
+if [[ -f "$marker2b" ]]; then ok "mvnw stub ran after the wait"; else bad "mvnw stub never ran"; fi
+if [[ "$out2b" == *"waiting"* ]]; then ok "the wait was announced"; else bad "no waiting line: $out2b"; fi
+if (( took2b >= 3 )); then ok "it waited for the holder (${took2b}s)"; else bad "returned in ${took2b}s — did not wait"; fi
+wait "$holder2b" 2>/dev/null
+
 # still alive — review finding, nexus-c00dw. ─────────────────────────────
 echo "Test 3: killing the wrapper alone must not free a still-building lease"
 started_marker="$WORKDIR/stub3-started.txt"
