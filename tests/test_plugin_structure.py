@@ -1401,6 +1401,8 @@ class TestRdrGateLoopRemedies:
         assert "Fix check pointer mismatch" in skill
         accept = self.ACCEPT_SKILL.read_text()
         assert "fix_check:" in accept and "not the record's `commit:`" in accept
+        assert "no `fix_check:`" in accept, "a skipped fix check blocks accept"
+        assert "mandatory on every re-gate" in skill and "mandatory on every re-gate" in self.GATE_CMD.read_text()
 
     def test_fix_commit_rule_in_research_and_gate_skills(self) -> None:
         """Remedy 5: a fix changes the fact named and nothing else; glosses and

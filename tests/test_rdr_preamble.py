@@ -1769,7 +1769,63 @@ class TestRdrGateRoundAndFixCheck:
         result = self._gate(rdr_env, monkeypatch, outcome="BLOCKED", commit=sha, prior=prior)
         assert result.exit_code == 0, result.output
         assert "Gate round 5" in result.output, result.output
-        assert "prior rounds: 4 (2 BLOCKED, 2 PASSED)" in result.output
+        assert "prior rounds: 4 (2 BLOCKED, 2 PASSED, 0 unlabelled" in result.output
+
+    def test_round_number_counts_bare_and_wrapped_chains(self, rdr_env, monkeypatch):
+        """deep critique [24873] Critical 1: entries without an outcome word
+        and chains wrapped over lines must still count."""
+        from nexus.commands.rdr import _gate_round_lines
+
+        bare = "outcome: \"BLOCKED\"\nprior: [1], [2], [3], [4], [5], [6], [7], [8], [9]\n"
+        assert "Gate round 11" in _gate_round_lines(bare)[0]
+        assert "9 unlabelled" in _gate_round_lines(bare)[0]
+        wrapped = ("outcome: \"PASSED\"\nprior: [1] (BLOCKED 1C), [2] (PASSED 0C),\n"
+                   "  [3] (BLOCKED 2C), [4] (PASSED)\ncommit: abc1234\n")
+        line = _gate_round_lines(wrapped)[0]
+        assert "Gate round 6" in line and "2 BLOCKED, 3 PASSED, 0 unlabelled" in line
+
+    def test_round_number_prefers_the_critique_record_count(self, rdr_env, monkeypatch):
+        """A hand-retyped chain that lost entries cannot reset the cap: the
+        critique records T2 holds are the count nobody retypes."""
+        import nexus.commands.rdr as rdr_mod
+
+        sha = self._commit(rdr_env, self._BODY, "gated")
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": f"outcome: \"BLOCKED\"\ndate: \"2026-09-07\"\ncommit: {sha}\n",
+            **{f"204-gate-critique-2026-09-0{i}": "x" for i in range(1, 6)},
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        out = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"]).output
+        assert "Gate round 6" in out and "from the critique records" in out, out
+
+    def test_regate_without_fix_check_field_is_flagged(self, rdr_env, monkeypatch):
+        """deep critique [24873] Critical 3: omitting fix_check: on a re-gate
+        is a skipped check, never a clean one."""
+        import nexus.commands.rdr as rdr_mod
+
+        sha = self._commit(rdr_env, self._BODY, "gated")
+        for content, flagged in (
+            (f"outcome: \"PASSED\"\ncommit: {sha}\nprior: [1] (BLOCKED 1C)\n", True),
+            (f"outcome: \"PASSED\"\ncommit: {sha}\n", False),
+            (f"outcome: \"PASSED\"\ncommit: {sha}\nprior: [1] (BLOCKED 1C)\nfix_check: none (no change since {sha})\n", False),
+        ):
+            fake = _FakeT2ResearchClient({"204-gate-latest": content})
+            monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda fake=fake: fake)
+            out = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"]).output
+            assert ("Fix check missing" in out) is flagged, (content, out)
+
+    def test_fix_check_pointer_to_absent_record_is_flagged(self, rdr_env, monkeypatch):
+        import nexus.commands.rdr as rdr_mod
+
+        sha = self._commit(rdr_env, self._BODY, "gated")
+        rec = f"outcome: \"PASSED\"\ncommit: {sha}\nprior: [1] (BLOCKED 1C)\nfix_check: nexus_rdr/204-fix-check-{sha}\n"
+        fake = _FakeT2ResearchClient({"204-gate-latest": rec})
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        assert "Fix check record missing" in _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"]).output
+        fake = _FakeT2ResearchClient({"204-gate-latest": rec, f"204-fix-check-{sha}": "verdict: CLEAN\n"})
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        out = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"]).output
+        assert "Fix check record missing" not in out and "Fix check" in out
 
     def test_round_number_without_prior_field_is_two(self, rdr_env, monkeypatch):
         sha = self._commit(rdr_env, self._BODY, "gated")
@@ -1795,6 +1851,21 @@ class TestRdrGateRoundAndFixCheck:
         assert f"204-fix-check-{fixed}" in out, "the T2 title carries the tip sha"
         assert "enumeration" in out and "universal" in out
         assert "Do not enter Layer 1 or Layer 3" in out
+
+    def test_fix_check_not_applicable_past_the_gate(self, rdr_env, monkeypatch):
+        """An accepted RDR's post-accept edits are not gate fixes."""
+        gated = self._commit(rdr_env, self._BODY, "gated")
+        path = _write_rdr(
+            rdr_env["rdr_dir"], "rdr-204-example.md",
+            {"title": "Example", "status": "accepted", "type": "Architecture", "priority": "medium"},
+            body=self._BODY,
+        )
+        root = str(rdr_env["repo_root"])
+        subprocess.run(["git", "-C", root, "add", str(path)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "accept"], check=True, capture_output=True)
+        out = self._gate(rdr_env, monkeypatch, outcome="PASSED", commit=gated, prior=None).output
+        assert "Fix check: not applicable (RDR status is `accepted`" in out, out
+        assert "### Fix check (required" not in out
 
     def test_fix_check_not_required_when_nothing_changed(self, rdr_env, monkeypatch):
         gated = self._commit(rdr_env, self._BODY, "gated")

@@ -1649,6 +1649,7 @@ def preamble_rdr_gate(args: tuple[str, ...]) -> None:
     # findings and the diff since the gated commit.
     for _line in _preamble_regate_block(
         repo_root=repo_root, repo_name=repo_name, t2_key=t2_key, rdr_file=rdr_file,
+        status=str(fm.get("status", "")),
     ):
         print(_line)
 
@@ -1755,7 +1756,7 @@ def _critique_findings(text: str) -> list[str]:
 
 
 def _preamble_regate_block(
-    *, repo_root: str, repo_name: str, t2_key: str, rdr_file: Path,
+    *, repo_root: str, repo_name: str, t2_key: str, rdr_file: Path, status: str = "",
 ) -> list[str]:
     """Lines for the re-gate block of ``nx rdr preamble rdr-gate`` (nexus-7vdf9).
 
@@ -1796,6 +1797,20 @@ def _preamble_regate_block(
             critique_title = critique_title.rsplit("/", 1)[-1]
             gated_commit = (_preamble_parse_t2_field(content, "commit") or "").strip()
             fix_check_field = (_preamble_parse_t2_field(content, "fix_check") or "").strip()
+            fix_check_exists: bool | None = None
+            fc = re.search(r"fix-check-([0-9a-f]{6,40})", fix_check_field)
+            if fc:
+                fix_check_exists = client.get(project=project, title=f"{t2_key}-fix-check-{fc.group(1)}") is not None
+            # Every gate round writes a critique record; their count is the
+            # round count nobody retypes (deep critique [24873] Critical 1).
+            critique_count = 0
+            get_all = getattr(client, "get_all", None)
+            if callable(get_all):
+                prefix = f"{t2_key}-gate-critique-"
+                critique_count = sum(
+                    1 for row in (get_all(project=project) or [])
+                    if isinstance(row, dict) and str(row.get("title", "")).startswith(prefix)
+                )
             critique = None
             fetch_failed = False
             if critique_title:
@@ -1822,8 +1837,11 @@ def _preamble_regate_block(
     if critique_title:
         lines.append(f"Critique: `{project}/{critique_title}`")
     lines.append("")
-    lines.extend(_gate_round_lines(content))
-    lines.extend(_fix_check_pointer_lines(fix_check_field, gated_commit))
+    lines.extend(_gate_round_lines(content, critique_count))
+    lines.extend(_fix_check_pointer_lines(
+        fix_check_field, gated_commit,
+        is_regate=bool(_t2_field_block(content, "prior")), record_exists=fix_check_exists,
+    ))
 
     findings = _critique_findings(str(critique.get("content", ""))) if isinstance(critique, dict) else []
     if findings:
@@ -1868,10 +1886,18 @@ def _preamble_regate_block(
                     + (stat[-1].strip() if stat else "no changes to the RDR file")
                 )
                 lines.append("")
-                lines.extend(_fix_check_lines(
-                    repo_root=repo_root, t2_key=t2_key, rel=rel,
-                    gated_commit=gated_commit, changed=bool(stat),
-                ))
+                if stat and status.strip().lower() not in ("", "draft", "open"):
+                    # Post-accept edits (the status flip itself, residual
+                    # dispositions) are not gate fixes (deep critique [24873]).
+                    lines.append(
+                        f"Fix check: not applicable (RDR status is `{status.strip()}`; the "
+                        "fix check gates re-gates of a draft, and this RDR is past the gate)."
+                    )
+                else:
+                    lines.extend(_fix_check_lines(
+                        repo_root=repo_root, t2_key=t2_key, rel=rel,
+                        gated_commit=gated_commit, changed=bool(stat),
+                    ))
         except (OSError, subprocess.SubprocessError) as exc:
             lines.append(f"Changed since the gated commit `{gated_commit}`: (git diff failed: {exc})")
         lines.append("")
@@ -1895,28 +1921,54 @@ def _preamble_regate_block(
 GATE_MAX_ANY_CRITICAL_ROUNDS: int = 2
 
 
-def _gate_round_lines(gate_record: str) -> list[str]:
-    """The gate round number and its rule, from the record's ``prior:`` chain.
+def _t2_field_block(content: str, field: str) -> str:
+    """The value of *field* including wrapped continuation lines: everything
+    from ``field:`` up to the next ``word:`` line. ``_preamble_parse_t2_field``
+    reads one line, which truncated a wrapped ``prior:`` chain to its first
+    line and undercounted rounds (deep critique [24873] Critical 1)."""
+    out: list[str] = []
+    active = False
+    for line in content.splitlines():
+        stripped = line.strip()
+        if active and re.match(r"^[A-Za-z_][A-Za-z0-9_]*:", stripped):
+            break
+        if stripped.startswith(f"{field}:"):
+            out.append(stripped.split(":", 1)[1])
+            active = True
+        elif active:
+            out.append(stripped)
+    return " ".join(out).strip()
 
-    The chain is the skill's own format, ``[id] (OUTCOME ...), [id] (...)``;
-    each bracketed T2 id is one prior round, and the record itself is one
-    more, so a record with no ``prior:`` field is round 2's predecessor.
-    The count never resets for the RDR's life.
+
+def _gate_round_lines(gate_record: str, critique_count: int = 0) -> list[str]:
+    """The gate round number and its rule.
+
+    Two sources, the larger wins: the number of ``{id}-gate-critique-*``
+    records in T2 (*critique_count*, written by every gate round and never
+    hand-retyped), and the record's ``prior:`` chain plus the record itself.
+    The chain counts every ``[id]`` token whether or not it carries an
+    outcome in parentheses; entries with no outcome word are tallied as
+    unlabelled so the tally always sums. The count never resets for the
+    RDR's life.
     """
-    prior = _preamble_parse_t2_field(gate_record, "prior") or ""
-    entries = re.findall(r"\[\d+\]\s*\(([^)]*)\)", prior)
-    n_prior = 1 + len(entries)
-    blocked = sum(1 for e in entries if "BLOCKED" in e.upper())
-    passed = sum(1 for e in entries if "PASSED" in e.upper())
+    prior = _t2_field_block(gate_record, "prior")
+    ids = re.findall(r"\[\d+\]", prior)
+    labelled = re.findall(r"\[\d+\]\s*\(([^)]*)\)", prior)
+    blocked = sum(1 for e in labelled if "BLOCKED" in e.upper())
+    passed = sum(1 for e in labelled if "PASSED" in e.upper())
     this_outcome = (_preamble_parse_t2_field(gate_record, "outcome") or "").strip().upper()
     if this_outcome == "BLOCKED":
         blocked += 1
     elif this_outcome == "PASSED":
         passed += 1
+    n_chain = 1 + len(ids)
+    n_prior = max(n_chain, critique_count)
+    unlabelled = n_prior - blocked - passed
+    source = "critique records" if critique_count > n_chain else "prior chain"
     round_no = n_prior + 1
     lines = [
-        f"**Gate round {round_no}** (prior rounds: {n_prior} ({blocked} BLOCKED, {passed} PASSED); "
-        "the count never resets for this RDR)."
+        f"**Gate round {round_no}** (prior rounds: {n_prior} ({blocked} BLOCKED, {passed} PASSED, "
+        f"{unlabelled} unlabelled; from the {source}); the count never resets for this RDR)."
     ]
     if round_no > GATE_MAX_ANY_CRITICAL_ROUNDS:
         lines.append(
@@ -1934,25 +1986,50 @@ def _gate_round_lines(gate_record: str) -> list[str]:
     return lines
 
 
-def _fix_check_pointer_lines(fix_check_field: str, gated_commit: str) -> list[str]:
-    """Flag a gate record whose ``fix_check:`` names a sha other than its
-    ``commit:`` (critique [24865] Critical 1: the invariant was prose-only and
-    already violated in the live RDR-204 record). The field may carry the
-    T2 pointer form ``<project>/<id>-fix-check-<sha> (note)``; the sha is
-    the token after ``fix-check-``."""
-    if not fix_check_field or not gated_commit:
+def _fix_check_pointer_lines(
+    fix_check_field: str, gated_commit: str, *, is_regate: bool, record_exists: bool | None,
+) -> list[str]:
+    """Flag a gate record whose ``fix_check:`` is missing on a re-gate, names
+    a sha other than its ``commit:``, or points at a T2 record that does not
+    exist. Critique [24865] Critical 1 found the sha invariant prose-only and
+    already violated live; deep critique [24873] Critical 3 found that
+    omitting the field entirely was indistinguishable from a clean check.
+    The field may carry the pointer form ``<project>/<id>-fix-check-<sha>
+    (note)`` or the literal ``none (no change since <sha>)``.
+    *record_exists* is None when the field named no sha."""
+    if not fix_check_field:
+        if is_regate:
+            return [
+                "**Fix check missing:** this gate record has a `prior:` chain, so it is a "
+                "re-gate, and it carries no `fix_check:` field. Every re-gated record names "
+                "either `{id}-fix-check-<sha>` (sha equal to `commit:`) or `none (no change "
+                "since <sha>)`; a skipped fix check is not a clean one. Run the fix check on the "
+                "current diff before Layer 3, and accept refuses this record until it is named.",
+                "",
+            ]
+        return []
+    if fix_check_field.lower().startswith("none"):
+        return []
+    if not gated_commit:
         return []
     m = re.search(r"fix-check-([0-9a-f]{6,40})", fix_check_field)
     sha = m.group(1) if m else fix_check_field.split()[0]
-    if sha == gated_commit or sha.startswith(gated_commit) or gated_commit.startswith(sha):
-        return []
-    return [
-        f"**Fix check pointer mismatch:** the gate record's `fix_check:` names `{sha}` but "
-        f"its `commit:` is `{gated_commit}`. The prior gate cited a fix check of an older "
-        "tree; run the fix check on the current diff before Layer 3, and accept refuses "
-        "this record until the two agree.",
-        "",
-    ]
+    if not (sha == gated_commit or sha.startswith(gated_commit) or gated_commit.startswith(sha)):
+        return [
+            f"**Fix check pointer mismatch:** the gate record's `fix_check:` names `{sha}` but "
+            f"its `commit:` is `{gated_commit}`. The prior gate cited a fix check of an older "
+            "tree; run the fix check on the current diff before Layer 3, and accept refuses "
+            "this record until the two agree.",
+            "",
+        ]
+    if record_exists is False:
+        return [
+            f"**Fix check record missing:** `fix_check:` names `{sha}` but no T2 record "
+            f"`*-fix-check-{sha}` exists. The pointer is not evidence; the verdict is. Run "
+            "the fix check and store its verdict before Layer 3.",
+            "",
+        ]
+    return []
 
 
 def _fix_check_lines(

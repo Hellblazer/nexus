@@ -70,16 +70,21 @@ fix commits, and the T2 title for the verdict. Then:
       counts and universals in the research entry the fix cites.
    3. Does its cited source (changeset, file:line, RDR, T2 entry) contain the
       claim as stated?
+   4. A `file:line` taken from a T3 search or query hit is a lead, not a
+      citation: the store carries the line as of index time. The clause passes
+      only when the line was re-read from the working tree.
 2. Deliverable: one row per clause, PASS or FAIL with line numbers, plus the
    standard Verdict block.
 3. Store the verdict in T2: mcp__plugin_conexus_nexus__memory_put(project="{repo}_rdr", title="{id}-fix-check-<sha>", ttl="permanent", tags="rdr,gate,fix-check"), where `<sha>` is the RDR file's tip commit as printed by the preamble.
 4. Any FAIL: fix it, re-run the fix check on the new diff. Do not enter Layer 1
    or Layer 3 with a FAIL open. Zero FAIL: proceed.
 
-The gate record written at the end carries `fix_check: <sha>`, and that sha must
-equal the record's `commit:`; a gate cannot cite a fix check of an older tree. The
-preamble prints `Fix check pointer mismatch` on the next run when they differ,
-and accept refuses a record whose two shas differ.
+Every re-gated record (one with a `prior:` chain) carries `fix_check:`: either
+`{repo}_rdr/{id}-fix-check-<sha>` with the sha equal to the record's `commit:`, or
+the literal `none (no change since <sha>)` when the preamble printed `Fix check:
+not required`. A record with neither is a skipped fix check, not a clean one. The
+preamble prints `Fix check missing`, `Fix check pointer mismatch` or `Fix check
+record missing` on the next run, and accept refuses the record in all three cases.
 The fix check is a precondition and never counts toward the round cap.
 
 ### Fixing findings
@@ -194,8 +199,9 @@ If no collections found: "No prior RDRs indexed. Cross-project prior-art search 
 
 ### Gate Aggregation
 
-The round number comes from the preamble (the gate records so far, the latest
-plus its `prior:` chain, plus one; it never resets for the RDR's life). The critic's Verdict supplies `critical_count`,
+The round number comes from the preamble (the larger of the `{id}-gate-critique-*`
+record count and the latest record plus its `prior:` chain, plus one; it never
+resets for the RDR's life). The critic's Verdict supplies `critical_count`,
 `significant_count` and `ship_blockers`.
 
 - Rounds 1 and 2: BLOCKED iff `critical_count > 0`. Significants never block.
@@ -213,7 +219,7 @@ plus its `prior:` chain, plus one; it never resets for the RDR's life). The crit
 ### On Pass
 
 1. Store the critique in T2 FIRST: mcp__plugin_conexus_nexus__memory_put(content="{critique}", project="{repo}_rdr", title="{id}-gate-critique-{date}", ttl="permanent", tags="rdr,gate,critique"). Same-day re-gates append a letter (`{date}b`, `{date}c`). T2 is where the preamble reads; a T3 copy (collection="knowledge", title="gate-rdr-NNN-{date}") is optional and never the only copy.
-2. Write gate result to T2: mcp__plugin_conexus_nexus__memory_put(content="outcome: PASSED\ndate: YYYY-MM-DD\ncritical_count: 0\nsignificant_count: N\nobservation_count: N\nship_blockers: 0\nsummary: One-sentence summary\ncritique: {repo}_rdr/{id}-gate-critique-{date}\ncommit: <git log -1 --format=%h -- <rdr file>>\nfix_check: <same sha, when a fix check ran>\nresiduals: <one line per residual finding, round 3+>\nprior: [<previous record id>] (<OUTCOME> <nC> <nS>), <the previous record's own prior chain>", project="{repo}_rdr", title="{id}-gate-latest", ttl="permanent", tags="rdr,gate"). `critique:`, `commit:` and `prior:` are what the re-gate block reads; `fix_check:` must equal `commit:`.
+2. Write gate result to T2: mcp__plugin_conexus_nexus__memory_put(content="outcome: PASSED\ndate: YYYY-MM-DD\ncritical_count: 0\nsignificant_count: N\nobservation_count: N\nship_blockers: 0\nsummary: One-sentence summary\ncritique: {repo}_rdr/{id}-gate-critique-{date}\ncommit: <git log -1 --format=%h -- <rdr file>>\nfix_check: <{repo}_rdr/{id}-fix-check-<sha>, sha equal to commit:, or 'none (no change since <sha>)'; mandatory on every re-gate>\nresiduals: <one line per residual finding, round 3+>\nprior: [<previous record id>] (<OUTCOME> <nC> <nS>), <the previous record's own prior chain>", project="{repo}_rdr", title="{id}-gate-latest", ttl="permanent", tags="rdr,gate"). `critique:`, `commit:` and `prior:` are what the re-gate block reads; `fix_check:` must equal `commit:`.
 3. Append gate findings to the RDR's Revision History section
 4. Print: `> Run '/conexus:rdr-accept <id>' to accept this RDR.`
 

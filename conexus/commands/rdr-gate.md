@@ -41,7 +41,7 @@ All data is pre-loaded above — no additional tool calls needed, except the rea
   ship_blockers: 0
   critique: {repo_name}_rdr/{id}-gate-critique-{date}
   commit: <output of: git log -1 --format=%h -- <rdr file>>
-  fix_check: <same sha, when a fix check ran>
+  fix_check: <{repo_name}_rdr/{id}-fix-check-<sha> with sha equal to commit:, or 'none (no change since <sha>)'; mandatory on every re-gate (a record with prior:)>
   residuals: <one line per residual finding, round 3 onward>
   prior: [<previous gate-latest id>] (<OUTCOME> <nC> <nS>), <the previous record's own prior chain>
   ```

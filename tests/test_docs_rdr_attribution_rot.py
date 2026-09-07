@@ -5,8 +5,9 @@ of an identifier to a changeset or an RDR is backed by that artifact's text.
 RDR-204's gate loop (T2 ``nexus/deep-analysis-rdr-gate-fix-loop-2026-09-07``)
 blocked twice on provenance prose that a mechanical check refutes in
 milliseconds: "``fk-002`` created the registry table" (the changelog file
-``fk-002-collection-registry.xml`` never mentions ``catalog_collections``
-in a CREATE; ``catalog-001-baseline.xml`` does) and "the flag RDR-103 set"
+``fk-002-collection-registry.xml`` carries no CREATE TABLE at all;
+``catalog-001-baseline.xml`` does; caught by the DDL-kind leg, since the
+object is plain English and no identifier can be looked up) and "the flag RDR-103 set"
 about ``legacy_grandfathered`` (the identifier does not occur in RDR-103's
 file). The reference-rot lint (``tests/test_docs_reference_rot.py``)
 covers commit, bead, RDR and JDR ids; this file adds the two legs it lacks.
@@ -83,6 +84,41 @@ _PASSIVE_RDR = re.compile(_IDENT + r"[^.;\n]{0,30}?" + _VERB + r"\s+(?:by|in)\s+
 _TRAILING_RDR = re.compile(
     _IDENT + r"[^.;\n]{0,40}?" + _RDR + r"\s+(?:" + _VERB[2:-2] + r"|set|sets)\b(?!\s+of\b)"
 )
+
+# "`fk-002` created the registry table": the object is plain English, not
+# an identifier, so no name can be looked up; what CAN be checked is the DDL
+# kind. A changeset said to create a table must carry a CREATE TABLE (or
+# Liquibase createTable), and so on per object kind (deep critique [24873]
+# Critical 2: the first cut claimed to catch this sentence and did not).
+_DDL_OBJECT = r"\b(table|column|index|function|view|trigger|policy|constraint)s?\b"
+_ACTIVE_CS_DDL = re.compile(
+    _CS + r"`?[^.;\n`]{0,30}?\b(created|creates|create|added|adds|add|dropped|drops|drop)\b"
+    r"[^.;\n`]{0,60}?" + _DDL_OBJECT
+)
+#: (verb family, object kind) -> DDL markers the changeset must carry. Keyed
+#: by verb family because a changeset whose only "table" DDL is a rollback
+#: DROP TABLE must not back a claim that it CREATED the table.
+_DDL_MARKERS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("create", "table"): ("CREATE TABLE", "createTable"),
+    ("create", "column"): ("ADD COLUMN", "addColumn"),
+    ("create", "index"): ("CREATE INDEX", "CREATE UNIQUE INDEX", "createIndex"),
+    ("create", "function"): ("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", "createFunction"),
+    ("create", "view"): ("CREATE VIEW", "CREATE OR REPLACE VIEW", "createView"),
+    ("create", "trigger"): ("CREATE TRIGGER", "CREATE OR REPLACE TRIGGER"),
+    ("create", "policy"): ("CREATE POLICY",),
+    ("create", "constraint"): ("ADD CONSTRAINT", "addForeignKeyConstraint", "addUniqueConstraint", "addCheckConstraint"),
+    ("drop", "table"): ("DROP TABLE", "dropTable"),
+    ("drop", "column"): ("DROP COLUMN", "dropColumn"),
+    ("drop", "index"): ("DROP INDEX", "dropIndex"),
+    ("drop", "function"): ("DROP FUNCTION", "dropFunction"),
+    ("drop", "view"): ("DROP VIEW", "dropView"),
+    ("drop", "trigger"): ("DROP TRIGGER",),
+    ("drop", "policy"): ("DROP POLICY",),
+    ("drop", "constraint"): ("DROP CONSTRAINT", "dropForeignKeyConstraint", "dropUniqueConstraint"),
+}
+_VERB_FAMILY = {"created": "create", "creates": "create", "create": "create",
+                "added": "create", "adds": "create", "add": "create",
+                "dropped": "drop", "drops": "drop", "drop": "drop"}
 
 #: Changeset-shaped citations with no changelog file or changeSet id.
 #: Value -> reason. Enumerated from the first run (2026-09-07, 4 of 253).
@@ -162,6 +198,41 @@ def _attributions(files: list[Path]) -> list[Attribution]:
             for m in _TRAILING_RDR.finditer(line):
                 out.append((f"RDR-{m.group(2)}", m.group(1), rel, lineno))
     return sorted(set(out))
+
+
+DdlAttribution = tuple[str, str, str, str, int]  # (changeset, verb family, object kind, relpath, lineno)
+
+
+def _ddl_attributions(files: list[Path]) -> list[DdlAttribution]:
+    """Every "<changeset> created/added/dropped ... <table|column|...>" claim."""
+    out: list[DdlAttribution] = []
+    for path in files:
+        rel = _relpath(path)
+        for lineno, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
+            for m in _ACTIVE_CS_DDL.finditer(line):
+                out.append((m.group(1), _VERB_FAMILY[m.group(2).lower()], m.group(3).lower(), rel, lineno))
+    return sorted(set(out))
+
+
+def _unbacked_ddl(
+    attributions: list[DdlAttribution], texts: dict[str, str], id_to_stem: dict[str, str],
+) -> tuple[list[DdlAttribution], int]:
+    """(claims whose changeset carries no DDL of that kind, number checked)."""
+    checked = 0
+    bad: list[DdlAttribution] = []
+    for changeset, verb, kind, rel, lineno in attributions:
+        text = _artifact_text(changeset, texts, id_to_stem, {})
+        if text is None:
+            continue
+        checked += 1
+        markers = _DDL_MARKERS[(verb, kind)]
+        if not any(mk.lower() in text.lower() for mk in markers):
+            bad.append((changeset, verb, kind, rel, lineno))
+    return bad, checked
+
+
+#: (changeset, verb family, object kind) DDL attributions the changeset does not carry.
+DDL_ATTRIBUTION_ALLOWLIST: dict[tuple[str, str, str], str] = {}
 
 
 def _rdr_texts() -> dict[str, str]:
@@ -260,6 +331,44 @@ def test_attribution_allowlist_carries_no_dead_rows() -> None:
     live = {(a, i) for a, i, _, _ in bad}
     dead = sorted(k for k in ATTRIBUTION_ALLOWLIST if k not in live)
     assert not dead, f"allowlist rows no longer needed (sentence fixed or gone): {dead}"
+
+
+def test_ddl_attributions_backed_by_changeset_ddl() -> None:
+    texts = _changelog_texts()
+    _, _, id_to_stem = _changelog_index(texts)
+    bad, checked = _unbacked_ddl(_ddl_attributions(_rdr_docs()), texts, id_to_stem)
+    # One real instance in the corpus at introduction (rdr-156:72); the
+    # planted test below is the non-vacuity proof for this leg.
+    assert checked >= 1, f"only {checked} DDL attributions checked; the scan is broken"
+    unlisted = sorted(b for b in bad if (b[0], b[1], b[2]) not in DDL_ATTRIBUTION_ALLOWLIST)
+    assert not unlisted, (
+        "docs/rdr says a changeset created/added/dropped an object of a kind whose DDL "
+        "that changeset does not carry (quote the changeset and fix the sentence):\n"
+        + "\n".join(f"  {rel}:{ln}: {cs} {verb} {kind}" for cs, verb, kind, rel, ln in unlisted)
+    )
+
+
+def test_ddl_attribution_allowlist_carries_no_dead_rows() -> None:
+    texts = _changelog_texts()
+    _, _, id_to_stem = _changelog_index(texts)
+    bad, _ = _unbacked_ddl(_ddl_attributions(_rdr_docs()), texts, id_to_stem)
+    live = {(cs, verb, kind) for cs, verb, kind, _, _ in bad}
+    dead = sorted(k for k in DDL_ATTRIBUTION_ALLOWLIST if k not in live)
+    assert not dead, f"allowlist rows no longer needed: {dead}"
+
+
+def test_planted_verbatim_rdr204_c1_sentence_is_detected(tmp_path: Path) -> None:
+    """The sentence 606f530db actually wrote, object in plain English."""
+    texts = _changelog_texts()
+    _, _, id_to_stem = _changelog_index(texts)
+    planted = tmp_path / "rdr-999-planted.md"
+    planted.write_text(
+        "cites `fk-004` (`fk-002` created the registry table) and "
+        "`catalog-001-5` created the collections table.\n"
+    )
+    bad, checked = _unbacked_ddl(_ddl_attributions([planted]), texts, id_to_stem)
+    assert checked == 2
+    assert [(cs, verb, kind) for cs, verb, kind, _, _ in bad] == [("fk-002", "create", "table")]
 
 
 # --- non-vacuity ------------------------------------------------------------
