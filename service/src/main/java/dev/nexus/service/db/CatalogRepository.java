@@ -6182,7 +6182,12 @@ public final class CatalogRepository {
      * public} for exactly that reachability; the method's own behavior is unchanged.
      */
     public static void deferManifestChunkFk(DSLContext ctx) {
-        ctx.execute("SET CONSTRAINTS fk_catalog_chunks_chunk DEFERRED");
+        // nexus-cbo4a batch 9 item 1 (Sam's directive, nexus-zrcj7): the constraint
+        // name here was UNQUALIFIED, so PostgreSQL resolved it via search_path --
+        // exactly the reliance batch 9 item 0/1's role-level search_path deletion
+        // was meant to surface. Schema-qualified now; there is no unqualified form
+        // once nexus_svc's session carries no search_path at all.
+        ctx.execute("SET CONSTRAINTS nexus.fk_catalog_chunks_chunk DEFERRED");
     }
 
     private Map<String, Integer> deleteCollectionTxn(String tenant, String name) {

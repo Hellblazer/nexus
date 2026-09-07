@@ -298,9 +298,16 @@ class RawSqlGateTest {
             // method found via Context7). Deferred-constraint fix for
             // deleteCollectionTxn's chunk-before-manifest ordering under
             // fk_catalog_chunks_chunk (class-B site 2 — see the method's own
-            // javadoc for the full derivation).
+            // javadoc for the full derivation). Schema-qualified nexus-cbo4a batch 9
+            // item 1: the constraint name was UNQUALIFIED and resolved via
+            // search_path -- exactly the reliance the role-level search_path
+            // deletion was meant to surface (full Java suite run against the
+            // deletion caught it: CatalogDeleteCollectionCascadeTest,
+            // CatalogHandlerDeleteTest, ManifestChunkFkTest,
+            // RdrO8dil7GlobalManifestAntiJoinTest, StagingPromoteOpsIntegrationTest
+            // all failed with "constraint ... does not exist" until qualified).
             "deferManifestChunkFk", Map.of(
-                ".execute(\"SET CONSTRAINTS fk_catalog_chunks_chunk DEFERRED\")", 1))),
+                ".execute(\"SET CONSTRAINTS nexus.fk_catalog_chunks_chunk DEFERRED\")", 1))),
         Map.entry("PoolerModeCheck.java", Map.of(
             // `SHOW CONFIG` is a PgBouncer admin-console meta-command, not SQL against any
             // table/schema — no jOOQ DSL form exists (no bind params, no fixed column set).
