@@ -761,7 +761,7 @@ All five Critical Assumptions carry a Verified status with their method
 and evidence stated inline: the one-model-per-content-type premise
 (assumption 1, both production tenants, `204-research-6`), the dimension
 ground truth (2, `collection_vector_stats`, `204-research-3`), the
-parse-site census (3, `204-research-4`), the two-segment rows (4, the
+parse-site census (3, `204-research-4` and `-15`), the two-segment rows (4, the
 segment census of both tenants, `204-research-13`), and the
 registry cache (5, a read of `CollectionRegistry`'s invalidation points).
 
