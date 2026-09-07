@@ -162,6 +162,48 @@ class CatalogRestoreTrashTest {
     }
 
     /**
+     * nexus-dkymw, Sam's 2026-09-07 second ruling: {@code chashesForCollection}
+     * (the {@code nx t3 gc} / indexer-prune alive-set) must PROTECT a
+     * tombstoned-but-not-yet-purged document's chashes, superseding
+     * nexus-mqd6t's original immediate-exclusion fix for this one read.
+     * Without this, {@code nx t3 gc}'s own {@code --orphan-window} clock
+     * (independent of purge-trash's window) could reap the chunks of a
+     * document tombstoned only seconds ago, and a later {@code nx catalog
+     * restore} would resurrect an empty shell.
+     */
+    @Test
+    @Order(45)
+    void restore_chashesForCollection_protectsTombstonedDocUntilRestore() {
+        String tumbler = catalogRepo.registerDocument(
+            TENANT_A, "restore-gc-alive-set", regDoc("GC Alive Set", "gc-alive-set.md"));
+        String chashHex = Chash.ofText("restore-gc-alive-set-chunk").toHex();
+        vecRepo.upsertChunks(TENANT_A, COLLECTION,
+            List.of(chashHex), List.of("chunk text"), List.of(Map.of()));
+        catalogRepo.writeManifest(TENANT_A, tumbler, COLLECTION,
+            List.of(Map.<String, Object>of("position", 0, "chash", chashHex, "chunk_index", 0)));
+
+        assertThat(catalogRepo.chashesForCollection(TENANT_A, COLLECTION))
+            .as("visible in the alive-set while live")
+            .contains(chashHex);
+
+        assertThat(catalogRepo.deleteDocument(TENANT_A, tumbler)).isEqualTo(1);
+
+        assertThat(catalogRepo.chashesForCollection(TENANT_A, COLLECTION))
+            .as("a tombstoned-but-not-yet-purged doc's chash must STAY in the T3 GC "
+                + "alive-set — nx t3 gc must not reap it inside the restore window")
+            .contains(chashHex);
+
+        assertThat(catalogRepo.restoreDocument(TENANT_A, tumbler)).isEqualTo(1);
+
+        var manifest = catalogRepo.getManifest(TENANT_A, tumbler);
+        assertThat(manifest)
+            .as("restore must not resurrect an empty shell — the chunk survived because "
+                + "the alive-set protected it")
+            .hasSize(1);
+        assertThat(manifest.get(0).get("chash")).isEqualTo(chashHex);
+    }
+
+    /**
      * {@code older_than_days=0}: the aged-tombstone threshold is {@code NOW()}
      * itself, so a document tombstoned moments ago is already at/past it —
      * purges immediately, with no need to wait or backdate {@code deleted_at}.

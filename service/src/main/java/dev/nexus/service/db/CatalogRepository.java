@@ -5819,11 +5819,34 @@ public final class CatalogRepository {
     /**
      * Get chashes for a physical_collection via manifest join.
      *
-     * <p>nexus-mqd6t BUG 1: this is the T3 GC ALIVE-SET (commands/t3.py). It
-     * joined {@code catalog_documents} but filtered only on
-     * {@code physical_collection}, so a tombstoned document's chunks stayed in
-     * the returned set and {@code nx t3 gc} treated their vectors as still
-     * referenced — a permanent, silent under-collection.
+     * <p>This is the T3 GC ALIVE-SET ({@code nx t3 gc}, {@code
+     * commands/t3.py}) and the indexer's orphan-quarantine prune ({@code
+     * indexer.py}'s prune step). nexus-mqd6t BUG 1 originally found this
+     * joined {@code catalog_documents} but filtered only on {@code
+     * physical_collection}, so a tombstoned document's chunks stayed in the
+     * returned set and {@code nx t3 gc} treated their vectors as still
+     * referenced — a permanent, silent under-collection. The fix at the time
+     * was a {@code DELETED_AT.isNull()} filter (Hal ruling, mqd6t).
+     *
+     * <p><b>Sam's 2026-09-07 ruling on nexus-dkymw supersedes that filter
+     * for THIS ONE READ.</b> catalog-026 later made the tombstone-to-purge
+     * window the recovery contract ({@code nx catalog restore}), and this
+     * alive-set is a GC INPUT, not a read surface — excluding a tombstoned
+     * document here let {@code nx t3 gc}'s own clock (chunk {@code
+     * indexed_at} vs {@code --orphan-window}, independent of purge-trash's
+     * {@code --older-than-days}) reap a just-tombstoned document's chunks
+     * inside the recovery window, so a later {@code nx catalog restore}
+     * resurrected an empty shell. The {@code DELETED_AT} filter is DROPPED
+     * here: a tombstoned-but-not-yet-purged document's chashes stay in the
+     * alive-set until {@code nexus.purge_trash} physically reclaims the
+     * {@code catalog_documents} row (at which point the join itself yields
+     * nothing for it — no explicit tombstone check is needed post-purge).
+     * This does NOT reopen mqd6t's read-invisibility concern: tombstoned
+     * content still does not surface in search results or {@code
+     * getManifest} ({@code liveParentDoc}/{@code liveDocument} filters,
+     * untouched) — only this GC-alive-set read changed. See
+     * TombstoneFilterGateTest's {@code TOMBSTONE_EXEMPT} entry for this
+     * method.
      */
     public Set<String> chashesForCollection(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
@@ -5831,8 +5854,7 @@ public final class CatalogRepository {
                           .from(CATALOG_DOCUMENT_CHUNKS)
                           .join(CATALOG_DOCUMENTS).on(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CATALOG_DOCUMENTS.TENANT_ID)
                                            .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(CATALOG_DOCUMENTS.TUMBLER)))
-                          .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection)
-                                 .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                          .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection))
                           .fetch();
             Set<String> result = new LinkedHashSet<>();
             for (var r : rows) result.add(r.value1());

@@ -303,7 +303,16 @@ class TombstoneFilterGateTest {
         new ExemptEntry("CatalogRepository.java", "listTrash",
             "nexus-dkymw (GET /v1/catalog/trash): this read's whole PURPOSE is listing the "
             + "TOMBSTONED population itself (deleted_at IS NOT NULL), the read-only counterpart "
-            + "to restoreDocument — same direction and same rationale as agedTombstoneCount above")
+            + "to restoreDocument — same direction and same rationale as agedTombstoneCount above"),
+        new ExemptEntry("CatalogRepository.java", "chashesForCollection",
+            "nexus-dkymw (Sam's 2026-09-07 ruling, SUPERSEDING nexus-mqd6t's original "
+            + "DELETED_AT.isNull() fix for this ONE read): this is the T3 GC alive-set (nx t3 "
+            + "gc, the indexer orphan-quarantine prune) — a tombstoned-but-not-yet-purged "
+            + "document's chashes must stay in the alive-set until nexus.purge_trash physically "
+            + "reclaims the catalog_documents row, or nx t3 gc's own --orphan-window clock can "
+            + "reap its chunks inside nx catalog restore's recovery window, resurrecting an "
+            + "empty shell. Read-invisibility (search results, getManifest) is unaffected — "
+            + "this is a GC input, not a read surface")
     );
 
     record WidenEntry(String file, String method, String rationale) {}

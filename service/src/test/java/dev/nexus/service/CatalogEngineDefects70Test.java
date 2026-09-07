@@ -181,10 +181,19 @@ class CatalogEngineDefects70Test {
     // nexus-mqd6t — tombstone filters on the manifest-side reads
     // ══════════════════════════════════════════════════════════════════════════
 
-    /** BUG 1: chashesForCollection is the T3 GC alive-set; a tombstoned doc's
-     *  chunks must leave it or `nx t3 gc` never collects those vectors. */
+    /** BUG 1, ORIGINAL (nexus-mqd6t, Hal ruling): chashesForCollection is the
+     *  T3 GC alive-set; a tombstoned doc's chunks were made to leave it so
+     *  `nx t3 gc` would collect those vectors.
+     *
+     *  <p>SUPERSEDED (nexus-dkymw, Sam's 2026-09-07 ruling): that same
+     *  immediate exclusion let `nx t3 gc`'s own --orphan-window clock reap a
+     *  just-tombstoned document's chunks inside `nx catalog restore`'s
+     *  recovery window, resurrecting an empty shell. The alive-set now
+     *  PROTECTS a tombstoned-but-not-yet-purged document's chashes — they
+     *  leave the alive-set only once `nexus.purge_trash` physically reclaims
+     *  the row, never merely because the row was tombstoned. */
     @Test
-    void mqd6t_chashesForCollection_excludesTombstonedDoc() {
+    void mqd6t_chashesForCollection_protectsTombstonedDocUntilPurge() {
         String owner = freshOwner();
         String coll = "code__defects70-gc1__voyage-code-3__v1";
         String t = repo.registerDocument(TENANT, owner, Map.of(
@@ -200,7 +209,15 @@ class CatalogEngineDefects70Test {
         assertThat(repo.deleteDocument(TENANT, t)).isEqualTo(1);
 
         assertThat(repo.chashesForCollection(TENANT, coll))
-            .as("tombstoned doc's chunks must leave the T3 GC alive-set")
+            .as("a tombstoned-but-not-yet-purged doc's chunks must STAY in the T3 GC "
+                + "alive-set (nexus-dkymw, superseding nexus-mqd6t's original exclusion)")
+            .contains(h);
+
+        Map<String, Object> purged = repo.purgeTrash(TENANT, 0);
+        assertThat(((Number) purged.get("documents_purged")).longValue()).isGreaterThanOrEqualTo(1L);
+
+        assertThat(repo.chashesForCollection(TENANT, coll))
+            .as("once purge_trash reclaims the row, the join yields nothing for it")
             .doesNotContain(h);
     }
 
