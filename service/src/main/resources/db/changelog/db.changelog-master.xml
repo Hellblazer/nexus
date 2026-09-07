@@ -1109,6 +1109,14 @@
          telemetry-013-capability-census-scope-split.xml (current telemetry
          tail) and before the search-path / grants tail. -->
     <include file="db/changelog/telemetry-014-install-pings.xml"/>
+    <!-- RDR-204 Phase 1 item 1 (bead nexus-ft04v.2): embedding_models (seeded,
+         no RLS) + embedding_profile (tenant-scoped, RLS) + nullable
+         catalog_collections.dimension/lifecycle_state. Additive only — see
+         the included file's own header for why the constraints wait for the
+         walk (bead nexus-ft04v.4). Placed after telemetry-014-install-pings.xml
+         (current tail) and before search-path-001 (reserved changeset-id
+         ordering per nexus-ft04v.1/.2's NOTES). -->
+    <include file="db/changelog/catalog-036-embedding-profile.xml"/>
 
     <!--
         nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): relocates the

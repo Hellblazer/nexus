@@ -174,7 +174,15 @@ class JooqRecordReflectionFeatureTest {
     // (telemetry-011, both nexus-gjv9b). telemetry-012 only added a column.
     // 87 -> 88: nexus.install_pings (telemetry-014, nexus-h5olw), the
     // anonymous install-ping table, one generated Record type.
-    private static final int EXPECTED_RECORD_TYPES = 88;
+    // 88 -> 90: RDR-204 Phase 1 item 1 (bead nexus-ft04v.2,
+    // catalog-036-embedding-profile.xml) added nexus.embedding_models and
+    // nexus.embedding_profile — both plain tables, one generated Record
+    // type each (EmbeddingModelsRecord, EmbeddingProfileRecord). The new
+    // dimension/lifecycle_state columns on the pre-existing
+    // nexus.catalog_collections table are a column-count change only, no
+    // new Record type (same shape as telemetry-012's column-only bump
+    // above). This is the deliberate bump the assertion message demands.
+    private static final int EXPECTED_RECORD_TYPES = 90;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {
