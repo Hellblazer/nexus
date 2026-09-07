@@ -64,7 +64,9 @@ The reason the name carries this load has expired. RDR-101 and RDR-103
 put the tuple in the name because ChromaDB (the vector store retired at
 RDR-155) had no collection metadata worth relying on and constrained
 names to a regex; the name was the only durable place. Postgres is the
-store now, the table exists, and the FK is in place (`fk-002`).
+store now, the table exists, and the FK is in place
+(`fk-004-chunks-collection-registry.xml`, the changeset that added the
+chunks-to-registry foreign key; `fk-002` created the registry table).
 
 The premise this RDR rests on, and the thing that keeps it small: **no
 installation today chooses an embedding model per collection.** Local
@@ -95,14 +97,17 @@ Nothing records that an install has one model per content type, so the
 schema cannot refuse a new collection whose model disagrees with what the
 install embeds with. The fix adds an install-scoped embedding profile that
 new collections inherit from. The profile is a setting, not a constant:
-`local.embed_model` is already user-mutable (GH #1461), so the profile
+`local.embed_model` is already user-mutable (GH #1461, the report of a
+local install whose embedder setting changed after collections existed),
+so the profile
 must be updatable, and existing collections keep the model they were
 embedded with rather than being refused when the profile moves.
 
 #### Gap 4: Lifecycle state is encoded in the name too
 
 The orphan GC parks chunks in `quarantine-<content_type>__...` siblings
-(nexus-xukbj) so that the `quarantine-` prefix falls outside every search
+(nexus-xukbj, the bead that introduced the prefix) so that the
+`quarantine-` prefix falls outside every search
 corpus. That is a lifecycle state spelled as a content-type prefix. The
 fix records it as a column on the same table and lets corpus resolution
 exclude by column.
@@ -118,7 +123,7 @@ exclude by column.
 | RDR-137 (eliminate repos.json) | Precedent | Same move one level up: retired a side file that duplicated a catalog fact and made the catalog canonical. The census-and-delete method it used is reused here. |
 | RDR-164 (lifecycle cascade consolidation) | Precedent | Moved cross-store cascades onto the engine. The rename and delete cascades it built are the reason no collection needs renaming here: the name can stay a stable handle. |
 | RDR-191 (unify chunk tables) | Precedent | Made `nexus.chunks` one table with three typed vector columns and `exactly_one_embedding`. That column, not the name, is the ground truth for a collection's dimension, and it is what the backfill verifies against. |
-| RDR-194 (FK census) | Precedent | Enforced every expressible relationship, including `chunks_collection_fk` in `fk-002`. The FK is why "name as opaque handle" already holds structurally. |
+| RDR-194 (FK census) | Precedent | Enforced every expressible relationship, including `chunks_collection_fk` in `fk-004`. The FK is why "name as opaque handle" already holds structurally. |
 | RDR-144 (guided embedder provisioning) | Adjacent, closed | Made the local 384-vs-768 choice explicit at `nx init`. The embedding profile is where that choice is now recorded, so `nx init` writes the profile rather than only picking a model. |
 
 Searched the table for "collection", "naming", "embedder", "embedding",
@@ -198,7 +203,8 @@ per-collection chunk counts from `nx collection list`. Full numbers in T2
 - **Verified**: `AspectRepository` (RDR-164 P1a) and `TaxonomyRepository`
   (RDR-156 P0.2) insert `catalog_collections` stub rows with empty
   attribute columns to satisfy their FKs.
-- **Verified**: `chunks_collection_fk` exists (`fk-002-collection-registry.xml`),
+- **Verified**: `chunks_collection_fk` exists (added by
+  `fk-004-chunks-collection-registry.xml`; `fk-002`'s own header says so),
   so a chunk cannot reference a collection without a row. The name is
   already a key; it is only its *content* that is still read.
 - **Verified**: 70 live collections (at least one chunk) against 223
@@ -236,7 +242,8 @@ per-collection chunk counts from `nx collection list`. Full numbers in T2
   `corpus.effective_embedding_model_for_writes(content_type)` (RDR-109 P2)
   returns the local token in local mode, the per-content-type Voyage token
   in cloud mode, and mirrors cloud when `local.embed_model=voyage-*` is
-  configured (nexus-35ok4, GH #1461); the engine mirrors it with a
+  configured (nexus-35ok4, the client half of the GH #1461 fix); the
+  engine mirrors it with a
   pure-Voyage or pure-ONNX router. The profile table is that function as
   data; the GH #1461 opt-in becomes a profile write.
 - **Verified**: registration derives a collection's attributes by parsing
@@ -250,7 +257,10 @@ per-collection chunk counts from `nx collection list`. Full numbers in T2
   `aspect_extraction_queue`, `taxonomy_meta`, `topics`, `topic_assignments`),
   the manifest, and four audit-only tables with no FK (`relevance_log`,
   `search_telemetry`, `hook_failures`, `gc_audit`); `collectionIsEmpty`
-  reads it and `deleteCollectionTxn` refuses on it. Three drafts of this
+  reads it, `renameCollectionTxn` refuses to merge into a name it reports
+  non-empty (nexus-v6za0, the merge that once read a taxonomy-only
+  collection as empty), and `deleteCollectionTxn` cascades over the same
+  list without refusing on anything. Three drafts of this
   RDR tried to restate that set (two hand lists, then an FK derivation) and
   each was narrower than the engine's; the sweep now calls the predicate.
 - **Verified**: the model token vocabulary is five tokens on the engine
@@ -263,7 +273,8 @@ per-collection chunk counts from `nx collection list`. Full numbers in T2
   never-wedge directive this rules out a refusing backfill; see Technical
   Design step 3 for the disputed-row design that replaced it.
 - **Verified**: the grandfather-or-raise switch table already exists
-  (`corpus.resolve_write_embedding_model`, nexus-o5x2c, GH #1461) and is
+  (`corpus.resolve_write_embedding_model`, nexus-o5x2c, the write-side
+  half of the GH #1461 fix) and is
   documented in `docs/cli-reference.md` under "Local mode with Voyage";
   its probe is what the profile design repoints at `for_tuple`.
 - **Verified**: `CollectionRegistry` caches only `(tenant, name)` presence:
@@ -396,16 +407,18 @@ of "referenced anywhere" rather than inventing one. `CatalogRepository`
 already carries `COLLECTION_SCOPED_TABLES`, the single list of every table
 that holds a denormalised collection name (the FK tables, the manifest, and
 four audit-only tables with no FK at all), and `collectionIsEmpty` asks that
-list whether any row names the collection; `deleteCollectionTxn` refuses on
-it. That list exists because two earlier operations kept separate table
+list whether any row names the collection; `renameCollectionTxn` refuses a
+merge on it, and `deleteCollectionTxn` cascades over the same list. That
+list exists because two earlier operations kept separate table
 lists and drifted (nexus-v6za0). This RDR drafted its own list twice and
 missed a table each time ([24806], [24809]), then proposed deriving the set
 from foreign keys, which the fourth gate showed is narrower than the
 engine's list ([24812]). So the sweep is not Liquibase SQL: it is an
 engine-side job run once after the changesets in the same boot, in jOOQ,
 that walks `catalog_collections` and deletes every row for which
-`collectionIsEmpty` is true and no `catalog_documents` row names it as
-`physical_collection`, guarded by a `catalog_meta` marker so it runs once.
+`collectionIsEmpty` is true (`catalog_documents.physical_collection` is one
+of the fourteen entries that predicate checks, so it needs no separate
+clause), guarded by a `catalog_meta` marker so it runs once.
 A row `collectionIsEmpty` refuses on is kept and becomes `dormant` (below).
 The Liquibase changesets that follow add columns and constraints only.
 Ghosts are deleted with counts reported
@@ -487,7 +500,9 @@ a new collection may be given an opaque name. Existing names never change.
 - `CollectionRegistry` exists and is extended, not replaced.
 - `/v1/catalog/collections/list`, `get`, `for_tuple` exist; `list` gains
   two filter parameters.
-- The RawSqlGateTest pattern exists and is copied for the parse census.
+- The RawSqlGateTest pattern (a test that counts the remaining sites of a
+  retired idiom and pins the count so it can only fall) exists and is
+  copied for the parse census.
 
 ### Decision Rationale
 
@@ -611,8 +626,12 @@ walks the tree's own changeset over a populated store.
    bge rows and boot with a Voyage key yields the Voyage rows; a second
    boot changes nothing; refused register; backfill agree, disputed
    (a fixture collection whose stored dimension disagrees with its name)
-   and dormant (a row referenced by a manifest with no chunks) cases;
-   ghost sweep deletes the unreferenced and keeps the referenced.
+   dormant (a row referenced by a manifest with no chunks) and quarantine
+   (a `quarantine-code__…` fixture backfills to `lifecycle_state =
+   'quarantine'` with content type `code`, and a search scoped to `code`
+   does not return it) cases; ghost sweep deletes the unreferenced and
+   keeps the referenced; after the backfill no surviving row carries a
+   blank `content_type`, `owner_id` or `embedding_model`.
 6. The GH #1461 recipe, end to end on the engine substrate: bge profile,
    set a Voyage key, restart, profile now Voyage, existing bge collection
    still readable and still registered under bge, a new write mints the
@@ -671,7 +690,8 @@ None.
 ## Test Plan
 
 - Engine: boot writes the profile in both modes and is idempotent;
-  changeset agree, disputed, dormant and ghost cases; register 422;
+  changeset agree, disputed, dormant, quarantine and ghost cases, and no
+  blank column survives the backfill; register 422;
   registry eviction on profile write; the GH #1461 restart journey; parse
   census at target count.
 - Client: corpus resolution by content type and lifecycle state; model
@@ -722,10 +742,14 @@ is not deferred.
 ### Cross-Cutting Concerns
 
 - **Versioning**: engine cut carries Phases 1 and 2; the client floor bumps
-  to it in the release that ships Phase 3 (paired-release choreography).
+  to it in the release that ships Phase 3 (paired-release choreography:
+  the engine deploys before the client tag, so no client can meet an
+  engine that lacks its half).
 - **Build tool compatibility**: N/A.
 - **Licensing**: N/A.
 - **Deployment model**: the changeset walks on the cloud via the PITR fork
+  (a point-in-time restored copy of the production database, walked and
+  destroyed before the live deploy)
   rehearsal first (`deploy/RESTORE.md`) to read the ghost and disputed
   counts before they run live; the walk itself cannot fail.
 - **IDE compatibility**: N/A.
