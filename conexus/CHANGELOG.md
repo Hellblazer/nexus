@@ -4,6 +4,10 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.35.0] - 2026-09-07
+
+Plugin version aligned with conexus 7.35.0. No plugin-side changes.
+
 ## [7.34.1] - 2026-09-07
 
 - `rdr-gate` command and skill: a Layer 0 re-gate survivor sweep driven by
