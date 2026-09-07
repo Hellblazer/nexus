@@ -88,8 +88,7 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 ## Pre-edit capture for gate fixes
 
 A research entry that records a gate fix is written BEFORE the edit, never
-transcribed from it (RDR-204's `204-research-13` named commits that already
-existed and inherited their errors; nexus-g7zgw.5):
+transcribed from it:
 
 1. Record the entry first: `nx rdr preamble rdr-research -- add <id> ...`.
    Its `commits:` field is filled in after the commit exists.

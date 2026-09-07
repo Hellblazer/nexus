@@ -24,7 +24,7 @@ Delegates Layer 3 to the **substantive-critic** agent (sonnet). See [registry.ya
 
 Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/rdr`. Use the Step 0 snippet from the rdr-create skill, stored as `RDR_DIR`. All file paths below use `$RDR_DIR` in place of `docs/rdr`.
 
-## Three Validation Layers (run in sequence)
+## Validation Layers (run in sequence)
 
 ### Layer 0 — Re-gate survivor sweep (whenever a prior gate record exists)
 
@@ -40,8 +40,7 @@ gated commit, and the Fix check section. Do this before anything else:
    corrected one. Every occurrence must agree. A fact lives in the Problem
    Statement, Research Findings, Technical Design and the Implementation Plan
    at once; the last two paraphrase the design and are where survivors hide.
-   Fix every site; a fix at the quoted line alone is what produced two blocked
-   rounds on RDR-204 (nexus-7vdf9).
+   Fix every site.
 2. If a finding changed a design decision, read Implementation Plan, Test Plan,
    Day 2 Operations, Trade-offs and Proportionality in full.
 3. Brief the Layer 3 critic with the prior findings and ask it to verify each is
@@ -49,9 +48,7 @@ gated commit, and the Fix check section. Do this before anything else:
    RDRs only if the diff touched the Relationship section; otherwise the prior
    round's P7 check stands.
 
-A first gate has no Layer 0. A re-gate after a PASSED result has one: both
-RDR-204 rounds that introduced new Criticals were fixes authored against a
-PASSED gate's Significants (nexus-g7zgw.4).
+A first gate has no Layer 0. A re-gate after a PASSED result has one.
 
 ### Fix check — diff-scoped verification (whenever the RDR changed since the gated commit)
 

@@ -1358,7 +1358,7 @@ class TestRdrGateLoopRemedies:
         for path in (self.GATE_SKILL, self.GATE_CMD):
             text = path.read_text()
             assert "Fix check" in text, path
-            assert "ONLY" in text and "diff" in text, f"{path}: the fix check reads only the diff"
+            assert "with ONLY th" in text and "diff" in text, f"{path}: the fix check reads only the diff"
             assert "fix-check-" in text, f"{path}: names the T2 title shape"
             assert "fix_check:" in text, f"{path}: the gate record carries the pointer"
         skill = self.GATE_SKILL.read_text()
@@ -1376,9 +1376,11 @@ class TestRdrGateLoopRemedies:
         assert "residual" in skill
         assert "prior:" in skill, "the gate record carries the prior chain the round number is derived from"
         assert "would build the wrong thing" in skill, "RDR-specific ship-blocker definition in the brief"
-        assert "Criterion 6" in skill and "never" in skill
+        assert "Criterion 6 output is never a finding" in skill
         cmd = self.GATE_CMD.read_text()
         assert "ship_blockers" in cmd and "residual" in cmd
+        critic = (PLUGIN_DIR / "agents" / "substantive-critic.md").read_text()
+        assert "may block on `critical_count`" in critic, "the critic contract names the caller's own rule"
 
     def test_layer_zero_always_on_and_sites_list(self) -> None:
         """Remedy 4: Layer 0 fires whenever a prior gate record exists, and the
@@ -1413,6 +1415,15 @@ class TestRdrGateLoopRemedies:
             assert "before the edit" in text.lower(), f"{path}: research entry precedes the edit"
             assert "inferred, not read" in text, f"{path}: unquoted clauses are marked"
             assert "census" in text, f"{path}: universals need a census"
+
+    def test_remedy_skills_carry_no_incident_narrative(self) -> None:
+        """Skills are instructions; the why lives in the RDR and T2
+        (feedback_no_prose_in_skills). No bead pointers or RDR-204 history in
+        the sections the remedies added."""
+        for path in (self.GATE_SKILL, self.RESEARCH_SKILL, self.ACCEPT_SKILL):
+            text = path.read_text()
+            assert "nexus-g7zgw" not in text, f"{path}: bead pointer in a skill"
+            assert "RDR-204" not in text, f"{path}: incident narrative in a skill"
 
     def test_accept_dispositions_residuals(self) -> None:
         text = self.ACCEPT_SKILL.read_text()

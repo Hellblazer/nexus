@@ -1703,7 +1703,13 @@ def preamble_rdr_gate(args: tuple[str, ...]) -> None:
 _CRITIQUE_SECTION_RE = re.compile(r"^\s*#{1,3}\s*(critical|significant)\b", re.IGNORECASE)
 _CRITIQUE_ISSUE_RE = re.compile(r"^\s*#{1,6}\s*issue:\s*(.+)$", re.IGNORECASE)
 _CRITIQUE_DETAIL_RE = re.compile(r"^\s*[-*]\s*\*{0,2}(location|problem|recommendation|issue|sites)\*{0,2}\s*:\s*(.+)$", re.IGNORECASE)
-_CRITIQUE_INLINE_RE = re.compile(r"^[-*#\s]*(?:\*\*)?(?:new\s+)?(?:critical|significant)\b", re.IGNORECASE)
+# A free-form finding opens with the severity and then a number, a colon, a
+# bold close or the word "issue"; "Critical mass of the aspect queue" and
+# "Significant prior art exists" are prose (deep critique [24873] S1).
+_CRITIQUE_INLINE_RE = re.compile(
+    r"^[-*#\s]*(?:\*\*)?(?:new\s+)?(?:critical|significant)(?:\s+issue)?(?:\s*\d+)?\s*(?::|\*\*|$)",
+    re.IGNORECASE,
+)
 
 
 def _critique_findings(text: str) -> list[str]:
@@ -1771,8 +1777,9 @@ def _preamble_regate_block(
     ``commit:``), and the Layer 0 survivor-sweep instruction.
 
     Returns ``[]`` only when there is no gate record (a first gate). The
-    block fires after a PASSED gate too (nexus-g7zgw.4): both RDR-204
-    rounds that introduced new Criticals were fixes authored against a
+    block fires after a PASSED gate too (nexus-g7zgw.4): of RDR-204's four
+    rounds that introduced new Criticals (passes 3, 4, 7 and 9), the two
+    after the design had stabilised (7 and 9) were fixes authored against a
     PASSED gate's Significants, and the sweep was structurally off for
     them. It also carries the gate round number, derived from the record's
     ``prior:`` chain (nexus-g7zgw.2), and the Fix check section naming the
@@ -1846,9 +1853,21 @@ def _preamble_regate_block(
     findings = _critique_findings(str(critique.get("content", ""))) if isinstance(critique, dict) else []
     if findings:
         lines.append("Prior findings (each must be closed EVERYWHERE in the file, not at the quoted line):")
-        lines.extend(f"- {f}" for f in findings[:30])
-        if len(findings) > 30:
-            lines.append(f"- ... and {len(findings) - 30} more in the critique")
+        # Cap on FINDINGS, not lines: a canonical issue is four lines (Issue,
+        # Location, Recommendation, Sites) and a line cap dropped the Sites
+        # lists Layer 0 sweeps (deep critique [24873] S2).
+        shown = 0
+        cut = len(findings)
+        for i, f in enumerate(findings):
+            if not f.startswith("  "):
+                shown += 1
+                if shown > _REGATE_MAX_FINDINGS:
+                    cut = i
+                    break
+        lines.extend(f"- {f}" for f in findings[:cut])
+        hidden = sum(1 for f in findings[cut:] if not f.startswith("  "))
+        if hidden:
+            lines.append(f"- ... and {hidden} more findings in the critique")
     elif fetch_failed:
         lines.append(f"The `critique:` pointer names `{critique_title}` but no such T2 record was found; "
                      "locate the prior critique by hand before Layer 3.")
@@ -1915,6 +1934,9 @@ def _preamble_regate_block(
     return lines
 
 
+#: Prior findings printed in full by the re-gate block before "... and N more".
+_REGATE_MAX_FINDINGS: int = 12
+
 #: Gate rounds that may block on any Critical. From the next round on only
 #: a ship-blocker blocks and everything else is a residual recorded for
 #: accept (nexus-g7zgw.2; the shape of ``nexus.plans.audit_rounds``).
@@ -1954,8 +1976,9 @@ def _gate_round_lines(gate_record: str, critique_count: int = 0) -> list[str]:
     prior = _t2_field_block(gate_record, "prior")
     ids = re.findall(r"\[\d+\]", prior)
     labelled = re.findall(r"\[\d+\]\s*\(([^)]*)\)", prior)
+    # A partition: an entry naming both words counts once, as BLOCKED.
     blocked = sum(1 for e in labelled if "BLOCKED" in e.upper())
-    passed = sum(1 for e in labelled if "PASSED" in e.upper())
+    passed = sum(1 for e in labelled if "PASSED" in e.upper() and "BLOCKED" not in e.upper())
     this_outcome = (_preamble_parse_t2_field(gate_record, "outcome") or "").strip().upper()
     if this_outcome == "BLOCKED":
         blocked += 1
@@ -1970,11 +1993,19 @@ def _gate_round_lines(gate_record: str, critique_count: int = 0) -> list[str]:
         f"**Gate round {round_no}** (prior rounds: {n_prior} ({blocked} BLOCKED, {passed} PASSED, "
         f"{unlabelled} unlabelled; from the {source}); the count never resets for this RDR)."
     ]
+    hand_typed = (_preamble_parse_t2_field(gate_record, "round") or "").strip()
+    if hand_typed.isdigit() and int(hand_typed) != n_prior:
+        lines.append(
+            f"The record's hand-typed `round: {hand_typed}` disagrees with the derived count "
+            f"({n_prior} rounds so far); the derived count is the one that applies. Drop the "
+            "field or write the derived value."
+        )
     if round_no > GATE_MAX_ANY_CRITICAL_ROUNDS:
         lines.append(
             f"From round {GATE_MAX_ANY_CRITICAL_ROUNDS + 1} only a ship-blocker blocks "
-            "(`ship_blockers > 0` in the critic's Verdict); every other Critical and "
-            "Significant is a residual: record it in the gate record's `residuals:` lines "
+            "(`ship_blockers > 0` in the critic's Verdict; a Verdict with no `ship_blockers` "
+            "line reads as `ship_blockers = critical_count`, never zero); every other Critical "
+            "and Significant is a residual: record it in the gate record's `residuals:` lines "
             "and in Revision History, and disposition it at accept."
         )
     else:
@@ -2014,7 +2045,8 @@ def _fix_check_pointer_lines(
         return []
     m = re.search(r"fix-check-([0-9a-f]{6,40})", fix_check_field)
     sha = m.group(1) if m else fix_check_field.split()[0]
-    if not (sha == gated_commit or sha.startswith(gated_commit) or gated_commit.startswith(sha)):
+    shorter = min(len(sha), len(gated_commit))
+    if not (shorter >= 7 and sha[:shorter] == gated_commit[:shorter]):
         return [
             f"**Fix check pointer mismatch:** the gate record's `fix_check:` names `{sha}` but "
             f"its `commit:` is `{gated_commit}`. The prior gate cited a fix check of an older "
@@ -2060,7 +2092,7 @@ def _fix_check_lines(
     if log.returncode != 0 or tip.returncode != 0 or not tip.stdout.strip():
         err = (log.stderr or tip.stderr).strip()[:160]
         return [
-            "### Fix check (required before Layer 3)",
+            "### Fix check (required before Layer 1)",
             "",
             f"Range: `git diff {gated_commit}..HEAD -- {rel}`",
             f"The fix commits and the RDR file's tip sha could not be read (git log failed: {err}); "
@@ -2070,7 +2102,7 @@ def _fix_check_lines(
     commits = [ln for ln in log.stdout.strip().splitlines() if ln.strip()]
     tip_sha = tip.stdout.strip()
     lines = [
-        "### Fix check (required before Layer 3)",
+        "### Fix check (required before Layer 1)",
         "",
         f"Range: `git diff {gated_commit}..HEAD -- {rel}`",
         "Fix commits:",

@@ -339,6 +339,10 @@ make the verdict look more actionable, and do not suppress a real one to make it
 look cleaner; the orchestrator may override a marking upward but the definition
 above stays objective.
 
+A caller's aggregation may block on `critical_count` independently of
+`ship_blockers` (the RDR gate does so in its first two rounds); `ship_blockers` is
+your judgement of the relay's bar, not the caller's rule.
+
 > Fallback parse rule: if this Verdict block is absent or the `- **outcome**:` line cannot be located verbatim, downstream parsers count `### Issue:` headers under `## Critical Issues` and `## Significant Issues` and derive outcome mechanically. The fallback works but the canonical path is preferred, emit the block exactly as shown above.
 
 ## Operating Principles

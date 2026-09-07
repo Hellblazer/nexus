@@ -1845,7 +1845,7 @@ class TestRdrGateRoundAndFixCheck:
         fixed = self._commit(rdr_env, self._BODY + "\nFive registration sites, not one.\n", "fix")
         result = self._gate(rdr_env, monkeypatch, outcome="PASSED", commit=gated, prior=None)
         out = result.output
-        assert "### Fix check (required before Layer 3)" in out, out
+        assert "### Fix check (required before Layer 1)" in out, out
         assert f"git diff {gated}..HEAD -- docs/rdr/rdr-204-example.md" in out
         assert f"fix" in out and fixed in out, "the fix commits are listed"
         assert f"204-fix-check-{fixed}" in out, "the T2 title carries the tip sha"
