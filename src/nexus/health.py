@@ -2809,7 +2809,7 @@ def _check_catalog(cat: "CatalogReader | None", cat_path: "Path") -> list[Health
             )]
         return [HealthResult(
             label="Catalog", ok=True,
-            detail="not initialized (optional — run: nx catalog setup)",
+            detail="empty (optional — populate with: nx index repo <path>)",
         )]
     except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
         return [HealthResult(label="Catalog", ok=True, detail="check failed (non-critical)")]

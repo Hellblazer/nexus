@@ -70,7 +70,7 @@ def _resolve_rdr_collection(repo_root: Path) -> str | None:
     when both the catalog and an owner row exist; otherwise asks the
     indexer's :func:`_repo_collection_or_legacy` for the
     path-derived conformant fallback so SessionStart keeps working
-    before ``nx catalog setup`` lands. Returns ``None`` when no
+    before ``nx index repo`` has run. Returns ``None`` when no
     in-process resolution is available; the caller treats that as
     "not indexed" rather than splicing a non-conformant 2-segment shape
     that the post-Phase-5 strict-naming guard would later reject.
@@ -215,7 +215,7 @@ def main() -> None:
         if rdr_collection:
             print(f"     Run: nx index repo {root}")
         else:
-            print(f"     Run: nx catalog setup && nx index repo {root}")
+            print(f"     Run: nx index repo {root}")
 
     sys.exit(0)
 

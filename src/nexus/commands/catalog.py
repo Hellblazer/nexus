@@ -212,7 +212,8 @@ def _get_catalog() -> "CatalogReader":
     cat = make_catalog_reader()
     if cat is None:
         raise click.ClickException(
-            "Catalog not initialized. Run 'nx catalog setup' to create and populate it."
+            "Catalog unavailable: the nexus service owns it (nx daemon service start); "
+            "populate with nx index repo / nx store put."
         )
     return cat
 

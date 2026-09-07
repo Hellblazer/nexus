@@ -2459,7 +2459,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         # gate printed a false "run: nx catalog setup" on healthy boxes).
         reader = make_catalog_reader()
         if reader is None:
-            click.echo("Catalog not initialized — run: nx catalog setup")
+            click.echo("Catalog is empty — populate with: nx index repo <path>")
             return
         writer = make_catalog_writer()
 

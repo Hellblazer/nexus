@@ -567,7 +567,7 @@ def _migrate_repos_json_to_catalog(*, dry_run: bool) -> None:
         if cat is None:
             click.echo(
                 f"Note: {reg_path} present but catalog not initialised; "
-                f"skipping migration (run 'nx catalog setup' first)."
+                f"skipping migration (the catalog is empty; run 'nx index repo' first)."
             )
             return
 

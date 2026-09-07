@@ -895,7 +895,7 @@ def require_catalog():
     """Return (catalog, None) or (None, error_message)."""
     cat = get_catalog()
     if cat is None:
-        return None, "Catalog not initialized — run 'nx catalog setup' to create and populate it"
+        return None, "Catalog empty — run 'nx index repo <path>' to populate it (the service owns the catalog; 'nx catalog setup' is retired)"
     return cat, None
 
 

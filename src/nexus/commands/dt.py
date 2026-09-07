@@ -1330,7 +1330,7 @@ def _resolve_dt_uri_from_tumbler(tumbler: str) -> str | None:
     cat = make_catalog_reader()
     if cat is None:
         raise click.ClickException(
-            "Catalog not initialized. Run 'nx catalog setup' first.",
+            "Catalog is empty. Index or store documents first (nx index repo / nx store put).",
         )
     try:
         t, err = resolve_tumbler(cat, tumbler)

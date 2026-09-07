@@ -161,7 +161,7 @@ def _make_catalog():
     cat = make_catalog_reader()
     if cat is None:
         raise click.ClickException(
-            "Catalog not initialized. Run 'nx catalog setup' before 'nx t3 gc'."
+            "Catalog is empty. Index or store documents before 'nx t3 gc' (nx index repo / nx store put)."
         )
     return cat
 

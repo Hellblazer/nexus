@@ -1226,7 +1226,7 @@ def _select_entries(
     # nexus-kmo9h: factory delegation — None ⇔ sqlite opt-out + uninitialised.
     cat = make_catalog_reader()
     if cat is None:
-        click.echo("Catalog not initialized — run 'nx catalog setup' first.")
+        click.echo("Catalog is empty — index or store documents first (nx index repo / nx store put).")
         return None
     entries = cat.list_by_collection(collection)
 
@@ -2147,7 +2147,7 @@ def _resolve_catalog_entry(tumbler_or_title: str):
     cat = make_catalog_reader()
     if cat is None:
         raise click.ClickException(
-            "Catalog not initialized. Run 'nx catalog setup' first."
+            "Catalog is empty. Index or store documents first (nx index repo / nx store put)."
         )
     t, err = resolve_tumbler(cat, tumbler_or_title)
     if err:
@@ -2339,7 +2339,7 @@ def aspects_list_cmd(
         cat = make_catalog_reader()
         if cat is None:
             raise click.ClickException(
-                "Catalog not initialized. Run 'nx catalog setup' first."
+                "Catalog is empty. Index or store documents first (nx index repo / nx store put)."
             )
         entries = cat.list_by_collection(collection)
         with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
