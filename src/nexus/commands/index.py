@@ -103,11 +103,26 @@ class _CatalogBackedRegistry:
                 owner_id = str(owner).replace(".", "-")
                 ct = new_name.split("__", 1)[0]
                 try:
+                    # RDR-204 P1.10 (nexus-ft04v.34): route through the
+                    # client's write-time profile instead of hardcoding
+                    # 'voyage-context-3'. On a local-mode (bge) install
+                    # the hardcoded literal disagreed with the engine's
+                    # profile the moment the engine started rejecting a
+                    # differing model (nexus-ft04v.8); this call always
+                    # agrees with the engine's profile-as-data by
+                    # construction. A raised LocalVoyageCredentialMissingError
+                    # (local mode opted into voyage, no key configured) or
+                    # ValueError (unknown content_type) is deliberately left
+                    # to propagate into the except below — both exception
+                    # messages already name the concrete remedy, and the
+                    # existing log line's error=str(exc) carries it through
+                    # to catalog_registry_adapter_register_failed unchanged.
+                    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415 — circular-dep avoidance (corpus)
                     self._writer.register_collection(
                         new_name,
                         content_type=ct,
                         owner_id=owner_id,
-                        embedding_model="voyage-context-3",
+                        embedding_model=effective_embedding_model_for_writes(ct),
                         # RDR-137 followup CRITICAL-3 (nexus-43qgm.3):
                         # 'v1' matches parse_conformant_collection_name's
                         # f'v{ver}' contract; '1' would trip the
