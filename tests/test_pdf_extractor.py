@@ -413,12 +413,19 @@ class TestAutoDetectRouting:
         # discards it, so it must not run at all here.
         with (
             patch("nexus.pdf_extractor._has_formulas_quick", return_value=5),
+            patch("nexus.pdf_extractor._log") as mock_log,
             patch.object(extractor, "_extract_with_docling") as mock_docling,
             patch.object(extractor, "_extract_with_mineru", return_value=self._mineru) as m,
         ):
             result = extractor.extract(dummy_pdf, extractor="auto")
         assert result.metadata["extraction_method"] == "mineru"
         mock_docling.assert_not_called()
+        # The Docling pass used to be the only emitter of this event; the
+        # short-circuit must not silence it for the math case.
+        mock_log.warning.assert_any_call(
+            "formula_content_detected", formula_count=5,
+            path=str(dummy_pdf), source="quick_screen",
+        )
         m.assert_called_once_with(dummy_pdf, formula_count=5, on_page=None, on_formula_oom="fail")
 
     def test_auto_docling_markers_still_route_when_screen_is_low(self, extractor, dummy_pdf):

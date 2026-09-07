@@ -391,8 +391,9 @@ def _classify(command: str) -> str:
     ``nx index /papers/mineru-benchmarks/`` a mineru daemon and
     ``nx search aspect-worker`` an aspect-worker. Worse, the aspect-worker
     TOCTOU re-verify re-checks the SAME predicate, so a misclassified process
-    passes the one check placed there to catch exactly this -- and the mineru
-    branch has no pid re-verify at all before running a 300s stop/start.
+    passes the one check placed there to catch exactly this. The mineru
+    branch re-verifies through this function too (nexus-ho9d2), as does
+    ``nx mineru stop`` itself (nexus-5yrob), so the predicate is structural.
 
     Structural instead: the EXECUTABLE decides, and for `nx` the verb sequence
     decides. An argument is not a daemon.

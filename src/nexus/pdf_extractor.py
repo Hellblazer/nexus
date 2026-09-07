@@ -230,8 +230,8 @@ _MATH_UNICODE = frozenset("∑∫∏∀∃∈∉∪∩⊆⊇⊂⊃→←↔∧�
 def _count_formula_markers(text: str) -> int:
     """Count LaTeX formula markers in *text*.
 
-    Used as the routing heuristic in auto-mode extraction; ``count >= 5``
-    escalates to MinerU. The count is the sum of two independent measures:
+    Used as the routing heuristic in auto-mode extraction; ``count >=
+    _FORMULA_ROUTE_THRESHOLD`` escalates to MinerU. The count is the sum of two independent measures:
 
     1. **Block delimiters** (``$$..$$``, ``\\(..\\)``, ``\\[..\\]``, equation
        and align environments) — each delimited block contributes 1.
@@ -1007,6 +1007,12 @@ class PDFExtractor:
         # branch discards it: measured 2026-09-07, a 6-page paper the screen
         # had already routed spent 24s in Docling ahead of a 32s MinerU run.
         if formula_count >= _FORMULA_ROUTE_THRESHOLD:
+            # The Docling pass used to emit this on the math case; the
+            # short-circuit keeps the event so log readers see the same line.
+            _log.warning(
+                "formula_content_detected", formula_count=formula_count,
+                path=str(pdf_path), source="quick_screen",
+            )
             return self._route_to_mineru(
                 pdf_path, formula_count, on_page=on_page, on_formula_oom=on_formula_oom,
             )
