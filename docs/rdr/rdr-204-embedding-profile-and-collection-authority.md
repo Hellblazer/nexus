@@ -295,6 +295,11 @@ per-collection chunk counts from `nx collection list`. Full numbers in T2
   **Status**: Verified by the parse-site census: every extracted value is
   one of content_type, owner_id, embedding_model, or the quarantine prefix.
   **Method**: Source Search.
+- [x] No two-segment (model-less) collection carries vectors on any
+  censused tenant. **Status**: Verified on both tenants: all 106 two-segment
+  rows have zero chunks. **Method**: Spike. The walk still has a rule for
+  the case (Technical Design step 3) so a future tenant that falsifies this
+  gets `disputed` or a profile-derived model, never a wedge.
 - [x] `CollectionRegistry`'s cache can hold the row, not only the name,
   without a correctness change to its invalidation. **Status**: Verified by
   reading the class: its invalidation points are delete and rename, both
@@ -315,13 +320,14 @@ Nothing is renamed and no chunk moves.
 `nexus.embedding_profile(tenant_id, content_type, embedding_model,
 dimension, PRIMARY KEY (tenant_id, content_type))`, plus a reference table
 `nexus.embedding_models(embedding_model PRIMARY KEY, dimension, provider)`
-seeded with the four models the engine can serve. `nx init` writes the
-profile for the chosen mode, and the engine writes it at boot from that
-mode (1a). The engine has no tenant-mint route (tenants exist through
-data-token mint at the edge), so a cloud tenant's profile is seeded lazily
-and idempotently by the engine on the first registration for a content
-type, from the same mode decision. The profile is the only place a model
-is chosen, and the engine is the only writer.
+seeded with the four models the engine can serve. The engine is the only
+writer: it upserts the local tenant's rows at boot from its own mode
+decision (1a), and `nx init` reaches the same outcome only because it
+starts the service, not because it writes anything itself. The engine has
+no tenant-mint route (tenants exist through data-token mint at the edge),
+so a cloud tenant's profile is seeded lazily and idempotently by the engine
+on the first registration for a content type, from the same mode decision.
+The profile is the only place a model is chosen.
 
 **1a. The profile is updatable, and a switch mints a sibling.**
 `local.embed_model` can change at any time through `nx config set`
@@ -343,8 +349,11 @@ lazily, see step 1), idempotent, from the same branch that constructs the
 router. This is the trigger the GH #1461 recipe already has: the
 documented switch is `nx config set local.embed_model ...`, `nx config set
 voyage_api_key ...`, then a service restart, and the restart is the boot.
-`nx config set` writes nothing to the profile; it keeps printing the
-restart reminder it prints today. Until the restart, the engine's profile
+`nx config set` writes nothing to the profile. Today it prints no restart
+hint for this flow either (gate critique [24806]; the restart is documented
+only in the CLI reference), so Phase 3 gives `nx config set` a one-line
+hint when the key is `local.embed_model` or `voyage_api_key`: restart the
+service for the engine to adopt it. Until the restart, the engine's profile
 and the client's intended model differ, and `nx doctor`'s profile row
 names that (Day 2), which turns today's invisible "did you restart?" state
 into a visible one. `nx upgrade` is not involved; the earlier draft's
@@ -379,8 +388,11 @@ warn loudly, delete garbage, constrain after, never abort. An earlier
 cut of this design refused on disagreement; that was wrong.
 
 The first changeset sweeps ghosts: a `catalog_collections` row with zero
-`nexus.chunks` rows, zero `document_chunks` manifest rows, and zero
-aspect, highlight, queue, or topic references is deleted, counts reported
+`nexus.chunks` rows, zero `document_chunks` manifest rows, and zero rows in
+each of `document_aspects`, `document_highlights`,
+`aspect_extraction_queue`, `taxonomy_meta`, and `topics` (the six tables
+whose `ON DELETE RESTRICT` FKs point at it, `fk-002/003/004`; the same set
+RDR-164's `deleteCollectionTxn` deletes in order) is deleted, counts reported
 with `RAISE NOTICE`. The live census counted chunk-emptiness only (153 of
 223 rows on this tenant); the sweep's condition is stricter, so the
 deleted count will be at most 153 and the difference is the next class.
@@ -405,7 +417,14 @@ Measured today, zero live rows would be disputed. NOT NULL, the FK to
 `embedding_models`, and the CHECKs are added after this rewrite, so the
 constraining step cannot fail. `quarantine-` prefixes become
 `lifecycle_state = 'quarantine'` with the base content type. Grandfathered
-two-segment names are backfilled the same way and keep their flag.
+two-segment names (`<content_type>__<owner>`, no model token) take
+`content_type` and `owner_id` from the name and, when they own chunks,
+their model from the profile for that content type if the profile model's
+dimension equals the stored dimension, else `disputed`; with no chunks they
+are ghosts or dormant like any other row. They keep their flag. On both
+censused tenants every two-segment row is a ghost (T2 `204-research-1`,
+`-6`), so this branch is expected to write nothing; it exists so the walk
+has an answer for every row rather than an assumption.
 
 **4. Engine reads the row.** `CollectionRegistry` caches the row. The six
 engine parse sites resolve model, dimension, and content type from it.
@@ -593,11 +612,14 @@ Phases 1 and 2 ride one engine cut.
    measured count. Every later step lowers the pin.
 2. Funnel: rewrite the raw sites to the three helpers, file by file,
    behaviour unchanged; the gate falls to the helpers' own internals.
-3. `list` route gains `content_type` and `lifecycle_state` filters.
-4. Repoint the three helpers and `resolve_corpus` / `_resolve_corpus_target`
+3. `list` route gains `content_type` and `lifecycle_state` filters; the
+   stats route gains the joined catalog attributes.
+4. `nx config set` prints the restart hint for `local.embed_model` and
+   `voyage_api_key` (the client's only touch on the profile story).
+5. Repoint the three helpers and `resolve_corpus` / `_resolve_corpus_target`
    / `_group_collections_by_model` at the row; the gate falls to zero
    outside the backfill.
-5. `CollectionName.parse` callers reduce to the census gate and the
+6. `CollectionName.parse` callers reduce to the census gate and the
    backfill.
 
 Client-only release.
