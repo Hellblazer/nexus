@@ -1501,22 +1501,24 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         restore once that grace window has passed — see that method's own
         AGE SEMANTICS note).
 
-        CARVE-OUT (review round 2, T2 [24834]): the grace-window guarantee
-        above holds for tombstones made by :meth:`delete_document` /
-        :meth:`purge_trash` only. Three other paths reach the same content
-        outside it, and this method cannot undo their loss: the ``nx t3
-        gc`` orphan sweep (chunk-``indexed_at``-clocked, independent of
-        :meth:`purge_trash`'s own window, and its alive-set excludes
-        tombstoned documents immediately — it can reap a just-tombstoned
-        document's chunks INSIDE the grace window); the MCP ``store_delete``
-        tool (tombstones the row and hard-deletes the T3 chunk in the SAME
-        call — no window at all); and ``delete_collection`` /
-        collection-prune (irreversible, never tombstones). This method
-        reports success on the CATALOG ROW regardless of whether the T3
-        chunks are still there — it never checks — so a caller restoring a
-        document that may have gone through one of those three paths should
-        confirm the chunk count separately (e.g. via ``show``) before
-        trusting the content is back.
+        CARVE-OUT (review round 2, T2 [24834]; narrowed by Sam's second
+        2026-09-07 ruling on nexus-dkymw): the grace-window guarantee above
+        holds for tombstones made by :meth:`delete_document` /
+        :meth:`purge_trash`, AND — as of the dkymw alive-set fix — for
+        ``nx t3 gc``'s orphan sweep too: its alive-set now protects a
+        tombstoned-but-not-yet-purged document's chashes, so it can no
+        longer reap a just-tombstoned document's chunks inside this
+        window. Two other paths still reach the same content outside this
+        contract, and this method cannot undo their loss: the MCP
+        ``store_delete`` tool (tombstones the row and hard-deletes the T3
+        chunk in the SAME call — no window at all); and
+        ``delete_collection`` / collection-prune (irreversible, never
+        tombstones). This method reports success on the CATALOG ROW
+        regardless of whether the T3 chunks are still there — it never
+        checks — so a caller restoring a document that may have gone
+        through one of those two paths should confirm the chunk count
+        separately (e.g. via ``show``) before trusting the content is
+        back.
 
         A pre-nexus-dkymw engine has no matching route and answers 404 —
         this method does NOT swallow that (same discipline as
@@ -1598,17 +1600,22 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         ``dry_run=False`` calls. Past the window, ``restore_document``
         returns ``False`` — nothing left to restore.
 
-        CARVE-OUT (review round 2, T2 [24834]): this window applies to
-        tombstones made by :meth:`delete_document` only. ``nx t3 gc``'s
-        orphan sweep (a chunk-``indexed_at``-vs-``--orphan-window`` clock,
-        independent of this method's window, whose alive-set excludes
-        tombstoned documents immediately — it can reap a just-tombstoned
-        document's chunks INSIDE this window), the MCP ``store_delete``
-        tool (tombstones and hard-deletes the T3 chunk in the SAME call —
-        no window here at all), and ``delete_collection`` / collection-
-        prune (irreversible, never tombstones) all reach the same content
-        outside this contract; :meth:`restore_document` cannot undo their
-        loss and does not verify chunk survival before reporting success.
+        CARVE-OUT (review round 2, T2 [24834]; narrowed by Sam's second
+        2026-09-07 ruling on nexus-dkymw): this window applies to
+        tombstones made by :meth:`delete_document` only, and — as of the
+        dkymw alive-set fix — ``nx t3 gc``'s orphan sweep now RESPECTS it
+        too: its alive-set (``chashesForCollection``, the GC input the
+        engine's ``nx t3 gc`` / indexer-prune reads) protects a
+        tombstoned-but-not-yet-purged document's chashes, superseding
+        nexus-mqd6t's original immediate-exclusion filter for that one
+        read, so ``nx t3 gc`` can no longer reap a just-tombstoned
+        document's chunks inside this window. The MCP ``store_delete``
+        tool (tombstones the catalog row and hard-deletes the T3 chunk in
+        the SAME call — no window here at all) and ``delete_collection`` /
+        collection-prune (irreversible, never tombstones) still reach the
+        same content outside this contract; :meth:`restore_document`
+        cannot undo their loss and does not verify chunk survival before
+        reporting success.
 
         Wire contract (LOCKED, design of record T1 scratch 2fbc12df): POST
         body ``{"older_than_days": int, "dry_run": bool}``; the engine's

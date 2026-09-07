@@ -380,7 +380,12 @@ def non_complete_documents(documents) -> list:
     stated requirement on (b), not a nice-to-have."
 
     ``nx t3 gc``'s alive-set (``chashes_for_collection``) is a
-    COLLECTION-level union of every live document's manifest — post-RDR-108
+    COLLECTION-level union of every live OR still-tombstoned-but-not-yet-
+    purged document's manifest (nexus-dkymw, Sam's second 2026-09-07
+    ruling, superseding nexus-mqd6t's original immediate-exclusion filter
+    for that one read — a tombstoned document's chashes stay in the union
+    until ``nx catalog purge-trash`` physically reclaims the row) —
+    post-RDR-108
     a T3 chunk carries no ``doc_id`` at all, so an orphan CANDIDATE
     (a chash referenced by no current manifest row) cannot be attributed
     back to the specific document that most recently owned it. The

@@ -327,6 +327,20 @@ def gc_cmd(
     event emission for audit trail.
 
     \b
+    TOMBSTONE PROTECTION (nexus-dkymw, Sam's second 2026-09-07 ruling,
+    superseding nexus-mqd6t's original immediate-exclusion filter): the
+    "referenced by any manifest entry" set above is read from the
+    catalog's ``chashesForCollection`` alive-set, which now includes a
+    tombstoned-but-not-yet-purged document's chashes, not just live
+    documents'. Deleting a document with ``nx catalog delete`` does NOT
+    make its chunks orphan-eligible here — only ``nx catalog purge-trash``
+    physically reclaiming the row does. This keeps ``nx catalog restore``
+    honest: without it, this command's own ``--orphan-window`` clock
+    (independent of purge-trash's ``--older-than-days``) could reap a
+    just-tombstoned document's chunks inside the restore window, and
+    restore would resurrect an empty shell.
+
+    \b
     Per RF-101-3, ``nx t3 gc`` is the SOLE emitter of ``ChunkOrphaned``
     events. The strict order on each candidate is:
 
@@ -391,6 +405,15 @@ def gc_cmd(
         # orphan when its content hash is not referenced by any
         # manifest row for this collection's documents. Same SQL the
         # indexer's _prune_deleted_files uses.
+        #
+        # nexus-dkymw (Sam's second 2026-09-07 ruling, superseding
+        # nexus-mqd6t's original DELETED_AT.isNull() filter for this one
+        # read): "referenced" here includes a tombstoned-but-not-yet-
+        # purged document's chashes, not just live documents' -- the
+        # alive-set protects them until nx catalog purge-trash physically
+        # reclaims the row, so this --orphan-window clock cannot reap a
+        # just-tombstoned document's chunks inside nx catalog restore's
+        # recovery window.
         referenced = cat.chashes_for_collection(collection)
     except Exception as exc:  # noqa: BLE001 — boundary catch; logged then re-raised as a domain error
         click.echo(f"Failed to read catalog manifest: {exc}")

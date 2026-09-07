@@ -3637,6 +3637,14 @@ def _prune_deleted_files(
         # collection with a structured error (never a silent continue,
         # never a sweep-wide abort; same per-collection isolation as the
         # nexus-ou4tb degraded-read guard below).
+        #
+        # nexus-dkymw (Sam's second 2026-09-07 ruling, superseding
+        # nexus-mqd6t's original DELETED_AT.isNull() filter for this one
+        # read): the returned set also protects a tombstoned-but-not-yet-
+        # purged document's chashes, not just live documents' — only
+        # nx catalog purge-trash physically reclaiming the row drops them,
+        # so this prune cannot reap a just-tombstoned document's chunks
+        # inside nx catalog restore's recovery window.
         try:
             referenced = catalog.chashes_for_collection(collection_name)
         except Exception:  # noqa: BLE001 — one collection's failed alive-set read must not end the sweep

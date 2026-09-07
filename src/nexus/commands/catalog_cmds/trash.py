@@ -31,26 +31,28 @@ nothing — recovery at that point means re-indexing the source, never a
 hand-written SQL ``UPDATE`` against ``catalog_documents.deleted_at`` (there
 is no supported direct-SQL recovery path and none should be improvised).
 
-THREE OTHER PATHS REACH THE SAME CONTENT OUTSIDE THAT WINDOW, and this
-verb's restore does NOT undo their chunk/row loss:
+TWO OTHER PATHS REACH THE SAME CONTENT OUTSIDE THAT WINDOW, and this verb's
+restore does NOT undo their chunk/row loss:
 
-* ``nx t3 gc``'s orphan sweep — its alive-set excludes tombstoned documents
-  IMMEDIATELY, and its clock (chunk ``indexed_at`` vs ``--orphan-window``)
-  is independent of ``purge-trash``'s own window, so it can reap a
-  just-tombstoned document's chunks INSIDE the grace window above.
 * the MCP ``store_delete`` tool — tombstones the catalog row and
   hard-deletes the T3 chunk in the SAME call; there is no window at all.
 * ``nx collection delete`` / ``nx collection prune``
   (``purge_collection_cascade``) — irreversible, never tombstones.
 
-After any of those three, recovery is a RE-INDEX, not ``nx catalog
-restore``. ``restore`` reports success on the CATALOG ROW regardless of
-whether the T3 chunks are still there (it never checks) — after restoring a
-document that may have gone through one of these three paths, confirm with
-``nx catalog show``'s chunk count before trusting the content is actually
-back. (Sam's ruling on which, if any, of the three should itself gain a
-tombstone/window is a separate decision, tracked on nexus-dkymw — this verb
-does not change their behavior.)
+``nx t3 gc``'s orphan sweep is NO LONGER on this list (Sam's second
+2026-09-07 ruling on nexus-dkymw): its alive-set (``chashesForCollection``)
+now PROTECTS a tombstoned-but-not-yet-purged document's chashes, superseding
+nexus-mqd6t's original immediate-exclusion filter for that one read, so its
+clock (chunk ``indexed_at`` vs ``--orphan-window``, still independent of
+``purge-trash``'s own window) can no longer reap a just-tombstoned
+document's chunks inside the grace window above.
+
+After either of the two remaining paths, recovery is a RE-INDEX, not ``nx
+catalog restore``. ``restore`` reports success on the CATALOG ROW regardless
+of whether the T3 chunks are still there (it never checks) — after
+restoring a document that may have gone through one of these two paths,
+confirm with ``nx catalog show``'s chunk count before trusting the content
+is actually back.
 """
 from __future__ import annotations
 
@@ -148,11 +150,12 @@ def trash_cmd(limit: int) -> None:
     Read-only — the counterpart to 'nx catalog restore'. A row listed here
     is restorable via 'nx catalog restore <tumbler>' until 'nx catalog
     purge-trash' physically reclaims it (see that command's grace window) --
-    for tombstones made by 'nx catalog delete' only. 'nx t3 gc', the MCP
-    store_delete tool, and 'nx collection delete'/'prune' can each remove a
-    document's chunks (or the whole document) outside that window; 'restore'
-    cannot undo those. See this module's own docstring for the full
-    carve-out.
+    for tombstones made by 'nx catalog delete', and now also 'nx t3 gc'
+    (its alive-set protects a tombstoned-but-not-yet-purged document's
+    chunks, nexus-dkymw). The MCP store_delete tool and 'nx collection
+    delete'/'prune' can still each remove a document's chunks (or the whole
+    document) outside that window; 'restore' cannot undo those. See this
+    module's own docstring for the full carve-out.
     """
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
@@ -193,11 +196,12 @@ def restore_cmd(tumbler_or_title: str) -> None:
 
     A restored ROW is not a guarantee the CONTENT is back: this reports
     success once 'deleted_at' clears, without checking whether the T3
-    chunks are still there. 'nx t3 gc', the MCP store_delete tool, and 'nx
-    collection delete'/'prune' can each remove chunks (or the whole
-    collection) independently of 'nx catalog delete's tombstone window --
-    after restoring, confirm with 'nx catalog show's chunk count. See this
-    module's own docstring for the full carve-out.
+    chunks are still there. The MCP store_delete tool and 'nx collection
+    delete'/'prune' can each remove chunks (or the whole collection)
+    independently of 'nx catalog delete's tombstone window ('nx t3 gc' no
+    longer can — nexus-dkymw's alive-set fix) -- after restoring, confirm
+    with 'nx catalog show's chunk count. See this module's own docstring for
+    the full carve-out.
     """
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
