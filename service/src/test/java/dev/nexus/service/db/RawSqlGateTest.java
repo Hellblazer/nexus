@@ -898,7 +898,12 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/CatalogPurgeTrashPopulationParityTest.java", 8),
         Map.entry("dev/nexus/service/CatalogPurgeTrashTest.java", 14),
         Map.entry("dev/nexus/service/CatalogPurgeTrashVacuumTest.java", 6),
-        Map.entry("dev/nexus/service/CatalogRenameCollectionTest.java", 42),
+        // nexus-cbo4a batch 10: 42 -> 2 (39 row-count `rows(Connection, String)` wrapper
+        // call sites onto typed jOOQ selectCount(), wrapper retired; the surviving 2 are
+        // ALTER TABLE .. [NO] FORCE ROW LEVEL SECURITY, a Postgres-only RLS DDL extension
+        // with no jOOQ typed-DSL form). This file's seed INSERTs were already jOOQ typed
+        // from an earlier batch -- only the row-count read shape remained.
+        Map.entry("dev/nexus/service/CatalogRenameCollectionTest.java", 2),
         Map.entry("dev/nexus/service/CatalogRepositoryTest.java", 6),
         Map.entry("dev/nexus/service/ChashConformanceReportIntegrationTest.java", 9),
         Map.entry("dev/nexus/service/ChashHandlerRerouteTest.java", 4),
@@ -1172,8 +1177,17 @@ class RawSqlGateTest {
      * {@code [NOT] ENFORCED}, not Postgres's {@code NOT VALID}/{@code VALIDATE
      * CONSTRAINT}); {@code DROP CONSTRAINT IF EXISTS} DOES have a typed form
      * ({@code alterTable(table).dropConstraintIfExists(name)}) and was converted.
+     *
+     * <p><b>nexus-cbo4a batch 10, file 2 of 2:</b> 1565 -&gt; 1525 (-40), {@code
+     * CatalogRenameCollectionTest.java} 42 -&gt; 2 -- its {@code rows(Connection, String)}
+     * row-count wrapper and all 39 literal-fed call sites onto typed jOOQ {@code
+     * selectCount()}, the wrapper retired outright. The surviving 2 sites are {@code
+     * ALTER TABLE .. [NO] FORCE ROW LEVEL SECURITY} (Postgres-only RLS DDL, no jOOQ
+     * typed-DSL form). This file's seed INSERTs were already typed jOOQ from an earlier
+     * batch; only the row-count read shape remained, confirming the task's own
+     * Shape-A/Shape-B split.
      */
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1565;
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1525;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
