@@ -186,6 +186,22 @@ def test_a_fully_covered_collection_is_quiet(wiring, monkeypatch) -> None:
     assert "match no current catalog entry" not in result.output
 
 
+def test_an_unknown_collection_refuses_rather_than_reporting_coverage(wiring, monkeypatch) -> None:
+    """Measured 2026-09-07: a bare subject name the catalog does not know
+    returned zero entries, so zero gaps, so "No missing aspects" for a
+    collection where 54 of 58 rows had no aspect record. Zero rows is a
+    refusal, never a clean audit."""
+    monkeypatch.setattr(
+        "nexus.catalog.factory.make_catalog_reader",
+        lambda: SimpleNamespace(list_by_collection=lambda _c: []),
+    )
+    monkeypatch.setattr(enrich_mod.click, "echo", _REAL_ECHO)
+    result = CliRunner().invoke(aspects_list_cmd, ["--collection", "knowledge__dt-papers", "--missing"])
+    assert result.exit_code != 0, result.output
+    assert "No catalog rows in 'knowledge__dt-papers'" in result.output
+    assert "No missing aspects" not in result.output
+
+
 # --------------------------------------------------------------------------
 # kill control: the old audit key on this fixture
 # --------------------------------------------------------------------------

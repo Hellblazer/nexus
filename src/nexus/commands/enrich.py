@@ -2342,6 +2342,18 @@ def aspects_list_cmd(
                 "Catalog is empty. Index or store documents first (nx index repo / nx store put)."
             )
         entries = cat.list_by_collection(collection)
+        if not entries:
+            # A collection the catalog does not know (a bare subject name
+            # such as ``knowledge__dt-papers`` where the physical name is
+            # the four-segment form) has zero rows and therefore zero
+            # gaps; reporting "no missing aspects" for it is the vacuous
+            # pass the gate doctrine bans. Measured 2026-09-07: the bare
+            # name reported full coverage while 54 of 58 rows had no
+            # aspect record.
+            raise click.ClickException(
+                f"No catalog rows in '{collection}'. Pass the physical "
+                "collection name as `nx collection list` prints it."
+            )
         with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
             existing = {
                 r.source_path for r in db.document_aspects.list_by_collection(
