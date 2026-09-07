@@ -977,6 +977,11 @@ async def _t1_lifespan(_app: Any):
     _svc_log = _structlog.get_logger(__name__)
     _svc_log.info("t1_service_path_active", backend="service")
 
+    # nexus-h5olw: anonymous daily install ping, daemon thread, never
+    # blocks; opt-out via NX_NO_TELEMETRY=1 / `nx telemetry off`.
+    from nexus.install_ping import ping_in_background  # noqa: PLC0415 — startup cost
+    ping_in_background()
+
     # nexus-d76vc: start the T1 handoff-marker watcher UNCONDITIONALLY,
     # before the routing decision below picks a branch. A handoff can
     # arrive at any point after this server starts -- including onto a

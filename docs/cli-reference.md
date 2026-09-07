@@ -108,6 +108,7 @@ Every `nx index repo` run also writes a per-repo log file at `~/.config/nexus/lo
 - **`nx store import`'s `[embed]` heartbeat** (nexus-s71lr) — the import is one call with no per-record progress at all (worse than the per-file loops: not even a start/end line per record). Same mechanism, armed for the whole call: `  [embed] importing <file> still running (Xs elapsed)` every 5 s, always on.
 - **`nx store put`'s `[embed]` heartbeat** (nexus-s71lr pass 3) — a single document is still ONE embed call, and a large document's embed can run a minute+ with zero progress signal. Same mechanism, armed for the whole `db.put()` call: `  [embed] storing <title> still running (Xs elapsed)` every 5 s, always on.
 - **`GET /v1/status`** (nexus-s71lr, engine-side) — additive endpoint serving live embed-activity counters (`embedding_mode`, `local_embed_activity` for the local bge path, and — pass 3 — `embedder_activity`, a map keyed by model token covering the cloud-mode Voyage/CCE embedders too, so a cloud install is no longer always `null`). `nx doctor` (also `--check-engine-activity` standalone) polls it and renders one "Engine activity: …" line, falling back to the busiest tracked embedder when `local_embed_activity` is null.
+- **`POST /v1/install-ping`** (nexus-h5olw, engine-side) — additive unauthenticated route recording the client's anonymous daily install ping into the global, RLS-free `nexus.install_pings` table (telemetry-014). 202 on accept; 400 on any malformed or over-long field; 429 with `Retry-After` past the mint-route rate limits (per remote address, then per install id). Active installs = distinct `install_id` in the trailing 28 days. See `nx telemetry status`.
 
 **Voyage per-project rate limit (nexus-cy9u7):** the engine embeds server-side on write, so a bulk `nx index` run's real "embed pressure" is its T3 vector-write and catalog manifest-write request rate. Voyage's RPM budget (4000 RPM for `voyage-context-3`) is per PROJECT, not per process or per worker — every concurrent worker thread AND every concurrent `nx index` session sharing that Voyage project draws from the SAME budget. Every write path now routes through a shared process-wide "rate brake" — `HttpVectorClient.upsert_chunks` (the one choke point every T3 write call site funnels through: the ChunkBatcher's combined-write flush, the per-file prose/code fallback, and PDF indexing, which never uses the batcher), the catalog manifest write, and the migration-ETL leg. The first worker to see ANY retryable transient failure — a 429, 502, 503, or 504, or a retryable transport error (connect refused, read timeout, ...), not only a narrow 429/503-with-`Retry-After` signal — pauses EVERY writer in this process until the same shared deadline, instead of each worker backing off independently and re-firing the limit the moment its own backoff elapses (the 2026-08-15 incident, conexus-ddh0/nexus-99r7y: the engine was retrying Voyage internally and the edge's own timeout surfaced to the client as a 502/504 with no `Retry-After` at all — a signal the narrower pre-fix scope would have missed entirely). The pause is floored at the server's `Retry-After` when one is supplied, otherwise an escalating default (2s, doubling per consecutive process-wide trip, capped at 60s); it resumes at the base delay once a write succeeds. `nexus-99r7y` (engine fail-fast with an explicit 429 + `Retry-After` instead of a bare edge timeout) sharpens this signal but is **not required** for the brake to engage — the escalating-default path covers every retryable failure shape either way.
 
@@ -3791,6 +3792,29 @@ checked against the requested family on every dispatch (a mismatch logs
 a loud `model_family_drift` warning).
 
 ---
+
+## nx telemetry status / off / on
+
+```
+nx telemetry status
+nx telemetry off
+nx telemetry on
+```
+
+The anonymous daily install ping (nexus-h5olw): once every 24 hours the
+MCP server POSTs six fields to the managed service's unauthenticated
+`POST /v1/install-ping` route so active installs can be counted across
+local and cloud mode. Fields: `install_id` (random UUID in
+`~/.config/nexus/install_id`), `client_version`, `mode` (`local`/`cloud`,
+the same dispatch `nx init` uses), `os`, `arch`, `python`. Nothing else.
+Daemon thread, 2 s timeout, every failure swallowed at debug level; the
+last successful send is recorded in `~/.config/nexus/install_ping.last`.
+
+Opt-out, default on. `off` writes `telemetry.enabled: false` to
+`config.yml`; `NX_NO_TELEMETRY=1` (any value but `0`) wins over config.
+`NX_INSTALL_PING_URL` overrides the target (tests, private deployments).
+`status` prints the decision, its source, the install id, and the last
+ping time.
 
 ## nx telemetry baseline
 

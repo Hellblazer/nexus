@@ -572,3 +572,39 @@ def baseline_cmd(since: str | None, json_out: bool) -> None:
         click.echo(_json.dumps(data, indent=2))
         return
     _render_text(data)
+
+
+@telemetry_group.command("status")
+def status_cmd() -> None:
+    """Show whether the anonymous daily install ping is on, and why."""
+    from nexus.install_ping import install_id, last_ping_at, telemetry_status  # noqa: PLC0415
+
+    st = telemetry_status()
+    click.echo(f"install ping: {'on' if st['enabled'] else 'off'} ({st['source']})")
+    click.echo(f"install id:   {install_id()}")
+    last = last_ping_at()
+    if last is None:
+        click.echo("last ping:    never")
+    else:
+        from datetime import datetime, timezone  # noqa: PLC0415
+
+        click.echo(f"last ping:    {datetime.fromtimestamp(last, tz=timezone.utc).isoformat()}")
+    click.echo("sent:         install id, client version, mode, os, arch, python. Nothing else.")
+
+
+@telemetry_group.command("off")
+def off_cmd() -> None:
+    """Disable the install ping (writes telemetry.enabled: false to config.yml)."""
+    from nexus.config import set_config_value  # noqa: PLC0415
+
+    set_config_value("telemetry.enabled", False)
+    click.echo("install ping: off")
+
+
+@telemetry_group.command("on")
+def on_cmd() -> None:
+    """Enable the install ping (the default)."""
+    from nexus.config import set_config_value  # noqa: PLC0415
+
+    set_config_value("telemetry.enabled", True)
+    click.echo("install ping: on")

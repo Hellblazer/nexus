@@ -1310,7 +1310,7 @@ def get_credential(name: str) -> str:
     return ""
 
 
-def set_config_value(dotted_key: str, value: str) -> None:
+def set_config_value(dotted_key: str, value: str | bool) -> None:
     """Persist a dotted config key in ``~/.config/nexus/config.yml``.
 
     Example: ``set_config_value("pdf.extractor", "mineru")`` writes::

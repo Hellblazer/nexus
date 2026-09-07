@@ -51,6 +51,9 @@ def _disable_aspect_worker_autostart() -> None:
     import os
 
     os.environ.setdefault("NX_ASPECT_WORKER_AUTOSTART", "0")
+    # nexus-h5olw: the MCP lifespan fires the anonymous install ping on a
+    # daemon thread; the suite must never beacon the managed service.
+    os.environ.setdefault("NX_NO_TELEMETRY", "1")
 
 
 _disable_aspect_worker_autostart()
