@@ -2,12 +2,19 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.db.CollectionRegistry;
+import dev.nexus.service.db.TenantScope;
+import org.jooq.DSLContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+
+import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
+import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_PROFILE;
 
 /**
  * RDR-152 bead nexus-gmiaf.21 — Routes embedding requests to the correct embedder
@@ -194,6 +201,168 @@ public final class EmbedderRouter implements Embedder {
             }
         }
         return out;
+    }
+
+    /**
+     * RDR-204 Phase 1 (bead nexus-ft04v.6) — this router's content-type to
+     * embedding-model-token mapping, read off the SAME prefix table and mode
+     * fields {@link #resolveEmbedder} already uses (no new mode vocabulary
+     * invented here): {@link #CCE_PREFIXES}' content types (knowledge, docs,
+     * rdr) share one token, {@link #CODE_PREFIX}'s "code" gets its own, and
+     * {@code "unknown"} (bead nexus-ft04v.4's walk sentinel for an
+     * unparseable collection name) shares the CCE token — {@code voyage-3} is
+     * deliberately absent from {@code nexus.embedding_models} (no client
+     * token, no live row — {@code catalog-036-embedding-profile.xml}'s
+     * header), so it is not a legal {@code embedding_profile.embedding_model}
+     * value, and the CCE bucket already serves the majority (3 of 4) of this
+     * router's named content types and is the "everything but code" bucket
+     * {@link #resolveEmbedder} itself falls through to.
+     *
+     * <p>Local mode (no Voyage): every content type maps to the single
+     * injected local embedder's token (RDR-160: bge-768) — trivially
+     * including "unknown", since local mode routes everything through it
+     * regardless of content type.
+     *
+     * @return content type → model token, keyed by "code", "docs", "rdr",
+     *         "knowledge", "unknown" (whatever {@link #CCE_PREFIXES} lists,
+     *         stripped of their trailing {@code "__"}, plus "code" and
+     *         "unknown")
+     */
+    public Map<String, String> contentTypeModelTokens() {
+        String cceToken  = (voyageCodeEmbedder == null) ? localEmbedder.modelToken() : cceEmbedder.modelToken();
+        String codeToken = (voyageCodeEmbedder == null) ? localEmbedder.modelToken() : voyageCodeEmbedder.modelToken();
+
+        Map<String, String> tokens = new LinkedHashMap<>();
+        for (String prefix : CCE_PREFIXES) {
+            tokens.put(stripTrailingSeparator(prefix), cceToken);
+        }
+        tokens.put(stripTrailingSeparator(CODE_PREFIX), codeToken);
+        tokens.put("unknown", cceToken);
+        return tokens;
+    }
+
+    private static String stripTrailingSeparator(String prefix) {
+        return prefix.endsWith("__") ? prefix.substring(0, prefix.length() - 2) : prefix;
+    }
+
+    /**
+     * RDR-204 Phase 1 (bead nexus-ft04v.6) — upsert this router's ENTIRE
+     * content-type → model mapping into {@code nexus.embedding_profile} for
+     * {@code tenant}, one row per content type, in a SINGLE transaction.
+     *
+     * <p>Called by {@code Main} right after the routers are built, for the
+     * LOCAL tenant, on EVERY boot (RDR-204 Technical Design step 1a: the
+     * engine is the only writer, and a service restart after {@code nx config
+     * set local.embed_model}/{@code voyage_api_key} IS the trigger that
+     * adopts a mode switch — so this is a real UPSERT, not an insert-once. A
+     * second boot in the SAME mode changes no row's content (idempotent); a
+     * boot after a mode switch overwrites every row with the new mode's
+     * tokens).
+     *
+     * <p>Post-commit, evicts every {@link CollectionRegistry} entry cached
+     * for {@code tenant} — see {@link CollectionRegistry#evictTenant}.
+     *
+     * @param tenantScope the RLS-stamping gateway ({@code embedding_profile}
+     *                    is tenant-scoped with FORCE ROW LEVEL SECURITY)
+     * @param tenant      the tenant to seed (the LOCAL tenant at boot; a cloud
+     *                    tenant instead calls {@link
+     *                    #seedEmbeddingProfileForContentType} lazily — see
+     *                    that method's javadoc for the reusable seam)
+     */
+    public void seedEmbeddingProfile(TenantScope tenantScope, String tenant) {
+        Map<String, String> tokens = contentTypeModelTokens();
+        tenantScope.withTenant(tenant, ctx -> {
+            for (Map.Entry<String, String> e : tokens.entrySet()) {
+                upsertProfileRow(ctx, tenant, e.getKey(), e.getValue());
+            }
+            return null;
+        });
+        CollectionRegistry.evictTenant(tenant);
+    }
+
+    /**
+     * RDR-204 Phase 1 (bead nexus-ft04v.6) — the LAZY, per-cloud-tenant SEAM:
+     * upserts exactly ONE {@code nexus.embedding_profile} row, for {@code
+     * contentType} only, from this router's own mapping.
+     *
+     * <p>The engine has no tenant-mint route (tenants exist through
+     * data-token mint at the edge), so a cloud tenant's profile cannot be
+     * seeded at boot the way the local tenant's is by {@link
+     * #seedEmbeddingProfile}. This method is meant to be called at that
+     * tenant's FIRST registration for {@code contentType} (bead
+     * nexus-ft04v.8's future {@code register_collection} wiring) and is
+     * idempotent by the SAME upsert shape as the boot path — no separate
+     * existence check is needed before calling it; the upsert itself is the
+     * idempotency check, and calling it again for a content type already
+     * profiled simply overwrites it with the SAME mode-derived tokens.
+     *
+     * <p>THE REUSABLE SEAM: bead nexus-ft04v.3's per-tenant,
+     * first-request-after-boot ghost sweep already gates its OWN one-time
+     * work behind a {@code CatalogRepository.setMeta}/{@code getMeta}
+     * marker for that tenant. That sweep can call {@link
+     * #seedEmbeddingProfile} (the ALL-content-types boot method, not this
+     * one) for the same tenant inside its OWN first-request gate, rather than
+     * inventing a second marker — neither seed method needs one of its own,
+     * because the UPSERT is the idempotency check, not a marker read.
+     *
+     * @param tenantScope the RLS-stamping gateway
+     * @param tenant      the tenant being registered for
+     * @param contentType the content type of the collection being registered
+     *                    (one of this router's mapped types, or {@code
+     *                    "unknown"} — see {@link #contentTypeModelTokens})
+     * @throws IllegalArgumentException if {@code contentType} has no mapping
+     *                                  in this router's mode
+     */
+    public void seedEmbeddingProfileForContentType(
+            TenantScope tenantScope, String tenant, String contentType) {
+        String modelToken = contentTypeModelTokens().get(contentType);
+        if (modelToken == null) {
+            throw new IllegalArgumentException(
+                "content type '" + contentType + "' has no model mapping in mode " + modeName());
+        }
+        tenantScope.withTenant(tenant, ctx -> {
+            upsertProfileRow(ctx, tenant, contentType, modelToken);
+            return null;
+        });
+        CollectionRegistry.evictTenant(tenant);
+    }
+
+    /**
+     * The single upsert primitive both seed methods share. Derives {@code
+     * dimension} from {@code nexus.embedding_models} (a SELECT first, then
+     * the write) rather than duplicating {@code PgVectorRepository
+     * .MODEL_DIMS}'s model → dimension mapping a second time in this class.
+     * {@code ON CONFLICT (tenant_id, content_type) DO UPDATE} — a real
+     * upsert, not {@code DO NOTHING} — so a mode switch's next boot actually
+     * overwrites a stale row rather than leaving it pinned to whichever mode
+     * first wrote it.
+     *
+     * @throws IllegalStateException if {@code modelToken} has no {@code
+     *         nexus.embedding_models} row — every token an {@link
+     *         EmbedderRouter} mode can produce must be one of the four
+     *         seeded models ({@code catalog-036-embedding-profile.xml})
+     */
+    private static void upsertProfileRow(
+            DSLContext ctx, String tenant, String contentType, String modelToken) {
+        Integer dimension = ctx.select(EMBEDDING_MODELS.DIMENSION)
+                .from(EMBEDDING_MODELS)
+                .where(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(modelToken))
+                .fetchOne(EMBEDDING_MODELS.DIMENSION);
+        if (dimension == null) {
+            throw new IllegalStateException(
+                "embedding_model '" + modelToken + "' has no nexus.embedding_models row — "
+                + "every token an EmbedderRouter mode can produce must be one of the four "
+                + "seeded models (catalog-036-embedding-profile.xml)");
+        }
+        ctx.insertInto(EMBEDDING_PROFILE,
+                       EMBEDDING_PROFILE.TENANT_ID, EMBEDDING_PROFILE.CONTENT_TYPE,
+                       EMBEDDING_PROFILE.EMBEDDING_MODEL, EMBEDDING_PROFILE.DIMENSION)
+           .values(tenant, contentType, modelToken, dimension)
+           .onConflict(EMBEDDING_PROFILE.TENANT_ID, EMBEDDING_PROFILE.CONTENT_TYPE)
+           .doUpdate()
+           .set(EMBEDDING_PROFILE.EMBEDDING_MODEL, modelToken)
+           .set(EMBEDDING_PROFILE.DIMENSION, dimension)
+           .execute();
     }
 
     /**

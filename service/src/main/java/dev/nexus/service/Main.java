@@ -231,8 +231,27 @@ public final class Main {
                     docEmbedRouter.modeName(), docEmbedRouter.availableModels(),
                     reranker.modelToken());
         }
-        var pgVectorRepo = new PgVectorRepository(new TenantScope(ds), docEmbedRouter,
+        var tenantScope = new TenantScope(ds);
+        var pgVectorRepo = new PgVectorRepository(tenantScope, docEmbedRouter,
                                                   qryEmbedRouter);
+
+        // Embedding profile (RDR-204 Phase 1, bead nexus-ft04v.6): the engine is
+        // the only writer of nexus.embedding_profile, and this mode decision
+        // (Voyage vs local, just resolved above) IS the profile. Seed the LOCAL
+        // tenant's row for every content type now, after the routers exist —
+        // idempotent (a second boot in the same mode changes nothing; a boot
+        // after a config-driven mode switch overwrites every row). Fail loud,
+        // same shape as the root-token seed above: a service whose profile
+        // write fails is not in a state bead nexus-ft04v.8's register_collection
+        // can trust.
+        try {
+            docEmbedRouter.seedEmbeddingProfile(
+                    tenantScope, dev.nexus.service.db.TenantConstants.DEFAULT_TENANT);
+        } catch (RuntimeException e) {
+            ds.close();
+            log.error("event=embedding_profile_seed_failed error=\"{}\"", e.getMessage(), e);
+            System.exit(1);
+        }
 
         // Pooler-mode backstop (nexus-bhzuv): if a PgBouncer is interposed
         // (NX_PGBOUNCER_ADMIN_URL set), refuse to bind unless it reports

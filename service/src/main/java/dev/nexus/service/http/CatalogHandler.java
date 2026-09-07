@@ -1604,6 +1604,20 @@ public final class CatalogHandler implements HttpHandler {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
         repo.upsertCollection(tenant, body);
+        // RDR-204 Phase 1 (bead nexus-ft04v.6): this IS the single choke point
+        // for "register a collection" (the client's register_collection() ->
+        // POST /v1/catalog/collections/upsert -> here) — the lazy,
+        // per-content-type embedding_profile seed for a cloud tenant fires
+        // right after registration succeeds. combinedWriteService is null
+        // only when this handler was built with no EmbedderRouter available
+        // (the 1-arg constructor, e.g. some tests); no router means no mode
+        // decision to seed from, so the seed is skipped, not defaulted.
+        if (combinedWriteService != null) {
+            Object contentType = body.get("content_type");
+            if (contentType instanceof String s) {
+                combinedWriteService.seedEmbeddingProfileForContentType(tenant, s);
+            }
+        }
         HttpUtil.send(exchange, 200, "{\"ok\":true}");
     }
 

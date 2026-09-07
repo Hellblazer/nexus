@@ -300,4 +300,29 @@ class CollectionRegistryTest {
         // Evicting an unknown pair is a harmless no-op.
         CollectionRegistry.evict("t1", "never-known");
     }
+
+    @Test
+    void evictTenant_forgetsOnlyThatTenantsPairs() {
+        // RDR-204 bead nexus-ft04v.6: an embedding_profile write for a tenant
+        // evicts every CollectionRegistry entry for that tenant only.
+        CollectionRegistry.markKnown("t1", "c1");
+        CollectionRegistry.markKnown("t1", "c2");
+        CollectionRegistry.markKnown("t2", "c1");
+
+        CollectionRegistry.evictTenant("t1");
+
+        assertThat(CollectionRegistry.isKnown("t1", "c1")).isFalse();
+        assertThat(CollectionRegistry.isKnown("t1", "c2")).isFalse();
+        // A different tenant's entries are untouched, including one sharing
+        // the SAME collection name ("t1x" starting with "t1" must not
+        // collide with "t1" — the '|' separator is part of the prefix test).
+        assertThat(CollectionRegistry.isKnown("t2", "c1")).isTrue();
+        CollectionRegistry.markKnown("t1x", "c9");
+        CollectionRegistry.evictTenant("t1");
+        assertThat(CollectionRegistry.isKnown("t1x", "c9"))
+                .as("evictTenant(\"t1\") must not evict tenant \"t1x\" via a bare prefix match")
+                .isTrue();
+        // Evicting a tenant with no cached entries is a harmless no-op.
+        CollectionRegistry.evictTenant("never-known-tenant");
+    }
 }

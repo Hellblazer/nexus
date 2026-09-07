@@ -97,6 +97,26 @@ public final class CollectionRegistry {
         KNOWN.remove(key(tenant, collection));
     }
 
+    /**
+     * Forget every {@code (tenant, collection)} pair cached for {@code tenant}
+     * (RDR-204 bead nexus-ft04v.6). Called post-commit after an
+     * {@code embedding_profile} write for that tenant — defense-in-depth, not a
+     * correctness requirement: a profile write never touches an existing
+     * {@code catalog_collections} row (the row records the model its vectors
+     * were already embedded with; the profile only governs what NEW
+     * registrations get), so no cached entry is actually stale after one. This
+     * exists so a subsequent registration for that tenant always re-verifies
+     * against the database rather than trusting in-process state that predates
+     * the profile change, mirroring the post-commit discipline of {@link
+     * #evict}.
+     *
+     * @param tenant the tenant whose cached entries should be forgotten
+     */
+    public static void evictTenant(String tenant) {
+        String prefix = tenant + '|';
+        KNOWN.removeIf(k -> k.startsWith(prefix));
+    }
+
     /** Test-only: clears all cached entries. */
     static void clearForTests() {
         KNOWN.clear();

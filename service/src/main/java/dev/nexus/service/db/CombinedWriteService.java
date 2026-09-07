@@ -91,6 +91,28 @@ public final class CombinedWriteService {
         this.docRouter   = docRouter;
     }
 
+    /**
+     * RDR-204 Phase 1 (bead nexus-ft04v.6) — the LAZY per-tenant,
+     * per-content-type {@code nexus.embedding_profile} seed, called from
+     * {@code CatalogHandler.handleCollectionUpsert} right after a collection
+     * registration succeeds. This IS "first registration for a content type"
+     * for a cloud tenant: the engine has no tenant-mint route (tenants exist
+     * through data-token mint at the edge), so a real client registration
+     * request is the only seam available. Delegates to {@link
+     * EmbedderRouter#seedEmbeddingProfileForContentType} — idempotent (a real
+     * upsert, safe to call on every registration for that content type, not
+     * only the first) and never touches the {@code catalog_collections} row
+     * {@link CatalogRepository#upsertCollection} just wrote.
+     *
+     * @param tenant      tenant principal for RLS scoping
+     * @param contentType the collection's content type (blank/null is a
+     *                    no-op — nothing to seed a profile row against)
+     */
+    public void seedEmbeddingProfileForContentType(String tenant, String contentType) {
+        if (contentType == null || contentType.isBlank()) return;
+        docRouter.seedEmbeddingProfileForContentType(tenantScope, tenant, contentType);
+    }
+
     /** Embed-phase token usage plus the underlying {@code writeManifestMany} response. */
     public record CombinedWriteResult(Map<String, Object> response, long tokens) {}
 
