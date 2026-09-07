@@ -648,7 +648,7 @@ class SchemaMigratorIntegrationTest {
                 // catalog-013-3's inline comment. The fix must be defensive
                 // regardless of how the divergence arose.)
                 try (Connection conn = agedDs.getConnection()) {
-                    // chunks_384 no longer exists at HEAD (RDR-191 Phase 4 unify) --
+                    // the per-dim 384 chunk table no longer exists at HEAD (RDR-191 Phase 4 unify) --
                     // schema-agnostic mid-ladder table reference, per the ladder-file
                     // CAUTION (task brief; RawSqlGateTest's own javadoc history).
                     PgContainerHelper.dropConstraint(conn, DSL.table(DSL.name("nexus", "chunks_384")),
@@ -1065,7 +1065,7 @@ class SchemaMigratorIntegrationTest {
                 // Phase C: simulate the divergence — drop chunks_384_collection_fk right
                 // after fk-002-1 added it NOT VALID.
                 try (Connection conn = agedDs.getConnection()) {
-                    // chunks_384 no longer exists at HEAD (RDR-191 Phase 4 unify) --
+                    // the per-dim 384 chunk table no longer exists at HEAD (RDR-191 Phase 4 unify) --
                     // schema-agnostic mid-ladder table reference.
                     PgContainerHelper.dropConstraint(conn, DSL.table(DSL.name("nexus", "chunks_384")),
                         "chunks_384_collection_fk");

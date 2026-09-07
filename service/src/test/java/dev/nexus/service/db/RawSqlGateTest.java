@@ -977,7 +977,7 @@ class RawSqlGateTest {
         // ROW LEVEL SECURITY/ADD CONSTRAINT NOT VALID/VALIDATE CONSTRAINT sites onto
         // PgContainerHelper's typed DDL helpers (dropConstraint/setForceRls/
         // addFkNotValid/addFkNotValidComposite3/validateConstraint) against either
-        // the generated table or, for chunks_384/chash_index (dropped at HEAD),
+        // the generated table or, for the per-dim 384 chunk table and chash_index (dropped at HEAD),
         // DSL.table(DSL.name("nexus", "<table>")) -- these dedicated-container
         // aged-box tests never call applyProductSchema, so PgContainerHelper#
         // installTestObjects (new this batch, hoisted out of applyProductSchema)
