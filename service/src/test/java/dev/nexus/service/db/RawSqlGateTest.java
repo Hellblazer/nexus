@@ -970,7 +970,41 @@ class RawSqlGateTest {
         // on both SECURITY DEFINER mirrors, closing the gap between this
         // and Python's own relocate_vector_extensions_to_nexus_schema,
         // which has carried the REVOKE since commit 7d04c40cf).
-        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 81),
+        // nexus-cbo4a batch 12: 81 -> 50. Converted databasechangelog reads (typed
+        // DSL.table(DSL.name("databasechangelog"))/DSL.field(DSL.name(...), Class) --
+        // Liquibase's own bookkeeping table, no jOOQ codegen), nexus.memory INSERT/
+        // SELECT (generated MEMORY table), the mid-ladder DROP CONSTRAINT/[NO] FORCE
+        // ROW LEVEL SECURITY/ADD CONSTRAINT NOT VALID/VALIDATE CONSTRAINT sites onto
+        // PgContainerHelper's typed DDL helpers (dropConstraint/setForceRls/
+        // addFkNotValid/addFkNotValidComposite3/validateConstraint) against either
+        // the generated table or, for chunks_384/chash_index (dropped at HEAD),
+        // DSL.table(DSL.name("nexus", "<table>")) -- these dedicated-container
+        // aged-box tests never call applyProductSchema, so PgContainerHelper#
+        // installTestObjects (new this batch, hoisted out of applyProductSchema)
+        // installs the nexus_test.* functions those helpers need, via the MIGRATING
+        // role's own connection (not su) so databasechangelog stays owned by
+        // whichever role's Liquibase run creates it -- installing via su would leave
+        // it superuser-owned and the migrating role's own product-changelog walk
+        // would then hit "permission denied for table databasechangelog". VALIDATE
+        // CONSTRAINT conversions switch their expected exception from PSQLException
+        // to org.jooq.exception.DataAccessException (a jOOQ Routine call wraps the
+        // underlying PSQLException), same as batch 10's review fold-in. Seed INSERTs
+        // onto generated jOOQ tables (CATALOG_DOCUMENTS/CATALOG_DOCUMENT_CHUNKS/
+        // CHUNKS/CATALOG_COLLECTIONS). changesetExecType onto the same
+        // databasechangelog schema-agnostic form.
+        //
+        // Kept raw with reasons, all documented inline at their site:
+        // bootstrapVectorExtensionsForFreshWalk's 9-site DBA bootstrap (same class as
+        // SchemaRollbackRoundTripIntegrationTest's own kept-raw copy of this exact
+        // method), 8 occurrences of a 5-site admin/svc role bootstrap against a
+        // dedicated container (bootstrap() plus 7 aged-box tests -- CREATE ROLE /
+        // GRANT CREATE ON DATABASE|SCHEMA / GRANT pg_monitor WITH ADMIN OPTION, no
+        // jOOQ typed-DSL form), and one chunks seed INSERT (test 13,
+        // lateUpgradingDeployment...) whose bare, deliberately UNQUALIFIED ::vector
+        // cast is the test's own subject (VectorBinding always renders the
+        // schema-qualified ::nexus.vector, which would silently change what that one
+        // statement proves).
+        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 50),
         // nexus-cbo4a batch 9 item 0: 32 -> 37 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 37 -> 39 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         // nexus-cbo4a batch 12: 39 -> 16. Converted seed inserts (10 sites: HEAD-schema
@@ -1375,7 +1409,7 @@ class RawSqlGateTest {
      * but the new function is available for a future batch to rewire them
      * onto.
      */
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1222;
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1191;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

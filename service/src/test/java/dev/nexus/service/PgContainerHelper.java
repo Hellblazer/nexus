@@ -259,9 +259,29 @@ public final class PgContainerHelper {
         // (the other two tiers exist for a NOSUPERUSER migrating role, which `su`
         // here is not).
         liquibase.update(new Contexts());
-        // Test-only schema objects (nexus_test.*), never part of the product changelog;
-        // the codegen-time counterpart is db.changelog-test-master.xml (see the pom's
-        // generate-jooq-test-sources execution).
+        installTestObjects(su);
+    }
+
+    /**
+     * Install the {@code nexus_test.*} schema objects (nexus-cbo4a batch 12) —
+     * hoisted out of {@link #applyProductSchema} so a caller that migrates the
+     * PRODUCT changelog a different way (e.g. via {@code SchemaMigrator.migrate}
+     * as the real non-superuser migrating role, rather than this class's own
+     * superuser-driven {@code applyProductSchema}) can still install the
+     * {@code drop_constraint}/{@code add_fk_not_valid}/{@code
+     * add_fk_not_valid_composite3}/{@code set_force_rls}/{@code
+     * grant_execute_on_function} test-lifecycle functions {@link #dropConstraint}
+     * and friends need. {@code nexus_test} is entirely separate from
+     * {@code nexus}/{@code staging}/{@code public} and inert with respect to
+     * product-schema migration testing — installing it changes nothing the
+     * product changelog walk can observe. Never part of the product changelog;
+     * the codegen-time counterpart is db.changelog-test-master.xml (see the
+     * pom's generate-jooq-test-sources execution).
+     *
+     * @param su superuser connection to install the test objects under
+     */
+    public static void installTestObjects(Connection su) throws Exception {
+        Database db = DatabaseFactory.getInstance().findCorrectDatabaseImplementation(new JdbcConnection(su));
         new Liquibase("db/changelog-test/db.changelog-test-objects.xml",
             new ClassLoaderResourceAccessor(), db).update(new Contexts());
         su.setAutoCommit(true);
