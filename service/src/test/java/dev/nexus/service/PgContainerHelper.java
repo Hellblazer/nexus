@@ -266,14 +266,17 @@ public final class PgContainerHelper {
     /**
      * Bootstrap a test-local service role via the {@code db/changelog-test/
      * db.changelog-test-role.xml} test changelog (nexus-cbo4a batch 1a) — replaces
-     * the hand-rolled DO-block {@code CREATE ROLE}, schema/table/sequence
-     * {@code GRANT}s, and {@code ALTER ROLE ... SET search_path} that 84 test
-     * classes used to copy by hand. Creates {@code svcRole} (LOGIN, NOSUPERUSER,
-     * NOBYPASSRLS) if absent, redundantly/idempotently ensures {@code nexus_svc}
-     * exists too (see {@link #applyProductSchema}'s javadoc — always a no-op here
-     * in practice), grants {@code svcRole} the same {@code nexus}+{@code staging}
-     * DML/sequence access {@link #grantServiceSchemaAccess} used to hand-grant, and
-     * sets {@code svcRole}'s {@code search_path}.
+     * the hand-rolled DO-block {@code CREATE ROLE} and schema/table/sequence
+     * {@code GRANT}s that 84 test classes used to copy by hand. Creates
+     * {@code svcRole} (LOGIN, NOSUPERUSER, NOBYPASSRLS) if absent,
+     * redundantly/idempotently ensures {@code nexus_svc} exists too (see
+     * {@link #applyProductSchema}'s javadoc — always a no-op here in practice), and
+     * grants {@code svcRole} the same {@code nexus}+{@code staging} DML/sequence
+     * access {@link #grantServiceSchemaAccess} used to hand-grant. Deliberately does
+     * NOT set {@code svcRole}'s {@code search_path} (nexus-cbo4a batch 9 item 1,
+     * Sam's directive nexus-zrcj7): every legitimate query already goes through
+     * schema-qualified jOOQ generated Tables/Routines or a function-pinned
+     * {@code SET search_path} in the function definition itself.
      *
      * <p><b>Call AFTER {@link #applyProductSchema}</b> — the {@code GRANT ... ON ALL
      * TABLES}/{@code ON ALL SEQUENCES} statements inside the test changelog require

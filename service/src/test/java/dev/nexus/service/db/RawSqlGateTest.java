@@ -2200,15 +2200,17 @@ class RawSqlGateTest {
     //    its ~11 test copies (8 setConnectionInitSql call sites plus 3 "-c
     //    search_path=..." datasource-property sites across 2 files) are deleted,
     //    not sanctioned, in this same batch. This scan makes sure neither shape
-    //    can come back. DELIBERATELY does NOT scan for the ROLE-level {@code ALTER
-    //    ROLE ... SET search_path} shape ({@code db.changelog-test-role.xml}'s
-    //    {@code bootstrapServiceRole} plus its own remaining per-class literal
-    //    copies) -- that shape is real, understood, and its removal is a SEPARATE,
-    //    already-identified item (batch 9 item 1: fold the leftover per-class
-    //    literals onto {@code PgContainerHelper.bootstrapServiceRole}/{@code
-    //    seedServiceToken}), not this batch's scope; a blanket "any SET
-    //    search_path string literal" scan would fail loud today against that
-    //    known, deferred population instead of catching a genuine regression. ──
+    //    can come back. Batch 9 item 1 (2026-09-07) widened the same scan to the
+    //    ROLE-level {@code ALTER ROLE ... SET search_path} shape too -- the
+    //    remaining ~24 per-class literals plus {@code db.changelog-test-role.xml}'s
+    //    own line were all folded onto {@code PgContainerHelper.bootstrapServiceRole}
+    //    (which now sets no search_path at all) in that same batch, so this scan's
+    //    zero-tolerance claim covers all three shapes with no grandfathered
+    //    population. SharedClusterMutationFalsifyTest's poison-value {@code ALTER
+    //    ROLE ... SET search_path TO yhmav_poison_schema, public} is a deliberate
+    //    falsification proof (nexus-tyiht: proves SharedCluster's reset-at-acquire
+    //    clears a cluster-wide role GUC) and is exempted by its distinctive target
+    //    schema name, not by file name -- see {@link #scanSessionSearchPathReliance}. ──
 
     /** Per-file scan: every {@code setConnectionInitSql(...)} call site (unconditional --
      * this method sets a SESSION-level search_path/GUC string on a connection pool, and
@@ -2230,7 +2232,23 @@ class RawSqlGateTest {
      * shape via string concatenation rather than one contiguous literal, so this
      * class's own real source never spells the shape out as a single matchable run --
      * exactly how {@link #scanDslTemplates}'s field/condition/query/table matcher
-     * keeps its own risky-looking fixture text inside a blanked comment instead. */
+     * keeps its own risky-looking fixture text inside a blanked comment instead.
+     *
+     * <p><b>Third branch, added nexus-cbo4a batch 9 item 1 (2026-09-07):</b> the
+     * ROLE-level {@code ALTER ROLE <role> SET search_path TO <schema list>} shape --
+     * deferred out of batch 9 item 0's scope, folded in this batch onto {@code
+     * PgContainerHelper.bootstrapServiceRole} (which now sets no search_path at all).
+     * Same STRING-CONTENT visibility requirement as the "-c" branch above, so it also
+     * runs against {@link #blankComments} and this class's own fixture-building
+     * literals split the "ALTER ROLE" / "SET search_path" pair via concatenation for
+     * the same reason. One exemption, matched on the CAPTURED TARGET SCHEMA rather
+     * than file name (a file-name allowlist could be spoofed by a future violation
+     * added to that same file): {@code SharedClusterMutationFalsifyTest}'s
+     * {@code ALTER ROLE ... SET search_path TO yhmav_poison_schema, public} is a
+     * deliberate falsification proof (nexus-tyiht) that a poisoned cluster-wide
+     * role GUC is reset at the next {@code SharedCluster#acquireDatabase()} --
+     * not a real reliance, and the poison schema name is a value nothing else in
+     * the suite would ever set. */
     static List<String> scanSessionSearchPathReliance(String fileName, String rawSource) {
         String fullyBlanked = blank(rawSource);
         String commentsBlanked = blankComments(rawSource);
@@ -2257,16 +2275,41 @@ class RawSqlGateTest {
                 + "setConnectionInitSql; same retirement, same reason");
         }
 
+        Matcher alterRole = Pattern.compile(
+            "ALTER\\s+ROLE\\b[\\s\\S]{0,300}?SET\\s+search_path\\s+TO\\s+([A-Za-z0-9_]+)")
+            .matcher(commentsBlanked);
+        while (alterRole.find()) {
+            if ("yhmav_poison_schema".equals(alterRole.group(1))) {
+                // SharedClusterMutationFalsifyTest's deliberate poison-value
+                // falsification proof (nexus-tyiht) -- not a real reliance.
+                continue;
+            }
+            int line = 1 + (int) commentsBlanked.substring(0, alterRole.start()).chars()
+                .filter(c -> c == '\n').count();
+            violations.add(fileName + ":" + line + "  ALTER ROLE ... SET search_path -- "
+                + "role-level session search_path reliance is retired (Sam's directive, "
+                + "nexus-zrcj7, 2026-09-05); fold onto PgContainerHelper.bootstrapServiceRole "
+                + "(sets no search_path) and qualify every schema reference through "
+                + "generated jOOQ Tables/Routines instead");
+        }
+
         return violations;
     }
 
     /**
      * Scans BOTH {@code src/main/java} AND {@code src/test/java} for {@link
-     * #scanSessionSearchPathReliance} violations. Zero-tolerance in both trees:
-     * this batch converted every known call site (Main.java's production pool plus
-     * 8 test setConnectionInitSql copies and 3 "-c search_path=" datasource-property
-     * sites across 2 files), so there is no grandfathered population to ratchet
-     * against, unlike {@link #noRawExecuteSqlRegressionInTestSources}.
+     * #scanSessionSearchPathReliance} violations (all three branches: {@code
+     * setConnectionInitSql}, the "-c search_path=" datasource property, and
+     * ROLE-level {@code ALTER ROLE ... SET search_path}). Zero-tolerance in both
+     * trees: batch 9 item 0 converted every known connection-level call site
+     * (Main.java's production pool plus 8 test setConnectionInitSql copies and 3
+     * "-c search_path=" datasource-property sites across 2 files), and batch 9
+     * item 1 converted every known role-level call site (~24 per-class literals
+     * plus {@code db.changelog-test-role.xml}'s own line, all folded onto {@code
+     * PgContainerHelper.bootstrapServiceRole}), so there is no grandfathered
+     * population to ratchet against, unlike {@link #noRawExecuteSqlRegressionInTestSources}.
+     * The one exemption ({@code SharedClusterMutationFalsifyTest}'s poison-value
+     * falsification proof) is matched inside the scan itself, not carved out here.
      */
     @Test
     void noSessionSearchPathConnectionOptionInMainOrTestSources() throws IOException {
@@ -2286,11 +2329,11 @@ class RawSqlGateTest {
             }
         }
         assertThat(violations)
-            .as("session-level search_path connection option (setConnectionInitSql(...) or "
-                + "a PostgreSQL JDBC \"options\" property setting the same GUC) -- see "
-                + "scanSessionSearchPathReliance's own javadoc; never sanctioned, always "
-                + "convert onto schema-qualified jOOQ Tables/Routines or a function-pinned "
-                + "SET search_path")
+            .as("session- or role-level search_path reliance (setConnectionInitSql(...), a "
+                + "PostgreSQL JDBC \"options\" property setting the same GUC, or ALTER ROLE "
+                + "... SET search_path) -- see scanSessionSearchPathReliance's own javadoc; "
+                + "never sanctioned, always convert onto schema-qualified jOOQ "
+                + "Tables/Routines or a function-pinned SET search_path")
             .isEmpty();
     }
 
@@ -2351,21 +2394,67 @@ class RawSqlGateTest {
             .isEmpty();
     }
 
+    /** nexus-cbo4a batch 9 item 1: this used to be a NEGATIVE fixture
+     * ({@code searchPathReliance_alterRoleShape_isDeliberatelyNotFlagged}) proving
+     * the shape was deliberately out of scope. Batch 9 item 1 folded every real
+     * ALTER ROLE ... SET search_path call site onto {@code
+     * PgContainerHelper.bootstrapServiceRole} (which sets no search_path at all),
+     * so the deferral is over and this is now a POSITIVE detection proof. */
     @Test
-    void searchPathReliance_alterRoleShape_isDeliberatelyNotFlagged() {
+    void searchPathReliance_alterRoleShape_isFlagged() {
         String synthetic = String.join("\n",
             "public final class Whatever {",
-            "    void stillLegal() throws Exception {",
+            "    void danger() throws Exception {",
             "        su.createStatement().execute(\"ALTER ROLE nexus_svc SET search_path TO "
                 + "nexus, public\");",
             "    }",
             "}");
         assertThat(scanSessionSearchPathReliance("Whatever.java", synthetic))
-            .as("the ROLE-level ALTER ROLE ... SET search_path shape is a separate, "
-                + "already-identified, deferred item (batch 9 item 1: fold onto "
-                + "PgContainerHelper.bootstrapServiceRole/seedServiceToken) -- deliberately "
-                + "out of THIS scan's scope, not a gap")
+            .as("ALTER ROLE ... SET search_path must fail loud (Sam's directive, "
+                + "nexus-zrcj7, 2026-09-05: no session/role search_path reliance, ever)")
+            .anySatisfy(h -> assertThat(h).contains("ALTER ROLE"));
+    }
+
+    /** The one sanctioned exception, matched on the target schema rather than file
+     * name: {@code SharedClusterMutationFalsifyTest}'s poison-value {@code ALTER
+     * ROLE ... SET search_path TO yhmav_poison_schema, public} falsifies
+     * {@code SharedCluster}'s reset-at-acquire, it does not rely on search_path. */
+    @Test
+    void searchPathReliance_alterRoleShapePoisonValue_isNotFlagged() {
+        String synthetic = String.join("\n",
+            "public final class Whatever {",
+            "    void poisonProof() throws Exception {",
+            "        su.createStatement().execute(\"ALTER ROLE nexus_svc SET search_path TO "
+                + "yhmav_poison_schema, public\");",
+            "    }",
+            "}");
+        assertThat(scanSessionSearchPathReliance("Whatever.java", synthetic))
+            .as("SharedClusterMutationFalsifyTest's poison-schema ALTER ROLE is a "
+                + "deliberate falsification proof (nexus-tyiht), not a real reliance")
             .isEmpty();
+    }
+
+    /**
+     * Resource-scan (nexus-cbo4a batch 9 item 1): {@code db.changelog-test-role.xml}
+     * is the one Liquibase changeset that used to set {@code svcRole}'s
+     * search_path, and it is not itself a {@code .java} file, so {@link
+     * #noSessionSearchPathConnectionOptionInMainOrTestSources}'s walk cannot see
+     * it. This targeted check makes sure the line cannot silently come back.
+     */
+    @Test
+    void testRoleChangelog_neverRegainsSearchPathLine() throws IOException {
+        Path xml = Path.of(
+            "src", "test", "resources", "db", "changelog-test", "db.changelog-test-role.xml");
+        assertThat(xml).exists();
+        String content = Files.readString(xml);
+        assertThat(content)
+            .as("db.changelog-test-role.xml must never set svcRole's search_path again "
+                + "(Sam's directive, nexus-zrcj7, 2026-09-05) -- "
+                + "PgContainerHelper.bootstrapServiceRole sets no search_path at all. "
+                + "(Matches \"SET search_path TO\", not the bare phrase, so this file's own "
+                + "prose explaining that a function-pinned SET search_path is still "
+                + "sanctioned stays legal.)")
+            .doesNotContain("SET search_path TO");
     }
 
     // ── nexus-zrcj7 step 4 (Sam's no-SQL-strings-in-Java directive): the checked,
