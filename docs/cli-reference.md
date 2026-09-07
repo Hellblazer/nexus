@@ -3249,6 +3249,25 @@ nx upgrade --yes                  # Unattended: pre-approve the billed re-embed 
 | `--skip-t3` | Skip T3 upgrade steps for a fast T2-only run. Also suppresses the precondition stage's engine install and process cycle (verdicts are still reported) |
 | `--yes` | Assume yes to the **billed re-embed** consent prompt only (equivalent to `NX_ASSUME_YES=1`) — the unattended channel for a walk that would otherwise block on the cost preview. Not a blanket "say yes to everything": a vanished source still defers rather than guessing, and rollback is never automatic |
 
+**Plugin update (nexus-2uwag).** After the ladder, `nx upgrade` reads
+Claude Code's plugin registry (`~/.claude/plugins/installed_plugins.json`)
+and, for each installed `conexus` / `sn` plugin strictly behind this wheel,
+runs `claude plugin update <plugin>@<marketplace> -s <scope> -y` at the
+scope the registry records for it. One line per plugin
+touched; silent when already in lockstep or on a box without the plugins.
+The updated plugin loads at the next session start (the CLI says "Restart
+to apply", and so does this step, once). Advisory by design: a failed
+update prints the reason and the manual command and the upgrade still
+exits 0, because the data convergence above already happened; an exit 0
+the parser does not recognise is reported as "not confirmed", never as
+done. Distinct from the `Precondition [plugin-lockstep]` line above it,
+which reports the RDR-143 marker state read-only. Skipped
+under `--auto` (the budgeted SessionStart-hook invocation; the detached
+RDR-143 lockstep action calls plain `nx upgrade`, where it runs) and
+reported without running under `--dry-run`. This is the reverse of the
+RDR-143 hook, which drives `nx self install` + `nx upgrade` from a plugin
+update; together they make either entry point converge all three.
+
 **Plan-library precondition runs on every invocation, never skipped.**
 Beside package/engine/process/lockstep, `nx upgrade` also converges the
 builtin plan-template library (reconciling it against the templates this

@@ -492,6 +492,7 @@ nexus-2t63u
 nexus-2t7o5
 nexus-2tdkx
 nexus-2u7o
+nexus-2uwag
 nexus-2v0v7
 nexus-2v0v7.1
 nexus-2vvdi
@@ -903,6 +904,7 @@ nexus-56ndn
 nexus-56o1u
 nexus-56pmt
 nexus-56pmt.1
+nexus-56qvf
 nexus-56uno
 nexus-572g
 nexus-575kd
@@ -1030,6 +1032,7 @@ nexus-5sy6
 nexus-5t1jp
 nexus-5tyhi
 nexus-5uj6t
+nexus-5umlb
 nexus-5uoxu
 nexus-5ut2a
 nexus-5uvag
@@ -5047,6 +5050,7 @@ nexus-tafjk
 nexus-tafjk.1
 nexus-taseo
 nexus-tawx0
+nexus-tb01a
 nexus-tbj48
 nexus-tbj48.1
 nexus-tbkk1

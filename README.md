@@ -79,14 +79,20 @@ nx upgrade                               # 2. converge the data
 Both steps, every time. Step 1 installs a new generation beside the one you
 are running and repoints `current`; nothing is swapped under a live process,
 so it is safe with Claude Code sessions open and the service up. Step 2
-converges the package, engine, and service, then walks any pending data
-rung. `nx doctor` shows what is pending; `nx upgrade --dry-run` previews.
+converges the package, engine, and service, walks any pending data rung,
+and brings the Claude Code plugins up to the same release (it runs
+`claude plugin update` for a plugin that is behind; the updated plugin
+loads at your next session). Either entry point converges the others:
+`/plugin update` in Claude Code triggers the same two steps at the next
+session start. `nx doctor` shows what is pending; `nx upgrade --dry-run`
+previews.
 
 Do not upgrade with `uv tool install conexus` or `--force`: that resets the
 environment and drops `[local]`, which downgrades the embedder and makes
 search return nothing. If you did, `nx self install` repairs it.
 
-After `/plugin update`, run both steps so the CLI matches the plugin.
+After `/plugin update`, the next session start runs both steps for you;
+run them by hand to converge now.
 
 Installs that never left ChromaDB (5.x, or 6.x never migrated) take a
 different path: [Getting Started § Upgrading from a pre-PG install](docs/getting-started.md#upgrading-from-a-pre-pg-install).
