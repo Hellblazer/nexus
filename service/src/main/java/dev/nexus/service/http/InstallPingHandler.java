@@ -38,7 +38,8 @@ import java.util.regex.Pattern;
  * 400 on a missing, over-long, or malformed field; 405 on non-POST; 429 when
  * the {@link MintRateLimiter} refuses (keyed by remote address, then by
  * install id — a runaway client can neither flood the table nor burn the
- * per-address budget of everyone behind one NAT). A DB failure is 500 and
+ * per-address budget of everyone behind one NAT; the address comes from
+ * {@link #remoteAddress}, see its trusted-proxy rule). A DB failure is 500 and
  * logged; the client swallows every outcome, so nothing here is retried.
  *
  * <p>Additive wire change: a NEW route; see docs/wire-contract-pending.md.
@@ -57,17 +58,22 @@ public final class InstallPingHandler implements HttpHandler {
     /** Version/os/arch/python: printable token characters only; no whitespace, no JSON noise. */
     private static final Pattern TOKEN = Pattern.compile("[A-Za-z0-9._+-]{1," + MAX_FIELD_CHARS + "}");
 
+    /** Trailing X-Forwarded-For hops appended by proxies this engine trusts; 0 = key on the socket peer. */
+    static final String TRUSTED_PROXIES_ENV = "NX_INSTALL_PING_TRUSTED_PROXIES";
+
     private final InstallPingSink sink;
     private final MintRateLimiter rateLimiter;
+    private final int trustedProxies;
 
-    public InstallPingHandler(InstallPingSink sink, MintRateLimiter rateLimiter) {
+    public InstallPingHandler(InstallPingSink sink, MintRateLimiter rateLimiter, int trustedProxies) {
         this.sink = sink;
         this.rateLimiter = rateLimiter;
+        this.trustedProxies = Math.max(0, trustedProxies);
     }
 
-    /** Production wiring: env-tuned limiter (same knobs as the mint route). */
+    /** Production wiring: env-tuned limiter (same knobs as the mint route) and proxy count. */
     public static InstallPingHandler fromEnv(InstallPingSink sink, Clock clock) {
-        return new InstallPingHandler(sink, MintRateLimiter.fromEnv(clock));
+        return new InstallPingHandler(sink, MintRateLimiter.fromEnv(clock), trustedProxiesFromEnv());
     }
 
     @Override
@@ -119,7 +125,7 @@ public final class InstallPingHandler implements HttpHandler {
             return;
         }
 
-        String remote = remoteAddress(ex);
+        String remote = remoteAddress(ex, trustedProxies);
         if (!rateLimiter.tryAcquire(remote, installId.toString())) {
             ex.getResponseHeaders().set("Retry-After", "60");
             HttpUtil.send(ex, 429, "{\"error\":\"rate limit exceeded, retry later\"}");
@@ -143,15 +149,39 @@ public final class InstallPingHandler implements HttpHandler {
     }
 
     /**
-     * The edge terminates TLS and forwards; the first X-Forwarded-For hop is
-     * the client. Absent that (direct or local), the socket peer.
+     * The client address the rate limiter keys on, derived from
+     * X-Forwarded-For by a TRUSTED-PROXY COUNT rather than by picking an end
+     * of the list: either end is wrong in one deployment. The trailing
+     * {@code trustedProxies} hops were appended by proxies this engine
+     * trusts; the hop immediately before them is the client. With the count
+     * at 0 (the default, a bare local engine) the header is entirely
+     * untrusted and the socket peer is the key. On the managed edge the
+     * control plane collapses the header to exactly the ALB-vouched client
+     * IP and the TLS sidecar appends the control plane's address, so the
+     * engine sees {@code "client-ip, edge-ip"} and the count is 1
+     * ({@code NX_INSTALL_PING_TRUSTED_PROXIES=1}; conexus-n5n8's edge test
+     * asserts the same shape). A list shorter than the count falls back to
+     * the socket peer.
      */
-    static String remoteAddress(HttpExchange ex) {
+    static String remoteAddress(HttpExchange ex, int trustedProxies) {
+        String peer = ex.getRemoteAddress().getAddress().getHostAddress();
+        if (trustedProxies <= 0) return peer;
         String xff = ex.getRequestHeaders().getFirst("X-Forwarded-For");
-        if (xff != null && !xff.isBlank()) {
-            int comma = xff.indexOf(',');
-            return (comma < 0 ? xff : xff.substring(0, comma)).trim();
+        if (xff == null || xff.isBlank()) return peer;
+        String[] hops = xff.split(",");
+        int idx = hops.length - trustedProxies - 1;
+        if (idx < 0) return peer;
+        String hop = hops[idx].trim();
+        return hop.isEmpty() ? peer : hop;
+    }
+
+    static int trustedProxiesFromEnv() {
+        String raw = System.getenv(TRUSTED_PROXIES_ENV);
+        if (raw == null || raw.isBlank()) return 0;
+        try {
+            return Math.max(0, Integer.parseInt(raw.trim()));
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(TRUSTED_PROXIES_ENV + " must be an integer, got: " + raw, e);
         }
-        return ex.getRemoteAddress().getAddress().getHostAddress();
     }
 }

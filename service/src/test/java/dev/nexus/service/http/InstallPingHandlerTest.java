@@ -39,11 +39,16 @@ class InstallPingHandlerTest {
 
     @BeforeEach
     void start() throws Exception {
+        start(0);
+    }
+
+    private void start(int trustedProxies) throws Exception {
+        if (server != null) server.stop(0);
         Clock fixed = Clock.fixed(Instant.parse("2026-09-07T12:00:00Z"), ZoneOffset.UTC);
-        // Generous limiter so only the explicit rate-limit test trips it.
+        // Generous limiter so only the explicit rate-limit tests trip it.
         var limiter = new MintRateLimiter(fixed, 5, 1, 100);
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        server.createContext("/v1/install-ping", new InstallPingHandler(recorded::add, limiter));
+        server.createContext("/v1/install-ping", new InstallPingHandler(recorded::add, limiter, trustedProxies));
         server.start();
         url = "http://127.0.0.1:" + server.getAddress().getPort() + "/v1/install-ping";
     }
@@ -54,9 +59,14 @@ class InstallPingHandlerTest {
     }
 
     private HttpResponse<String> post(String body) throws Exception {
-        return http.send(HttpRequest.newBuilder(URI.create(url))
-                .POST(HttpRequest.BodyPublishers.ofString(body)).build(),
-                HttpResponse.BodyHandlers.ofString());
+        return post(body, null);
+    }
+
+    private HttpResponse<String> post(String body, String xff) throws Exception {
+        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(url))
+                .POST(HttpRequest.BodyPublishers.ofString(body));
+        if (xff != null) b.header("X-Forwarded-For", xff);
+        return http.send(b.build(), HttpResponse.BodyHandlers.ofString());
     }
 
     @Test
@@ -130,11 +140,41 @@ class InstallPingHandlerTest {
     }
 
     @Test
+    void trustedProxiesZero_ignoresForwardedFor_keysOnSocketPeer() throws Exception {
+        // Default posture (bare engine): the header is untrusted. Every request
+        // here comes from 127.0.0.1, so varying X-Forwarded-For must not buy
+        // fresh per-address budget (100/min shared by one peer).
+        for (int i = 0; i < 100; i++) {
+            assertThat(post(VALID.formatted(UUID.randomUUID()), "203.0.113." + (i % 250)).statusCode())
+                    .as("ping %d", i).isEqualTo(202);
+        }
+        assertThat(post(VALID.formatted(UUID.randomUUID()), "198.51.100.7").statusCode()).isEqualTo(429);
+    }
+
+    @Test
+    void trustedProxiesOne_keysOnHopBeforeTheEdge() throws Exception {
+        // Managed-edge shape (conexus-n5n8): engine sees "client-ip, edge-ip".
+        start(1);
+        for (int i = 0; i < 100; i++) {
+            assertThat(post(VALID.formatted(UUID.randomUUID()), "203.0.113.5, 10.0.0.1").statusCode())
+                    .as("ping %d", i).isEqualTo(202);
+        }
+        // Same client behind the same edge: budget spent.
+        assertThat(post(VALID.formatted(UUID.randomUUID()), "203.0.113.5, 10.0.0.1").statusCode())
+                .isEqualTo(429);
+        // A different client behind the same edge is a different key.
+        assertThat(post(VALID.formatted(UUID.randomUUID()), "203.0.113.6, 10.0.0.1").statusCode())
+                .isEqualTo(202);
+        // Too few hops for the count: socket peer, never an exception.
+        assertThat(post(VALID.formatted(UUID.randomUUID()), "10.0.0.1").statusCode()).isEqualTo(202);
+    }
+
+    @Test
     void sinkFailure_is500_notSwallowed() throws Exception {
         server.removeContext("/v1/install-ping");
         var limiter = new MintRateLimiter(Clock.systemUTC(), 5, 1, 100);
         server.createContext("/v1/install-ping", new InstallPingHandler(
-                p -> { throw new IllegalStateException("db down"); }, limiter));
+                p -> { throw new IllegalStateException("db down"); }, limiter, 0));
         assertThat(post(VALID.formatted(UUID.randomUUID())).statusCode()).isEqualTo(500);
     }
 }
