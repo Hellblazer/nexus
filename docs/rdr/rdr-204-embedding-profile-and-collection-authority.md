@@ -112,7 +112,7 @@ exclude by column.
 | Prior RDR | Relationship | What it means for this one |
 | --- | --- | --- |
 | RDR-101 (event-sourced catalog) | Origin | Created `catalog_collections` as a "first-class collections projection" (changeset catalog-001-5) and defined the four-segment name. Its rationale for the name was ChromaDB's metadata poverty and name regex. Both are gone with RDR-155. The projection it created is what this RDR promotes to authority. |
-| RDR-103 (catalog as collection-name authority) | Origin | Made the catalog the only place that *renders* a name, via `CollectionName` and `collection_for`. It kept parsing as the read path ("`CollectionName.parse` is strict"). Its rendering discipline stays; its parse-as-read contract is what this RDR retires. |
+| RDR-103 (catalog as collection-name authority) | Origin | Made the catalog the only place that *renders* a name, via `CollectionName` and `collection_for`, and kept parsing as the read path ("`CollectionName.parse` is strict"). One of its rationales survives ChromaDB and this RDR keeps it: "switching embedding models necessarily creates a new collection (the vectors are not compatible)", so a collection stays the unit of embedding identity and a profile switch mints a new sibling, never re-embeds in place. The rendering discipline and the unique tuple index stay; only parse-as-read is retired. |
 | RDR-109 (honest local-mode naming) | Precedent | Diagnosed GH #667: local collections labelled `voyage-*`. Fixed by widening the token set so a local model gets a local-shaped token. It repaired the label; this RDR removes the label's authority so the class cannot recur. |
 | RDR-160 / RDR-162 (bge-768 local embedder; truthful post-160 upgrade path) | Precedent | Established that local mode has exactly one model for every content type and built a parity gate against it. The "one model per install per content type" fact this RDR encodes is theirs, verified in production. |
 | RDR-137 (eliminate repos.json) | Precedent | Same move one level up: retired a side file that duplicated a catalog fact and made the catalog canonical. The census-and-delete method it used is reused here. |
@@ -231,6 +231,14 @@ per-collection chunk counts from `nx collection list`. Full numbers in T2
   `minilm-l6-v2-384`) and four on the client (no `voyage-3`). The
   `embedding_models` seed is the four shared tokens; `voyage-3` has no
   client token and no live rows and is not seeded.
+- **Verified**: a failed changeset stops the engine (`SchemaMigrator` wraps
+  `LiquibaseException` in `MigrationException`). With the 2026-08-16
+  never-wedge directive this rules out a refusing backfill; see Technical
+  Design step 3 for the disputed-row design that replaced it.
+- **Verified**: the grandfather-or-raise switch table already exists
+  (`corpus.resolve_write_embedding_model`, nexus-o5x2c, GH #1461) and is
+  documented in `docs/cli-reference.md` under "Local mode with Voyage";
+  its probe is what the profile design repoints at `for_tuple`.
 - **Verified**: `CollectionRegistry` caches only `(tenant, name)` presence:
   process-local, unbounded, marked after commit, evicted on delete and on
   the canonical branch of rename. Holding the row instead of a boolean is
@@ -281,12 +289,23 @@ Nothing is renamed and no chunk moves.
 dimension, PRIMARY KEY (tenant_id, content_type))`, plus a reference table
 `nexus.embedding_models(embedding_model PRIMARY KEY, dimension, provider)`
 seeded with the four models the engine can serve. `nx init` writes the
-profile for the chosen mode; a cloud tenant's profile is written at tenant
-mint. The profile is the only place a model is chosen.
+profile for the chosen mode. The engine has no tenant-mint route (tenants
+exist through data-token mint at the edge), so a cloud tenant's profile is
+seeded lazily and idempotently by the engine on the first registration
+for a content type, from its own mode. The profile is the only place a
+model is chosen.
 
-**1a. The profile is updatable.** `local.embed_model` can change at any
-time through `nx config set` (GH #1461), and that is the feature, not a
-bug. A change is a profile write: `nx upgrade`'s `provisioning`
+**1a. The profile is updatable, and a switch mints a sibling.**
+`local.embed_model` can change at any time through `nx config set`
+(GH #1461), and that is the feature, not a bug. The switch semantics
+already exist as code: `corpus.resolve_write_embedding_model` implements
+the documented grandfather-or-raise table (key absent and an existing
+local-token collection: write there; key absent and nothing: raise; key
+present: the canonical Voyage token, a NEW sibling collection). This RDR
+keeps that table verbatim and changes only where the "does a collection
+exist for this content type and owner under token X" probe looks: the
+catalog's `for_tuple` lookup instead of a rendered-name test. A change is
+a profile write: `nx upgrade`'s `provisioning`
 precondition (and the engine at boot, from its own mode) writes the
 profile row for each content type. A profile change never touches an
 existing collection's row: the row records the model its vectors were
@@ -308,22 +327,34 @@ tying an existing row to the current profile (see 1a). A new
 `lifecycle_state` column (`live` | `quarantine`) replaces the
 `quarantine-` prefix as the thing corpus resolution excludes.
 
-**3. The one-time backfill.** Two changesets, in order. The first sweeps
-ghosts: a `catalog_collections` row with zero `nexus.chunks` rows, zero
-`document_chunks` manifest rows, and zero aspect or highlight references is
-deleted (153 of 223 rows on this tenant; a row still referenced by a
-manifest or an aspect is kept and reported, never guessed at). The second
-walks every surviving row. Ground truth is `nexus.collection_vector_stats`
-(one row per `(collection, dim)` derived from the stored column): exactly
-one row per collection gives the dimension, two rows is a disagreement;
-the profile gives the model for that content type; the two must agree. On
-agreement the row is written from the profile and the name is never read.
-On disagreement, or on a collection whose rows use more than one column,
-the changeset fails naming the collection and the remedy (re-embed under
-the profile). Content type and owner are taken from the name exactly once
-here, as the last parse; `quarantine-` becomes `lifecycle_state =
-'quarantine'` with the base content type. Grandfathered two-segment names
-are backfilled the same way and keep their flag.
+**3. The one-time backfill, which never wedges an upgrade.** Two
+changesets, in order, and neither can fail on data: the engine wraps any
+Liquibase failure in `MigrationException` and refuses to boot, which on
+the cloud is the single live environment and on a laptop is a bricked
+`nx upgrade`. The standing rule for cleanup migrations (2026-08-16) is
+warn loudly, delete garbage, constrain after, never abort. An earlier
+cut of this design refused on disagreement; that was wrong.
+
+The first changeset sweeps ghosts: a `catalog_collections` row with zero
+`nexus.chunks` rows, zero `document_chunks` manifest rows, and zero
+aspect, highlight, queue, or topic references is deleted, counts reported
+with `RAISE NOTICE` (153 of 223 rows on this tenant). A row still
+referenced anywhere is kept and reported, never guessed at.
+
+The second walks every surviving row. `content_type` and `owner_id` come
+from the name, the last parse this codebase performs. `embedding_model`
+comes from the name's token when that token's dimension equals the
+collection's stored dimension in `nexus.collection_vector_stats` (one row
+per collection, derived from the non-null vector column). When they
+disagree, or a collection has two dimensions, the row keeps the name's
+attributes, gets `lifecycle_state = 'disputed'`, and is reported; a
+disputed collection is excluded from bare-prefix corpus fan-out and shown
+red by `nx doctor` with the remedy (re-index under the current profile).
+Measured today, zero live rows would be disputed. NOT NULL, the FK to
+`embedding_models`, and the CHECKs are added after this rewrite, so the
+constraining step cannot fail. `quarantine-` prefixes become
+`lifecycle_state = 'quarantine'` with the base content type. Grandfathered
+two-segment names are backfilled the same way and keep their flag.
 
 **4. Engine reads the row.** `CollectionRegistry` caches the row. The six
 engine parse sites resolve model, dimension, and content type from it.
@@ -333,7 +364,14 @@ mode cannot serve", which is the true condition. The stub-insert paths in
 `AspectRepository` and `TaxonomyRepository` are deleted; a write against an
 unregistered collection fails loud.
 
-**5. Client resolves through the catalog, in two moves.** First the
+**5. Client resolves through the catalog, in two moves.** The client's
+collection cache (`mcp_infra.get_collection_names`) is fed by
+`/v1/vectors/stats` (name, dim, count), so the cheapest repoint is to
+join the catalog attributes (`content_type`, `owner_id`,
+`embedding_model`, `lifecycle_state`) into that response and keep the one
+round trip and the existing TTL cache; switching the cache to the catalog
+list is the alternative. Either way the row, not the name, is what the
+client reads. First the
 funnel: every raw string site (about sixty) is rewritten to call one of
 three helpers, `collection_content_type(name)`, `collection_model(name)`,
 `collection_owner(name)`, which at that point still parse; this is
@@ -374,7 +412,7 @@ zero information gain.
 
 ### Alternative 1: Repair the table, keep parsing
 
-Backfill the columns and constrain them, but leave the twelve parsers.
+Backfill the columns and constrain them, but leave the parsers.
 Rejected: the parsers are the read path, so a future write that gets the
 name wrong is still believed. This is the status quo with better decor.
 
@@ -410,10 +448,11 @@ the fact and lets the constraint refuse the lie.
 
 ### Risks and Mitigations
 
-- **A collection's stored vectors disagree with the profile.** This is the
-  GH #667 class surfacing at upgrade time. Mitigation: the backfill refuses
-  and names the collection; it never guesses from the name. The remedy is
-  re-embedding, which the RDR-185 ladder already knows how to sequence.
+- **A collection's stored vectors disagree with its name's model.** This
+  is the GH #667 class surfacing at upgrade time. Mitigation: the backfill
+  marks the row `disputed`, keeps it out of fan-out, and names it in
+  doctor with the re-index remedy; it never guesses a model from a
+  dimension (1024 maps to three Voyage tokens) and never wedges the walk.
 - **Cloud estate has a tenant with two models for one content type.**
   Would falsify the premise. Mitigation: the read-only grouping query in
   Critical Assumptions runs against the cloud before the changeset is
@@ -432,9 +471,10 @@ the fact and lets the constraint refuse the lie.
 
 - Register with a wrong model: 422, message carries the profile's model.
 - Write against an unregistered collection: 4xx, no stub row.
-- Backfill disagreement: changeset fails, engine does not boot on that
-  tree, error names the collection. This is deliberate: silently
-  proceeding is the fiasco.
+- Backfill disagreement: the row is marked `disputed`, reported by
+  `RAISE NOTICE` and by `nx doctor`, excluded from fan-out, and the
+  engine boots. The walk never fails on data (2026-08-16 directive);
+  "loud" is the notice plus the doctor red, not a refused upgrade.
 
 ## Implementation Plan
 
@@ -463,7 +503,9 @@ walks the tree's own changeset over a populated store.
 3. `register_collection` writes from the profile; `nx init` writes the
    profile.
 4. Engine suite: profile write, refused register, backfill agree and
-   refuse cases, each against a real PG.
+   disputed cases (a fixture collection whose stored dimension disagrees
+   with its name), ghost sweep with a still-referenced row kept, each
+   against a real PG.
 
 ### Phase 2: Engine reads the row
 
@@ -507,7 +549,7 @@ None.
 
 ## Test Plan
 
-- Engine: changeset agree/refuse cases; register 422; registry eviction;
+- Engine: changeset agree/disputed/ghost cases; register 422; registry eviction;
   parse census at target count.
 - Client: corpus resolution by content type and lifecycle state; model
   grouping by column; census at target count; exporter and reconciler
@@ -521,9 +563,9 @@ None.
 ### Testing Strategy
 
 The two census gates are the acceptance signal: each phase lowers its pin
-and the gate refuses a regression. The backfill's refusal branch is tested
+and the gate refuses a regression. The backfill's disputed branch is tested
 with a deliberately mis-embedded fixture collection, not asserted from the
-happy path.
+happy path, and the walk is asserted to complete on that fixture.
 
 ### Performance Expectations
 
@@ -561,7 +603,8 @@ is not deferred.
 - **Build tool compatibility**: N/A.
 - **Licensing**: N/A.
 - **Deployment model**: the changeset walks on the cloud via the PITR fork
-  rehearsal first (`deploy/RESTORE.md`), because it can refuse.
+  rehearsal first (`deploy/RESTORE.md`) to read the ghost and disputed
+  counts before they run live; the walk itself cannot fail.
 - **IDE compatibility**: N/A.
 - **Incremental adoption**: phases are independently shippable; Phase 3
   tolerates a pre-Phase-1 engine by failing loud on the missing filter.
