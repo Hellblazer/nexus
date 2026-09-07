@@ -690,6 +690,8 @@ nx enrich aspects-list --collection knowledge__delos --json --limit 0
 
 Companion to `aspects-show` at the collection level (preview / audit shape) instead of single-record detail. With `--missing` the verb inverts to gap detection: catalog rows in the collection that do not have a matching aspect row.
 
+**`--missing` refuses a collection the catalog does not know (nexus-ngpx0).** A bare subject name (e.g. `knowledge__dt-papers` written where the physical four-segment collection name belongs) returns zero catalog rows and therefore zero gaps; reporting "no missing aspects" for that state is a vacuous pass, not a real audit — measured on a collection where 54 of 58 rows had no aspect record. `--missing` now raises naming the collection and pointing at `nx collection list` for the physical name instead.
+
 **`--missing` uses the gap-fill's own key (7.21.0, nexus-bocft).** A catalog entry is matched to `document_aspects.source_path` by `file_path or title` — the identity the store hook mints and the identity `nx enrich aspects` bills by. Before 7.21.0 the audit keyed on `file_path` alone and so silently dropped every title-only note: on a 416-entry knowledge collection with 10 file-path entries it reported 1 gap where the gap-fill would dispatch 407. The audit also reports **orphaned aspect rows** — rows in T2 that no current catalog entry claims (identities recorded under an earlier registration rule); a large count there is why "437 rows but 407 gaps" can both be true, and those rows never cover a gap. `--json` emits `{collection, entries, aspect_rows, gaps: [{tumbler, title, file_path, identity}], orphaned_aspect_rows: [...]}`.
 
 | Flag | Description |
@@ -3485,7 +3487,18 @@ Start a persistent `mineru-api` FastAPI process for PDF extraction. Stores PID f
 nx mineru stop
 ```
 
-Stop the running MinerU server. Sends SIGTERM, waits up to 10s.
+Stop the running MinerU server: SIGTERM, then SIGKILL after 10s, sent to
+the PID file's whole process group — MinerU's multiprocessing workers and
+their `resource_tracker` children need the signal too, or POSIX semaphores
+leak into the global namespace (nexus-ze2a). The PID is judged before it
+is signalled (nexus-5yrob): a PID file left by an unclean death can name a
+PID the OS has since reused for something else, so `stop` re-checks the
+live command line first and refuses to signal it if it is no longer a
+`mineru-api` (the stale PID file is removed instead). When the command
+line cannot be read at all — a `ps` timeout reads the same as a vanished
+process — `stop` signals nothing and keeps the PID file rather than risk
+orphaning a server that is still ours; re-run `nx mineru stop`, or signal
+the group yourself.
 
 ### nx mineru status
 

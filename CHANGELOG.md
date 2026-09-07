@@ -6,6 +6,113 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.36.0] - 2026-09-07
+
+Pairs with engine-service-v0.1.108 (additive).
+
+### Catalog: trash and restore (nexus-dkymw, nexus-xavu7)
+
+- `nx catalog trash [--limit N]` lists this tenant's tombstoned documents;
+  `nx catalog restore TUMBLER_OR_TITLE` clears a tombstone (title
+  resolution falls back to the trash listing when the live resolver
+  misses it). Closes nexus-xavu7: three operator-facing sites told a user
+  to "restore the trashed document(s)" with no surface to do it. Engine:
+  `POST /v1/catalog/restore`, `GET /v1/catalog/trash`, the first callers of
+  the RDR-156 P1.2 `nexus.document_restore` function since it shipped.
+- `_resolve_restore_target` no longer resolves a title present both live
+  and in the trash to the live copy and hides the restorable one — it now
+  refuses as ambiguous and names every tombstoned tumbler.
+- `nx t3 gc`'s orphan-sweep alive-set now protects a tombstoned-but-not-yet-
+  purged document's chashes, superseding nexus-mqd6t's original immediate-
+  exclusion filter for that one read (Sam's second 2026-09-07 ruling on
+  nexus-dkymw): its independent chunk-`indexed_at` clock can no longer
+  reap a just-tombstoned document's chunks inside `nx catalog restore`'s
+  recovery window. The MCP `store_delete` tool and `nx collection
+  delete`/`prune` still bypass the window entirely (they never tombstone,
+  or hard-delete in the same call); docs narrowed to name exactly those
+  two remaining carve-outs.
+
+### CLI: `nx catalog setup` retired from every remaining remedy (nexus-owna8)
+
+The SessionStart RDR hook, `mcp_infra`, `health`, `enrich`, `dt`, `t3`,
+`doctor`, `upgrade`, and `catalog` no longer point an operator at the
+retired verb — the service owns the catalog now; populate with
+`nx index repo` / `nx store put`.
+
+### PDF and MinerU
+
+- Auto PDF-extraction mode skips the Docling pass once the quick formula
+  screen has already routed a document to MinerU, instead of running both
+  and discarding Docling's output — measured 24s saved ahead of a 32s
+  MinerU run on a 6-page paper (nexus-m5ym5).
+- `nx mineru stop` now signals the PID file's whole process group (so
+  MinerU's multiprocessing workers and their resource trackers exit too),
+  refuses to signal a PID the OS has recycled for something other than
+  `mineru-api`, and leaves an inconclusive command read alone rather than
+  orphaning a server that may still be ours (nexus-5yrob, nexus-aabdr,
+  nexus-ajfld, nexus-8sb6x). `nx doctor` / the post-upgrade sweep now
+  re-check the live command before treating a PID-file MinerU server as
+  real, and flag one whose interpreter lies outside the current
+  generation as stale — a server spawned from a develop checkout's
+  `.venv` previously survived three generation flips unnoticed
+  (nexus-ho9d2, nexus-ydqwo).
+
+### Aspects
+
+`nx enrich aspects-list --missing` refuses a collection the catalog does
+not know instead of reporting false full coverage (nexus-ngpx0): a bare
+subject name (rather than the physical collection name `nx collection
+list` prints) returned zero catalog rows and therefore zero gaps, on a
+collection where 54 of 58 rows actually had none.
+
+### Index
+
+`nx index repo` registers `docs`/`rdr` collections with the effective
+write-time embedding model instead of a hardcoded `voyage-context-3`,
+closing a 422 a local-mode (bge) install would otherwise hit the moment
+the engine started enforcing profile-vs-write-model agreement
+(nexus-ft04v.34).
+
+### RDR lifecycle: gate loop, fix surface, and one round table (nexus-zbdm0, nexus-g7zgw, nexus-dv7gw, nexus-yxo2l)
+
+- `nx rdr preamble rdr-fix <id>` is the new fix step: prints the latest
+  gate's findings with their `Sites:` lists, the diff range and fix
+  commits since the gated commit, whether a fix-check record exists for
+  the file's current tip, the pre-edit research title, and the fix rules;
+  `/conexus:rdr-fix` and the `rdr-fix` skill wrap it.
+- `nx rdr preamble rdr-verdict <id> <critique-title>` computes a gate's
+  outcome from the stored critique instead of by hand: Critical and
+  Significant issue blocks and `Ship-blocker: yes` marks are counted, the
+  larger of each self-reported and counted number wins, and
+  `review-rounds.toml`'s round-numbered rdr-gate rule decides
+  PASSED/BLOCKED.
+- `nx rdr preamble rdr-gate`'s re-gate block now fires after every prior
+  gate record, PASSED or BLOCKED, surfaces the prior round's findings via
+  a Layer 0 sweep, and adds a diff-scoped Fix check layer ahead of Layer
+  1. `nx rdr preamble rdr-audit` leads with a Gate loop health block:
+  rounds and Criticals per round per gated RDR, flagging a loop that ran
+  past the round cap.
+- `src/nexus/tables/review-rounds.toml` is now the single statement of
+  the code-review, plan-audit, and rdr-gate round bounds; the surfaces
+  that used to hardcode them cite it instead.
+
+### Developer tooling
+
+- One engine build lease per box, shared across worktrees via the git
+  common dir, and a content-keyed cache for the stamped gate jar, so a
+  fresh worktree with an unchanged `service/` tree gets a copy instead of
+  a nine-minute rebuild (nexus-g6xpa).
+- Raw-SQL test-tree conversions onto typed jOOQ DSL continued (batches
+  9-12, nexus-cbo4a): the tree-wide raw-SQL ceiling fell from 1661 to
+  1245 sites across batches 9-11, with batch 12 continuing the trend.
+  Role-level `search_path` reliance was deleted from the test tree
+  entirely (Sam's directive, nexus-zrcj7), surfacing one real production
+  bug along the way — `CatalogRepository.deferManifestChunkFk` ran an
+  unqualified `SET CONSTRAINTS` name that only resolved via search_path.
+- The recall-parity gate now accepts a documented, measured cost: the
+  tail-ranking swap a split embedding-model group shows against
+  pre-batching fan-out (nexus-atylb, test-only).
+
 ## [7.35.0] - 2026-09-07
 
 Paired with engine-service-v0.1.107 (`REQUIRED_ENGINE_VERSION` 0.1.107,
