@@ -5819,9 +5819,19 @@ public final class CatalogRepository {
     /**
      * Get chashes for a physical_collection via manifest join.
      *
-     * <p>This is the T3 GC ALIVE-SET ({@code nx t3 gc}, {@code
-     * commands/t3.py}) and the indexer's orphan-quarantine prune ({@code
-     * indexer.py}'s prune step). nexus-mqd6t BUG 1 originally found this
+     * <p>This is the T3 GC ALIVE-SET for the {@code nx t3 gc} CLI verb
+     * ({@code commands/t3.py}'s {@code gc_cmd}), which diffs T3 chunk chashes
+     * against this exact returned set to decide which chunks are orphan. It
+     * is NOT the indexer's own orphan-quarantine prune ({@code indexer.py}'s
+     * {@code _prune_deleted_files}): that path's actual delete decision runs
+     * through the server-side anti-join {@code nexus.gc_quarantine_orphans}
+     * (catalog-023 / vectors-005), which checks {@code
+     * catalog_document_chunks} row EXISTENCE only and never joins {@code
+     * deleted_at} — the client-side fallback that used to consult this
+     * method for orphan classification there was retired at RDR-191 Phase 6
+     * (2026-08-15, nexus-o8dil.33); today {@code indexer.py} calls this
+     * method only as an empty-manifest skip guard (nexus-oqku), never to
+     * classify a single chunk. nexus-mqd6t BUG 1 originally found this
      * joined {@code catalog_documents} but filtered only on {@code
      * physical_collection}, so a tombstoned document's chunks stayed in the
      * returned set and {@code nx t3 gc} treated their vectors as still
@@ -5836,11 +5846,19 @@ public final class CatalogRepository {
      * indexed_at} vs {@code --orphan-window}, independent of purge-trash's
      * {@code --older-than-days}) reap a just-tombstoned document's chunks
      * inside the recovery window, so a later {@code nx catalog restore}
-     * resurrected an empty shell. The {@code DELETED_AT} filter is DROPPED
-     * here: a tombstoned-but-not-yet-purged document's chashes stay in the
+     * resurrected an empty shell. The indexer's own prune was never at this
+     * risk — see above, it already tolerates tombstones by construction
+     * (a tombstoned document's manifest row still exists, deleted or not,
+     * so the existence-only anti-join never orphaned its chunks either
+     * way). The {@code DELETED_AT} filter is DROPPED here: a
+     * tombstoned-but-not-yet-purged document's chashes stay in the
      * alive-set until {@code nexus.purge_trash} physically reclaims the
      * {@code catalog_documents} row (at which point the join itself yields
-     * nothing for it — no explicit tombstone check is needed post-purge).
+     * nothing for it — no explicit tombstone check is needed post-purge). A
+     * chash orphaned from every LIVE document's manifest but still held by
+     * a tombstone's manifest row is reclaimed by {@code purge_trash}'s own
+     * chunk sweep once the tombstone ages past its window — never by
+     * {@code nx t3 gc}, which this fix now keeps hands off it until then.
      * This does NOT reopen mqd6t's read-invisibility concern: tombstoned
      * content still does not surface in search results or {@code
      * getManifest} ({@code liveParentDoc}/{@code liveDocument} filters,

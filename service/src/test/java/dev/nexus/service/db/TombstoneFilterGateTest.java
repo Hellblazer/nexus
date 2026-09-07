@@ -306,13 +306,20 @@ class TombstoneFilterGateTest {
             + "to restoreDocument — same direction and same rationale as agedTombstoneCount above"),
         new ExemptEntry("CatalogRepository.java", "chashesForCollection",
             "nexus-dkymw (Sam's 2026-09-07 ruling, SUPERSEDING nexus-mqd6t's original "
-            + "DELETED_AT.isNull() fix for this ONE read): this is the T3 GC alive-set (nx t3 "
-            + "gc, the indexer orphan-quarantine prune) — a tombstoned-but-not-yet-purged "
-            + "document's chashes must stay in the alive-set until nexus.purge_trash physically "
-            + "reclaims the catalog_documents row, or nx t3 gc's own --orphan-window clock can "
-            + "reap its chunks inside nx catalog restore's recovery window, resurrecting an "
-            + "empty shell. Read-invisibility (search results, getManifest) is unaffected — "
-            + "this is a GC input, not a read surface")
+            + "DELETED_AT.isNull() fix for this ONE read): this is the T3 GC alive-set for the "
+            + "nx t3 gc CLI verb, which diffs T3 chunk chashes against this exact returned set "
+            + "-- a tombstoned-but-not-yet-purged document's chashes must stay in the alive-set "
+            + "until nexus.purge_trash physically reclaims the catalog_documents row, or nx t3 "
+            + "gc's own --orphan-window clock can reap its chunks inside nx catalog restore's "
+            + "recovery window, resurrecting an empty shell. NOT the indexer's own orphan-"
+            + "quarantine prune: that path's delete decision runs through the server-side "
+            + "anti-join nexus.gc_quarantine_orphans (catalog-023), which checks "
+            + "catalog_document_chunks row existence only and never joined deleted_at, so it "
+            + "was already tombstone-tolerant by construction and was never at this risk -- the "
+            + "indexer calls this method only as an empty-manifest skip guard (nexus-oqku), not "
+            + "for orphan classification (the client-side fallback that once did was retired at "
+            + "RDR-191 Phase 6, 2026-08-15). Read-invisibility (search results, getManifest) is "
+            + "unaffected -- this is a GC input, not a read surface")
     );
 
     record WidenEntry(String file, String method, String rationale) {}
