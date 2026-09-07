@@ -501,7 +501,11 @@ class TestRequiredEngineVersion:
         # batch 9: vector/pg_trgm relocated into the nexus schema by
         # search-path-001, 33 functions qualified in search-path-002), and the
         # JVM UTC pin (nexus-9gaj7). 35 changesets over a v0.1.104 store.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 105)
+        # ->(0,1,106) 2026-09-06: v0.1.106 carries nexus-hxrcm, the write_many
+        # deadlock fix (metadata UPDATE batch ordered by chash, DeadlockRetry on
+        # the combined-write refresh, shared sweep gate on the metadata-only
+        # UPDATE surface on both paths). No changeset; a v0.1.105 store walks 0.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 106)
 
 
 class TestParseEngineVersion:
