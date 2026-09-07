@@ -1420,9 +1420,16 @@ class TestRdrGateLoopRemedies:
         """Skills are instructions; the why lives in the RDR and T2
         (feedback_no_prose_in_skills). No bead pointers or RDR-204 history in
         the sections the remedies added."""
+        fix_skill = SKILLS_DIR / "rdr-fix" / "SKILL.md"
+        fix_cmd = PLUGIN_DIR / "commands" / "rdr-fix.md"
         for path in (self.GATE_SKILL, self.RESEARCH_SKILL, self.ACCEPT_SKILL):
             text = path.read_text()
             assert "nexus-g7zgw" not in text, f"{path}: bead pointer in a skill"
+            assert "RDR-204" not in text, f"{path}: incident narrative in a skill"
+        # The new surfaces start clean: no bead pointer of any kind.
+        for path in (fix_skill, fix_cmd):
+            text = path.read_text()
+            assert not re.search(r"\bnexus-[0-9a-z]{5}\b", text), f"{path}: bead pointer in a skill"
             assert "RDR-204" not in text, f"{path}: incident narrative in a skill"
 
     def test_fix_step_has_its_own_surface(self) -> None:

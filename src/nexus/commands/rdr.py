@@ -2813,9 +2813,9 @@ def preamble_rdr_fix(args: tuple[str, ...]) -> None:
         print(
             f"> RDR-{t2_key} is past the gate (status `{status}`). Post-accept edits are "
             "not gate fixes; residual dispositions go through rdr-accept, and a design "
-            "change reopens the RDR."
+            "change reopens the RDR. Nothing to fix here."
         )
-        print()
+        return
 
     try:
         with _t2_client_factory() as client:
@@ -2905,12 +2905,45 @@ def preamble_rdr_fix(args: tuple[str, ...]) -> None:
     print()
 
 
+def _residual_count(content: str) -> int:
+    """Residuals in a gate record: bullets under ``residuals:`` (the live
+    shape), or one per ``residuals:`` key line carrying inline text. Never a
+    split on punctuation inside a residual's own prose (code review [24883]
+    finding 1)."""
+    count = 0
+    active = False
+    inline = 0
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("residuals:"):
+            active = True
+            if stripped.split(":", 1)[1].strip():
+                inline += 1
+            continue
+        if active and re.match(r"^[A-Za-z_][A-Za-z0-9_]*:", stripped):
+            active = False
+            continue
+        if active and stripped.startswith("-"):
+            count += 1
+    return count + inline
+
+
+#: The day the round cap shipped (nexus-g7zgw.2). Gate records dated before
+#: it are the uncapped baseline the doctrine's rise/fall test compares against.
+GATE_CAP_SHIPPED: str = "2026-09-07"
+
+
 def _gate_loop_health_lines(rows: list[dict]) -> list[str]:
     """Per gated RDR: rounds, the Criticals-per-round series read from the
     prior chain plus the record itself, the residual count, and a flag when
-    the loop ran past the round cap (nexus-zbdm0; the counter-metric
-    conexus/skills/orchestration/SKILL.md requires of any bound)."""
+    the loop ran past the round cap. Then the doctrine's own test
+    (conexus/skills/orchestration/SKILL.md § bounds): across RDRs gated
+    before and since :data:`GATE_CAP_SHIPPED`, findings per round must rise
+    while rounds per RDR fall; when both fall the bound is suppressing recall
+    (nexus-zbdm0; critique [24884] Critical 1)."""
     out: list[str] = []
+    before: list[tuple[int, float]] = []
+    since: list[tuple[int, float]] = []
     for row in sorted(rows, key=lambda r: str(r.get("title", ""))):
         title = str(row.get("title", ""))
         m = re.match(r"^(\d+)-gate-latest$", title)
@@ -2926,11 +2959,18 @@ def _gate_loop_health_lines(rows: list[dict]) -> list[str]:
             series.append(c.group(1) if c else "?")
         latest_c = (_preamble_parse_t2_field(content, "critical_count") or "").strip()
         series.append(latest_c if latest_c.isdigit() else "?")
-        rounds = len(entries) + 1
-        residuals = [x for x in re.split(r"[;\n]", _t2_field_block(content, "residuals")) if x.strip()]
+        # The critique records are the count nobody retypes; the chain can
+        # undercount (deep critique [24873]), so the larger wins, exactly as
+        # in _gate_round_lines.
+        prefix = f"{rdr_id}-gate-critique-"
+        critique_count = sum(
+            1 for r in rows if isinstance(r, dict) and str(r.get("title", "")).startswith(prefix)
+        )
+        rounds = max(len(entries) + 1, critique_count)
+        n_res = _residual_count(content)
         line = (
             f"- RDR-{rdr_id}: {rounds} round{'s' if rounds != 1 else ''}; "
-            f"Criticals per round: {', '.join(series)}; residuals: {len(residuals)}"
+            f"Criticals per round: {', '.join(series)}; residuals: {n_res}"
         )
         if rounds > GATE_MAX_ANY_CRITICAL_ROUNDS + 1:
             line += (
@@ -2938,6 +2978,39 @@ def _gate_loop_health_lines(rows: list[dict]) -> list[str]:
                 "check whether findings per round fell while rounds kept coming"
             )
         out.append(line)
+        known = [int(x) for x in series if x.isdigit()]
+        if known:
+            date = (_preamble_parse_t2_field(content, "date") or "").strip()
+            bucket = since if date >= GATE_CAP_SHIPPED else before
+            bucket.append((rounds, sum(known) / len(known)))
+    if not out:
+        return out
+    out.append("")
+
+    def _mean(pairs: list[tuple[int, float]], i: int) -> float:
+        return sum(p[i] for p in pairs) / len(pairs)
+
+    if before and since:
+        r_b, r_s = _mean(before, 0), _mean(since, 0)
+        f_b, f_s = _mean(before, 1), _mean(since, 1)
+        out.append(
+            f"Bound test (RDRs gated before {GATE_CAP_SHIPPED}: {len(before)}; since: {len(since)}): "
+            f"rounds per RDR {r_b:.1f} -> {r_s:.1f}; Criticals per round {f_b:.2f} -> {f_s:.2f}."
+        )
+        if r_s < r_b and f_s < f_b:
+            out.append(
+                "BOTH FELL: the round cap may be suppressing recall. Revert to full-review "
+                "rounds for the next gate and surface it (orchestration doctrine)."
+            )
+        elif r_s <= r_b and f_s >= f_b:
+            out.append("Rounds fell and findings per round did not: the bound is doing its job.")
+        else:
+            out.append("Mixed: rounds did not fall; the cap is not the limiting factor yet.")
+    else:
+        out.append(
+            f"Bound test: not yet measurable ({len(before)} RDRs gated before {GATE_CAP_SHIPPED}, "
+            f"{len(since)} since); it needs both sides."
+        )
     return out
 
 

@@ -2036,6 +2036,7 @@ class TestRdrFixPreamble:
         monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
         out = _runner().invoke(rdr, ["preamble", "rdr-fix", "--", "204"]).output
         assert "past the gate" in out and "accepted" in out
+        assert "#### Before the edit" not in out, "past the gate, the instructions do not print"
 
     def test_unreachable_t2_is_named(self, rdr_env, monkeypatch):
         import nexus.commands.rdr as rdr_mod
@@ -2067,7 +2068,8 @@ class TestRdrAuditGateLoopHealth:
         fake = _FakeT2ResearchClient({
             "204-gate-latest": (
                 "outcome: \"PASSED\"\ncritical_count: 0\nsignificant_count: 1\n"
-                "residuals: one; two\n"
+                "residuals:\n  - Finalization Gate count is stale; disposition at accept: pointer, no number\n"
+                "  - a second residual\n"
                 "prior: [9] (BLOCKED 3C), [8] (PASSED 0C 2S), [7] (BLOCKED 1C 2S), [6] (PASSED 0C 3S), [5] (1C)\n"
             ),
             "150-gate-latest": "outcome: \"PASSED\"\ncritical_count: 0\n",
@@ -2083,6 +2085,49 @@ class TestRdrAuditGateLoopHealth:
         assert "residuals: 2" in out
         assert "cap did not end the loop" in out
         assert "RDR-150: 1 round" in out
+
+    def test_bound_test_flags_both_falling(self, rdr_env, monkeypatch):
+        """The doctrine's signature: rounds per RDR fell AND findings per
+        round fell since the cap shipped."""
+        import nexus.commands.rdr as rdr_mod
+
+        fake = _FakeT2ResearchClient({
+            "100-gate-latest": "outcome: \"PASSED\"\ndate: \"2026-08-01\"\ncritical_count: 0\nprior: [1] (BLOCKED 3C), [2] (BLOCKED 2C)\n",
+            "101-gate-latest": "outcome: \"PASSED\"\ndate: \"2026-08-02\"\ncritical_count: 1\nprior: [3] (BLOCKED 2C)\n",
+            "300-gate-latest": "outcome: \"PASSED\"\ndate: \"2026-09-08\"\ncritical_count: 0\n",
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        out = _runner().invoke(rdr, ["preamble", "rdr-audit"]).output
+        assert "Bound test (RDRs gated before 2026-09-07: 2; since: 1)" in out, out
+        assert "BOTH FELL" in out
+
+    def test_bound_test_needs_both_sides(self, rdr_env, monkeypatch):
+        import nexus.commands.rdr as rdr_mod
+
+        fake = _FakeT2ResearchClient({
+            "300-gate-latest": "outcome: \"PASSED\"\ndate: \"2026-09-08\"\ncritical_count: 0\n",
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        out = _runner().invoke(rdr, ["preamble", "rdr-audit"]).output
+        assert "not yet measurable (0 RDRs gated before" in out
+
+    def test_round_count_prefers_critique_records(self, rdr_env, monkeypatch):
+        import nexus.commands.rdr as rdr_mod
+
+        fake = _FakeT2ResearchClient({
+            "150-gate-latest": "outcome: \"PASSED\"\ncritical_count: 0\n",
+            **{f"150-gate-critique-2026-09-0{i}": "x" for i in range(1, 5)},
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        out = _runner().invoke(rdr, ["preamble", "rdr-audit"]).output
+        assert "RDR-150: 4 rounds" in out and "cap did not end the loop" in out
+
+    def test_residual_count_is_by_bullet_not_punctuation(self):
+        from nexus.commands.rdr import _residual_count
+
+        assert _residual_count("residuals:\n  - one; with a semicolon\ncommit: abc\n") == 1
+        assert _residual_count("residuals: inline one\n") == 1
+        assert _residual_count("outcome: PASSED\n") == 0
 
     def test_unreachable_t2_is_named_not_silent(self, rdr_env, monkeypatch):
         import nexus.commands.rdr as rdr_mod

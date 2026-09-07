@@ -13,7 +13,7 @@ $ARGUMENTS
 
 **Targeted load**: parse the **numeric ID** from `$ARGUMENTS` and run, via the
 Bash tool, `nx rdr preamble rdr-fix -- <ID>` (literal argv token). Never splice
-raw `$ARGUMENTS` into a shell-quoted line (nexus-ybvyo).
+raw `$ARGUMENTS` into a shell-quoted line.
 
 ## Action
 

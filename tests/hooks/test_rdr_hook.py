@@ -218,3 +218,23 @@ def test_session_start_names_rdrs_with_unchecked_fix_edits(rdr_hook_module, tmp_
     with pytest.raises(SystemExit):
         mod.main()
     assert "rdr-fix" not in capsys.readouterr().out
+
+
+def test_gated_commits_key_on_the_bare_number(rdr_hook_module, monkeypatch) -> None:
+    mod = rdr_hook_module
+    rows = [
+        {"title": "RDR-105-gate-latest", "content": "commit: abc1234\n"},
+        {"title": "097-gate-latest", "content": "outcome: PASSED\ncommit: \"def5678\"\n"},
+        {"title": "204", "content": "status: draft\n"},
+    ]
+    monkeypatch.setattr(mod, "_fetch_rdr_rows", lambda repo: rows)
+    assert mod._load_gated_commits("nexus") == {"105": "abc1234", "97": "def5678"}
+
+
+def test_uncommitted_rdr_file_is_not_reported(rdr_hook_module, tmp_path) -> None:
+    mod = rdr_hook_module
+    (tmp_path / "docs" / "rdr").mkdir(parents=True)
+    f = tmp_path / "docs" / "rdr" / "rdr-204-example.md"
+    f.write_text("---\nstatus: draft\n---\n")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    assert mod._unchecked_fix_edits(tmp_path, [f], {"204": "draft"}, {"204": "abc1234"}) == []
