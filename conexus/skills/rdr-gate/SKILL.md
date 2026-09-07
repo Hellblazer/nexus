@@ -86,6 +86,8 @@ The fix check is a precondition and never counts toward the round cap.
 
 ### Fixing findings
 
+Fixes go through `/conexus:rdr-fix <id>` (the rdr-fix skill); its preamble prints the findings with their Sites, the diff range and the pre-edit research title. The rules, restated:
+
 - A fix changes the fact the critic named and nothing else. New glosses,
   rationales, parentheticals and counts are a separate commit, gated separately.
 - Every clause a fix adds carries either a tool-produced quote from its source

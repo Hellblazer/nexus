@@ -302,6 +302,16 @@ rdr_skills:
       - "is this RDR ready"
     dispatches_to: [substantive-critic]
 
+  rdr-fix:
+    slash_command: /rdr-fix
+    command_file: commands/rdr-fix.md
+    description: "Fix a gated RDR's findings: sites, diff since the gated commit, pre-edit research entry, fix check"
+    triggers:
+      - "fix the gate findings"
+      - "address the critique"
+      - "fix RDR"
+    dispatches_to: [substantive-critic]
+
   rdr-accept:
     slash_command: /rdr-accept
     command_file: commands/rdr-accept.md

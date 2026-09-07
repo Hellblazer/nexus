@@ -1425,6 +1425,22 @@ class TestRdrGateLoopRemedies:
             assert "nexus-g7zgw" not in text, f"{path}: bead pointer in a skill"
             assert "RDR-204" not in text, f"{path}: incident narrative in a skill"
 
+    def test_fix_step_has_its_own_surface(self) -> None:
+        """nexus-zbdm0: the fix step is a command and a skill, and the gate
+        skill points at it instead of carrying the rules alone."""
+        fix_skill = SKILLS_DIR / "rdr-fix" / "SKILL.md"
+        fix_cmd = PLUGIN_DIR / "commands" / "rdr-fix.md"
+        assert fix_skill.exists() and fix_cmd.exists()
+        assert "nx rdr preamble rdr-fix" in fix_cmd.read_text()
+        skill = fix_skill.read_text()
+        for phrase in ("nothing else", "inferred, not read", "census", "before the edit", "fix-check-"):
+            assert phrase in skill, f"rdr-fix/SKILL.md lacks '{phrase}'"
+        assert "/conexus:rdr-fix" in self.GATE_SKILL.read_text()
+        lifecycle = (SKILLS_DIR / "using-nx-skills" / "SKILL.md").read_text()
+        assert "/conexus:rdr-fix" in lifecycle
+        registry = (PLUGIN_DIR / "registry.yaml").read_text()
+        assert "rdr-fix:" in registry and "commands/rdr-fix.md" in registry
+
     def test_accept_dispositions_residuals(self) -> None:
         text = self.ACCEPT_SKILL.read_text()
         assert "residuals:" in text

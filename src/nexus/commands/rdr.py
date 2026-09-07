@@ -2572,7 +2572,10 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
 # ---------------------------------------------------------------------------
 
 #: Matches a T2 research-finding title, e.g. "201-research-3".
-_RDR_RESEARCH_TITLE_RE = re.compile(r"^(\d+)-research-(\d+)$")
+# A title may carry a ": <summary>" suffix ("204-research-16: the Key
+# Discoveries bullet"); the seq scan must see it, or the next add lands on
+# seq 1 over sixteen existing entries (measured live, nexus-zbdm0).
+_RDR_RESEARCH_TITLE_RE = re.compile(r"^(\d+)-research-(\d+)(?::.*)?$")
 
 #: Bound on the "advance past a collision" retry loop in
 #: :func:`_rdr_research_add` — a defensive ceiling against looping forever
@@ -2749,6 +2752,193 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
             "> **Usage**: `nx rdr preamble rdr-research -- <id>` or "
             "`nx rdr preamble rdr-research -- add <id>`"
         )
+
+
+# ---------------------------------------------------------------------------
+# preamble rdr-fix — the fix step's own surface (nexus-zbdm0)
+# ---------------------------------------------------------------------------
+
+_FIX_RULES: tuple[str, ...] = (
+    "A fix changes the fact the critic named and nothing else; a gloss, rationale, "
+    "parenthetical or count is a separate commit with its own fix check.",
+    "Every clause the fix adds carries a tool-produced quote from its source, or the "
+    "marker \"inferred, not read\".",
+    "A count or a universal (never / always / only / nothing / every / the one / all) "
+    "needs a census of the whole surface, captured in the research entry as an enumeration.",
+    "Sweep every site in the finding's Sites: list; a fact lives in Problem Statement, "
+    "Research Findings, Technical Design and the Implementation Plan at once.",
+    "A Criterion 6 readability WARN is never closed inside a fix commit.",
+)
+
+
+def _git_out(repo_root: str, *args: str) -> str | None:
+    """stdout of a git command, or None when it fails."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", repo_root, *args], capture_output=True, text=True, timeout=20, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+@preamble.command("rdr-fix")
+@click.argument("args", nargs=-1)
+def preamble_rdr_fix(args: tuple[str, ...]) -> None:
+    """Print the fix-step context for an RDR: the latest gate's findings with
+    their Sites, the diff and fix commits since the gated commit, the
+    pre-edit research title, and the fix rules."""
+    repo_root, repo_name = _preamble_resolve_repo()
+    rdr_dir = _preamble_rdr_dir(repo_root)
+    rdr_path = Path(repo_root) / rdr_dir
+    args_str = " ".join(args).strip()
+    id_match = re.search(r"\d+", args_str)
+    if not id_match:
+        print("> **Usage**: `nx rdr preamble rdr-fix <id>`")
+        return
+    rdr_file = _preamble_find_rdr_file(rdr_path, id_match.group(0))
+    if not rdr_file:
+        print(f"> RDR not found for ID: `{id_match.group(0)}`")
+        return
+    fm, _text = _preamble_parse_frontmatter(rdr_file)
+    rdr_num = re.search(r"\d+", rdr_file.stem)
+    t2_key = rdr_num.group(0) if rdr_num else rdr_file.stem
+    status = str(fm.get("status", "")).strip()
+    rel = os.path.relpath(str(rdr_file), repo_root)
+    project = f"{repo_name}_rdr"
+
+    print(f"### Fix RDR-{t2_key} ({rdr_file.name}, status `{status or '?'}`)")
+    print()
+    if status.lower() not in ("", "draft", "open"):
+        print(
+            f"> RDR-{t2_key} is past the gate (status `{status}`). Post-accept edits are "
+            "not gate fixes; residual dispositions go through rdr-accept, and a design "
+            "change reopens the RDR."
+        )
+        print()
+
+    try:
+        with _t2_client_factory() as client:
+            latest = client.get(project=project, title=f"{t2_key}-gate-latest")
+            if not latest:
+                print(
+                    f"> No gate record for RDR-{t2_key}; there is nothing to fix. A finding "
+                    f"from a review goes through `nx rdr preamble rdr-research -- add {t2_key} ...`."
+                )
+                return
+            content = latest.get("content", "") if isinstance(latest, dict) else ""
+            outcome = (_preamble_parse_t2_field(content, "outcome") or "?").strip().upper()
+            date = _preamble_parse_t2_field(content, "date") or "?"
+            gated_commit = (_preamble_parse_t2_field(content, "commit") or "").strip()
+            critique_title = (_preamble_parse_t2_field(content, "critique") or "").strip()
+            critique_title = re.sub(r"\s*\[\d+\]\s*$", "", critique_title).rsplit("/", 1)[-1]
+            rows = client.get_all(project=project) or [] if callable(getattr(client, "get_all", None)) else []
+            prefix = f"{t2_key}-gate-critique-"
+            critique_count = sum(
+                1 for r in rows if isinstance(r, dict) and str(r.get("title", "")).startswith(prefix)
+            )
+            next_seq = _rdr_research_next_seq(rows, t2_key)
+            critique = client.get(project=project, title=critique_title) if critique_title else None
+            tip = (_git_out(repo_root, "log", "-1", "--format=%h", "--", rel) or "").strip()
+            fix_check_exists = (
+                client.get(project=project, title=f"{t2_key}-fix-check-{tip}") is not None if tip else False
+            )
+    except Exception as exc:  # noqa: BLE001 — T2 unreachable must be a visible note, never silence
+        print(f"> T2 unreachable ({type(exc).__name__}: {exc}); load `{project}/{t2_key}-gate-latest` by hand.")
+        return
+
+    print(f"Latest gate {date}: {outcome}." + (f" Critique: `{project}/{critique_title}`" if critique_title else ""))
+    print()
+    for line in _gate_round_lines(content, critique_count):
+        print(line)
+
+    findings = _critique_findings(str(critique.get("content", ""))) if isinstance(critique, dict) else []
+    print("#### Findings to fix (each at every site named)")
+    print()
+    if findings:
+        for f in findings:
+            print(f"- {f}")
+    elif critique_title:
+        print(f"The critique `{critique_title}` could not be loaded or holds no Critical/Significant findings; read it in full.")
+    else:
+        print("The gate record carries no `critique:` pointer; find the prior critique by hand.")
+    print()
+
+    print("#### Tree state")
+    print()
+    if gated_commit:
+        stat = (_git_out(repo_root, "diff", "--stat", f"{gated_commit}..HEAD", "--", rel) or "").strip().splitlines()
+        log = (_git_out(repo_root, "log", "--format=%h %s", f"{gated_commit}..HEAD", "--", rel) or "").strip().splitlines()
+        print(f"Gated commit `{gated_commit}`; RDR file tip `{tip or '?'}`.")
+        print(f"Range the fix check will read: `git diff {gated_commit}..HEAD -- {rel}`")
+        print("Changed since the gated commit: " + (stat[-1].strip() if stat else "no changes to the RDR file"))
+        if log:
+            print("Fix commits so far:")
+            for ln in log:
+                print(f"- {ln}")
+        if tip:
+            if fix_check_exists:
+                print(f"Fix-check record `{t2_key}-fix-check-{tip}` exists for the current tip.")
+            else:
+                print(f"No fix-check record yet for the current tip (`{t2_key}-fix-check-{tip}`).")
+    else:
+        print("The gate record carries no `commit:`; the fix check has no range. Name the gated tree by hand.")
+    print()
+
+    print("#### Before the edit")
+    print()
+    print(
+        f"1. Record the research entry first: `nx rdr preamble rdr-research -- add {t2_key} "
+        f"<finding tokens>` (it becomes `{project}/{t2_key}-research-{next_seq}`); the quote or "
+        "enumeration for every clause the fix will add lives there."
+    )
+    print("2. Edit the RDR at every site the finding names.")
+    print(
+        f"3. Commit, then `nx rdr preamble rdr-gate -- {t2_key}` prints the Fix check section; "
+        "dispatch it and store the verdict under the title it names before any re-gate."
+    )
+    print()
+    print("#### Rules")
+    print()
+    for rule in _FIX_RULES:
+        print(f"- {rule}")
+    print()
+
+
+def _gate_loop_health_lines(rows: list[dict]) -> list[str]:
+    """Per gated RDR: rounds, the Criticals-per-round series read from the
+    prior chain plus the record itself, the residual count, and a flag when
+    the loop ran past the round cap (nexus-zbdm0; the counter-metric
+    conexus/skills/orchestration/SKILL.md requires of any bound)."""
+    out: list[str] = []
+    for row in sorted(rows, key=lambda r: str(r.get("title", ""))):
+        title = str(row.get("title", ""))
+        m = re.match(r"^(\d+)-gate-latest$", title)
+        if not m:
+            continue
+        rdr_id = m.group(1)
+        content = str(row.get("content", ""))
+        prior = _t2_field_block(content, "prior")
+        entries = re.findall(r"\[\d+\]\s*(?:\(([^)]*)\))?", prior)
+        series: list[str] = []
+        for e in reversed(entries):
+            c = re.search(r"(\d+)C\b", e or "")
+            series.append(c.group(1) if c else "?")
+        latest_c = (_preamble_parse_t2_field(content, "critical_count") or "").strip()
+        series.append(latest_c if latest_c.isdigit() else "?")
+        rounds = len(entries) + 1
+        residuals = [x for x in re.split(r"[;\n]", _t2_field_block(content, "residuals")) if x.strip()]
+        line = (
+            f"- RDR-{rdr_id}: {rounds} round{'s' if rounds != 1 else ''}; "
+            f"Criticals per round: {', '.join(series)}; residuals: {len(residuals)}"
+        )
+        if rounds > GATE_MAX_ANY_CRITICAL_ROUNDS + 1:
+            line += (
+                f"; the cap did not end the loop (more than {GATE_MAX_ANY_CRITICAL_ROUNDS + 1} rounds): "
+                "check whether findings per round fell while rounds kept coming"
+            )
+        out.append(line)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -3018,6 +3208,20 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
             f"**Target project:** `{target}`"
             + (" (derived from current repo)" if not first_token else "")
         )
+        print()
+        print("### Gate loop health")
+        print()
+        try:
+            with _t2_client_factory() as client:
+                rows = client.get_all(project=f"{target}_rdr") or []
+            health = _gate_loop_health_lines([r for r in rows if isinstance(r, dict)])
+            if health:
+                for line in health:
+                    print(line)
+            else:
+                print(f"No gate records in `{target}_rdr`.")
+        except Exception as exc:  # noqa: BLE001 — an unreachable T2 is a named note, never a silent skip
+            print(f"Gate loop health: T2 unreachable ({type(exc).__name__}: {exc}).")
         print()
 
         home = Path.home()

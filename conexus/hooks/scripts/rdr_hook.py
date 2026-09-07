@@ -145,6 +145,58 @@ def _load_all_t2_statuses(repo_name: str) -> dict[str, str]:
     return statuses
 
 
+def _load_gated_commits(repo_name: str) -> dict[str, str]:
+    """``{rdr_id: commit}`` from every ``<id>-gate-latest`` T2 record that
+    carries a ``commit:`` field (nexus-zbdm0)."""
+    gated: dict[str, str] = {}
+    try:
+        from nexus.commands._helpers import default_db_path
+        from nexus.db.t2 import T2Database
+
+        with T2Database(default_db_path()) as db:
+            for entry in db.get_all(project=f"{repo_name}_rdr"):
+                title = entry.get("title", "")
+                if not title.endswith("-gate-latest"):
+                    continue
+                for line in entry.get("content", "").splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith("commit:"):
+                        val = stripped.split(":", 1)[1].strip().strip('"').strip("'")
+                        if val:
+                            gated[title[: -len("-gate-latest")]] = val
+                        break
+    except Exception:
+        pass
+    return gated
+
+
+def _unchecked_fix_edits(root: Path, rdr_files: list[Path], statuses: dict[str, str], gated: dict[str, str]) -> list[str]:
+    """Lines naming draft RDRs whose file tip is past the gated commit."""
+    lines: list[str] = []
+    for path in rdr_files:
+        rid = _extract_rdr_id(path)
+        if rid is None or rid not in gated:
+            continue
+        if statuses.get(rid, "draft") not in ("draft", "open"):
+            continue
+        try:
+            tip = subprocess.run(
+                ["git", "-C", str(root), "log", "-1", "--format=%h", "--", str(path)],
+                capture_output=True, text=True, timeout=10, check=False,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            continue
+        commit = gated[rid]
+        n = min(len(tip), len(commit))
+        if tip and n >= 7 and tip[:n] == commit[:n]:
+            continue
+        lines.append(
+            f"RDR-{rid}: edits since the gated commit {commit}; run /conexus:rdr-fix {rid} "
+            "before re-gating (fix check first)."
+        )
+    return lines
+
+
 def _rdr_status_counts(repo_name: str, preloaded: dict[str, str] | None = None) -> Counter[str]:
     """Status counts from T2. Uses preloaded statuses if available."""
     statuses = preloaded if preloaded is not None else _load_all_t2_statuses(repo_name)
@@ -194,7 +246,8 @@ def main() -> None:
     rdr_collection = _resolve_rdr_collection(root)
     indexed = bool(rdr_collection) and _collection_exists(rdr_collection)
 
-    counts = _rdr_status_counts(repo_name)
+    statuses = _load_all_t2_statuses(repo_name)
+    counts = _rdr_status_counts(repo_name, statuses)
     if counts:
         breakdown = ", ".join(f"{n} {s}" for s, n in counts.most_common())
         status_info = f"{len(rdr_files)} documents ({breakdown})"
@@ -216,6 +269,9 @@ def main() -> None:
             print(f"     Run: nx index repo {root}")
         else:
             print(f"     Run: nx index repo {root}")
+
+    for line in _unchecked_fix_edits(root, rdr_files, statuses, _load_gated_commits(repo_name)):
+        print(line)
 
     sys.exit(0)
 

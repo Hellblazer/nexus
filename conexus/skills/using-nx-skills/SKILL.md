@@ -65,7 +65,7 @@ Two return shapes (RDR-200, landing with the Phase 1 go-live; headless is the on
 - 3+ validated findings to keep → `/conexus:knowledge-tidy`
 - PDF to index → `/conexus:pdf-process`
 
-RDR lifecycle: `/conexus:rdr-create` → `/conexus:rdr-research` → `/conexus:rdr-gate` → `/conexus:rdr-accept` → (implementation phases) → `/conexus:rdr-close`. List and show: `/conexus:rdr-list`, `/conexus:rdr-show NNN`. Audit: `/conexus:rdr-audit`.
+RDR lifecycle: `/conexus:rdr-create` → `/conexus:rdr-research` → `/conexus:rdr-gate` → (`/conexus:rdr-fix` per finding, then re-gate) → `/conexus:rdr-accept` → (implementation phases) → `/conexus:rdr-close`. List and show: `/conexus:rdr-list`, `/conexus:rdr-show NNN`. Audit: `/conexus:rdr-audit`.
 
 Phase boundary inside an implementation arc: every phase-review bead, before close, runs `/conexus:phase-review-gate <rdr-id> --phase N`. Pass 1 enumerates the RDR's numbered §Approach items; Pass 2 validates that each has a closing-bead pointer (`ItemN=nexus-xxxx`) or an explicit `none` deferral. BLOCKED on any unaccounted item. Not optional. It prevents the silent scope reduction class (RDR-112 Phase 1 / nexus-52lb, 2026-05-15: the T3 daemon was silently dropped from a 6-bead close, found three phases later, at a cost of 2 to 3 days of replanning).
 
