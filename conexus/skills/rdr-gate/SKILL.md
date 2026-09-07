@@ -77,7 +77,9 @@ fix commits, and the T2 title for the verdict. Then:
    or Layer 3 with a FAIL open. Zero FAIL: proceed.
 
 The gate record written at the end carries `fix_check: <sha>`, and that sha must
-equal the record's `commit:`; a gate cannot cite a fix check of an older tree.
+equal the record's `commit:`; a gate cannot cite a fix check of an older tree. The
+preamble prints `Fix check pointer mismatch` on the next run when they differ,
+and accept refuses a record whose two shas differ.
 The fix check is a precondition and never counts toward the round cap.
 
 ### Fixing findings
@@ -192,8 +194,8 @@ If no collections found: "No prior RDRs indexed. Cross-project prior-art search 
 
 ### Gate Aggregation
 
-The round number comes from the preamble (`1 + len(prior chain)`; it never
-resets for the RDR's life). The critic's Verdict supplies `critical_count`,
+The round number comes from the preamble (the gate records so far, the latest
+plus its `prior:` chain, plus one; it never resets for the RDR's life). The critic's Verdict supplies `critical_count`,
 `significant_count` and `ship_blockers`.
 
 - Rounds 1 and 2: BLOCKED iff `critical_count > 0`. Significants never block.
@@ -201,6 +203,8 @@ resets for the RDR's life). The critic's Verdict supplies `critical_count`,
   Significant is a residual: the gate writes `outcome: PASSED` with one
   `residuals:` line per finding in the gate record, appends "Gate N residuals"
   to Revision History, and accept dispositions each one (rdr-accept skill).
+- A Verdict with no `ship_blockers` line is read as `ship_blockers = critical_count`
+  (the conservative default of `nexus.plans.audit_rounds`); never as zero.
 - Criterion 6 output is never a finding and never counted.
 - Warns only, or all pass → PASSED. Status remains Draft.
 

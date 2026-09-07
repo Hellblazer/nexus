@@ -277,6 +277,10 @@ The canonical structure (in emission order):
 - **Impact**: [Why it matters]
 - **Recommendation**: [How to fix]
 - **Evidence**: [Supporting references from nx store or analysis]
+- **Sites**: every file:line where the fact this issue names lives, so the
+  author sweeps an enumerated set rather than a remembered phrase (an RDR
+  states one fact in Problem Statement, Research Findings, Technical Design and
+  the Implementation Plan at once)
 - **Ship-blocker**: yes | no — "yes" only if shipping AS-IS violates the relay's
   stated acceptance bar, loses data, wedges an install, or breaks a published
   contract. Everything else is "no" and becomes a bead, not a reason to hold.

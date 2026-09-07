@@ -204,7 +204,7 @@ def _unbacked(
         if text is None:
             continue
         checked += 1
-        if ident not in text:
+        if not re.search(r"(?<![A-Za-z0-9_])" + re.escape(ident) + r"(?![A-Za-z0-9_])", text):
             bad.append((artifact, ident, rel, lineno))
     return bad, checked
 
@@ -302,6 +302,14 @@ def test_planted_unbacked_rdr_attribution_is_detected(tmp_path: Path) -> None:
     bad, checked = _unbacked(_attributions([planted]), {}, {}, rdrs)
     assert checked == 2
     assert [(a, i) for a, i, _, _ in bad] == [("RDR-103", "legacy_grandfathered_nonexistent")]
+
+
+def test_identifier_match_is_word_bounded() -> None:
+    """`chunk_id` attributed to an artifact that only says `chunk_ids` is unbacked."""
+    bad, checked = _unbacked([("RDR-999", "chunk_id", "x.md", 1)], {}, {}, {"RDR-999": "the chunk_ids column"})
+    assert checked == 1 and bad, "substring match would have passed this"
+    bad, _ = _unbacked([("RDR-999", "chunk_id", "x.md", 1)], {}, {}, {"RDR-999": "the `chunk_id` column"})
+    assert not bad
 
 
 def test_attribution_pattern_ignores_distant_verbs() -> None:

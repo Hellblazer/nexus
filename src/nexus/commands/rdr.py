@@ -1701,7 +1701,7 @@ def preamble_rdr_gate(args: tuple[str, ...]) -> None:
 
 _CRITIQUE_SECTION_RE = re.compile(r"^\s*#{1,3}\s*(critical|significant)\b", re.IGNORECASE)
 _CRITIQUE_ISSUE_RE = re.compile(r"^\s*#{1,6}\s*issue:\s*(.+)$", re.IGNORECASE)
-_CRITIQUE_DETAIL_RE = re.compile(r"^\s*[-*]\s*\*{0,2}(location|problem|recommendation|issue)\*{0,2}\s*:\s*(.+)$", re.IGNORECASE)
+_CRITIQUE_DETAIL_RE = re.compile(r"^\s*[-*]\s*\*{0,2}(location|problem|recommendation|issue|sites)\*{0,2}\s*:\s*(.+)$", re.IGNORECASE)
 _CRITIQUE_INLINE_RE = re.compile(r"^[-*#\s]*(?:\*\*)?(?:new\s+)?(?:critical|significant)\b", re.IGNORECASE)
 
 
@@ -1739,7 +1739,7 @@ def _critique_findings(text: str) -> list[str]:
                 out.append(f"Issue: {m.group(1).strip()}")
                 continue
             d = _CRITIQUE_DETAIL_RE.match(line)
-            if d and d.group(1).lower() in ("location", "recommendation", "issue"):
+            if d and d.group(1).lower() in ("location", "recommendation", "issue", "sites"):
                 out.append(f"  {d.group(1).capitalize()}: {d.group(2).strip()}")
                 continue
     if saw_sections:
@@ -1795,6 +1795,7 @@ def _preamble_regate_block(
             # title is what T2 keys on within this project.
             critique_title = critique_title.rsplit("/", 1)[-1]
             gated_commit = (_preamble_parse_t2_field(content, "commit") or "").strip()
+            fix_check_field = (_preamble_parse_t2_field(content, "fix_check") or "").strip()
             critique = None
             fetch_failed = False
             if critique_title:
@@ -1822,6 +1823,7 @@ def _preamble_regate_block(
         lines.append(f"Critique: `{project}/{critique_title}`")
     lines.append("")
     lines.extend(_gate_round_lines(content))
+    lines.extend(_fix_check_pointer_lines(fix_check_field, gated_commit))
 
     findings = _critique_findings(str(critique.get("content", ""))) if isinstance(critique, dict) else []
     if findings:
@@ -1875,8 +1877,9 @@ def _preamble_regate_block(
         lines.append("")
 
     lines.extend([
-        "**Layer 0 (survivor sweep, before Layer 3):** for every prior finding, grep the RDR "
-        "for the refuted phrasing AND the corrected one; every occurrence must agree. A "
+        "**Layer 0 (survivor sweep, before Layer 3):** for every prior finding, sweep every "
+        "site in its `Sites:` list; where a finding has none, grep the RDR for the refuted "
+        "phrasing AND the corrected one; every occurrence must agree. A "
         "fact lives in Problem Statement, Research Findings, Technical Design and the "
         "Implementation Plan at once, and the last two are where survivors hide. Brief "
         "the critic to verify each prior finding closed everywhere, then run a full-document "
@@ -1931,6 +1934,27 @@ def _gate_round_lines(gate_record: str) -> list[str]:
     return lines
 
 
+def _fix_check_pointer_lines(fix_check_field: str, gated_commit: str) -> list[str]:
+    """Flag a gate record whose ``fix_check:`` names a sha other than its
+    ``commit:`` (critique [24865] Critical 1: the invariant was prose-only and
+    already violated in the live RDR-204 record). The field may carry the
+    T2 pointer form ``<project>/<id>-fix-check-<sha> (note)``; the sha is
+    the token after ``fix-check-``."""
+    if not fix_check_field or not gated_commit:
+        return []
+    m = re.search(r"fix-check-([0-9a-f]{6,40})", fix_check_field)
+    sha = m.group(1) if m else fix_check_field.split()[0]
+    if sha == gated_commit or sha.startswith(gated_commit) or gated_commit.startswith(sha):
+        return []
+    return [
+        f"**Fix check pointer mismatch:** the gate record's `fix_check:` names `{sha}` but "
+        f"its `commit:` is `{gated_commit}`. The prior gate cited a fix check of an older "
+        "tree; run the fix check on the current diff before Layer 3, and accept refuses "
+        "this record until the two agree.",
+        "",
+    ]
+
+
 def _fix_check_lines(
     *, repo_root: str, t2_key: str, rel: str, gated_commit: str, changed: bool,
 ) -> list[str]:
@@ -1956,8 +1980,18 @@ def _fix_check_lines(
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return [f"Fix check: git log failed ({exc}); list the fix commits by hand."]
+    if log.returncode != 0 or tip.returncode != 0 or not tip.stdout.strip():
+        err = (log.stderr or tip.stderr).strip()[:160]
+        return [
+            "### Fix check (required before Layer 3)",
+            "",
+            f"Range: `git diff {gated_commit}..HEAD -- {rel}`",
+            f"The fix commits and the RDR file's tip sha could not be read (git log failed: {err}); "
+            "read them by hand with `git log --format=%h %s` on that range before dispatching the "
+            "fix check, and name the tip sha in the T2 title `{id}-fix-check-<sha>` yourself.",
+        ]
     commits = [ln for ln in log.stdout.strip().splitlines() if ln.strip()]
-    tip_sha = tip.stdout.strip() or "HEAD"
+    tip_sha = tip.stdout.strip()
     lines = [
         "### Fix check (required before Layer 3)",
         "",
@@ -1978,7 +2012,7 @@ def _fix_check_lines(
         "",
         f"Verdict goes to T2 `{t2_key}-fix-check-{tip_sha}` (project `<repo>_rdr`); the gate "
         f"record's `fix_check:` must name `{tip_sha}`, equal to its `commit:`. Any FAIL: fix, "
-        "re-run the fix check on the new diff. Do not enter Layer 3 with a FAIL open.",
+        "re-run the fix check on the new diff. Do not enter Layer 1 or Layer 3 with a FAIL open.",
     ])
     return lines
 

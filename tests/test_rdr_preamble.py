@@ -1794,7 +1794,7 @@ class TestRdrGateRoundAndFixCheck:
         assert f"fix" in out and fixed in out, "the fix commits are listed"
         assert f"204-fix-check-{fixed}" in out, "the T2 title carries the tip sha"
         assert "enumeration" in out and "universal" in out
-        assert "Do not enter Layer 3" in out
+        assert "Do not enter Layer 1 or Layer 3" in out
 
     def test_fix_check_not_required_when_nothing_changed(self, rdr_env, monkeypatch):
         gated = self._commit(rdr_env, self._BODY, "gated")
@@ -1803,6 +1803,56 @@ class TestRdrGateRoundAndFixCheck:
         assert "Fix check: not required" in out, out
         assert f"no change to the RDR file since `{gated}`" in out
         assert "### Fix check (required" not in out
+
+    def test_fix_check_pointer_mismatch_is_flagged(self, rdr_env, monkeypatch):
+        """critique [24865] Critical 1: `fix_check:` must name `commit:`'s sha."""
+        import nexus.commands.rdr as rdr_mod
+
+        gated = self._commit(rdr_env, self._BODY, "gated")
+        for field, flagged in (
+            (f"nexus_rdr/204-fix-check-df91f4072 (CLEAN)", True),
+            (f"nexus_rdr/204-fix-check-{gated}", False),
+            (gated, False),
+        ):
+            fake = _FakeT2ResearchClient({"204-gate-latest": (
+                f"outcome: \"PASSED\"\ndate: \"2026-09-07\"\ncommit: {gated}\nfix_check: {field}\n")})
+            monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda fake=fake: fake)
+            out = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"]).output
+            assert ("Fix check pointer mismatch" in out) is flagged, (field, out)
+
+    def test_fix_check_git_log_failure_never_yields_a_fake_sha(self, rdr_env, monkeypatch):
+        """code review [24866] Important 3: a failed `git log` must not print
+        `HEAD` as the tip sha the T2 title is keyed on."""
+        from nexus.commands.rdr import _fix_check_lines
+
+        root = str(rdr_env["repo_root"])
+        lines = _fix_check_lines(
+            repo_root=root, t2_key="204", rel="docs/rdr/nope.md",
+            gated_commit="0000000", changed=True,
+        )
+        joined = "\n".join(lines)
+        assert "fix-check-HEAD" not in joined
+        assert "could not be read" in joined
+
+    def test_regate_block_carries_the_critics_sites_lines(self, rdr_env, monkeypatch):
+        """code review [24866] Important 1: the Sites: line is what Layer 0 sweeps."""
+        import nexus.commands.rdr as rdr_mod
+
+        sha = self._commit(rdr_env, self._BODY, "gated")
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                f"outcome: \"BLOCKED\"\ndate: \"2026-09-07\"\ncommit: {sha}\n"
+                "critique: nexus_rdr/204-gate-critique-2026-09-07h\n"
+            ),
+            "204-gate-critique-2026-09-07h": (
+                "## Critical Issues\n\n### Issue: model_version never parsed\n"
+                "- **Location**: L471\n- **Sites**: L471, L254-257, L612\n"
+                "- **Recommendation**: cite indexer.py:790\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        out = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"]).output
+        assert "Sites: L471, L254-257, L612" in out, out
 
     def test_fix_check_with_unresolvable_commit_is_reported(self, rdr_env, monkeypatch):
         self._commit(rdr_env, self._BODY, "gated")

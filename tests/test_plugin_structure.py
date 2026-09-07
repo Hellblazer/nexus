@@ -1390,6 +1390,17 @@ class TestRdrGateLoopRemedies:
         cmd = self.GATE_CMD.read_text()
         assert "i.e. the prior gate was BLOCKED" not in cmd
         assert "Sites:" in cmd
+        critic = (PLUGIN_DIR / "agents" / "substantive-critic.md").read_text()
+        assert "- **Sites**:" in critic, "the canonical Issue format carries the Sites line"
+
+    def test_command_and_skill_agree_on_fix_check_scope(self) -> None:
+        cmd = self.GATE_CMD.read_text()
+        assert "research entry" in cmd, "the enumeration rule covers the cited research entry"
+        skill = self.GATE_SKILL.read_text()
+        assert "ship_blockers = critical_count" in skill, "a missing ship_blockers line defaults conservatively"
+        assert "Fix check pointer mismatch" in skill
+        accept = self.ACCEPT_SKILL.read_text()
+        assert "fix_check:" in accept and "not the record's `commit:`" in accept
 
     def test_fix_commit_rule_in_research_and_gate_skills(self) -> None:
         """Remedy 5: a fix changes the fact named and nothing else; glosses and
