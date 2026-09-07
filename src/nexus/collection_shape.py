@@ -346,7 +346,8 @@ def run_checks(
         if f.doc_count == 1:
             out.append(Finding(f.name, "one-document", "warn",
                                "exactly one document: a partition with no cross-document ranking",
-                               "move the document into the subject collection it belongs to"))
+                               "add the other documents on this subject, or move this one into "
+                               "the broader subject it belongs to"))
 
         # Rule 5: residue.
         if a.content_type == "knowledge" and _has_residue_token(a.owner_id):

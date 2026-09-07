@@ -1036,6 +1036,7 @@ nexus-5vn
 nexus-5vn.1
 nexus-5votw
 nexus-5votw.1
+nexus-5vvmd
 nexus-5xn3k
 nexus-5xn3k.1
 nexus-5xn3k.1.1
@@ -2651,6 +2652,7 @@ nexus-fiovt
 nexus-fiovt.1
 nexus-fix9t
 nexus-fiyv9
+nexus-fjc8v
 nexus-fju9d
 nexus-fju9d.1
 nexus-fjwxh
@@ -2757,6 +2759,7 @@ nexus-gcwq.1
 nexus-gcx2r
 nexus-gdb3
 nexus-gednd
+nexus-ger23
 nexus-gete7
 nexus-gev
 nexus-gev.1

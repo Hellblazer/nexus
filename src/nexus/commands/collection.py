@@ -74,9 +74,16 @@ def _shape_write_model() -> Callable[[str], str | None]:
     return effective_embedding_model_for_writes
 
 
+#: Human output lists at most this many collections per check before
+#: summarising the rest; ``--full`` or ``--json`` lifts the cap. 151 ghost
+#: rows on the first live run buried the six findings that needed a human.
+_SHAPE_MAX_LISTED_PER_CHECK: int = 10
+
+
 @collection.command("shape")
 @click.option("--json", "as_json", is_flag=True, help="Emit the report as JSON.")
-def shape_cmd(as_json: bool) -> None:
+@click.option("--full", is_flag=True, help=f"List every collection per check instead of the first {_SHAPE_MAX_LISTED_PER_CHECK}.")
+def shape_cmd(as_json: bool, full: bool) -> None:
     """Read-only shape audit of the whole collection SET against docs/collections.md.
 
     Distinct from ``nx collection audit NAME`` (the RDR-087 deep dive of one
@@ -115,12 +122,16 @@ def shape_cmd(as_json: bool) -> None:
     for check in sorted(by_check, key=lambda c: (by_check[c][0].rule, c)):
         items = by_check[check]
         click.echo(f"\n[rule {items[0].rule}] {check} ({len(items)})")
-        for f in items:
+        shown = items if full else items[:_SHAPE_MAX_LISTED_PER_CHECK]
+        for f in shown:
             target = f.collection or "(install)"
             rel = f" <> {f.related}" if f.related else ""
             click.echo(f"  {f.severity:<4} {target}{rel}")
             click.echo(f"       {f.message}")
             click.echo(f"       action: {f.action}")
+        hidden = len(items) - len(shown)
+        if hidden > 0:
+            click.echo(f"  ... and {hidden} more (--full or --json to list all)")
     click.echo("\nrules: docs/collections.md  (this command never writes)")
 
 

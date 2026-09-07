@@ -19,6 +19,7 @@ from click.testing import CliRunner
 from unittest.mock import MagicMock
 
 from nexus.commands import collection as _collection_mod
+from nexus.commands.collection import _SHAPE_MAX_LISTED_PER_CHECK
 from nexus.mcp.core import _FANOUT_MIN_COLLECTION_CHUNK_COUNT
 
 from nexus.collection_shape import (
@@ -321,6 +322,17 @@ class TestCli:
         assert res.exit_code == 0, res.output
         assert "placeholder-subject" in res.output and name in res.output
         assert "examined 1 collection" in res.output and "shape" in res.output
+
+    def test_human_output_caps_each_check_and_names_the_escape_hatch(self, monkeypatch) -> None:
+        n = _SHAPE_MAX_LISTED_PER_CHECK + 5
+        rows = [_filled(f"code__1-{i}__voyage-code-3__v1") for i in range(n)]  # all ghosts
+        res = self._run(monkeypatch, rows, [], {}, [])
+        assert res.exit_code == 0, res.output
+        assert f"ghost-row ({n})" in res.output
+        assert "... and 5 more (--full or --json to list all)" in res.output
+        res_full = self._run(monkeypatch, rows, [], {}, ["--full"])
+        assert "more (--full" not in res_full.output
+        assert res_full.output.count("catalog row with no chunks") == n
 
     def test_json_output(self, monkeypatch) -> None:
         name = "docs__default__voyage-context-3__v1"
