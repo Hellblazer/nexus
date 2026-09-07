@@ -931,7 +931,6 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/CombinedWriteRepositoryTest.java", 6),
         Map.entry("dev/nexus/service/DataTokenHandlerTest.java", 1),
         Map.entry("dev/nexus/service/DenseGateScanBudgetIntegrationTest.java", 8),
-        Map.entry("dev/nexus/service/ForeignKeyConstraintTest.java", 53),
         // nexus-cbo4a batch 9 item 0: 13 -> 18 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 18 -> 20 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         Map.entry("dev/nexus/service/GrantsNexusDiagViewAccessIntegrationTest.java", 20),
@@ -1209,8 +1208,20 @@ class RawSqlGateTest {
      * not yet rewired onto the shared version, a follow-up). The surviving 3 sites are
      * the same {@code ADD CONSTRAINT .. NOT VALID} / {@code VALIDATE CONSTRAINT} x2
      * shape as {@code CollectionRegistryFkExtraTest}'s identical helper.
+     *
+     * <p><b>nexus-cbo4a batch 10, file 4:</b> 1465 -&gt; 1412 (-53), {@code
+     * ForeignKeyConstraintTest.java} 53 -&gt; 0, its {@link #TEST_TREE_RAW_SQL_CEILING}
+     * entry REMOVED outright -- every seed insert, row-count read, and cascade/cross-
+     * tenant probe across topic_assignments/document_aspects/document_highlights/
+     * aspect_extraction_queue/catalog_document_chunks onto typed jOOQ DSL. Rewired
+     * onto the batch-10 {@code PgContainerHelper} helpers ({@code insertCollection}/
+     * {@code insertCatalogDocument}); {@code seedChunk}/{@code insertTopic}/{@code
+     * vector}/{@code chashAscii} stay local (this file's own dim/shape specifics).
+     * The one 32-hex-char legacy chash literal this file's own {@code hexChash}
+     * javadoc already documented as a "half-digest" oddity is preserved verbatim per
+     * this batch's no-value-change rule.
      */
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1465;
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1412;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

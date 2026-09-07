@@ -1,23 +1,29 @@
 package dev.nexus.service;
 
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.jooq.binding.Vector;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.*;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.postgresql.util.PSQLException;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.sql.Timestamp;
-import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.util.HexFormat;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -87,6 +93,7 @@ class ForeignKeyConstraintTest {
         // registration, so the collections are pre-seeded here rather than per-insert.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             String[][] seeds = {
                 {TENANT_A, "knowledge__a"}, {TENANT_A, "knowledge__b"}, {TENANT_A, "knowledge__c"},
                 {TENANT_A, "knowledge__d"}, {TENANT_A, "knowledge__q"}, {TENANT_A, "knowledge__qq"},
@@ -94,9 +101,7 @@ class ForeignKeyConstraintTest {
                 {TENANT_B, "knowledge__x"}, {TENANT_B, "knowledge__y"},
             };
             for (String[] s : seeds) {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
-                    + s[0] + "', '" + s[1] + "') ON CONFLICT (tenant_id, name) DO NOTHING");
+                PgContainerHelper.insertCollection(ctx, s[0], s[1]);
             }
         }
 
@@ -189,11 +194,14 @@ class ForeignKeyConstraintTest {
         // source_uri would trip its own NOT NULL check first) so ONLY doc_id fires.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            Exception ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.document_aspects " +
-                    "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, source_uri) VALUES " +
-                    "('" + TENANT_A + "', 'knowledge__a', 'path/not-nullable-doc-id.pdf', NOW(), 'v1', 'docling', 'file:///path/not-nullable-doc-id.pdf')")
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                        DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                        DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.SOURCE_URI)
+                    .values(TENANT_A, "knowledge__a", "path/not-nullable-doc-id.pdf", OffsetDateTime.now(), "v1",
+                        "docling", "file:///path/not-nullable-doc-id.pdf")
+                    .execute()
             );
             assertThat(ex.getMessage())
                 .as("document_aspects.doc_id must be NOT NULL (hygiene-001 step 1)")
@@ -207,11 +215,13 @@ class ForeignKeyConstraintTest {
         // nullable conversion -- it is NOT NULL again.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            Exception ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.aspect_extraction_queue " +
-                    "(tenant_id, collection, source_path, enqueued_at) VALUES " +
-                    "('" + TENANT_A + "', 'knowledge__q', 'path/not-nullable-queue.pdf', NOW())")
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID,
+                        ASPECT_EXTRACTION_QUEUE.COLLECTION, ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
+                        ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT)
+                    .values(TENANT_A, "knowledge__q", "path/not-nullable-queue.pdf", OffsetDateTime.now())
+                    .execute()
             );
             assertThat(ex.getMessage())
                 .as("aspect_extraction_queue.doc_id must be NOT NULL (hygiene-001 step 2)")
@@ -229,24 +239,26 @@ class ForeignKeyConstraintTest {
         // fk_ta_catalog_doc. A chash doc_id with no matching catalog_documents row imports.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertTopic(su, TENANT_A, 100L, "test-topic", "col-a");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            insertTopic(ctx, TENANT_A, 100L, "test-topic", "col-a");
             String chash = hexChash("fk-topicAssignment-chashDocId"); // 64-hex chunk chash, not a tumbler
             // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk now requires
             // a matching nexus.chunks row for this INSERT to succeed at all.
-            seedChunk(su, TENANT_A, "col-a", chash, 384);
-            // decode(...,'hex') (RDR-194 P3d): doc_id is bytea now (P3c) -- a bare
+            byte[] chashBytes = HexFormat.of().parseHex(chash);
+            seedChunk(ctx, TENANT_A, "col-a", chashBytes);
+            // Genuine hex-decoded bytes (RDR-194 P3d): doc_id is bytea now (P3c) -- a bare
             // string literal would store the ASCII bytes of the hex STRING via
             // Postgres's bytea "escape format" input, not the 32-byte digest
             // decode() produces, so it would never match seedChunk's chunks row.
-            su.createStatement().execute(
-                "INSERT INTO nexus.topic_assignments " +
-                "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
-                "('" + TENANT_A + "', decode('" + chash + "', 'hex'), 100, 'hdbscan', 'col-a', NOW())");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.topic_assignments " +
-                "WHERE tenant_id='" + TENANT_A + "' AND doc_id=decode('" + chash + "', 'hex')");
-            rs.next();
-            assertThat(rs.getInt(1)).isEqualTo(1);
+            ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+                .values(TENANT_A, chashBytes, 100L, "hdbscan", "col-a", OffsetDateTime.now())
+                .execute();
+            int count = ctx.selectCount().from(TOPIC_ASSIGNMENTS)
+                .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(TENANT_A)).and(TOPIC_ASSIGNMENTS.DOC_ID.eq(chashBytes))
+                .fetchOne(0, int.class);
+            assertThat(count).isEqualTo(1);
         }
     }
 
@@ -256,11 +268,14 @@ class ForeignKeyConstraintTest {
         // catalog doc_id FK was removed). An assignment to a non-existent topic rejects.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            Exception ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.topic_assignments " +
-                    "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
-                    "('" + TENANT_A + "', '" + hexChash("fk-topicAssignment-topicIdFk") + "', 999999, 'hdbscan', 'col-a', NOW())")
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                        TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                        TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+                    .values(TENANT_A, HexFormat.of().parseHex(hexChash("fk-topicAssignment-topicIdFk")), 999999L,
+                        "hdbscan", "col-a", OffsetDateTime.now())
+                    .execute()
             );
             assertThat(ex.getMessage()).containsIgnoringCase("foreign key");
         }
@@ -272,31 +287,33 @@ class ForeignKeyConstraintTest {
         // to topic_assignments (assignments are chunk-keyed and independent of the catalog).
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, "1.99");
-            insertTopic(su, TENANT_A, 199L, "no-cascade-topic", "col-a");
-            String chash = hexChash("fk-deleteCatalogDoc-doesNotAffectTopicAssignments");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "1.99");
+            insertTopic(ctx, TENANT_A, 199L, "no-cascade-topic", "col-a");
+            byte[] chashBytes = HexFormat.of().parseHex(
+                hexChash("fk-deleteCatalogDoc-doesNotAffectTopicAssignments"));
             // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk now requires
             // a matching nexus.chunks row for this INSERT to succeed at all. The
             // chunk is untouched by the catalog_documents DELETE below, so it
             // remains a valid FK parent throughout -- consistent with what this
             // test proves (the assignment survives independently of the catalog).
-            seedChunk(su, TENANT_A, "col-a", chash, 384);
-            // decode(...,'hex') (RDR-194 P3d): see the sibling test's identical note.
-            su.createStatement().execute(
-                "INSERT INTO nexus.topic_assignments " +
-                "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
-                "('" + TENANT_A + "', decode('" + chash + "', 'hex'), 199, 'hdbscan', 'col-a', NOW())");
+            seedChunk(ctx, TENANT_A, "col-a", chashBytes);
+            // Genuine hex-decoded bytes (RDR-194 P3d): see the sibling test's identical note.
+            ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+                .values(TENANT_A, chashBytes, 199L, "hdbscan", "col-a", OffsetDateTime.now())
+                .execute();
 
-            su.createStatement().execute(
-                "DELETE FROM nexus.catalog_documents " +
-                "WHERE tenant_id='" + TENANT_A + "' AND tumbler='1.99'");
+            ctx.deleteFrom(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENTS.TUMBLER.eq("1.99"))
+                .execute();
 
             // Assignment must SURVIVE (no cascade — chash doc_id is independent of catalog).
-            ResultSet after = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.topic_assignments " +
-                "WHERE tenant_id='" + TENANT_A + "' AND doc_id=decode('" + chash + "', 'hex')");
-            after.next();
-            assertThat(after.getInt(1)).as("assignment must survive catalog-doc delete").isEqualTo(1);
+            int count = ctx.selectCount().from(TOPIC_ASSIGNMENTS)
+                .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(TENANT_A)).and(TOPIC_ASSIGNMENTS.DOC_ID.eq(chashBytes))
+                .fetchOne(0, int.class);
+            assertThat(count).as("assignment must survive catalog-doc delete").isEqualTo(1);
         }
     }
 
@@ -312,11 +329,14 @@ class ForeignKeyConstraintTest {
         // definition) so ONLY doc_id's NOT NULL check fires.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            Exception ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.document_aspects " +
-                    "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, source_uri) VALUES " +
-                    "('" + TENANT_A + "', 'knowledge__a', 'path/null-doc.pdf', NOW(), 'v1', 'docling', 'file:///path/null-doc.pdf')")
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                        DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                        DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.SOURCE_URI)
+                    .values(TENANT_A, "knowledge__a", "path/null-doc.pdf", OffsetDateTime.now(), "v1", "docling",
+                        "file:///path/null-doc.pdf")
+                    .execute()
             );
             assertThat(ex.getMessage())
                 .as("document_aspects.doc_id must be NOT NULL (hygiene-001 step 1)")
@@ -328,17 +348,20 @@ class ForeignKeyConstraintTest {
     void aspect_validDocId_succeeds() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, "3.1");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "3.1");
             // hygiene-001 step 1: source_uri is NOT NULL now too, alongside doc_id.
-            su.createStatement().execute(
-                "INSERT INTO nexus.document_aspects " +
-                "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) VALUES " +
-                "('" + TENANT_A + "', 'knowledge__b', 'path/valid-doc.pdf', NOW(), 'v1', 'docling', '3.1', 'file:///path/valid-doc.pdf')");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT doc_id FROM nexus.document_aspects " +
-                "WHERE tenant_id='" + TENANT_A + "' AND source_path='path/valid-doc.pdf'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getString("doc_id")).isEqualTo("3.1");
+            ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                    DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                .values(TENANT_A, "knowledge__b", "path/valid-doc.pdf", OffsetDateTime.now(), "v1", "docling", "3.1",
+                    "file:///path/valid-doc.pdf")
+                .execute();
+            String docId = ctx.select(DOCUMENT_ASPECTS.DOC_ID).from(DOCUMENT_ASPECTS)
+                .where(DOCUMENT_ASPECTS.TENANT_ID.eq(TENANT_A))
+                .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq("path/valid-doc.pdf"))
+                .fetchOne(DOCUMENT_ASPECTS.DOC_ID);
+            assertThat(docId).isEqualTo("3.1");
         }
     }
 
@@ -346,13 +369,16 @@ class ForeignKeyConstraintTest {
     void aspect_orphanDocId_rejectsWithFKViolation() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // hygiene-001 step 1: source_uri is NOT NULL now -- supply it so the
             // NOT NULL check doesn't fire ahead of the FK check under test.
-            Exception ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.document_aspects " +
-                    "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) VALUES " +
-                    "('" + TENANT_A + "', 'knowledge__c', 'path/orphan.pdf', NOW(), 'v1', 'docling', 'no-such-tumbler', 'file:///path/orphan.pdf')")
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                        DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                        DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                    .values(TENANT_A, "knowledge__c", "path/orphan.pdf", OffsetDateTime.now(), "v1", "docling",
+                        "no-such-tumbler", "file:///path/orphan.pdf")
+                    .execute()
             );
             assertThat(ex.getMessage()).containsIgnoringCase("foreign key");
         }
@@ -362,22 +388,24 @@ class ForeignKeyConstraintTest {
     void deleteCatalogDoc_cascadesToAspects() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, "3.99");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "3.99");
             // hygiene-001 step 1: source_uri is NOT NULL now, alongside doc_id.
-            su.createStatement().execute(
-                "INSERT INTO nexus.document_aspects " +
-                "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) VALUES " +
-                "('" + TENANT_A + "', 'knowledge__d', 'path/cascade-aspect.pdf', NOW(), 'v1', 'docling', '3.99', 'file:///path/cascade-aspect.pdf')");
+            ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                    DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                .values(TENANT_A, "knowledge__d", "path/cascade-aspect.pdf", OffsetDateTime.now(), "v1", "docling",
+                    "3.99", "file:///path/cascade-aspect.pdf")
+                .execute();
 
-            su.createStatement().execute(
-                "DELETE FROM nexus.catalog_documents " +
-                "WHERE tenant_id='" + TENANT_A + "' AND tumbler='3.99'");
+            ctx.deleteFrom(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENTS.TUMBLER.eq("3.99"))
+                .execute();
 
-            ResultSet after = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.document_aspects " +
-                "WHERE tenant_id='" + TENANT_A + "' AND doc_id='3.99'");
-            after.next();
-            assertThat(after.getInt(1)).as("Cascade delete must remove document_aspects").isZero();
+            int count = ctx.selectCount().from(DOCUMENT_ASPECTS)
+                .where(DOCUMENT_ASPECTS.TENANT_ID.eq(TENANT_A)).and(DOCUMENT_ASPECTS.DOC_ID.eq("3.99"))
+                .fetchOne(0, int.class);
+            assertThat(count).as("Cascade delete must remove document_aspects").isZero();
         }
     }
 
@@ -389,18 +417,18 @@ class ForeignKeyConstraintTest {
     void highlight_validDocId_succeeds() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, "4.1");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "4.1");
             // hygiene-001 step 3: source_uri and collection are NOT NULL now;
             // 'knowledge__b' is pre-registered for TENANT_A in startAll() Phase 3.5.
-            su.createStatement().execute(
-                "INSERT INTO nexus.document_highlights " +
-                "(tenant_id, doc_id, source_uri, collection, ingested_at) VALUES " +
-                "('" + TENANT_A + "', '4.1', 'file:///4.1', 'knowledge__b', NOW())");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.document_highlights " +
-                "WHERE tenant_id='" + TENANT_A + "' AND doc_id='4.1'");
-            rs.next();
-            assertThat(rs.getInt(1)).isEqualTo(1);
+            ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
+                    DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                .values(TENANT_A, "4.1", "file:///4.1", "knowledge__b", OffsetDateTime.now())
+                .execute();
+            int count = ctx.selectCount().from(DOCUMENT_HIGHLIGHTS)
+                .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(TENANT_A)).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq("4.1"))
+                .fetchOne(0, int.class);
+            assertThat(count).isEqualTo(1);
         }
     }
 
@@ -408,13 +436,15 @@ class ForeignKeyConstraintTest {
     void highlight_orphanDocId_rejectsWithFKViolation() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // hygiene-001 step 3: source_uri/collection are NOT NULL now -- supply
             // them so that check doesn't fire ahead of the doc-id FK check under test.
-            Exception ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.document_highlights " +
-                    "(tenant_id, doc_id, source_uri, collection, ingested_at) VALUES " +
-                    "('" + TENANT_A + "', 'no-such-tumbler-hl', 'file:///no-such-tumbler-hl', 'knowledge__c', NOW())")
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
+                        DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                    .values(TENANT_A, "no-such-tumbler-hl", "file:///no-such-tumbler-hl", "knowledge__c",
+                        OffsetDateTime.now())
+                    .execute()
             );
             assertThat(ex.getMessage()).containsIgnoringCase("foreign key");
         }
@@ -424,22 +454,22 @@ class ForeignKeyConstraintTest {
     void deleteCatalogDoc_cascadesToHighlights() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, "4.99");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "4.99");
             // hygiene-001 step 3: source_uri/collection are NOT NULL now.
-            su.createStatement().execute(
-                "INSERT INTO nexus.document_highlights " +
-                "(tenant_id, doc_id, source_uri, collection, ingested_at) VALUES " +
-                "('" + TENANT_A + "', '4.99', 'file:///4.99', 'knowledge__d', NOW())");
+            ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
+                    DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                .values(TENANT_A, "4.99", "file:///4.99", "knowledge__d", OffsetDateTime.now())
+                .execute();
 
-            su.createStatement().execute(
-                "DELETE FROM nexus.catalog_documents " +
-                "WHERE tenant_id='" + TENANT_A + "' AND tumbler='4.99'");
+            ctx.deleteFrom(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENTS.TUMBLER.eq("4.99"))
+                .execute();
 
-            ResultSet after = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.document_highlights " +
-                "WHERE tenant_id='" + TENANT_A + "' AND doc_id='4.99'");
-            after.next();
-            assertThat(after.getInt(1)).as("Cascade delete must remove document_highlights").isZero();
+            int count = ctx.selectCount().from(DOCUMENT_HIGHLIGHTS)
+                .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(TENANT_A)).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq("4.99"))
+                .fetchOne(0, int.class);
+            assertThat(count).as("Cascade delete must remove document_highlights").isZero();
         }
     }
 
@@ -453,11 +483,13 @@ class ForeignKeyConstraintTest {
         // reverses fk-001-4's nullable conversion.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            Exception ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.aspect_extraction_queue " +
-                    "(tenant_id, collection, source_path, enqueued_at) VALUES " +
-                    "('" + TENANT_A + "', 'knowledge__q', 'path/queue-null.pdf', NOW())")
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID,
+                        ASPECT_EXTRACTION_QUEUE.COLLECTION, ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
+                        ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT)
+                    .values(TENANT_A, "knowledge__q", "path/queue-null.pdf", OffsetDateTime.now())
+                    .execute()
             );
             assertThat(ex.getMessage())
                 .as("aspect_extraction_queue.doc_id must be NOT NULL (hygiene-001 step 2)")
@@ -469,16 +501,18 @@ class ForeignKeyConstraintTest {
     void queue_validDocId_succeeds() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, "5.1");
-            su.createStatement().execute(
-                "INSERT INTO nexus.aspect_extraction_queue " +
-                "(tenant_id, collection, source_path, doc_id, enqueued_at) VALUES " +
-                "('" + TENANT_A + "', 'knowledge__q', 'path/queue-valid.pdf', '5.1', NOW())");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT doc_id FROM nexus.aspect_extraction_queue " +
-                "WHERE tenant_id='" + TENANT_A + "' AND source_path='path/queue-valid.pdf'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getString("doc_id")).isEqualTo("5.1");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "5.1");
+            ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID,
+                    ASPECT_EXTRACTION_QUEUE.COLLECTION, ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
+                    ASPECT_EXTRACTION_QUEUE.DOC_ID, ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT)
+                .values(TENANT_A, "knowledge__q", "path/queue-valid.pdf", "5.1", OffsetDateTime.now())
+                .execute();
+            String docId = ctx.select(ASPECT_EXTRACTION_QUEUE.DOC_ID).from(ASPECT_EXTRACTION_QUEUE)
+                .where(ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(TENANT_A))
+                .and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq("path/queue-valid.pdf"))
+                .fetchOne(ASPECT_EXTRACTION_QUEUE.DOC_ID);
+            assertThat(docId).isEqualTo("5.1");
         }
     }
 
@@ -486,11 +520,14 @@ class ForeignKeyConstraintTest {
     void queue_orphanDocId_rejectsWithFKViolation() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            Exception ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.aspect_extraction_queue " +
-                    "(tenant_id, collection, source_path, doc_id, enqueued_at) VALUES " +
-                    "('" + TENANT_A + "', 'knowledge__q', 'path/queue-orphan.pdf', 'no-such-tumbler-q', NOW())")
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID,
+                        ASPECT_EXTRACTION_QUEUE.COLLECTION, ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
+                        ASPECT_EXTRACTION_QUEUE.DOC_ID, ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT)
+                    .values(TENANT_A, "knowledge__q", "path/queue-orphan.pdf", "no-such-tumbler-q",
+                        OffsetDateTime.now())
+                    .execute()
             );
             assertThat(ex.getMessage()).containsIgnoringCase("foreign key");
         }
@@ -500,22 +537,24 @@ class ForeignKeyConstraintTest {
     void deleteCatalogDoc_cascadesToQueue() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, "5.99");
-            su.createStatement().execute(
-                "INSERT INTO nexus.aspect_extraction_queue " +
-                "(tenant_id, collection, source_path, doc_id, enqueued_at) VALUES " +
-                "('" + TENANT_A + "', 'knowledge__q', 'path/queue-cascade.pdf', '5.99', NOW())");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "5.99");
+            ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID,
+                    ASPECT_EXTRACTION_QUEUE.COLLECTION, ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
+                    ASPECT_EXTRACTION_QUEUE.DOC_ID, ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT)
+                .values(TENANT_A, "knowledge__q", "path/queue-cascade.pdf", "5.99", OffsetDateTime.now())
+                .execute();
 
-            su.createStatement().execute(
-                "DELETE FROM nexus.catalog_documents " +
-                "WHERE tenant_id='" + TENANT_A + "' AND tumbler='5.99'");
+            ctx.deleteFrom(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENTS.TUMBLER.eq("5.99"))
+                .execute();
 
             // Queue item must be deleted (ON DELETE CASCADE — stale queue for a deleted doc is moot)
-            ResultSet after = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.aspect_extraction_queue " +
-                "WHERE tenant_id='" + TENANT_A + "' AND source_path='path/queue-cascade.pdf'");
-            after.next();
-            assertThat(after.getInt(1))
+            int count = ctx.selectCount().from(ASPECT_EXTRACTION_QUEUE)
+                .where(ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(TENANT_A))
+                .and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq("path/queue-cascade.pdf"))
+                .fetchOne(0, int.class);
+            assertThat(count)
                 .as("Cascade delete must remove queue item for deleted catalog doc").isZero();
         }
     }
@@ -543,16 +582,19 @@ class ForeignKeyConstraintTest {
     void crossTenantAspect_isRejectedByCompositeFk() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // Tenant-A has a catalog document; Tenant-B tries to reference it
-            insertCatalogDocument(su, TENANT_A, TUMBLER_A);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, TUMBLER_A);
 
             // hygiene-001 step 1: source_uri is NOT NULL now -- supply it so that
             // check doesn't fire ahead of the composite FK check under test.
-            Exception ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.document_aspects " +
-                    "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) VALUES " +
-                    "('" + TENANT_B + "', 'knowledge__x', 'path/cross-tenant.pdf', NOW(), 'v1', 'docling', '" + TUMBLER_A + "', 'file:///path/cross-tenant.pdf')")
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                        DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                        DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                    .values(TENANT_B, "knowledge__x", "path/cross-tenant.pdf", OffsetDateTime.now(), "v1", "docling",
+                        TUMBLER_A, "file:///path/cross-tenant.pdf")
+                    .execute()
             );
             assertThat(ex.getMessage())
                 .as("FK must reject cross-tenant aspect reference")
@@ -564,15 +606,16 @@ class ForeignKeyConstraintTest {
     void crossTenantHighlight_isRejectedByCompositeFk() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, TUMBLER_A);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, TUMBLER_A);
 
             // hygiene-001 step 3: source_uri/collection are NOT NULL now --
             // 'knowledge__x' is pre-registered for TENANT_B in Phase 3.5.
-            Exception ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.document_highlights " +
-                    "(tenant_id, doc_id, source_uri, collection, ingested_at) VALUES " +
-                    "('" + TENANT_B + "', '" + TUMBLER_A + "', 'file:///cross-tenant-hl', 'knowledge__x', NOW())")
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
+                        DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                    .values(TENANT_B, TUMBLER_A, "file:///cross-tenant-hl", "knowledge__x", OffsetDateTime.now())
+                    .execute()
             );
             assertThat(ex.getMessage())
                 .as("FK must reject cross-tenant highlight reference")
@@ -584,13 +627,15 @@ class ForeignKeyConstraintTest {
     void crossTenantQueueItem_isRejectedByCompositeFk() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, TUMBLER_A);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, TUMBLER_A);
 
-            Exception ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.aspect_extraction_queue " +
-                    "(tenant_id, collection, source_path, doc_id, enqueued_at) VALUES " +
-                    "('" + TENANT_B + "', 'knowledge__y', 'path/ct-queue.pdf', '" + TUMBLER_A + "', NOW())")
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID,
+                        ASPECT_EXTRACTION_QUEUE.COLLECTION, ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
+                        ASPECT_EXTRACTION_QUEUE.DOC_ID, ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT)
+                    .values(TENANT_B, "knowledge__y", "path/ct-queue.pdf", TUMBLER_A, OffsetDateTime.now())
+                    .execute()
             );
             assertThat(ex.getMessage())
                 .as("FK must reject cross-tenant queue reference")
@@ -606,25 +651,24 @@ class ForeignKeyConstraintTest {
     void chunkManifest_validDocId_succeeds() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, "chunk-doc-1");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES " +
-                "('" + TENANT_A + "', 'fk-chunk-coll') ON CONFLICT DO NOTHING");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "chunk-doc-1");
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "fk-chunk-coll");
             // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires
             // a matching nexus.chunks row for this CONTROL insert to succeed.
-            su.createStatement().execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) VALUES " +
-                "('" + TENANT_A + "', 'fk-chunk-coll', 'abc123abc123abc123abc123abc12300', 'text', " +
-                "('[" + "0.1,".repeat(383) + "0.1]')::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_document_chunks " +
-                "(tenant_id, doc_id, position, chash, collection) VALUES " +
-                "('" + TENANT_A + "', 'chunk-doc-1', 0, 'abc123abc123abc123abc123abc12300', 'fk-chunk-coll')");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.catalog_document_chunks " +
-                "WHERE tenant_id='" + TENANT_A + "' AND doc_id='chunk-doc-1'");
-            rs.next();
-            assertThat(rs.getInt(1)).as("Chunk manifest row must be inserted").isEqualTo(1);
+            byte[] chash = chashAscii("abc123abc123abc123abc123abc12300");
+            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+                .values(TENANT_A, "fk-chunk-coll", chash, "text", vector(384))
+                .onConflictDoNothing()
+                .execute();
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                .values(TENANT_A, "chunk-doc-1", 0, chash, "fk-chunk-coll")
+                .execute();
+            int count = ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("chunk-doc-1"))
+                .fetchOne(0, int.class);
+            assertThat(count).as("Chunk manifest row must be inserted").isEqualTo(1);
         }
     }
 
@@ -632,14 +676,14 @@ class ForeignKeyConstraintTest {
     void chunkManifest_orphanDocId_rejectsWithFKViolation() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES " +
-                "('" + TENANT_A + "', 'fk-chunk-coll') ON CONFLICT DO NOTHING");
-            Exception ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_document_chunks " +
-                    "(tenant_id, doc_id, position, chash, collection) VALUES " +
-                    "('" + TENANT_A + "', 'nonexistent-chunk-doc', 0, 'deadbeefdeadbeefdeadbeefdeadbeef', 'fk-chunk-coll')")
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "fk-chunk-coll");
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                    .values(TENANT_A, "nonexistent-chunk-doc", 0, chashAscii("deadbeefdeadbeefdeadbeefdeadbeef"),
+                        "fk-chunk-coll")
+                    .execute()
             );
             assertThat(ex.getMessage())
                 .as("FK must reject chunk row with no matching catalog_documents entry")
@@ -651,39 +695,37 @@ class ForeignKeyConstraintTest {
     void deleteCatalogDoc_cascadesToChunkManifest() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, "chunk-cascade-doc");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES " +
-                "('" + TENANT_A + "', 'fk-chunk-coll') ON CONFLICT DO NOTHING");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "chunk-cascade-doc");
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "fk-chunk-coll");
             // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires
             // a matching nexus.chunks row for each of these two manifest inserts.
-            su.createStatement().execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) VALUES " +
-                "('" + TENANT_A + "', 'fk-chunk-coll', 'hash0000000000000000000000000000', 'text0', " +
-                "('[" + "0.1,".repeat(383) + "0.1]')::nexus.vector), " +
-                "('" + TENANT_A + "', 'fk-chunk-coll', 'hash1111111111111111111111111111', 'text1', " +
-                "('[" + "0.1,".repeat(383) + "0.1]')::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_document_chunks " +
-                "(tenant_id, doc_id, position, chash, collection) VALUES " +
-                "('" + TENANT_A + "', 'chunk-cascade-doc', 0, 'hash0000000000000000000000000000', 'fk-chunk-coll'), " +
-                "('" + TENANT_A + "', 'chunk-cascade-doc', 1, 'hash1111111111111111111111111111', 'fk-chunk-coll')");
+            byte[] chash0 = chashAscii("hash0000000000000000000000000000");
+            byte[] chash1 = chashAscii("hash1111111111111111111111111111");
+            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+                .values(TENANT_A, "fk-chunk-coll", chash0, "text0", vector(384))
+                .values(TENANT_A, "fk-chunk-coll", chash1, "text1", vector(384))
+                .onConflictDoNothing()
+                .execute();
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                .values(TENANT_A, "chunk-cascade-doc", 0, chash0, "fk-chunk-coll")
+                .values(TENANT_A, "chunk-cascade-doc", 1, chash1, "fk-chunk-coll")
+                .execute();
 
-            ResultSet before = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.catalog_document_chunks " +
-                "WHERE tenant_id='" + TENANT_A + "' AND doc_id='chunk-cascade-doc'");
-            before.next();
-            assertThat(before.getInt(1)).isEqualTo(2);
+            int before = ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("chunk-cascade-doc"))
+                .fetchOne(0, int.class);
+            assertThat(before).isEqualTo(2);
 
-            su.createStatement().execute(
-                "DELETE FROM nexus.catalog_documents " +
-                "WHERE tenant_id='" + TENANT_A + "' AND tumbler='chunk-cascade-doc'");
+            ctx.deleteFrom(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENTS.TUMBLER.eq("chunk-cascade-doc"))
+                .execute();
 
-            ResultSet after = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.catalog_document_chunks " +
-                "WHERE tenant_id='" + TENANT_A + "' AND doc_id='chunk-cascade-doc'");
-            after.next();
-            assertThat(after.getInt(1))
+            int after = ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("chunk-cascade-doc"))
+                .fetchOne(0, int.class);
+            assertThat(after)
                 .as("ON DELETE CASCADE must remove chunk manifest rows")
                 .isZero();
         }
@@ -693,18 +735,17 @@ class ForeignKeyConstraintTest {
     void crossTenantChunkManifest_isRejectedByCompositeFk() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // Seed catalog_documents for TENANT_A only
-            insertCatalogDocument(su, TENANT_A, TUMBLER_A);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES " +
-                "('" + TENANT_B + "', 'fk-chunk-coll') ON CONFLICT DO NOTHING");
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, TUMBLER_A);
+            PgContainerHelper.insertCollection(ctx, TENANT_B, "fk-chunk-coll");
             // Insert chunk row for TENANT_B referencing TENANT_A's tumbler — must be rejected
             // (FK checks as table owner; without composite key this would silently succeed)
-            Exception ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_document_chunks " +
-                    "(tenant_id, doc_id, position, chash, collection) VALUES " +
-                    "('" + TENANT_B + "', '" + TUMBLER_A + "', 0, 'crosshashcrosshashcrosshash00000', 'fk-chunk-coll')")
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                    .values(TENANT_B, TUMBLER_A, 0, chashAscii("crosshashcrosshashcrosshash00000"), "fk-chunk-coll")
+                    .execute()
             );
             assertThat(ex.getMessage())
                 .as("Composite FK must reject cross-tenant chunk manifest reference")
@@ -726,7 +767,7 @@ class ForeignKeyConstraintTest {
         // Insert a catalog doc for TENANT_A via superuser
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, "rls-check-tumbler");
+            PgContainerHelper.insertCatalogDocument(DSL.using(su, SQLDialect.POSTGRES), TENANT_A, "rls-check-tumbler");
         }
 
         // Query via svc role with Tenant-B GUC — must see 0 rows.
@@ -768,17 +809,20 @@ class ForeignKeyConstraintTest {
     void rlsIsolation_topicAssignment_tenantA_invisibleToTenantB() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, "rls-ta-tumbler");
-            insertTopic(su, TENANT_A, 300L, "rls-topic", "col-rls");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "rls-ta-tumbler");
+            insertTopic(ctx, TENANT_A, 300L, "rls-topic", "col-rls");
             // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk now requires
             // a matching nexus.chunks row for this INSERT to succeed at all.
-            seedChunk(su, TENANT_A, "col-rls", hexChash("rls-ta-tumbler"), 384);
-            // decode(...,'hex') (RDR-194 P3d): see topicAssignment_chashDocId_
+            byte[] chashBytes = HexFormat.of().parseHex(hexChash("rls-ta-tumbler"));
+            seedChunk(ctx, TENANT_A, "col-rls", chashBytes);
+            // Genuine hex-decoded bytes (RDR-194 P3d): see topicAssignment_chashDocId_
             // succeeds_noCatalogFk's identical note.
-            su.createStatement().execute(
-                "INSERT INTO nexus.topic_assignments " +
-                "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
-                "('" + TENANT_A + "', decode('" + hexChash("rls-ta-tumbler") + "', 'hex'), 300, 'hdbscan', 'col-rls', NOW())");
+            ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+                .values(TENANT_A, chashBytes, 300L, "hdbscan", "col-rls", OffsetDateTime.now())
+                .execute();
         }
 
         try (Connection svc = svcDs.getConnection()) {
@@ -813,12 +857,15 @@ class ForeignKeyConstraintTest {
     void rlsIsolation_documentAspects_tenantA_invisibleToTenantB() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, "rls-asp-tumbler");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "rls-asp-tumbler");
             // hygiene-001 step 1: source_uri is NOT NULL now, alongside doc_id.
-            su.createStatement().execute(
-                "INSERT INTO nexus.document_aspects " +
-                "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) VALUES " +
-                "('" + TENANT_A + "', 'knowledge__rls', 'path/rls-aspect.pdf', NOW(), 'v1', 'docling', 'rls-asp-tumbler', 'file:///path/rls-aspect.pdf')");
+            ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                    DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                .values(TENANT_A, "knowledge__rls", "path/rls-aspect.pdf", OffsetDateTime.now(), "v1", "docling",
+                    "rls-asp-tumbler", "file:///path/rls-aspect.pdf")
+                .execute();
         }
 
         try (Connection svc = svcDs.getConnection()) {
@@ -853,37 +900,19 @@ class ForeignKeyConstraintTest {
     // ══════════════════════════════════════════════════════════════════════════
 
     /**
-     * Insert a minimal catalog_documents row. Uses ON CONFLICT DO NOTHING for idempotency
-     * (tests at various @Order values may insert the same tumbler).
+     * Insert a minimal nexus.chunks row at dim 384 (RDR-194 P3d, nexus-tk070.p3d):
+     * every topic_assignments row now requires a matching (tenant_id,
+     * source_collection, doc_id) -> chunks(tenant_id, collection, chash) parent via
+     * topic_assignments_chunk_fk. Also registers the collection since
+     * chunks_collection_fk requires it -- safe to call even when the caller already
+     * registered it. Every call site in this file uses dim 384.
      */
-    private static void insertCatalogDocument(Connection su, String tenantId, String tumbler)
-            throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents " +
-            "(tenant_id, tumbler, title) " +
-            "VALUES ('" + tenantId + "', '" + tumbler + "', 'Test Doc " + tumbler + "') " +
-            "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
-    }
-
-    /**
-     * Insert a minimal nexus.chunks row (RDR-194 P3d, nexus-tk070.p3d): every
-     * topic_assignments row now requires a matching (tenant_id, source_collection,
-     * doc_id) -> chunks(tenant_id, collection, chash) parent via
-     * topic_assignments_chunk_fk. ON CONFLICT DO NOTHING for idempotency. Also
-     * registers the collection (ON CONFLICT DO NOTHING) since chunks_collection_fk
-     * requires it -- safe to call even when the caller already registered it.
-     */
-    private static void seedChunk(Connection su, String tenantId, String collection, String chashHex, int dim)
-            throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenantId + "', '"
-            + collection + "') ON CONFLICT (tenant_id, name) DO NOTHING");
-        String embeddingCol = "embedding_" + dim;
-        su.createStatement().execute(
-            "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, " + embeddingCol + ") VALUES " +
-            "('" + tenantId + "', '" + collection + "', decode('" + chashHex + "', 'hex'), 'fk-test chunk', " +
-            "('[" + "0.1,".repeat(dim - 1) + "0.1]')::nexus.vector) " +
-            "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+    private static void seedChunk(DSLContext ctx, String tenantId, String collection, byte[] chashBytes) {
+        PgContainerHelper.insertCollection(ctx, tenantId, collection);
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+            .values(tenantId, collection, chashBytes, "fk-test chunk", vector(384))
+            .onConflictDoNothing()
+            .execute();
     }
 
     /**
@@ -891,17 +920,29 @@ class ForeignKeyConstraintTest {
      * Uses ON CONFLICT DO NOTHING (id is BIGSERIAL; here we supply explicit IDs to avoid
      * sequence issues across tests — tests use non-overlapping ids via @Order convention).
      */
-    private static void insertTopic(Connection su, String tenantId, long id, String label, String collection)
-            throws Exception {
+    private static void insertTopic(DSLContext ctx, String tenantId, long id, String label, String collection) {
         // RDR-164 P1a: register the topic's collection (topics_collection_fk).
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenantId + "', '"
-            + collection + "') ON CONFLICT (tenant_id, name) DO NOTHING");
-        // Insert by id using the sequence; supply literal id via nextval override
-        su.createStatement().execute(
-            "INSERT INTO nexus.topics (id, tenant_id, label, collection, doc_count, created_at, review_status) " +
-            "VALUES (" + id + ", '" + tenantId + "', '" + label + "', '" + collection + "', 0, NOW(), 'pending') " +
-            "ON CONFLICT (id) DO NOTHING");
+        PgContainerHelper.insertCollection(ctx, tenantId, collection);
+        ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
+                TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+            .values(id, tenantId, label, collection, 0, OffsetDateTime.now(), "pending")
+            .onConflictDoNothing()
+            .execute();
+    }
+
+    /** A pgvector value with every one of {@code dim} components equal to {@code 0.1}. */
+    private static Vector vector(int dim) {
+        float[] v = new float[dim];
+        java.util.Arrays.fill(v, 0.1f);
+        return Vector.of(v);
+    }
+
+    /** Store a chash-shaped string as its own ASCII bytes -- matches the pre-conversion
+     *  raw-SQL behavior of a bare string literal into a {@code bytea} column via
+     *  PostgreSQL's escape-format input (as opposed to {@link #hexChash}'s genuine
+     *  hex-decoded form, used where the original SQL called {@code decode(..., 'hex')}). */
+    private static byte[] chashAscii(String literal) {
+        return literal.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
     }
 
     /** Genuine 64-lowercase-hex sha256 chash — required for topic_assignments.doc_id
