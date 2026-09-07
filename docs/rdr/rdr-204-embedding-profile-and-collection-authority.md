@@ -236,7 +236,7 @@ per-collection chunk counts from `nx collection list`. Full numbers in T2
 - **Verified**: `GET /v1/catalog/collections/list` takes no filter
   parameters today (`CatalogHandler.handleCollectionList` calls
   `repo.listCollections(tenant)` unconditionally); the `content_type` and
-  `lifecycle_state` filters are new work in Phase 3.
+  `lifecycle_state` filters are new work in Phase 2.
 - **Verified**: the vector dimension ground truth already exists as a view.
   `nexus.collection_vector_stats` (catalog-005-1) derives `dim` per
   `(tenant, collection)` from the stored column (`CASE WHEN embedding_384 IS
@@ -318,9 +318,9 @@ per-collection chunk counts from `nx collection list`. Full numbers in T2
 - [x] No consumer needs a fact from the name that the table cannot carry.
   **Status**: Verified by the parse-site census: every extracted value is
   one of content_type, owner_id, embedding_model, the quarantine prefix,
-  or, at the six registration sites that call
-  `parse_conformant_collection_name` (`indexer.py`, `commands/index.py` and
-  four catalog and collection commands, enumerated in `204-research-17`), the `v<n>`
+  or, at the five registration sites that call
+  `parse_conformant_collection_name` (`indexer.py` and four catalog and
+  collection commands, enumerated in `204-research-15`), the `v<n>`
   segment the table already stores as `model_version` (`204-research-4`
   counted those callers but not that value). **Method**: Source Search.
 - [x] No two-segment (model-less) collection carries vectors on either
@@ -472,10 +472,9 @@ disputed collection is excluded from bare-prefix corpus fan-out and shown
 red by `nx doctor` with the remedy (re-index under the current profile).
 `display_name`, `superseded_by` and `superseded_at` are left exactly as
 registered. So is `model_version`: it is the name's `v<n>` segment, parsed
-from the rendered name at the six registration sites (`indexer.py`,
-`commands/index.py` and four catalog and collection commands,
-`204-research-17`) and upserted by
-the engine as sent; the walk does not touch it, and those six parses are
+from the rendered name at the five registration sites (`indexer.py` and
+four catalog and collection commands, `204-research-15`) and upserted by
+the engine as sent; the walk does not touch it, and those five parses are
 retired by Phase 3's census like every other parse site.
 Measured today, zero live rows would be disputed. NOT NULL, the FK to
 `embedding_models`, and the CHECKs are added after this rewrite, so the
@@ -656,7 +655,7 @@ walks the tree's own changeset over a populated store.
    idempotent upsert, and `CollectionRegistry` evicts on that write.
 3. Delete the seven stub inserts (`204-research-17`).
 4. `register_collection` writes the model from the profile and keeps
-   storing the `model_version` it is sent (the six registration parses
+   storing the `model_version` it is sent (the five registration parses
    go with Phase 3's census, not here); a different model in the request
    is a 422 naming the profile's value. `nx config
    set` does not write the profile; the restart the GH #1461 recipe already
