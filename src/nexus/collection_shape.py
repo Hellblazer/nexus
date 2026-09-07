@@ -16,8 +16,9 @@ Two seams are deliberate:
 
 * :func:`collection_attributes` is the ONLY place that derives a
   collection's content type, owner, model and version. Today it prefers the
-  catalog row's columns and falls back to parsing the name (most rows on a
-  live tenant are blank stubs, T2 ``nexus_rdr/204-research-1``). When
+  catalog row's columns and falls back to parsing the name (158 of 223 rows
+  on the tenant measured were blank stubs, 12 of them live collections, T2
+  ``nexus_rdr/204-research-1``). When
   RDR-204 lands, the fallback goes and this function is the one-line
   repoint.
 * :data:`CHECKS_BY_RULE` maps each ``## Rule N`` heading in the doc to the
@@ -43,7 +44,10 @@ __all__ = [
     "CHECKS_BY_RULE",
     "FANOUT_FLOOR",
     "GENERIC_SUBJECT_TOKENS",
+    "MODEL_DIMS",
     "PLACEHOLDER_SUBJECTS",
+    "SOURCE_APP_SUBJECTS",
+    "TASK_OR_DOCUMENT_TOKENS",
     "TEST_RESIDUE_TOKENS",
     "THIN_CHUNK_FLOOR",
     "AuditReport",
@@ -68,12 +72,43 @@ PLACEHOLDER_SUBJECTS: frozenset[str] = frozenset({
     "other", "new", "my", "personal",
 })
 
-#: Rule 5. A subject containing one of these tokens is test or rehearsal
-#: residue unless someone says otherwise.
-TEST_RESIDUE_TOKENS: frozenset[str] = frozenset({
-    "shakedown", "smoke", "test", "fixture", "probe", "rehearsal", "tmp",
-    "scratch", "dummy", "sample",
+#: Rule 1. Tokens that make a subject read as one document or one piece of
+#: work rather than a topic. Singular ``paper`` on purpose: ``papers`` is a
+#: legitimate subject suffix (a collection OF papers), ``paper`` is one.
+TASK_OR_DOCUMENT_TOKENS: frozenset[str] = frozenset({
+    "paper", "pdf", "session", "task", "todo", "draft", "meeting", "sprint",
+    "week", "day", "ticket", "issue", "bead",
 })
+
+#: Rule 1. Identifier shapes that mark a subject as one piece of work: an
+#: RDR or bead id inside the subject (``rdr-204-notes``, ``nexus-ger23-audit``).
+_WORK_ID_RE = re.compile(r"(?:^|-)(?:rdr-\d{1,4}|jdr-\d{1,4}|nexus-[a-z0-9]{4,6}|conexus-[a-z0-9]{4,6}|gh-?\d{2,5}|pr-?\d{2,5})(?:-|$)")
+
+#: Rule 1. Subjects named after where content came from instead of what it
+#: is about. Provenance belongs in tags.
+SOURCE_APP_SUBJECTS: frozenset[str] = frozenset({
+    "devonthink", "dt", "browser", "chrome", "safari", "firefox", "clips",
+    "clippings", "bookmarks", "obsidian", "notion", "slack", "email", "mail",
+    "zotero", "kindle", "pocket", "readwise", "downloads", "inbox",
+    "exports", "export", "imports", "import", "archive", "web",
+})
+
+#: Rule 5. A subject containing one of these tokens is test or rehearsal
+#: residue unless someone says otherwise. ``probe`` and ``sample`` were
+#: removed after critique: they are ordinary vocabulary in this tenant's
+#: interpretability and ML collections.
+TEST_RESIDUE_TOKENS: frozenset[str] = frozenset({
+    "shakedown", "smoke", "test", "fixture", "rehearsal", "tmp", "scratch",
+    "dummy",
+})
+
+#: Rule 3. Dimension each known model token embeds at (mirrors the engine's
+#: ``PgVectorRepository.MODEL_DIMS``). A live collection whose stored
+#: dimension disagrees with its name's token is the GH #667 class.
+MODEL_DIMS: dict[str, int] = {
+    "voyage-code-3": 1024, "voyage-context-3": 1024, "voyage-3": 1024,
+    "bge-base-en-v15-768": 768, "minilm-l6-v2-384": 384,
+}
 
 #: Rule 4. Below this many chunks a collection is not yet earning its
 #: partition (a shard per query, its own taxonomy, no cross-document
@@ -105,9 +140,11 @@ _DATE_LIKE = re.compile(r"(?:^|-)(?:20\d{2}(?:-?\d{2}){0,2}|\d{8})(?:-|$)")
 #: Rule number -> check ids. The doc headings are the source of truth for
 #: the numbers; the test pins this map to them.
 CHECKS_BY_RULE: dict[int, tuple[str, ...]] = {
-    1: ("placeholder-subject", "default-corpus"),
+    1: ("placeholder-subject", "task-or-document-subject", "source-app-subject",
+        "default-corpus"),
     2: ("duplicate-subject",),
-    3: ("model-differs-from-install", "write-model-unresolvable"),
+    3: ("model-differs-from-install", "dimension-disagrees-with-model",
+        "write-model-unresolvable"),
     4: ("thin-collection", "one-document", "below-fanout-floor"),
     5: ("test-residue",),
     6: ("ghost-row", "grandfathered-relic", "blank-attributes",
@@ -252,6 +289,21 @@ def _is_placeholder_subject(subject: str) -> bool:
     return False
 
 
+def _is_task_or_document_subject(subject: str) -> bool:
+    s = subject.lower()
+    if _WORK_ID_RE.search(s):
+        return True
+    return any(t in TASK_OR_DOCUMENT_TOKENS for t in _subject_tokens(s))
+
+
+def _is_source_app_subject(subject: str) -> bool:
+    """True when EVERY token names a source or a transfer, leaving no topic
+    (``browser-clips``, ``dt-inbox``); ``dt-papers`` keeps a topic word and
+    is a subject."""
+    toks = _subject_tokens(subject)
+    return bool(toks) and all(t in SOURCE_APP_SUBJECTS for t in toks)
+
+
 def _has_residue_token(subject: str) -> bool:
     return any(t in TEST_RESIDUE_TOKENS for t in _subject_tokens(subject))
 
@@ -327,6 +379,17 @@ def run_checks(
                                f"subject {a.owner_id!r} is a container word or a date, not a topic",
                                "rename to a durable subject (nx collection rename) or merge "
                                "its documents into the subject collections they belong to"))
+        elif a.content_type == "knowledge" and _is_task_or_document_subject(a.owner_id):
+            out.append(Finding(f.name, "task-or-document-subject", "warn",
+                               f"subject {a.owner_id!r} names one document or one piece of work, "
+                               "not a topic",
+                               "put the documents in the subject collection they are about; "
+                               "carry the task or RDR id as a tag"))
+        elif a.content_type == "knowledge" and _is_source_app_subject(a.owner_id):
+            out.append(Finding(f.name, "source-app-subject", "warn",
+                               f"subject {a.owner_id!r} names where the content came from, "
+                               "not what it is about",
+                               "file by subject; record the source as a tag"))
         if a.content_type in ("docs", "code", "rdr") and a.owner_id == "default":
             out.append(Finding(f.name, "default-corpus", "warn",
                                "the 'default' corpus is a placeholder owner",
@@ -341,6 +404,14 @@ def run_checks(
                                f"{a.content_type} with {wm}",
                                "expected after a model switch; re-index under the current "
                                "model when you want one search space, then delete this sibling"))
+
+        expected_dim = MODEL_DIMS.get(a.embedding_model)
+        if expected_dim is not None and f.dim is not None and f.dim != expected_dim:
+            out.append(Finding(f.name, "dimension-disagrees-with-model", "warn",
+                               f"stored vectors are {f.dim}-dimensional but the name's model "
+                               f"{a.embedding_model} embeds at {expected_dim}",
+                               "the label lies about the bytes (the GH #667 class); re-index "
+                               "under the current model and delete this collection"))
 
         # Rule 4: size.
         if f.chunk_count < FANOUT_FLOOR:
@@ -364,7 +435,9 @@ def run_checks(
                 and not _is_placeholder_subject(a.owner_id)):
             out.append(Finding(f.name, "test-residue", "warn",
                                f"subject {a.owner_id!r} looks like test or rehearsal residue",
-                               "delete it, or re-put its documents with a TTL"))
+                               "delete it when the run is over; if its documents already "
+                               "carry a TTL they expire on their own and this finding "
+                               "clears with them"))
 
         if a.content_type == "knowledge":
             knowledge_live.append(f)

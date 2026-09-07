@@ -134,7 +134,11 @@ nx collection shape --json
 ```
 
 `shape` reads the catalog rows, the vector stats, and the document counts,
-and reports each violation with a proposed action. It never renames,
+and reports each violation with a proposed action. Two things it cannot see
+and does not pretend to: a person-shaped subject (no signal to detect), and
+tags or categories used only once (tags live on chunk metadata, not on the
+catalog document, so that check would be a scan of every chunk; deferred on
+nexus-ger23). It never renames,
 merges, or deletes; those stay yours. For a suspected duplicate it names
 `nx collection merge-candidates`, which ranks pairs by shared-topic
 overlap, as the evidence to confirm with, and for one collection's depth

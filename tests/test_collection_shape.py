@@ -10,8 +10,10 @@ one check, and every check names a rule that exists.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import uuid
 from pathlib import Path
 
 import pytest
@@ -21,10 +23,13 @@ from unittest.mock import MagicMock
 from nexus.commands import collection as _collection_mod
 from nexus.commands.collection import _SHAPE_MAX_LISTED_PER_CHECK
 from nexus.corpus import resolve_read_embedding_model
+from nexus.db.http_vector_client import HttpVectorClient
+from tests._catalog_fixture_ops import ActiveCatalog, active_reader
 from nexus.mcp.core import _FANOUT_MIN_COLLECTION_CHUNK_COUNT
 
 from nexus.collection_shape import (
     CHECKS_BY_RULE,
+    audit,
     FANOUT_FLOOR,
     PLACEHOLDER_SUBJECTS,
     THIN_CHUNK_FLOOR,
@@ -142,6 +147,28 @@ class TestRule1Subjects:
         f = run_checks(_facts([_filled(name)], [_stats(name, 100)], {name: 5}), write_model_for=_cloud_write_model)
         assert _checks(f, "placeholder-subject")
 
+    @pytest.mark.parametrize("subject", ["rdr-204-notes", "nexus-ger23-audit", "hnsw-paper",
+                                         "sprint-42", "gh-1461", "meeting-with-sam"])
+    def test_task_or_document_shaped_subject_is_flagged(self, subject) -> None:
+        name = f"knowledge__{subject}__voyage-context-3__v1"
+        f = run_checks(_facts([_filled(name)], [_stats(name, 100)], {name: 5}), write_model_for=_cloud_write_model)
+        assert _checks(f, "task-or-document-subject"), subject
+
+    @pytest.mark.parametrize("subject", ["devonthink", "dt-inbox", "browser-clips", "slack-exports"])
+    def test_source_app_subject_is_flagged(self, subject) -> None:
+        name = f"knowledge__{subject}__voyage-context-3__v1"
+        f = run_checks(_facts([_filled(name)], [_stats(name, 100)], {name: 5}), write_model_for=_cloud_write_model)
+        assert _checks(f, "source-app-subject"), subject
+
+    @pytest.mark.parametrize("subject", ["dt-papers", "agentic-scholar-papers", "augur-oracle-papers",
+                                         "agent-memory", "interpretability", "semantic-operators"])
+    def test_live_real_subjects_are_not_flagged_by_rule_1(self, subject) -> None:
+        """The tenant's own good subjects, including ones that start with a
+        source-app token (dt-papers) or contain 'papers'."""
+        name = f"knowledge__{subject}__voyage-context-3__v1"
+        f = run_checks(_facts([_filled(name)], [_stats(name, 500)], {name: 20}), write_model_for=_cloud_write_model)
+        assert not [x for x in f if x.rule == 1], [x.check for x in f]
+
     def test_docs_default_corpus_is_flagged(self) -> None:
         name = "docs__default__voyage-context-3__v1"
         f = run_checks(_facts([_filled(name)], [_stats(name, 168)], {name: 9}), write_model_for=_cloud_write_model)
@@ -210,6 +237,17 @@ class TestRule3ModelToken:
         f = run_checks(_facts([_filled(name)], [_stats(name, 40)], {name: 2}), write_model_for=boom)
         assert _checks(f, "write-model-unresolvable")
 
+    def test_stored_dimension_disagreeing_with_the_name_is_the_gh667_class(self) -> None:
+        name = "knowledge__vector-search__voyage-context-3__v1"
+        f = run_checks(_facts([_filled(name)], [_stats(name, 40, dim=768)], {name: 2}), write_model_for=_cloud_write_model)
+        hits = _checks(f, "dimension-disagrees-with-model")
+        assert hits and hits[0].severity == "warn" and "768" in hits[0].message and "1024" in hits[0].message
+
+    def test_matching_dimension_is_silent(self) -> None:
+        name = "knowledge__vector-search__bge-base-en-v15-768__v1"
+        f = run_checks(_facts([_filled(name)], [_stats(name, 40, dim=768)], {name: 2}), write_model_for=_cloud_write_model)
+        assert not _checks(f, "dimension-disagrees-with-model")
+
     def test_ghosts_are_not_model_checked(self) -> None:
         name = "knowledge__ingestgate__minilm-l6-v2-384__v1"
         f = run_checks(_facts([_filled(name)], [], {}), write_model_for=_cloud_write_model)
@@ -240,11 +278,18 @@ class TestRule5Residue:
         f = run_checks(_facts([_filled(name)], [_stats(name, 10)], {name: 1}), write_model_for=_cloud_write_model)
         assert _checks(f, "placeholder-subject") and not _checks(f, "test-residue")
 
-    @pytest.mark.parametrize("subject", ["shakedown", "smoke-run", "fixture-probe"])
+    @pytest.mark.parametrize("subject", ["shakedown", "smoke-run", "fixture-run"])
     def test_test_residue_is_flagged(self, subject) -> None:
         name = f"knowledge__{subject}__voyage-context-3__v1"
         f = run_checks(_facts([_filled(name)], [_stats(name, 105)], {name: 4}), write_model_for=_cloud_write_model)
         assert _checks(f, "test-residue")
+
+
+    @pytest.mark.parametrize("subject", ["interpretability-probes", "sample-efficiency"])
+    def test_ml_vocabulary_is_not_residue(self, subject) -> None:
+        name = f"knowledge__{subject}__voyage-context-3__v1"
+        f = run_checks(_facts([_filled(name)], [_stats(name, 100)], {name: 4}), write_model_for=_cloud_write_model)
+        assert not _checks(f, "test-residue")
 
 
 class TestRule6Lifecycle:
@@ -374,3 +419,37 @@ class TestCli:
         res = CliRunner().invoke(mod.collection, ["shape"])
         assert res.exit_code != 0
         assert "engine down" in res.output
+
+
+# ── real engine ────────────────────────────────────────────────────────────
+
+
+class TestAgainstTheEngine:
+    """The bead asked for one substrate-backed case: a registered ghost row
+    and a live collection, read through the real catalog and vector
+    clients, produce the expected findings and a truthful examined count."""
+
+    def test_ghost_and_live_collection_through_real_clients(self) -> None:
+        tag = uuid.uuid4().hex[:10]
+        # The test engine serves the local bge-768 embedder; a voyage-named
+        # collection would be refused at embed time (RDR-160 strict routing).
+        ghost = f"knowledge__ghost-{tag}__bge-base-en-v15-768__v1"
+        live = f"knowledge__topic-{tag}__bge-base-en-v15-768__v1"
+        cat = ActiveCatalog()
+        cat.register_collection(ghost, content_type="knowledge", owner_id=f"ghost-{tag}",
+                                embedding_model="bge-base-en-v15-768", model_version="v1")
+        cat.register_collection(live, content_type="knowledge", owner_id=f"topic-{tag}",
+                                embedding_model="bge-base-en-v15-768", model_version="v1")
+        client = HttpVectorClient()  # the real service client; the in-memory unit substrate has no stats route
+        texts = [f"alpha text {tag}", f"beta text {tag}"]
+        ids = [hashlib.sha256(x.encode()).hexdigest() for x in texts]  # chunk ids are the chash
+        client.upsert_chunks(live, ids, texts, [{"content_hash": i} for i in ids])
+
+        report = audit(catalog=active_reader(), t3=client, write_model_for=_cloud_write_model)
+
+        by_name = {(f.collection, f.check) for f in report.findings}
+        assert (ghost, "ghost-row") in by_name
+        assert (live, "below-fanout-floor") in by_name, "two chunks is below the fan-out floor of three"
+        assert (live, "ghost-row") not in by_name
+        assert (live, "dimension-disagrees-with-model") not in by_name, "768 stored, 768 named"
+        assert report.collections_examined >= 2
