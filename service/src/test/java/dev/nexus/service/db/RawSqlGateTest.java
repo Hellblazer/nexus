@@ -1176,7 +1176,7 @@ class RawSqlGateTest {
      * CollectionRegistryFkTest.java} 63 -&gt; 3 -- chunks/topic_assignments seed inserts
      * across three dims, row-count reads, cross-tenant/RLS/ON-DELETE-RESTRICT probes,
      * and six {@code @Disabled} dead-code CHECK-constraint tests targeting the DROPPED
-     * {@code chunks_384/768/1024} tables, all onto typed jOOQ DSL. Rewired onto {@code
+     * per-dim chunk tables (retired at RDR-191), all onto typed jOOQ DSL. Rewired onto {@code
      * CollectionRegistryFkExtraTest}'s batch-10 {@code PgContainerHelper.insertCollection}/
      * {@code insertCatalogDocument} helpers, and onto three NEW {@code PgContainerHelper}
      * helpers ({@code insertChunk384/768/1024}) hoisted from the byte-for-byte duplicate

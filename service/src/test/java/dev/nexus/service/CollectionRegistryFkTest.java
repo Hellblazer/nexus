@@ -519,7 +519,7 @@ class CollectionRegistryFkTest {
         + "nexus/rdr-191-batch-D5-2026-08-13).")
     void chunks384_chashLenCheck_rejects31() throws Exception {
         // RED until P0.2 adds chunks_384_chash_len_check.
-        // Dead code (this test is @Disabled): nexus.chunks_384 was DROPPED CASCADE by
+        // Dead code (this test is @Disabled): the per-dim 384 chunk table was DROPPED CASCADE by
         // vectors-004-unify-chunks.xml, so no generated jOOQ Table exists for it any
         // more -- DSL.table(DSL.name(...))/DSL.field(DSL.name(...), Class) is the
         // sanctioned typed-DSL form for a relation with no codegen (nexus-cbo4a batch 10).
