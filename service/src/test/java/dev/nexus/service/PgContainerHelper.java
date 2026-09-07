@@ -28,6 +28,8 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 
 
@@ -380,6 +382,55 @@ public final class PgContainerHelper {
             step = step.set(SERVICE_TOKENS.REVOKED_AT, revokedAt);
         }
         step.onConflictDoNothing().execute();
+    }
+
+    /**
+     * Seed a minimal {@code nexus.catalog_collections} row via generated jOOQ DSL
+     * (nexus-cbo4a batch 10) — replaces the identical hand-rolled {@code INSERT INTO
+     * nexus.catalog_collections (tenant_id, name) VALUES (...) ON CONFLICT (tenant_id,
+     * name) DO NOTHING} that {@code CollectionRegistryFkTest} and
+     * {@code CollectionRegistryFkExtraTest} each built by string concatenation
+     * (identical shape, duplicated across files — the same class of duplication
+     * {@link #seedServiceToken(DSLContext, String, String, String)} closed for
+     * {@code service_tokens}). {@code catalog_collections} PK is {@code (tenant_id,
+     * name)}; the four remaining NOT NULL TEXT columns
+     * ({@code content_type}/{@code owner_id}/{@code embedding_model}/{@code
+     * model_version}/{@code display_name}) all default to {@code ''} and are left
+     * unset, matching every hand-rolled call site's own scope.
+     *
+     * @param dsl      a {@link DSLContext} over the same connection/role the schema
+     *                 was migrated under (e.g. {@code DSL.using(su, SQLDialect.POSTGRES)})
+     * @param tenantId the tenant id to register the collection under
+     * @param name     the collection name ({@code catalog_collections.name})
+     */
+    public static void insertCollection(DSLContext dsl, String tenantId, String name) {
+        dsl.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+            .values(tenantId, name)
+            .onConflictDoNothing()
+            .execute();
+    }
+
+    /**
+     * Seed a minimal {@code nexus.catalog_documents} row via generated jOOQ DSL
+     * (nexus-cbo4a batch 10) — the {@code catalog_documents} counterpart to {@link
+     * #insertCollection}, replacing the identical hand-rolled {@code INSERT INTO
+     * nexus.catalog_documents (tenant_id, tumbler, title) VALUES (...) ON CONFLICT
+     * (tenant_id, tumbler) DO NOTHING} duplicated the same way. {@code
+     * catalog_documents} PK is {@code (tenant_id, tumbler)}; {@code title} is
+     * required NOT NULL and is synthesized as {@code "Test Doc " + tumbler}, matching
+     * every hand-rolled call site's own literal exactly.
+     *
+     * @param dsl      a {@link DSLContext} over the same connection/role the schema
+     *                 was migrated under
+     * @param tenantId the tenant id to register the document under
+     * @param tumbler  the document's {@code catalog_documents.tumbler}
+     */
+    public static void insertCatalogDocument(DSLContext dsl, String tenantId, String tumbler) {
+        dsl.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                CATALOG_DOCUMENTS.TITLE)
+            .values(tenantId, tumbler, "Test Doc " + tumbler)
+            .onConflictDoNothing()
+            .execute();
     }
 
     /**

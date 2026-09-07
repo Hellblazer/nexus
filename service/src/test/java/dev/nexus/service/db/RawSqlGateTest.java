@@ -905,7 +905,11 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/ChashProbePlanShapeTest.java", 8),
         Map.entry("dev/nexus/service/ChashRepositoryTest.java", 8),
         Map.entry("dev/nexus/service/ChunksRlsBehavioralTest.java", 12),
-        Map.entry("dev/nexus/service/CollectionRegistryFkExtraTest.java", 40),
+        // nexus-cbo4a batch 10: 40 -> 3 (seed INSERTs / row-count reads onto typed jOOQ
+        // DSL; the surviving 3 are ADD CONSTRAINT .. NOT VALID + VALIDATE CONSTRAINT x2
+        // in assertReconcileLoadBearing, Postgres-only ALTER TABLE extensions with no
+        // jOOQ typed-DSL form -- verified against jOOQ 3.21's manual).
+        Map.entry("dev/nexus/service/CollectionRegistryFkExtraTest.java", 3),
         Map.entry("dev/nexus/service/CollectionRegistryFkTest.java", 63),
         Map.entry("dev/nexus/service/CollectionVectorStatsTest.java", 18),
         Map.entry("dev/nexus/service/CombinedQueryParityIntegrationTest.java", 4),
@@ -1152,8 +1156,24 @@ class RawSqlGateTest {
      * red on the unmodified ceiling map reported the exact "declares N, only
      * M found" delta for all 36 files, and the reseeded map plus this
      * constant reproduce it exactly.
+     *
+     * <p><b>nexus-cbo4a batch 10 (2026-09-07), file 1 of 2:</b> 1602 -&gt; 1565 (-37),
+     * {@code CollectionRegistryFkExtraTest.java} 40 -&gt; 3 -- seed INSERTs (backfill-
+     * stub fixtures across five FK-eligible tables), row-count reads, and cross-
+     * tenant/ON-DELETE-RESTRICT probes all onto typed jOOQ DSL over generated
+     * {@code Tables}. Two new {@code PgContainerHelper} helpers, {@code
+     * insertCollection}/{@code insertCatalogDocument}, hoisted for reuse by the
+     * same-shaped duplication in {@code CollectionRegistryFkTest} and nine other
+     * files -- not yet rewired onto it, a follow-up. The surviving 3 sites are
+     * {@code ADD CONSTRAINT .. NOT VALID} and {@code VALIDATE CONSTRAINT} x2 inside
+     * {@code assertReconcileLoadBearing} -- Postgres-only {@code ALTER TABLE}
+     * extensions with no jOOQ typed-DSL form (verified against jOOQ 3.21's manual:
+     * {@code alterConstraint().enforced()/notEnforced()} renders MySQL-style
+     * {@code [NOT] ENFORCED}, not Postgres's {@code NOT VALID}/{@code VALIDATE
+     * CONSTRAINT}); {@code DROP CONSTRAINT IF EXISTS} DOES have a typed form
+     * ({@code alterTable(table).dropConstraintIfExists(name)}) and was converted.
      */
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1602;
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1565;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

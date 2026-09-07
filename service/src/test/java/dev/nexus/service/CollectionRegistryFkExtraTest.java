@@ -1,20 +1,24 @@
 package dev.nexus.service;
 
+import org.jooq.DSLContext;
+import org.jooq.Table;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.*;
 import org.postgresql.util.PSQLException;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
+import java.time.OffsetDateTime;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_META;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -49,7 +53,11 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  *
  * <p>Conventions mirror {@link CollectionRegistryFkTest}: {@link PgContainerHelper#start()},
  * master changelog via Liquibase, PER_CLASS lifecycle, {@code @Order}, AssertJ +
- * {@code assertThrows(PSQLException.class)}, superuser for direct inserts.
+ * {@code assertThrows(DataAccessException.class)} (jOOQ's unchecked wrapper around the
+ * underlying {@code PSQLException} — nexus-cbo4a batch 10 converted every insert/select/
+ * delete here off {@code Connection}+string-literal SQL onto typed jOOQ DSL, so
+ * {@code jOOQ}'s own exception type is what a rejected {@code .execute()} now throws),
+ * superuser for direct inserts.
  *
  * <p>Verified schema facts (do not re-derive; source = Liquibase baselines):
  * <ul>
@@ -77,6 +85,13 @@ class CollectionRegistryFkExtraTest {
 
     private static final List<String> ALL_FIVE_FK_NAMES = List.of(
             FK_DOC_ASPECTS, FK_ASPECT_QUEUE, FK_TOPICS, FK_TAX_META, FK_DOC_HL);
+
+    /** The five FK-eligible tables in {@code ALL_FIVE_FK_NAMES} order — used to drive
+     *  the GROUP F/G loops over typed jOOQ {@link Table} references instead of raw
+     *  table-name strings, mirroring {@code CollectionRegistryFkTest}'s per-table FK
+     *  bookkeeping. */
+    private static final List<Table<?>> ALL_FIVE_FK_TABLES = List.of(
+            DOCUMENT_ASPECTS, ASPECT_EXTRACTION_QUEUE, TOPICS, TAXONOMY_META, DOCUMENT_HIGHLIGHTS);
 
     private static final String TENANT_A = "crfkx-tenant-a";
     private static final String TENANT_B = "crfkx-tenant-b";
@@ -106,14 +121,18 @@ class CollectionRegistryFkExtraTest {
     void documentAspects_unregisteredCollection_rejected() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // hygiene-001 step 1: doc_id/source_uri are NOT NULL now -- seed a
             // real catalog-document parent so the ONLY violation exercised here
             // is the (still-unregistered) collection FK.
-            insertCatalogDocument(su, TENANT_A, "asp-unreg-doc");
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) " +
-                    "VALUES ('" + TENANT_A + "', 'unreg-aspect-col', '/p/a.md', NOW(), 'v1', 'test', 'asp-unreg-doc', 'file:///p/a.md')"));
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "asp-unreg-doc");
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                        DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                        DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                    .values(TENANT_A, "unreg-aspect-col", "/p/a.md", OffsetDateTime.now(), "v1", "test",
+                        "asp-unreg-doc", "file:///p/a.md")
+                    .execute());
             assertThat(ex.getMessage())
                 .as("document_aspects_collection_fk must reject unregistered collection")
                 .containsIgnoringCase(FK_DOC_ASPECTS);
@@ -124,13 +143,18 @@ class CollectionRegistryFkExtraTest {
     void aspectQueue_unregisteredCollection_rejected() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // hygiene-001 step 2: doc_id is NOT NULL now -- seed a real
             // catalog-document parent so the collection FK is the sole violation.
-            insertCatalogDocument(su, TENANT_A, "queue-unreg-doc");
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.aspect_extraction_queue (tenant_id, collection, source_path, status, enqueued_at, doc_id) " +
-                    "VALUES ('" + TENANT_A + "', 'unreg-queue-col', '/p/q.md', 'pending', NOW(), 'queue-unreg-doc')"));
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "queue-unreg-doc");
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID,
+                        ASPECT_EXTRACTION_QUEUE.COLLECTION, ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
+                        ASPECT_EXTRACTION_QUEUE.STATUS, ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,
+                        ASPECT_EXTRACTION_QUEUE.DOC_ID)
+                    .values(TENANT_A, "unreg-queue-col", "/p/q.md", "pending", OffsetDateTime.now(),
+                        "queue-unreg-doc")
+                    .execute());
             assertThat(ex.getMessage())
                 .as("aspect_extraction_queue_collection_fk must reject unregistered collection")
                 .containsIgnoringCase(FK_ASPECT_QUEUE);
@@ -141,10 +165,12 @@ class CollectionRegistryFkExtraTest {
     void topics_unregisteredCollection_rejected() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.topics (tenant_id, label, collection, doc_count, created_at, review_status) " +
-                    "VALUES ('" + TENANT_A + "', 'topic-x', 'unreg-topic-col', 0, NOW(), 'pending')"));
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
+                        TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+                    .values(TENANT_A, "topic-x", "unreg-topic-col", 0, OffsetDateTime.now(), "pending")
+                    .execute());
             assertThat(ex.getMessage())
                 .as("topics_collection_fk must reject unregistered collection")
                 .containsIgnoringCase(FK_TOPICS);
@@ -155,10 +181,11 @@ class CollectionRegistryFkExtraTest {
     void taxonomyMeta_unregisteredCollection_rejected() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.taxonomy_meta (tenant_id, collection) " +
-                    "VALUES ('" + TENANT_A + "', 'unreg-meta-col')"));
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+                    .values(TENANT_A, "unreg-meta-col")
+                    .execute());
             assertThat(ex.getMessage())
                 .as("taxonomy_meta_collection_fk must reject unregistered collection")
                 .containsIgnoringCase(FK_TAX_META);
@@ -169,14 +196,16 @@ class CollectionRegistryFkExtraTest {
     void documentHighlights_unregisteredCollection_rejected() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // Parent catalog_documents row so the doc-rooted fk-001 FK is satisfied and the
             // ONLY remaining violation is the collection FK under test. hygiene-001 step 3:
             // source_uri is NOT NULL now too.
-            insertCatalogDocument(su, TENANT_A, "hl-doc-unreg");
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.document_highlights (tenant_id, doc_id, source_uri, collection, ingested_at) " +
-                    "VALUES ('" + TENANT_A + "', 'hl-doc-unreg', 'file:///hl-doc-unreg', 'unreg-hl-col', NOW())"));
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "hl-doc-unreg");
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
+                        DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                    .values(TENANT_A, "hl-doc-unreg", "file:///hl-doc-unreg", "unreg-hl-col", OffsetDateTime.now())
+                    .execute());
             assertThat(ex.getMessage())
                 .as("document_highlights_collection_fk must reject unregistered non-null collection")
                 .containsIgnoringCase(FK_DOC_HL);
@@ -191,15 +220,21 @@ class CollectionRegistryFkExtraTest {
     void documentAspects_registeredCollection_accepted() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, "ctrl-aspect-col");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "ctrl-aspect-col");
             // hygiene-001 step 1: doc_id/source_uri are NOT NULL now.
-            insertCatalogDocument(su, TENANT_A, "ctrl-aspect-doc");
-            su.createStatement().execute(
-                "INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) " +
-                "VALUES ('" + TENANT_A + "', 'ctrl-aspect-col', '/p/ctrl.md', NOW(), 'v1', 'test', 'ctrl-aspect-doc', 'file:///p/ctrl.md')");
-            assertThat(count(su,
-                "SELECT COUNT(*) FROM nexus.document_aspects " +
-                "WHERE tenant_id='" + TENANT_A + "' AND collection='ctrl-aspect-col'"))
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "ctrl-aspect-doc");
+            ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                    DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                .values(TENANT_A, "ctrl-aspect-col", "/p/ctrl.md", OffsetDateTime.now(), "v1", "test",
+                    "ctrl-aspect-doc", "file:///p/ctrl.md")
+                .execute();
+            int count = ctx.selectCount().from(DOCUMENT_ASPECTS)
+                .where(DOCUMENT_ASPECTS.TENANT_ID.eq(TENANT_A))
+                .and(DOCUMENT_ASPECTS.COLLECTION.eq("ctrl-aspect-col"))
+                .fetchOne(0, int.class);
+            assertThat(count)
                 .as("registered document_aspects insert must succeed").isEqualTo(1);
         }
     }
@@ -208,13 +243,17 @@ class CollectionRegistryFkExtraTest {
     void topics_registeredCollection_accepted() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, "ctrl-topic-col");
-            su.createStatement().execute(
-                "INSERT INTO nexus.topics (tenant_id, label, collection, doc_count, created_at, review_status) " +
-                "VALUES ('" + TENANT_A + "', 'topic-ctrl', 'ctrl-topic-col', 0, NOW(), 'pending')");
-            assertThat(count(su,
-                "SELECT COUNT(*) FROM nexus.topics " +
-                "WHERE tenant_id='" + TENANT_A + "' AND collection='ctrl-topic-col'"))
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "ctrl-topic-col");
+            ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
+                    TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+                .values(TENANT_A, "topic-ctrl", "ctrl-topic-col", 0, OffsetDateTime.now(), "pending")
+                .execute();
+            int count = ctx.selectCount().from(TOPICS)
+                .where(TOPICS.TENANT_ID.eq(TENANT_A))
+                .and(TOPICS.COLLECTION.eq("ctrl-topic-col"))
+                .fetchOne(0, int.class);
+            assertThat(count)
                 .as("registered topics insert must succeed").isEqualTo(1);
         }
     }
@@ -227,11 +266,16 @@ class CollectionRegistryFkExtraTest {
         // outright by the NOT NULL constraint, ahead of this FK.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, "hl-doc-null");
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.document_highlights (tenant_id, doc_id, source_uri, collection, ingested_at) " +
-                    "VALUES ('" + TENANT_A + "', 'hl-doc-null', 'file:///hl-doc-null', NULL, NOW())"));
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "hl-doc-null");
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(DOCUMENT_HIGHLIGHTS)
+                    .set(DOCUMENT_HIGHLIGHTS.TENANT_ID, TENANT_A)
+                    .set(DOCUMENT_HIGHLIGHTS.DOC_ID, "hl-doc-null")
+                    .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, "file:///hl-doc-null")
+                    .set(DOCUMENT_HIGHLIGHTS.COLLECTION, (String) null)
+                    .set(DOCUMENT_HIGHLIGHTS.INGESTED_AT, OffsetDateTime.now())
+                    .execute());
             assertThat(ex.getMessage())
                 .as("document_highlights.collection must be NOT NULL (hygiene-001 step 3)")
                 .containsIgnoringCase("null value in column \"collection\"");
@@ -268,16 +312,21 @@ class CollectionRegistryFkExtraTest {
     void deleteCollection_withLiveAspectRow_isRejected() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, "restrict-aspect-col");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "restrict-aspect-col");
             // hygiene-001 step 1: doc_id/source_uri are NOT NULL now.
-            insertCatalogDocument(su, TENANT_A, "restrict-aspect-doc");
-            su.createStatement().execute(
-                "INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) " +
-                "VALUES ('" + TENANT_A + "', 'restrict-aspect-col', '/p/r.md', NOW(), 'v1', 'test', 'restrict-aspect-doc', 'file:///p/r.md')");
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "DELETE FROM nexus.catalog_collections " +
-                    "WHERE tenant_id='" + TENANT_A + "' AND name='restrict-aspect-col'"));
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "restrict-aspect-doc");
+            ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                    DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                .values(TENANT_A, "restrict-aspect-col", "/p/r.md", OffsetDateTime.now(), "v1", "test",
+                    "restrict-aspect-doc", "file:///p/r.md")
+                .execute();
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.deleteFrom(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A))
+                    .and(CATALOG_COLLECTIONS.NAME.eq("restrict-aspect-col"))
+                    .execute());
             assertThat(ex.getMessage())
                 .as("ON DELETE RESTRICT must block deleting a collection with live document_aspects rows")
                 .containsIgnoringCase(FK_DOC_ASPECTS);
@@ -288,18 +337,24 @@ class CollectionRegistryFkExtraTest {
     void deleteCollection_afterAspectDeleted_succeeds() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, "restrict-aspect-after");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "restrict-aspect-after");
             // hygiene-001 step 1: doc_id/source_uri are NOT NULL now.
-            insertCatalogDocument(su, TENANT_A, "restrict-aspect-after-doc");
-            su.createStatement().execute(
-                "INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) " +
-                "VALUES ('" + TENANT_A + "', 'restrict-aspect-after', '/p/after.md', NOW(), 'v1', 'test', 'restrict-aspect-after-doc', 'file:///p/after.md')");
-            su.createStatement().execute(
-                "DELETE FROM nexus.document_aspects " +
-                "WHERE tenant_id='" + TENANT_A + "' AND collection='restrict-aspect-after'");
-            int deleted = su.createStatement().executeUpdate(
-                "DELETE FROM nexus.catalog_collections " +
-                "WHERE tenant_id='" + TENANT_A + "' AND name='restrict-aspect-after'");
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "restrict-aspect-after-doc");
+            ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                    DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                .values(TENANT_A, "restrict-aspect-after", "/p/after.md", OffsetDateTime.now(), "v1", "test",
+                    "restrict-aspect-after-doc", "file:///p/after.md")
+                .execute();
+            ctx.deleteFrom(DOCUMENT_ASPECTS)
+                .where(DOCUMENT_ASPECTS.TENANT_ID.eq(TENANT_A))
+                .and(DOCUMENT_ASPECTS.COLLECTION.eq("restrict-aspect-after"))
+                .execute();
+            int deleted = ctx.deleteFrom(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A))
+                .and(CATALOG_COLLECTIONS.NAME.eq("restrict-aspect-after"))
+                .execute();
             assertThat(deleted)
                 .as("collection delete must succeed once referencing aspect rows are removed")
                 .isEqualTo(1);
@@ -314,14 +369,18 @@ class CollectionRegistryFkExtraTest {
     void documentAspects_crossTenantCollection_rejected() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_B, "xtenant-aspect-col-b");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT_B, "xtenant-aspect-col-b");
             // hygiene-001 step 1: doc_id/source_uri are NOT NULL now -- seed a real
             // catalog-document parent for TENANT_A so the collection FK is the sole violation.
-            insertCatalogDocument(su, TENANT_A, "xtenant-aspect-doc");
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) " +
-                    "VALUES ('" + TENANT_A + "', 'xtenant-aspect-col-b', '/p/x.md', NOW(), 'v1', 'test', 'xtenant-aspect-doc', 'file:///p/x.md')"));
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "xtenant-aspect-doc");
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                        DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                        DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                    .values(TENANT_A, "xtenant-aspect-col-b", "/p/x.md", OffsetDateTime.now(), "v1", "test",
+                        "xtenant-aspect-doc", "file:///p/x.md")
+                    .execute());
             assertThat(ex.getMessage())
                 .as("composite FK must reject cross-tenant collection reference in document_aspects")
                 .containsIgnoringCase(FK_DOC_ASPECTS);
@@ -334,11 +393,12 @@ class CollectionRegistryFkExtraTest {
     // The master changelog applies the backfill against an EMPTY DB (no-op), then
     // adds the NOT VALID FKs. To exercise the backfill SQL against real orphan rows
     // we DROP the five FKs (so orphan inserts are allowed), seed orphans, then run
-    // the SAME backfill SQL fk-003-0 ships and assert EXACT stub counts:
+    // the SAME backfill shape fk-003-0 ships (jOOQ typed INSERT ... SELECT DISTINCT
+    // ... ON CONFLICT DO NOTHING, rendering the identical statement the changeset's
+    // literal SQL specifies) and assert EXACT stub counts:
     //   - DISTINCT (tenant_id, collection) per source table
     //   - ON CONFLICT DO NOTHING dedup across tables and against pre-existing rows
     //   - document_highlights: only non-null, non-empty collection contributes
-    // The SQL below MUST stay identical to changeset fk-003-0-backfill-stubs.
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(60)
@@ -346,16 +406,15 @@ class CollectionRegistryFkExtraTest {
         final String T = "crfkx-backfill-tenant";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
 
-            // Drop the five FKs so orphan child rows can be seeded.
-            for (String fk : List.of(
-                    "document_aspects",        // table → constraint <table>_collection_fk
-                    "aspect_extraction_queue",
-                    "topics",
-                    "taxonomy_meta",
-                    "document_highlights")) {
-                su.createStatement().execute(
-                    "ALTER TABLE nexus." + fk + " DROP CONSTRAINT IF EXISTS " + fk + "_collection_fk");
+            // Drop the five FKs so orphan child rows can be seeded. ALTER TABLE ..
+            // DROP CONSTRAINT IF EXISTS has a typed jOOQ form (unlike ADD CONSTRAINT
+            // .. NOT VALID / VALIDATE CONSTRAINT below, both Postgres-only DDL
+            // extensions jOOQ's DSL does not model -- verified against jOOQ 3.21's
+            // manual, nexus-cbo4a batch 10).
+            for (int i = 0; i < ALL_FIVE_FK_TABLES.size(); i++) {
+                ctx.alterTable(ALL_FIVE_FK_TABLES.get(i)).dropConstraintIfExists(ALL_FIVE_FK_NAMES.get(i)).execute();
             }
 
             // Seed orphan rows referencing collections NOT in catalog_collections.
@@ -368,69 +427,63 @@ class CollectionRegistryFkExtraTest {
             // are all NOT NULL now -- seed real catalog-document parents and supply the
             // columns so these rows insert at all; the backfill-stub SQL under test is
             // orthogonal to doc_id attribution.
-            insertCatalogDocument(su, T, "bf-aspect-doc");
-            insertCatalogDocument(su, T, "bf-queue-doc");
-            su.createStatement().execute(
-                "INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) VALUES " +
-                "('" + T + "', 'bf-colA', '/a/1.md', NOW(), 'v1', 'test', 'bf-aspect-doc', 'file:///a/1.md'), " +
-                "('" + T + "', 'bf-colA', '/a/2.md', NOW(), 'v1', 'test', 'bf-aspect-doc', 'file:///a/2.md')");
-            su.createStatement().execute(
-                "INSERT INTO nexus.aspect_extraction_queue (tenant_id, collection, source_path, status, enqueued_at, doc_id) VALUES " +
-                "('" + T + "', 'bf-colA', '/a/1.md', 'pending', NOW(), 'bf-queue-doc'), " +
-                "('" + T + "', 'bf-colB', '/b/1.md', 'pending', NOW(), 'bf-queue-doc')");
-            su.createStatement().execute(
-                "INSERT INTO nexus.topics (tenant_id, label, collection, doc_count, created_at, review_status) VALUES " +
-                "('" + T + "', 'tA', 'bf-colA', 0, NOW(), 'pending'), " +
-                "('" + T + "', 'tC', 'bf-colC', 0, NOW(), 'pending')");
-            su.createStatement().execute(
-                "INSERT INTO nexus.taxonomy_meta (tenant_id, collection) VALUES ('" + T + "', 'bf-colD')");
+            PgContainerHelper.insertCatalogDocument(ctx, T, "bf-aspect-doc");
+            PgContainerHelper.insertCatalogDocument(ctx, T, "bf-queue-doc");
+            ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                    DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                .values(T, "bf-colA", "/a/1.md", OffsetDateTime.now(), "v1", "test", "bf-aspect-doc", "file:///a/1.md")
+                .values(T, "bf-colA", "/a/2.md", OffsetDateTime.now(), "v1", "test", "bf-aspect-doc", "file:///a/2.md")
+                .execute();
+            ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID,
+                    ASPECT_EXTRACTION_QUEUE.COLLECTION, ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
+                    ASPECT_EXTRACTION_QUEUE.STATUS, ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,
+                    ASPECT_EXTRACTION_QUEUE.DOC_ID)
+                .values(T, "bf-colA", "/a/1.md", "pending", OffsetDateTime.now(), "bf-queue-doc")
+                .values(T, "bf-colB", "/b/1.md", "pending", OffsetDateTime.now(), "bf-queue-doc")
+                .execute();
+            ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
+                    TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+                .values(T, "tA", "bf-colA", 0, OffsetDateTime.now(), "pending")
+                .values(T, "tC", "bf-colC", 0, OffsetDateTime.now(), "pending")
+                .execute();
+            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+                .values(T, "bf-colD")
+                .execute();
             // Parent docs for the highlight rows (doc-rooted fk-001 FK). bf-hl-2 (the prior
             // NULL-collection seed row) is GONE: hygiene-001 step 3 makes collection NOT
             // NULL, so that case can no longer be represented by a live insert -- the
             // empty-string arm (bf-hl-3) remains as the fixture's sole coverage of the
             // reconcile SQL's exclusion filter.
-            insertCatalogDocument(su, T, "bf-hl-1");
-            insertCatalogDocument(su, T, "bf-hl-3");
-            su.createStatement().execute(
-                "INSERT INTO nexus.document_highlights (tenant_id, doc_id, source_uri, collection, ingested_at) VALUES " +
-                "('" + T + "', 'bf-hl-1', 'file:///bf-hl-1', 'bf-colE', NOW()), " +
-                "('" + T + "', 'bf-hl-3', 'file:///bf-hl-3', '', NOW())");
+            PgContainerHelper.insertCatalogDocument(ctx, T, "bf-hl-1");
+            PgContainerHelper.insertCatalogDocument(ctx, T, "bf-hl-3");
+            ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
+                    DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                .values(T, "bf-hl-1", "file:///bf-hl-1", "bf-colE", OffsetDateTime.now())
+                .values(T, "bf-hl-3", "file:///bf-hl-3", "", OffsetDateTime.now())
+                .execute();
 
-            assertThat(count(su,
-                "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + T + "'"))
+            assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).fetchOne(0, int.class))
                 .as("no stubs registered for backfill tenant before backfill").isEqualTo(0);
 
-            // ── fk-003-0-backfill-stubs SQL (MUST match the changeset verbatim) ──
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                "SELECT DISTINCT tenant_id, collection FROM nexus.document_aspects " +
-                "ON CONFLICT (tenant_id, name) DO NOTHING");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                "SELECT DISTINCT tenant_id, collection FROM nexus.aspect_extraction_queue " +
-                "ON CONFLICT (tenant_id, name) DO NOTHING");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                "SELECT DISTINCT tenant_id, collection FROM nexus.topics " +
-                "ON CONFLICT (tenant_id, name) DO NOTHING");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                "SELECT DISTINCT tenant_id, collection FROM nexus.taxonomy_meta " +
-                "ON CONFLICT (tenant_id, name) DO NOTHING");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                "SELECT DISTINCT tenant_id, collection FROM nexus.document_highlights " +
-                "WHERE collection IS NOT NULL AND collection != '' " +
-                "ON CONFLICT (tenant_id, name) DO NOTHING");
+            // ── fk-003-0-backfill-stubs shape (MUST render the changeset's SQL verbatim) ──
+            runBackfillStub(ctx, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION, null);
+            runBackfillStub(ctx, ASPECT_EXTRACTION_QUEUE.TENANT_ID, ASPECT_EXTRACTION_QUEUE.COLLECTION, null);
+            runBackfillStub(ctx, TOPICS.TENANT_ID, TOPICS.COLLECTION, null);
+            runBackfillStub(ctx, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION, null);
+            runBackfillStub(ctx, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.COLLECTION,
+                DOCUMENT_HIGHLIGHTS.COLLECTION.isNotNull().and(DOCUMENT_HIGHLIGHTS.COLLECTION.ne("")));
 
             // Exactly five distinct collections registered: colA, colB, colC, colD, colE.
-            assertThat(count(su,
-                "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + T + "'"))
+            assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).fetchOne(0, int.class))
                 .as("backfill must stub-register exactly 5 distinct collections (colA deduped, empty-string highlight skipped)")
                 .isEqualTo(5);
-            assertThat(count(su,
-                "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + T + "' " +
-                "AND name IN ('bf-colA','bf-colB','bf-colC','bf-colD','bf-colE')"))
+            assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T))
+                    .and(CATALOG_COLLECTIONS.NAME.in("bf-colA", "bf-colB", "bf-colC", "bf-colD", "bf-colE"))
+                    .fetchOne(0, int.class))
                 .as("the 5 expected collection names must each be registered exactly once")
                 .isEqualTo(5);
         }
@@ -466,17 +519,20 @@ class CollectionRegistryFkExtraTest {
         final String ORPHAN_COL = "p1b-orphan-aspects";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // hygiene-001 step 1: doc_id/source_uri are NOT NULL now -- seed a real
             // catalog-document parent so the orphan insert succeeds at all (it is
             // seeded while the collection FK is absent, so the doc-id FK stays
             // the only one exercised at insert time).
-            insertCatalogDocument(su, T, "p1b-aspects-doc");
-            assertReconcileLoadBearing(su, "document_aspects", FK_DOC_ASPECTS, T, ORPHAN_COL,
-                "INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) " +
-                "VALUES ('" + T + "', '" + ORPHAN_COL + "', '/p1b/o.md', NOW(), 'v1', 'test', 'p1b-aspects-doc', 'file:///p1b/o.md')",
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                "SELECT DISTINCT tenant_id, collection FROM nexus.document_aspects " +
-                "ON CONFLICT (tenant_id, name) DO NOTHING");
+            PgContainerHelper.insertCatalogDocument(ctx, T, "p1b-aspects-doc");
+            assertReconcileLoadBearing(su, ctx, DOCUMENT_ASPECTS, FK_DOC_ASPECTS, T, ORPHAN_COL,
+                () -> ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                        DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                        DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                    .values(T, ORPHAN_COL, "/p1b/o.md", OffsetDateTime.now(), "v1", "test",
+                        "p1b-aspects-doc", "file:///p1b/o.md")
+                    .execute(),
+                () -> runBackfillStub(ctx, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION, null));
         }
     }
 
@@ -486,15 +542,18 @@ class CollectionRegistryFkExtraTest {
         final String ORPHAN_COL = "p1b-orphan-queue";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // hygiene-001 step 2: doc_id is NOT NULL now -- seed a real
             // catalog-document parent so the orphan insert succeeds at all.
-            insertCatalogDocument(su, T, "p1b-queue-doc");
-            assertReconcileLoadBearing(su, "aspect_extraction_queue", FK_ASPECT_QUEUE, T, ORPHAN_COL,
-                "INSERT INTO nexus.aspect_extraction_queue (tenant_id, collection, source_path, status, enqueued_at, doc_id) " +
-                "VALUES ('" + T + "', '" + ORPHAN_COL + "', '/p1b/q.md', 'pending', NOW(), 'p1b-queue-doc')",
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                "SELECT DISTINCT tenant_id, collection FROM nexus.aspect_extraction_queue " +
-                "ON CONFLICT (tenant_id, name) DO NOTHING");
+            PgContainerHelper.insertCatalogDocument(ctx, T, "p1b-queue-doc");
+            assertReconcileLoadBearing(su, ctx, ASPECT_EXTRACTION_QUEUE, FK_ASPECT_QUEUE, T, ORPHAN_COL,
+                () -> ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID,
+                        ASPECT_EXTRACTION_QUEUE.COLLECTION, ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
+                        ASPECT_EXTRACTION_QUEUE.STATUS, ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,
+                        ASPECT_EXTRACTION_QUEUE.DOC_ID)
+                    .values(T, ORPHAN_COL, "/p1b/q.md", "pending", OffsetDateTime.now(), "p1b-queue-doc")
+                    .execute(),
+                () -> runBackfillStub(ctx, ASPECT_EXTRACTION_QUEUE.TENANT_ID, ASPECT_EXTRACTION_QUEUE.COLLECTION, null));
         }
     }
 
@@ -504,12 +563,13 @@ class CollectionRegistryFkExtraTest {
         final String ORPHAN_COL = "p1b-orphan-topic";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            assertReconcileLoadBearing(su, "topics", FK_TOPICS, T, ORPHAN_COL,
-                "INSERT INTO nexus.topics (tenant_id, label, collection, doc_count, created_at, review_status) " +
-                "VALUES ('" + T + "', 'topic-p1b', '" + ORPHAN_COL + "', 0, NOW(), 'pending')",
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                "SELECT DISTINCT tenant_id, collection FROM nexus.topics " +
-                "ON CONFLICT (tenant_id, name) DO NOTHING");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertReconcileLoadBearing(su, ctx, TOPICS, FK_TOPICS, T, ORPHAN_COL,
+                () -> ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
+                        TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+                    .values(T, "topic-p1b", ORPHAN_COL, 0, OffsetDateTime.now(), "pending")
+                    .execute(),
+                () -> runBackfillStub(ctx, TOPICS.TENANT_ID, TOPICS.COLLECTION, null));
         }
     }
 
@@ -519,12 +579,12 @@ class CollectionRegistryFkExtraTest {
         final String ORPHAN_COL = "p1b-orphan-meta";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            assertReconcileLoadBearing(su, "taxonomy_meta", FK_TAX_META, T, ORPHAN_COL,
-                "INSERT INTO nexus.taxonomy_meta (tenant_id, collection) " +
-                "VALUES ('" + T + "', '" + ORPHAN_COL + "')",
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                "SELECT DISTINCT tenant_id, collection FROM nexus.taxonomy_meta " +
-                "ON CONFLICT (tenant_id, name) DO NOTHING");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertReconcileLoadBearing(su, ctx, TAXONOMY_META, FK_TAX_META, T, ORPHAN_COL,
+                () -> ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+                    .values(T, ORPHAN_COL)
+                    .execute(),
+                () -> runBackfillStub(ctx, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION, null));
         }
     }
 
@@ -534,6 +594,7 @@ class CollectionRegistryFkExtraTest {
         final String ORPHAN_COL = "p1b-orphan-hl";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // GROUP F @Order(60) deliberately left an empty-string-collection highlight row
             // (bf-hl-3, collection='') and proved the reconcile's WHERE collection != '' filter
             // refuses to register it. Such a row is a STUB-UNSATISFIABLE orphan: it is non-null
@@ -541,96 +602,110 @@ class CollectionRegistryFkExtraTest {
             // VALIDATE fails LOUD on it by design (arm-c, the intended safety property; the
             // non-registration is already asserted by GROUP F). Remove it here so this case can
             // isolate the happy-path gap-window reconcile proof for a real (non-empty) collection.
-            su.createStatement().execute(
-                "DELETE FROM nexus.document_highlights WHERE collection = ''");
+            ctx.deleteFrom(DOCUMENT_HIGHLIGHTS).where(DOCUMENT_HIGHLIGHTS.COLLECTION.eq("")).execute();
             // document_highlights is doc-rooted (fk-001): seed the parent catalog_documents
             // row so the ONLY remaining VALIDATE failure is the collection FK under test.
-            insertCatalogDocument(su, T, "hl-doc-p1b");
+            PgContainerHelper.insertCatalogDocument(ctx, T, "hl-doc-p1b");
             // The document_highlights reconcile arm carries the WHERE collection IS NOT NULL
             // AND collection != '' filter (collection is NULLABLE here, MATCH SIMPLE) — this
             // is the materially-distinct arm; proving it still registers a real gap-window
             // collection is the point of this case.
             // hygiene-001 step 3: source_uri is NOT NULL now too.
-            assertReconcileLoadBearing(su, "document_highlights", FK_DOC_HL, T, ORPHAN_COL,
-                "INSERT INTO nexus.document_highlights (tenant_id, doc_id, source_uri, collection, ingested_at) " +
-                "VALUES ('" + T + "', 'hl-doc-p1b', 'file:///hl-doc-p1b', '" + ORPHAN_COL + "', NOW())",
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                "SELECT DISTINCT tenant_id, collection FROM nexus.document_highlights " +
-                "WHERE collection IS NOT NULL AND collection != '' " +
-                "ON CONFLICT (tenant_id, name) DO NOTHING");
+            assertReconcileLoadBearing(su, ctx, DOCUMENT_HIGHLIGHTS, FK_DOC_HL, T, ORPHAN_COL,
+                () -> ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
+                        DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                    .values(T, "hl-doc-p1b", "file:///hl-doc-p1b", ORPHAN_COL, OffsetDateTime.now())
+                    .execute(),
+                () -> runBackfillStub(ctx, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.COLLECTION,
+                    DOCUMENT_HIGHLIGHTS.COLLECTION.isNotNull().and(DOCUMENT_HIGHLIGHTS.COLLECTION.ne(""))));
         }
     }
 
     // ── helpers ────────────────────────────────────────────────────────────────
 
     /**
+     * Runs the fk-003-0-backfill-stubs shape for one source table via typed jOOQ:
+     * {@code INSERT INTO nexus.catalog_collections (tenant_id, name) SELECT DISTINCT
+     * tenant_id, <collectionField> FROM <source table> [WHERE <filter>] ON CONFLICT
+     * (tenant_id, name) DO NOTHING} — renders the exact statement shape the changeset's
+     * raw SQL specifies (DISTINCT projection, optional WHERE, ON CONFLICT DO NOTHING),
+     * just built through jOOQ's typed DSL instead of string concatenation.
+     */
+    private static void runBackfillStub(
+            DSLContext ctx, org.jooq.TableField<?, String> tenantField,
+            org.jooq.TableField<?, String> collectionField, org.jooq.Condition filter) {
+        var select = filter == null
+            ? ctx.selectDistinct(tenantField, collectionField).from(tenantField.getTable())
+            : ctx.selectDistinct(tenantField, collectionField).from(tenantField.getTable()).where(filter);
+        ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+            .select(select)
+            .onConflictDoNothing()
+            .execute();
+    }
+
+    /**
      * Drives the RDR-164 P1b reconcile→VALIDATE causal proof for one collection FK:
      * the FK is absent (GROUP F dropped all five), an orphan row referencing an
      * unregistered collection is seeded while absent, the FK is re-added NOT VALID,
      * VALIDATE FAILS on the orphan, the reconcile stub-registers the collection, and
-     * VALIDATE then SUCCEEDS with convalidated=true. {@code orphanInsertSql} and
-     * {@code reconcileInsertSql} are the table-specific arms mirroring
-     * fk-003-validate.xml fk-003-6-reconcile.
+     * VALIDATE then SUCCEEDS with convalidated=true. {@code orphanInsert} and
+     * {@code reconcileInsert} are the table-specific arms mirroring
+     * fk-003-validate.xml fk-003-6-reconcile, now typed jOOQ closures instead of raw
+     * SQL text.
+     *
+     * <p>{@code ADD CONSTRAINT .. NOT VALID} and {@code VALIDATE CONSTRAINT} stay raw
+     * SQL strings deliberately — both are Postgres-specific {@code ALTER TABLE}
+     * extensions with no jOOQ typed-DSL form (verified against jOOQ 3.21's manual:
+     * {@code alterConstraint().enforced()/notEnforced()} renders MySQL-style {@code
+     * [NOT] ENFORCED}, not Postgres's {@code NOT VALID}/{@code VALIDATE CONSTRAINT}).
      */
     private void assertReconcileLoadBearing(
-            Connection su, String table, String fkName, String tenant, String orphanCol,
-            String orphanInsertSql, String reconcileInsertSql) throws Exception {
+            Connection su, DSLContext ctx, Table<?> table, String fkName, String tenant, String orphanCol,
+            Runnable orphanInsert, Runnable reconcileInsert) throws Exception {
         // FK absent (dropped by GROUP F); seed an orphan row while it is absent.
-        su.createStatement().execute(
-            "ALTER TABLE nexus." + table + " DROP CONSTRAINT IF EXISTS " + fkName);
-        su.createStatement().execute(orphanInsertSql);
-        assertThat(count(su, "SELECT COUNT(*) FROM nexus.catalog_collections " +
-            "WHERE tenant_id='" + tenant + "' AND name='" + orphanCol + "'"))
-            .as(table + ": orphan collection is NOT registered before reconcile").isZero();
+        ctx.alterTable(table).dropConstraintIfExists(fkName).execute();
+        orphanInsert.run();
+        assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+                .and(CATALOG_COLLECTIONS.NAME.eq(orphanCol))
+                .fetchOne(0, int.class))
+            .as(table.getName() + ": orphan collection is NOT registered before reconcile").isZero();
 
         // Re-add the FK as NOT VALID — succeeds (NOT VALID skips existing-row validation).
+        // SANCTIONED RAW (nexus-cbo4a): ALTER TABLE .. ADD CONSTRAINT .. NOT VALID has no
+        // jOOQ typed-DSL form (Postgres-only extension).
         su.createStatement().execute(
-            "ALTER TABLE nexus." + table + " ADD CONSTRAINT " + fkName + " " +
+            "ALTER TABLE nexus." + table.getName() + " ADD CONSTRAINT " + fkName + " " +
             "FOREIGN KEY (tenant_id, collection) " +
             "REFERENCES nexus.catalog_collections (tenant_id, name) " +
             "ON DELETE RESTRICT NOT VALID");
 
         // VALIDATE must FAIL while the orphan is unregistered — proves reconcile is load-bearing.
+        // SANCTIONED RAW: VALIDATE CONSTRAINT has no jOOQ typed-DSL form. Run via a raw
+        // JDBC Statement (not jOOQ), so the failure surfaces as PSQLException, not jOOQ's
+        // DataAccessException wrapper.
         PSQLException ex = assertThrows(PSQLException.class, () ->
             su.createStatement().execute(
-                "ALTER TABLE nexus." + table + " VALIDATE CONSTRAINT " + fkName));
+                "ALTER TABLE nexus." + table.getName() + " VALIDATE CONSTRAINT " + fkName));
         assertThat(ex.getMessage())
-            .as(table + ": VALIDATE must fail loud on a gap-window orphan before reconcile")
+            .as(table.getName() + ": VALIDATE must fail loud on a gap-window orphan before reconcile")
             .containsIgnoringCase(fkName);
 
         // Reconcile: re-run this table's stub-register arm (fk-003-6-reconcile).
-        su.createStatement().execute(reconcileInsertSql);
-        assertThat(count(su, "SELECT COUNT(*) FROM nexus.catalog_collections " +
-            "WHERE tenant_id='" + tenant + "' AND name='" + orphanCol + "'"))
-            .as(table + ": reconcile stub-registers the gap-window collection").isEqualTo(1);
+        reconcileInsert.run();
+        assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+                .and(CATALOG_COLLECTIONS.NAME.eq(orphanCol))
+                .fetchOne(0, int.class))
+            .as(table.getName() + ": reconcile stub-registers the gap-window collection").isEqualTo(1);
 
         // VALIDATE now SUCCEEDS and flips convalidated=true.
+        // SANCTIONED RAW: VALIDATE CONSTRAINT has no jOOQ typed-DSL form.
         su.createStatement().execute(
-            "ALTER TABLE nexus." + table + " VALIDATE CONSTRAINT " + fkName);
-        PgCatalogProbes.Constraint rs = PgCatalogProbes.foreignKey(
-            DSL.using(su, SQLDialect.POSTGRES), "nexus", fkName);
+            "ALTER TABLE nexus." + table.getName() + " VALIDATE CONSTRAINT " + fkName);
+        PgCatalogProbes.Constraint rs = PgCatalogProbes.foreignKey(ctx, "nexus", fkName);
         assertThat(rs).isNotNull();
         assertThat(rs.convalidated())
-            .as(table + ": VALIDATE succeeds after reconcile → convalidated=true").isTrue();
-    }
-
-    private static void insertCollection(Connection su, String tenantId, String name) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-            "VALUES ('" + tenantId + "', '" + name + "') " +
-            "ON CONFLICT (tenant_id, name) DO NOTHING");
-    }
-
-    private static void insertCatalogDocument(Connection su, String tenantId, String tumbler) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) " +
-            "VALUES ('" + tenantId + "', '" + tumbler + "', 'Test Doc " + tumbler + "') " +
-            "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
-    }
-
-    private static int count(Connection su, String sql) throws Exception {
-        ResultSet rs = su.createStatement().executeQuery(sql);
-        rs.next();
-        return rs.getInt(1);
+            .as(table.getName() + ": VALIDATE succeeds after reconcile → convalidated=true").isTrue();
     }
 }
