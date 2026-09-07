@@ -6,7 +6,6 @@ import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
 import org.junit.jupiter.api.*;
-import org.postgresql.util.PSQLException;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
@@ -653,11 +652,16 @@ class CollectionRegistryFkExtraTest {
      * fk-003-validate.xml fk-003-6-reconcile, now typed jOOQ closures instead of raw
      * SQL text.
      *
-     * <p>{@code ADD CONSTRAINT .. NOT VALID} and {@code VALIDATE CONSTRAINT} stay raw
-     * SQL strings deliberately — both are Postgres-specific {@code ALTER TABLE}
-     * extensions with no jOOQ typed-DSL form (verified against jOOQ 3.21's manual:
-     * {@code alterConstraint().enforced()/notEnforced()} renders MySQL-style {@code
-     * [NOT] ENFORCED}, not Postgres's {@code NOT VALID}/{@code VALIDATE CONSTRAINT}).
+     * <p>{@code ADD CONSTRAINT .. NOT VALID} and {@code VALIDATE CONSTRAINT} run
+     * through {@code nexus_test.add_fk_not_valid}/{@code nexus_test.validate_constraint}
+     * (db/changelog-test/db.changelog-test-objects.xml) via {@link
+     * PgContainerHelper#addFkNotValid}/{@link PgContainerHelper#validateConstraint}
+     * (nexus-cbo4a batch 10 review fold-in) — both Postgres-specific {@code ALTER
+     * TABLE} extensions with no jOOQ typed-DSL form (verified against jOOQ 3.21's
+     * manual: {@code alterConstraint().enforced()/notEnforced()} renders MySQL-style
+     * {@code [NOT] ENFORCED}, not Postgres's {@code NOT VALID}/{@code VALIDATE
+     * CONSTRAINT}), so the raw statement now lives server-side inside a plpgsql
+     * wrapper function rather than being assembled client-side.
      */
     private void assertReconcileLoadBearing(
             Connection su, DSLContext ctx, Table<?> table, String fkName, String tenant, String orphanCol,
@@ -672,21 +676,13 @@ class CollectionRegistryFkExtraTest {
             .as(table.getName() + ": orphan collection is NOT registered before reconcile").isZero();
 
         // Re-add the FK as NOT VALID — succeeds (NOT VALID skips existing-row validation).
-        // SANCTIONED RAW (nexus-cbo4a): ALTER TABLE .. ADD CONSTRAINT .. NOT VALID has no
-        // jOOQ typed-DSL form (Postgres-only extension).
-        su.createStatement().execute(
-            "ALTER TABLE nexus." + table.getName() + " ADD CONSTRAINT " + fkName + " " +
-            "FOREIGN KEY (tenant_id, collection) " +
-            "REFERENCES nexus.catalog_collections (tenant_id, name) " +
-            "ON DELETE RESTRICT NOT VALID");
+        PgContainerHelper.addFkNotValid(su, table, fkName, "collection", CATALOG_COLLECTIONS, "name",
+            "ON DELETE RESTRICT");
 
         // VALIDATE must FAIL while the orphan is unregistered — proves reconcile is load-bearing.
-        // SANCTIONED RAW: VALIDATE CONSTRAINT has no jOOQ typed-DSL form. Run via a raw
-        // JDBC Statement (not jOOQ), so the failure surfaces as PSQLException, not jOOQ's
-        // DataAccessException wrapper.
-        PSQLException ex = assertThrows(PSQLException.class, () ->
-            su.createStatement().execute(
-                "ALTER TABLE nexus." + table.getName() + " VALIDATE CONSTRAINT " + fkName));
+        // jOOQ wraps the underlying PSQLException in its own unchecked DataAccessException.
+        DataAccessException ex = assertThrows(DataAccessException.class, () ->
+            PgContainerHelper.validateConstraint(su, table, fkName));
         assertThat(ex.getMessage())
             .as(table.getName() + ": VALIDATE must fail loud on a gap-window orphan before reconcile")
             .containsIgnoringCase(fkName);
@@ -700,9 +696,7 @@ class CollectionRegistryFkExtraTest {
             .as(table.getName() + ": reconcile stub-registers the gap-window collection").isEqualTo(1);
 
         // VALIDATE now SUCCEEDS and flips convalidated=true.
-        // SANCTIONED RAW: VALIDATE CONSTRAINT has no jOOQ typed-DSL form.
-        su.createStatement().execute(
-            "ALTER TABLE nexus." + table.getName() + " VALIDATE CONSTRAINT " + fkName);
+        PgContainerHelper.validateConstraint(su, table, fkName);
         PgCatalogProbes.Constraint rs = PgCatalogProbes.foreignKey(ctx, "nexus", fkName);
         assertThat(rs).isNotNull();
         assertThat(rs.convalidated())

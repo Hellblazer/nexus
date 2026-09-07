@@ -14,7 +14,6 @@ import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.HexFormat;

@@ -8,10 +8,8 @@ import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
-import org.postgresql.util.PSQLException;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.time.OffsetDateTime;
 import java.util.HexFormat;
 import java.util.List;
@@ -36,7 +34,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  *
  * <ol>
  *   <li>REFERENTIAL INTEGRITY: inserting a taxonomy/aspect row whose doc-ref has no matching
- *       catalog_documents entry is rejected by the FK (PSQLException).</li>
+ *       catalog_documents entry is rejected by the FK (jOOQ's {@code DataAccessException}
+ *       wrapping the underlying {@code PSQLException} — nexus-cbo4a batch 10, every insert
+ *       here runs through typed jOOQ DSL rather than raw JDBC).</li>
  *   <li>ON DELETE CASCADE: deleting a catalog_documents row removes dependent
  *       topic_assignments, document_aspects, and document_highlights rows.</li>
  *   <li>ON DELETE CASCADE for queue: deleting a catalog_documents row removes dependent
@@ -273,7 +273,12 @@ class ForeignKeyConstraintTest {
                 ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                         TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
                         TOPIC_ASSIGNMENTS.ASSIGNED_AT)
-                    .values(TENANT_A, HexFormat.of().parseHex(hexChash("fk-topicAssignment-topicIdFk")), 999999L,
+                    // nexus-cbo4a batch 10 review fold-in: the pre-conversion raw SQL
+                    // (git show 7cd690dde) inserted this doc_id as a bare quoted string
+                    // literal with NO decode(..., 'hex') wrapper -- ASCII-escape-format
+                    // bytes of the hex STRING, not a genuine hex-decode, unlike the
+                    // sibling tests above/below that DO call decode() in the original.
+                    .values(TENANT_A, chashAscii(hexChash("fk-topicAssignment-topicIdFk")), 999999L,
                         "hdbscan", "col-a", OffsetDateTime.now())
                     .execute()
             );

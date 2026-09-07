@@ -898,33 +898,12 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/CatalogPurgeTrashPopulationParityTest.java", 8),
         Map.entry("dev/nexus/service/CatalogPurgeTrashTest.java", 14),
         Map.entry("dev/nexus/service/CatalogPurgeTrashVacuumTest.java", 6),
-        // nexus-cbo4a batch 10: 42 -> 2 (39 row-count `rows(Connection, String)` wrapper
-        // call sites onto typed jOOQ selectCount(), wrapper retired; the surviving 2 are
-        // ALTER TABLE .. [NO] FORCE ROW LEVEL SECURITY, a Postgres-only RLS DDL extension
-        // with no jOOQ typed-DSL form). This file's seed INSERTs were already jOOQ typed
-        // from an earlier batch -- only the row-count read shape remained.
-        Map.entry("dev/nexus/service/CatalogRenameCollectionTest.java", 2),
         Map.entry("dev/nexus/service/CatalogRepositoryTest.java", 6),
         Map.entry("dev/nexus/service/ChashConformanceReportIntegrationTest.java", 9),
         Map.entry("dev/nexus/service/ChashHandlerRerouteTest.java", 4),
         Map.entry("dev/nexus/service/ChashProbePlanShapeTest.java", 8),
         Map.entry("dev/nexus/service/ChashRepositoryTest.java", 8),
         Map.entry("dev/nexus/service/ChunksRlsBehavioralTest.java", 12),
-        // nexus-cbo4a batch 10: 40 -> 3 (seed INSERTs / row-count reads onto typed jOOQ
-        // DSL; the surviving 3 are ADD CONSTRAINT .. NOT VALID + VALIDATE CONSTRAINT x2
-        // in assertReconcileLoadBearing, Postgres-only ALTER TABLE extensions with no
-        // jOOQ typed-DSL form -- verified against jOOQ 3.21's manual).
-        Map.entry("dev/nexus/service/CollectionRegistryFkExtraTest.java", 3),
-        // nexus-cbo4a batch 10: 63 -> 3 (chunks/topic_assignments seed inserts across
-        // three dims, row-count reads, cross-tenant/RLS/ON-DELETE-RESTRICT probes, and
-        // six @Disabled dead-code CHECK-constraint tests targeting the DROPPED
-        // chunks_384/768/1024 tables -- all onto typed jOOQ DSL; the disabled tests use
-        // DSL.table(DSL.name(...))/DSL.field(DSL.name(...), Class) since no generated
-        // Tables entry exists for a relation that no longer exists). The surviving 3
-        // sites are ADD CONSTRAINT .. NOT VALID + VALIDATE CONSTRAINT x2 in
-        // assertReconcileLoadBearing, the same Postgres-only ALTER TABLE extensions with
-        // no jOOQ typed-DSL form as CollectionRegistryFkExtraTest's identical helper.
-        Map.entry("dev/nexus/service/CollectionRegistryFkTest.java", 3),
         Map.entry("dev/nexus/service/CollectionVectorStatsTest.java", 18),
         Map.entry("dev/nexus/service/CombinedQueryParityIntegrationTest.java", 4),
         Map.entry("dev/nexus/service/CombinedQueryParityTest.java", 22),
@@ -1241,8 +1220,54 @@ class RawSqlGateTest {
      * common generated-Tables supertype) resolves generically via a name-to-Table map
      * plus {@code Table#field(String, Class)}, same idiom as {@code
      * CatalogRenameCollectionTest}'s nine-table loop.
+     *
+     * <p><b>nexus-cbo4a batch 10 review fold-in (code-review T2 [code-review-nexus-
+     * cbo4a-batch-10] ship-ready, critique [24862] 0 blockers):</b> 1338 -&gt; 1330
+     * (-8). The 8 sites files 1/2/3 above kept raw ({@code ADD CONSTRAINT .. NOT
+     * VALID}/{@code VALIDATE CONSTRAINT} x3 each in {@code CollectionRegistryFkExtraTest}'s
+     * and {@code CollectionRegistryFkTest}'s reconcile helpers, {@code ALTER TABLE ..
+     * [NO] FORCE ROW LEVEL SECURITY} x2 in {@code CatalogRenameCollectionTest}) move
+     * onto the batch-5 test-lifecycle-function pattern instead of staying raw: three
+     * new plpgsql functions in {@code nexus_test}
+     * (db/changelog-test/db.changelog-test-objects.xml changesets test-objects-3/4/5 --
+     * {@code add_fk_not_valid}, {@code validate_constraint}, {@code set_force_rls}),
+     * called from Java through the generated {@code dev.nexus.service.jooq.test
+     * Routines} exactly as {@code nexus_test.analyze_table} already was (new {@code
+     * PgContainerHelper#addFkNotValid}/{@code #validateConstraint}/{@code
+     * #setForceRls} wrappers, same {@code ctx.render(table)}-into-{@code regclass}
+     * idiom as {@code #analyzeTable}). All three files reach ZERO and their {@link
+     * #TEST_TREE_RAW_SQL_CEILING} entries are REMOVED outright -- {@code
+     * CollectionRegistryFkExtraTest.java} 3 -&gt; 0, {@code CollectionRegistryFkTest.java}
+     * 3 -&gt; 0, {@code CatalogRenameCollectionTest.java} 2 -&gt; 0. Calling a jOOQ Routine
+     * wraps the underlying {@code PSQLException} in jOOQ's own {@code
+     * DataAccessException} (same wrapping every other {@code .execute()}/insert call
+     * in these files already goes through), so the two {@code VALIDATE CONSTRAINT}
+     * must-fail assertions switch from {@code assertThrows(PSQLException.class, ...)}
+     * to {@code assertThrows(DataAccessException.class, ...)} accordingly.
+     *
+     * <p>Same fold-in, a real correctness bug the code-review round surfaced: 5
+     * {@code topic_assignments.doc_id} seed/select sites in {@code
+     * CollectionRegistryFkTest} (the {@code hexChash(seed)} value inserted as a bare
+     * quoted string literal with NO {@code decode(..., 'hex')} in the pre-batch raw
+     * SQL, per {@code git show 7cd690dde}) had been converted to genuine hex-decoded
+     * bytes ({@code HexFormat.parseHex(hexChash(seed))}) instead of the ASCII-escape-
+     * format bytes of the hex STRING the original actually stored -- fixed by renaming
+     * the helper to {@code hexChashAscii} and changing its body to {@code
+     * hexChash(seed).getBytes(US_ASCII)}. The identical mistake was found, by the same
+     * check, at ONE site in {@code ForeignKeyConstraintTest}
+     * ({@code topicAssignment_topicIdFk_stillEnforced}, also a bare literal with no
+     * {@code decode()} in the original) and fixed the same way via the file's existing
+     * {@code chashAscii(String)} helper -- neither site's assertion outcome changes
+     * (both are FK-violation negative tests unaffected by the exact doc_id bytes), but
+     * the stored value now matches the pre-conversion source exactly, per this batch's
+     * no-value-change rule. Every other {@code hexChash}/{@code decode(...)} site
+     * across all 6 batch-10 files was re-verified against its own pre-batch source at
+     * this review round and found already correct (the encoding choice is per-site,
+     * never assumed from a sibling file's convention -- see {@code
+     * CollectionRegistryFkTest}'s {@code hexChashAscii} javadoc for the full
+     * distinction from {@code hexChashBytes}-style genuine hex-decode).
      */
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1338;
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1330;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

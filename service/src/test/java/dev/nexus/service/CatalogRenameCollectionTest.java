@@ -407,18 +407,19 @@ class CatalogRenameCollectionTest {
             insertChunk384(ctx, TENANT_A, src, xmChash, vector(384));
             insertChunk768(ctx, TENANT_A, tgt, xmChash, vector(768));
             // a manifest row still homed at the SOURCE (the pre-rename state)
-            // SANCTIONED RAW (nexus-cbo4a): ALTER TABLE .. [NO] FORCE ROW LEVEL SECURITY
-            // has no jOOQ typed-DSL form (Postgres-only RLS DDL extension; verified
-            // against jOOQ 3.21's manual, which models only ENABLE/DISABLE ROW LEVEL
-            // SECURITY-adjacent constraint enforcement, not the FORCE flag).
-            su.createStatement().execute("ALTER TABLE nexus.catalog_document_chunks NO FORCE ROW LEVEL SECURITY");
+            // ALTER TABLE .. [NO] FORCE ROW LEVEL SECURITY has no jOOQ typed-DSL form
+            // (Postgres-only RLS DDL extension; verified against jOOQ 3.21's manual,
+            // which models only ENABLE/DISABLE ROW LEVEL SECURITY-adjacent constraint
+            // enforcement, not the FORCE flag) -- runs through
+            // nexus_test.set_force_rls via PgContainerHelper#setForceRls
+            // (nexus-cbo4a batch 10 review fold-in).
+            PgContainerHelper.setForceRls(su, CATALOG_DOCUMENT_CHUNKS, false);
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                            CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
                            CATALOG_DOCUMENT_CHUNKS.COLLECTION)
                .values(TENANT_A, "xm-doc-1", 0, xmChash, src)
                .execute();
-            // SANCTIONED RAW: see above.
-            su.createStatement().execute("ALTER TABLE nexus.catalog_document_chunks FORCE ROW LEVEL SECURITY");
+            PgContainerHelper.setForceRls(su, CATALOG_DOCUMENT_CHUNKS, true);
         }
         Map<String, Integer> c = repo.renameCollection(TENANT_A, src, tgt);
         assertThat(c).as("cross-model branch re-homes docs AND manifests")

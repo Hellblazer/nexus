@@ -9,7 +9,6 @@ import org.jooq.SQLDialect;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.junit.jupiter.api.*;
-import org.postgresql.util.PSQLException;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.nio.charset.StandardCharsets;
@@ -117,7 +116,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * DEFERRED pending ghost dedup; P0.2 ships NO such constraint (group 9b verifies absence).
  *
  * <p>Mirror conventions from ForeignKeyConstraintTest: PgContainerHelper.start(), master changelog
- * via Liquibase, PER_CLASS lifecycle, @Order, AssertJ + assertThrows(PSQLException.class),
+ * via Liquibase, PER_CLASS lifecycle, @Order, AssertJ + assertThrows(DataAccessException.class)
+ * (nexus-cbo4a batch 10: jOOQ's unchecked wrapper around the underlying PSQLException, since
+ * every insert/select/delete here runs through typed jOOQ DSL rather than raw JDBC),
  * superuser for direct inserts, svc role + GUC for RLS tests.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -362,7 +363,7 @@ class CollectionRegistryFkTest {
             ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                     TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
                     TOPIC_ASSIGNMENTS.ASSIGNED_AT)
-                .values(TENANT_A, hexChashBytes("casc-doc-1"), 8001L, "hdbscan", "casc__old", OffsetDateTime.now())
+                .values(TENANT_A, hexChashAscii("casc-doc-1"), 8001L, "hdbscan", "casc__old", OffsetDateTime.now())
                 .execute();
 
             // Rename collection: 'casc__old' -> 'casc__new'
@@ -374,7 +375,7 @@ class CollectionRegistryFkTest {
             // Assert: topic_assignments.source_collection must now be 'casc__new'
             var row = ctx.select(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).from(TOPIC_ASSIGNMENTS)
                 .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(TENANT_A))
-                .and(TOPIC_ASSIGNMENTS.DOC_ID.eq(hexChashBytes("casc-doc-1")))
+                .and(TOPIC_ASSIGNMENTS.DOC_ID.eq(hexChashAscii("casc-doc-1")))
                 .and(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(8001L))
                 .fetchOptional();
             assertThat(row.isPresent()).as("topic_assignment row must still exist after rename").isTrue();
@@ -407,7 +408,7 @@ class CollectionRegistryFkTest {
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
                 ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                         TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.ASSIGNED_AT)
-                    .values(TENANT_A, hexChashBytes("null-src-doc"), 8002L, "hdbscan", OffsetDateTime.now())
+                    .values(TENANT_A, hexChashAscii("null-src-doc"), 8002L, "hdbscan", OffsetDateTime.now())
                     .execute()
             );
             assertThat(ex.getMessage())
@@ -434,7 +435,7 @@ class CollectionRegistryFkTest {
                 ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                         TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
                         TOPIC_ASSIGNMENTS.ASSIGNED_AT)
-                    .values(TENANT_A, hexChashBytes("unreg-src-doc"), 8003L, "hdbscan", "truly-unreg-src-col",
+                    .values(TENANT_A, hexChashAscii("unreg-src-doc"), 8003L, "hdbscan", "truly-unreg-src-col",
                         OffsetDateTime.now())
                     .execute()
             );
@@ -1280,7 +1281,7 @@ class CollectionRegistryFkTest {
                 () -> ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                         TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
                         TOPIC_ASSIGNMENTS.ASSIGNED_AT)
-                    .values(T, hexChashBytes("p03-ta-doc"), 90301L, "hdbscan", COL, OffsetDateTime.now())
+                    .values(T, hexChashAscii("p03-ta-doc"), 90301L, "hdbscan", COL, OffsetDateTime.now())
                     .execute(),
                 () -> runCollectionBackfillStub(ctx, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
                     TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.isNotNull().and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.ne(""))));
@@ -1302,12 +1303,15 @@ class CollectionRegistryFkTest {
      * reconcileInsert} are the table-specific arms mirroring fk-002-validate.xml, now
      * typed jOOQ closures instead of raw SQL text.
      *
-     * <p>{@code ADD CONSTRAINT .. NOT VALID} and {@code VALIDATE CONSTRAINT} stay raw
-     * SQL strings deliberately — both are Postgres-specific {@code ALTER TABLE}
-     * extensions with no jOOQ typed-DSL form (verified against jOOQ 3.21's manual, same
-     * finding as {@code CollectionRegistryFkExtraTest}'s identical helper). {@code DROP
-     * CONSTRAINT IF EXISTS} DOES have a typed form and is used by every caller before
-     * this helper runs.
+     * <p>{@code ADD CONSTRAINT .. NOT VALID} and {@code VALIDATE CONSTRAINT} run
+     * through {@code nexus_test.add_fk_not_valid}/{@code nexus_test.validate_constraint}
+     * (db/changelog-test/db.changelog-test-objects.xml) via {@link
+     * PgContainerHelper#addFkNotValid}/{@link PgContainerHelper#validateConstraint}
+     * (nexus-cbo4a batch 10 review fold-in, same fold-in as {@code
+     * CollectionRegistryFkExtraTest}'s identical helper) — both Postgres-specific
+     * {@code ALTER TABLE} extensions with no jOOQ typed-DSL form (verified against
+     * jOOQ 3.21's manual). {@code DROP CONSTRAINT IF EXISTS} DOES have a typed form
+     * and is used by every caller before this helper runs.
      */
     private void assertReconcileLoadBearing(
             Connection su, DSLContext ctx, Table<?> table, String fkName, String fkColumn, String extraFkClause,
@@ -1321,17 +1325,12 @@ class CollectionRegistryFkTest {
             .as(table.getName() + ": orphan collection is NOT registered before reconcile").isZero();
 
         // Re-add the FK NOT VALID — succeeds (NOT VALID skips existing-row validation).
-        // SANCTIONED RAW (nexus-cbo4a): see javadoc above.
-        su.createStatement().execute(
-            "ALTER TABLE nexus." + table.getName() + " ADD CONSTRAINT " + fkName + " " +
-            "FOREIGN KEY (tenant_id, " + fkColumn + ") " +
-            "REFERENCES nexus.catalog_collections (tenant_id, name) " + extraFkClause + " NOT VALID");
+        PgContainerHelper.addFkNotValid(su, table, fkName, fkColumn, CATALOG_COLLECTIONS, "name", extraFkClause);
 
         // VALIDATE must FAIL while the orphan is unregistered — proves reconcile is load-bearing.
-        // SANCTIONED RAW: see javadoc above.
-        PSQLException ex = assertThrows(PSQLException.class, () ->
-            su.createStatement().execute(
-                "ALTER TABLE nexus." + table.getName() + " VALIDATE CONSTRAINT " + fkName));
+        // jOOQ wraps the underlying PSQLException in its own unchecked DataAccessException.
+        DataAccessException ex = assertThrows(DataAccessException.class, () ->
+            PgContainerHelper.validateConstraint(su, table, fkName));
         assertThat(ex.getMessage())
             .as(table.getName() + ": VALIDATE must fail loud on a gap-window orphan before reconcile")
             .containsIgnoringCase(fkName);
@@ -1344,9 +1343,7 @@ class CollectionRegistryFkTest {
             .as(table.getName() + ": reconcile stub-registers the gap-window collection").isEqualTo(1);
 
         // VALIDATE now SUCCEEDS and flips convalidated=true.
-        // SANCTIONED RAW: see javadoc above.
-        su.createStatement().execute(
-            "ALTER TABLE nexus." + table.getName() + " VALIDATE CONSTRAINT " + fkName);
+        PgContainerHelper.validateConstraint(su, table, fkName);
         PgCatalogProbes.Constraint rs = PgCatalogProbes.foreignKey(ctx, "nexus", fkName);
         assertThat(rs).isNotNull();
         assertThat(rs.convalidated())
@@ -1432,12 +1429,21 @@ class CollectionRegistryFkTest {
         }
     }
 
-    /** {@link #hexChash}'s genuine hex-decoded bytes, for bytea columns like
-     *  topic_assignments.doc_id -- NOT the ASCII-of-the-hex-string form {@link
-     *  #chashAscii} produces (a different, deliberately distinct encoding; see
-     *  CatalogRenameCollectionTest's identical hexChashBytes/chashBytes pairing). */
-    private static byte[] hexChashBytes(String seed) {
-        return java.util.HexFormat.of().parseHex(hexChash(seed));
+    /** {@link #hexChash}'s value stored as its OWN ASCII bytes -- nexus-cbo4a batch 10
+     *  review fold-in correction: the pre-conversion raw SQL for every
+     *  topic_assignments.doc_id site in THIS file inserted {@code hexChash(seed)} as a
+     *  bare quoted string literal with no {@code decode(..., 'hex')} wrapper (verified
+     *  against {@code git show 7cd690dde} for all 5 call sites), so Postgres's bytea
+     *  escape-format input stored the ASCII bytes of the 64-char hex STRING itself --
+     *  the same {@link #chashAscii} shape, at hex-string width, NOT the genuine
+     *  hex-decoded 32-byte digest a {@code decode(...)} call would produce. Distinct
+     *  from {@code ForeignKeyConstraintTest}'s/{@code CollectionRegistryFkExtraTest}'s
+     *  topic_assignments seeding, whose original SQL DOES call {@code decode(chash,
+     *  'hex')} and so genuinely needs hex-decoded bytes -- the two shapes are not
+     *  interchangeable and must be verified per file against its own pre-conversion
+     *  source, not assumed from a sibling file's convention. */
+    private static byte[] hexChashAscii(String seed) {
+        return hexChash(seed).getBytes(StandardCharsets.US_ASCII);
     }
 
     /**

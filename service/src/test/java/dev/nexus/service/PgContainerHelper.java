@@ -584,4 +584,66 @@ public final class PgContainerHelper {
         DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
         Routines.analyzeTable(ctx.configuration(), ctx.render(DSL.table(qualifiedName)));
     }
+
+    /**
+     * {@code ALTER TABLE .. ADD CONSTRAINT .. FOREIGN KEY (tenant_id, column) REFERENCES
+     * ref (tenant_id, refColumn) extraClause NOT VALID} (nexus-cbo4a batch 10 review
+     * fold-in) -- the test-tree counterpart to {@link #analyzeTable}, same idiom: the
+     * raw statement moves server-side into {@code nexus_test.add_fk_not_valid}
+     * (db/changelog-test/db.changelog-test-objects.xml), a Postgres-only {@code ALTER
+     * TABLE} extension ({@code NOT VALID}) with no jOOQ typed-DSL form (confirmed
+     * against jOOQ 3.20.11/3.21's manual: {@code alterConstraint().enforced()/
+     * notEnforced()} renders MySQL-style {@code [NOT] ENFORCED}, not Postgres's
+     * {@code NOT VALID}). {@code table}/{@code refTable} are generated jOOQ
+     * {@link Table}s, rendered through {@code ctx.render(...)} into the function's
+     * {@code regclass} arguments -- never a hand-typed schema-qualified string. Every
+     * caller's composite FK is {@code (tenant_id, X) -> (tenant_id, Y)}, so
+     * {@code tenant_id} is hardcoded as the first column on both sides inside the
+     * function body rather than parameterizing a shape no call site actually varies.
+     *
+     * @param conn           the connection to run the ALTER TABLE on (superuser/table owner)
+     * @param table          the table gaining the FK (e.g. {@code Tables.CHUNKS})
+     * @param constraintName the FK constraint name
+     * @param column         the second FK column (after {@code tenant_id})
+     * @param refTable       the referenced table (e.g. {@code Tables.CATALOG_COLLECTIONS})
+     * @param refColumn      the second referenced column (after {@code tenant_id})
+     * @param extraClause    the {@code ON UPDATE}/{@code ON DELETE} clause fragment
+     *                       (e.g. {@code "ON DELETE RESTRICT"}), or {@code ""} for none
+     */
+    public static void addFkNotValid(Connection conn, Table<?> table, String constraintName, String column,
+                                      Table<?> refTable, String refColumn, String extraClause) throws SQLException {
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        Routines.addFkNotValid(ctx.configuration(), ctx.render(table), constraintName, column,
+            ctx.render(refTable), refColumn, extraClause);
+    }
+
+    /**
+     * {@code ALTER TABLE .. VALIDATE CONSTRAINT} (nexus-cbo4a batch 10 review fold-in)
+     * -- see {@link #addFkNotValid} for the full contract this shares. {@code
+     * VALIDATE CONSTRAINT} has no jOOQ typed-DSL form.
+     *
+     * @param conn           the connection to run the ALTER TABLE on
+     * @param table          the table whose constraint is being validated
+     * @param constraintName the constraint name
+     */
+    public static void validateConstraint(Connection conn, Table<?> table, String constraintName) throws SQLException {
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        Routines.validateConstraint(ctx.configuration(), ctx.render(table), constraintName);
+    }
+
+    /**
+     * {@code ALTER TABLE .. [NO] FORCE ROW LEVEL SECURITY} (nexus-cbo4a batch 10
+     * review fold-in) -- see {@link #addFkNotValid} for the full contract this
+     * shares. {@code [NO] FORCE ROW LEVEL SECURITY} is a Postgres-only RLS DDL
+     * extension with no jOOQ typed-DSL form.
+     *
+     * @param conn  the connection to run the ALTER TABLE on (table owner)
+     * @param table the table to toggle {@code FORCE ROW LEVEL SECURITY} on
+     * @param force {@code true} for {@code FORCE ROW LEVEL SECURITY}, {@code false}
+     *              for {@code NO FORCE ROW LEVEL SECURITY}
+     */
+    public static void setForceRls(Connection conn, Table<?> table, boolean force) throws SQLException {
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        Routines.setForceRls(ctx.configuration(), ctx.render(table), force);
+    }
 }

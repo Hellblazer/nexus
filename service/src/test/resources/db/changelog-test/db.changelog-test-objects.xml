@@ -41,4 +41,56 @@ $$;
         <rollback>DROP FUNCTION IF EXISTS nexus_test.analyze_table(regclass)</rollback>
     </changeSet>
 
+    <changeSet id="test-objects-3-add-fk-not-valid" author="nexus-cbo4a">
+        <comment>nexus_test.add_fk_not_valid(regclass, text, text, regclass, text, text): plpgsql wrapper for ALTER TABLE .. ADD CONSTRAINT .. FOREIGN KEY (tenant_id, p_column) REFERENCES .. (tenant_id, p_ref_column) p_extra NOT VALID -- a Postgres-only ALTER TABLE extension with no jOOQ typed-DSL form (batch 10 review fold-in). p_table/p_ref are regclass so PostgreSQL resolves each table identity with no string to validate; p_name/p_column/p_ref_column are %I-quoted identifiers; p_extra is the caller-supplied ON UPDATE/ON DELETE clause fragment (e.g. 'ON DELETE RESTRICT'), inserted via %s since it is not a single identifier -- always a fixed literal from Java call sites, never end-user input. Every caller's composite FK is (tenant_id, X) -> (tenant_id, Y), so tenant_id is hardcoded as the first column on both sides rather than adding two more parameters no call site would vary. SECURITY INVOKER so the caller's own (superuser, in every test) privilege authorizes the ALTER TABLE.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.add_fk_not_valid(
+    p_table regclass, p_name text, p_column text, p_ref regclass, p_ref_column text, p_extra text
+) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+BEGIN
+    EXECUTE format('ALTER TABLE %s ADD CONSTRAINT %I FOREIGN KEY (tenant_id, %I) REFERENCES %s (tenant_id, %I) %s NOT VALID',
+        p_table, p_name, p_column, p_ref, p_ref_column, p_extra);
+END;
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.add_fk_not_valid(regclass, text, text, regclass, text, text)</rollback>
+    </changeSet>
+
+    <changeSet id="test-objects-4-validate-constraint" author="nexus-cbo4a">
+        <comment>nexus_test.validate_constraint(regclass, text): plpgsql wrapper for ALTER TABLE .. VALIDATE CONSTRAINT -- a Postgres-only ALTER TABLE extension with no jOOQ typed-DSL form (batch 10 review fold-in). p_table is regclass so PostgreSQL resolves the table identity with no string to validate; p_name is a %I-quoted constraint identifier. SECURITY INVOKER so the caller's own privilege authorizes the ALTER TABLE.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.validate_constraint(p_table regclass, p_name text) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+BEGIN
+    EXECUTE format('ALTER TABLE %s VALIDATE CONSTRAINT %I', p_table, p_name);
+END;
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.validate_constraint(regclass, text)</rollback>
+    </changeSet>
+
+    <changeSet id="test-objects-5-set-force-rls" author="nexus-cbo4a">
+        <comment>nexus_test.set_force_rls(regclass, boolean): plpgsql wrapper for ALTER TABLE .. [NO] FORCE ROW LEVEL SECURITY -- a Postgres-only RLS DDL extension with no jOOQ typed-DSL form (batch 10 review fold-in). p_table is regclass so PostgreSQL resolves the table identity with no string to validate. SECURITY INVOKER so the caller's own (table-owner) privilege authorizes the ALTER TABLE.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.set_force_rls(p_table regclass, p_force boolean) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+BEGIN
+    IF p_force THEN
+        EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', p_table);
+    ELSE
+        EXECUTE format('ALTER TABLE %s NO FORCE ROW LEVEL SECURITY', p_table);
+    END IF;
+END;
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.set_force_rls(regclass, boolean)</rollback>
+    </changeSet>
+
 </databaseChangeLog>
