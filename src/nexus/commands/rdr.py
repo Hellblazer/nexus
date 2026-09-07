@@ -1645,6 +1645,13 @@ def preamble_rdr_gate(args: tuple[str, ...]) -> None:
         )
         print()
 
+    # nexus-7vdf9: a re-gate after a BLOCKED round leads with the prior
+    # findings and the diff since the gated commit.
+    for _line in _preamble_regate_block(
+        repo_root=repo_root, repo_name=repo_name, t2_key=t2_key, rdr_file=rdr_file,
+    ):
+        print(_line)
+
     clean = _strip_code_blocks(text)
 
     # Section headings
@@ -1691,6 +1698,177 @@ def preamble_rdr_gate(args: tuple[str, ...]) -> None:
 # ---------------------------------------------------------------------------
 # preamble rdr-accept
 # ---------------------------------------------------------------------------
+
+_CRITIQUE_SECTION_RE = re.compile(r"^\s*#{1,3}\s*(critical|significant)\b", re.IGNORECASE)
+_CRITIQUE_ISSUE_RE = re.compile(r"^\s*#{1,6}\s*issue:\s*(.+)$", re.IGNORECASE)
+_CRITIQUE_DETAIL_RE = re.compile(r"^\s*[-*]\s*\*{0,2}(location|problem|recommendation|issue)\*{0,2}\s*:\s*(.+)$", re.IGNORECASE)
+_CRITIQUE_INLINE_RE = re.compile(r"^[-*#\s]*(?:\*\*)?(?:new\s+)?(?:critical|significant)\b", re.IGNORECASE)
+
+
+def _critique_findings(text: str) -> list[str]:
+    """Extract the Critical and Significant findings from a critique body.
+
+    Two formats are read. The substantive-critic's canonical output
+    (``## Critical Issues`` / ``## Significant Issues`` sections holding
+    ``### Issue: <title>`` blocks with ``- **Location**:`` and
+    ``- **Recommendation**:`` details) yields one line per issue title plus
+    its location and recommendation. Free-form critiques yield any line
+    that opens with Critical, Significant, NEW CRITICAL, or ``Issue:``.
+    Observations and other sections are never findings. Empty input, or a
+    critique with none of either, yields ``[]``.
+    """
+    out: list[str] = []
+    in_finding_section = False
+    saw_sections = False
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if re.match(r"^\s*#{1,3}\s+\S", line) and not _CRITIQUE_ISSUE_RE.match(line):
+            m = _CRITIQUE_SECTION_RE.match(line)
+            in_finding_section = m is not None
+            if m is not None:
+                saw_sections = True
+            continue
+        if in_finding_section:
+            if stripped.lower() in ("none.", "none"):
+                continue
+            m = _CRITIQUE_ISSUE_RE.match(line)
+            if m:
+                out.append(f"Issue: {m.group(1).strip()}")
+                continue
+            d = _CRITIQUE_DETAIL_RE.match(line)
+            if d and d.group(1).lower() in ("location", "recommendation", "issue"):
+                out.append(f"  {d.group(1).capitalize()}: {d.group(2).strip()}")
+                continue
+    if saw_sections:
+        return out
+    # Free-form fallback.
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if _CRITIQUE_INLINE_RE.match(stripped) or re.match(r"^(?:\*\*)?issue:", stripped, re.IGNORECASE):
+            out.append(stripped.lstrip("-*# ").strip())
+    return out
+
+
+def _preamble_regate_block(
+    *, repo_root: str, repo_name: str, t2_key: str, rdr_file: Path,
+) -> list[str]:
+    """Lines for the re-gate block of ``nx rdr preamble rdr-gate`` (nexus-7vdf9).
+
+    When the RDR's ``<id>-gate-latest`` record is BLOCKED, the previous
+    round's findings are the first thing the author and the critic need:
+    RDR-204 went through four gates, and rounds three and four were blocked
+    on sentences that restated facts already fixed elsewhere in the same
+    file, because the fix was applied at the quoted line and nothing
+    surfaced the other occurrences. This block prints the prior outcome,
+    the critique's Critical and Significant lines verbatim, the diff of
+    the RDR file since the gated commit (when the record carries
+    ``commit:``), and the Layer 0 survivor-sweep instruction.
+
+    Returns ``[]`` when there is no gate record or it is not BLOCKED (a
+    first gate, or a re-gate after a pass, prints nothing extra). A T2 read
+    failure returns a single named note rather than nothing, so an
+    unreachable T2 is visible and never mistaken for "no prior round".
+    """
+    project = f"{repo_name}_rdr"
+    try:
+        with _t2_client_factory() as client:
+            latest = client.get(project=project, title=f"{t2_key}-gate-latest")
+            if not latest:
+                return []
+            content = latest.get("content", "") if isinstance(latest, dict) else ""
+            outcome = (_preamble_parse_t2_field(content, "outcome") or "").strip().upper()
+            if outcome != "BLOCKED":
+                return []
+            critique_title = (_preamble_parse_t2_field(content, "critique") or "").strip()
+            # Tolerate the "project/title [id]" form the skill writes into the pointer.
+            critique_title = re.sub(r"\s*\[\d+\]\s*$", "", critique_title)
+            # The pointer may carry ANY project prefix ("nexus_rdr/<title>"); the
+            # title is what T2 keys on within this project.
+            critique_title = critique_title.rsplit("/", 1)[-1]
+            gated_commit = (_preamble_parse_t2_field(content, "commit") or "").strip()
+            critique = None
+            fetch_failed = False
+            if critique_title:
+                # Exact-then-prefix when the client offers it (a same-day
+                # pointer written as "...-2026-09-07" resolves to "...-2026-09-07d"
+                # only if unique); plain get otherwise.
+                resolve = getattr(client, "resolve_title", None)
+                if callable(resolve):
+                    critique, _candidates = resolve(project=project, title=critique_title)
+                else:
+                    critique = client.get(project=project, title=critique_title)
+                fetch_failed = critique is None
+    except Exception as exc:  # noqa: BLE001 — T2 unreachable must be a visible note, never a silent "no prior round"
+        return [
+            f"> Re-gate check: T2 unreachable ({type(exc).__name__}: {exc}); the prior "
+            "critique could not be loaded. Load it by hand before Layer 3.",
+            "",
+        ]
+
+    lines = ["### Re-gate: the previous gate was BLOCKED", ""]
+    date = _preamble_parse_t2_field(content, "date") or "?"
+    summary = _preamble_parse_t2_field(content, "summary") or ""
+    lines.append(f"Prior gate {date}: BLOCKED. {summary}".rstrip())
+    if critique_title:
+        lines.append(f"Critique: `{project}/{critique_title}`")
+    lines.append("")
+
+    findings = _critique_findings(str(critique.get("content", ""))) if isinstance(critique, dict) else []
+    if findings:
+        lines.append("Prior findings (each must be closed EVERYWHERE in the file, not at the quoted line):")
+        lines.extend(f"- {f}" for f in findings[:30])
+        if len(findings) > 30:
+            lines.append(f"- ... and {len(findings) - 30} more in the critique")
+    elif fetch_failed:
+        lines.append(f"The `critique:` pointer names `{critique_title}` but no such T2 record was found; "
+                     "locate the prior critique by hand before Layer 3.")
+    elif critique_title:
+        lines.append("Prior critique loaded but no Critical/Significant findings were recognised; read it in full.")
+    else:
+        lines.append(
+            "No `critique:` pointer in the gate record; find the prior critique by hand "
+            f'(memory_get project="{project}" title="{t2_key}-gate-critique-*").'
+        )
+    lines.append("")
+
+    if gated_commit:
+        rel = os.path.relpath(str(rdr_file), repo_root)
+        try:
+            diff = subprocess.run(
+                ["git", "-C", repo_root, "diff", "--stat", f"{gated_commit}..HEAD", "--", rel],
+                capture_output=True, text=True, timeout=20, check=False,
+            )
+            if diff.returncode != 0:
+                lines.append(
+                    f"Changed since the gated commit `{gated_commit}`: unknown "
+                    f"(git diff exited {diff.returncode}: {diff.stderr.strip()[:160]})"
+                )
+            else:
+                stat = diff.stdout.strip().splitlines()
+                lines.append(
+                    f"Changed since the gated commit `{gated_commit}`: "
+                    + (stat[-1].strip() if stat else "no changes to the RDR file")
+                )
+        except (OSError, subprocess.SubprocessError) as exc:
+            lines.append(f"Changed since the gated commit `{gated_commit}`: (git diff failed: {exc})")
+        lines.append("")
+
+    lines.extend([
+        "**Layer 0 (survivor sweep, before Layer 3):** for every prior finding, grep the RDR "
+        "for the refuted phrasing AND the corrected one; every occurrence must agree. A "
+        "fact lives in Problem Statement, Research Findings, Technical Design and the "
+        "Implementation Plan at once, and the last two are where survivors hide. Brief "
+        "the critic to verify each prior finding closed everywhere, then run a full-document "
+        "consistency pass; re-read related RDRs only if the Relationship section changed.",
+        "",
+    ])
+    return lines
+
 
 @preamble.command("rdr-accept")
 @click.argument("args", nargs=-1)

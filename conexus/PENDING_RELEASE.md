@@ -31,4 +31,6 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.34.0)
 
-(none)
+- `conexus/commands/rdr-gate.md`: the slash command that real gates run through: Layer 0 re-gate survivor sweep; critique stored in T2 `{id}-gate-critique-{date}` before the gate result; gate-latest gains `critique:` and `commit:` (nexus-7vdf9).
+- `conexus/skills/rdr-gate/SKILL.md`: Layer 0 re-gate survivor sweep; critiques stored in T2 `{id}-gate-critique-{date}` (the preamble reads them); gate-latest gains `critique:` and `commit:` (nexus-7vdf9). The `nx rdr preamble rdr-gate` half is wheel code and ships with the client.
+- `conexus/resources/rdr/TEMPLATE.md`: Technical Design guidance: state each measured value once and cite it; derive sets at run time, never type them as the condition (nexus-7vdf9).

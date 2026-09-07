@@ -134,6 +134,15 @@ extension points.]
 - Limit illustrative code to patterns that cannot be
   expressed as prose (e.g., callback signatures,
   serialization formats)
+- State each measured value ONCE, in Research Findings,
+  and cite it here and in the plan ("the census count")
+  rather than restating the number; a fix then has one
+  site. Two blocked gates on RDR-204 were numbers that
+  had been fixed in one section and not the others.
+- A set the implementation can derive (tables with a
+  foreign key into X, call sites of Y) is derived by the
+  implementation at run time and pinned by a test; never
+  typed into the RDR as the condition. Hand lists miss.
 
 ```text
 // Illustrative — verify API signatures during implementation
