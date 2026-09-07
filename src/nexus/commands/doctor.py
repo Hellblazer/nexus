@@ -1692,6 +1692,25 @@ def _run_check_storage_boundary(
         _sys.exit(1)
 
 
+def _mineru_interpreter_suffix() -> str:
+    """`` (pid N, <python>)`` from the MinerU pid file, or ``""``.
+
+    nexus-ydqwo: a healthy server is not necessarily this install's server.
+    Naming the interpreter is what lets a reader see a checkout-spawned
+    one; the staleness verdict itself is the Process freshness check.
+    """
+    try:
+        from nexus._mineru_pid import read_pid_file  # noqa: PLC0415 — deferred: optional probe
+
+        info = read_pid_file() or {}
+    except Exception:  # noqa: BLE001 — a missing pid file is not a doctor failure
+        return ""
+    pid, python = info.get("pid"), info.get("python")
+    if not isinstance(pid, int) or not isinstance(python, str) or not python:
+        return ""
+    return f" (pid {pid}, {python})"
+
+
 # ── --check-mineru (nexus-2fyb code-review R3-3) ────────────────────────────
 
 
@@ -1743,7 +1762,10 @@ def _run_check_mineru() -> None:
             with httpx.Client(timeout=2.0) as client:
                 r = client.get(f"{url}/health")
             if r.status_code == 200:
-                click.echo(_check("MinerU server", True, f"reachable at {url}"))
+                click.echo(_check(
+                    "MinerU server", True,
+                    f"reachable at {url}{_mineru_interpreter_suffix()}",
+                ))
             else:
                 click.echo(_check(
                     "MinerU server", False,

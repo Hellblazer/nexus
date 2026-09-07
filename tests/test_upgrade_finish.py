@@ -146,6 +146,94 @@ class TestEnumerate:
         assert report.stale == []
 
 
+class TestRegisteredMineruOutsideGeneration:
+    """nexus-ydqwo: the MinerU server the pid file registers is stale when
+    its interpreter lives outside the current generation, even though no
+    generation marker matches its command line.
+
+    Measured 2026-09-07: a server spawned from a develop checkout's .venv
+    survived three generation flips unreported, because enumeration only
+    sees generation-marked rows and the pid file's ``python`` field had no
+    consumer that compared it to ``current``.
+    """
+
+    _GEN = "/Users/u/.local/share/nexus/tools/gen-01"
+    _PS_HEADER = "  PID ELAPSED COMMAND\n"
+
+    def _detect(self, pid_info, *, alive=True, current=_GEN, ps_rows="", pairs=None):
+        from pathlib import Path as _P  # noqa: PLC0415
+
+        pairs = pairs if pairs is not None else [(self._GEN, _P(self._GEN))]
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(1_000_000.0, "7.35.0"),
+        ), patch(
+            "nexus.upgrade_finish._current_generation",
+            return_value=_P(current) if current else None,
+        ), patch(
+            "nexus.install_census.generation_match_pairs", return_value=pairs,
+        ), patch(
+            "nexus._mineru_pid.read_pid_file", return_value=pid_info,
+        ), patch(
+            "nexus._mineru_pid.is_process_alive", return_value=alive,
+        ):
+            return detect_stale_processes(
+                self._PS_HEADER + ps_rows, now=1_000_000.0 + 10 * 86400,
+            )
+
+    def test_checkout_interpreter_is_stale_and_restartable(self):
+        info = {
+            "pid": 64778, "port": 62389, "mineru_version": "3.1.11",
+            "python": "/Users/u/git/nexus/.venv/bin/python3",
+        }
+        report = self._detect(
+            info,
+            ps_rows="  64778 4-01:00:00 /Users/u/git/nexus/.venv/bin/python "
+                    "/Users/u/git/nexus/.venv/bin/mineru-api --host 127.0.0.1\n",
+        )
+        assert [(p.pid, p.kind) for p in report.stale] == [(64778, "mineru")]
+        assert [p.pid for p in report.restartable] == [64778]
+        assert "/Users/u/git/nexus/.venv/bin/python3" in report.stale[0].command
+
+    def test_current_generation_interpreter_is_fresh(self):
+        info = {"pid": 300, "port": 1, "python": f"{self._GEN}/bin/python3"}
+        report = self._detect(
+            info,
+            ps_rows=f"  300 4-01:00:00 {self._GEN}/bin/python3 "
+                    f"{self._GEN}/bin/mineru-api --host 127.0.0.1\n",
+        )
+        assert report.stale == []
+
+    def test_older_generation_is_reported_once(self):
+        # The marker path already reports a gen-00 holder; the pid-file
+        # path must not add a second row for the same pid.
+        old = "/Users/u/.local/share/nexus/tools/gen-00"
+        info = {"pid": 300, "port": 1, "python": f"{old}/bin/python3"}
+        from pathlib import Path as _P  # noqa: PLC0415
+
+        report = self._detect(
+            info,
+            ps_rows=f"  300 00:05 {old}/bin/python3 {old}/bin/mineru-api\n",
+            pairs=[(old, _P(old)), (self._GEN, _P(self._GEN))],
+        )
+        assert [p.pid for p in report.stale] == [300]
+        assert report.stale[0].command.startswith(f"{old}/bin/python3")
+
+    def test_dead_pid_is_ignored(self):
+        info = {"pid": 64778, "port": 1, "python": "/Users/u/git/nexus/.venv/bin/python3"}
+        assert self._detect(info, alive=False).stale == []
+
+    def test_no_layout_defers_to_marker_regime(self):
+        # A box with no generation pointer cannot judge the interpreter;
+        # the age regime on the marker rows is the only evidence there.
+        info = {"pid": 64778, "port": 1, "python": "/Users/u/git/nexus/.venv/bin/python3"}
+        assert self._detect(info, current=None).stale == []
+
+    def test_pid_file_without_interpreter_is_ignored(self):
+        info = {"pid": 64778, "port": 1}
+        assert self._detect(info).stale == []
+
+
 class TestRestartStale:
     @staticmethod
     def _report() -> SkewReport:

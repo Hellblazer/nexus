@@ -615,7 +615,64 @@ def detect_stale_processes(
                 pid=pid, kind=_classify(command),
                 command=command, age_s=age_s,
             ))
+    outside = _registered_mineru_outside_generation(current, now=now)
+    if outside is not None and all(p.pid != outside.pid for p in report.stale):
+        report.stale.append(outside)
     return report
+
+
+def _registered_mineru_outside_generation(
+    current: Path | None, *, now: float,
+) -> StaleProcess | None:
+    """The pid-file MinerU server, as a stale row, when its interpreter is
+    outside the current generation (nexus-ydqwo).
+
+    The marker regime above enumerates only rows whose command names a
+    generation, so a server spawned from a develop checkout's ``.venv`` is
+    never judged at all: one such server survived three generation flips
+    with ``nx doctor`` silent. The pid file already records the interpreter
+    (``python``, nexus-yq3vk); this is the consumer that compares it to
+    ``current``. A server INSIDE the current generation is fresh by
+    identity, one inside an older generation is already reported by the
+    marker regime (the caller dedupes by pid), and one anywhere else is
+    stale: the install that would serve the next PDF is not the install
+    that started it. With no resolvable generation there is nothing to
+    compare against, and the age regime on the marker rows stands alone.
+    """
+    if current is None:
+        return None
+    try:
+        from nexus._mineru_pid import is_process_alive, read_pid_file  # noqa: PLC0415 — deferred, avoids an import cycle
+    except Exception:  # noqa: BLE001 — pid-file helpers unavailable: nothing to judge
+        return None
+    info = read_pid_file()
+    if not info:
+        return None
+    pid = info.get("pid")
+    python = info.get("python")
+    if not isinstance(pid, int) or not isinstance(python, str) or not python:
+        return None
+    if not is_process_alive(pid):
+        return None
+    try:
+        Path(python).relative_to(current)
+        return None
+    except ValueError:
+        pass
+    age_s = 0
+    started = info.get("started_at")
+    if isinstance(started, str):
+        try:
+            from datetime import datetime  # noqa: PLC0415 — stdlib, deferred
+
+            age_s = max(0, int(now - datetime.fromisoformat(started).timestamp()))
+        except ValueError:
+            age_s = 0
+    return StaleProcess(
+        pid=pid, kind="mineru",
+        command=f"mineru-api under {python} (registered in mineru.pid, outside {current.name})",
+        age_s=age_s,
+    )
 
 
 def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
