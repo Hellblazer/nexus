@@ -965,6 +965,10 @@ BUILD_ARGS=()
 docker build ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} -f "$STAGE/Dockerfile" -t "$IMAGE" "$STAGE"
 
 run_env=(-e "WITH_CLOUD=$WITH_CLOUD" -e "COMPREHENSIVE=$COMPREHENSIVE" -e "STRESS=$STRESS")
+# nexus-h5olw follow-on: every rehearsal install is a throwaway, never a
+# user; the anonymous install ping must not count it. `-e` is the only
+# channel into the container, so the opt-out is forwarded here, not exported.
+run_env+=(-e "NX_NO_TELEMETRY=1")
 # nexus-mfage: every leg that boots the artifact candidate asserts the
 # manifest's build_ref against the served /version (lib/assert_build_ref.sh
 # in the container). Unset without --artifacts, so the assertion is a no-op

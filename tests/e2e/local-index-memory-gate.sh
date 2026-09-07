@@ -112,6 +112,10 @@
 # Exit codes: 0 PASSED, 1 FAILED, 2 KILLED (ceiling breach — a distinct,
 # non-pass, non-ordinary-fail outcome; see the verdict line).
 set -uo pipefail
+# nexus-h5olw follow-on: sandbox installs are throwaways, never users; the
+# anonymous install ping must not count them (tests/test_e2e_no_telemetry_lint.py).
+export NX_NO_TELEMETRY=1
+
 
 (( BASH_VERSINFO[0] >= 4 )) || {
     echo "ERROR: bash >= 4 required (found $BASH_VERSION) — invoke with an explicit" >&2

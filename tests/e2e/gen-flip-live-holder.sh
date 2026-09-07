@@ -81,6 +81,7 @@ echo "  repo under test: $REPO_ROOT"
 env -i \
     PATH="$UV_BIN:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" \
     HOME="$WORK/home" \
+    NX_NO_TELEMETRY=1 \
     TMPDIR="${TMPDIR:-/tmp}" \
     NEXUS_CONFIG_DIR="$WORK/config" \
     NX_LOCAL=1 \

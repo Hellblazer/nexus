@@ -34,6 +34,10 @@
 # Companion gist: https://gist.github.com/Hellblazer/511a05e1bf79dd6ea20be962d0ca04af
 
 set -euo pipefail
+# nexus-h5olw follow-on: sandbox installs are throwaways, never users; the
+# anonymous install ping must not count them (tests/test_e2e_no_telemetry_lint.py).
+export NX_NO_TELEMETRY=1
+
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
