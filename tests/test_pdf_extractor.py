@@ -346,6 +346,7 @@ def test_formula_structlog_warning(extractor, dummy_pdf, item_type, expect_warni
     if expect_warning:
         mock_log.warning.assert_any_call(
             "formula_content_detected", formula_count=1, path=str(dummy_pdf),
+            source="docling",
         )
     else:
         for call in mock_log.warning.call_args_list:

@@ -184,6 +184,19 @@ class TestMineruStop:
         assert not pid_file.exists()
         assert "no longer a mineru-api" in result.output
 
+    def test_stop_keeps_pid_file_when_command_unreadable(self, runner, pid_file):
+        """An empty command read is inconclusive (ps timeout and vanished
+        process look alike), so the verb neither signals nor deletes."""
+        _write_pid(pid_file, pid=12345)
+        with patch("nexus.commands.mineru.os.killpg") as killpg, \
+             patch("nexus.commands.mineru._is_process_alive", return_value=True), \
+             patch("nexus.upgrade_finish.process_command", return_value=""):
+            result = runner.invoke(main, ["mineru", "stop"])
+        assert result.exit_code == 0, result.output
+        killpg.assert_not_called()
+        assert pid_file.exists()
+        assert "could not be read" in result.output
+
     def test_stop_no_pid_file(self, runner, pid_file):
         result = runner.invoke(main, ["mineru", "stop"])
         assert result.exit_code == 0 and "not running" in result.output.lower()

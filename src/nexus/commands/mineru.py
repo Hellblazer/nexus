@@ -194,7 +194,18 @@ def _stop_under_election() -> None:
     # pid's whole process group. Judge the live command before signalling.
     from nexus.upgrade_finish import _classify, process_command  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-    if _classify(process_command(pid)) != "mineru":
+    live_cmd = process_command(pid)
+    if not live_cmd:
+        # An empty read is inconclusive (a ps timeout looks the same as a
+        # vanished process), and deleting the pid file on it would orphan a
+        # server that is still ours. Keep the file, signal nothing, say so.
+        click.echo(
+            f"MinerU server PID {pid} is alive but its command line could not "
+            "be read; not signalling and keeping the PID file. Re-run `nx "
+            f"mineru stop`, or stop it yourself: kill -TERM -{pid}"
+        )
+        return
+    if _classify(live_cmd) != "mineru":
         click.echo(
             f"MinerU server not running (PID {pid} is no longer a mineru-api; "
             "removing the stale PID file)"

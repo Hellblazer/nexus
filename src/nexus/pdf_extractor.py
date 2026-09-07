@@ -1250,7 +1250,10 @@ class PDFExtractor:
                     table_regions.append({"page": page_no, "html": html})
 
         if formula_count > 0:
-            _log.warning("formula_content_detected", formula_count=formula_count, path=str(pdf_path))
+            _log.warning(
+                "formula_content_detected", formula_count=formula_count,
+                path=str(pdf_path), source="docling",
+            )
 
         return ExtractionResult(
             text=text,
