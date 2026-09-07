@@ -732,12 +732,13 @@ contradiction a pass named is closed at the commit the next pass gated.
 
 ### Assumption Verification
 
-All five Critical Assumptions carry a Verified status with the T2
-research entry that verified each cited inline: the cloud grouping query
-(assumption 1, `204-research-6`), the dimension ground truth (2,
-`204-research-3`), the parse-site census (3, `204-research-4`), the
-two-segment rows (4, `204-research-1`), and the registry eviction (5,
-`204-research-2`).
+All five Critical Assumptions carry a Verified status with their method
+and evidence stated inline: the one-model-per-content-type premise
+(assumption 1, both production tenants, `204-research-6`), the dimension
+ground truth (2, `collection_vector_stats`, `204-research-3`), the
+parse-site census (3, `204-research-4`), the two-segment rows (4, the
+live censuses of both tenants, `204-research-1` and `-6`), and the
+registry cache (5, a read of `CollectionRegistry`'s invalidation points).
 
 #### API Verification
 
