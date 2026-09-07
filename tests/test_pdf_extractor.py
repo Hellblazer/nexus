@@ -407,6 +407,35 @@ class TestAutoDetectRouting:
         assert result.metadata["extraction_method"] == "mineru"
         m.assert_called_once_with(dummy_pdf, formula_count=10, on_page=None, on_formula_oom="fail")
 
+    def test_auto_skips_docling_when_quick_screen_already_routes(self, extractor, dummy_pdf):
+        # The 0.1s pymupdf screen settles the math case on its own; the
+        # 24s Docling pass is the non-math extraction and the MinerU branch
+        # discards it, so it must not run at all here.
+        with (
+            patch("nexus.pdf_extractor._has_formulas_quick", return_value=5),
+            patch.object(extractor, "_extract_with_docling") as mock_docling,
+            patch.object(extractor, "_extract_with_mineru", return_value=self._mineru) as m,
+        ):
+            result = extractor.extract(dummy_pdf, extractor="auto")
+        assert result.metadata["extraction_method"] == "mineru"
+        mock_docling.assert_not_called()
+        m.assert_called_once_with(dummy_pdf, formula_count=5, on_page=None, on_formula_oom="fail")
+
+    def test_auto_docling_markers_still_route_when_screen_is_low(self, extractor, dummy_pdf):
+        # A paper whose math is rendered without Unicode operators: the
+        # screen stays under the threshold, Docling runs, and its LaTeX
+        # markers are what escalate.
+        with (
+            patch("nexus.pdf_extractor._has_formulas_quick", return_value=2),
+            patch("nexus.pdf_extractor._count_formula_markers", return_value=9),
+            patch.object(extractor, "_extract_with_docling", return_value=self._docling_f) as mock_docling,
+            patch.object(extractor, "_extract_with_mineru", return_value=self._mineru) as m,
+        ):
+            result = extractor.extract(dummy_pdf, extractor="auto")
+        assert result.metadata["extraction_method"] == "mineru"
+        mock_docling.assert_called_once()
+        m.assert_called_once_with(dummy_pdf, formula_count=9, on_page=None, on_formula_oom="fail")
+
     def test_auto_raises_when_mineru_import_fails_on_formula_pdf(self, extractor, dummy_pdf):
         """nexus-2fyb: ImportError branch — mineru is a default dep, so the
         message MUST advise reinstalling conexus (corrupt install) and not a

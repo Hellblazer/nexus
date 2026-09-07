@@ -219,6 +219,11 @@ _FORMULA_COMMAND_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 # Unicode math symbols that indicate formula content in raw PDF text.
 # These are present in the PDF's embedded text even without enrichment.
+#: Formula count at which auto mode routes a PDF to MinerU. One name for the
+#: quick screen's early exit and the routing decision, which used to carry
+#: the literal separately.
+_FORMULA_ROUTE_THRESHOLD = 5
+
 _MATH_UNICODE = frozenset("∑∫∏∀∃∈∉∪∩⊆⊇⊂⊃→←↔∧∨¬⇒⇔⇐∂∇≤≥≠±×÷√∞≈≡∝∅⊕⊗⊥∥")
 
 
@@ -253,7 +258,9 @@ def _has_formulas_quick(pdf_path: Path) -> int:
     """Quick formula detection via raw PDF text Unicode math symbols.
 
     Uses pymupdf to extract raw text (~0.1s) and counts Unicode math symbols.
-    Returns the count. A threshold of >=5 indicates a formula-containing paper.
+    Returns the count, stopping early at ``_FORMULA_ROUTE_THRESHOLD``: at
+    that point the auto path has decided on MinerU, so the exact total is
+    never consulted.
     """
     try:
         import pymupdf  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
@@ -262,7 +269,7 @@ def _has_formulas_quick(pdf_path: Path) -> int:
             for page in doc:
                 text = page.get_text()
                 count += sum(1 for c in text if c in _MATH_UNICODE)
-                if count >= 5:
+                if count >= _FORMULA_ROUTE_THRESHOLD:
                     return count  # early exit
             return count
     except Exception:  # noqa: BLE001 — best-effort page count; falls back to 0
@@ -995,6 +1002,15 @@ class PDFExtractor:
         # Step 1: Quick formula pre-screen via raw PDF text (~0.1s)
         formula_count = _has_formulas_quick(pdf_path)
 
+        # The screen alone settles the math case. The Docling pass below is
+        # the extraction for the non-math case, not a probe, and the MinerU
+        # branch discards it: measured 2026-09-07, a 6-page paper the screen
+        # had already routed spent 24s in Docling ahead of a 32s MinerU run.
+        if formula_count >= _FORMULA_ROUTE_THRESHOLD:
+            return self._route_to_mineru(
+                pdf_path, formula_count, on_page=on_page, on_formula_oom=on_formula_oom,
+            )
+
         # Step 2: Extract with non-enriched Docling (probe — no on_page callback
         # to avoid double-firing if MinerU takes over for formula PDFs)
         _progress(f"  Docling: extracting {pdf_path.name}…")
@@ -1010,7 +1026,7 @@ class PDFExtractor:
         text_markers = _count_formula_markers(fast_result.text)
         formula_count = max(formula_count, text_markers)
 
-        if formula_count < 5:
+        if formula_count < _FORMULA_ROUTE_THRESHOLD:
             # Docling wins — replay on_page from page_boundaries since the
             # probe pass didn't fire the callback.
             if on_page is not None:
@@ -1022,13 +1038,27 @@ class PDFExtractor:
                     on_page(page_num - 1, page_text, {"page_number": page_num, "text_length": length})
             return fast_result
 
-        # Math paper detected — switch to MinerU for formula-aware extraction.
-        # nexus-2fyb: previously, a MinerU failure here silently returned the
-        # non-enriched Docling probe (formulas already stripped). That hid
-        # extraction corruption from every caller — the result was
-        # indistinguishable from a paper that legitimately had no math. Auto
-        # mode now fails loudly so the user installs MinerU or explicitly opts
-        # into formula-stripped extraction with --extractor docling.
+        return self._route_to_mineru(
+            pdf_path, formula_count, on_page=on_page, on_formula_oom=on_formula_oom,
+        )
+
+    def _route_to_mineru(
+        self,
+        pdf_path: Path,
+        formula_count: int,
+        *,
+        on_page: Callable[[int, str, dict], None] | None,
+        on_formula_oom: str,
+    ) -> ExtractionResult:
+        """Auto mode's MinerU branch: a math paper, extracted formula-aware.
+
+        nexus-2fyb: previously, a MinerU failure here silently returned the
+        non-enriched Docling probe (formulas already stripped). That hid
+        extraction corruption from every caller — the result was
+        indistinguishable from a paper that legitimately had no math. Auto
+        mode now fails loudly so the user installs MinerU or explicitly opts
+        into formula-stripped extraction with --extractor docling.
+        """
         _progress(f"  Formulas detected ({formula_count}) — switching to MinerU: {pdf_path.name}")
         try:
             return self._extract_with_mineru(
