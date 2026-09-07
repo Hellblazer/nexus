@@ -97,6 +97,8 @@ existed and inherited their errors; nexus-g7zgw.5):
    source (`sed -n`, `grep -n`, a T2 read) or the explicit marker
    "inferred, not read". A quote read at sentence granularity does not cover
    a clause welded on beside it.
+   A `file:line` from a T3 hit is re-read from the working tree before it is
+   quoted; the store's line number is as of index time.
 3. A count or a universal (never / always / only / nothing / every / the one /
    all) requires a census of the whole surface, captured in the entry as an
    enumeration; two sites that happen to agree are not a source.
