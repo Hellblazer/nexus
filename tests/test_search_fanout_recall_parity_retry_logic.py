@@ -54,9 +54,12 @@ def test_below_floor_first_measurement_with_no_retry_recorded_is_a_confirmed_fai
     assert _is_confirmed_regression(0.5, None) is True
 
 
-def test_floor_for_unsplit_group_is_strict(monkeypatch):
+def test_floor_for_unsplit_group_is_strict(monkeypatch, cloud_mode):
     """A group whose desired candidate count fits under the engine cap is
-    held to the strict floor (nexus-atylb)."""
+    held to the strict floor (nexus-atylb). The three floor tests name
+    voyage collections because a multi-collection embedding-model group is
+    the shape under test, so they opt into ``cloud_mode`` for the
+    mode-declaration lint."""
     monkeypatch.setattr(
         "nexus.search_engine._desired_candidate_count", lambda cols, n: 90,
     )
@@ -64,7 +67,7 @@ def test_floor_for_unsplit_group_is_strict(monkeypatch):
     assert _floor_for(cols) == _JACCARD_FLOOR
 
 
-def test_floor_for_split_group_uses_split_floor(monkeypatch):
+def test_floor_for_split_group_uses_split_floor(monkeypatch, cloud_mode):
     """A group that would exceed QUOTAS.MAX_QUERY_RESULTS splits into
     sub-batches and is held to the evidence-based split floor (nexus-atylb,
     Sam's ruling 2026-09-07)."""
@@ -76,7 +79,7 @@ def test_floor_for_split_group_uses_split_floor(monkeypatch):
     assert _floor_for(cols) == _JACCARD_FLOOR_SPLIT
 
 
-def test_floor_for_singleton_never_splits(monkeypatch):
+def test_floor_for_singleton_never_splits(monkeypatch, cloud_mode):
     """A one-collection group is never split, whatever its desired count."""
     monkeypatch.setattr(
         "nexus.search_engine._desired_candidate_count", lambda cols, n: 10_000,
