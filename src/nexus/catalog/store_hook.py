@@ -736,8 +736,9 @@ def store_delete_catalog_cleanup(
     ``delete_document`` cascades the manifest on both backends — false).
     The engine soft-tombstones: it stamps ``deleted_at`` on the catalog row
     and DELIBERATELY leaves ``document_chunks`` (the manifest) and the T3
-    chunk rows untouched, so a manual restore stays possible
-    (nexus-xavu7) and so ``nexus.purge_trash``'s own orphan predicate
+    chunk rows untouched, so ``nx catalog restore`` (nexus-dkymw — the
+    operator-facing caller nexus-xavu7 found missing) stays possible and so
+    ``nexus.purge_trash``'s own orphan predicate
     (``EXISTS`` manifest row AND ``NOT EXISTS`` a live parent) still has
     something to find later — cascading at tombstone time would strand
     those chunks (manifest-less) forever, since ``purge_trash`` never
@@ -750,8 +751,10 @@ def store_delete_catalog_cleanup(
     after the engine retired it, nexus-kcm6c) the chunk sweep protects
     every tombstone still inside the ``--older-than-days`` grace window:
     row, manifest, and chunks stay TOGETHER until the window passes, so
-    "manual restore stays possible" holds for the whole window, even
-    across purge runs. Until the engine ships the RDR-156 read-side tombstone
+    restore stays possible for the whole window, even across purge runs
+    (once that window passes, ``nx catalog restore`` returns 0 — nothing
+    left to restore; recovery becomes re-indexing). Until the engine ships
+    the RDR-156 read-side tombstone
     filter (also nexus-3ck2g), the deleted content also stays fully
     searchable in the interim — this cleanup only stops the CATALOG ROW
     from resolving.

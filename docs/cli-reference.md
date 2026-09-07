@@ -1389,6 +1389,27 @@ nx catalog reconcile-stale --execute tombstone-ghost-notes             # dry-run
 nx catalog reconcile-stale --execute drop-orphan-collections           # dry-run plan
 ```
 
+### nx catalog trash / restore
+
+```
+nx catalog trash [--limit N]
+nx catalog restore TUMBLER_OR_TITLE
+```
+
+nexus-dkymw — Sam's 2026-09-07 ruling on the RDR-106 Option A regression (bead nexus-dkymw): tombstones ARE the recovery story, not a resurrected backup-before-delete mechanism. `nx catalog delete` only ever soft-tombstones (`deleted_at` stamped, nothing cascaded); these two verbs are the operator door in and out of that state that nexus-xavu7 found missing — `nexus.document_restore` (`catalog-003-soft-delete.xml`, RDR-156 P1.2) had existed engine-side with zero callers anywhere in the stack until now.
+
+`nx catalog trash` lists this tenant's tombstoned documents, newest-tombstoned first: tumbler, title, and `deleted_at`. `nx catalog restore` clears the tombstone on one document (accepts a tumbler or a title — title resolution considers tombstoned rows, since the live resolver alone cannot see them) and prints whether anything was actually restored. Restoring a document that is already live, unknown, or genuinely gone (see below) is a no-op — the command says so rather than pretending success.
+
+**The recovery horizon is `nx catalog purge-trash`'s grace window, nothing else.** A tombstoned document's catalog row, manifest, and T3 chunks stay together until `--older-than-days` passes (catalog-026) — `nx catalog restore` works for the whole window. Once `purge-trash` physically reclaims a tombstone, restore returns nothing: recovery at that point means re-indexing the source, not a hand-written SQL `UPDATE` against `catalog_documents.deleted_at` — there is no supported direct-SQL recovery path, and none should be improvised.
+
+```
+nx catalog trash                          # what is restorable right now
+nx catalog restore 1.2.3                  # bring one document back by tumbler
+nx catalog restore "My Document Title"    # or by title
+```
+
+Requires an engine carrying the nexus-dkymw routes (`POST /v1/catalog/restore`, `GET /v1/catalog/trash`); an older engine raises a clear error naming the required release rather than a silent 404.
+
 ### nx catalog gc-audit list
 
 ```
@@ -1402,11 +1423,11 @@ Read the destructive-T3-op audit trail, `nexus.gc_audit` (nexus-jqvzk), newest f
 nx catalog purge-trash [--older-than-days N] [--dry-run/--no-dry-run] [--confirm] [--json]
 ```
 
-Physically reclaim tombstoned catalog rows and their manifest-orphaned T3 chunks (nexus-3ck2g). `nx catalog delete` soft-tombstones: it stamps `deleted_at` on the catalog row and deliberately leaves the `document_chunks` manifest and the T3 chunk rows in place, so a manual restore stays possible and the engine's own `nexus.purge_trash` orphan predicate (a manifest row exists but no live parent document does) still has something to sweep. This verb is the caller for that engine-side sweep, which previously had none.
+Physically reclaim tombstoned catalog rows and their manifest-orphaned T3 chunks (nexus-3ck2g). `nx catalog delete` soft-tombstones: it stamps `deleted_at` on the catalog row and deliberately leaves the `document_chunks` manifest and the T3 chunk rows in place, so [`nx catalog restore`](#nx-catalog-trash--restore) stays possible and the engine's own `nexus.purge_trash` orphan predicate (a manifest row exists but no live parent document does) still has something to sweep. This verb is the caller for that engine-side sweep, which previously had none.
 
 Default is a read-only dry-run: a per-dim stranded-chunk count preview plus an aged-tombstone document count (`--older-than-days`, default 30, must be >= 1), computed engine-side and printed. Nothing is deleted in this mode, and `--json` emits the same counts as machine-parseable JSON.
 
-**Age semantics are symmetric since catalog-026 (nexus-5da44, RDR-191 GATE-2; this paragraph described the earlier asymmetric behaviour for two weeks after the engine retired it — nexus-kcm6c):** both the `documents_purged` row delete AND the `chunks_<dim>_stranded` sweep honor `--older-than-days`. A tombstoned document inside the grace window keeps its catalog row, manifest rows, and chunks TOGETHER — the chunk sweep protects any chunk whose manifest row belongs to a live or still-in-window document, the exact complement of the row delete's predicate — and loses all three together once the window passes. "Manual restore stays possible" therefore genuinely holds for the whole window, even across mutating `purge-trash` runs. Consequence for reading the counts: a near-zero stranded count at 30 days next to a large one at `--older-than-days 1` means recent tombstones are being protected, by design — the 2026-08-27 shakedown read exactly that pair and concluded the counter was lying when the stale prose was (nexus-kcm6c). **The default is one day since 7.32.0** (Sam, 2026-09-05): the 30-day window held 880 tombstoned documents and 1,503 stranded chunks for months against a standing request to delete them. `nx doctor --fix` runs the one-day purge (see [garbage sweep](#nx-doctor)).
+**Age semantics are symmetric since catalog-026 (nexus-5da44, RDR-191 GATE-2; this paragraph described the earlier asymmetric behaviour for two weeks after the engine retired it — nexus-kcm6c):** both the `documents_purged` row delete AND the `chunks_<dim>_stranded` sweep honor `--older-than-days`. A tombstoned document inside the grace window keeps its catalog row, manifest rows, and chunks TOGETHER — the chunk sweep protects any chunk whose manifest row belongs to a live or still-in-window document, the exact complement of the row delete's predicate — and loses all three together once the window passes. `nx catalog restore` therefore genuinely works for the whole window, even across mutating `purge-trash` runs — past it, restore returns nothing and recovery means re-indexing. Consequence for reading the counts: a near-zero stranded count at 30 days next to a large one at `--older-than-days 1` means recent tombstones are being protected, by design — the 2026-08-27 shakedown read exactly that pair and concluded the counter was lying when the stale prose was (nexus-kcm6c). **The default is one day since 7.32.0** (Sam, 2026-09-05): the 30-day window held 880 tombstoned documents and 1,503 stranded chunks for months against a standing request to delete them. `nx doctor --fix` runs the one-day purge (see [garbage sweep](#nx-doctor)).
 
 Mutation is gated behind BOTH `--no-dry-run` AND `--confirm` (same gate as `nx catalog reconcile-stale`): `--no-dry-run` alone still reports only, and `--json` cannot be combined with `--no-dry-run` (the mutation path prints a plain-text report, not JSON).
 

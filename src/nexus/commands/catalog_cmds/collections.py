@@ -292,7 +292,9 @@ def rename_collection_cmd(
     if old_state is CollectionState.TOMBSTONED:
         raise click.ClickException(
             f"old name {old!r} is tombstoned (every chunk belongs to a "
-            f"trashed document) — restore the trashed document(s) before renaming."
+            f"trashed document) — run `nx catalog trash` to see it, then "
+            f"`nx catalog restore <tumbler>` to bring the document(s) back "
+            f"before renaming."
         )
     if old == new:
         raise click.ClickException(

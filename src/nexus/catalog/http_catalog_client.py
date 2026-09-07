@@ -1484,6 +1484,47 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         result = self._post("/owners/reactivate", {"tumbler_prefix": str(tumbler_prefix)})
         return bool(result.get("reactivated", 0) > 0 if result else False)
 
+    def restore_document(self, tumbler: Tumbler | str) -> bool:
+        """POST /v1/catalog/restore — undo a soft delete (nexus-dkymw).
+
+        The operator-facing caller ``nexus.document_restore``
+        (``catalog-003-soft-delete.xml``, RDR-156 P1.2) never had —
+        nexus-xavu7 found three sites telling an operator to "restore the
+        trashed document(s)" with zero CLI/MCP/REST surface to do it. Sam's
+        2026-09-07 ruling on nexus-dkymw: tombstones ARE the recovery
+        story, so this closes that gap directly rather than resurrecting
+        the RDR-106 Option A backup-before-delete machinery.
+
+        Returns ``True`` if a tombstoned row was cleared, ``False`` if the
+        tumbler is unknown, already live, or its tombstone has already been
+        physically reclaimed by :meth:`purge_trash` (nothing left to
+        restore once that grace window has passed — see that method's own
+        AGE SEMANTICS note).
+
+        A pre-nexus-dkymw engine has no matching route and answers 404 —
+        this method does NOT swallow that (same discipline as
+        :meth:`purge_trash`); it propagates the raw
+        ``httpx.HTTPStatusError`` so the CLI verb can name the required
+        engine release instead of silently reporting "not restored."
+        """
+        result = self._post("/restore", {"tumbler": str(tumbler)})
+        return bool(result.get("restored", 0) > 0 if result else False)
+
+    def list_trash(self, *, limit: int = 200, offset: int = 0) -> list[dict[str, Any]]:
+        """GET /v1/catalog/trash — this tenant's tombstoned documents,
+        newest-tombstoned first (nexus-dkymw). Read-only counterpart to
+        :meth:`restore_document`: lets a caller see what is restorable
+        before calling it. Each entry carries ``tumbler``, ``title``,
+        ``physical_collection``, ``corpus``, ``content_type``, and
+        ``deleted_at``, returned verbatim from the engine (this method does
+        not reshape it).
+
+        A pre-nexus-dkymw engine has no matching route and answers 404 —
+        propagated raw, same discipline as :meth:`restore_document`.
+        """
+        result = self._get("/trash", limit=limit, offset=offset)
+        return list((result or {}).get("documents", []))
+
     def delete_many(self, tumblers: list[Tumbler | str]) -> set[str]:
         """Batch-tombstone N documents; returns the subset of *tumblers*
         (as strings) that were actually tombstoned (nexus-xedhp: completes
@@ -1526,7 +1567,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
         Delete tombstones the catalog row but deliberately leaves the
         ``document_chunks`` manifest and T3 chunk rows in place (preserving
-        the manual-restore path, nexus-xavu7); this is the caller that
+        the ``nx catalog restore`` path, nexus-dkymw — the operator-facing
+        caller nexus-xavu7 found missing); this is the caller that
         physically reclaims them.
 
         AGE SEMANTICS (catalog-026, nexus-5da44 — this docstring carried the
@@ -1535,8 +1577,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         protects every tombstone still inside the ``older_than_days`` grace
         window, the exact complement of Step 4's document-delete predicate —
         row, manifest, and chunks stay together until the window passes, so
-        the manual-restore path (nexus-xavu7) holds for the whole window,
-        even across ``dry_run=False`` calls.
+        ``restore_document`` holds for the whole window, even across
+        ``dry_run=False`` calls. Past the window, ``restore_document``
+        returns ``False`` — nothing left to restore.
 
         Wire contract (LOCKED, design of record T1 scratch 2fbc12df): POST
         body ``{"older_than_days": int, "dry_run": bool}``; the engine's

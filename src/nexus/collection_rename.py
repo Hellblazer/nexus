@@ -73,7 +73,8 @@ def rename_collection_data_plane(
     # never touches the physical chunks_<dim> rows) to tell the two apart:
     #   - old ABSENT -> "not found" (accurate).
     #   - old TOMBSTONED -> "not found" would hide the real remedy
-    #     ("restore the trashed documents first"); say so instead.
+    #     ("nx catalog restore the trashed document(s) first"); say so instead
+    #     (nexus-dkymw: the verb nexus-xavu7 found missing now exists).
     #   - new PRESENT or TOMBSTONED -> refuse. This rename path has no
     #     cross_model escape valve (unlike remap_collection_references), so
     #     claiming a tombstoned name would silently land live/fresh data on
@@ -88,7 +89,9 @@ def rename_collection_data_plane(
     if old_state is CollectionState.TOMBSTONED:
         raise click.ClickException(
             f"collection {old!r} is tombstoned (every chunk belongs to a "
-            f"trashed document) — restore the trashed document(s) before renaming."
+            f"trashed document) — run `nx catalog trash` to see it, then "
+            f"`nx catalog restore <tumbler>` to bring the document(s) back "
+            f"before renaming."
         )
     new_state = probe_collection_state(t3_db, new)
     if new_state is not CollectionState.ABSENT:
