@@ -915,7 +915,16 @@ class RawSqlGateTest {
         // in assertReconcileLoadBearing, Postgres-only ALTER TABLE extensions with no
         // jOOQ typed-DSL form -- verified against jOOQ 3.21's manual).
         Map.entry("dev/nexus/service/CollectionRegistryFkExtraTest.java", 3),
-        Map.entry("dev/nexus/service/CollectionRegistryFkTest.java", 63),
+        // nexus-cbo4a batch 10: 63 -> 3 (chunks/topic_assignments seed inserts across
+        // three dims, row-count reads, cross-tenant/RLS/ON-DELETE-RESTRICT probes, and
+        // six @Disabled dead-code CHECK-constraint tests targeting the DROPPED
+        // chunks_384/768/1024 tables -- all onto typed jOOQ DSL; the disabled tests use
+        // DSL.table(DSL.name(...))/DSL.field(DSL.name(...), Class) since no generated
+        // Tables entry exists for a relation that no longer exists). The surviving 3
+        // sites are ADD CONSTRAINT .. NOT VALID + VALIDATE CONSTRAINT x2 in
+        // assertReconcileLoadBearing, the same Postgres-only ALTER TABLE extensions with
+        // no jOOQ typed-DSL form as CollectionRegistryFkExtraTest's identical helper.
+        Map.entry("dev/nexus/service/CollectionRegistryFkTest.java", 3),
         Map.entry("dev/nexus/service/CollectionVectorStatsTest.java", 18),
         Map.entry("dev/nexus/service/CombinedQueryParityIntegrationTest.java", 4),
         Map.entry("dev/nexus/service/CombinedQueryParityTest.java", 22),
@@ -1162,7 +1171,7 @@ class RawSqlGateTest {
      * M found" delta for all 36 files, and the reseeded map plus this
      * constant reproduce it exactly.
      *
-     * <p><b>nexus-cbo4a batch 10 (2026-09-07), file 1 of 2:</b> 1602 -&gt; 1565 (-37),
+     * <p><b>nexus-cbo4a batch 10 (2026-09-07), file 1:</b> 1602 -&gt; 1565 (-37),
      * {@code CollectionRegistryFkExtraTest.java} 40 -&gt; 3 -- seed INSERTs (backfill-
      * stub fixtures across five FK-eligible tables), row-count reads, and cross-
      * tenant/ON-DELETE-RESTRICT probes all onto typed jOOQ DSL over generated
@@ -1178,7 +1187,7 @@ class RawSqlGateTest {
      * CONSTRAINT}); {@code DROP CONSTRAINT IF EXISTS} DOES have a typed form
      * ({@code alterTable(table).dropConstraintIfExists(name)}) and was converted.
      *
-     * <p><b>nexus-cbo4a batch 10, file 2 of 2:</b> 1565 -&gt; 1525 (-40), {@code
+     * <p><b>nexus-cbo4a batch 10, file 2:</b> 1565 -&gt; 1525 (-40), {@code
      * CatalogRenameCollectionTest.java} 42 -&gt; 2 -- its {@code rows(Connection, String)}
      * row-count wrapper and all 39 literal-fed call sites onto typed jOOQ {@code
      * selectCount()}, the wrapper retired outright. The surviving 2 sites are {@code
@@ -1186,8 +1195,22 @@ class RawSqlGateTest {
      * typed-DSL form). This file's seed INSERTs were already typed jOOQ from an earlier
      * batch; only the row-count read shape remained, confirming the task's own
      * Shape-A/Shape-B split.
+     *
+     * <p><b>nexus-cbo4a batch 10, file 3:</b> 1525 -&gt; 1465 (-60), {@code
+     * CollectionRegistryFkTest.java} 63 -&gt; 3 -- chunks/topic_assignments seed inserts
+     * across three dims, row-count reads, cross-tenant/RLS/ON-DELETE-RESTRICT probes,
+     * and six {@code @Disabled} dead-code CHECK-constraint tests targeting the DROPPED
+     * {@code chunks_384/768/1024} tables, all onto typed jOOQ DSL. Rewired onto {@code
+     * CollectionRegistryFkExtraTest}'s batch-10 {@code PgContainerHelper.insertCollection}/
+     * {@code insertCatalogDocument} helpers, and onto three NEW {@code PgContainerHelper}
+     * helpers ({@code insertChunk384/768/1024}) hoisted from the byte-for-byte duplicate
+     * pair already living in {@code CatalogDeleteCollectionCascadeTest} and {@code
+     * CatalogRenameCollectionTest} (those two files' own local copies are untouched --
+     * not yet rewired onto the shared version, a follow-up). The surviving 3 sites are
+     * the same {@code ADD CONSTRAINT .. NOT VALID} / {@code VALIDATE CONSTRAINT} x2
+     * shape as {@code CollectionRegistryFkExtraTest}'s identical helper.
      */
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1525;
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1465;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

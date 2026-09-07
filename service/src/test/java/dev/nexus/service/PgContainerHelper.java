@@ -12,6 +12,7 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.jooq.test.Routines;
 import org.jooq.DSLContext;
 import org.jooq.Name;
@@ -30,6 +31,7 @@ import java.util.Set;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 
 
@@ -431,6 +433,47 @@ public final class PgContainerHelper {
             .values(tenantId, tumbler, "Test Doc " + tumbler)
             .onConflictDoNothing()
             .execute();
+    }
+
+    /**
+     * Seed one {@code nexus.chunks} row at dim 384 via generated jOOQ DSL (nexus-cbo4a
+     * batch 10) — hoisted from the byte-for-byte identical {@code insertChunk384}
+     * duplicated in {@code CatalogDeleteCollectionCascadeTest} and {@code
+     * CatalogRenameCollectionTest} (batch-4's own critique named this exact
+     * duplication class for the seed-insert shape). {@code chashBytes} is the raw
+     * {@code chash} column value (callers control the 32-byte-vs-64-hex-decoded
+     * distinction; see {@code chashBytes}/{@code hexChashBytes} helper pairs in the
+     * callers), {@code chunk_text} is fixed at {@code "text"} — every existing call
+     * site's own literal — since no caller has ever needed a different value.
+     *
+     * @param ctx        a {@link DSLContext} over the same connection/role the schema
+     *                   was migrated under
+     * @param tenant     the tenant id
+     * @param collection the collection name
+     * @param chashBytes the raw {@code chash} bytea value
+     * @param v          the 384-dim embedding vector
+     */
+    public static void insertChunk384(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                       CHUNKS.EMBEDDING_384)
+           .values(tenant, collection, chashBytes, "text", v)
+           .execute();
+    }
+
+    /** {@code nexus.chunks} seed at dim 768 — see {@link #insertChunk384} for the full contract. */
+    public static void insertChunk768(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                       CHUNKS.EMBEDDING_768)
+           .values(tenant, collection, chashBytes, "text", v)
+           .execute();
+    }
+
+    /** {@code nexus.chunks} seed at dim 1024 — see {@link #insertChunk384} for the full contract. */
+    public static void insertChunk1024(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                       CHUNKS.EMBEDDING_1024)
+           .values(tenant, collection, chashBytes, "text", v)
+           .execute();
     }
 
     /**
