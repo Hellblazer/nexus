@@ -316,11 +316,12 @@ Nothing is renamed and no chunk moves.
 dimension, PRIMARY KEY (tenant_id, content_type))`, plus a reference table
 `nexus.embedding_models(embedding_model PRIMARY KEY, dimension, provider)`
 seeded with the four models the engine can serve. `nx init` writes the
-profile for the chosen mode. The engine has no tenant-mint route (tenants
-exist through data-token mint at the edge), so a cloud tenant's profile is
-seeded lazily and idempotently by the engine on the first registration
-for a content type, from its own mode. The profile is the only place a
-model is chosen.
+profile for the chosen mode, and the engine writes it at boot from that
+mode (1a). The engine has no tenant-mint route (tenants exist through
+data-token mint at the edge), so a cloud tenant's profile is seeded lazily
+and idempotently by the engine on the first registration for a content
+type, from the same mode decision. The profile is the only place a model
+is chosen, and the engine is the only writer.
 
 **1a. The profile is updatable, and a switch mints a sibling.**
 `local.embed_model` can change at any time through `nx config set`
@@ -331,10 +332,24 @@ local-token collection: write there; key absent and nothing: raise; key
 present: the canonical Voyage token, a NEW sibling collection). This RDR
 keeps that table verbatim and changes only where the "does a collection
 exist for this content type and owner under token X" probe looks: the
-catalog's `for_tuple` lookup instead of a rendered-name test. A change is
-a profile write: `nx upgrade`'s `provisioning`
-precondition (and the engine at boot, from its own mode) writes the
-profile row for each content type. A profile change never touches an
+catalog's `for_tuple` lookup instead of a rendered-name test.
+
+Who writes the profile, and when: the ENGINE, at boot, from its own mode,
+and nobody else. `Main.java` already decides the mode once per process
+(`NX_VOYAGE_API_KEY` present: pure Voyage routing; absent: the ONNX local
+embedder), and that decision is the profile. At boot the engine upserts
+one row per content type for the local tenant (cloud tenants get theirs
+lazily, see step 1), idempotent, from the same branch that constructs the
+router. This is the trigger the GH #1461 recipe already has: the
+documented switch is `nx config set local.embed_model ...`, `nx config set
+voyage_api_key ...`, then a service restart, and the restart is the boot.
+`nx config set` writes nothing to the profile; it keeps printing the
+restart reminder it prints today. Until the restart, the engine's profile
+and the client's intended model differ, and `nx doctor`'s profile row
+names that (Day 2), which turns today's invisible "did you restart?" state
+into a visible one. `nx upgrade` is not involved; the earlier draft's
+claim that it was is withdrawn (gate critique [24800]). A profile change
+never touches an
 existing collection's row: the row records the model its vectors were
 embedded with, which is a fact about stored bytes, and the profile
 records what new collections get. `nx doctor` reports every live
@@ -351,8 +366,9 @@ for joins. They are constrained: NOT NULL and non-empty on
 from the current profile; a register call that names a different model is
 a 422 carrying the profile's value. There is deliberately no constraint
 tying an existing row to the current profile (see 1a). A new
-`lifecycle_state` column (`live` | `quarantine`) replaces the
-`quarantine-` prefix as the thing corpus resolution excludes.
+`lifecycle_state` column (`live` | `quarantine` | `dormant` | `disputed`)
+replaces the `quarantine-` prefix as the thing corpus resolution excludes;
+only `live` rows take part in a bare-corpus fan-out.
 
 **3. The one-time backfill, which never wedges an upgrade.** Two
 changesets, in order, and neither can fail on data: the engine wraps any
@@ -365,8 +381,16 @@ cut of this design refused on disagreement; that was wrong.
 The first changeset sweeps ghosts: a `catalog_collections` row with zero
 `nexus.chunks` rows, zero `document_chunks` manifest rows, and zero
 aspect, highlight, queue, or topic references is deleted, counts reported
-with `RAISE NOTICE` (153 of 223 rows on this tenant). A row still
-referenced anywhere is kept and reported, never guessed at.
+with `RAISE NOTICE`. The live census counted chunk-emptiness only (153 of
+223 rows on this tenant); the sweep's condition is stricter, so the
+deleted count will be at most 153 and the difference is the next class.
+A row still referenced anywhere but owning no chunks is kept, gets
+`lifecycle_state = 'dormant'`, takes its `content_type`, `owner_id` and
+`embedding_model` from the name with `dimension` NULL (there are no
+vectors to read), and is reported by notice and by `nx doctor` as
+"referenced but empty: re-index it or remove the references". Dormant
+rows are outside the disputed rule by construction, since there is no
+stored dimension to disagree with.
 
 The second walks every surviving row. `content_type` and `owner_id` come
 from the name, the last parse this codebase performs. `embedding_model`
@@ -393,12 +417,16 @@ unregistered collection fails loud.
 
 **5. Client resolves through the catalog, in two moves.** The client's
 collection cache (`mcp_infra.get_collection_names`) is fed by
-`/v1/vectors/stats` (name, dim, count), so the cheapest repoint is to
-join the catalog attributes (`content_type`, `owner_id`,
-`embedding_model`, `lifecycle_state`) into that response and keep the one
-round trip and the existing TTL cache; switching the cache to the catalog
-list is the alternative. Either way the row, not the name, is what the
-client reads. First the
+`/v1/vectors/stats` (name, dim, count). Decision: join the catalog
+attributes (`content_type`, `owner_id`, `embedding_model`,
+`lifecycle_state`) into that response, server side, and leave the client
+cache untouched: same one round trip, same TTL, the cached rows simply
+carry four more fields that the three helpers read. Switching the cache
+to the catalog list was considered and rejected because it would change
+the cache's population (the catalog knows ghosts the stats route does
+not) and its refresh path at the same time as the repoint. The catalog
+list route still gains `content_type` and `lifecycle_state` filters for
+the CLI verbs that read it directly. First the
 funnel: every raw string site (about sixty) is rewritten to call one of
 three helpers, `collection_content_type(name)`, `collection_model(name)`,
 `collection_owner(name)`, which at that point still parse; this is
@@ -524,15 +552,27 @@ walks the tree's own changeset over a populated store.
 ### Phase 1: Schema and backfill (engine)
 
 1. Changesets: `embedding_models`, `embedding_profile`, new columns and
-   constraints on `catalog_collections`, the backfill with its refusal
-   precondition. Liquibase only; no Python DDL.
-2. Delete the stub inserts in `AspectRepository` and `TaxonomyRepository`.
-3. `register_collection` writes from the profile; `nx init` writes the
-   profile.
-4. Engine suite: profile write, refused register, backfill agree and
-   disputed cases (a fixture collection whose stored dimension disagrees
-   with its name), ghost sweep with a still-referenced row kept, each
-   against a real PG.
+   constraints on `catalog_collections`, the ghost sweep, the walk with
+   its disputed and dormant outcomes, constraints added last. Liquibase
+   only; no Python DDL; no failing precondition anywhere.
+2. Engine boot writes the profile from its mode decision in `Main.java`
+   (local tenant at boot; cloud tenants lazily at first registration),
+   idempotent upsert, and `CollectionRegistry` evicts on that write.
+3. Delete the stub inserts in `AspectRepository` and `TaxonomyRepository`.
+4. `register_collection` writes the model from the profile; a different
+   model in the request is a 422 naming the profile's value. `nx config
+   set` is unchanged: it does not write the profile, it reminds the user
+   to restart, which is the write.
+5. Engine suite, each against a real PG: boot in ONNX mode yields the
+   bge rows and boot with a Voyage key yields the Voyage rows; a second
+   boot changes nothing; refused register; backfill agree, disputed
+   (a fixture collection whose stored dimension disagrees with its name)
+   and dormant (a row referenced by a manifest with no chunks) cases;
+   ghost sweep deletes the unreferenced and keeps the referenced.
+6. The GH #1461 recipe, end to end on the engine substrate: bge profile,
+   set a Voyage key, restart, profile now Voyage, existing bge collection
+   still readable and still registered under bge, a new write mints the
+   Voyage sibling.
 
 ### Phase 2: Engine reads the row
 
@@ -566,8 +606,15 @@ Client-only release.
 
 ### Day 2 Operations
 
-- `nx doctor` gains a row: profile present, every collection agrees with
-  it. A disagreement is a red, never a warning.
+- `nx doctor` gains a profile row: the engine's profile per content type,
+  and whether the client's intended model (`local.embed_model` and key
+  state) agrees with it. A disagreement means the service has not been
+  restarted since the config change, and the row says so; this is the
+  GH #1461 "did you restart?" blind spot made visible. Live collections
+  under a model other than the profile's are listed as needing
+  re-embedding, informational; `disputed` and `dormant` rows are listed
+  red with their remedies. `nx collection shape` already reports the
+  pre-RDR view of the same population and stays the curation tool.
 - `nx collection list` prints the columns, not a parsed name.
 
 ### New Dependencies
@@ -576,8 +623,10 @@ None.
 
 ## Test Plan
 
-- Engine: changeset agree/disputed/ghost cases; register 422; registry eviction;
-  parse census at target count.
+- Engine: boot writes the profile in both modes and is idempotent;
+  changeset agree, disputed, dormant and ghost cases; register 422;
+  registry eviction on profile write; the GH #1461 restart journey; parse
+  census at target count.
 - Client: corpus resolution by content type and lifecycle state; model
   grouping by column; census at target count; exporter and reconciler
   round-trips.
