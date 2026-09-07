@@ -2352,6 +2352,26 @@ public final class CatalogRepository {
     // plan evidence and the FK-dependent equivalence argument.
     private static long strandedChunkCount(
             DSLContext ctx, String tenant, DimTables.ChunkTable ch, int olderThanDays) {
+        return strandedChunkCount(ctx, tenant, ch, olderThanDays, null);
+    }
+
+    /**
+     * nexus-zewg3: {@code collection}-scoping overload of {@link
+     * #strandedChunkCount(DSLContext, String, DimTables.ChunkTable, int)}. Restricts the
+     * OUTPUT rows to chunks physically located in {@code collection} ({@code null} keeps
+     * the original tenant-wide behavior, the 4-arg overload above) while leaving the
+     * {@code hasManifest}/{@code hasProtectingManifest} predicates completely unscoped —
+     * both still match a manifest row in ANY collection, exactly like {@code
+     * nexus.purge_trash}'s own chunk-sweep anti-join, which never joins on collection at
+     * all. This is deliberate: the whole point of the collection filter here is to
+     * attribute a row to a REPORT bucket ("this chunk lives in collection X"), never to
+     * change whether that row counts as stranded — that decision must stay identical to
+     * what an unscoped call (and the real DELETE) would make, or a report scoped to one
+     * collection could disagree with what {@code purgeTrash} actually reclaims (the
+     * nexus-zewg3 critique's Significant 1 gap in the FIRST, rejected client-side cut).
+     */
+    private static long strandedChunkCount(
+            DSLContext ctx, String tenant, DimTables.ChunkTable ch, int olderThanDays, String collection) {
         // nexus-erwvd: same server-side, olderThanInterval-derived threshold expression
         // agedTombstoneCount uses (nexus-ff85q) — identical dialect, identical clock, no
         // second Java-computed cutoff to drift against the SQL function's own NOW() call.
@@ -2369,8 +2389,7 @@ public final class CatalogRepository {
                       .and(CHK_CHASH_HEX.eq(ch.chash()))
                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()
                            .or(CATALOG_DOCUMENTS.DELETED_AT.gt(threshold)))));
-        Long count = ctx.selectCount().from(ch.table())
-            .where(ch.tenantId().eq(tenant)
+        Condition where = ch.tenantId().eq(tenant)
                    // RDR-191 D1 hazard: ch.table() is now the SAME physical
                    // nexus.chunks for all three dims -- table membership no
                    // longer implies dim. Without this guard, all three
@@ -2379,7 +2398,12 @@ public final class CatalogRepository {
                    // their own per-dim slice (the callers sum them, so a
                    // missed guard here silently triples the reported total).
                    .and(ch.embedding().isNotNull())
-                   .and(hasManifest).and(hasProtectingManifest.not()))
+                   .and(hasManifest).and(hasProtectingManifest.not());
+        if (collection != null) {
+            where = where.and(ch.collection().eq(collection));
+        }
+        Long count = ctx.selectCount().from(ch.table())
+            .where(where)
             .fetchOne(0, Long.class);
         return count != null ? count : 0L;
     }
@@ -2468,6 +2492,56 @@ public final class CatalogRepository {
             out.put("chunks_1024_stranded", strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(1024), olderThanDays));
             return out;
         });
+    }
+
+    /**
+     * Tombstone-protected chunk count for a collection (nexus-zewg3, follow-up to
+     * nexus-dkymw's alive-set ruling). {@code chashesForCollection}'s alive-set no
+     * longer excludes a tombstoned document's chashes (Sam's 2026-09-07 ruling), so
+     * {@code nx t3 gc}'s orphan sweep now leaves a chash referenced ONLY by a pending
+     * tombstone untouched — it is not garbage, but it is also not something {@code nx
+     * t3 gc} will ever reclaim; only {@code nexus.purge_trash}'s own chunk sweep, once
+     * the tombstone ages past its {@code --older-than-days} window, does that. An
+     * operator reading {@code nx t3 gc}'s report has no way to tell "kept alive by a
+     * live document" from "kept alive only by a tombstone nobody will purge for weeks"
+     * without this count.
+     *
+     * <p>Reuses {@link #strandedChunkCount}'s exact anti-join — the SAME predicate
+     * {@code nexus.purge_trash}'s own chunk-sweep DELETE uses, tenant-wide,
+     * collection-blind on the manifest side — called with {@code olderThanDays=0} so
+     * {@code hasProtectingManifest} collapses to "referenced by a LIVE document's
+     * manifest row" only (a tombstone's {@code deleted_at} is always at or before the
+     * instant this query runs, so {@code deleted_at > NOW() - 0 days} is false for
+     * every real tombstone; see {@link #agedThreshold}). That is deliberate, not an
+     * arbitrary choice of window: {@code nx t3 gc}'s alive-set itself is NOT
+     * grace-window-aware (it does not filter {@code deleted_at} at all, per the
+     * {@code chashesForCollection} javadoc above), so "tombstone-protected" here means
+     * "held alive by a tombstone of ANY age, whether or not that tombstone has yet
+     * cleared whatever {@code --older-than-days} value a future {@code purge_trash}
+     * call is given" — exactly the report line's own wording ("once past its
+     * --older-than-days window").
+     *
+     * <p>The collection filter is OUTPUT-side only (see the collection-scoping
+     * overload's own javadoc): it restricts which physical chunk rows are counted,
+     * never which manifest rows can protect them — a chash tombstoned in one
+     * collection but live-referenced from a document in ANOTHER collection is
+     * correctly excluded here (0 contribution), matching what {@code purge_trash}
+     * itself will actually do (never reclaim it, since its own predicate is equally
+     * collection-blind) — the exact cross-collection gap the FIRST, client-side-derived
+     * cut of nexus-zewg3 could not close (critique T2 nexus/critique-nexus-zewg3
+     * Significant 1).
+     *
+     * <p>One indexed SQL query per dim (three total, summed) inside a single
+     * transaction — cheaper than the rejected client-side cut's tenant-wide {@code
+     * list_trash} page-through plus a full-collection {@code get_manifests} pass, and
+     * it can never disagree with {@code purge_trash}'s own predicate because it IS
+     * that predicate (Significant 2 of the same critique).
+     */
+    public long tombstoneProtectedChunkCount(String tenant, String collection) {
+        return tenantScope.withTenant(tenant, ctx ->
+            strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(384), 0, collection)
+            + strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(768), 0, collection)
+            + strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(1024), 0, collection));
     }
 
     /**

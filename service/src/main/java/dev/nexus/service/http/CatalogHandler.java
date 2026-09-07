@@ -1174,7 +1174,20 @@ public final class CatalogHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, "{\"deleted\":" + deleted + "}");
     }
 
-    /** GET /v1/catalog/manifest/chashes?collection=X */
+    /**
+     * GET /v1/catalog/manifest/chashes?collection=X
+     *
+     * <p>nexus-zewg3 (ADDITIVE wire change): the envelope also carries
+     * {@code tombstone_protected_count} — of the chashes above, how many are
+     * held alive ONLY by a pending tombstone (never by a live document,
+     * tenant-wide) rather than a live document, per {@link
+     * CatalogRepository#tombstoneProtectedChunkCount}. {@code nx t3 gc}'s own
+     * alive-set diff cannot make this distinction (both classes stay in
+     * {@code chashes} equally per nexus-dkymw), so the client reads this
+     * field to report it instead of re-deriving it client-side. Old clients
+     * that don't know the key simply ignore it (same pattern as
+     * nexus-kzso5's per-row {@code collection} addition above).
+     */
     private void handleManifestChashes(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         String collection = queryParam(exchange, "collection");
@@ -1190,8 +1203,10 @@ public final class CatalogHandler implements HttpHandler {
         // all. The client reconciles len(chashes) == count before any orphan
         // classification and aborts on mismatch.
         var list = new ArrayList<>(chashes);
+        long tombstoneProtected = repo.tombstoneProtectedChunkCount(tenant, collection);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
-            Map.of("chashes", list, "count", list.size())));
+            Map.of("chashes", list, "count", list.size(),
+                   "tombstone_protected_count", tombstoneProtected)));
     }
 
     /** POST /v1/catalog/manifest/docs_for_chashes */
