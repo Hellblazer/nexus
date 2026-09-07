@@ -278,13 +278,26 @@ public final class PgContainerHelper {
      * the codegen-time counterpart is db.changelog-test-master.xml (see the
      * pom's generate-jooq-test-sources execution).
      *
-     * @param su superuser connection to install the test objects under
+     * <p><b>ORDERING / OWNERSHIP CONTRACT (found the hard way in batch 12):</b>
+     * whichever role's Liquibase run creates {@code databasechangelog} first OWNS
+     * it. A test that later migrates the product changelog as a NON-superuser
+     * migrating role (SchemaMigratorIntegrationTest's aged-box walks) must call
+     * this through THAT role's own connection, never the superuser's, or the
+     * walk fails with "permission denied for table databasechangelog". Callers
+     * that migrate via {@link #applyProductSchema} (superuser throughout) can
+     * pass the same superuser connection, which is what {@code applyProductSchema}
+     * itself does. Pass the connection of the role that will run the product
+     * changelog on this database, whichever that is.
+     *
+     * @param conn connection of the role that will migrate the product changelog
+     *             on this database (the superuser for applyProductSchema-driven
+     *             tests; the migrating role for SchemaMigrator-driven tests)
      */
-    public static void installTestObjects(Connection su) throws Exception {
-        Database db = DatabaseFactory.getInstance().findCorrectDatabaseImplementation(new JdbcConnection(su));
+    public static void installTestObjects(Connection conn) throws Exception {
+        Database db = DatabaseFactory.getInstance().findCorrectDatabaseImplementation(new JdbcConnection(conn));
         new Liquibase("db/changelog-test/db.changelog-test-objects.xml",
             new ClassLoaderResourceAccessor(), db).update(new Contexts());
-        su.setAutoCommit(true);
+        conn.setAutoCommit(true);
     }
 
     /**
