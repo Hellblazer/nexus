@@ -1104,6 +1104,11 @@
          grants-nexus-svc.xml runAlways block, matching the established
          late-append convention (D0.1). -->
     <include file="db/changelog/telemetry-013-capability-census-scope-split.xml"/>
+    <!-- nexus-h5olw: anonymous install ping table (active-install count).
+         Global, no RLS (see the file header). Placed after
+         telemetry-013-capability-census-scope-split.xml (current telemetry
+         tail) and before the search-path / grants tail. -->
+    <include file="db/changelog/telemetry-014-install-pings.xml"/>
 
     <!--
         nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): relocates the
