@@ -151,6 +151,8 @@ public final class CatalogHandler implements HttpHandler {
                 case "/update_many"           -> handleUpdateMany(exchange, tenant, method);
                 case "/delete"                -> handleDelete(exchange, tenant, method);
                 case "/delete_many"           -> handleDeleteMany(exchange, tenant, method);
+                case "/restore"               -> handleRestore(exchange, tenant, method);
+                case "/trash"                 -> handleTrash(exchange, tenant, method);
                 case "/purge-trash"           -> handlePurgeTrash(exchange, tenant, method);
                 case "/resolve"               -> handleResolve(exchange, tenant, method);
                 case "/stats"                 -> handleStats(exchange, tenant, method);
@@ -642,6 +644,49 @@ public final class CatalogHandler implements HttpHandler {
         }
         int deleted = repo.deleteDocument(tenant, tumbler);
         HttpUtil.send(exchange, 200, "{\"deleted\":" + deleted + "}");
+    }
+
+    /**
+     * POST /v1/catalog/restore (nexus-dkymw) — undo a soft delete. The caller
+     * {@code nexus.document_restore} (catalog-003-soft-delete.xml, RDR-156
+     * P1.2) never had, mirroring {@code /purge-trash}'s own history (nexus-
+     * 3ck2g E3 gave {@code nexus.purge_trash} its first caller the same way).
+     *
+     * <p>Body: {@code {"tumbler": "1.2.3"}}. Response: {@code {"restored": 0|1}}
+     * — 1 if a tombstoned row was cleared, 0 if the tumbler is unknown,
+     * already live, or its tombstone was already physically reclaimed by
+     * {@code nx catalog purge-trash} (nothing left to restore once that has
+     * run past the grace window).
+     */
+    private void handleRestore(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        String tumbler = queryParam(exchange, "tumbler");
+        if (tumbler == null || tumbler.isBlank()) {
+            Map<String, Object> body = readBody(exchange);
+            tumbler = (String) body.get("tumbler");
+        }
+        if (tumbler == null || tumbler.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'tumbler' required\"}"); return;
+        }
+        int restored = repo.restoreDocument(tenant, tumbler);
+        HttpUtil.send(exchange, 200, "{\"restored\":" + restored + "}");
+    }
+
+    /**
+     * GET /v1/catalog/trash?limit=&amp;offset= (nexus-dkymw) — this tenant's
+     * tombstoned documents, newest-tombstoned first. Read-only counterpart to
+     * {@code /restore}: lets an operator see what is restorable before
+     * calling {@code nx catalog restore}. Response shape mirrors {@link
+     * #handleList}: {@code {"documents": [...], "count": N}}, each entry
+     * carrying {@code tumbler}, {@code title}, {@code physical_collection},
+     * {@code corpus}, {@code content_type}, and {@code deleted_at}.
+     */
+    private void handleTrash(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        int limit  = intParam(exchange, "limit", 200);
+        int offset = intParam(exchange, "offset", 0);
+        var docs = repo.listTrash(tenant, limit, offset);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("documents", docs, "count", docs.size())));
     }
 
     /**

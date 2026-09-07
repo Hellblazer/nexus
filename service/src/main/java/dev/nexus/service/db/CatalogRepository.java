@@ -2261,6 +2261,55 @@ public final class CatalogRepository {
     }
 
     /**
+     * Restore a tombstoned document by tumbler (nexus-dkymw — Sam's 2026-09-07
+     * ruling: bless tombstones as the recovery story rather than resurrecting
+     * RDR-106 Option A backups). {@code nexus.document_restore(tumbler text)}
+     * (catalog-003-soft-delete.xml, RDR-156 P1.2) has existed engine-side since
+     * that changeset with no caller anywhere in the stack — this method and
+     * {@code POST /v1/catalog/restore} are that caller, the same "SQL function
+     * with no route" gap {@link #purgeTrash}/{@code nexus.purge_trash} closed
+     * for the reclaim side (nexus-3ck2g).
+     *
+     * <p>Clears {@code deleted_at} (sets it to {@code NULL}), making the
+     * document live again. Mirrors {@link #deleteDocument}'s direct-jOOQ-DSL
+     * shape rather than invoking the plpgsql function via a generated {@code
+     * Routines} call — {@link #deleteDocument} already established that the
+     * Java-side tombstone writer re-implements the SQL function's predicate
+     * rather than delegating to it, and this keeps the trash/restore pair
+     * symmetric.
+     *
+     * <p>The {@code AND deleted_at IS NOT NULL} guard is idempotent in the
+     * OPPOSITE direction from {@link #deleteDocument}'s own {@code
+     * DELETED_AT.isNull()} guard: restoring an already-live document, an
+     * unknown tumbler, or a tombstone that {@link #purgeTrash} has already
+     * physically reclaimed (nothing left to clear — see that method's
+     * grace-window contract) is all a no-op, returning 0 rather than
+     * resurrecting a row that was never tombstoned or no longer exists.
+     *
+     * @return 1 if restored, 0 if not found, already live, or purged
+     */
+    // TOMBSTONE-EXEMPT (nexus-dkymw): this method's DELETED_AT.isNotNull()
+    // WHERE guard is the mirror image of deleteDocument's DELETED_AT.isNull()
+    // guard -- idempotency in the RESTORE direction, not the read-invisibility
+    // concern TombstoneFilterGateTest's scanDocAndChunkSites otherwise
+    // enforces. It is the SECOND sanctioned un-tombstone alongside
+    // upsertDocument's ON CONFLICT arm (nexus-mqd6t Hal ruling), this one
+    // reachable via an explicit operator verb rather than re-registration.
+    // scanSetDeletedSites's self-guard token is the literal substring
+    // "DELETED_AT.isNull(", which "DELETED_AT.isNotNull(" does not contain,
+    // so this needs a named TOMBSTONE_EXEMPT entry (see that table) rather
+    // than passing on the literal-token self-guard deleteDocument gets for
+    // free.
+    public int restoreDocument(String tenant, String tumbler) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.update(CATALOG_DOCUMENTS)
+               .set(CATALOG_DOCUMENTS.DELETED_AT, (java.time.OffsetDateTime) null)
+               .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler).and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull()))
+               .execute()
+        );
+    }
+
+    /**
      * Per-dim stranded-chunk count (nexus-3ck2g E3) — the SELECT-only mirror of
      * {@code nexus.purge_trash}'s Step 1-3 DELETE predicate. As of nexus-erwvd this
      * mirrors catalog-026-purge-trash-chunk-age.xml's grace-window-scoped predicate
@@ -2744,6 +2793,48 @@ public final class CatalogRepository {
             ctx.selectCount().from(CATALOG_DOCUMENTS)
                .where(CATALOG_DOCUMENTS.DELETED_AT.isNull())
                .fetchOne(0, Long.class)
+        );
+    }
+
+    /**
+     * GET /v1/catalog/trash (nexus-dkymw) — this tenant's tombstoned
+     * documents, newest-tombstoned first. The read-only counterpart to
+     * {@link #restoreDocument}: lets an operator see what is restorable
+     * (and its {@code deleted_at} age relative to whatever {@code
+     * --older-than-days} they intend to purge with) before calling
+     * {@code nx catalog restore}. No {@code purge_eligible_at} field —
+     * {@code nexus.purge_trash}'s grace window is an operator-supplied
+     * {@code older_than_days} argument at PURGE time (see {@link
+     * #purgeTrash}), not a stored per-row or per-tenant configuration
+     * value, so there is no fixed horizon this listing could stamp onto
+     * a row in advance.
+     */
+    // TOMBSTONE-EXEMPT (nexus-dkymw): same rationale as agedTombstoneCount
+    // below (nexus-3ck2g E3) -- this read's whole PURPOSE is listing the
+    // TOMBSTONED population itself (deleted_at IS NOT NULL), the inverse of
+    // every other CATALOG_DOCUMENTS read this gate polices, which must
+    // EXCLUDE tombstones.
+    public List<Map<String, Object>> listTrash(String tenant, int limit, int offset) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
+                       CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CORPUS,
+                       CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.DELETED_AT)
+               .from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull()))
+               .orderBy(CATALOG_DOCUMENTS.DELETED_AT.desc())
+               .limit(limit <= 0 ? 200 : limit)
+               .offset(offset)
+               .fetch()
+               .map(r -> {
+                   Map<String, Object> m = new LinkedHashMap<>();
+                   m.put("tumbler", r.get(CATALOG_DOCUMENTS.TUMBLER));
+                   m.put("title", r.get(CATALOG_DOCUMENTS.TITLE));
+                   m.put("physical_collection", r.get(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION));
+                   m.put("corpus", r.get(CATALOG_DOCUMENTS.CORPUS));
+                   m.put("content_type", r.get(CATALOG_DOCUMENTS.CONTENT_TYPE));
+                   m.put("deleted_at", r.get(CATALOG_DOCUMENTS.DELETED_AT));
+                   return m;
+               })
         );
     }
 

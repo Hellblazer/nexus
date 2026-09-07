@@ -291,7 +291,19 @@ class TombstoneFilterGateTest {
             + "DELETE CASCADE), only a tumbler with NO row is a dangling_endpoint. Adding "
             + "DELETED_AT.isNull() here would reject rows the FK accepts, diverging the "
             + "precheck's 400 from the constraint of record; the FK remains the enforcement, "
-            + "this SELECT only names the offending row before the INSERT would abort the tx")
+            + "this SELECT only names the offending row before the INSERT would abort the tx"),
+        new ExemptEntry("CatalogRepository.java", "restoreDocument",
+            "nexus-dkymw (POST /v1/catalog/restore, Sam's 2026-09-07 tombstone-is-the-recovery-"
+            + "story ruling): the SECOND sanctioned un-tombstone alongside upsertDocument's ON "
+            + "CONFLICT arm. Its idempotency guard is DELETED_AT.isNotNull() — the mirror image "
+            + "of deleteDocument's DELETED_AT.isNull() guard — which scanSetDeletedSites's "
+            + "literal self-guard token \"DELETED_AT.isNull(\" does not recognize as a substring "
+            + "of \"DELETED_AT.isNotNull(\", so it needs this named entry rather than passing on "
+            + "the literal-token self-guard deleteDocument gets for free"),
+        new ExemptEntry("CatalogRepository.java", "listTrash",
+            "nexus-dkymw (GET /v1/catalog/trash): this read's whole PURPOSE is listing the "
+            + "TOMBSTONED population itself (deleted_at IS NOT NULL), the read-only counterpart "
+            + "to restoreDocument — same direction and same rationale as agedTombstoneCount above")
     );
 
     record WidenEntry(String file, String method, String rationale) {}
@@ -700,11 +712,12 @@ class TombstoneFilterGateTest {
 
     @Test
     void floor_setDeletedAtSites() throws IOException {
-        // 3 distinct .set(CATALOG_DOCUMENTS.DELETED_AT, ...) call sites on the
+        // 4 distinct .set(CATALOG_DOCUMENTS.DELETED_AT, ...) call sites on the
         // final tree: upsertDocument's un-tombstone, deleteDocument's
-        // tombstone, deleteDocumentsMany's batch tombstone.
+        // tombstone, deleteDocumentsMany's batch tombstone, restoreDocument's
+        // un-tombstone (nexus-dkymw).
         var result = scan();
-        assertThat(result.setDeletedSites().size()).isGreaterThanOrEqualTo(3);
+        assertThat(result.setDeletedSites().size()).isGreaterThanOrEqualTo(4);
     }
 
     // floor_rawChunksReadSites: RETIRED (nexus-zrcj7, 2026-09-03), not adjusted to
