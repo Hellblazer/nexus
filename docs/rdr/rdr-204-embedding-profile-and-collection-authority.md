@@ -134,6 +134,29 @@ consistent so that parsing would be safe; it did not make parsing
 unnecessary. Meanwhile the table those facts belong in is written by five
 paths, two of which write blanks, and read by none of the hot paths.
 
+### Two facts about the grain that this RDR does not change
+
+A document belongs to exactly one collection: `catalog_documents.
+physical_collection` is a single column, the manifest inherits it, and a
+chunk row is keyed by `(tenant, collection, chash)`. A repo indexed under
+two models is therefore two documents with the same source URI and no link
+between them, not one document with two embeddings. The profile design
+keeps this: a switch mints a sibling collection.
+
+The collection is also the grain of nearly every quality decision: the
+corpus fan-out and its thin-collection floor, the per-collection top-N
+then merge, the dedup boundary (identical text in two repos is two rows),
+per-collection taxonomy (RDR-075 exists to project topics across it),
+aspects and highlights, and code-versus-prose scoring by prefix. Those
+mechanisms were written against a bundle of three unrelated things: the
+embedding space physics requires, the owner lifecycle wants, and the
+content type scoring wants. This RDR unbundles the attributes into
+columns and stops there. Moving each mechanism to the grain it actually
+wants (fan-out and ranking per model space, dedup per model per tenant,
+taxonomy per tenant per model with owner and content type as filters,
+scoring by document content type) is a follow-on RDR whose problem
+statement this paragraph is.
+
 ### Technical Environment
 
 - Engine: Java service, jOOQ generated DSL only (no SQL strings; nexus-zrcj7),
@@ -252,12 +275,16 @@ per-collection chunk counts from `nx collection list`. Full numbers in T2
 
 ### Critical Assumptions
 
-- [x] Every install has exactly one embedding model per content type, and it
-  is a function of mode alone. **Status**: Verified on this tenant (70 live
-  collections, zero exceptions) and by RDR-160's design for local mode.
-  **Method**: Spike (live census) + Source Search. Still to run before the
-  backfill ships: the same grouping across every cloud tenant, read-only,
-  from conexus's side (a relay to Sam; this box sees one tenant).
+- [x] Every install has exactly one embedding model per content type among
+  the collections that carry vectors, and it is a function of the install.
+  **Status**: Verified on both active production tenants (T2
+  `204-research-6`, read by the conexus session on the live cluster,
+  2026-09-07 00:35Z): zero exceptions among collections with vector stats;
+  the single catalog-row exception is the zero-chunk
+  `knowledge__ingestgate__minilm-l6-v2-384__v1` ghost the sweep removes.
+  The second tenant embeds `knowledge` with voyage-code-3, which is why the
+  profile is keyed per tenant and not a global constant per content type.
+  **Method**: Spike (two live censuses) + Source Search.
 - [x] For every collection that owns chunks, the non-null vector column in
   `nexus.chunks` is the same for all its rows and matches the profile.
   **Status**: Verified on this tenant through `collection_vector_stats`
