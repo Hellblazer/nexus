@@ -94,10 +94,10 @@ _SINGLE_QUOTED = {n: b for n, b in _LINES.items() if "'$ARGUMENTS'" in b}
 def test_inventory_is_sane() -> None:
     """Guards against the regex silently matching nothing (which would make the
     parametrised tests vacuously pass)."""
-    assert len(_LINES) == 25, sorted(_LINES)
+    assert len(_LINES) == 26, sorted(_LINES)  # 26 since rdr-fix.md (nexus-zbdm0)
     # No command may double-quote $ARGUMENTS (mirrors the static guard).
     assert not [n for n, b in _LINES.items() if '"$ARGUMENTS"' in b]
-    assert len(_DROPPED) >= 23
+    assert len(_DROPPED) >= 24
     # nexus-ybvyo (fixed 2026-07-13): the five single-quoting commands were
     # converted to the argless-preamble + Bash-tool re-invoke pattern; the
     # single-quoted class must now stay EMPTY forever — a new entry means a
