@@ -6,6 +6,54 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.34.0] - 2026-09-06
+
+Paired with engine-service-v0.1.106 (`REQUIRED_ENGINE_VERSION` 0.1.106).
+
+### Fixed
+
+- Engine (nexus-hxrcm): `POST /v1/catalog/manifest/write_many` no longer
+  fails with `deadlock detected` when two calls on one collection overlap.
+  The metadata-only UPDATE batch orders its row locks by chash, the same
+  fix class as the multi-row INSERT, and the combined-write refresh retries
+  on SQLSTATE 40P01. The metadata-only UPDATE on both write paths now takes
+  the shared sweep gate first, so it waits for a running superseded-chunk
+  sweep or orphan quarantine instead of racing it on a different lock
+  order. Six cloud 500s since the v0.1.104 flip; the client-side symptom
+  was `superseded-chunk sweep skipped ... (sweep_failed)`.
+- Storage-service supervisor (nexus-59bah): the heartbeat takes the
+  per-scope election flock with a budget of one third of the lease TTL
+  instead of blocking on it. A held flock costs one skipped stamp, logged
+  as `service_supervisor_heartbeat_election_busy`, and the next tick
+  retries; a wedged holder can no longer keep the heartbeat loop blocked
+  past the TTL. `publish`, `relinquish`, and the shutdown marker still
+  block, so concurrent first claims serialize into increasing generations.
+- `nx_answer` (nexus-wj12p, nexus-90gyo, nexus-zy0kj): a grown plan whose
+  stored question names different identifiers (RDR ids, bead ids, engine
+  tags, client versions, issue numbers) than the incoming question is no
+  longer matched; the call falls through to the inline planner. A
+  retrieval-only or reduce-less result is classified as a non-answer,
+  recorded `success=False`, never grown, and returned as a
+  `[non-answer: <shape>]` notice carrying the retrieved chunk refs; the
+  envelope gains `answer_shape`. `nx answer-runs` reports the same shapes
+  as `degenerate/non_answer/<shape>` for pre-fix runs too.
+
+### Removed
+
+- `nx index repo --force-stale` and the collection pipeline-version stamp
+  (nexus-ebu0c). Since RDR-155 every collection handle is a service stub
+  with no metadata, so the stamp had been a silent no-op; since
+  nexus-4jj40 the engine skips embedding for unchanged chunk text, so
+  `--force` after a chunker change re-embeds only what the chunker
+  changed. `--force` is the one lever. The `nx doctor` "pipeline versions"
+  row is gone with it.
+
+### Documentation
+
+- README § Updating and Getting Started § Upgrading are cut to the two
+  commands, the do-not-reinstall-with-uv rule, and a pointer for pre-PG
+  installs.
+
 ## [7.33.0] - 2026-09-06
 
 Paired with engine-service-v0.1.105 (`REQUIRED_ENGINE_VERSION` 0.1.105).

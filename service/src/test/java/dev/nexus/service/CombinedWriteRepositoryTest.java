@@ -696,6 +696,50 @@ class CombinedWriteRepositoryTest {
             .as("text itself must be untouched (same value either way)").isEqualTo(stableText);
     }
 
+    @Test @Order(14)
+    void combinedWrite_metadataOnlyRefresh_waitsForExternalExclusiveSweepGate_nexusHxrcm() throws Exception {
+        // nexus-hxrcm residual: phase 2a (existence SELECT + metadata-only UPDATE on
+        // nexus.chunks) took NO sweep gate, so it could interleave with the superseded-chunk
+        // sweep's DELETE on a different lock order (one deadlock and one lock_timeout on the
+        // sweep in the same cloud log window as the six UPDATE deadlocks). It now takes the
+        // SHARED gate like every manifest writer, so while an EXCLUSIVE holder (a sweep,
+        // gc_quarantine_orphans) has the key, the refresh WAITS rather than racing.
+        String col = "code__cw14__minilm-l6-v2-384__v1";
+        String chash = ch("cw14-stable-text");
+        String stableText = "cw14 stable text, unchanged across both calls";
+        registerDoc(TENANT_A, "cw.14a", col);
+        registerDoc(TENANT_A, "cw.14b", col);
+        svc.writeManyCombined(TENANT_A, col,
+            List.of(chunk(chash, stableText, Map.of("section_type", ""))),
+            List.of(doc("cw.14a", List.of(row(0, chash)))), null, false, false);
+
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try (Connection external = dsConnection()) {
+            external.setAutoCommit(false);
+            PgContainerHelper.setTenant(external, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
+            acquireGateExclusive(external, TENANT_A, col, 5000);
+
+            Future<?> refresh = pool.submit(() -> svc.writeManyCombined(TENANT_A, col,
+                List.of(chunk(chash, stableText, Map.of("section_type", "imports"))),
+                List.of(doc("cw.14b", List.of(row(0, chash)))), null, false, false));
+
+            assertThatThrownBy(() -> refresh.get(1500, TimeUnit.MILLISECONDS))
+                .as("the metadata-only refresh must BLOCK on the exclusive holder, not run past it")
+                .isInstanceOf(java.util.concurrent.TimeoutException.class);
+            assertThat(chunk384MetadataJson(TENANT_A, col, chash))
+                .as("nothing landed while the exclusive gate was held")
+                .contains("\"section_type\": \"\"");
+
+            external.rollback();  // releases the exclusive gate
+            refresh.get(30, TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(chunk384MetadataJson(TENANT_A, col, chash))
+            .as("the refresh completed once the gate was released")
+            .contains("\"section_type\": \"imports\"");
+    }
+
     /** Deterministic, dim-384 embedder that counts every text it is asked to embed. */
     static final class CountingFakeEmbedder implements Embedder {
         final AtomicInteger calls = new AtomicInteger();

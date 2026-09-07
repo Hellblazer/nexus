@@ -12,8 +12,8 @@ regression suite for the point-fix, nexus-jn0nm) monkeypatches
 never detect the factory being un-wired from a CLI command, or the probe
 being un-wired from the factory. Same anti-pattern in
 ``tests/commands/test_migrate_cost_guardrail.py`` /
-``tests/test_storage_migrate_vectors_cmd.py`` / ``tests/test_health.py`` /
-``tests/test_pipeline_version.py`` — all mock at a level that bypasses the
+``tests/test_storage_migrate_vectors_cmd.py`` / ``tests/test_health.py``
+— all mock at a level that bypasses the
 real graph.
 
 This suite drives the REAL graph instead, via :class:`click.testing.CliRunner`

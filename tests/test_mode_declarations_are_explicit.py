@@ -353,7 +353,7 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 59
 # resolver's TARGET-collection answer, opaque stand-in data for a
 # mode-changed reinstall; no embedder, no credential, `is_local_mode`
 # never runs. Rationale in conftest.py beside the entries.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 65
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 62
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

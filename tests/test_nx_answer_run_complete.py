@@ -188,15 +188,17 @@ class TestConvertingArmCensus:
         )
 
     def test_ten_converting_arms_route_through_the_choke_point(self) -> None:
-        """Sanity companion to the two counts above: exactly ten call
-        sites reach the new choke point at all. This does not, by
+        """Sanity companion to the two counts above: exactly eleven call
+        sites reach the new choke point at all (ten RDR-203 P1 converting
+        arms plus the nexus-90gyo answer-shape non-answer arm, which was
+        born on the choke point rather than converted onto it). This does not, by
         itself, catch a reverted arm (that shows up as a record_run/
         record_outcome survivor-count red instead) — it catches the
         choke point being bypassed some OTHER way, e.g. an arm calling
         ``db.telemetry.record_nx_answer_run`` directly.
         """
-        assert len(self.record_complete_calls) == 10, (
-            f"expected exactly 10 _nx_answer_record_complete call sites, "
+        assert len(self.record_complete_calls) == 11, (
+            f"expected exactly 11 _nx_answer_record_complete call sites, "
             f"found {len(self.record_complete_calls)} at lines "
             f"{sorted(c.lineno for c in self.record_complete_calls)}"
         )

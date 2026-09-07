@@ -1240,15 +1240,6 @@ def _check_t3_cloud() -> list[HealthResult]:
         detail="set" if voyage_key else "not set (enrichment/engine-bootstrap only, not for serving)",
     ))
 
-    # Pipeline version sweep read Chroma COLLECTION metadata, which has no
-    # pgvector equivalent — retired with the Chroma serving path, but the
-    # line must still appear, not vanish (reviewer-c7aj3 Medium).
-    results.append(HealthResult(
-        label="pipeline versions",
-        ok=True,
-        detail="sweep retired with the Chroma serving path (RDR-155 P4a)",
-    ))
-
     return results
 
 

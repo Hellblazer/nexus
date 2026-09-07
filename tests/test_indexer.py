@@ -1921,34 +1921,6 @@ def test_on_flush_defaults_to_none_when_omitted(tmp_path, monkeypatch):
     assert captured["on_flush"] is None
 
 
-def test_on_phase_includes_stamp_phase_every_run(tmp_path):
-    """Pipeline-version stamp phase fires on every successful run (nexus-7yfm).
-
-    Earlier behaviour gated stamping on ``force=True``; that meant
-    incremental runs that wrote v4 embeddings produced unstamped
-    collections, which doctor then nagged about. The remediation
-    "index with --force" forced a costly full re-embed to repair a
-    state that should never have existed. Stamp now writes
-    unconditionally on a successful run.
-    """
-    run, repo = _cb_repo(tmp_path)
-    db, _ = _mock_db()
-
-    # Without force → stamp phase present
-    phases_no_force: list[str] = []
-    with _cb_patches(db):
-        run(repo, _reg(), on_phase=phases_no_force.append)
-    assert any("Stamping pipeline version" in p for p in phases_no_force)
-    assert any("Pipeline version stamped" in p for p in phases_no_force)
-
-    # With force → stamp phase still present (regression guard)
-    phases_force: list[str] = []
-    with _cb_patches(db):
-        run(repo, _reg(), force=True, on_phase=phases_force.append)
-    assert any("Stamping pipeline version" in p for p in phases_force)
-    assert any("Pipeline version stamped" in p for p in phases_force)
-
-
 # ── on_stage_timers callback (nexus-7niu) ──────────────────────────────────
 
 

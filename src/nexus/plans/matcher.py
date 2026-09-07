@@ -26,6 +26,7 @@ Side effect: every returned plan increments
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Protocol
 
 import structlog
@@ -76,6 +77,59 @@ _SCOPE_FIT_WEIGHT: float = 0.15
 # above the precision-first 0.50 calibration documented in RDR-079 P5
 # (precision 0.90 / recall 0.19 at 0.50).
 _GROWN_PLAN_MIN_CONFIDENCE: float = 0.55
+
+
+#: nexus-wj12p: identifier-shaped literals a grown plan memoizes from its
+#: originating question. A grown plan's retrieval steps carry these as
+#: baked strings (no ``$binding``), so a paraphrase that names a DIFFERENT
+#: identifier of the same shape retrieves the wrong documents at full
+#: confidence. Measured 2026-09-06: "Compare RDR-185 with RDR-197" hit a
+#: plan grown from "Compare RDR-185 with RDR-176" at cosine 0.698 (above
+#: the 0.55 grown floor) and answered about RDR-176. Only identifier
+#: shapes with a fixed grammar belong here — never bare words.
+_GROWN_LITERAL_RES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bRDR-\d{1,4}\b", re.IGNORECASE),          # RDR ids
+    re.compile(r"\bJDR-\d{1,4}\b", re.IGNORECASE),          # joint RDR ids
+    re.compile(r"\bnexus-[a-z0-9]{4,6}(?:\.\d+)?\b"),       # bead ids
+    re.compile(r"\bconexus-[a-z0-9]{4,6}\b"),               # sibling bead ids
+    re.compile(r"\bengine-service-v\d+\.\d+\.\d+\b"),       # engine tags
+    re.compile(r"(?<![\w-])v\d+\.\d+\.\d+\b"),                # client versions (not the tail of an engine tag)
+    re.compile(r"(?:\b(?:GH|PR)\s?)?#\d{2,6}\b", re.IGNORECASE),  # issue / PR numbers
+)
+
+#: Canonical form of an issue/PR reference: the ``GH``/``PR`` prefix is
+#: dropped so ``GH #1402``, ``gh#1402`` and ``#1402`` are one token.
+_ISSUE_PREFIX_RE = re.compile(r"^(?:gh|pr)", re.IGNORECASE)
+
+
+def _grown_literals(text: str) -> frozenset[str]:
+    """Case-folded set of identifier literals in *text* (see the table above)."""
+    found: set[str] = set()
+    for pat in _GROWN_LITERAL_RES:
+        for m in pat.finditer(text or ""):
+            token = re.sub(r"\s+", "", m.group(0)).casefold()
+            if "#" in token:
+                token = _ISSUE_PREFIX_RE.sub("", token)
+            found.add(token)
+    return frozenset(found)
+
+
+def _grown_literals_disagree(row: dict, intent: str) -> bool:
+    """True when a GROWN plan's memoized identifiers do not match *intent*'s.
+
+    Rule: when the plan's originating question names identifiers, the
+    intent must name exactly the same set. A plan with no identifiers is
+    unconstrained (cosine governs, as before). Symmetric on purpose —
+    an intent that ADDS an identifier (asks about RDR-185 and RDR-197,
+    plan knows RDR-185 only) would also be answered from the wrong
+    documents, only less visibly.
+    """
+    if not _is_grown_plan_tags(row.get("tags")):
+        return False
+    plan_lits = _grown_literals(str(row.get("query") or ""))
+    if not plan_lits:
+        return False
+    return plan_lits != _grown_literals(intent)
 
 
 #: nexus-vtp8h: a plan whose recorded runs are ALL failures at/past this
@@ -251,6 +305,22 @@ def _log_t1_drops(
             "plan_match_always_failing_dropped",
             dropped=always_failing_drops,
             remedy="nx plan hygiene --apply retires these durably",
+        )
+
+
+def _log_literal_drops(plan_ids: list) -> None:
+    """Report grown plans dropped for identifier disagreement (nexus-wj12p).
+
+    INFO like the other drop reporters: a drop here is the matcher
+    refusing to answer a question about one identifier from a plan built
+    for another, and an operator reading the log needs to see it as a
+    fall-through to the inline planner, not a miss.
+    """
+    if plan_ids:
+        _log.info(
+            "plan_match_grown_literal_disagreement_dropped",
+            dropped=len(plan_ids),
+            plan_ids=list(plan_ids),
         )
 
 
@@ -568,6 +638,7 @@ def plan_match(
         category_pool: list[tuple[float, bool, int, Match]] = []
         scope_conflict_drops = 0
         always_failing_drops = 0
+        literal_drops: list = []
         # nexus-h33x8.6 a2 fix-pass (substantive-critic SIGNIFICANT #2,
         # T2 substantive-critique-nexus-h33x8.6-a4-a2-2026-08-19): the
         # RAW cosine confidence per candidate, captured BEFORE the
@@ -655,6 +726,14 @@ def plan_match(
                 grown_floor = max(min_confidence, _GROWN_PLAN_MIN_CONFIDENCE)
                 if confidence < grown_floor:
                     continue
+            # nexus-wj12p: a grown plan whose memoized identifiers (RDR
+            # ids, bead ids, tags) differ from the intent's retrieves the
+            # wrong documents at full confidence; the cosine floor cannot
+            # see a one-token difference. Not bypassed by the verbatim
+            # override (a verbatim repeat carries identical literals).
+            if not is_verbatim and _grown_literals_disagree(row, intent):
+                literal_drops.append(row.get("id"))
+                continue
             m = Match.from_plan_row(row, confidence=confidence)
             if filter_dims and not _superset(m.dimensions, filter_dims):
                 continue
@@ -724,6 +803,7 @@ def plan_match(
             scope_pref=scope_pref,
         )
         _log_binding_drops(binding_drops)
+        _log_literal_drops(literal_drops)
 
         if scored:
             scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
@@ -777,6 +857,7 @@ def plan_match(
         _fts_over += n
     rows = library.search_plans(intent, limit=_fts_over, project=project)
     matches: list[Match] = []
+    fts_literal_drops: list = []
     for row in rows:
         if _is_always_failing(row):
             # nexus-vtp8h: same skip on the FTS5 path.
@@ -788,6 +869,11 @@ def plan_match(
         # empty-project grown plan otherwise passes search_plans' project
         # filter and _scope_fit's agnostic-neutral keep.
         if scope_pref_is_real and _is_unanchored_grown(row):
+            continue
+        # nexus-wj12p: same literal-agreement gate on the FTS5 path. A
+        # verbatim repeat trivially agrees, so no bypass is needed here.
+        if _grown_literals_disagree(row, intent):
+            fts_literal_drops.append(row.get("id"))
             continue
         if _scope_fit(m.scope_tags, scope_pref) is None:
             continue  # scope conflict on the fallback path too
@@ -801,6 +887,7 @@ def plan_match(
             break
 
     _log_binding_drops(binding_drops)
+    _log_literal_drops(fts_literal_drops)
     for m in matches:
         library.increment_match_metrics(m.plan_id, confidence=None)
     return matches

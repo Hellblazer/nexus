@@ -8132,7 +8132,16 @@ async def nx_answer(
             ``truncated_chars`` (nexus-2xjge): ``None`` unless ``final_text``
             was capped (a trailing ``[nx_answer: result capped at ...]``
             marker is appended in text mode too), in which case it is the
-            count of characters dropped.
+            count of characters dropped. ``answer_shape`` (nexus-90gyo):
+            ``"answered"`` when ``final_text`` is a synthesized answer,
+            else one of ``hydration_dump`` / ``extractions_only`` /
+            ``ranking_only`` / ``operator_payload`` / ``retrieval_only`` / ``listing`` / ``empty``
+            — a non-answer, in which case ``final_text`` is a one-line
+            ``[non-answer: <shape>]`` notice (the raw payload is never
+            echoed as prose), the run is recorded as a failure, and no
+            plan is grown from it (nexus-zy0kj). ``None`` on paths that
+            never classified (errors, misses, the single-step fast path,
+            a continuation handoff).
         min_confidence: Per-call plan-match floor override (RDR-092 Phase
             2 Option A). ``None`` (default) uses the global
             :data:`_PLAN_MATCH_MIN_CONFIDENCE` (0.40, per RDR-079 P5).
@@ -8224,6 +8233,12 @@ async def nx_answer(
     # a closure that only got assigned inside one conditional branch
     # would raise on any call from an earlier-returning path.
     _plan_choice_info: "dict | None" = None
+    # nexus-90gyo: the answer-shape verdict for the plan path (see
+    # ``nexus.plans.answer_shape``). ``None`` on every path that never
+    # reached final_text extraction (errors, misses, the single-step
+    # fast path, a continuation handoff); a shape value string once the
+    # plan path classified its result. Read by `_result`'s closure.
+    _answer_shape: "str | None" = None
     # nexus-h33x8.6 a4: anchored at call entry (not at plan_run's own
     # start) so "budget_seconds" reads as "answer me within N seconds
     # total", matching caller intuition. Threaded through to plan_run
@@ -8474,6 +8489,13 @@ async def nx_answer(
             # path below, and ONLY after the handoff telemetry row has
             # already been written (RDR-200 R2).
             "continuation": continuation,
+            # nexus-90gyo: what final_text structurally IS — "answered",
+            # or one of the non-answer shapes (hydration_dump,
+            # extractions_only, ranking_only, operator_payload, retrieval_only, listing,
+            # empty). A caller must not read final_text as prose unless
+            # this is "answered". None when the plan path never
+            # classified (see the closure declaration).
+            "answer_shape": _answer_shape,
         }
 
     # nexus-h33x8.6 a4 / nexus-nyry9.2 (RDR-196 .r2): single shared
@@ -9891,6 +9913,70 @@ async def nx_answer(
         return _result(
             no_match, plan_id=best.plan_id,
             step_count=len(result.steps), chunks=[],
+            step_records=_result_step_records,
+        )
+
+    # nexus-90gyo / nexus-zy0kj: answer-shape gate. Past the empty-
+    # retrieval guard the plan DID retrieve evidence, but that alone does
+    # not make final_text an answer: a retrieval-only grown plan returns
+    # the store_get_many payload (plan 488, run 706), an extract-terminal
+    # plan returns bare extractions (plan 487). Both were recorded as
+    # successes and grown as plans on 2026-09-06. Classify first; a
+    # non-answer is recorded success=False (so the plan's failure rate is
+    # real and promote.py / the always-failing skip can retire it), is
+    # NEVER grown, and returns a one-line notice plus the chunks instead
+    # of echoing the payload as if it were prose.
+    from nexus.plans.answer_shape import (  # noqa: PLC0415 — deferred: plan path only
+        NON_ANSWER_SHAPES as _NON_ANSWER_SHAPES,
+        classify_answer_shape as _classify_answer_shape,
+        render_non_answer_notice as _render_non_answer_notice,
+    )
+
+    _shape = _classify_answer_shape(final_text)
+    _answer_shape = _shape.value
+    if _shape in _NON_ANSWER_SHAPES:
+        _log.info(
+            "nx_answer_non_answer_shape",
+            plan_id=best.plan_id,
+            shape=_shape.value,
+            step_count=len(result.steps),
+            grown_candidate=best.plan_id == 0,
+        )
+        # Chunk refs for the notice are harvested in BOTH modes: a text-mode
+        # caller never sees ``envelope_chunks`` (built only when structured),
+        # so the notice itself must carry what was retrieved.
+        _notice_refs: list[str] = []
+        for _step_out in result.steps:
+            if not isinstance(_step_out, dict):
+                continue
+            _ids = _step_out.get("ids")
+            if not isinstance(_ids, list):
+                continue
+            _colls = _step_out.get("chunk_collections") or _step_out.get("collections") or []
+            for _i, _cid in enumerate(_ids):
+                _coll = _colls[_i] if _i < len(_colls) else (_colls[0] if _colls else "")
+                _notice_refs.append(f"{_coll} chash:{_cid}".strip())
+        notice = _render_non_answer_notice(
+            _shape, plan_id=best.plan_id, step_count=len(result.steps),
+            chunk_refs=_notice_refs,
+        )
+        try:
+            with _t2_ctx() as db:
+                _nx_answer_record_complete(
+                    db, question=question, plan_id=best.plan_id,
+                    matched_confidence=best.confidence,
+                    step_count=len(result.steps),
+                    final_text=notice[:2000], step_records=_result_step_records,
+                    duration_ms=elapsed_ms, trace=trace, success=False,
+                    composite_supported_at_start=composite_supported_at_start,
+                    early_bump_fired=early_bump_fired,
+                )
+        except Exception:  # noqa: BLE001 — graceful degradation; the notice must still surface
+            pass
+        return _result(
+            notice, plan_id=best.plan_id,
+            step_count=len(result.steps),
+            chunks=envelope_chunks if structured else None,
             step_records=_result_step_records,
         )
 

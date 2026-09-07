@@ -172,31 +172,6 @@ def test_t3_collections_census_degrades_when_service_unreachable(
     assert "could not query" in line.detail
 
 
-def test_pipeline_version_row_is_retired_static(monkeypatch) -> None:
-    """RDR-155 P4b re-ground of the nexus-b6qlf regression pin: the
-    pipeline-version sweep (and its unguarded make_t3() call) died with
-    the chroma credential rows — the row is now a static retired notice
-    that never opens a T3 handle, so no probe failure can crash doctor."""
-    from nexus.health import _check_t3_cloud
-
-    def _cred(key: str) -> str:
-        return "" if key == "service_url" else "value"
-
-    monkeypatch.setattr("nexus.config.get_credential", _cred)
-    monkeypatch.setattr("nexus.db.http_vector_client._get", lambda *a, **kw: [])
-
-    def _boom(**kw):
-        raise AssertionError("the retired pipeline row must never open T3")
-
-    monkeypatch.setattr("nexus.db.make_t3", _boom)
-
-    results = _check_t3_cloud()  # must not raise
-    line = next((r for r in results if r.label == "pipeline versions"), None)
-    assert line is not None
-    assert line.ok is True
-    assert "retired" in line.detail
-
-
 def test_vector_service_probe_unconditional_and_fatal(monkeypatch, tmp_path) -> None:
     """RDR-155 P4a.2 dual-review finding 2 (substantive-critic): the vector
     service probe must fire in BOTH mode branches and without legacy Chroma

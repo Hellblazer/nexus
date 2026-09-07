@@ -173,14 +173,6 @@ class TestDoctorCredLines:
         assert not any("CHROMA" in r.label for r in cred_lines)
         assert any("not for serving" in r.detail for r in cred_lines)
 
-    def test_pipeline_version_line_reports_retired(self):
-        """reviewer-c7aj3 Medium: the pipeline-version line must not vanish
-        without legacy creds — it reports the sweep as retired."""
-        results = self._cloud_results(creds_present=False)
-        pipeline_lines = [r for r in results if r.label == "pipeline versions"]
-        assert pipeline_lines and pipeline_lines[0].ok
-        assert "retired" in pipeline_lines[0].detail
-
 
 class TestCredentialPersistenceCheck:
     """critic-c7aj3 Critical: the shell-env-only warning's premise

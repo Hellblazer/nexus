@@ -4,6 +4,7 @@ package dev.nexus.service.vectors;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.ChashHex;
 import dev.nexus.service.db.CollectionRegistry;
 import dev.nexus.service.db.DeadlockRetry;
@@ -2790,13 +2791,25 @@ public final class PgVectorRepository {
      *
      * @param ids         full dedup id list (index-aligned with {@code metadatas})
      * @param metadatas   full dedup metadata list (index-aligned with {@code ids})
-     * @param idxToUpdate indices into {@code ids}/{@code metadatas} to UPDATE, in order
+     * <p>LOCK ORDER (nexus-hxrcm): the indices are re-ordered by CHASH before the
+     * batch is built, whatever order the caller passed. Each statement takes one row
+     * lock, so two concurrent batches over overlapping chashes in different arrival
+     * orders lock the shared rows in opposite orders and one is killed as the
+     * deadlock victim (SQLSTATE 40P01) — the same cycle nexus-ps9wb closed for the
+     * multi-row INSERT by sorting the dedup list. The direct upsert path already
+     * sorts before {@link #resolveNeedEmbedIdx}; the combined-write path
+     * ({@code CombinedWriteService.writeManyCombined} phase 2a) fed arrival order and
+     * deadlocked six times in the cloud after the v0.1.104 flip. Sorting HERE gives
+     * every caller one global lock order and is the contract, not a caller courtesy.
+     *
+     * @param idxToUpdate indices into {@code ids}/{@code metadatas} to UPDATE; any order
      * @return the SUBSET of {@code idxToUpdate} whose UPDATE affected 0 rows —
      *         {@link #resolveNeedEmbedIdx}'s concurrent-delete race guard (see that
      *         method's javadoc): a chash present at the existence SELECT but gone by
      *         the time this UPDATE runs (concurrent orphan-GC pass) must be rerouted
-     *         to need-embed, never silently dropped. Order matches the SUBSEQUENCE of
-     *         {@code idxToUpdate} whose statement affected 0 rows (page-by-page).
+     *         to need-embed, never silently dropped. Returned in CHASH order (the
+     *         order the statements ran), which is the order of {@code idxToUpdate}
+     *         only when the caller already sorted; callers only ever {@code addAll}.
      *
      * <p>{@code public} (nexus-4jj40 round 5): {@link
      * dev.nexus.service.db.CombinedWriteService#writeManyCombined} in the
@@ -2820,9 +2833,13 @@ public final class PgVectorRepository {
                                                        List<Map<String, Object>> metadatas,
                                                        List<Integer> idxToUpdate) {
         List<Integer> zeroAffected = new ArrayList<>();
-        for (int start = 0; start < idxToUpdate.size(); start += SOURCE_URI_JOIN_BATCH) {
-            List<Integer> page = idxToUpdate.subList(
-                start, Math.min(start + SOURCE_URI_JOIN_BATCH, idxToUpdate.size()));
+        // nexus-hxrcm: one global lock order — sort the indices by the chash they
+        // update (see javadoc). Copy: idxToUpdate may be an unmodifiable view.
+        List<Integer> ordered = new ArrayList<>(idxToUpdate);
+        ordered.sort(Comparator.comparing(ids::get));
+        for (int start = 0; start < ordered.size(); start += SOURCE_URI_JOIN_BATCH) {
+            List<Integer> page = ordered.subList(
+                start, Math.min(start + SOURCE_URI_JOIN_BATCH, ordered.size()));
             List<org.jooq.Query> queries = new ArrayList<>(page.size());
             for (int idx : page) {
                 // Same NUL defense as updateMetadataOneRow/upsertChunks (nexus-rvfwj).
@@ -3022,6 +3039,16 @@ public final class PgVectorRepository {
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         try {
             return tenantScope.withTenant(tenant, ctx -> {
+                // nexus-hxrcm residual: the have-vector metadata-only UPDATE below touches
+                // rows the superseded-chunk sweep DELETEs and gc_quarantine_orphans moves,
+                // both under the EXCLUSIVE half of this key. SHARED here means we wait for a
+                // running sweep instead of racing it on a different lock order (40P01).
+                // First statement of the transaction, before any row is read or locked.
+                // Worst-case wait compounds: sweeps queued ahead (bounded by the client's
+                // flush_concurrency) times SWEEP_STATEMENT_TIMEOUT_MS each, not a flat 5 s;
+                // see acquireSweepGateShared's javadoc for the formula and why the writer
+                // side deliberately has no lock_timeout.
+                CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
                 Map<String, String> existingText = selectExistingChashTextCtx(ctx, ch, collection, dedupIds);
                 ExistencePartition partition = partitionByExistence(dedupIds, existingText.keySet());
                 // Test-only interleaving seam (bead nexus-f0r8p.4) — see

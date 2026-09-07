@@ -1400,7 +1400,7 @@ def test_phase_heartbeat_disarm_before_first_tick_emits_nothing():
     from nexus.commands.index import _PhaseHeartbeat
     calls: list[str] = []
     hb = _PhaseHeartbeat(is_tty=False, echo=lambda msg, nl: calls.append(msg), interval=5.0)
-    hb.arm("Stamping pipeline version…")
+    hb.arm("Pruning deleted files…")
     hb.disarm()
     assert calls == []
 

@@ -2110,3 +2110,87 @@ class TestAnswerRunsHumanOutputContinuation:
         assert "1 unreported" in cli_result.output
         assert "unreported rate: 100.0%" in cli_result.output
         assert "abandoned" not in cli_result.output.lower()
+
+
+class TestNonAnswerShapes:
+    """nexus-90gyo / nexus-zy0kj: rows whose body is a raw tool payload, a
+    post-fix ``[non-answer: ...]`` notice, or a retrieval-only step list
+    land in ``degenerate``, never ``executed_ok``. Anchored to run 706 /
+    plan 488 (hydration dump) and plan 487 (bare extractions) from the
+    2026-09-06 live probe."""
+
+    def _row(self, final_text: str, *, steps: list[dict] | None = None,
+             step_count: int = 6) -> dict:
+        return {
+            "id": 706, "question": "Why does RDR-160 route ...", "plan_id": 0,
+            "matched_confidence": None, "step_count": step_count,
+            "final_text": final_text, "cost_usd": 0.0, "duration_ms": 116_123,
+            "created_at": "2026-09-02T09:43:24Z",
+            "steps": steps if steps is not None else [],
+        }
+
+    def test_hydration_dump_body_classifies(self) -> None:
+        import json
+
+        from nexus.commands.answer_runs import _classify_degenerate_row
+
+        body = json.dumps({"contents": ["\"\"\"Formal embedding parity gate"], "missing": [],
+                           "section_types": ["class"]})
+        assert _classify_degenerate_row(self._row(body)) == "non_answer/hydration_dump"
+
+    def test_extractions_body_classifies(self) -> None:
+        import json
+
+        from nexus.commands.answer_runs import _classify_degenerate_row
+
+        body = json.dumps({"extractions": [{"item_index": 1, "rdr_id": "RDR-176"}]})
+        assert _classify_degenerate_row(self._row(body)) == "non_answer/extractions_only"
+
+    def test_post_fix_notice_classifies_by_its_own_verdict(self) -> None:
+        from nexus.commands.answer_runs import _classify_degenerate_row
+        from nexus.plans.answer_shape import AnswerShape, render_non_answer_notice
+
+        notice = render_non_answer_notice(AnswerShape.RETRIEVAL_ONLY, plan_id=488, step_count=6)
+        assert _classify_degenerate_row(self._row(notice)) == "non_answer/retrieval_only"
+
+    def test_search_result_body_classifies_as_retrieval_only(self) -> None:
+        import json
+
+        from nexus.commands.answer_runs import _classify_degenerate_row
+
+        body = json.dumps({"ids": ["c1"], "tumblers": [""], "distances": [0.2],
+                           "collections": ["rdr__1-1"], "chunk_collections": ["rdr__1-1"],
+                           "chunk_text_hash": ["c1"]})
+        assert _classify_degenerate_row(self._row(body)) == "non_answer/retrieval_only"
+
+    def test_prose_body_is_other_regardless_of_steps(self) -> None:
+        """Text-only classifier: the plan's step names are not consulted."""
+        from nexus.commands.answer_runs import _classify_degenerate_row
+
+        steps = [{"operator": "search", "ok": True}, {"operator": "store_get_many", "ok": True}]
+        assert _classify_degenerate_row(self._row("some rendered line", steps=steps)) == "other"
+
+    def test_error_and_redaction_still_win_over_shape(self) -> None:
+        from nexus.commands.answer_runs import _classify_degenerate_row
+
+        assert _classify_degenerate_row(self._row("Error: {\"contents\": []}", step_count=0)) == "error"
+        assert _classify_degenerate_row(self._row("[redacted]")) == "redacted"
+
+    def test_non_answer_rows_land_in_degenerate_not_executed_ok(self) -> None:
+        import json
+
+        from nexus.commands.answer_runs import _split_four_way
+
+        dump = self._row(json.dumps({"contents": ["x"], "missing": []}))
+        ok, failed, handed_off, degenerate, reports = _split_four_way([dump])
+        assert ok == [] and failed == []
+        assert [r["id"] for r in degenerate.get("non_answer/hydration_dump", [])] == [706]
+
+    def test_prose_answer_with_operator_steps_stays_executed_ok(self) -> None:
+        from nexus.commands.answer_runs import _split_four_way
+
+        row = self._row("**Limitation 1.** RkNN results can lie far from q.",
+                        steps=[{"operator": "search", "ok": True},
+                               {"operator": "rank+generate", "ok": True}])
+        ok, failed, handed_off, degenerate, reports = _split_four_way([row])
+        assert [r["id"] for r in ok] == [706] and degenerate == {}

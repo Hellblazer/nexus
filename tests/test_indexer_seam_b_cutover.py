@@ -73,7 +73,6 @@ def _service_mode_patches(db, *, extra=None):
         "nexus.indexer._prune_misclassified": {},
         "nexus.indexer._prune_deleted_files": {},
         "nexus.indexer._migrate_legacy_collections": {"return_value": {}},
-        "nexus.indexer.stamp_collection_version": {},
         "nexus.catalog.factory.make_catalog_reader": {"return_value": None},
         "nexus.catalog.factory.make_catalog_writer": {"return_value": None},
     }
