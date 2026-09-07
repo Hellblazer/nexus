@@ -9,7 +9,7 @@ reviewed-by: self
 created: 2026-09-06
 accepted_date:
 related_issues: []
-related_rdrs: [RDR-101, RDR-103, RDR-109, RDR-137, RDR-160, RDR-162, RDR-164, RDR-191, RDR-194]
+related_rdrs: [RDR-101, RDR-103, RDR-109, RDR-137, RDR-144, RDR-160, RDR-162, RDR-164, RDR-191, RDR-194]
 ---
 
 # RDR-204: Collections Stop Encoding Metadata in Their Names
@@ -213,7 +213,9 @@ per-collection chunk counts from `nx collection list`. Full numbers in T2
 - **Verified**: 70 live collections (at least one chunk) against 223
   `catalog_collections` rows. The 153 rows with zero chunks are ghosts:
   106 two-segment Chroma-era names, 45 four-segment, 2 three-segment. All
-  22 `legacy_grandfathered` rows are ghosts. Ghosts have no vector column to
+  22 `legacy_grandfathered` rows (the flag RDR-103 set on rows registered
+  before its naming shape, so they are readable but exempt from the
+  conformance check) are ghosts. Ghosts have no vector column to
   verify against, which changes the backfill (see Technical Design step 3).
 - **Verified**: 158 of 223 rows carry blank `content_type`, `owner_id`, and
   `embedding_model`. Twelve of those blank rows belong to LIVE collections
@@ -422,7 +424,8 @@ engine-side job run once after the changesets in the same boot, in jOOQ,
 that walks `catalog_collections` and deletes every row for which
 `collectionIsEmpty` is true (`catalog_documents.physical_collection` is one
 of the fourteen entries that predicate checks, so it needs no separate
-clause), guarded by a `catalog_meta` marker so it runs once.
+clause), guarded by a marker row in `nexus.catalog_meta` (the catalog's
+per-tenant key/value table from the baseline changeset) so it runs once.
 A row `collectionIsEmpty` reports non-empty is kept and becomes `dormant`
 (below); the predicate answers, it does not refuse.
 The Liquibase changesets that follow add columns and constraints only.
@@ -448,6 +451,10 @@ disagree, or a collection has two dimensions, the row keeps the name's
 attributes, gets `lifecycle_state = 'disputed'`, and is reported; a
 disputed collection is excluded from bare-prefix corpus fan-out and shown
 red by `nx doctor` with the remedy (re-index under the current profile).
+The columns the name never carried (`model_version`, `display_name`,
+`superseded_by`, `superseded_at`) are left exactly as registered:
+`model_version` is supplied by the client at registration and upserted
+by the engine, never parsed from the name, so the walk does not touch it.
 Measured today, zero live rows would be disputed. NOT NULL, the FK to
 `embedding_models`, and the CHECKs are added after this rewrite, so the
 constraining step cannot fail. `quarantine-` prefixes become
@@ -726,8 +733,8 @@ split a string; corpus resolution reads fields of a list already fetched.
 
 ### Contradiction Check
 
-Six gate passes so far (T2 `204-gate-critique-2026-09-06` through
-`-2026-09-07f`); the latest verdict is in T2 `204-gate-latest`. Every
+Eight gate critiques so far (T2 `204-gate-critique-2026-09-06` through
+`-2026-09-07g`); the latest verdict is in T2 `204-gate-latest`. Every
 contradiction a pass named is closed at the commit the next pass gated.
 
 ### Assumption Verification
