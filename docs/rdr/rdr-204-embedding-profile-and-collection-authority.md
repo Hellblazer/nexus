@@ -2,12 +2,12 @@
 title: "Collections Stop Encoding Metadata in Their Names: An Install-Scoped Embedding Profile and catalog_collections as the Authority"
 id: RDR-204
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Sam
 reviewed-by: self
 created: 2026-09-06
-accepted_date:
+accepted_date: 2026-09-07
 related_issues: []
 related_rdrs: [RDR-101, RDR-103, RDR-109, RDR-137, RDR-144, RDR-160, RDR-162, RDR-164, RDR-191, RDR-194]
 ---
@@ -805,3 +805,6 @@ first draft admitted, about sixty raw sites plus thirty-four helper
 callers, which is why Phase 3 is a funnel then a single repoint under a
 shrinking gate rather than a site-by-site rewrite. Phase 4 is held out of
 scope on purpose.
+
+## Revision History
+- 2026-09-07: Gate round 9 (T2 `204-gate-critique-2026-09-07i`) PASSED with one residual, the stale critique count in the Finalization Gate; fixed in `a7efb15df`. Accepted.
