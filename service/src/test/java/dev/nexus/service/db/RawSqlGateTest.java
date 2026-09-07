@@ -2315,7 +2315,7 @@ class RawSqlGateTest {
         }
 
         Matcher alterRole = Pattern.compile(
-            "ALTER\\s+ROLE\\b[\\s\\S]{0,300}?SET\\s+search_path\\s+TO\\s+([A-Za-z0-9_]+)")
+            "(?i)ALTER\\s+ROLE\\b[\\s\\S]{0,300}?SET\\s+search_path\\s*(?:TO\\b|=)\\s*\\\"?([A-Za-z0-9_]+)")
             .matcher(commentsBlanked);
         while (alterRole.find()) {
             if ("yhmav_poison_schema".equals(alterRole.group(1))) {
@@ -2452,6 +2452,31 @@ class RawSqlGateTest {
             .as("ALTER ROLE ... SET search_path must fail loud (Sam's directive, "
                 + "nexus-zrcj7, 2026-09-05: no session/role search_path reliance, ever)")
             .anySatisfy(h -> assertThat(h).contains("ALTER ROLE"));
+    }
+
+    /** Spelling variants PostgreSQL accepts for the same statement (review fold-in,
+     * T2 [24827] Significant #1): {@code =} instead of {@code TO}, lowercase keywords,
+     * and a quoted target identifier all name the same role-level reliance and must
+     * all be caught; the scan is case-insensitive and accepts either assignment form. */
+    @Test
+    void searchPathReliance_alterRoleAlternateSpellings_areFlagged() {
+        // Each target is split after the assignment token so this file's OWN raw
+        // source never spells the shape contiguously (same reason as the
+        // dataSourcePropertyOptionsShape fixture above: the outer walk scans this file).
+        for (String stmt : List.of(
+                "alter role nexus_svc set search_path = " + "nexus, public",
+                "ALTER ROLE nexus_svc SET search_path=" + "\"nexus\", public",
+                "ALTER ROLE \" + role + \" SET search_path TO " + "nexus")) {
+            String synthetic = String.join("\n",
+                "public final class Whatever {",
+                "    void danger() throws Exception {",
+                "        su.createStatement().execute(\"" + stmt + "\");",
+                "    }",
+                "}");
+            assertThat(scanSessionSearchPathReliance("Whatever.java", synthetic))
+                .as("spelling variant must still fail loud: " + stmt)
+                .anySatisfy(h -> assertThat(h).contains("ALTER ROLE"));
+        }
     }
 
     /** The one sanctioned exception, matched on the target schema rather than file
