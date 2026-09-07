@@ -213,9 +213,10 @@ per-collection chunk counts from `nx collection list`. Full numbers in T2
 - **Verified**: 70 live collections (at least one chunk) against 223
   `catalog_collections` rows. The 153 rows with zero chunks are ghosts:
   106 two-segment Chroma-era names, 45 four-segment, 2 three-segment. All
-  22 `legacy_grandfathered` rows (the flag RDR-103 set on rows registered
-  before its naming shape, so they are readable but exempt from the
-  conformance check) are ghosts. Ghosts have no vector column to
+  22 `legacy_grandfathered` rows (the flag RDR-101 Phase 6 set on rows
+  whose names predate its shape, "true for pre-RDR-101 collection names";
+  RDR-103 keeps them readable but never freshly constructed) are ghosts.
+  Ghosts have no vector column to
   verify against, which changes the backfill (see Technical Design step 3).
 - **Verified**: 158 of 223 rows carry blank `content_type`, `owner_id`, and
   `embedding_model`. Twelve of those blank rows belong to LIVE collections
@@ -314,8 +315,11 @@ per-collection chunk counts from `nx collection list`. Full numbers in T2
   ghost rows are outside it by construction.
 - [x] No consumer needs a fact from the name that the table cannot carry.
   **Status**: Verified by the parse-site census: every extracted value is
-  one of content_type, owner_id, embedding_model, or the quarantine prefix.
-  **Method**: Source Search.
+  one of content_type, owner_id, embedding_model, the quarantine prefix,
+  or (at the indexer's registration site only) the `v<n>` segment the
+  table already stores as `model_version` (`204-research-4` counted the
+  site but not that value; `204-research-14` names it). **Method**: Source
+  Search.
 - [x] No two-segment (model-less) collection carries vectors on either
   active tenant. **Status**: Verified on both tenants by a segment census
   run 2026-09-07T17:26:57Z (T2 `204-research-13`): tenant `nexus` has 106
@@ -457,10 +461,13 @@ disagree, or a collection has two dimensions, the row keeps the name's
 attributes, gets `lifecycle_state = 'disputed'`, and is reported; a
 disputed collection is excluded from bare-prefix corpus fan-out and shown
 red by `nx doctor` with the remedy (re-index under the current profile).
-The columns the name never carried (`model_version`, `display_name`,
-`superseded_by`, `superseded_at`) are left exactly as registered:
-`model_version` is supplied by the client at registration and upserted
-by the engine, never parsed from the name, so the walk does not touch it.
+`display_name`, `superseded_by` and `superseded_at` are left exactly as
+registered. So is `model_version`: it is the name's `v<n>` segment, parsed
+once at registration (`indexer.py` through
+`parse_conformant_collection_name`) and upserted by the engine as sent;
+the walk does not touch it, and Phase 1 item 4 removes that registration
+parse along with the others because the indexer already holds the version
+it composed into the name.
 Measured today, zero live rows would be disputed. NOT NULL, the FK to
 `embedding_models`, and the CHECKs are added after this rewrite, so the
 constraining step cannot fail. `quarantine-` prefixes become
@@ -470,8 +477,9 @@ two-segment names (`<content_type>__<owner>`, no model token) take
 their model from the profile for that content type if the profile model's
 dimension equals the stored dimension, else `disputed`; with no chunks they
 are ghosts or dormant like any other row. They keep their flag. On both
-censused tenants every two-segment row is a ghost (T2 `204-research-1`,
-`-6`), so this branch is expected to write nothing; it exists so the walk
+censused tenants every two-segment row is a ghost (T2 `204-research-13`:
+106 on `nexus`, none on `gate-xr789`), so this branch is expected to write
+nothing; it exists so the walk
 has an answer for every row rather than an assumption.
 
 **4. Engine reads the row.** `CollectionRegistry` caches the row. The eight
@@ -635,8 +643,10 @@ walks the tree's own changeset over a populated store.
    (local tenant at boot; cloud tenants lazily at first registration),
    idempotent upsert, and `CollectionRegistry` evicts on that write.
 3. Delete the stub inserts in `AspectRepository` and `TaxonomyRepository`.
-4. `register_collection` writes the model from the profile; a different
-   model in the request is a 422 naming the profile's value. `nx config
+4. `register_collection` writes the model from the profile and the
+   version from the value the indexer composed into the name, so no
+   registration parse remains; a different model in the request is a 422
+   naming the profile's value. `nx config
    set` does not write the profile; the restart the GH #1461 recipe already
    requires is the write (the client-side hint is Phase 3 item 4).
 5. Engine suite, each against a real PG: the sweep keeps a row that
