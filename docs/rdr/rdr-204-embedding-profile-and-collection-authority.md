@@ -436,7 +436,7 @@ censused tenants every two-segment row is a ghost (T2 `204-research-1`,
 `-6`), so this branch is expected to write nothing; it exists so the walk
 has an answer for every row rather than an assumption.
 
-**4. Engine reads the row.** `CollectionRegistry` caches the row. The six
+**4. Engine reads the row.** `CollectionRegistry` caches the row. The eight
 engine parse sites resolve model, dimension, and content type from it.
 `EmbedderRouter` resolves by content type through the profile; the
 "unavailable model" 422 becomes "this install's profile names a model this
@@ -608,7 +608,7 @@ walks the tree's own changeset over a populated store.
 ### Phase 2: Engine reads the row
 
 1. `CollectionRegistry` caches the row; evict on profile write.
-2. Replace the six parse sites; `dimForCollection` and
+2. Replace the eight parse sites; `dimForCollection` and
    `resolveEmbedderStrict` read the registry.
 3. `CollectionParseGateTest` in the RawSqlGateTest style: pins the count
    of `split("__")` on collection names; only shrinks.
