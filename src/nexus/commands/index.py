@@ -2828,8 +2828,10 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     "--collection",
     default=None,
     help=(
-        "T3 collection name. Bare names (e.g. 'mynotes') are auto-normalized "
-        "to knowledge__<name>; qualified names (e.g. knowledge__mydocs) pass through. "
+        "T3 collection: a bare SUBJECT (e.g. 'vector-search') becomes "
+        "knowledge__<subject>; never type a model token or version. A subject "
+        "is a durable topic area, not a document or a session; reuse an "
+        "existing one before creating (docs/collections.md). "
         "Overrides --corpus when set. Use to route Markdown into a knowledge__ "
         "collection so 'nx enrich aspects' can process it (GH #981). "
         "NOTE: the aspect extractor for knowledge__ targets the scholarly-paper schema; "

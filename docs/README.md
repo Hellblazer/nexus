@@ -12,6 +12,7 @@ Start with [Getting Started](getting-started.md) for installation. Then find you
 
 ## I want to...
 
+- **Decide which collection something belongs in, or name a new one** — [Choosing and Naming Collections](collections.md) — content type by source, `knowledge` subjects not containers, reuse before create, bare names only
 - **Back up my knowledge store** — [Storage Tiers § T3 Backup and Migration](storage-tiers.md#t3-backup-and-migration-exportimport) — `nx store export`/`import`, live T3, `.nxexp` format
 - **Fix empty search results after upgrading** — [Getting Started § Troubleshooting](getting-started.md#troubleshooting) (`nx search` returns no results); if you upgraded straight from a pre-PG install, see [Upgrading an existing install](getting-started.md#upgrading-an-existing-install-skip-this-if-this-is-your-first-install) for the two-hop path
 - **Check my install's health** — `nx doctor`, see [CLI Reference — nx doctor](cli-reference.md#nx-doctor)

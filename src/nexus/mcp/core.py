@@ -3810,7 +3810,13 @@ def store_put(
             that, split it into titled parts and call store_put once per
             part with the same tags (e.g. title "my-note (1/2)",
             "my-note (2/2)") rather than one oversized call.
-        collection: Collection name or prefix (default: knowledge)
+        collection: Collection name or prefix (default: knowledge). Give a
+            bare SUBJECT (``distributed-systems``), never a four-segment
+            name or a model token; the catalog renders the rest. A
+            knowledge collection is a durable subject area a reader would
+            browse, not a document, session, task, or source app, and
+            existing subjects are reused before a new one is created
+            (``nx collection list``). Rules: docs/collections.md.
         title: Document title (recommended for deduplication). A non-empty
             title makes catalog identity stable: re-putting the same
             (collection, title) pair reconciles onto the existing document
@@ -10241,7 +10247,8 @@ async def nx_tidy(
 
     Args:
         topic: The knowledge topic to consolidate (e.g. "chromadb quotas").
-        collection: T3 collection to search (default: knowledge).
+        collection: T3 collection to search (default: knowledge). A bare
+            subject name resolves like ``store_put``'s (docs/collections.md).
         timeout: Subprocess timeout in seconds. Default 600s (10 min) —
             consolidation on a large corpus does heavy LLM-only reasoning
             over the inlined entries; 120s was hitting the timeout

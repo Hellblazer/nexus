@@ -245,6 +245,8 @@ A collection is indexed and queried under the same embedding model — mixing mo
 
 **Use for**: semantic search across sessions, institutional knowledge.
 
+**Choosing a collection** (which content type, how to name a `knowledge` subject, when to reuse instead of create, what goes where): [Choosing and Naming Collections](collections.md). The short version: `code`/`docs`/`rdr` come from `nx index repo` only; `knowledge` collections are named after a durable subject area, never a document, session, source app, or placeholder; type the bare subject and let the catalog render the model and version.
+
 ## T3 Backup and Migration (Export/Import)
 
 `nx store export` / `import` operate on **live T3** — both read and write

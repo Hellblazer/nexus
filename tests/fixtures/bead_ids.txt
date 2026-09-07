@@ -2447,6 +2447,7 @@ nexus-eanej.1
 nexus-eap5l
 nexus-eap5l.1
 nexus-ebu0c
+nexus-ebu0c.1
 nexus-ebu6
 nexus-ebz
 nexus-ebz6
@@ -3088,6 +3089,7 @@ nexus-i0frt.1
 nexus-i0wsm
 nexus-i1mi1
 nexus-i1oh4
+nexus-i24r4
 nexus-i28l6
 nexus-i35j
 nexus-i3a9f
@@ -5617,6 +5619,7 @@ nexus-wigzi
 nexus-wixar
 nexus-wizj6
 nexus-wj12p
+nexus-wj12p.1
 nexus-wji11
 nexus-wjkc7
 nexus-wk3s9
@@ -6140,6 +6143,7 @@ nexus-zxqs4
 nexus-zxqs4.1
 nexus-zxtiz
 nexus-zy0kj
+nexus-zy0kj.1
 nexus-zzact
 nexus-zzbt
 nexus-zzuiq

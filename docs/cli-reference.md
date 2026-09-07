@@ -1757,7 +1757,7 @@ taxonomy:
 Manage T3 knowledge entries.
 
 ```
-echo "# Cache Strategy" | nx store put - --collection knowledge --title "decision-cache" --tags "decision,arch"
+echo "# Cache Strategy" | nx store put - --collection distributed-systems --title "decision-cache" --tags "decision,arch"
 ```
 
 | Subcommand | Description |
