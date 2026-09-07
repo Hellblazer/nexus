@@ -42,6 +42,11 @@ from nexus.collection_shape import (
 
 _REPO = Path(__file__).resolve().parents[1]
 
+# The fixtures name voyage-* collections throughout; declare the mode the
+# names imply (RDR-109 mode-declaration lint). The checks themselves are
+# name-shape logic and do not branch on mode.
+pytestmark = pytest.mark.usefixtures("cloud_mode")
+
 # ── fixtures ───────────────────────────────────────────────────────────────
 
 
@@ -407,7 +412,7 @@ class TestCli:
         name = "docs__default__voyage-context-3__v1"
         res = self._run(monkeypatch, [_filled(name)], [_stats(name, 168)], {name: 9}, ["--json"])
         assert res.exit_code == 0, res.output
-        d = json.loads(res.output)
+        d = json.loads(res.stdout)
         assert d["by_check"]["default-corpus"] == 1
 
     def test_read_failure_is_loud_not_an_empty_report(self, monkeypatch) -> None:
