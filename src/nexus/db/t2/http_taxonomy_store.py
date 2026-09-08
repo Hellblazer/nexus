@@ -2112,8 +2112,16 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
         Delegates to the service (/rename_collection).
         Returns count dict {topics, assignments, meta}.
+
+        RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine no longer
+        auto-registers the rename DESTINATION — ``new`` must be a
+        registered ``catalog_collections`` row before the fan-out.
         """
-        r = self._post("/rename_collection", {"old": old, "new": new})
+        from nexus.corpus import write_with_registration_retry  # noqa: PLC0415 — circular-dep avoidance (corpus)
+        r = write_with_registration_retry(
+            new,
+            lambda: self._post("/rename_collection", {"old": old, "new": new}),
+        )
         return {
             "topics": int(r.get("topics", 0)),
             "assignments": int(r.get("assignments", 0)),

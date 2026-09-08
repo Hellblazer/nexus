@@ -165,7 +165,14 @@ class HttpDocumentHighlightsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin
         """
         if not old or not new:
             raise ValueError("old and new must not be empty")
-        r = self._post("/rename_collection", {"old": old, "new": new})
+        # RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine no longer
+        # auto-registers the rename DESTINATION — ``new`` must be a
+        # registered ``catalog_collections`` row before the fan-out.
+        from nexus.corpus import write_with_registration_retry  # noqa: PLC0415 — circular-dep avoidance (corpus)
+        r = write_with_registration_retry(
+            new,
+            lambda: self._post("/rename_collection", {"old": old, "new": new}),
+        )
         return int(r.get("updated", 0))
 
     # ── ETL import ────────────────────────────────────────────────────────────

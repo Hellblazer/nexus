@@ -23,14 +23,46 @@ def _seed_for_store_put(content: str, collection: str = "fixture-subject") -> No
     now requires the manifest's chash to have a matching REAL
     ``nexus.chunks`` row. Computes the exact ``(collection, chash)``
     production will use via the same derivation production code uses.
+
+    RDR-204 Phase 1 follow-up (nexus-f5wwx): under this file's ``env_creds``
+    fixture (cloud posture: ``NX_LOCAL=0`` + Voyage/Chroma creds), ``col_name``
+    is voyage-shaped -- exactly the scenario ``seed_manifest_chunks``'s own
+    docstring names ("a real backing chunk in a voyage-named collection with
+    no API key available"). Its ``HttpVectorClient().upsert_chunks(...)`` call
+    now goes through this bead's registration wiring
+    (``write_with_registration_retry`` -> ``ensure_collection_registered``),
+    which derives ``embedding_model`` via ``effective_embedding_model_for_
+    writes("knowledge")`` -- under cloud posture that is "voyage-context-3".
+    The engine's ``/collections/upsert`` unconditionally seeds this tenant's
+    'knowledge' embedding_profile from its OWN configured embedder (bge on
+    this local test box, bead nexus-ft04v.6/.8) on the FIRST touch of that
+    content_type, so a voyage-context-3 request 422s regardless of ordering
+    -- there is no real local substrate on which this box could ever accept
+    it. Register the row directly, with the box's real (bge) model, and
+    cache it as already-known so this bead's own registration wiring never
+    re-attempts a conflicting voyage registration underneath the chunk
+    write. Nothing downstream of this seed validates that the collection
+    NAME's embedded model token matches the registered attribute.
     """
     import hashlib
 
-    from nexus.corpus import t3_collection_name
+    from nexus.catalog.factory import make_catalog_writer
+    from nexus.corpus import _REGISTERED_COLLECTIONS, collection_registration_kwargs, t3_collection_name
+    from nexus.db.local_ef import _MODEL_TOKENS, _TIER1_MODEL
     from tests._catalog_fixture_ops import seed_manifest_chunks
 
     col_name = t3_collection_name(collection)
     chash = hashlib.sha256(content.encode()).hexdigest()
+
+    kwargs = collection_registration_kwargs(col_name)
+    kwargs["embedding_model"] = _MODEL_TOKENS[_TIER1_MODEL]
+    writer = make_catalog_writer()
+    try:
+        writer.register_collection(col_name, **kwargs)
+    finally:
+        writer.close()
+    _REGISTERED_COLLECTIONS.add(col_name)
+
     seed_manifest_chunks(col_name, [chash])
 
 

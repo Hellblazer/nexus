@@ -297,8 +297,19 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         )
 
     def rename_collection(self, *, old: str, new: str) -> int:
-        """Re-point every row's collection from *old* to *new*."""
-        r = self._post("/rename_collection", {"old": old, "new": new})
+        """Re-point every row's collection from *old* to *new*.
+
+        RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine no longer
+        auto-registers the rename DESTINATION (bead nexus-ft04v.7's
+        stub-insert retirement reaches ``AspectRepository``'s rename
+        route too) — ``new`` must be a registered ``catalog_collections``
+        row before the fan-out, same as any other first write to it.
+        """
+        from nexus.corpus import write_with_registration_retry  # noqa: PLC0415 — circular-dep avoidance (corpus)
+        r = write_with_registration_retry(
+            new,
+            lambda: self._post("/rename_collection", {"old": old, "new": new}),
+        )
         return int(r.get("updated", 0))
 
     def list_by_extractor_version(

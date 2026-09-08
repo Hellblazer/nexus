@@ -72,6 +72,33 @@ def _local_token() -> str:
     return local_model_token()
 
 
+def _registered_token(content_type: str = "docs") -> str:
+    """The model token a REAL ``/collections/upsert`` call always ends up
+    registered under on this box, independent of the client's own
+    embedding-backend choice.
+
+    RDR-204 Phase 1 follow-up (nexus-f5wwx), root-caused via debug trace
+    (T2 scratch, this session): ``CatalogHandler.handleCollectionUpsert``
+    unconditionally seeds the tenant's ``embedding_profile`` row for the
+    request's ``content_type`` from the ENGINE's OWN configured embedder
+    (``combinedWriteService.seedEmbeddingProfileForContentType``) BEFORE
+    ``upsertCollection``'s conflict check runs -- on every call, first
+    registration included. That seed reads the SERVER's tier-1 embedder
+    (bge on this box), never the CLIENT's ``NX_STORAGE_BACKEND_VECTORS``
+    opt-out (that env var only steers this Python client's own T3/vector
+    construction, e.g. ``_setup_phase_a_catalog``'s deliberate chroma
+    opt-out for local ONNX ingest). So a client that opts into local
+    minilm ingest but still registers via the real catalog endpoint is
+    registering into a profile the engine has ALREADY pinned to bge
+    inside the SAME request -- ``effective_embedding_model_for_writes``
+    (which DOES respect the client opt-out) computes the wrong token for
+    this specific case. Mirror the engine's tier-1 constant directly
+    instead of routing through that client-side derivation.
+    """
+    from nexus.db.local_ef import _MODEL_TOKENS, _TIER1_MODEL
+    return _MODEL_TOKENS[_TIER1_MODEL]
+
+
 def _add_cce_mock(mock_voyage_client: MagicMock) -> None:
     def _fake_cce(inputs, model, input_type):
         batch = inputs[0]
@@ -2776,12 +2803,20 @@ def test_index_pdf_writes_doc_id_when_catalog_initialized(
     """
     cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
     _wrap_write_batch_with_fk_seed(t3)
+    # RDR-204 Phase 1 follow-up (nexus-f5wwx): t3 is already constructed
+    # above with the chroma opt-out baked in (its own local ONNX embed
+    # fn), so lifting the opt-out here only changes what the CATALOG
+    # registration call (which reads this env var via
+    # effective_embedding_model_for_writes) derives — see _registered_token()'s
+    # docstring for why the engine's real-catalog seed needs that to
+    # match its own tier-1 embedder regardless of the client's T3 choice.
+    monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
 
     with pdf_extract_patches_ctx():
         index_pdf(sample_pdf, corpus="rdr102-pdf", t3=t3, embed_fn=_fake_embed)
 
     col = t3.get_or_create_collection(
-        f"docs__rdr102-pdf__{_local_token()}__v1",
+        f"docs__rdr102-pdf__{_registered_token('docs')}__v1",
     )
     rows = col.get(include=["metadatas"])
     assert rows["metadatas"], (
@@ -2793,7 +2828,7 @@ def test_index_pdf_writes_doc_id_when_catalog_initialized(
     for m in rows["metadatas"]:
         assert "doc_id" not in m
     cat = ActiveCatalog()
-    documents = cat.list_by_collection(f"docs__rdr102-pdf__{_local_token()}__v1")
+    documents = cat.list_by_collection(f"docs__rdr102-pdf__{_registered_token('docs')}__v1")
     assert documents, "catalog must have a Document for the indexed PDF"
     for entry in documents:
         assert cat.get_manifest(str(entry.tumbler)), (
@@ -2811,12 +2846,15 @@ def test_index_markdown_writes_doc_id_when_catalog_initialized(
     """
     cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
     _wrap_write_batch_with_fk_seed(t3)
+    # RDR-204 Phase 1 follow-up (nexus-f5wwx): see the matching comment in
+    # test_index_pdf_writes_doc_id_when_catalog_initialized above.
+    monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
 
     n = index_markdown(sample_md, corpus="rdr102-md", t3=t3)
     assert n > 0, "expected index_markdown to upsert chunks"
 
     col = t3.get_or_create_collection(
-        f"docs__rdr102-md__{_local_token()}__v1",
+        f"docs__rdr102-md__{_registered_token('docs')}__v1",
     )
     rows = col.get(include=["metadatas"])
     assert rows["metadatas"], (
@@ -2825,7 +2863,7 @@ def test_index_markdown_writes_doc_id_when_catalog_initialized(
     for m in rows["metadatas"]:
         assert "doc_id" not in m
     cat = ActiveCatalog()
-    documents = cat.list_by_collection(f"docs__rdr102-md__{_local_token()}__v1")
+    documents = cat.list_by_collection(f"docs__rdr102-md__{_registered_token('docs')}__v1")
     assert documents, "catalog must have a Document for the indexed markdown"
     for entry in documents:
         assert cat.get_manifest(str(entry.tumbler))
@@ -2847,16 +2885,19 @@ def test_batch_index_markdowns_rdr_mode_writes_doc_id_when_catalog_initialized(
         "# Section A\n\nBody text alpha.\n\n"
         "# Section B\n\nBody text beta.\n"
     )
+    # RDR-204 Phase 1 follow-up (nexus-f5wwx): see the matching comment in
+    # test_index_pdf_writes_doc_id_when_catalog_initialized above.
+    monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
 
     batch_index_markdowns(
         [rdr_path], corpus="rdr102-rdrmode",
-        collection_name=f"rdr__rdr102-rdrmode__{_local_token()}__v1",
+        collection_name=f"rdr__rdr102-rdrmode__{_registered_token('rdr')}__v1",
         content_type="rdr",
         t3=t3,
     )
 
     col = t3.get_or_create_collection(
-        f"rdr__rdr102-rdrmode__{_local_token()}__v1",
+        f"rdr__rdr102-rdrmode__{_registered_token('rdr')}__v1",
     )
     rows = col.get(include=["metadatas"])
     assert rows["metadatas"], (
@@ -2865,7 +2906,7 @@ def test_batch_index_markdowns_rdr_mode_writes_doc_id_when_catalog_initialized(
     for m in rows["metadatas"]:
         assert "doc_id" not in m
     cat = ActiveCatalog()
-    documents = cat.list_by_collection(f"rdr__rdr102-rdrmode__{_local_token()}__v1")
+    documents = cat.list_by_collection(f"rdr__rdr102-rdrmode__{_registered_token('rdr')}__v1")
     assert documents, "catalog must have a Document for the indexed RDR md"
     for entry in documents:
         assert cat.get_manifest(str(entry.tumbler))

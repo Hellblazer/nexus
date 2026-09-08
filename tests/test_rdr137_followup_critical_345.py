@@ -32,7 +32,17 @@ from structlog.testing import capture_logs
 
 from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.commands.index import _CatalogBackedRegistry
+from nexus.corpus import effective_embedding_model_for_writes
 from nexus.repos import _read_repos_json
+
+# RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine's ``/collections/upsert``
+# handler unconditionally seeds the tenant's embedding_profile for the
+# request's content_type from the ENGINE's own configured embedder (bead
+# nexus-ft04v.6/.8) on the FIRST touch of that content_type — a hardcoded
+# "voyage-context-3" literal in a DIRECT register_collection call (as
+# opposed to going through the adapter's own derivation) 422s against the
+# box's real (bge) profile.
+_DOCS_MODEL = effective_embedding_model_for_writes("knowledge")
 
 
 @pytest.fixture(autouse=True)
@@ -101,12 +111,12 @@ class TestCriticalThreeModelVersionV1:
             cat=cat, registry_path=tmp_path / "repos.json",
         )
         adapter.add(repo)
-        col_name = "knowledge__myrepo-1-1__voyage-context-3__v1"
+        col_name = f"knowledge__myrepo-1-1__{_DOCS_MODEL}__v1"
         # First registration via the indexer's catalog hook would set
         # model_version='v1'. Simulate that:
         cat.register_collection(
             col_name, content_type="knowledge", owner_id="myrepo-1-1",
-            embedding_model="voyage-context-3", model_version="v1",
+            embedding_model=_DOCS_MODEL, model_version="v1",
         )
 
         # Now the operator runs `nx index repo . --corpus knowledge`

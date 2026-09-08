@@ -32,8 +32,16 @@ from tests._catalog_fixture_ops import ActiveCatalog
 import structlog
 from structlog.testing import capture_logs
 
+from nexus.corpus import effective_embedding_model_for_writes
 from nexus.registry import RepoRegistry
 from nexus.repos import _shim_log_level, from_catalog, read_dual
+
+# RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine's ``/collections/upsert``
+# handler unconditionally seeds the tenant's embedding_profile for the
+# request's content_type from the ENGINE's own configured embedder (bead
+# nexus-ft04v.6/.8) on the FIRST touch of that content_type — a hardcoded
+# "voyage-context-3" literal here 422s against the box's real (bge) profile.
+_KNOWLEDGE_MODEL = effective_embedding_model_for_writes("knowledge")
 
 
 @pytest.fixture(autouse=True)
@@ -83,12 +91,12 @@ class TestSig6FromCatalogDeterministicOrdering:
         # Register two knowledge collections for the same owner —
         # simulates post embedding-model-upgrade state.
         for name in (
-            "knowledge__myrepo-1-1__voyage-context-3__v1",
-            "knowledge__myrepo-1-1__voyage-context-3__v2",
+            f"knowledge__myrepo-1-1__{_KNOWLEDGE_MODEL}__v1",
+            f"knowledge__myrepo-1-1__{_KNOWLEDGE_MODEL}__v2",
         ):
             cat.register_collection(
                 name, content_type="knowledge", owner_id=owner_id,
-                embedding_model="voyage-context-3", model_version="v1",
+                embedding_model=_KNOWLEDGE_MODEL, model_version="v1",
             )
 
         winners = {from_catalog(repo, cat=cat).docs_collection for _ in range(20)}

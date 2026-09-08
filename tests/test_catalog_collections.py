@@ -46,10 +46,20 @@ from typing import Any
 import pytest
 
 from nexus.corpus import (
+    effective_embedding_model_for_writes,
     is_conformant_collection_name,
     parse_conformant_collection_name,
 )
 from tests._catalog_fixture_ops import ActiveCatalog
+
+# RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine's ``/collections/upsert``
+# handler unconditionally seeds the tenant's embedding_profile for the
+# request's content_type from the ENGINE's own configured embedder (bead
+# nexus-ft04v.6/.8) BEFORE checking for a conflict — so the FIRST real
+# registration for a content_type already carries the box's real model, and a
+# hardcoded "voyage-code-3" literal here 422s against it. Resolve the real
+# write-time model instead of hardcoding a foreign token.
+_CODE_MODEL = effective_embedding_model_for_writes("code")
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -102,18 +112,19 @@ def test_legacy_names_rejected(name):
 
 
 def test_register_conformant_collection_marks_not_legacy(active_catalog):
+    name = f"code__1-1__{_CODE_MODEL}__v1"
     active_catalog.register_collection(
-        "code__1-1__voyage-code-3__v1",
+        name,
         content_type="code",
         owner_id="1-1",
-        embedding_model="voyage-code-3",
+        embedding_model=_CODE_MODEL,
         model_version="v1",
     )
-    row = active_catalog.get_collection("code__1-1__voyage-code-3__v1")
+    row = active_catalog.get_collection(name)
     assert row is not None
     assert row["content_type"] == "code"
     assert row["owner_id"] == "1-1"
-    assert row["embedding_model"] == "voyage-code-3"
+    assert row["embedding_model"] == _CODE_MODEL
     assert row["model_version"] == "v1"
     # NOTE (nexus-cecqy): the ``False`` half of the legacy flag holds on both
     # substrates, but for DIFFERENT reasons — local DERIVES it from
@@ -147,11 +158,12 @@ def test_register_collection_idempotent_on_name(active_catalog):
 
 
 def test_list_collections_returns_all(active_catalog):
+    name = f"code__1-1__{_CODE_MODEL}__v1"
     active_catalog.register_collection("docs__nexus-571b8edd")
     active_catalog.register_collection(
-        "code__1-1__voyage-code-3__v1",
+        name,
         content_type="code", owner_id="1-1",
-        embedding_model="voyage-code-3", model_version="v1",
+        embedding_model=_CODE_MODEL, model_version="v1",
     )
     rows = active_catalog.list_collections()
     names = sorted(r["name"] for r in rows)
@@ -159,10 +171,7 @@ def test_list_collections_returns_all(active_catalog):
     # claim, and both substrates give this test a private namespace — a tmp
     # catalog dir on the SQLite arm, a per-test tenant on the engine arm
     # (tests/conftest.py::t2_service_env).
-    assert names == [
-        "code__1-1__voyage-code-3__v1",
-        "docs__nexus-571b8edd",
-    ]
+    assert names == sorted([name, "docs__nexus-571b8edd"])
 
 
 def test_is_legacy_collection_unknown_returns_false(active_catalog):

@@ -29,7 +29,15 @@ from tests._catalog_fixture_ops import ActiveCatalog
 import structlog
 
 from nexus.context import _repo_collections
+from nexus.corpus import effective_embedding_model_for_writes
 from nexus.registry import RepoRegistry
+
+# RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine's ``/collections/upsert``
+# handler unconditionally seeds the tenant's embedding_profile for the
+# request's content_type from the ENGINE's own configured embedder (bead
+# nexus-ft04v.6/.8) on the FIRST touch of that content_type — a hardcoded
+# "voyage-context-3" literal here 422s against the box's real (bge) profile.
+_DOCS_MODEL = effective_embedding_model_for_writes("docs")
 
 
 @pytest.fixture(autouse=True)
@@ -80,7 +88,7 @@ def _register_owner_with_docs(cat: Catalog, repo: Path, docs_name: str) -> None:
         docs_name,
         content_type="docs",
         owner_id=owner_id,
-        embedding_model="voyage-context-3",
+        embedding_model=_DOCS_MODEL,
         model_version="1",
     )
 
@@ -93,7 +101,7 @@ class TestPhantomCollectionRegression:
         registry has the phantom docs__1-2188. The reader must surface
         the catalog's value."""
         # Seed catalog with the truth.
-        _register_owner_with_docs(cat, repo, "docs__1-1__voyage-context-3__v1")
+        _register_owner_with_docs(cat, repo, f"docs__1-1__{_DOCS_MODEL}__v1")
         # Seed registry with the phantom (the bug scenario).
         cfg = Path(__import__("os").environ["NEXUS_CONFIG_DIR"])
         reg_path = cfg / "repos.json"
@@ -113,7 +121,7 @@ class TestPhantomCollectionRegression:
         colls = _repo_collections(repo)
         assert colls is not None
         # The catalog's docs collection wins.
-        assert "docs__1-1__voyage-context-3__v1" in colls
+        assert f"docs__1-1__{_DOCS_MODEL}__v1" in colls
         # The phantom does NOT appear.
         assert "docs__1-2188" not in colls
 

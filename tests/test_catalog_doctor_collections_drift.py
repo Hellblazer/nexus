@@ -27,8 +27,17 @@ from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbed
 from click.testing import CliRunner
 
 from nexus.cli import main
+from nexus.corpus import effective_embedding_model_for_writes
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
+
+# RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine pins an install-scoped
+# embedding profile per (tenant, content_type) on first write — an explicit
+# "voyage-context-3" literal here conflicts with the box's real (bge)
+# profile the moment any earlier test in this file registers a
+# knowledge__* collection for real. Resolve the box's real write-time
+# model instead of hardcoding a foreign token.
+_KNOWLEDGE_MODEL = effective_embedding_model_for_writes("knowledge")
 
 
 @pytest.fixture()
@@ -128,14 +137,14 @@ def test_doctor_collections_drift_orphan_warning_with_superseded_skip(
     """
     catalog.register_collection("knowledge__delos")
     catalog.register_collection(
-        "knowledge__1-1__voyage-context-3__v1",
+        f"knowledge__1-1__{_KNOWLEDGE_MODEL}__v1",
         content_type="knowledge", owner_id="1-1",
-        embedding_model="voyage-context-3", model_version="v1",
+        embedding_model=_KNOWLEDGE_MODEL, model_version="v1",
     )
     catalog.supersede_collection(
-        "knowledge__delos", "knowledge__1-1__voyage-context-3__v1",
+        "knowledge__delos", f"knowledge__1-1__{_KNOWLEDGE_MODEL}__v1",
     )
-    _seed_t3(t3_db, "knowledge__1-1__voyage-context-3__v1")
+    _seed_t3(t3_db, f"knowledge__1-1__{_KNOWLEDGE_MODEL}__v1")
     # Note: knowledge__delos NOT in T3 (gone post-rename) but is
     # superseded_by, so should NOT count as drift.
 

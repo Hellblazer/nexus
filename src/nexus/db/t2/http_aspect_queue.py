@@ -387,8 +387,17 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         return [_body_to_queue_row(r) for r in rows]
 
     def rename_collection(self, *, old: str, new: str) -> int:
-        """Re-point every row's collection from *old* to *new*."""
-        r = self._post("/rename_collection", {"old": old, "new": new})
+        """Re-point every row's collection from *old* to *new*.
+
+        RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine no longer
+        auto-registers the rename DESTINATION — ``new`` must be a
+        registered ``catalog_collections`` row before the fan-out.
+        """
+        from nexus.corpus import write_with_registration_retry  # noqa: PLC0415 — circular-dep avoidance (corpus)
+        r = write_with_registration_retry(
+            new,
+            lambda: self._post("/rename_collection", {"old": old, "new": new}),
+        )
         return int(r.get("updated", 0))
 
     # ── ETL import ────────────────────────────────────────────────────────────

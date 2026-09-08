@@ -26,7 +26,14 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
+from nexus.corpus import effective_embedding_model_for_writes
 from tests._catalog_fixture_ops import ActiveCatalog
+
+# RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine pins an install-scoped
+# embedding profile per (tenant, content_type) on first write — the backfill
+# verb parses the model straight from a conformant T3 name, so a hardcoded
+# "voyage-code-3" literal here 422s against the box's real (bge) profile.
+_CODE_MODEL = effective_embedding_model_for_writes("code")
 
 
 @pytest.fixture()
@@ -73,7 +80,7 @@ def test_backfill_registers_t3_and_catalog_collections(catalog, runner):
     """
     fake_t3 = _FakeT3(
         names=[
-            "code__1-1__voyage-code-3__v1",  # conformant
+            f"code__1-1__{_CODE_MODEL}__v1",  # conformant
             "knowledge__delos",              # legacy
             "rdr__nexus-571b8edd",           # legacy
         ]
@@ -85,7 +92,7 @@ def test_backfill_registers_t3_and_catalog_collections(catalog, runner):
 
     assert result.exit_code == 0, result.output
     assert _projection_names(catalog) == [
-        "code__1-1__voyage-code-3__v1",
+        f"code__1-1__{_CODE_MODEL}__v1",
         "docs__nexus-571b8edd",
         "knowledge__delos",
         "rdr__nexus-571b8edd",
@@ -102,7 +109,7 @@ def test_backfill_marks_legacy_via_projector(catalog, runner):
     """
     fake_t3 = _FakeT3(
         names=[
-            "code__1-1__voyage-code-3__v1",
+            f"code__1-1__{_CODE_MODEL}__v1",
             "knowledge__delos",
         ]
     )
@@ -112,7 +119,7 @@ def test_backfill_marks_legacy_via_projector(catalog, runner):
 
     assert result.exit_code == 0, result.output
     assert catalog.is_legacy_collection("knowledge__delos") is True
-    assert catalog.is_legacy_collection("code__1-1__voyage-code-3__v1") is False
+    assert catalog.is_legacy_collection(f"code__1-1__{_CODE_MODEL}__v1") is False
 
 
 def test_backfill_idempotent(catalog, runner):
