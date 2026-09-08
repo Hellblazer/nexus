@@ -105,6 +105,18 @@ def _log_resolution_error(source: str, exc: BaseException) -> None:
     path-derived fallback, whose owner id can differ from the catalog's, and
     the hook then reported a fully indexed tree as NOT indexed. The failure
     is logged so the next false verdict names its cause."""
+    # stderr FIRST, with nothing but sys: on 2026-09-08 the interpreter that
+    # ran this hook had neither nexus nor structlog, so the structlog line
+    # below could not be written and the false NOT-indexed verdict shipped
+    # with an empty stderr (nexus-4ti7e). A guard that needs the package it
+    # guards is no guard.
+    try:
+        sys.stderr.write(
+            f"rdr_hook: collection resolution failed ({source}): "
+            f"{type(exc).__name__}: {exc} [python {sys.executable}]\n"
+        )
+    except Exception:  # noqa: BLE001 — even stderr is best-effort in a hook
+        pass
     try:
         import structlog  # noqa: PLC0415
 

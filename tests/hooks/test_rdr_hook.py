@@ -318,3 +318,22 @@ def test_slow_t3_answer_falls_back_to_the_listing_within_the_hook_budget(
     assert mod._collection_exists("rdr__1-1__voyage-context-3__v1")
     assert not mod._collection_exists("rdr__other__voyage-context-3__v1")
     assert time.monotonic() - started < 1.5
+
+
+def test_resolution_failure_reaches_stderr_without_structlog(rdr_hook_module, monkeypatch, capsys):
+    """nexus-4ti7e: the failure line must not depend on structlog, which the
+    interpreter that ran this hook on 2026-09-08 did not have either."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_structlog(name, *a, **k):
+        if name == "structlog":
+            raise ModuleNotFoundError("No module named 'structlog'")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", no_structlog)
+    rdr_hook_module._log_resolution_error("catalog", ModuleNotFoundError("No module named 'nexus'"))
+    err = capsys.readouterr().err
+    assert "collection resolution failed (catalog)" in err
+    assert "No module named 'nexus'" in err and "[python " in err
