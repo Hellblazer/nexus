@@ -80,9 +80,10 @@ motivated the lint.
 
 The fix: every mixed-use file gets a COUNT PIN, not a blanket exemption —
 ``_COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]]`` records the
-CURRENT live hit count ON CODE LINES alongside the reason (comment lines are
-not tallied, nexus-9gggv: a pin of 0 means the file's mentions are all
-prose and any code hit is a violation). ``test_count_pinned_allowlist_
+CURRENT live hit count ON CODE LINES alongside the reason (lines that start
+as a `#`, `//`, `/*`, `*` or `<!--` comment are not tallied, nexus-9gggv;
+Python docstring lines still are. A pin of 0 means the file's mentions are
+all prose and any code hit is a violation). ``test_count_pinned_allowlist_
 matches_live_hit_counts`` asserts the live count still equals the pin,
 bidirectionally:
 
@@ -665,7 +666,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         2,
         "6 of the 8 hits are comments/javadoc narrating chunks_384 as the "
         "pre-unify fixture table (historical, mirrors "
-        "CatalogDeleteCollectionCascadeTest). The other 2 (lines 380, 540) "
+        "CatalogDeleteCollectionCascadeTest). The other 2 (lines 398, 563) "
         "are inside .as(...) AssertJ description strings in LIVE test code, "
         "not comments — corrected from an earlier 'historical prose' "
         "mis-bucketing (nexus-a66gd substantive-critic remediation, "
@@ -892,9 +893,11 @@ def _iter_scope_files() -> list[Path]:
     return paths
 
 
-#: A line that is prose, not code: a shell/Python comment, a Java line
-#: comment or block-comment body, or an XML/HTML comment opener. The count
-#: pins tally CODE lines only (nexus-9gggv, 2026-09-08): three fix-forward
+#: A line that is prose, not code: a shell/Python `#` comment, a Java line
+#: comment or block-comment body, or an XML/HTML comment opener. A Python
+#: docstring line is NOT recognised (no line marker), so it still counts
+#: as code: that direction over-counts and never hides a reference. The
+#: count pins tally CODE lines only (nexus-9gggv, 2026-09-08): three fix-forward
 #: commits on 2026-09-07 moved pins because a COMMENT named chunks_384, and
 #: a comment cannot be a stale reference the way a query can. The unlisted-
 #: file guard still scans every line, so prose in live code is still caught

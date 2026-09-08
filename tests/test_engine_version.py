@@ -566,7 +566,7 @@ class TestRequiredEngineVersion:
         # floor is derived from it: a bump without a CHANGELOG pairing, or a
         # pairing without the bump, is the red. The trail above stays as
         # the provenance history.
-        assert REQUIRED_ENGINE_VERSION == _floor_named_by_changelog(_CHANGELOG.read_text())
+        assert REQUIRED_ENGINE_VERSION == _floor_named_by_changelog(_CHANGELOG.read_text(encoding="utf-8"))
 
 
 class TestParseEngineVersion:
