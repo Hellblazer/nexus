@@ -966,12 +966,14 @@ def _enrich_apply(
 #
 # Since nexus-oc98c production passes the config's model_version as
 # ``--model`` (haiku for scholarly-paper-v1) and logs each extraction's
-# actual cost and model (``aspect_extractor_usage``). Measured 2026-09-07
-# on haiku with real 54k to 109k token papers: $0.13 to $0.31 per paper.
-# This constant is therefore an upper bound from the wrong model; the
-# log line is the figure to trust, and the constant should be refreshed
-# from it by re-running ``-m integration -k LiveMeasurement -s``.
-_PER_PAPER_COST_USD = 1.18
+# actual cost and model (``aspect_extractor_usage``), so that 1.18 figure
+# is from the wrong model. Re-measured 2026-09-07 on haiku through the
+# production prompt over three real papers reassembled from T3 (100, 133
+# and 216 chunks; 54k, 62k and 109k prompt tokens): $0.131, $0.159 and
+# $0.306. The constant is their mean; the per-document actual is the log
+# line, and this is refreshed by re-running ``-m integration -k
+# LiveMeasurement -s`` when the model or its pricing changes.
+_PER_PAPER_COST_USD = 0.20
 
 # Default per the RDR's original Phase 2 spec. The P1.3 spike's
 # 16.7% strict-equality "stability" rate measures whether the model
@@ -1158,12 +1160,13 @@ def enrich_aspects(
         cost_str = "Estimated cost: $0 (deterministic parser, no API calls)"
     else:
         cost_estimate = len(entries) * _PER_PAPER_COST_USD
-        # RDR-196 .p0b (nexus-nyry9.6): "at Haiku rates" was FALSE -- the
-        # extractor never passes --model, so it runs the CLI's ambient
-        # default model, not Haiku. Name the real basis instead: a single
-        # measured sample dispatch (see _PER_PAPER_COST_USD's docstring),
-        # not a live-metered per-run figure.
-        cost_str = f"Estimated cost: ~${cost_estimate:.2f} (single-sample measured estimate, default model)"
+        # A per-paper mean from measured dispatches on the config's model
+        # (see _PER_PAPER_COST_USD), not a live-metered per-run figure;
+        # the per-document actual lands in the aspect_extractor_usage log.
+        cost_str = (
+            f"Estimated cost: ~${cost_estimate:.2f} "
+            f"(mean of measured {config.model_version} dispatches)"
+        )
     click.echo(
         f"{len(entries)} document(s) in '{collection}' "
         f"(extractor={config.extractor_name}, "
@@ -1255,12 +1258,15 @@ def _select_entries(
         click.echo("Catalog is empty — index or store documents first (nx index repo / nx store put).")
         return None
     entries = cat.list_by_collection(collection)
-    if not entries:
-        # nexus-3ygp3: the same vacuous shape as the --missing audit. A
-        # bare name that select_config prefix-matched but the catalog
-        # does not know produced "No documents to process" at exit 0,
-        # which reads as a completed, zero-cost extraction.
-        raise click.ClickException(_no_catalog_rows_message(collection))
+    # nexus-3ygp3: zero catalog rows is a refusal, never "No documents to
+    # process" at exit 0 (a bare name select_config prefix-matched but the
+    # catalog does not know read as a completed, zero-cost extraction).
+    # The refusal is raised after the aspect-side read below so it can
+    # name the rows that exist under this name with no entry to claim
+    # them, as the --missing audit does; --all takes no such read and
+    # refuses without the count.
+    orphan_rows: int | None = None
+    raw_empty = not entries
 
     if re_extract or not extract_all:
         # ONE T2 open serves both filters. nexus-ym9ey originally added a
@@ -1280,6 +1286,9 @@ def _select_entries(
                     config_extractor_name, extractor_version,
                 )
             } if re_extract else set()
+        orphan_rows = len(existing_paths)
+        if not entries:
+            raise click.ClickException(_no_catalog_rows_message(collection, orphan_rows))
 
         if re_extract:
             # "Ensure every entry is at >= version": rows below the threshold,
@@ -1312,6 +1321,8 @@ def _select_entries(
                     f"--extractor-version X to refresh only outdated rows."
                 )
 
+    if raw_empty:
+        raise click.ClickException(_no_catalog_rows_message(collection, orphan_rows))
     return entries
 
 
@@ -1457,7 +1468,7 @@ def _dry_run_predict_skips(
         actual_cost = (len(entries) - skipped) * _PER_PAPER_COST_USD
         click.echo(
             f"  Predicted actual cost (excluding skips): ~${actual_cost:.2f} "
-            f"(single-sample measured estimate, default model)"
+            "(mean of measured dispatches on the configured model)"
         )
 
 
