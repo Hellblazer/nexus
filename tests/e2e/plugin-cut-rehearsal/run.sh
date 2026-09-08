@@ -268,6 +268,17 @@ if [ -n "$MACHINERY_DRIFT" ]; then
 fi
 g push -q origin main develop
 g push -q origin --tags
+# The source's archive/* branches too (local or remote-tracking): docs cite
+# commits that are reachable only from them, and a real clone of github has
+# them as origin/archive/*; a fake origin without them fails the docs-rot
+# lint inside the cut battery on a citation every real checkout resolves
+# (2026-09-08, rdr-120's 122feaff).
+# Pushed FROM THE SOURCE: `git clone` copies only the source's local heads,
+# so the clone itself never had them; the fetch below brings them into the
+# clone as origin/archive/*, where the lint resolves the citation.
+for ref in $(git -C "$SOURCE_REPO" for-each-ref --format='%(refname)' 'refs/heads/archive/' 'refs/remotes/origin/archive/'); do
+    git -C "$SOURCE_REPO" push -q "$ORIGIN" "$ref:refs/heads/archive/${ref##*/archive/}" 2>/dev/null || true
+done
 g fetch -q origin
 git -C "$SOURCE_REPO" rev-parse --verify --quiet "$BASE_TAG^{commit}" >/dev/null || _die "base tag $BASE_TAG does not resolve in the source"
 echo "   main=$(g rev-parse --short main) develop=$(g rev-parse --short develop) tags=$(g tag -l | wc -l | tr -d ' ')"
