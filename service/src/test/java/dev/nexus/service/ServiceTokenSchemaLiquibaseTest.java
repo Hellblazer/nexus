@@ -321,12 +321,13 @@ class ServiceTokenSchemaLiquibaseTest {
                 .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.LABEL)
                 .values("default-scope-hash", "tenant-a", "lbl")
                 .execute();
-            String scope = DSL.using(su, SQLDialect.POSTGRES)
+            java.util.List<String> scopes = DSL.using(su, SQLDialect.POSTGRES)
                 .select(SERVICE_TOKENS.SCOPE)
                 .from(SERVICE_TOKENS)
                 .where(SERVICE_TOKENS.TOKEN_HASH.eq("default-scope-hash"))
-                .fetchOne(SERVICE_TOKENS.SCOPE);
-            assertThat(scope)
+                .fetch(SERVICE_TOKENS.SCOPE);
+            assertThat(scopes).hasSize(1);
+            assertThat(scopes.get(0))
                 .as("a scope-less INSERT (every pre-868dq caller) must default to 'tenant'")
                 .isEqualTo("tenant");
         }

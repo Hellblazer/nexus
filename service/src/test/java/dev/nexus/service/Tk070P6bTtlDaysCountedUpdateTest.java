@@ -122,10 +122,9 @@ class Tk070P6bTtlDaysCountedUpdateTest {
             // Test-only relaxation: undo telemetry-006-1 back to a shape
             // that accepts ttl_days=0 again (the CHECK now forbids it).
             PgContainerHelper.dropConstraint(su, FRECENCY, "frecency_ttl_days_positive_chk");
-            // KEPT RAW: no typed jOOQ/nexus_test form for ALTER TABLE ... ALTER
-            // COLUMN ... SET DEFAULT (candidate for a nexus_test bootstrap function).
-            su.createStatement().execute(
-                "ALTER TABLE nexus.frecency ALTER COLUMN ttl_days SET DEFAULT 0");
+            DSL.using(su, SQLDialect.POSTGRES)
+                .alterTable(FRECENCY).alterColumn(FRECENCY.TTL_DAYS).setDefault(0)
+                .execute();
 
             // Two ttl_days=0 rows, spanning two tenants (proves the RLS
             // toggle reaches every tenant, not just one).
@@ -179,10 +178,9 @@ class Tk070P6bTtlDaysCountedUpdateTest {
 
             // staging.frecency never had a CHECK — only NOT NULL DEFAULT 0
             // needs restoring to seed ttl_days=0 rows again via the default.
-            // KEPT RAW: no typed jOOQ/nexus_test form for ALTER TABLE ... ALTER
-            // COLUMN ... SET DEFAULT (candidate for a nexus_test bootstrap function).
-            su.createStatement().execute(
-                "ALTER TABLE staging.frecency ALTER COLUMN ttl_days SET DEFAULT 0");
+            DSL.using(su, SQLDialect.POSTGRES)
+                .alterTable(STAGING_FRECENCY).alterColumn(TTL_DAYS).setDefault(0)
+                .execute();
 
             seedStagingFrecencyRow(su, TENANT_A, "5".repeat(64), 0);
             seedStagingFrecencyRow(su, TENANT_B, "6".repeat(64), 0);

@@ -316,7 +316,8 @@ class TokenStoreDataTokenSweepTest {
             .transactionResult(cfg -> {
                 org.jooq.DSLContext tx = org.jooq.impl.DSL.using(cfg);
                 SweepBounds.applyStatementTimeout(tx, Duration.ofMillis(1234));
-                return tx.fetchValue("select current_setting('statement_timeout')").toString();
+                return tx.select(org.jooq.impl.DSL.function("current_setting", String.class,
+                        org.jooq.impl.DSL.val("statement_timeout"))).fetchOne(0, String.class);
             });
         assertThat(inside)
             .as("the bound must actually reach the session, not merely be passed around")
@@ -332,7 +333,8 @@ class TokenStoreDataTokenSweepTest {
             SweepBounds.applyStatementTimeout(org.jooq.impl.DSL.using(cfg), Duration.ofMillis(1234)));
 
         String after = org.jooq.impl.DSL.using(ds, org.jooq.SQLDialect.POSTGRES)
-            .fetchValue("select current_setting('statement_timeout')").toString();
+            .select(org.jooq.impl.DSL.function("current_setting", String.class,
+                org.jooq.impl.DSL.val("statement_timeout"))).fetchOne(0, String.class);
         assertThat(after)
             .as("the timeout must not survive its transaction")
             .isNotEqualTo("1234ms");

@@ -119,10 +119,9 @@ class Tk070P6aTtlDaysCountedDeleteTest {
             // SQL text expects (`RENAME COLUMN ttl TO ttl_days` requires the
             // column to currently be named `ttl`).
             PgContainerHelper.dropConstraint(su, MEMORY, "memory_ttl_days_positive_chk");
-            // KEPT RAW: no typed jOOQ/nexus_test DDL form for ALTER TABLE ... RENAME
-            // COLUMN (candidate for a nexus_test bootstrap function).
-            su.createStatement().execute(
-                "ALTER TABLE nexus.memory RENAME COLUMN ttl_days TO ttl");
+            DSL.using(su, SQLDialect.POSTGRES)
+                .alterTable(MEMORY).renameColumn(MEMORY.TTL_DAYS).to(DSL.name("ttl"))
+                .execute();
 
             // Two ttl=0 rows, spanning two tenants (proves the RLS toggle
             // reaches every tenant, not just one).
@@ -174,10 +173,9 @@ class Tk070P6aTtlDaysCountedDeleteTest {
             su.setAutoCommit(true);
 
             PgContainerHelper.dropConstraint(su, PLANS, "plans_ttl_days_positive_chk");
-            // KEPT RAW: no typed jOOQ/nexus_test DDL form for ALTER TABLE ... RENAME
-            // COLUMN (candidate for a nexus_test bootstrap function).
-            su.createStatement().execute(
-                "ALTER TABLE nexus.plans RENAME COLUMN ttl_days TO ttl");
+            DSL.using(su, SQLDialect.POSTGRES)
+                .alterTable(PLANS).renameColumn(PLANS.TTL_DAYS).to(DSL.name("ttl"))
+                .execute();
 
             seedPlanRow(su, TENANT_A, "p6a-proj", "zero-a query", 0);
             seedPlanRow(su, TENANT_B, "p6a-proj", "zero-b query", 0);
