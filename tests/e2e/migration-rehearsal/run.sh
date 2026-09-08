@@ -661,8 +661,11 @@ elif [ "$DO_BUILD" = 1 ]; then
     # nexus-c00dw: ./mvnw runs INSIDE the container, but /src is a bind
     # mount of this host checkout, so service/target is the same
     # single-writer resource the host-side lease guards — acquire on the
-    # host, around the docker invocation.
-    build_lease_acquire service docker-native-build migration-rehearsal
+    # host, around the docker invocation. A live holder is WAITED for,
+    # bounded by NX_BUILD_LEASE_WAIT like every other producer (nexus-pv93h:
+    # --shakeout used to exit 75 the instant a cached gate-jar copy held
+    # the lease); rc 75 names the holder only once the bound is exhausted.
+    build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" docker-native-build migration-rehearsal
     docker run --rm --entrypoint bash \
       --add-host=host.docker.internal:host-gateway \
       -v "$PWD":/src -w /src/service \

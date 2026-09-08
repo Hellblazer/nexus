@@ -173,6 +173,38 @@ def _scan_fixture_cache_files() -> set[Path]:
 _fixture_cache_baseline: set[Path] = set()
 
 
+def _gate_on_build_lease() -> None:
+    """Refuse the whole session ONCE while a service build holds the lease,
+    or wait for it when asked (nexus-pv93h).
+
+    The lease is shared by every worktree of this repo (nexus-g6xpa), so
+    while ANY Maven run on the box holds it, ``_boot()`` refuses per test:
+    a full run beside a scoped engine run reported 1216 setup errors
+    (2026-09-07), all one fact. Deciding at session start, on the xdist
+    controller (workers spawn after this returns), turns that into one
+    line and exit 75 — or, with ``NX_BUILD_LEASE_WAIT=<seconds>``, into a
+    wait that starts the suite when the holder is gone. The per-test check
+    in ``_boot()`` stays as the backstop for a build that starts later.
+
+    ``NX_TEST_T2_SUBSTRATE=none`` runs need no engine and are never gated.
+    """
+    if os.environ.get("NX_TEST_T2_SUBSTRATE") == "none":
+        return
+    try:
+        from tests.db._service_fixture import build_lease_wait_seconds, wait_for_build_lease
+        reason = wait_for_build_lease(build_lease_wait_seconds())
+    except Exception:  # noqa: BLE001 — the gate must never break collection on its own bug
+        return
+    if reason is None:
+        return
+    pytest.exit(
+        "engine substrate: refusing to start — " + reason
+        + " Set NX_BUILD_LEASE_WAIT=<seconds> to wait for it instead, or "
+        "NX_TEST_T2_SUBSTRATE=none for a run that needs no engine (nexus-pv93h).",
+        returncode=75,
+    )
+
+
 def _warn_if_service_jar_is_stale() -> None:
     """Say ONCE, at session start, that the service jar is stale (nexus-zryqm).
 
@@ -253,6 +285,8 @@ def pytest_sessionstart(session):
     """
     global _fixture_cache_baseline, _real_config_dir_baseline, _is_controller_or_serial
     _is_controller_or_serial = not _is_xdist_worker(session)
+    if _is_controller_or_serial:
+        _gate_on_build_lease()
 
     # nexus-pfuns: FENCE $HOME before any test runs. The gates were fenced
     # first; this suite was not, and it runs with the operator's real home.
