@@ -298,6 +298,18 @@ fi
 if [ -f "$BGE_MODEL" ]; then
   echo "fused rerank stage (RDR-188):"
   RCOL="knowledge__nativesmoke__bge-base-en-v15-768__v1"
+  # RDR-204 Phase 1 (nexus-ft04v.7): a write against an unregistered collection
+  # is a 422, the engine no longer auto-registers on a chunk write. Register
+  # the fixture collection the way the client does (POST /collections/upsert;
+  # the model must match the tenant's bge profile). Found by --shakeout Phase
+  # F on the v0.1.109 candidate, before the tag; this script also runs in
+  # engine-service-release.yml, where the same 422 would have burned the tag.
+  rreg=$(curl -s -o /tmp/ns-rerank-reg.out -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+    -d "{\"name\":\"$RCOL\",\"content_type\":\"knowledge\",\"owner_id\":\"nativesmoke\",\"embedding_model\":\"bge-base-en-v15-768\"}" \
+    "$U/v1/catalog/collections/upsert")
+  if [ "$rreg" != "200" ]; then
+    echo "  FAIL rerank fixture collection register -> $rreg: $(head -c200 /tmp/ns-rerank-reg.out)"; fail=1
+  fi
   put_rerank_chunk() {
     curl -s -o /tmp/ns-rerank-put.out -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
       -d "{\"collection\":\"$RCOL\",\"doc_id\":\"$1\",\"content\":$2}" "$U/v1/vectors/store-put"
