@@ -13,7 +13,12 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LIB = REPO_ROOT / "scripts" / "lib" / "build-lease.sh"
-EXEMPT = {LIB, REPO_ROOT / "scripts" / "lib" / "build-lease_test.sh"}
+#: The lease library and the tests that stand up a holder on purpose.
+EXEMPT = {
+    LIB,
+    REPO_ROOT / "scripts" / "lib" / "build-lease_test.sh",
+    REPO_ROOT / "scripts" / "mvnw-leased_test.sh",
+}
 #: A call anywhere on a non-comment line: start of line, or after `&&`, `||`, `;`, `(`, `{`, `then`, `do`.
 _BARE = re.compile(r"(?:^|&&|\|\||;|\(|\{|\bthen\b|\bdo\b)\s*build_lease_acquire\s")
 
