@@ -1,0 +1,86 @@
+# The review round contracts (nexus-dv7gw). One table for the three bounds
+# that used to be stated separately: code-review (conexus/skills/code-review),
+# plan-audit (nexus.plans.audit_rounds), rdr-gate (nexus.commands.rdr and
+# conexus/skills/rdr-gate). Each contract's constant derives from this
+# table through nexus.tables.review_rounds, and tests/test_plugin_structure.py
+# pins the numbers the skills quote to it.
+#
+# blocks_on     what can hold the work back in that round:
+#   any-critical      any Critical finding
+#   ship-blocker      a finding the reviewer marked Ship-blocker: yes
+#   blocks-planning   a finding classified BLOCKS-PLANNING
+#   nothing           the round cannot block; findings are residuals
+# next_round_by who may open the round after this one:
+#   orchestrator      the session that dispatched the review
+#   human             the user, by name, in this session
+#   nobody            there is no next round; residuals are carried
+# budget_tightens whether a caller-declared budget_rounds may LOWER the
+#   blocking cap for this contract (plan-audit's blocking_round_cap); never raise it
+# extension     the one orchestrator-authorised pass allowed after this round
+#   without counting as the next round:
+#   fix-introduced    a ship-blocking defect introduced by the fix under confirmation
+#   none              no extension
+
+[table]
+id = "review-rounds"
+kind = "decision-table"
+version = 1
+
+[dimensions.contract]
+domain = ["code-review", "plan-audit", "rdr-gate"]
+[dimensions.round]
+domain = ["1", "2", "3+"]
+
+[[row]]
+id = "code-review::1"
+match = { contract = "code-review" }
+guard = { round = "1" }
+emit = { blocks_on = "ship-blocker", next_round_by = "orchestrator", budget_tightens = "no", extension = "none" }
+
+[[row]]
+id = "code-review::2"
+match = { contract = "code-review" }
+guard = { round = "2" }
+emit = { blocks_on = "ship-blocker", next_round_by = "human", budget_tightens = "no", extension = "fix-introduced" }
+
+[[row]]
+id = "code-review::3+"
+match = { contract = "code-review" }
+guard = { round = "3+" }
+emit = { blocks_on = "ship-blocker", next_round_by = "human", budget_tightens = "no", extension = "none" }
+
+[[row]]
+id = "plan-audit::1"
+match = { contract = "plan-audit" }
+guard = { round = "1" }
+emit = { blocks_on = "blocks-planning", next_round_by = "orchestrator", budget_tightens = "yes", extension = "none" }
+
+[[row]]
+id = "plan-audit::2"
+match = { contract = "plan-audit" }
+guard = { round = "2" }
+emit = { blocks_on = "blocks-planning", next_round_by = "orchestrator", budget_tightens = "yes", extension = "none" }
+
+[[row]]
+id = "plan-audit::3+"
+match = { contract = "plan-audit" }
+guard = { round = "3+" }
+emit = { blocks_on = "nothing", next_round_by = "nobody", budget_tightens = "no", extension = "none" }
+
+[[row]]
+id = "rdr-gate::1"
+match = { contract = "rdr-gate" }
+guard = { round = "1" }
+emit = { blocks_on = "any-critical", next_round_by = "human", budget_tightens = "no", extension = "none" }
+
+[[row]]
+id = "rdr-gate::2"
+match = { contract = "rdr-gate" }
+guard = { round = "2" }
+emit = { blocks_on = "any-critical", next_round_by = "human", budget_tightens = "no", extension = "none" }
+
+[[row]]
+id = "rdr-gate::3+"
+match = { contract = "rdr-gate" }
+guard = { round = "3+" }
+emit = { blocks_on = "ship-blocker", next_round_by = "human", budget_tightens = "no", extension = "none" }

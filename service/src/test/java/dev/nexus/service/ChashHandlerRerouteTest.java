@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.vectors.DimTables;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -78,10 +80,8 @@ class ChashHandlerRerouteTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES ('"
-                + dev.nexus.service.db.TokenHashing.sha256Hex(TOKEN)
-                + "', '" + TENANT + "', 'chash-reroute-test') ON CONFLICT (token_hash) DO NOTHING");
+            PgContainerHelper.seedServiceToken(
+                DSL.using(su, SQLDialect.POSTGRES), TOKEN, TENANT, "chash-reroute-test");
 
             for (String coll : new String[] {COLL_384, COLL_768}) {
                 su.createStatement().execute(

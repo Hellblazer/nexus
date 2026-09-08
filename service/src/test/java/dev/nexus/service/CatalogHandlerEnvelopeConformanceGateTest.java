@@ -184,14 +184,15 @@ class CatalogHandlerEnvelopeConformanceGateTest {
     }
 
     /** Enumerated honestly from the live switch (see {@link #everySwitchRouteIsClassified}),
-     * post {@code by_doc_id}-removal. 69 routes on the tree as of nexus-du2dw
-     * (65 + {@code /purge-trash}, nexus-3ck2g E3; + {@code /chash/conformance},
-     * nexus-du2dw; + {@code /manifest/chashes_many}, nexus-eslkl; + {@code
-     * /descendants}, T2 nexus/chroma-residue-plan-2026-08-10 §C1). RDR-191
-     * Phase 6 (nexus-o8dil.33) retired FOUR: {@code /manifest/backfill},
-     * {@code /manifest/orphans}, {@code /manifest/verify}, {@code
-     * /manifest/verify_all} — 65 routes on the tree as of that bead. This
-     * count is descriptive prose only; {@link #everySwitchRouteIsClassified}
+     * post {@code by_doc_id}-removal. 71 routes on the tree as of nexus-dkymw
+     * (69 + {@code /restore} + {@code /trash}, the operator-facing tombstone-
+     * restore pair — 69 = 65 + {@code /purge-trash}, nexus-3ck2g E3; + {@code
+     * /chash/conformance}, nexus-du2dw; + {@code /manifest/chashes_many},
+     * nexus-eslkl; + {@code /descendants}, T2 nexus/chroma-residue-plan-
+     * 2026-08-10 §C1). RDR-191 Phase 6 (nexus-o8dil.33) retired FOUR: {@code
+     * /manifest/backfill}, {@code /manifest/orphans}, {@code /manifest/verify},
+     * {@code /manifest/verify_all} — 65 routes on the tree as of that bead.
+     * This count is descriptive prose only; {@link #everySwitchRouteIsClassified}
      * self-verifies against the live switch, not this comment. */
     private static final List<RouteSpec> ROUTES = List.of(
         // ── Documents ─────────────────────────────────────────────────────
@@ -207,6 +208,15 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         both("/update_many", "handleUpdateMany", POSITIONAL),
         neither("/delete", "handleDelete"),
         both("/delete_many", "handleDeleteMany", REPORT_ONLY),
+        // nexus-dkymw: response is a flat scalar map ({"restored": 0|1}) --
+        // no JSON array (not collectionReturning) and the request body
+        // carries a single tumbler scalar, no id list (not idListAccepting).
+        neither("/restore", "handleRestore"),
+        // nexus-dkymw: same envelope shape as /list ({"documents":[...],"count":N})
+        // -- handleTrash already emits the literal "count" JSON key, so this
+        // needs no exemption. Request carries only limit/offset query params,
+        // no id list (not idListAccepting).
+        collectionOk("/trash", "handleTrash"),
         // nexus-3ck2g E3: response is a flat scalar map (documents_purged,
         // chunks_<dim>_stranded counts) in both dry-run and live modes --
         // no JSON array of items (not collectionReturning) and the request

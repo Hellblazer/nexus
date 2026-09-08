@@ -514,8 +514,11 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                 + " embedding) — this branch deliberately does NOT bind to the"
                 + " idx_chunks_embedding_768 HNSW index (see the class-level comment above:"
                 + " production's own selective-gate dispatch says \"No HNSW\" for a small,"
-                + " already-resolved chash set). Plan was:%n%s", plan)
-            .contains("embedding_768 <=>");
+                + " already-resolved chash set). Plan was:%n%s"
+                + " (nexus-cbo4a batch 9 item 1: matches either the bare <=> form or the"
+                + " OPERATOR(nexus.<=>) form the extension relocation renders once the"
+                + " operator is no longer on search_path)", plan)
+            .containsPattern("embedding_768\\s*(OPERATOR\\(nexus\\.)?<=>");
         assertThat(plan)
             .as("a selective, single-chash lookup must not degrade into scanning the whole"
                 + " chunks table. Plan was:%n%s", plan)
@@ -616,9 +619,12 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
         String plan = explain(fn);
         assertThat(plan)
             .as("search_topic_scoped_384's distance projection must still read the CORRECT "
-                + "dim column (embedding_384) after vectors-006-3's guard was added. Plan was:%n%s",
+                + "dim column (embedding_384) after vectors-006-3's guard was added. Plan was:%n%s"
+                + " (nexus-cbo4a batch 9 item 1: matches either the bare <=> form or the"
+                + " OPERATOR(nexus.<=>) form the extension relocation renders once the"
+                + " operator is no longer on search_path)",
                 plan)
-            .contains("embedding_384 <=>");
+            .containsPattern("embedding_384\\s*(OPERATOR\\(nexus\\.)?<=>");
         // RDR-194 P3c (nexus-tk070.p3c): the join to topic_assignments changed from
         // `ta.doc_id = encode(c.chash, 'hex')` to direct bytea equality
         // `ta.doc_id = c.chash`, which turned out to BE sargable after all (the

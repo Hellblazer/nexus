@@ -6,6 +6,8 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TokenHashing;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -52,17 +54,11 @@ class TokenAdminHandlerTest {
         // lockout protection (revoke-refused / list-excluded) applies to it.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label, scope) VALUES (?, ?, ?, ?) "
-                + "ON CONFLICT (token_hash) DO NOTHING")) {
-                ps.setString(1, TokenHashing.sha256Hex(BOOT));
-                ps.setString(2, TenantConstants.DEFAULT_TENANT);
-                ps.setString(3, dev.nexus.service.db.TokenStore.ROOT_TOKEN_LABEL);
-                // nexus-868dq: operator privilege reads from scope, not label — a raw
-                // seed must stamp it like ensureBootstrapToken does.
-                ps.setString(4, dev.nexus.service.db.TokenStore.SCOPE_ROOT);
-                ps.executeUpdate();
-            }
+            // nexus-868dq: operator privilege reads from scope, not label — a raw
+            // seed must stamp it like ensureBootstrapToken does.
+            PgContainerHelper.seedServiceToken(DSL.using(su, SQLDialect.POSTGRES), BOOT,
+                TenantConstants.DEFAULT_TENANT, dev.nexus.service.db.TokenStore.ROOT_TOKEN_LABEL,
+                dev.nexus.service.db.TokenStore.SCOPE_ROOT, null, null);
         }
         // nexus-5j7pb: back the service under test with nexus_svc (NOSUPERUSER NOBYPASSRLS),
         // the SAME credential as production, rather than the Postgres superuser (BYPASSRLS).
@@ -529,10 +525,8 @@ class TokenAdminHandlerTest {
         String dataRaw = "raw-data-scope-admin-probe";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label, scope) "
-                + "VALUES ('" + TokenHashing.sha256Hex(dataRaw)
-                + "', 'edge-lockout', 'data-probe', 'data') ON CONFLICT (token_hash) DO NOTHING");
+            PgContainerHelper.seedServiceToken(DSL.using(su, SQLDialect.POSTGRES), dataRaw,
+                "edge-lockout", "data-probe", "data", null, null);
         }
         assertThat(whoami(dataRaw, null)).as("data token authenticates normally").isEqualTo(200);
         for (String route : new String[] {"/v1/service-tokens/issue", "/v1/service-tokens/rotate",

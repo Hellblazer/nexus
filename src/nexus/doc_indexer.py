@@ -2122,8 +2122,12 @@ def _pdf_chunks(
     git_meta: dict | None = None,
     doc_id: str = "",
     allow_degraded_extraction: bool = False,
+    extraction_stats: dict | None = None,
 ) -> list[tuple[str, str, dict]]:
     """Chunk a PDF and return (id, text, metadata) tuples.
+
+    *extraction_stats* (nexus-i0cwh), when given, receives ``page_count``
+    and ``pages_with_text`` from the extraction result.
 
     *chunk_chars* overrides the default chunk size (1500 chars).  When None
     the PDFChunker default is used.  Pass ``tuning.pdf_chunk_chars`` from
@@ -2155,6 +2159,10 @@ def _pdf_chunks(
         pdf_path, extractor=extractor, on_formula_oom=on_formula_oom,
         allow_degraded=allow_degraded_extraction,
     )
+    if extraction_stats is not None:
+        extraction_stats["page_count"] = int(result.metadata.get("page_count", 0) or 0)
+        _pwt = result.metadata.get("pages_with_text")
+        extraction_stats["pages_with_text"] = list(_pwt) if _pwt is not None else None
     chunker = PDFChunker(chunk_chars=chunk_chars) if chunk_chars is not None else PDFChunker()
     chunks = chunker.chunk(result.text, result.metadata)
     if not chunks:
@@ -2345,7 +2353,12 @@ def index_pdf(
 
     When *return_metadata* is True, returns a dict instead of an int::
 
-        {"chunks": int, "pages": list[int], "title": str, "author": str}
+        {"chunks": int, "pages": list[int], "title": str, "author": str,
+         "page_count": int, "pages_with_text": list[int]}
+
+    ``pages`` is the set of pages chunks START on; ``pages_with_text``
+    (nexus-i0cwh) is every page the extractor produced text for, the input
+    to a page-coverage check; ``page_count`` is the extractor's own count.
 
     Metadata is derived from chunk metadatas produced during extraction
     (no additional T3 query) on the batch and incremental paths.  The
@@ -2405,7 +2418,10 @@ def index_pdf(
     """
     from functools import partial  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
 
-    _empty_meta = {"chunks": 0, "pages": [], "title": "", "author": ""}
+    _empty_meta = {"chunks": 0, "pages": [], "title": "", "author": "", "page_count": 0, "pages_with_text": []}
+    # nexus-i0cwh: filled by whichever extraction path runs; surfaced in the
+    # return_metadata dict so callers can check page coverage.
+    _extraction_stats: dict = {}
     # GH #336 mirror: same local-fallback semantics as ``_index_document``.
     # RDR-152 Seam B (nexus-gmiaf.22): service mode checked FIRST (same
     # ordering fix as _index_document — prevents CredentialsMissingError on
@@ -2658,6 +2674,7 @@ def index_pdf(
                     allow_degraded_extraction=allow_degraded_extraction,
                     dry_run=dry_run,
                     on_doc_registered=_note_fallback_mint,
+                    extraction_stats=_extraction_stats,
                 )
             except Exception as exc:
                 _rollback_if_freshly_minted(exc)
@@ -2828,6 +2845,8 @@ def index_pdf(
                     "pages": sorted({m.get("page_number", 0) for m in all_meta}),
                     "title": all_meta[0].get("title", "") if all_meta else "",
                     "author": all_meta[0].get("source_author", "") if all_meta else "",
+                                    "page_count": _extraction_stats.get("page_count", 0),
+                    "pages_with_text": _extraction_stats.get("pages_with_text"),
                 }
             return count
 
@@ -2855,6 +2874,7 @@ def index_pdf(
     chunk_fn = partial(
         _pdf_chunks, bib_enrich_enabled=enrich, extractor=extractor, on_formula_oom=on_formula_oom,
         doc_id=doc_id, allow_degraded_extraction=allow_degraded_extraction,
+        extraction_stats=_extraction_stats,
     )
     prepared = chunk_fn(pdf_path, content_hash, target_model, now_iso, corpus)
     if not prepared:
@@ -2909,6 +2929,8 @@ def index_pdf(
                 "pages": sorted({m.get("page_number", 0) for m in metadatas}),
                 "title": metadatas[0].get("title", "") if metadatas else "",
                 "author": metadatas[0].get("source_author", "") if metadatas else "",
+                            "page_count": _extraction_stats.get("page_count", 0),
+                "pages_with_text": _extraction_stats.get("pages_with_text"),
             }
         return count
 
@@ -3085,6 +3107,8 @@ def index_pdf(
             "pages": sorted({m.get("page_number", 0) for m in metadatas_list}),
             "title": metadatas_list[0].get("source_title", "") if metadatas_list else "",
             "author": metadatas_list[0].get("source_author", "") if metadatas_list else "",
+                    "page_count": _extraction_stats.get("page_count", 0),
+            "pages_with_text": _extraction_stats.get("pages_with_text"),
         }
     return len(prepared)
 

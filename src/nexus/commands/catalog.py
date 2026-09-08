@@ -212,7 +212,8 @@ def _get_catalog() -> "CatalogReader":
     cat = make_catalog_reader()
     if cat is None:
         raise click.ClickException(
-            "Catalog not initialized. Run 'nx catalog setup' to create and populate it."
+            "Catalog unavailable: the nexus service owns it (nx daemon service start); "
+            "populate with nx index repo / nx store put."
         )
     return cat
 
@@ -308,6 +309,7 @@ from nexus.commands.catalog_cmds import reconcile_stale as _reconcile_stale_cmds
 from nexus.commands.catalog_cmds import purge_trash as _purge_trash_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import gc_audit as _gc_audit_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import recovery as _recovery_cmds  # noqa: E402 — must follow the `catalog` group definition above
+from nexus.commands.catalog_cmds import trash as _trash_cmds  # noqa: E402 — must follow the `catalog` group definition above
 
 _owners_cmds.register(catalog)
 _backfill_cmds.register(catalog)
@@ -324,6 +326,7 @@ _reconcile_stale_cmds.register(catalog)
 _purge_trash_cmds.register(catalog)
 _gc_audit_cmds.register(catalog)
 _recovery_cmds.register(catalog)
+_trash_cmds.register(catalog)
 
 
 @catalog.command("init")
@@ -777,19 +780,22 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
 
     Accepts a tumbler or title. Prompts for confirmation unless -y is passed.
     The document is soft-tombstoned (``deleted_at`` stamped) — its manifest
-    and T3 chunks are NOT cascaded (nexus-3ck2g: preserves the manual-restore
-    path, nexus-xavu7). On an engine carrying the nexus-3ck2g read-side
+    and T3 chunks are NOT cascaded (nexus-3ck2g: preserves the ``nx catalog
+    restore`` path, nexus-dkymw — the operator-facing caller nexus-xavu7
+    found missing). On an engine carrying the nexus-3ck2g read-side
     tombstone filter, the content stops appearing in search results
     immediately; on an older engine it stays fully searchable until that
-    filter is deployed. The manifest/T3 rows are physically reclaimed later,
-    via ``nx catalog purge-trash --no-dry-run --confirm``, and that reclaim
-    honors the grace window since catalog-026 (nexus-5da44; this docstring
-    described the earlier not-age-gated behaviour for two weeks after the
-    engine retired it — nexus-kcm6c): a tombstoned document inside
-    ``--older-than-days`` keeps its catalog row, manifest rows, and chunks
-    TOGETHER, so the manual-restore path (nexus-xavu7) stays open for the
-    whole window, and all three go together once it passes. Existing links remain — use 'nx catalog links
-    --type ...' to find orphaned links.
+    filter is deployed. Undo with ``nx catalog restore <tumbler>`` (see
+    ``nx catalog trash`` to list what is restorable) until the manifest/T3
+    rows are physically reclaimed via ``nx catalog purge-trash --no-dry-run
+    --confirm``. That reclaim honors the grace window since catalog-026
+    (nexus-5da44; this docstring described the earlier not-age-gated
+    behaviour for two weeks after the engine retired it — nexus-kcm6c): a
+    tombstoned document inside ``--older-than-days`` keeps its catalog row,
+    manifest rows, and chunks TOGETHER, so restore stays possible for the
+    whole window, and all three go together once it passes — after which
+    recovery means re-indexing, not restore. Existing links remain — use
+    'nx catalog links --type ...' to find orphaned links.
     """
     cat = _get_catalog()
     writer = _get_catalog_writer()
@@ -810,11 +816,13 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
         click.echo(
             f"Deleted: {t} ({entry.title}). Links preserved. "
             "Content stops appearing in search once the engine's tombstone "
-            "read-filter is deployed (nexus-3ck2g); physical reclaim happens "
-            "via 'nx catalog purge-trash', which since catalog-026 keeps "
-            "this doc's row, manifest, and chunks together for the whole "
-            "--older-than-days grace window — a manual restore stays "
-            "possible until the window passes, even across purge runs."
+            "read-filter is deployed (nexus-3ck2g). Undo with "
+            f"'nx catalog restore {t}' until 'nx catalog purge-trash' "
+            "physically reclaims it — since catalog-026 that keeps this "
+            "doc's row, manifest, and chunks together for the whole "
+            "--older-than-days grace window, so restore stays possible "
+            "until the window passes; after that, recovery means "
+            "re-indexing."
         )
     else:
         click.echo(f"Not found: {t}")

@@ -2261,6 +2261,55 @@ public final class CatalogRepository {
     }
 
     /**
+     * Restore a tombstoned document by tumbler (nexus-dkymw — Sam's 2026-09-07
+     * ruling: bless tombstones as the recovery story rather than resurrecting
+     * RDR-106 Option A backups). {@code nexus.document_restore(tumbler text)}
+     * (catalog-003-soft-delete.xml, RDR-156 P1.2) has existed engine-side since
+     * that changeset with no caller anywhere in the stack — this method and
+     * {@code POST /v1/catalog/restore} are that caller, the same "SQL function
+     * with no route" gap {@link #purgeTrash}/{@code nexus.purge_trash} closed
+     * for the reclaim side (nexus-3ck2g).
+     *
+     * <p>Clears {@code deleted_at} (sets it to {@code NULL}), making the
+     * document live again. Mirrors {@link #deleteDocument}'s direct-jOOQ-DSL
+     * shape rather than invoking the plpgsql function via a generated {@code
+     * Routines} call — {@link #deleteDocument} already established that the
+     * Java-side tombstone writer re-implements the SQL function's predicate
+     * rather than delegating to it, and this keeps the trash/restore pair
+     * symmetric.
+     *
+     * <p>The {@code AND deleted_at IS NOT NULL} guard is idempotent in the
+     * OPPOSITE direction from {@link #deleteDocument}'s own {@code
+     * DELETED_AT.isNull()} guard: restoring an already-live document, an
+     * unknown tumbler, or a tombstone that {@link #purgeTrash} has already
+     * physically reclaimed (nothing left to clear — see that method's
+     * grace-window contract) is all a no-op, returning 0 rather than
+     * resurrecting a row that was never tombstoned or no longer exists.
+     *
+     * @return 1 if restored, 0 if not found, already live, or purged
+     */
+    // TOMBSTONE-EXEMPT (nexus-dkymw): this method's DELETED_AT.isNotNull()
+    // WHERE guard is the mirror image of deleteDocument's DELETED_AT.isNull()
+    // guard -- idempotency in the RESTORE direction, not the read-invisibility
+    // concern TombstoneFilterGateTest's scanDocAndChunkSites otherwise
+    // enforces. It is the SECOND sanctioned un-tombstone alongside
+    // upsertDocument's ON CONFLICT arm (nexus-mqd6t Hal ruling), this one
+    // reachable via an explicit operator verb rather than re-registration.
+    // scanSetDeletedSites's self-guard token is the literal substring
+    // "DELETED_AT.isNull(", which "DELETED_AT.isNotNull(" does not contain,
+    // so this needs a named TOMBSTONE_EXEMPT entry (see that table) rather
+    // than passing on the literal-token self-guard deleteDocument gets for
+    // free.
+    public int restoreDocument(String tenant, String tumbler) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.update(CATALOG_DOCUMENTS)
+               .set(CATALOG_DOCUMENTS.DELETED_AT, (java.time.OffsetDateTime) null)
+               .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler).and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull()))
+               .execute()
+        );
+    }
+
+    /**
      * Per-dim stranded-chunk count (nexus-3ck2g E3) — the SELECT-only mirror of
      * {@code nexus.purge_trash}'s Step 1-3 DELETE predicate. As of nexus-erwvd this
      * mirrors catalog-026-purge-trash-chunk-age.xml's grace-window-scoped predicate
@@ -2303,6 +2352,26 @@ public final class CatalogRepository {
     // plan evidence and the FK-dependent equivalence argument.
     private static long strandedChunkCount(
             DSLContext ctx, String tenant, DimTables.ChunkTable ch, int olderThanDays) {
+        return strandedChunkCount(ctx, tenant, ch, olderThanDays, null);
+    }
+
+    /**
+     * nexus-zewg3: {@code collection}-scoping overload of {@link
+     * #strandedChunkCount(DSLContext, String, DimTables.ChunkTable, int)}. Restricts the
+     * OUTPUT rows to chunks physically located in {@code collection} ({@code null} keeps
+     * the original tenant-wide behavior, the 4-arg overload above) while leaving the
+     * {@code hasManifest}/{@code hasProtectingManifest} predicates completely unscoped —
+     * both still match a manifest row in ANY collection, exactly like {@code
+     * nexus.purge_trash}'s own chunk-sweep anti-join, which never joins on collection at
+     * all. This is deliberate: the whole point of the collection filter here is to
+     * attribute a row to a REPORT bucket ("this chunk lives in collection X"), never to
+     * change whether that row counts as stranded — that decision must stay identical to
+     * what an unscoped call (and the real DELETE) would make, or a report scoped to one
+     * collection could disagree with what {@code purgeTrash} actually reclaims (the
+     * nexus-zewg3 critique's Significant 1 gap in the FIRST, rejected client-side cut).
+     */
+    private static long strandedChunkCount(
+            DSLContext ctx, String tenant, DimTables.ChunkTable ch, int olderThanDays, String collection) {
         // nexus-erwvd: same server-side, olderThanInterval-derived threshold expression
         // agedTombstoneCount uses (nexus-ff85q) — identical dialect, identical clock, no
         // second Java-computed cutoff to drift against the SQL function's own NOW() call.
@@ -2320,8 +2389,7 @@ public final class CatalogRepository {
                       .and(CHK_CHASH_HEX.eq(ch.chash()))
                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()
                            .or(CATALOG_DOCUMENTS.DELETED_AT.gt(threshold)))));
-        Long count = ctx.selectCount().from(ch.table())
-            .where(ch.tenantId().eq(tenant)
+        Condition where = ch.tenantId().eq(tenant)
                    // RDR-191 D1 hazard: ch.table() is now the SAME physical
                    // nexus.chunks for all three dims -- table membership no
                    // longer implies dim. Without this guard, all three
@@ -2330,7 +2398,12 @@ public final class CatalogRepository {
                    // their own per-dim slice (the callers sum them, so a
                    // missed guard here silently triples the reported total).
                    .and(ch.embedding().isNotNull())
-                   .and(hasManifest).and(hasProtectingManifest.not()))
+                   .and(hasManifest).and(hasProtectingManifest.not());
+        if (collection != null) {
+            where = where.and(ch.collection().eq(collection));
+        }
+        Long count = ctx.selectCount().from(ch.table())
+            .where(where)
             .fetchOne(0, Long.class);
         return count != null ? count : 0L;
     }
@@ -2419,6 +2492,56 @@ public final class CatalogRepository {
             out.put("chunks_1024_stranded", strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(1024), olderThanDays));
             return out;
         });
+    }
+
+    /**
+     * Tombstone-protected chunk count for a collection (nexus-zewg3, follow-up to
+     * nexus-dkymw's alive-set ruling). {@code chashesForCollection}'s alive-set no
+     * longer excludes a tombstoned document's chashes (Sam's 2026-09-07 ruling), so
+     * {@code nx t3 gc}'s orphan sweep now leaves a chash referenced ONLY by a pending
+     * tombstone untouched — it is not garbage, but it is also not something {@code nx
+     * t3 gc} will ever reclaim; only {@code nexus.purge_trash}'s own chunk sweep, once
+     * the tombstone ages past its {@code --older-than-days} window, does that. An
+     * operator reading {@code nx t3 gc}'s report has no way to tell "kept alive by a
+     * live document" from "kept alive only by a tombstone nobody will purge for weeks"
+     * without this count.
+     *
+     * <p>Reuses {@link #strandedChunkCount}'s exact anti-join — the SAME predicate
+     * {@code nexus.purge_trash}'s own chunk-sweep DELETE uses, tenant-wide,
+     * collection-blind on the manifest side — called with {@code olderThanDays=0} so
+     * {@code hasProtectingManifest} collapses to "referenced by a LIVE document's
+     * manifest row" only (a tombstone's {@code deleted_at} is always at or before the
+     * instant this query runs, so {@code deleted_at > NOW() - 0 days} is false for
+     * every real tombstone; see {@link #agedThreshold}). That is deliberate, not an
+     * arbitrary choice of window: {@code nx t3 gc}'s alive-set itself is NOT
+     * grace-window-aware (it does not filter {@code deleted_at} at all, per the
+     * {@code chashesForCollection} javadoc above), so "tombstone-protected" here means
+     * "held alive by a tombstone of ANY age, whether or not that tombstone has yet
+     * cleared whatever {@code --older-than-days} value a future {@code purge_trash}
+     * call is given" — exactly the report line's own wording ("once past its
+     * --older-than-days window").
+     *
+     * <p>The collection filter is OUTPUT-side only (see the collection-scoping
+     * overload's own javadoc): it restricts which physical chunk rows are counted,
+     * never which manifest rows can protect them — a chash tombstoned in one
+     * collection but live-referenced from a document in ANOTHER collection is
+     * correctly excluded here (0 contribution), matching what {@code purge_trash}
+     * itself will actually do (never reclaim it, since its own predicate is equally
+     * collection-blind) — the exact cross-collection gap the FIRST, client-side-derived
+     * cut of nexus-zewg3 could not close (critique T2 nexus/critique-nexus-zewg3
+     * Significant 1).
+     *
+     * <p>One indexed SQL query per dim (three total, summed) inside a single
+     * transaction — cheaper than the rejected client-side cut's tenant-wide {@code
+     * list_trash} page-through plus a full-collection {@code get_manifests} pass, and
+     * it can never disagree with {@code purge_trash}'s own predicate because it IS
+     * that predicate (Significant 2 of the same critique).
+     */
+    public long tombstoneProtectedChunkCount(String tenant, String collection) {
+        return tenantScope.withTenant(tenant, ctx ->
+            strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(384), 0, collection)
+            + strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(768), 0, collection)
+            + strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(1024), 0, collection));
     }
 
     /**
@@ -2744,6 +2867,48 @@ public final class CatalogRepository {
             ctx.selectCount().from(CATALOG_DOCUMENTS)
                .where(CATALOG_DOCUMENTS.DELETED_AT.isNull())
                .fetchOne(0, Long.class)
+        );
+    }
+
+    /**
+     * GET /v1/catalog/trash (nexus-dkymw) — this tenant's tombstoned
+     * documents, newest-tombstoned first. The read-only counterpart to
+     * {@link #restoreDocument}: lets an operator see what is restorable
+     * (and its {@code deleted_at} age relative to whatever {@code
+     * --older-than-days} they intend to purge with) before calling
+     * {@code nx catalog restore}. No {@code purge_eligible_at} field —
+     * {@code nexus.purge_trash}'s grace window is an operator-supplied
+     * {@code older_than_days} argument at PURGE time (see {@link
+     * #purgeTrash}), not a stored per-row or per-tenant configuration
+     * value, so there is no fixed horizon this listing could stamp onto
+     * a row in advance.
+     */
+    // TOMBSTONE-EXEMPT (nexus-dkymw): same rationale as agedTombstoneCount
+    // below (nexus-3ck2g E3) -- this read's whole PURPOSE is listing the
+    // TOMBSTONED population itself (deleted_at IS NOT NULL), the inverse of
+    // every other CATALOG_DOCUMENTS read this gate polices, which must
+    // EXCLUDE tombstones.
+    public List<Map<String, Object>> listTrash(String tenant, int limit, int offset) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
+                       CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CORPUS,
+                       CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.DELETED_AT)
+               .from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull()))
+               .orderBy(CATALOG_DOCUMENTS.DELETED_AT.desc())
+               .limit(limit <= 0 ? 200 : limit)
+               .offset(offset)
+               .fetch()
+               .map(r -> {
+                   Map<String, Object> m = new LinkedHashMap<>();
+                   m.put("tumbler", r.get(CATALOG_DOCUMENTS.TUMBLER));
+                   m.put("title", r.get(CATALOG_DOCUMENTS.TITLE));
+                   m.put("physical_collection", r.get(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION));
+                   m.put("corpus", r.get(CATALOG_DOCUMENTS.CORPUS));
+                   m.put("content_type", r.get(CATALOG_DOCUMENTS.CONTENT_TYPE));
+                   m.put("deleted_at", r.get(CATALOG_DOCUMENTS.DELETED_AT));
+                   return m;
+               })
         );
     }
 
@@ -5728,11 +5893,52 @@ public final class CatalogRepository {
     /**
      * Get chashes for a physical_collection via manifest join.
      *
-     * <p>nexus-mqd6t BUG 1: this is the T3 GC ALIVE-SET (commands/t3.py). It
-     * joined {@code catalog_documents} but filtered only on
-     * {@code physical_collection}, so a tombstoned document's chunks stayed in
-     * the returned set and {@code nx t3 gc} treated their vectors as still
-     * referenced — a permanent, silent under-collection.
+     * <p>This is the T3 GC ALIVE-SET for the {@code nx t3 gc} CLI verb
+     * ({@code commands/t3.py}'s {@code gc_cmd}), which diffs T3 chunk chashes
+     * against this exact returned set to decide which chunks are orphan. It
+     * is NOT the indexer's own orphan-quarantine prune ({@code indexer.py}'s
+     * {@code _prune_deleted_files}): that path's actual delete decision runs
+     * through the server-side anti-join {@code nexus.gc_quarantine_orphans}
+     * (catalog-023 / vectors-005), which checks {@code
+     * catalog_document_chunks} row EXISTENCE only and never joins {@code
+     * deleted_at} — the client-side fallback that used to consult this
+     * method for orphan classification there was retired at RDR-191 Phase 6
+     * (2026-08-15, nexus-o8dil.33); today {@code indexer.py} calls this
+     * method only as an empty-manifest skip guard (nexus-oqku), never to
+     * classify a single chunk. nexus-mqd6t BUG 1 originally found this
+     * joined {@code catalog_documents} but filtered only on {@code
+     * physical_collection}, so a tombstoned document's chunks stayed in the
+     * returned set and {@code nx t3 gc} treated their vectors as still
+     * referenced — a permanent, silent under-collection. The fix at the time
+     * was a {@code DELETED_AT.isNull()} filter (Hal ruling, mqd6t).
+     *
+     * <p><b>Sam's 2026-09-07 ruling on nexus-dkymw supersedes that filter
+     * for THIS ONE READ.</b> catalog-026 later made the tombstone-to-purge
+     * window the recovery contract ({@code nx catalog restore}), and this
+     * alive-set is a GC INPUT, not a read surface — excluding a tombstoned
+     * document here let {@code nx t3 gc}'s own clock (chunk {@code
+     * indexed_at} vs {@code --orphan-window}, independent of purge-trash's
+     * {@code --older-than-days}) reap a just-tombstoned document's chunks
+     * inside the recovery window, so a later {@code nx catalog restore}
+     * resurrected an empty shell. The indexer's own prune was never at this
+     * risk — see above, it already tolerates tombstones by construction
+     * (a tombstoned document's manifest row still exists, deleted or not,
+     * so the existence-only anti-join never orphaned its chunks either
+     * way). The {@code DELETED_AT} filter is DROPPED here: a
+     * tombstoned-but-not-yet-purged document's chashes stay in the
+     * alive-set until {@code nexus.purge_trash} physically reclaims the
+     * {@code catalog_documents} row (at which point the join itself yields
+     * nothing for it — no explicit tombstone check is needed post-purge). A
+     * chash orphaned from every LIVE document's manifest but still held by
+     * a tombstone's manifest row is reclaimed by {@code purge_trash}'s own
+     * chunk sweep once the tombstone ages past its window — never by
+     * {@code nx t3 gc}, which this fix now keeps hands off it until then.
+     * This does NOT reopen mqd6t's read-invisibility concern: tombstoned
+     * content still does not surface in search results or {@code
+     * getManifest} ({@code liveParentDoc}/{@code liveDocument} filters,
+     * untouched) — only this GC-alive-set read changed. See
+     * TombstoneFilterGateTest's {@code TOMBSTONE_EXEMPT} entry for this
+     * method.
      */
     public Set<String> chashesForCollection(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
@@ -5740,8 +5946,7 @@ public final class CatalogRepository {
                           .from(CATALOG_DOCUMENT_CHUNKS)
                           .join(CATALOG_DOCUMENTS).on(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CATALOG_DOCUMENTS.TENANT_ID)
                                            .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(CATALOG_DOCUMENTS.TUMBLER)))
-                          .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection)
-                                 .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                          .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection))
                           .fetch();
             Set<String> result = new LinkedHashSet<>();
             for (var r : rows) result.add(r.value1());
@@ -6182,7 +6387,12 @@ public final class CatalogRepository {
      * public} for exactly that reachability; the method's own behavior is unchanged.
      */
     public static void deferManifestChunkFk(DSLContext ctx) {
-        ctx.execute("SET CONSTRAINTS fk_catalog_chunks_chunk DEFERRED");
+        // nexus-cbo4a batch 9 item 1 (Sam's directive, nexus-zrcj7): the constraint
+        // name here was UNQUALIFIED, so PostgreSQL resolved it via search_path --
+        // exactly the reliance batch 9 item 0/1's role-level search_path deletion
+        // was meant to surface. Schema-qualified now; there is no unqualified form
+        // once nexus_svc's session carries no search_path at all.
+        ctx.execute("SET CONSTRAINTS nexus.fk_catalog_chunks_chunk DEFERRED");
     }
 
     private Map<String, Integer> deleteCollectionTxn(String tenant, String name) {

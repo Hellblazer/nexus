@@ -8,9 +8,17 @@ import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.StagingPromoteOps;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.jooq.binding.Vector;
+import dev.nexus.service.jooq.binding.VectorBinding;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.SQLDialect;
+import org.jooq.Table;
+import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
@@ -23,11 +31,17 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.Connection;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -170,10 +184,10 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
             // The two gc_* function EXECUTE grants are not part of
             // bootstrapServiceRole's fixed grant set (nexus-cbo4a batch 1a) --
             // kept as explicit grants.
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.gc_quarantine_orphans(int, text, text, text, text, int) TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.gc_expire_quarantine(int, text, text, text, text, float8, int, boolean) TO " + SVC_ROLE);
+            PgContainerHelper.grantExecuteOnFunction(su,
+                "nexus.gc_quarantine_orphans(int, text, text, text, text, int)", SVC_ROLE);
+            PgContainerHelper.grantExecuteOnFunction(su,
+                "nexus.gc_expire_quarantine(int, text, text, text, text, float8, int, boolean)", SVC_ROLE);
         }
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
@@ -211,6 +225,27 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         public void close() { }
     }
 
+    // ── staging.* fixed-shape typed handles (nexus-cbo4a batch 11) ───────────
+    // staging.* carries no generated jOOQ Table (codegen's <schemata> covers only
+    // nexus/t1) -- same DSL.field(DSL.name(col), Type.class) house pattern
+    // StagingHandler/StagingPromoteOps/StagingPromoteOpsIntegrationTest already use.
+
+    private static final Table<?> STAGING_CHUNKS = DSL.table(DSL.name("staging", "chunks"));
+    private static final Field<String> SC_TENANT_ID = DSL.field(DSL.name("tenant_id"), String.class);
+    private static final Field<String> SC_COLLECTION = DSL.field(DSL.name("collection"), String.class);
+    private static final Field<Integer> SC_DIM = DSL.field(DSL.name("dim"), Integer.class);
+    private static final Field<String> SC_LEGACY_REF = DSL.field(DSL.name("legacy_ref"), String.class);
+    private static final Field<String> SC_CHUNK_TEXT = DSL.field(DSL.name("chunk_text"), String.class);
+    private static final Field<Vector> SC_EMBEDDING = DSL.field(DSL.name("embedding"),
+        SQLDataType.OTHER.asConvertedDataType(new VectorBinding()));
+    private static final Field<String> SC_MODEL = DSL.field(DSL.name("model"), String.class);
+
+    private static final Table<?> STAGING_DOCUMENT_CHUNKS = DSL.table(DSL.name("staging", "document_chunks"));
+    private static final Field<String> SDC_TENANT_ID = DSL.field(DSL.name("tenant_id"), String.class);
+    private static final Field<String> SDC_DOC_ID = DSL.field(DSL.name("doc_id"), String.class);
+    private static final Field<Integer> SDC_POSITION = DSL.field(DSL.name("position"), Integer.class);
+    private static final Field<String> SDC_CHASH = DSL.field(DSL.name("chash"), String.class);
+
     // ── THE TRIPWIRE ITSELF ───────────────────────────────────────────────
 
     /**
@@ -224,20 +259,20 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
      * SharedCluster.acquireDatabase()} clones a fresh database per test
      * class, so nothing outside this class's own tests can contribute rows.
      */
-    private int globalDanglingCount(Connection su) throws Exception {
-        try (var st = su.createStatement()) {
-            var rs = st.executeQuery(
-                "SELECT COUNT(*) FROM nexus.catalog_document_chunks m "
-                + "JOIN nexus.catalog_documents d "
-                + "  ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id "
-                + "WHERE d.deleted_at IS NULL "
-                // RDR-191 Phase 4: chunks_384/768/1024 unified into ONE nexus.chunks --
-                // one NOT EXISTS now covers what three ANDed ones did.
-                + "AND NOT EXISTS (SELECT 1 FROM " + DimTables.CHUNKS_TABLE_NAME + " c "
-                + "  WHERE c.tenant_id = m.tenant_id AND c.collection = m.collection AND c.chash = m.chash)");
-            rs.next();
-            return rs.getInt(1);
-        }
+    private int globalDanglingCount(Connection su) {
+        var m = CATALOG_DOCUMENT_CHUNKS.as("m");
+        var d = CATALOG_DOCUMENTS.as("d");
+        var c = CHUNKS.as("c");
+        return DSL.using(su, SQLDialect.POSTGRES)
+            .selectCount()
+            .from(m)
+            .join(d).on(d.TENANT_ID.eq(m.TENANT_ID)).and(d.TUMBLER.eq(m.DOC_ID))
+            .where(d.DELETED_AT.isNull())
+            // RDR-191 Phase 4: chunks_384/768/1024 unified into ONE nexus.chunks --
+            // one NOT EXISTS now covers what three ANDed ones did.
+            .andNotExists(DSL.selectOne().from(c)
+                .where(c.TENANT_ID.eq(m.TENANT_ID)).and(c.COLLECTION.eq(m.COLLECTION)).and(c.CHASH.eq(m.CHASH)))
+            .fetchOne(0, Integer.class);
     }
 
     /**
@@ -255,19 +290,19 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
      * asserting against this shape would be asserting the WRONG definition
      * for GATE-2's criterion.
      */
-    private int globalDanglingCountAnyOwnerState(Connection su) throws Exception {
-        try (var st = su.createStatement()) {
-            var rs = st.executeQuery(
-                "SELECT COUNT(*) FROM nexus.catalog_document_chunks m "
-                + "JOIN nexus.catalog_documents d "
-                + "  ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id "
-                // RDR-191 Phase 4: chunks_384/768/1024 unified into ONE nexus.chunks --
-                // one NOT EXISTS now covers what three ANDed ones did.
-                + "WHERE NOT EXISTS (SELECT 1 FROM " + DimTables.CHUNKS_TABLE_NAME + " c "
-                + "  WHERE c.tenant_id = m.tenant_id AND c.collection = m.collection AND c.chash = m.chash)");
-            rs.next();
-            return rs.getInt(1);
-        }
+    private int globalDanglingCountAnyOwnerState(Connection su) {
+        var m = CATALOG_DOCUMENT_CHUNKS.as("m");
+        var d = CATALOG_DOCUMENTS.as("d");
+        var c = CHUNKS.as("c");
+        return DSL.using(su, SQLDialect.POSTGRES)
+            .selectCount()
+            .from(m)
+            .join(d).on(d.TENANT_ID.eq(m.TENANT_ID)).and(d.TUMBLER.eq(m.DOC_ID))
+            // RDR-191 Phase 4: chunks_384/768/1024 unified into ONE nexus.chunks --
+            // one NOT EXISTS now covers what three ANDed ones did.
+            .whereNotExists(DSL.selectOne().from(c)
+                .where(c.TENANT_ID.eq(m.TENANT_ID)).and(c.COLLECTION.eq(m.COLLECTION)).and(c.CHASH.eq(m.CHASH)))
+            .fetchOne(0, Integer.class);
     }
 
     // ── fixture helpers ───────────────────────────────────────────────────
@@ -288,6 +323,17 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         return IntStream.range(0, dim).mapToObj(i -> "0.1").collect(Collectors.joining(",", "'[", "]'"));
     }
 
+    /** Typed-DSL counterpart to {@link #vec} — every component set to {@code value}
+     *  (nexus-cbo4a batch 11), for {@link VectorBinding}-backed inserts against a
+     *  generated/{@code STAGING_CHUNKS}-style {@code embedding}/{@code
+     *  embedding_&lt;dim&gt;} field, replacing the quoted {@code '[0.1,...]'::nexus.vector}
+     *  literal {@link #vec} builds for raw SQL. */
+    private static Vector allValueVector(int dim, float value) {
+        float[] f = new float[dim];
+        java.util.Arrays.fill(f, value);
+        return Vector.of(f);
+    }
+
     /**
      * A 32-char literal (not a real hex-decoded digest) used ONLY for raw-SQL
      * fixtures where both the {@code chunks_*} row and the manifest row are
@@ -300,19 +346,30 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         return (seed.replaceAll("[^0-9a-f]", "a") + "0".repeat(32)).substring(0, 32);
     }
 
-    private static int rows(Connection su, String sql) throws Exception {
-        var rs = su.createStatement().executeQuery(sql);
-        rs.next();
-        return rs.getInt(1);
+    /** Runs {@code query} against a raw superuser {@link Connection} and returns its
+     *  {@code int} result (nexus-cbo4a batch 11 -- retires the {@code rows(Connection,
+     *  String)} raw-SQL wrapper the same way {@code StagingPromoteOpsIntegrationTest}'s
+     *  {@code count(String sql)} was retired in this same batch). */
+    private static int rows(Connection su, Function<DSLContext, ? extends Number> query) {
+        return query.apply(DSL.using(su, SQLDialect.POSTGRES)).intValue();
+    }
+
+    /** {@code CHUNKS.embedding_<dim>} resolved by name, mirroring {@code
+     *  StagingPromoteOps}'s own {@code DimTables.embeddingColumn}-driven lookup. */
+    @SuppressWarnings("unchecked")
+    private static Field<Vector> embeddingColumn(int dim) {
+        return (Field<Vector>) CHUNKS.field(DimTables.embeddingColumn(dim));
     }
 
     /** RDR-191 Phase 4: chunks_<dim> unified into nexus.chunks -- (collection, chash)
      *  is the full PK, so no dim/embedding-column filter is needed here. */
-    private static String chunkText(Connection su, String collection, String chashHex) throws Exception {
-        var rs = su.createStatement().executeQuery(
-            "SELECT chunk_text FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection
-            + "' AND chash = decode('" + chashHex + "', 'hex')");
-        return rs.next() ? rs.getString(1) : null;
+    private static String chunkText(Connection su, String collection, String chashHex) {
+        return DSL.using(su, SQLDialect.POSTGRES)
+            .select(CHUNKS.CHUNK_TEXT)
+            .from(CHUNKS)
+            .where(CHUNKS.COLLECTION.eq(collection))
+            .and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(chashHex)))
+            .fetchOne(CHUNKS.CHUNK_TEXT);
     }
 
     // ── Order 10: UPSERT arm — CatalogRepository.writeManifest ────────────
@@ -340,8 +397,9 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
             List.of(Map.of("position", 0, "chash", chash, "chunk_index", 0)));
 
         try (Connection su = pg.createConnection("")) {
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_document_chunks "
-                + "WHERE doc_id = 'gate2-upsert-doc'"))
+            assertThat(rows(su, ctx -> ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("gate2-upsert-doc"))
+                .fetchOne(0, Integer.class)))
                 .as("precondition: the upsert path did not produce a comparable manifest row "
                     + "— the anti-join below would pass on an empty set")
                 .isGreaterThan(0);
@@ -360,10 +418,10 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         String canonical = digestHex(text);
 
         scope.withTenant(TENANT, ctx -> {
-            ctx.execute("INSERT INTO staging.chunks "
-                + "(tenant_id, collection, dim, legacy_ref, chunk_text, embedding, model) "
-                + "VALUES (?, ?, 768, ?, ?, " + vec(768) + "::nexus.vector, 'bge-768')",
-                TENANT, coll, canonical, text);
+            ctx.insertInto(STAGING_CHUNKS, SC_TENANT_ID, SC_COLLECTION, SC_DIM, SC_LEGACY_REF, SC_CHUNK_TEXT,
+                           SC_EMBEDDING, SC_MODEL)
+               .values(TENANT, coll, 768, canonical, text, allValueVector(768, 0.1f), "bge-768")
+               .execute();
             return null;
         });
         Map<String, Object> promoted = promoteOps.promoteCollection(TENANT, coll, 768);
@@ -377,8 +435,9 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
             "corpus", "knowledge",
             "physical_collection", coll));
         scope.withTenant(TENANT, ctx -> {
-            ctx.execute("INSERT INTO staging.document_chunks (tenant_id, doc_id, position, chash) "
-                + "VALUES (?, 'gate2-promote-doc', 0, ?)", TENANT, canonical);
+            ctx.insertInto(STAGING_DOCUMENT_CHUNKS, SDC_TENANT_ID, SDC_DOC_ID, SDC_POSITION, SDC_CHASH)
+               .values(TENANT, "gate2-promote-doc", 0, canonical)
+               .execute();
             return null;
         });
 
@@ -405,28 +464,33 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES ('" + TENANT + "', '" + collHome + "')");
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES ('" + TENANT + "', '" + collDel + "')");
+            var suCtx = DSL.using(su, SQLDialect.POSTGRES);
+            suCtx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+                 .values(TENANT, collHome).execute();
+            suCtx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+                 .values(TENANT, collDel).execute();
             // Document homed in collHome; its manifest row's OWN denormalized
             // `collection` names collDel (F8c reclassification-without-reindex
             // drift shape) — reachable by NEITHER scope symmetrically before
             // the F8d fix.
-            su.createStatement().execute("INSERT INTO nexus.catalog_documents "
-                + "(tenant_id, tumbler, title, physical_collection) "
-                + "VALUES ('" + TENANT + "', 'gate2-del-doc', 'gate2 del doc', '" + collHome + "')");
-            su.createStatement().execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " "
-                + "(tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
-                + "VALUES ('" + TENANT + "', '" + collDel + "', '" + chash + "', 'text', "
-                + vec(1024) + "::nexus.vector)");
-            su.createStatement().execute("INSERT INTO nexus.catalog_document_chunks "
-                + "(tenant_id, doc_id, position, chash, collection) "
-                + "VALUES ('" + TENANT + "', 'gate2-del-doc', 0, '" + chash + "', '" + collDel + "')");
+            suCtx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                             CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                 .values(TENANT, "gate2-del-doc", "gate2 del doc", collHome).execute();
+            suCtx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                             embeddingColumn(1024))
+                 .values(TENANT, collDel, chash.getBytes(StandardCharsets.US_ASCII), "text",
+                         allValueVector(1024, 0.1f))
+                 .execute();
+            suCtx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                             CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+                             CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                 .values(TENANT, "gate2-del-doc", 0, chash.getBytes(StandardCharsets.US_ASCII), collDel)
+                 .execute();
         }
         try (Connection su = pg.createConnection("")) {
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_document_chunks "
-                + "WHERE doc_id = 'gate2-del-doc'"))
+            assertThat(rows(su, ctx -> ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("gate2-del-doc"))
+                .fetchOne(0, Integer.class)))
                 .as("precondition: the asymmetry manifest row was actually seeded")
                 .isEqualTo(1);
         }
@@ -466,8 +530,9 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         catalogRepo.writeManifest(TENANT, "gate2-del-doc-a", coll, List.of());
 
         try (Connection su = pg.createConnection("")) {
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_document_chunks "
-                + "WHERE doc_id = 'gate2-del-doc-b'"))
+            assertThat(rows(su, ctx -> ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("gate2-del-doc-b"))
+                .fetchOne(0, Integer.class)))
                 .as("precondition: doc B's manifest still references the shared chash "
                     + "— the anti-join below would pass on an empty set")
                 .isEqualTo(1);
@@ -537,13 +602,16 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         catalogRepo.deleteDocument(TENANT, "gate2-del-tomb-doc-b");
 
         try (Connection su = pg.createConnection("")) {
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_document_chunks "
-                + "WHERE doc_id = 'gate2-del-tomb-doc-b'"))
+            assertThat(rows(su, ctx -> ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("gate2-del-tomb-doc-b"))
+                .fetchOne(0, Integer.class)))
                 .as("precondition: the tombstoned doc's manifest row still references the "
                     + "shared chash — soft-tombstone deliberately leaves it in place")
                 .isEqualTo(1);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_documents "
-                + "WHERE tumbler = 'gate2-del-tomb-doc-b' AND deleted_at IS NOT NULL"))
+            assertThat(rows(su, ctx -> ctx.selectCount().from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TUMBLER.eq("gate2-del-tomb-doc-b"))
+                .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull())
+                .fetchOne(0, Integer.class)))
                 .as("precondition: doc B is actually tombstoned").isEqualTo(1);
         }
 
@@ -696,16 +764,21 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES ('" + TENANT + "', '" + coll + "')");
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES ('" + TENANT + "', '" + quarantineColl + "')");
+            var suCtx = DSL.using(su, SQLDialect.POSTGRES);
+            suCtx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+                 .values(TENANT, coll).execute();
+            suCtx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+                 .values(TENANT, quarantineColl).execute();
             for (var pair : List.of(Map.entry(refChash, refContent), Map.entry(unrefChash, unrefContent))) {
-                su.createStatement().execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " "
-                    + "(tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ", metadata) VALUES ('"
-                    + TENANT + "', '" + quarantineColl + "', decode('" + pair.getKey() + "', 'hex'), '"
-                    + pair.getValue() + "', " + vec(1024) + "::nexus.vector, jsonb_build_object("
-                    + "'origin_collection', '" + coll + "', 'quarantined_at', '" + pastCutoff + "'))");
+                suCtx.insertInto(CHUNKS)
+                     .set(CHUNKS.TENANT_ID, TENANT)
+                     .set(CHUNKS.COLLECTION, quarantineColl)
+                     .set(CHUNKS.CHASH, HexFormat.of().parseHex(pair.getKey()))
+                     .set(CHUNKS.CHUNK_TEXT, pair.getValue())
+                     .set(embeddingColumn(1024), allValueVector(1024, 0.1f))
+                     .set(CHUNKS.METADATA, DSL.jsonbObject(DSL.jsonEntry("origin_collection", coll),
+                                                            DSL.jsonEntry("quarantined_at", pastCutoff)))
+                     .execute();
             }
         }
         catalogRepo.upsertDocument(TENANT, Map.of(
@@ -720,18 +793,15 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         // shape) so it is live again (unvalidated) for the rest of this test.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+            PgContainerHelper.dropConstraint(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk");
         }
         catalogRepo.writeManifest(TENANT, "gate2-gc-expire-doc", coll,
             List.of(Map.of("position", 0, "chash", refChash, "chunk_index", 0)));
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks "
-                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
-                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+            PgContainerHelper.addFkNotValidComposite3(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk",
+                "collection", "chash", CHUNKS, "collection", "chash",
+                "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
         }
         // unrefChash deliberately has NO manifest row anywhere.
 
@@ -836,11 +906,12 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES ('" + TENANT + "', '" + coll + "')");
-            su.createStatement().execute("INSERT INTO nexus.catalog_documents "
-                + "(tenant_id, tumbler, title, physical_collection) VALUES "
-                + "('" + TENANT + "', 'gate2-control-tombstone-doc', 'control tombstone doc', '" + coll + "')");
+            var suCtx = DSL.using(su, SQLDialect.POSTGRES);
+            suCtx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+                 .values(TENANT, coll).execute();
+            suCtx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                             CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                 .values(TENANT, "gate2-control-tombstone-doc", "control tombstone doc", coll).execute();
             // Genuinely a class-(b) ghost: ghostChash resolves in NO chunk
             // table anywhere (same construction as Order 90's class-(a)
             // ghost) — the owner below is tombstoned, turning this into the
@@ -850,16 +921,16 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
             // is exactly this test's SUBJECT, so bypass the FK locally: drop
             // the constraint, insert, then re-add it NOT VALID (catalog-029-0's
             // exact shape) so it is live again (unvalidated) afterward.
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
-            su.createStatement().execute("INSERT INTO nexus.catalog_document_chunks "
-                + "(tenant_id, doc_id, position, chash, collection) VALUES "
-                + "('" + TENANT + "', 'gate2-control-tombstone-doc', 0, '" + ghostChash + "', '" + coll + "')");
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks "
-                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
-                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+            PgContainerHelper.dropConstraint(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk");
+            suCtx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                             CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+                             CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                 .values(TENANT, "gate2-control-tombstone-doc", 0,
+                         ghostChash.getBytes(StandardCharsets.US_ASCII), coll)
+                 .execute();
+            PgContainerHelper.addFkNotValidComposite3(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk",
+                "collection", "chash", CHUNKS, "collection", "chash",
+                "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
         }
         // Real production tombstone path (CatalogRepository.deleteDocument),
         // not a raw UPDATE — matches Order 45's own discipline. Soft
@@ -867,14 +938,17 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         catalogRepo.deleteDocument(TENANT, "gate2-control-tombstone-doc");
 
         try (Connection su = pg.createConnection("")) {
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_document_chunks "
-                + "WHERE doc_id = 'gate2-control-tombstone-doc'"))
+            assertThat(rows(su, ctx -> ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("gate2-control-tombstone-doc"))
+                .fetchOne(0, Integer.class)))
                 .as("precondition: the tombstoned owner's manifest row still exists — "
                     + "soft-tombstone deliberately leaves it in place — the assertions "
                     + "below would pass vacuously on an empty set otherwise")
                 .isEqualTo(1);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_documents "
-                + "WHERE tumbler = 'gate2-control-tombstone-doc' AND deleted_at IS NOT NULL"))
+            assertThat(rows(su, ctx -> ctx.selectCount().from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TUMBLER.eq("gate2-control-tombstone-doc"))
+                .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull())
+                .fetchOne(0, Integer.class)))
                 .as("precondition: the owner is actually tombstoned").isEqualTo(1);
 
             assertThat(globalDanglingCount(su))
@@ -924,24 +998,28 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES ('" + TENANT + "', '" + coll + "')");
+            var suCtx = DSL.using(su, SQLDialect.POSTGRES);
+            suCtx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+                 .values(TENANT, coll).execute();
             // Correlation pin: one unrelated LIVE chunk per dim (three distinct rows,
             // one per embedding_<dim> column, RDR-191 unified table), in the SAME
             // collection, so the anti-join cannot pass by "nexus.chunks happens to
             // be empty".
-            su.createStatement().execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " "
-                + "(tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") VALUES "
-                + "('" + TENANT + "', '" + coll + "', '" + pin384 + "', 'pin', " + vec(384) + "::nexus.vector)");
-            su.createStatement().execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " "
-                + "(tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(768) + ") VALUES "
-                + "('" + TENANT + "', '" + coll + "', '" + pin768 + "', 'pin', " + vec(768) + "::nexus.vector)");
-            su.createStatement().execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " "
-                + "(tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") VALUES "
-                + "('" + TENANT + "', '" + coll + "', '" + pin1024 + "', 'pin', " + vec(1024) + "::nexus.vector)");
-            su.createStatement().execute("INSERT INTO nexus.catalog_documents "
-                + "(tenant_id, tumbler, title, physical_collection) VALUES "
-                + "('" + TENANT + "', 'gate2-control-doc', 'control doc', '" + coll + "')");
+            suCtx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                             embeddingColumn(384))
+                 .values(TENANT, coll, pin384.getBytes(StandardCharsets.US_ASCII), "pin", allValueVector(384, 0.1f))
+                 .execute();
+            suCtx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                             embeddingColumn(768))
+                 .values(TENANT, coll, pin768.getBytes(StandardCharsets.US_ASCII), "pin", allValueVector(768, 0.1f))
+                 .execute();
+            suCtx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                             embeddingColumn(1024))
+                 .values(TENANT, coll, pin1024.getBytes(StandardCharsets.US_ASCII), "pin", allValueVector(1024, 0.1f))
+                 .execute();
+            suCtx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                             CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                 .values(TENANT, "gate2-control-doc", "control doc", coll).execute();
             // Genuinely dangling: ghostChash resolves in NO chunk table, and
             // the owning document is LIVE (no deleted_at set above).
             // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now
@@ -949,16 +1027,15 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
             // is exactly this test's SUBJECT, so bypass the FK locally: drop
             // the constraint, insert, then re-add it NOT VALID (catalog-029-0's
             // exact shape) so it is live again (unvalidated) afterward.
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
-            su.createStatement().execute("INSERT INTO nexus.catalog_document_chunks "
-                + "(tenant_id, doc_id, position, chash, collection) VALUES "
-                + "('" + TENANT + "', 'gate2-control-doc', 0, '" + ghostChash + "', '" + coll + "')");
-            su.createStatement().execute(
-                "ALTER TABLE nexus.catalog_document_chunks "
-                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
-                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+            PgContainerHelper.dropConstraint(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk");
+            suCtx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                             CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+                             CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                 .values(TENANT, "gate2-control-doc", 0, ghostChash.getBytes(StandardCharsets.US_ASCII), coll)
+                 .execute();
+            PgContainerHelper.addFkNotValidComposite3(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk",
+                "collection", "chash", CHUNKS, "collection", "chash",
+                "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
         }
 
         try (Connection su = pg.createConnection("")) {

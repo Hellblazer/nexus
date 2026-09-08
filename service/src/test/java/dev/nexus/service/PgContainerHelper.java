@@ -12,6 +12,7 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.jooq.test.Routines;
 import org.jooq.DSLContext;
 import org.jooq.Name;
@@ -28,6 +29,9 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 
 
@@ -255,25 +259,61 @@ public final class PgContainerHelper {
         // (the other two tiers exist for a NOSUPERUSER migrating role, which `su`
         // here is not).
         liquibase.update(new Contexts());
-        // Test-only schema objects (nexus_test.*), never part of the product changelog;
-        // the codegen-time counterpart is db.changelog-test-master.xml (see the pom's
-        // generate-jooq-test-sources execution).
+        installTestObjects(su);
+    }
+
+    /**
+     * Install the {@code nexus_test.*} schema objects (nexus-cbo4a batch 12) —
+     * hoisted out of {@link #applyProductSchema} so a caller that migrates the
+     * PRODUCT changelog a different way (e.g. via {@code SchemaMigrator.migrate}
+     * as the real non-superuser migrating role, rather than this class's own
+     * superuser-driven {@code applyProductSchema}) can still install the
+     * {@code drop_constraint}/{@code add_fk_not_valid}/{@code
+     * add_fk_not_valid_composite3}/{@code set_force_rls}/{@code
+     * grant_execute_on_function} test-lifecycle functions {@link #dropConstraint}
+     * and friends need. {@code nexus_test} is entirely separate from
+     * {@code nexus}/{@code staging}/{@code public} and inert with respect to
+     * product-schema migration testing — installing it changes nothing the
+     * product changelog walk can observe. Never part of the product changelog;
+     * the codegen-time counterpart is db.changelog-test-master.xml (see the
+     * pom's generate-jooq-test-sources execution).
+     *
+     * <p><b>ORDERING / OWNERSHIP CONTRACT (found the hard way in batch 12):</b>
+     * whichever role's Liquibase run creates {@code databasechangelog} first OWNS
+     * it. A test that later migrates the product changelog as a NON-superuser
+     * migrating role (SchemaMigratorIntegrationTest's aged-box walks) must call
+     * this through THAT role's own connection, never the superuser's, or the
+     * walk fails with "permission denied for table databasechangelog". Callers
+     * that migrate via {@link #applyProductSchema} (superuser throughout) can
+     * pass the same superuser connection, which is what {@code applyProductSchema}
+     * itself does. Pass the connection of the role that will run the product
+     * changelog on this database, whichever that is.
+     *
+     * @param conn connection of the role that will migrate the product changelog
+     *             on this database (the superuser for applyProductSchema-driven
+     *             tests; the migrating role for SchemaMigrator-driven tests)
+     */
+    public static void installTestObjects(Connection conn) throws Exception {
+        Database db = DatabaseFactory.getInstance().findCorrectDatabaseImplementation(new JdbcConnection(conn));
         new Liquibase("db/changelog-test/db.changelog-test-objects.xml",
             new ClassLoaderResourceAccessor(), db).update(new Contexts());
-        su.setAutoCommit(true);
+        conn.setAutoCommit(true);
     }
 
     /**
      * Bootstrap a test-local service role via the {@code db/changelog-test/
      * db.changelog-test-role.xml} test changelog (nexus-cbo4a batch 1a) — replaces
-     * the hand-rolled DO-block {@code CREATE ROLE}, schema/table/sequence
-     * {@code GRANT}s, and {@code ALTER ROLE ... SET search_path} that 84 test
-     * classes used to copy by hand. Creates {@code svcRole} (LOGIN, NOSUPERUSER,
-     * NOBYPASSRLS) if absent, redundantly/idempotently ensures {@code nexus_svc}
-     * exists too (see {@link #applyProductSchema}'s javadoc — always a no-op here
-     * in practice), grants {@code svcRole} the same {@code nexus}+{@code staging}
-     * DML/sequence access {@link #grantServiceSchemaAccess} used to hand-grant, and
-     * sets {@code svcRole}'s {@code search_path}.
+     * the hand-rolled DO-block {@code CREATE ROLE} and schema/table/sequence
+     * {@code GRANT}s that 84 test classes used to copy by hand. Creates
+     * {@code svcRole} (LOGIN, NOSUPERUSER, NOBYPASSRLS) if absent,
+     * redundantly/idempotently ensures {@code nexus_svc} exists too (see
+     * {@link #applyProductSchema}'s javadoc — always a no-op here in practice), and
+     * grants {@code svcRole} the same {@code nexus}+{@code staging} DML/sequence
+     * access {@link #grantServiceSchemaAccess} used to hand-grant. Deliberately does
+     * NOT set {@code svcRole}'s {@code search_path} (nexus-cbo4a batch 9 item 1,
+     * Sam's directive nexus-zrcj7): every legitimate query already goes through
+     * schema-qualified jOOQ generated Tables/Routines or a function-pinned
+     * {@code SET search_path} in the function definition itself.
      *
      * <p><b>Call AFTER {@link #applyProductSchema}</b> — the {@code GRANT ... ON ALL
      * TABLES}/{@code ON ALL SEQUENCES} statements inside the test changelog require
@@ -332,6 +372,141 @@ public final class PgContainerHelper {
             .values(TokenHashing.sha256Hex(token), tenant, label)
             .onConflictDoNothing()
             .execute();
+    }
+
+    /**
+     * Seed one {@code nexus.service_tokens} row with {@code scope}/{@code
+     * expires_at}/{@code revoked_at} set (nexus-cbo4a batch 9 item 1) — the overload
+     * {@link #seedServiceToken(DSLContext, String, String, String)} does not cover,
+     * for the sites that previously hand-rolled a wider column list via {@code
+     * prepareStatement}/{@code createStatement().execute}. {@code scope}/{@code
+     * expiresAt}/{@code revokedAt} are OMITTED from the insert (never set to a SQL
+     * NULL) when the argument is {@code null} — {@code scope} carries a {@code NOT
+     * NULL DEFAULT 'tenant'} CHECK constraint (service-tokens-003-scope-column.xml)
+     * that a literal null would violate, and the two timestamp columns are simply
+     * nullable-and-unset in that case, matching how a caller who never mentioned
+     * them in a hand-rolled column list behaved.
+     *
+     * @param dsl       a {@link DSLContext} over the same connection/role the schema
+     *                  was migrated under
+     * @param token     the raw bearer token to hash and store
+     * @param tenant    the tenant id to bind the token to
+     * @param label     the token's {@code service_tokens.label} value
+     * @param scope     {@code service_tokens.scope} ({@code root}/{@code tenant}/
+     *                  {@code mint}/{@code data}), or {@code null} to take the
+     *                  column default ({@code tenant})
+     * @param expiresAt {@code service_tokens.expires_at}, or {@code null} to leave
+     *                  it unset
+     * @param revokedAt {@code service_tokens.revoked_at}, or {@code null} to leave
+     *                  it unset
+     */
+    public static void seedServiceToken(DSLContext dsl, String token, String tenant, String label,
+                                         String scope, java.time.OffsetDateTime expiresAt,
+                                         java.time.OffsetDateTime revokedAt) {
+        var step = dsl.insertInto(SERVICE_TOKENS)
+            .set(SERVICE_TOKENS.TOKEN_HASH, TokenHashing.sha256Hex(token))
+            .set(SERVICE_TOKENS.TENANT_ID, tenant)
+            .set(SERVICE_TOKENS.LABEL, label);
+        if (scope != null) {
+            step = step.set(SERVICE_TOKENS.SCOPE, scope);
+        }
+        if (expiresAt != null) {
+            step = step.set(SERVICE_TOKENS.EXPIRES_AT, expiresAt);
+        }
+        if (revokedAt != null) {
+            step = step.set(SERVICE_TOKENS.REVOKED_AT, revokedAt);
+        }
+        step.onConflictDoNothing().execute();
+    }
+
+    /**
+     * Seed a minimal {@code nexus.catalog_collections} row via generated jOOQ DSL
+     * (nexus-cbo4a batch 10) — replaces the identical hand-rolled {@code INSERT INTO
+     * nexus.catalog_collections (tenant_id, name) VALUES (...) ON CONFLICT (tenant_id,
+     * name) DO NOTHING} that {@code CollectionRegistryFkTest} and
+     * {@code CollectionRegistryFkExtraTest} each built by string concatenation
+     * (identical shape, duplicated across files — the same class of duplication
+     * {@link #seedServiceToken(DSLContext, String, String, String)} closed for
+     * {@code service_tokens}). {@code catalog_collections} PK is {@code (tenant_id,
+     * name)}; the four remaining NOT NULL TEXT columns
+     * ({@code content_type}/{@code owner_id}/{@code embedding_model}/{@code
+     * model_version}/{@code display_name}) all default to {@code ''} and are left
+     * unset, matching every hand-rolled call site's own scope.
+     *
+     * @param dsl      a {@link DSLContext} over the same connection/role the schema
+     *                 was migrated under (e.g. {@code DSL.using(su, SQLDialect.POSTGRES)})
+     * @param tenantId the tenant id to register the collection under
+     * @param name     the collection name ({@code catalog_collections.name})
+     */
+    public static void insertCollection(DSLContext dsl, String tenantId, String name) {
+        dsl.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+            .values(tenantId, name)
+            .onConflictDoNothing()
+            .execute();
+    }
+
+    /**
+     * Seed a minimal {@code nexus.catalog_documents} row via generated jOOQ DSL
+     * (nexus-cbo4a batch 10) — the {@code catalog_documents} counterpart to {@link
+     * #insertCollection}, replacing the identical hand-rolled {@code INSERT INTO
+     * nexus.catalog_documents (tenant_id, tumbler, title) VALUES (...) ON CONFLICT
+     * (tenant_id, tumbler) DO NOTHING} duplicated the same way. {@code
+     * catalog_documents} PK is {@code (tenant_id, tumbler)}; {@code title} is
+     * required NOT NULL and is synthesized as {@code "Test Doc " + tumbler}, matching
+     * every hand-rolled call site's own literal exactly.
+     *
+     * @param dsl      a {@link DSLContext} over the same connection/role the schema
+     *                 was migrated under
+     * @param tenantId the tenant id to register the document under
+     * @param tumbler  the document's {@code catalog_documents.tumbler}
+     */
+    public static void insertCatalogDocument(DSLContext dsl, String tenantId, String tumbler) {
+        dsl.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                CATALOG_DOCUMENTS.TITLE)
+            .values(tenantId, tumbler, "Test Doc " + tumbler)
+            .onConflictDoNothing()
+            .execute();
+    }
+
+    /**
+     * Seed one {@code nexus.chunks} row at dim 384 via generated jOOQ DSL (nexus-cbo4a
+     * batch 10) — hoisted from the byte-for-byte identical {@code insertChunk384}
+     * duplicated in {@code CatalogDeleteCollectionCascadeTest} and {@code
+     * CatalogRenameCollectionTest} (batch-4's own critique named this exact
+     * duplication class for the seed-insert shape). {@code chashBytes} is the raw
+     * {@code chash} column value (callers control the 32-byte-vs-64-hex-decoded
+     * distinction; see {@code chashBytes}/{@code hexChashBytes} helper pairs in the
+     * callers), {@code chunk_text} is fixed at {@code "text"} — every existing call
+     * site's own literal — since no caller has ever needed a different value.
+     *
+     * @param ctx        a {@link DSLContext} over the same connection/role the schema
+     *                   was migrated under
+     * @param tenant     the tenant id
+     * @param collection the collection name
+     * @param chashBytes the raw {@code chash} bytea value
+     * @param v          the 384-dim embedding vector
+     */
+    public static void insertChunk384(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                       CHUNKS.EMBEDDING_384)
+           .values(tenant, collection, chashBytes, "text", v)
+           .execute();
+    }
+
+    /** {@code nexus.chunks} seed at dim 768 — see {@link #insertChunk384} for the full contract. */
+    public static void insertChunk768(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                       CHUNKS.EMBEDDING_768)
+           .values(tenant, collection, chashBytes, "text", v)
+           .execute();
+    }
+
+    /** {@code nexus.chunks} seed at dim 1024 — see {@link #insertChunk384} for the full contract. */
+    public static void insertChunk1024(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                       CHUNKS.EMBEDDING_1024)
+           .values(tenant, collection, chashBytes, "text", v)
+           .execute();
     }
 
     /**
@@ -441,5 +616,141 @@ public final class PgContainerHelper {
     public static void analyzeTable(Connection conn, Name qualifiedName) throws SQLException {
         DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
         Routines.analyzeTable(ctx.configuration(), ctx.render(DSL.table(qualifiedName)));
+    }
+
+    /**
+     * {@code ALTER TABLE .. ADD CONSTRAINT .. FOREIGN KEY (tenant_id, column) REFERENCES
+     * ref (tenant_id, refColumn) extraClause NOT VALID} (nexus-cbo4a batch 10 review
+     * fold-in) -- the test-tree counterpart to {@link #analyzeTable}, same idiom: the
+     * raw statement moves server-side into {@code nexus_test.add_fk_not_valid}
+     * (db/changelog-test/db.changelog-test-objects.xml), a Postgres-only {@code ALTER
+     * TABLE} extension ({@code NOT VALID}) with no jOOQ typed-DSL form (confirmed
+     * against jOOQ 3.20.11/3.21's manual: {@code alterConstraint().enforced()/
+     * notEnforced()} renders MySQL-style {@code [NOT] ENFORCED}, not Postgres's
+     * {@code NOT VALID}). {@code table}/{@code refTable} are generated jOOQ
+     * {@link Table}s, rendered through {@code ctx.render(...)} into the function's
+     * {@code regclass} arguments -- never a hand-typed schema-qualified string. Every
+     * caller's composite FK is {@code (tenant_id, X) -> (tenant_id, Y)}, so
+     * {@code tenant_id} is hardcoded as the first column on both sides inside the
+     * function body rather than parameterizing a shape no call site actually varies.
+     *
+     * @param conn           the connection to run the ALTER TABLE on (superuser/table owner)
+     * @param table          the table gaining the FK (e.g. {@code Tables.CHUNKS})
+     * @param constraintName the FK constraint name
+     * @param column         the second FK column (after {@code tenant_id})
+     * @param refTable       the referenced table (e.g. {@code Tables.CATALOG_COLLECTIONS})
+     * @param refColumn      the second referenced column (after {@code tenant_id})
+     * @param extraClause    the {@code ON UPDATE}/{@code ON DELETE} clause fragment
+     *                       (e.g. {@code "ON DELETE RESTRICT"}), or {@code ""} for none
+     */
+    public static void addFkNotValid(Connection conn, Table<?> table, String constraintName, String column,
+                                      Table<?> refTable, String refColumn, String extraClause) throws SQLException {
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        Routines.addFkNotValid(ctx.configuration(), ctx.render(table), constraintName, column,
+            ctx.render(refTable), refColumn, extraClause);
+    }
+
+    /**
+     * {@code ALTER TABLE .. VALIDATE CONSTRAINT} (nexus-cbo4a batch 10 review fold-in)
+     * -- see {@link #addFkNotValid} for the full contract this shares. {@code
+     * VALIDATE CONSTRAINT} has no jOOQ typed-DSL form.
+     *
+     * @param conn           the connection to run the ALTER TABLE on
+     * @param table          the table whose constraint is being validated
+     * @param constraintName the constraint name
+     */
+    public static void validateConstraint(Connection conn, Table<?> table, String constraintName) throws SQLException {
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        Routines.validateConstraint(ctx.configuration(), ctx.render(table), constraintName);
+    }
+
+    /**
+     * {@code ALTER TABLE .. [NO] FORCE ROW LEVEL SECURITY} (nexus-cbo4a batch 10
+     * review fold-in) -- see {@link #addFkNotValid} for the full contract this
+     * shares. {@code [NO] FORCE ROW LEVEL SECURITY} is a Postgres-only RLS DDL
+     * extension with no jOOQ typed-DSL form.
+     *
+     * @param conn  the connection to run the ALTER TABLE on (table owner)
+     * @param table the table to toggle {@code FORCE ROW LEVEL SECURITY} on
+     * @param force {@code true} for {@code FORCE ROW LEVEL SECURITY}, {@code false}
+     *              for {@code NO FORCE ROW LEVEL SECURITY}
+     */
+    public static void setForceRls(Connection conn, Table<?> table, boolean force) throws SQLException {
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        Routines.setForceRls(ctx.configuration(), ctx.render(table), force);
+    }
+
+    /**
+     * {@code ALTER TABLE .. DROP CONSTRAINT IF EXISTS ..} (nexus-cbo4a batch 11) --
+     * a genuinely dangling manifest row can only be seeded by momentarily dropping its
+     * FK, inserting the dangling row, then re-adding the constraint NOT VALID (see
+     * {@link #addFkNotValidComposite3}) -- the insert happens BETWEEN this call and
+     * that one, so the two are separate methods rather than one combined drop-then-add.
+     * {@code table} is a generated jOOQ {@link Table}, rendered through
+     * {@code ctx.render(...)} into the function's {@code regclass} argument -- never a
+     * hand-typed schema-qualified string.
+     *
+     * @param conn           the connection to run the ALTER TABLE on (superuser/table owner)
+     * @param table          the table whose constraint is being dropped
+     * @param constraintName the constraint name
+     */
+    public static void dropConstraint(Connection conn, Table<?> table, String constraintName) throws SQLException {
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        Routines.dropConstraint(ctx.configuration(), ctx.render(table), constraintName);
+    }
+
+    /**
+     * {@code ALTER TABLE .. ADD CONSTRAINT .. FOREIGN KEY (tenant_id, col2, col3)
+     * REFERENCES .. (tenant_id, refCol2, refCol3) extraClause NOT VALID} (nexus-cbo4a
+     * batch 11) -- the THREE-column composite-FK sibling of {@link #addFkNotValid},
+     * which only covers a {@code (tenant_id, X) -> (tenant_id, Y)} shape. A
+     * dangling-manifest-row test needs to re-add {@code fk_catalog_chunks_chunk}'s real
+     * {@code (tenant_id, collection, chash)} composite after {@link #dropConstraint} and
+     * an intervening dangling-row insert -- moved server-side into {@code
+     * nexus_test.add_fk_not_valid_composite3} (db.changelog-test-objects.xml).
+     * {@code table}/{@code refTable} are generated jOOQ {@link Table}s, rendered
+     * through {@code ctx.render(...)} into the function's {@code regclass} arguments --
+     * never a hand-typed schema-qualified string.
+     *
+     * @param conn        the connection to run the ALTER TABLE on (superuser/table owner)
+     * @param table       the table gaining the FK (e.g. {@code Tables.CATALOG_DOCUMENT_CHUNKS})
+     * @param constraintName the FK constraint name
+     * @param column2     the second FK column (after {@code tenant_id})
+     * @param column3     the third FK column
+     * @param refTable    the referenced table (e.g. {@code Tables.CHUNKS})
+     * @param refColumn2  the second referenced column (after {@code tenant_id})
+     * @param refColumn3  the third referenced column
+     * @param extraClause the {@code ON UPDATE}/{@code ON DELETE} clause fragment
+     *                    (e.g. {@code "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE"}),
+     *                    or {@code ""} for none
+     */
+    public static void addFkNotValidComposite3(Connection conn, Table<?> table, String constraintName,
+                                                String column2, String column3, Table<?> refTable,
+                                                String refColumn2, String refColumn3, String extraClause)
+            throws SQLException {
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        Routines.addFkNotValidComposite3(ctx.configuration(), ctx.render(table), constraintName, column2, column3,
+            ctx.render(refTable), refColumn2, refColumn3, extraClause);
+    }
+
+    /**
+     * {@code GRANT EXECUTE ON FUNCTION functionSignature TO role} (nexus-cbo4a
+     * batch 11) -- jOOQ's typed GRANT DSL ({@link DSLContext#grant}/{@code
+     * GrantOnStep#on}) targets tables, not a function's parenthesized
+     * argument-type signature, which Postgres's {@code GRANT ... ON FUNCTION}
+     * syntax requires -- moved server-side into {@code
+     * nexus_test.grant_execute_on_function} (db.changelog-test-objects.xml).
+     *
+     * @param conn              the connection to run the GRANT on (superuser)
+     * @param functionSignature the function name plus its argument-type list
+     *                          (e.g. {@code "nexus.gc_quarantine_orphans(int, text,
+     *                          text, text, text, int)"}) -- a fixed Java literal,
+     *                          never end-user input
+     * @param role              the role to grant EXECUTE to
+     */
+    public static void grantExecuteOnFunction(Connection conn, String functionSignature, String role)
+            throws SQLException {
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        Routines.grantExecuteOnFunction(ctx.configuration(), functionSignature, role);
     }
 }

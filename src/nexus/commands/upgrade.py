@@ -121,6 +121,15 @@ def upgrade(
         # non-auto, non-dry-run; only touches already-managed hooks.
         if not auto_mode and not dry_run:
             _refresh_all_git_hooks()
+
+        # nexus-2uwag: the plugin is the third thing an upgrade converges.
+        # RDR-143's SessionStart hook drives wheel+data from a plugin update;
+        # this is the other direction, so `nx upgrade` is one verb for all
+        # three. Not under --auto: that is the budgeted-hook invocation and
+        # this step is a git fetch; the detached lockstep action calls plain
+        # `nx upgrade`, where it runs. Advisory: never fails the upgrade.
+        if not auto_mode:
+            _converge_plugins(dry_run=dry_run)
     except Exception:
         if auto_mode:
             _log.warning("upgrade_auto_error", exc_info=True)
@@ -558,7 +567,7 @@ def _migrate_repos_json_to_catalog(*, dry_run: bool) -> None:
         if cat is None:
             click.echo(
                 f"Note: {reg_path} present but catalog not initialised; "
-                f"skipping migration (run 'nx catalog setup' first)."
+                f"skipping migration (the catalog is empty; run 'nx index repo' first)."
             )
             return
 
@@ -621,3 +630,16 @@ def _emit_name_vs_embed_dim_advisory() -> None:
         f"(pre-4.32 local-mode data). Run `nx catalog doctor "
         f"--name-vs-embed-dim` for details and remediation."
     )
+
+
+def _converge_plugins(*, dry_run: bool) -> None:
+    """Bring a behind conexus/sn plugin to the marketplace's pinned version
+    (nexus-2uwag; contract in :mod:`nexus.plugin_lockstep`). Best-effort:
+    a failure is printed with the manual command and never raised."""
+    from nexus.plugin_lockstep import converge_plugins, render  # noqa: PLC0415 — deferred, CLI cold start
+
+    try:
+        render(converge_plugins(dry_run=dry_run), click.echo)
+    except Exception:  # noqa: BLE001 — advisory step; the data convergence above already happened
+        _log.warning("plugin_lockstep_error", exc_info=True)
+        click.echo("Plugin lockstep: could not check the installed plugins; run /plugin update in Claude Code")

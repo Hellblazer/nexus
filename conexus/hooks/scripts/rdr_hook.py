@@ -70,7 +70,7 @@ def _resolve_rdr_collection(repo_root: Path) -> str | None:
     when both the catalog and an owner row exist; otherwise asks the
     indexer's :func:`_repo_collection_or_legacy` for the
     path-derived conformant fallback so SessionStart keeps working
-    before ``nx catalog setup`` lands. Returns ``None`` when no
+    before ``nx index repo`` has run. Returns ``None`` when no
     in-process resolution is available; the caller treats that as
     "not indexed" rather than splicing a non-conformant 2-segment shape
     that the post-Phase-5 strict-naming guard would later reject.
@@ -119,15 +119,34 @@ def _extract_rdr_id(filepath: Path) -> str | None:
     return m.group(1) if m else None
 
 
-def _load_all_t2_statuses(repo_name: str) -> dict[str, str]:
-    """Batch-load all T2 RDR statuses. Returns {rdr_id: status}."""
-    statuses: dict[str, str] = {}
+_T2_ROWS_CACHE: dict[str, list[dict]] = {}
+
+
+def _fetch_rdr_rows(repo_name: str) -> list[dict]:
+    """One ``get_all`` per hook run, shared by the status and gate loaders
+    (code review [24883] finding 5: two full fetches of a 1000-row project
+    inside a 10s SessionStart budget)."""
+    if repo_name in _T2_ROWS_CACHE:
+        return _T2_ROWS_CACHE[repo_name]
+    rows: list[dict] = []
     try:
         from nexus.commands._helpers import default_db_path
         from nexus.db.t2 import T2Database
 
         with T2Database(default_db_path()) as db:
-            entries = db.get_all(project=f"{repo_name}_rdr")
+            rows = list(db.get_all(project=f"{repo_name}_rdr"))
+    except Exception:
+        rows = []
+    _T2_ROWS_CACHE[repo_name] = rows
+    return rows
+
+
+def _load_all_t2_statuses(repo_name: str) -> dict[str, str]:
+    """Batch-load all T2 RDR statuses. Returns {rdr_id: status}."""
+    statuses: dict[str, str] = {}
+    try:
+        if True:
+            entries = _fetch_rdr_rows(repo_name)
             for entry in entries:
                 title = entry.get("title", "")
                 if "-" in title:
@@ -143,6 +162,65 @@ def _load_all_t2_statuses(repo_name: str) -> dict[str, str]:
     except Exception:
         pass
     return statuses
+
+
+def _load_gated_commits(repo_name: str) -> dict[str, str]:
+    """``{rdr_id: commit}`` from every ``<id>-gate-latest`` T2 record that
+    carries a ``commit:`` field (nexus-zbdm0)."""
+    gated: dict[str, str] = {}
+    try:
+        for entry in _fetch_rdr_rows(repo_name):
+            title = entry.get("title", "")
+            if not title.endswith("-gate-latest"):
+                continue
+            # Keyed on the bare number ("RDR-105-gate-latest" and
+            # "097-gate-latest" both normalise), matching _extract_rdr_id.
+            num = re.search(r"(\d+)", title[: -len("-gate-latest")])
+            if not num:
+                continue
+            for line in entry.get("content", "").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("commit:"):
+                    val = stripped.split(":", 1)[1].strip().strip('"').strip("'")
+                    if val:
+                        gated[str(int(num.group(1)))] = val
+                    break
+    except Exception:
+        pass
+    return gated
+
+
+def _unchecked_fix_edits(root: Path, rdr_files: list[Path], statuses: dict[str, str], gated: dict[str, str]) -> list[str]:
+    """Lines naming draft RDRs whose file tip is past the gated commit."""
+    lines: list[str] = []
+    for path in rdr_files:
+        rid = _extract_rdr_id(path)
+        if rid is None:
+            continue
+        key = str(int(rid))
+        gated_norm = {str(int(k)): v for k, v in gated.items() if k.isdigit()}
+        if key not in gated_norm:
+            continue
+        if statuses.get(rid, statuses.get(key, "draft")) not in ("draft", "open"):
+            continue
+        try:
+            tip = subprocess.run(
+                ["git", "-C", str(root), "log", "-1", "--format=%h", "--", str(path)],
+                capture_output=True, text=True, timeout=10, check=False,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if not tip:
+            continue  # untracked or uncommitted file: unknown, not "past the gate"
+        commit = gated_norm[key]
+        n = min(len(tip), len(commit))
+        if n >= 7 and tip[:n] == commit[:n]:
+            continue
+        lines.append(
+            f"RDR-{rid}: edits since the gated commit {commit}; run /conexus:rdr-fix {rid} "
+            "before re-gating (fix check first)."
+        )
+    return lines
 
 
 def _rdr_status_counts(repo_name: str, preloaded: dict[str, str] | None = None) -> Counter[str]:
@@ -194,7 +272,8 @@ def main() -> None:
     rdr_collection = _resolve_rdr_collection(root)
     indexed = bool(rdr_collection) and _collection_exists(rdr_collection)
 
-    counts = _rdr_status_counts(repo_name)
+    statuses = _load_all_t2_statuses(repo_name)
+    counts = _rdr_status_counts(repo_name, statuses)
     if counts:
         breakdown = ", ".join(f"{n} {s}" for s, n in counts.most_common())
         status_info = f"{len(rdr_files)} documents ({breakdown})"
@@ -215,7 +294,10 @@ def main() -> None:
         if rdr_collection:
             print(f"     Run: nx index repo {root}")
         else:
-            print(f"     Run: nx catalog setup && nx index repo {root}")
+            print(f"     Run: nx index repo {root}")
+
+    for line in _unchecked_fix_edits(root, rdr_files, statuses, _load_gated_commits(repo_name)):
+        print(line)
 
     sys.exit(0)
 

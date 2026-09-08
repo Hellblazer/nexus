@@ -860,8 +860,14 @@ def pipeline_index_pdf(
     allow_degraded_extraction: bool = False,
     dry_run: bool = False,
     on_doc_registered: Callable[[str, bool], None] | None = None,
+    extraction_stats: dict | None = None,
 ) -> int:
     """Three-stage streaming pipeline for PDFs.
+
+    *extraction_stats* (nexus-i0cwh), when given, receives ``page_count``
+    and ``pages_with_text`` from the extraction result once the extract
+    stage completes, so ``index_pdf`` can report page coverage without a
+    second extraction.
 
     After the three stages complete, runs post-passes to:
     - Enrich chunk metadata from the ExtractionResult
@@ -1104,6 +1110,13 @@ def pipeline_index_pdf(
     # ── Post-passes (after all three stages complete) ────────────────────────
 
     extraction_result = extract_future.result()
+    if extraction_stats is not None:
+        _em = getattr(extraction_result, "metadata", None) or {}
+        extraction_stats["page_count"] = int(_em.get("page_count", 0) or 0)
+        # None when the extraction predates the field (a resumed pipeline
+        # buffer written by an older version): "unverified", never "no pages".
+        _pwt = _em.get("pages_with_text")
+        extraction_stats["pages_with_text"] = list(_pwt) if _pwt is not None else None
 
     # Resolve collection once for all post-passes (avoids repeated API calls).
     col = t3.get_or_create_collection(collection)

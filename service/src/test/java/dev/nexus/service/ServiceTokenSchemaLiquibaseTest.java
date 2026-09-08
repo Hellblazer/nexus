@@ -21,6 +21,7 @@ import java.sql.ResultSet;
 import java.util.HashSet;
 import java.util.Set;
 
+import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -138,14 +139,17 @@ class ServiceTokenSchemaLiquibaseTest {
 
     @Test
     void serviceTokens_readableByServiceRole_withoutTenantGuc() throws Exception {
-        // Seed two rows for two different tenants via superuser.
+        // Seed two rows for two different tenants via superuser. Literal (fake)
+        // hashes, not a real token's sha256 -- typed jOOQ DSL directly, not
+        // PgContainerHelper.seedServiceToken (which always hashes its token argument).
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("TRUNCATE nexus.service_tokens");
-            su.createStatement().execute(
-                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES "
-                + "('hash-tenant-a', 'tenant-a', 'a-root'), "
-                + "('hash-tenant-b', 'tenant-b', 'b-root')");
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(SERVICE_TOKENS)
+                .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.LABEL)
+                .values("hash-tenant-a", "tenant-a", "a-root")
+                .values("hash-tenant-b", "tenant-b", "b-root")
+                .execute();
         }
 
         // nexus_svc reads with NO nexus.tenant GUC stamped — must see BOTH rows.
@@ -234,18 +238,23 @@ class ServiceTokenSchemaLiquibaseTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("TRUNCATE nexus.service_tokens");
-            // First root-labelled row inserts fine.
-            su.createStatement().execute(
-                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) "
-                + "VALUES ('root-hash-1', 'default', 'bootstrap-legacy-token')");
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            // First root-labelled row inserts fine. Literal (fake) hashes -- typed
+            // jOOQ DSL directly, not PgContainerHelper.seedServiceToken (which always
+            // hashes its token argument).
+            dsl.insertInto(SERVICE_TOKENS)
+                .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.LABEL)
+                .values("root-hash-1", "default", "bootstrap-legacy-token")
+                .execute();
             // A SECOND root-labelled row (e.g. a rotated NX_SERVICE_TOKEN re-seed) must be
             // rejected by the partial unique index — otherwise two operator credentials.
             boolean rejected = false;
             try {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) "
-                    + "VALUES ('root-hash-2', 'default', 'bootstrap-legacy-token')");
-            } catch (java.sql.SQLException expected) {
+                dsl.insertInto(SERVICE_TOKENS)
+                    .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.LABEL)
+                    .values("root-hash-2", "default", "bootstrap-legacy-token")
+                    .execute();
+            } catch (org.jooq.exception.DataAccessException expected) {
                 rejected = true;
             }
             assertThat(rejected)
@@ -253,9 +262,11 @@ class ServiceTokenSchemaLiquibaseTest {
                     + "unique index (the operator invariant)")
                 .isTrue();
             // Ordinary (non-root) labels remain unconstrained — many rows may share one.
-            su.createStatement().execute(
-                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES "
-                + "('ord-1', 'tenant-a', 'worker'), ('ord-2', 'tenant-a', 'worker')");
+            dsl.insertInto(SERVICE_TOKENS)
+                .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.LABEL)
+                .values("ord-1", "tenant-a", "worker")
+                .values("ord-2", "tenant-a", "worker")
+                .execute();
         }
     }
 
@@ -266,20 +277,26 @@ class ServiceTokenSchemaLiquibaseTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("TRUNCATE nexus.service_tokens");
-            // Every member of the scope vocabulary inserts fine.
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            // Every member of the scope vocabulary inserts fine. Literal (fake)
+            // hashes -- typed jOOQ DSL directly, not PgContainerHelper.seedServiceToken.
             int i = 0;
             for (String scope : new String[] {"root", "tenant", "mint", "data"}) {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label, scope) "
-                    + "VALUES ('scope-hash-" + (i++) + "', 'tenant-a', 'lbl', '" + scope + "')");
+                dsl.insertInto(SERVICE_TOKENS)
+                    .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID,
+                        SERVICE_TOKENS.LABEL, SERVICE_TOKENS.SCOPE)
+                    .values("scope-hash-" + (i++), "tenant-a", "lbl", scope)
+                    .execute();
             }
             // Anything outside the vocabulary violates the CHECK.
             boolean rejected = false;
             try {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label, scope) "
-                    + "VALUES ('scope-hash-bogus', 'tenant-a', 'lbl', 'bogus')");
-            } catch (java.sql.SQLException expected) {
+                dsl.insertInto(SERVICE_TOKENS)
+                    .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID,
+                        SERVICE_TOKENS.LABEL, SERVICE_TOKENS.SCOPE)
+                    .values("scope-hash-bogus", "tenant-a", "lbl", "bogus")
+                    .execute();
+            } catch (org.jooq.exception.DataAccessException expected) {
                 rejected = true;
             }
             assertThat(rejected)
@@ -295,9 +312,12 @@ class ServiceTokenSchemaLiquibaseTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("TRUNCATE nexus.service_tokens");
-            su.createStatement().execute(
-                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) "
-                + "VALUES ('default-scope-hash', 'tenant-a', 'lbl')");
+            // Literal (fake) hash -- typed jOOQ DSL directly, not
+            // PgContainerHelper.seedServiceToken.
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(SERVICE_TOKENS)
+                .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.LABEL)
+                .values("default-scope-hash", "tenant-a", "lbl")
+                .execute();
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT scope FROM nexus.service_tokens WHERE token_hash = 'default-scope-hash'");
             assertThat(rs.next()).isTrue();

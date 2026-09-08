@@ -231,10 +231,6 @@ class HybridSearchFunctionParityIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
         }
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute("ALTER ROLE nexus_svc SET search_path TO nexus, public");
-        }
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
         cfg.setUsername("nexus_svc");

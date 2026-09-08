@@ -55,16 +55,16 @@ import java.util.concurrent.atomic.AtomicInteger;
  *       (no {@code IN DATABASE} clause) is NOT in that category</b> (nexus-tyiht,
  *       substantive-critic 2026-08-09): it writes a cluster-wide
  *       {@code pg_db_role_setting} row ({@code setdatabase=0}) that template cloning
- *       neither copies nor resets, and ~90 test files issue exactly that statement for
- *       their service role's {@code search_path}. The database boundary does NOT
- *       isolate it -- so {@link #acquireDatabase()} enforces isolation itself: before
- *       handing out each clone it RESETS every cluster-wide role-level setting,
- *       restoring the exact fresh-cluster baseline (the master changelog never issues
- *       {@code ALTER ROLE ... SET}; production sets {@code search_path} via
- *       {@code connectionInitSql} -- see {@code grants-nexus-svc.xml} and
- *       {@code Main.java} -- so zero role-level settings IS the virgin state). Each
- *       class's own {@code ALTER ROLE} lands after its acquire and survives for its
- *       own lifetime only. Falsified, not just argued:
+ *       neither copies nor resets. When this guard was written ~90 test files issued
+ *       exactly that statement for their service role's {@code search_path}; as of
+ *       nexus-cbo4a batch 9 none do (role-level search_path reliance is retired,
+ *       RawSqlGateTest fails loud on the shape, and production sets no search_path at
+ *       all -- every reference is schema-qualified), but the database boundary still
+ *       does NOT isolate a cluster-wide role setting, so {@link #acquireDatabase()}
+ *       enforces isolation itself: before handing out each clone it RESETS every
+ *       cluster-wide role-level setting, restoring the exact fresh-cluster baseline
+ *       (the master changelog never issues {@code ALTER ROLE ... SET}, so zero
+ *       role-level settings IS the virgin state). Falsified, not just argued:
  *       {@code SharedClusterMutationFalsifyTest} poison-writes a cluster-wide role
  *       setting and proves the next acquire clears it.</li>
  *   <li><b>Surefire runs test classes within one fork SEQUENTIALLY</b> (nexus-13eb0

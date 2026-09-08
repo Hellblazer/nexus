@@ -3637,6 +3637,25 @@ def _prune_deleted_files(
         # collection with a structured error (never a silent continue,
         # never a sweep-wide abort; same per-collection isolation as the
         # nexus-ou4tb degraded-read guard below).
+        #
+        # nexus-dkymw (Sam's second 2026-09-07 ruling, superseding
+        # nexus-mqd6t's original DELETED_AT.isNull() filter): the returned
+        # set now also includes a tombstoned-but-not-yet-purged document's
+        # chashes, not just live documents'. That does NOT change this
+        # prune's own deletion behavior, though — the actual orphan
+        # decision below runs through the server-side anti-join
+        # (nexus.gc_quarantine_orphans, catalog-023 / vectors-005), which
+        # checks catalog_document_chunks row existence only and never
+        # joins deleted_at, so this prune was ALREADY tombstone-tolerant
+        # by construction (a tombstoned document's manifest row still
+        # exists, deleted or not) and was never at risk of reaping a
+        # just-tombstoned document's chunks. `referenced` here is used
+        # ONLY as the empty-manifest skip guard below (nexus-oqku); the
+        # client-side diff that once consulted it for orphan
+        # classification was retired at RDR-191 Phase 6 (2026-08-15,
+        # nexus-o8dil.33). The genuinely fixed caller is the `nx t3 gc`
+        # CLI verb (commands/t3.py), which diffs T3 chunks against this
+        # exact returned set directly.
         try:
             referenced = catalog.chashes_for_collection(collection_name)
         except Exception:  # noqa: BLE001 — one collection's failed alive-set read must not end the sweep

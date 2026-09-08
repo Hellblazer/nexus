@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -182,3 +183,58 @@ def test_real_table_declares_a_version():
 
     doc = tomllib.loads(PACKAGE_TABLE_PATH.read_text(encoding="utf-8"))
     assert isinstance(doc["table"].get("version"), int)
+
+
+def test_session_start_names_rdrs_with_unchecked_fix_edits(rdr_hook_module, tmp_path, monkeypatch, capsys) -> None:
+    """nexus-zbdm0: a draft RDR whose file moved past its gated commit gets a
+    one-line pointer at /conexus:rdr-fix, so the fix step has a surface
+    that fires without anyone opening the gate skill."""
+    mod = rdr_hook_module
+    root = tmp_path
+    (root / "docs" / "rdr").mkdir(parents=True)
+    f = root / "docs" / "rdr" / "rdr-204-example.md"
+    f.write_text("---\nstatus: draft\n---\n# x\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "gated"], check=True)
+    gated = subprocess.run(["git", "-C", str(root), "log", "-1", "--format=%h"], capture_output=True, text=True, check=True).stdout.strip()
+    f.write_text("---\nstatus: draft\n---\n# x fixed\n")
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-am", "fix"], check=True)
+
+    monkeypatch.setattr(mod, "_repo_root", lambda: root)
+    monkeypatch.setattr(mod, "_load_all_t2_statuses", lambda repo: {"204": "draft"})
+    monkeypatch.setattr(mod, "_load_gated_commits", lambda repo: {"204": gated})
+    monkeypatch.setattr(mod, "_resolve_rdr_collection", lambda r: None)
+    monkeypatch.setattr(mod, "_collection_exists", lambda t: False)
+    with pytest.raises(SystemExit):
+        mod.main()
+    out = capsys.readouterr().out
+    assert f"RDR-204: edits since the gated commit {gated}" in out, out
+    assert "/conexus:rdr-fix 204" in out
+
+    # Same tree, gated commit equals the tip: no line.
+    tip = subprocess.run(["git", "-C", str(root), "log", "-1", "--format=%h"], capture_output=True, text=True, check=True).stdout.strip()
+    monkeypatch.setattr(mod, "_load_gated_commits", lambda repo: {"204": tip})
+    with pytest.raises(SystemExit):
+        mod.main()
+    assert "rdr-fix" not in capsys.readouterr().out
+
+
+def test_gated_commits_key_on_the_bare_number(rdr_hook_module, monkeypatch) -> None:
+    mod = rdr_hook_module
+    rows = [
+        {"title": "RDR-105-gate-latest", "content": "commit: abc1234\n"},
+        {"title": "097-gate-latest", "content": "outcome: PASSED\ncommit: \"def5678\"\n"},
+        {"title": "204", "content": "status: draft\n"},
+    ]
+    monkeypatch.setattr(mod, "_fetch_rdr_rows", lambda repo: rows)
+    assert mod._load_gated_commits("nexus") == {"105": "abc1234", "97": "def5678"}
+
+
+def test_uncommitted_rdr_file_is_not_reported(rdr_hook_module, tmp_path) -> None:
+    mod = rdr_hook_module
+    (tmp_path / "docs" / "rdr").mkdir(parents=True)
+    f = tmp_path / "docs" / "rdr" / "rdr-204-example.md"
+    f.write_text("---\nstatus: draft\n---\n")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    assert mod._unchecked_fix_edits(tmp_path, [f], {"204": "draft"}, {"204": "abc1234"}) == []

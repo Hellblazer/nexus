@@ -2,17 +2,32 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
 import org.jooq.DSLContext;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.jooq.binding.Vector;
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
+import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_STATS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_DOC_COUNTS;
+import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_HEALTH_META;
+import static dev.nexus.service.jooq.nexus.Tables.COVERAGE_BY_CONTENT_TYPE;
+import static dev.nexus.service.jooq.nexus.Tables.LINKS_BY_TYPE_COUNTS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS_WITH_COUNTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -47,6 +62,16 @@ class ReadShapeViewsTest {
         "collection_doc_counts", "coverage_by_content_type",
         "collection_health_meta", "topics_with_counts", "links_by_type_counts");
 
+    // Name -> generated jOOQ Table, for the loop over GROUPED_VIEWS below: each view
+    // has a different generated Table class but all five carry a TENANT_ID column,
+    // resolved generically via Table#field(String, Class) (nexus-cbo4a batch 10).
+    private static final Map<String, Table<?>> GROUPED_VIEW_TABLES = Map.of(
+        "collection_doc_counts", COLLECTION_DOC_COUNTS,
+        "coverage_by_content_type", COVERAGE_BY_CONTENT_TYPE,
+        "collection_health_meta", COLLECTION_HEALTH_META,
+        "topics_with_counts", TOPICS_WITH_COUNTS,
+        "links_by_type_counts", LINKS_BY_TYPE_COUNTS);
+
     PostgreSQLContainer<?> pg;
     com.zaxxer.hikari.HikariDataSource svcDs;
 
@@ -79,28 +104,31 @@ class ReadShapeViewsTest {
             // distinct) rather than registering b.x1/b.x2 as real documents, which would
             // have inflated TENANT_B's doc_count from 1 to 3 and broken
             // catalogStats_scopesScalarCountsToGucTenant's GUC=B doc_count==1 pin below.
-            seedDoc(su, TENANT_A, "a.1", "paper", "c_a");
-            seedDoc(su, TENANT_A, "a.2", "code",  "c_a");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_links (tenant_id, from_tumbler, to_tumbler, link_type, created_by) "
-                + "VALUES ('" + TENANT_A + "', 'a.1', 'a.2', 'cites', 'test')");
-            seedTopic(su, TENANT_A, "topic-a", "c_a");
-            seedOwner(su, TENANT_A, "a-own-1");
-            seedOwner(su, TENANT_A, "a-own-2");
-            seedColl(su, TENANT_A, "c_a");
-            seedColl(su, TENANT_A, "c_a2");
-            seedChunk(su, TENANT_A, "a.1", 0, "chash-a-0", "c_a");
-            seedChunk(su, TENANT_A, "a.1", 1, "chash-a-1", "c_a");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            seedDoc(ctx, TENANT_A, "a.1", "paper", "c_a");
+            seedDoc(ctx, TENANT_A, "a.2", "code",  "c_a");
+            ctx.insertInto(CATALOG_LINKS, CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER,
+                    CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE, CATALOG_LINKS.CREATED_BY)
+                .values(TENANT_A, "a.1", "a.2", "cites", "test")
+                .execute();
+            seedTopic(ctx, TENANT_A, "topic-a", "c_a");
+            seedOwner(ctx, TENANT_A, "a-own-1");
+            seedOwner(ctx, TENANT_A, "a-own-2");
+            seedColl(ctx, TENANT_A, "c_a");
+            seedColl(ctx, TENANT_A, "c_a2");
+            seedChunk(ctx, TENANT_A, "a.1", 0, "chash-a-0", "c_a");
+            seedChunk(ctx, TENANT_A, "a.1", 1, "chash-a-1", "c_a");
 
-            seedDoc(su, TENANT_B, "b.1", "paper", "c_b");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_links (tenant_id, from_tumbler, to_tumbler, link_type, created_by) "
-                + "VALUES ('" + TENANT_B + "', 'b.1', 'b.1', 'cites', 'test'), "
-                + "       ('" + TENANT_B + "', 'b.1', 'b.1', 'relates', 'test')");
-            seedTopic(su, TENANT_B, "topic-b", "c_b");
-            seedOwner(su, TENANT_B, "b-own-1");
-            seedColl(su, TENANT_B, "c_b");
-            seedChunk(su, TENANT_B, "b.1", 0, "chash-b-0", "c_b");
+            seedDoc(ctx, TENANT_B, "b.1", "paper", "c_b");
+            ctx.insertInto(CATALOG_LINKS, CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER,
+                    CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE, CATALOG_LINKS.CREATED_BY)
+                .values(TENANT_B, "b.1", "b.1", "cites", "test")
+                .values(TENANT_B, "b.1", "b.1", "relates", "test")
+                .execute();
+            seedTopic(ctx, TENANT_B, "topic-b", "c_b");
+            seedOwner(ctx, TENANT_B, "b-own-1");
+            seedColl(ctx, TENANT_B, "c_b");
+            seedChunk(ctx, TENANT_B, "b.1", 0, "chash-b-0", "c_b");
         }
 
         var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -118,29 +146,30 @@ class ReadShapeViewsTest {
         if (pg != null) pg.stop();
     }
 
-    private static void seedDoc(Connection su, String tenant, String tumbler,
-                                String ctype, String coll) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, content_type, physical_collection, indexed_at) "
-            + "VALUES ('" + tenant + "', '" + tumbler + "', 'T', '" + ctype + "', '" + coll + "', '2026-01-01T00:00:00Z')");
+    private static void seedDoc(DSLContext ctx, String tenant, String tumbler,
+                                String ctype, String coll) {
+        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
+                CATALOG_DOCUMENTS.INDEXED_AT)
+            .values(tenant, tumbler, "T", ctype, coll, OffsetDateTime.parse("2026-01-01T00:00:00Z"))
+            .execute();
     }
 
-
-    private static void seedTopic(Connection su, String tenant, String label, String coll) throws Exception {
+    private static void seedTopic(DSLContext ctx, String tenant, String label, String coll) {
         // RDR-164 P1a: register the collection (topics_collection_fk).
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenant + "', '"
-            + coll + "') ON CONFLICT (tenant_id, name) DO NOTHING");
-        su.createStatement().execute(
-            "INSERT INTO nexus.topics (tenant_id, label, collection, doc_count, created_at, review_status) "
-            + "VALUES ('" + tenant + "', '" + label + "', '" + coll + "', 0, now(), 'pending')");
+        PgContainerHelper.insertCollection(ctx, tenant, coll);
+        ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
+                TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+            .values(tenant, label, coll, 0, OffsetDateTime.now(), "pending")
+            .execute();
     }
 
-    private static void seedDocIndexed(Connection su, String tenant, String tumbler,
-                                       String coll, String indexedAt) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection, indexed_at) "
-            + "VALUES ('" + tenant + "', '" + tumbler + "', 'T', '" + coll + "', '" + indexedAt + "')");
+    private static void seedDocIndexed(DSLContext ctx, String tenant, String tumbler,
+                                       String coll, String indexedAt) {
+        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.INDEXED_AT)
+            .values(tenant, tumbler, "T", coll, indexedAt == null ? null : OffsetDateTime.parse(indexedAt))
+            .execute();
     }
 
     @Test @Order(40)
@@ -150,13 +179,14 @@ class ReadShapeViewsTest {
         final String col = "c_stale_age";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            seedDocIndexed(su, TENANT_A, "sa.1", col, "2020-01-01T00:00:00Z"); // stale
-            seedDocIndexed(su, TENANT_A, "sa.2", col, "2099-01-01T00:00:00Z"); // fresh
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT stale_source_ratio FROM nexus.collection_health_meta "
-                + "WHERE tenant_id = '" + TENANT_A + "' AND collection = '" + col + "'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getDouble("stale_source_ratio"))
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            seedDocIndexed(ctx, TENANT_A, "sa.1", col, "2020-01-01T00:00:00Z"); // stale
+            seedDocIndexed(ctx, TENANT_A, "sa.2", col, "2099-01-01T00:00:00Z"); // fresh
+            Double staleRatio = ctx.select(COLLECTION_HEALTH_META.STALE_SOURCE_RATIO).from(COLLECTION_HEALTH_META)
+                .where(COLLECTION_HEALTH_META.TENANT_ID.eq(TENANT_A))
+                .and(COLLECTION_HEALTH_META.COLLECTION.eq(col))
+                .fetchOne(COLLECTION_HEALTH_META.STALE_SOURCE_RATIO);
+            assertThat(staleRatio)
                 .as("1 of 2 dated docs is > 30 days old").isEqualTo(0.5d);
         }
     }
@@ -176,30 +206,35 @@ class ReadShapeViewsTest {
         final String col = "c_chm_parity";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            seedDocIndexed(su, TENANT_A, "chmp.1", col, "2026-01-01T08:00:00Z");
-            seedDocIndexed(su, TENANT_A, "chmp.2", col, "2026-06-01T12:00:00Z");
-            seedDocIndexed(su, TENANT_A, "chmp.3", col, "2026-03-15T00:00:00Z");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            seedDocIndexed(ctx, TENANT_A, "chmp.1", col, "2026-01-01T08:00:00Z");
+            seedDocIndexed(ctx, TENANT_A, "chmp.2", col, "2026-06-01T12:00:00Z");
+            seedDocIndexed(ctx, TENANT_A, "chmp.3", col, "2026-03-15T00:00:00Z");
             // Undated doc (NULL indexed_at, the '' -> NULL post-migration shape) — must
             // NOT win the MAX and must NOT count toward the stale_source_ratio denominator.
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-                + "VALUES ('" + TENANT_A + "', 'chmp.4', 'T', '" + col + "')");
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                .values(TENANT_A, "chmp.4", "T", col)
+                .execute();
 
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT last_indexed, orphan_count, stale_source_ratio FROM nexus.collection_health_meta "
-                + "WHERE tenant_id = '" + TENANT_A + "' AND collection = '" + col + "'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getTimestamp("last_indexed").toInstant())
+            var row = ctx.select(COLLECTION_HEALTH_META.LAST_INDEXED, COLLECTION_HEALTH_META.ORPHAN_COUNT,
+                    COLLECTION_HEALTH_META.STALE_SOURCE_RATIO)
+                .from(COLLECTION_HEALTH_META)
+                .where(COLLECTION_HEALTH_META.TENANT_ID.eq(TENANT_A))
+                .and(COLLECTION_HEALTH_META.COLLECTION.eq(col))
+                .fetchOptional();
+            assertThat(row.isPresent()).isTrue();
+            assertThat(row.get().value1().toInstant())
                 .as("MAX(indexed_at) over {01-01, 06-01, 03-15, NULL} must be 06-01, "
                     + "the NULL undated doc must not participate")
                 .isEqualTo(java.time.Instant.parse("2026-06-01T12:00:00Z"));
-            assertThat(rs.getLong("orphan_count"))
+            assertThat(row.get().value2())
                 .as("all 4 docs (dated and undated alike) have no inbound link — orphan-ness "
                     + "does not depend on indexed_at")
                 .isEqualTo(4L);
             // 3 dated docs, all far in the past relative to any real test-run clock — all
             // stale; the undated 4th doc excluded from BOTH numerator and denominator.
-            assertThat(rs.getDouble("stale_source_ratio"))
+            assertThat(row.get().value3())
                 .as("3/3 dated docs are stale; the undated 4th doc must not water down the ratio")
                 .isEqualTo(1.0d);
         }
@@ -214,10 +249,10 @@ class ReadShapeViewsTest {
     private StatsRow statsFor(String tenant) throws Exception {
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT doc_count, chunk_count FROM nexus.catalog_stats");
-            rs.next();
-            return new StatsRow(rs.getLong("doc_count"), rs.getLong("chunk_count"));
+            var row = DSL.using(svc, SQLDialect.POSTGRES)
+                .select(CATALOG_STATS.DOC_COUNT, CATALOG_STATS.CHUNK_COUNT).from(CATALOG_STATS)
+                .fetchOne();
+            return new StatsRow(row.value1(), row.value2());
         }
     }
 
@@ -234,11 +269,12 @@ class ReadShapeViewsTest {
         String tenant = "rsv-tomb-stats-" + System.nanoTime();
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            seedColl(su, tenant, "c_ts_tomb");
-            seedDoc(su, tenant, "ts.live", "paper", "c_ts_tomb");
-            seedDoc(su, tenant, "ts.dead", "paper", "c_ts_tomb");
-            seedChunk(su, tenant, "ts.live", 0, "chash-ts-live", "c_ts_tomb");
-            seedChunk(su, tenant, "ts.dead", 0, "chash-ts-dead", "c_ts_tomb");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            seedColl(ctx, tenant, "c_ts_tomb");
+            seedDoc(ctx, tenant, "ts.live", "paper", "c_ts_tomb");
+            seedDoc(ctx, tenant, "ts.dead", "paper", "c_ts_tomb");
+            seedChunk(ctx, tenant, "ts.live", 0, "chash-ts-live", "c_ts_tomb");
+            seedChunk(ctx, tenant, "ts.dead", 0, "chash-ts-dead", "c_ts_tomb");
         }
 
         StatsRow before = statsFor(tenant);
@@ -247,9 +283,10 @@ class ReadShapeViewsTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = now() "
-                + "WHERE tenant_id = '" + tenant + "' AND tumbler = 'ts.dead'");
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.DELETED_AT, OffsetDateTime.now())
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)).and(CATALOG_DOCUMENTS.TUMBLER.eq("ts.dead"))
+                .execute();
         }
 
         StatsRow after = statsFor(tenant);
@@ -261,27 +298,29 @@ class ReadShapeViewsTest {
 
         // CONTROL: the tombstoned row and its manifest chunk both still exist underneath.
         try (Connection su = pg.createConnection("")) {
-            ResultSet rsDoc = su.createStatement().executeQuery(
-                "SELECT count(*) FROM nexus.catalog_documents WHERE tenant_id = '" + tenant
-                + "' AND tumbler = 'ts.dead' AND deleted_at IS NOT NULL");
-            rsDoc.next();
-            assertThat(rsDoc.getLong(1)).as("CONTROL: tombstoned row exists").isEqualTo(1L);
-            ResultSet rsChunk = su.createStatement().executeQuery(
-                "SELECT count(*) FROM nexus.catalog_document_chunks WHERE tenant_id = '" + tenant
-                + "' AND doc_id = 'ts.dead'");
-            rsChunk.next();
-            assertThat(rsChunk.getLong(1))
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            int docCount = ctx.selectCount().from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)).and(CATALOG_DOCUMENTS.TUMBLER.eq("ts.dead"))
+                .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull())
+                .fetchOne(0, int.class);
+            assertThat(docCount).as("CONTROL: tombstoned row exists").isEqualTo(1);
+            int chunkCount = ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("ts.dead"))
+                .fetchOne(0, int.class);
+            assertThat(chunkCount)
                 .as("CONTROL: the tombstoned doc's manifest chunk row survives (no cascade)")
-                .isEqualTo(1L);
+                .isEqualTo(1);
         }
     }
 
     private long collectionDocCount(String tenant, String coll) throws Exception {
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT doc_count FROM nexus.collection_doc_counts WHERE physical_collection = '" + coll + "'");
-            return rs.next() ? rs.getLong(1) : 0L;
+            Long count = DSL.using(svc, SQLDialect.POSTGRES)
+                .select(COLLECTION_DOC_COUNTS.DOC_COUNT).from(COLLECTION_DOC_COUNTS)
+                .where(COLLECTION_DOC_COUNTS.PHYSICAL_COLLECTION.eq(coll))
+                .fetchOne(COLLECTION_DOC_COUNTS.DOC_COUNT);
+            return count == null ? 0L : count;
         }
     }
 
@@ -292,36 +331,40 @@ class ReadShapeViewsTest {
         String coll = "c_cdc_tomb";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            seedColl(su, tenant, coll);
-            seedDoc(su, tenant, "cdc.live", "paper", coll);
-            seedDoc(su, tenant, "cdc.dead", "paper", coll);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            seedColl(ctx, tenant, coll);
+            seedDoc(ctx, tenant, "cdc.live", "paper", coll);
+            seedDoc(ctx, tenant, "cdc.dead", "paper", coll);
         }
         assertThat(collectionDocCount(tenant, coll)).isEqualTo(2L);
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = now() "
-                + "WHERE tenant_id = '" + tenant + "' AND tumbler = 'cdc.dead'");
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.DELETED_AT, OffsetDateTime.now())
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)).and(CATALOG_DOCUMENTS.TUMBLER.eq("cdc.dead"))
+                .execute();
         }
         assertThat(collectionDocCount(tenant, coll))
             .as("tombstoned doc no longer counted").isEqualTo(1L);
 
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM nexus.catalog_documents WHERE tenant_id = '" + tenant
-                + "' AND tumbler = 'cdc.dead' AND deleted_at IS NOT NULL");
-            rs.next();
-            assertThat(rs.getLong(1)).as("CONTROL: tombstoned row exists").isEqualTo(1L);
+            int count = DSL.using(su, SQLDialect.POSTGRES).selectCount().from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)).and(CATALOG_DOCUMENTS.TUMBLER.eq("cdc.dead"))
+                .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull())
+                .fetchOne(0, int.class);
+            assertThat(count).as("CONTROL: tombstoned row exists").isEqualTo(1);
         }
     }
 
     private long coverageTotalFor(String tenant, String contentType) throws Exception {
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT total FROM nexus.coverage_by_content_type WHERE content_type = '" + contentType + "'");
-            return rs.next() ? rs.getLong(1) : 0L;
+            Long total = DSL.using(svc, SQLDialect.POSTGRES)
+                .select(COVERAGE_BY_CONTENT_TYPE.TOTAL).from(COVERAGE_BY_CONTENT_TYPE)
+                .where(COVERAGE_BY_CONTENT_TYPE.CONTENT_TYPE.eq(contentType))
+                .fetchOne(COVERAGE_BY_CONTENT_TYPE.TOTAL);
+            return total == null ? 0L : total;
         }
     }
 
@@ -338,35 +381,39 @@ class ReadShapeViewsTest {
         String tenant = "rsv-tomb-cov-" + System.nanoTime();
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            seedDoc(su, tenant, "cov.live", "paper", "c_cov_tomb");
-            seedDoc(su, tenant, "cov.dead", "paper", "c_cov_tomb");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            seedDoc(ctx, tenant, "cov.live", "paper", "c_cov_tomb");
+            seedDoc(ctx, tenant, "cov.dead", "paper", "c_cov_tomb");
         }
         assertThat(coverageTotalFor(tenant, "paper")).isEqualTo(2L);
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = now() "
-                + "WHERE tenant_id = '" + tenant + "' AND tumbler = 'cov.dead'");
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.DELETED_AT, OffsetDateTime.now())
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)).and(CATALOG_DOCUMENTS.TUMBLER.eq("cov.dead"))
+                .execute();
         }
         assertThat(coverageTotalFor(tenant, "paper"))
             .as("tombstoned doc excluded from total").isEqualTo(1L);
 
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM nexus.catalog_documents WHERE tenant_id = '" + tenant
-                + "' AND tumbler = 'cov.dead' AND deleted_at IS NOT NULL");
-            rs.next();
-            assertThat(rs.getLong(1)).as("CONTROL: tombstoned row exists").isEqualTo(1L);
+            int count = DSL.using(su, SQLDialect.POSTGRES).selectCount().from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)).and(CATALOG_DOCUMENTS.TUMBLER.eq("cov.dead"))
+                .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull())
+                .fetchOne(0, int.class);
+            assertThat(count).as("CONTROL: tombstoned row exists").isEqualTo(1);
         }
     }
 
     private long orphanCountFor(String tenant, String coll) throws Exception {
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT orphan_count FROM nexus.collection_health_meta WHERE collection = '" + coll + "'");
-            return rs.next() ? rs.getLong(1) : 0L;
+            Long count = DSL.using(svc, SQLDialect.POSTGRES)
+                .select(COLLECTION_HEALTH_META.ORPHAN_COUNT).from(COLLECTION_HEALTH_META)
+                .where(COLLECTION_HEALTH_META.COLLECTION.eq(coll))
+                .fetchOne(COLLECTION_HEALTH_META.ORPHAN_COUNT);
+            return count == null ? 0L : count;
         }
     }
 
@@ -386,21 +433,24 @@ class ReadShapeViewsTest {
         String coll = "c_chm_tomb";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            seedDoc(su, tenant, "chm.a", "paper", coll);
-            seedDoc(su, tenant, "chm.b", "paper", coll);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            seedDoc(ctx, tenant, "chm.a", "paper", coll);
+            seedDoc(ctx, tenant, "chm.b", "paper", coll);
             // chm.a has no inbound link (orphan); chm.b is the target of one (not orphan).
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_links (tenant_id, from_tumbler, to_tumbler, link_type, created_by) "
-                + "VALUES ('" + tenant + "', 'chm.a', 'chm.b', 'cites', 'test')");
+            ctx.insertInto(CATALOG_LINKS, CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER,
+                    CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE, CATALOG_LINKS.CREATED_BY)
+                .values(tenant, "chm.a", "chm.b", "cites", "test")
+                .execute();
         }
         assertThat(orphanCountFor(tenant, coll))
             .as("chm.a has no inbound link; chm.b does — one orphan").isEqualTo(1L);
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = now() "
-                + "WHERE tenant_id = '" + tenant + "' AND tumbler = 'chm.a'");
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.DELETED_AT, OffsetDateTime.now())
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)).and(CATALOG_DOCUMENTS.TUMBLER.eq("chm.a"))
+                .execute();
         }
         assertThat(orphanCountFor(tenant, coll))
             .as("tombstoning the orphan removes it from scope — it must NOT still be "
@@ -408,31 +458,33 @@ class ReadShapeViewsTest {
             .isEqualTo(0L);
 
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM nexus.catalog_documents WHERE tenant_id = '" + tenant
-                + "' AND tumbler = 'chm.a' AND deleted_at IS NOT NULL");
-            rs.next();
-            assertThat(rs.getLong(1)).as("CONTROL: tombstoned row exists").isEqualTo(1L);
+            int count = DSL.using(su, SQLDialect.POSTGRES).selectCount().from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)).and(CATALOG_DOCUMENTS.TUMBLER.eq("chm.a"))
+                .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull())
+                .fetchOne(0, int.class);
+            assertThat(count).as("CONTROL: tombstoned row exists").isEqualTo(1);
         }
     }
 
-    private static void seedOwner(Connection su, String tenant, String prefix) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type) "
-            + "VALUES ('" + tenant + "', '" + prefix + "', '" + prefix + "', 'repo')");
+    private static void seedOwner(DSLContext ctx, String tenant, String prefix) {
+        ctx.insertInto(CATALOG_OWNERS, CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX,
+                CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE)
+            .values(tenant, prefix, prefix, "repo")
+            .execute();
     }
 
-    private static void seedColl(Connection su, String tenant, String name) throws Exception {
+    private static void seedColl(DSLContext ctx, String tenant, String name) {
         // Idempotent: seedTopic (RDR-164 P1a) may have already stub-registered this collection.
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
-            + tenant + "', '" + name + "') ON CONFLICT (tenant_id, name) DO NOTHING");
+        PgContainerHelper.insertCollection(ctx, tenant, name);
     }
 
-    private static void seedChunk(Connection su, String tenant, String docId, int pos, String chash,
-                                   String collection) throws Exception {
-        // chash must be exactly 32 chars (catalog_document_chunks_chash_len_check).
-        String c = (chash + "00000000000000000000000000000000").substring(0, 32);
+    private static void seedChunk(DSLContext ctx, String tenant, String docId, int pos, String chash,
+                                   String collection) {
+        // chash must be exactly 32 chars (catalog_document_chunks_chash_len_check),
+        // stored as its own ASCII bytes -- matches the pre-conversion raw SQL's bare
+        // string literal into a bytea column via Postgres's escape-format input.
+        byte[] c = (chash + "00000000000000000000000000000000").substring(0, 32)
+            .getBytes(java.nio.charset.StandardCharsets.US_ASCII);
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
         // matching nexus.chunks row for every manifest write below.
         // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now ALSO carries
@@ -440,14 +492,17 @@ class ReadShapeViewsTest {
         // (tenant_id, name) — stub-register the collection first (idempotent,
         // mirrors seedColl above) rather than relying on every call site to have
         // already called it for this exact collection.
-        seedColl(su, tenant, collection);
-        su.createStatement().execute(
-            "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) VALUES ("
-            + "'" + tenant + "', '" + collection + "', '" + c + "', 'stub', "
-            + "('[" + "0.1,".repeat(383) + "0.1]')::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-            + "VALUES ('" + tenant + "', '" + docId + "', " + pos + ", '" + c + "', '" + collection + "')");
+        seedColl(ctx, tenant, collection);
+        float[] v = new float[384];
+        java.util.Arrays.fill(v, 0.1f);
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+            .values(tenant, collection, c, "stub", Vector.of(v))
+            .onConflictDoNothing()
+            .execute();
+        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+            .values(tenant, docId, pos, c, collection)
+            .execute();
     }
 
     // ── reloption physically set on every view ──────────────────────────────────
@@ -474,31 +529,35 @@ class ReadShapeViewsTest {
     void groupedViews_gucA_seeZeroTenantBRows() throws Exception {
         // CONTROL: superuser sees BOTH tenants in each grouped view (foreign rows exist).
         try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             for (String view : GROUPED_VIEWS) {
-                ResultSet rs = su.createStatement().executeQuery(
-                    "SELECT count(*) FROM nexus." + view + " WHERE tenant_id = '" + TENANT_B + "'");
-                rs.next();
-                assertThat(rs.getLong(1))
+                Table<?> table = GROUPED_VIEW_TABLES.get(view);
+                int count = ctx.selectCount().from(table)
+                    .where(table.field("tenant_id", String.class).eq(TENANT_B))
+                    .fetchOne(0, int.class);
+                assertThat(count)
                     .as("CONTROL: superuser must see tenant-B rows in nexus.%s", view)
-                    .isGreaterThanOrEqualTo(1L);
+                    .isGreaterThanOrEqualTo(1);
             }
         }
         // svc + GUC=A: zero tenant-B rows; at least one tenant-A row.
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
+            DSLContext ctx = DSL.using(svc, SQLDialect.POSTGRES);
             for (String view : GROUPED_VIEWS) {
-                ResultSet rsB = svc.createStatement().executeQuery(
-                    "SELECT count(*) FROM nexus." + view + " WHERE tenant_id = '" + TENANT_B + "'");
-                rsB.next();
-                assertThat(rsB.getLong(1))
+                Table<?> table = GROUPED_VIEW_TABLES.get(view);
+                int countB = ctx.selectCount().from(table)
+                    .where(table.field("tenant_id", String.class).eq(TENANT_B))
+                    .fetchOne(0, int.class);
+                assertThat(countB)
                     .as("GUC=A must see ZERO tenant-B rows in nexus.%s (caller RLS via security_invoker)", view)
-                    .isEqualTo(0L);
-                ResultSet rsA = svc.createStatement().executeQuery(
-                    "SELECT count(*) FROM nexus." + view + " WHERE tenant_id = '" + TENANT_A + "'");
-                rsA.next();
-                assertThat(rsA.getLong(1))
+                    .isEqualTo(0);
+                int countA = ctx.selectCount().from(table)
+                    .where(table.field("tenant_id", String.class).eq(TENANT_A))
+                    .fetchOne(0, int.class);
+                assertThat(countA)
                     .as("GUC=A must see its own tenant-A rows in nexus.%s", view)
-                    .isGreaterThanOrEqualTo(1L);
+                    .isGreaterThanOrEqualTo(1);
             }
         }
     }
@@ -508,27 +567,28 @@ class ReadShapeViewsTest {
     @Test @Order(30)
     void catalogStats_scopesScalarCountsToGucTenant() throws Exception {
         try (Connection svc = svcDs.getConnection()) {
+            DSLContext ctx = DSL.using(svc, SQLDialect.POSTGRES);
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            ResultSet a = svc.createStatement().executeQuery(
-                "SELECT doc_count, link_count, owner_count, collection_count, chunk_count "
-                + "FROM nexus.catalog_stats");
-            a.next();
-            assertThat(a.getLong("doc_count")).as("GUC=A doc_count").isEqualTo(2L);
-            assertThat(a.getLong("link_count")).as("GUC=A link_count").isEqualTo(1L);
-            assertThat(a.getLong("owner_count")).as("GUC=A owner_count").isEqualTo(2L);
-            assertThat(a.getLong("collection_count")).as("GUC=A collection_count").isEqualTo(2L);
-            assertThat(a.getLong("chunk_count")).as("GUC=A chunk_count").isEqualTo(2L);
+            var a = ctx.select(CATALOG_STATS.DOC_COUNT, CATALOG_STATS.LINK_COUNT, CATALOG_STATS.OWNER_COUNT,
+                    CATALOG_STATS.COLLECTION_COUNT, CATALOG_STATS.CHUNK_COUNT)
+                .from(CATALOG_STATS)
+                .fetchOne();
+            assertThat(a.value1()).as("GUC=A doc_count").isEqualTo(2L);
+            assertThat(a.value2()).as("GUC=A link_count").isEqualTo(1L);
+            assertThat(a.value3()).as("GUC=A owner_count").isEqualTo(2L);
+            assertThat(a.value4()).as("GUC=A collection_count").isEqualTo(2L);
+            assertThat(a.value5()).as("GUC=A chunk_count").isEqualTo(2L);
 
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_B, false);
-            ResultSet b = svc.createStatement().executeQuery(
-                "SELECT doc_count, link_count, owner_count, collection_count, chunk_count "
-                + "FROM nexus.catalog_stats");
-            b.next();
-            assertThat(b.getLong("doc_count")).as("GUC=B doc_count").isEqualTo(1L);
-            assertThat(b.getLong("link_count")).as("GUC=B link_count").isEqualTo(2L);
-            assertThat(b.getLong("owner_count")).as("GUC=B owner_count").isEqualTo(1L);
-            assertThat(b.getLong("collection_count")).as("GUC=B collection_count").isEqualTo(1L);
-            assertThat(b.getLong("chunk_count")).as("GUC=B chunk_count").isEqualTo(1L);
+            var b = ctx.select(CATALOG_STATS.DOC_COUNT, CATALOG_STATS.LINK_COUNT, CATALOG_STATS.OWNER_COUNT,
+                    CATALOG_STATS.COLLECTION_COUNT, CATALOG_STATS.CHUNK_COUNT)
+                .from(CATALOG_STATS)
+                .fetchOne();
+            assertThat(b.value1()).as("GUC=B doc_count").isEqualTo(1L);
+            assertThat(b.value2()).as("GUC=B link_count").isEqualTo(2L);
+            assertThat(b.value3()).as("GUC=B owner_count").isEqualTo(1L);
+            assertThat(b.value4()).as("GUC=B collection_count").isEqualTo(1L);
+            assertThat(b.value5()).as("GUC=B chunk_count").isEqualTo(1L);
         }
     }
 }

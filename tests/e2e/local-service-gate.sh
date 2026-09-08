@@ -107,6 +107,10 @@ export NX_ALLOW_PROD_WRITE="local-service-gate: self-provisioned throwaway servi
 # NEVER run this concurrently with another pytest invocation (repo rule:
 # one pytest at a time).
 set -euo pipefail
+# nexus-h5olw follow-on: sandbox installs are throwaways, never users; the
+# anonymous install ping must not count them (tests/test_e2e_no_telemetry_lint.py).
+export NX_NO_TELEMETRY=1
+
 
 # ── Vacuity-guard summary-line parser (nexus-edwlp Task 6) ──────────────────
 # Extracts a count (e.g. "77" from "77 passed") out of a pytest -q summary

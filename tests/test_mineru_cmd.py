@@ -160,11 +160,42 @@ class TestMineruStop:
         with patch("nexus.commands.mineru.os.killpg", side_effect=_fake_killpg), \
              patch("nexus.commands.mineru.os.getpgid", lambda pid: pid), \
              patch("nexus.commands.mineru._is_process_alive", side_effect=_alive), \
+             patch("nexus.upgrade_finish.process_command",
+                   return_value="python3 mineru-api --host 127.0.0.1"), \
              patch("nexus.commands.mineru.time.sleep"):
             result = runner.invoke(main, ["mineru", "stop"])
         assert result.exit_code == 0 and not pid_file.exists()
         assert (12345, signal.SIGTERM) in killpg_calls
         assert (12345, signal.SIGKILL) not in killpg_calls
+
+    def test_stop_refuses_recycled_pid(self, runner, pid_file):
+        """nexus-5yrob: the pid file outlived its server and the OS reused
+        the pid. The stop verb signals a whole process group, so an alive
+        pid that is no longer a mineru-api gets no signal at all; the stale
+        pid file is removed instead."""
+        _write_pid(pid_file, pid=12345)
+        with patch("nexus.commands.mineru.os.killpg") as killpg, \
+             patch("nexus.commands.mineru._is_process_alive", return_value=True), \
+             patch("nexus.upgrade_finish.process_command",
+                   return_value="/usr/bin/vim unrelated.txt"):
+            result = runner.invoke(main, ["mineru", "stop"])
+        assert result.exit_code == 0, result.output
+        killpg.assert_not_called()
+        assert not pid_file.exists()
+        assert "no longer a mineru-api" in result.output
+
+    def test_stop_keeps_pid_file_when_command_unreadable(self, runner, pid_file):
+        """An empty command read is inconclusive (ps timeout and vanished
+        process look alike), so the verb neither signals nor deletes."""
+        _write_pid(pid_file, pid=12345)
+        with patch("nexus.commands.mineru.os.killpg") as killpg, \
+             patch("nexus.commands.mineru._is_process_alive", return_value=True), \
+             patch("nexus.upgrade_finish.process_command", return_value=""):
+            result = runner.invoke(main, ["mineru", "stop"])
+        assert result.exit_code == 0, result.output
+        killpg.assert_not_called()
+        assert pid_file.exists()
+        assert "could not be read" in result.output
 
     def test_stop_no_pid_file(self, runner, pid_file):
         result = runner.invoke(main, ["mineru", "stop"])

@@ -124,8 +124,6 @@ class TaxonomyCentroidAnnPlanShapeTest {
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.taxonomy_centroids TO "
                 + SVC_ROLE_REALCALL);
             su.createStatement().execute(
-                "ALTER ROLE " + SVC_ROLE_REALCALL + " SET search_path TO nexus, public");
-            su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE_REALCALL + " SET enable_indexscan = off");
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE_REALCALL + " SET enable_bitmapscan = off");

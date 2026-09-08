@@ -43,8 +43,23 @@
 # before touching anything, so this script and a concurrent ./mvnw
 # invocation (an orchestrator + a developer agent, historically — see the
 # incident this bead records) can never write service/target at the same
-# time. Refuses loudly (rc 75) naming the live holder rather than
-# corrupting a concurrent build. See scripts/lib/build-lease.sh.
+# time. The lease is shared by every worktree of the repo and a live holder
+# is waited for, bounded by NX_BUILD_LEASE_WAIT (nexus-g6xpa); rc 75 names
+# the holder only once that bound is exhausted. See scripts/lib/build-lease.sh.
+#
+# GATE-JAR CACHE (nexus-g6xpa, 2026-09-07): a fresh worktree used to spend
+# ~9 minutes here rebuilding a jar byte-identical to the primary's. The
+# stamped jar is now cached in the git common dir keyed on the EXACT
+# service/ working-tree content (tracked, modified and untracked non-ignored
+# files, via a throwaway git index) plus the stamped release_version; a hit
+# copies the cached jar into service/target and prints the build_ref that
+# jar carries, a miss builds and stores. "Never rebuild deterministic
+# artifacts" (AGENTS.md § CI Cost Discipline), applied to the dev box. A hit
+# therefore REUSES a build_ref: the per-run-unique guarantee below holds per
+# distinct service/ content, not per invocation — a caller that captured the
+# printed value still matches the jar it is given. NX_GATE_JAR_CACHE=off
+# disables the cache; NX_GATE_JAR_CACHE=<dir> relocates it. See
+# scripts/lib/gate-jar-cache.sh.
 #
 #   usage: scripts/build-gate-jar.sh [extra mvn args...]
 
@@ -55,7 +70,13 @@ props="$repo_root/service/src/main/resources/META-INF/nexus/release.properties"
 
 # shellcheck source=./lib/build-lease.sh disable=SC1091
 source "$repo_root/scripts/lib/build-lease.sh"
-build_lease_acquire service build-gate-jar.sh "$@"
+# shellcheck source=./lib/gate-jar-cache.sh disable=SC1091
+source "$repo_root/scripts/lib/gate-jar-cache.sh"
+build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" build-gate-jar.sh "$@"
+# Release on every exit path from here on; the props-restore trap below
+# replaces this once there is a stamp to restore. Without it a failure in
+# the key computation would leak the lease until stale reclaim.
+trap 'build_lease_release service' EXIT
 
 test -f "$props" || { echo "release.properties missing at $props" >&2; exit 1; }
 
@@ -67,12 +88,34 @@ assert m, 'REQUIRED_ENGINE_VERSION not parseable — fix the regex before stampi
 print('.'.join(m.groups()))
 ")
 
-# nexus-308ph: git short sha + a per-invocation nonce (epoch seconds + PID) —
-# unique to THIS run, so no future build (dev or release) can ever bake the
-# identical value.
+# nexus-308ph: git short sha + a per-build nonce (epoch seconds + PID) —
+# unique to the BUILD that stamped it, so no other build (dev or release)
+# can bake the identical value. A cache hit (nexus-g6xpa) hands back the
+# jar that build produced together with its build_ref, so the value still
+# identifies exactly one artifact; it is per distinct service/ content, not
+# per invocation.
 sha="$(cd "$repo_root" && git rev-parse --short HEAD 2>/dev/null || echo nogit)"
 nonce="$(date +%s)-$$"
 build_ref="${sha}+${nonce}"
+
+# Cache lookup, AFTER the lease is held (so no concurrent stamp is in the
+# tree while the key is computed) and BEFORE this run stamps anything.
+# The key covers service/ content; extra mvn args are part of it too, so a
+# `-Pfoo` build never serves a plain one.
+jar_name="nexus-service-1.0-SNAPSHOT.jar"
+cache_key="$(gate_jar_cache_key "$repo_root" "$ver" "$*")"
+if cached="$(gate_jar_cache_lookup "$repo_root" "$cache_key")"; then
+    mkdir -p "$repo_root/service/target"
+    cp "$cached/jar" "$repo_root/service/target/$jar_name"
+    build_ref="$(cat "$cached/build_ref")"
+    echo "stamped release_version=$ver"
+    echo "stamped build_ref=$build_ref"
+    echo "gate jar cache HIT key=$cache_key (service/ content unchanged since that build; $cached)"
+    echo "built $repo_root/service/target/$jar_name"
+    build_lease_release service
+    exit 0
+fi
+echo "gate jar cache MISS key=$cache_key — building"
 
 backup="$(mktemp)"
 cp "$props" "$backup"
@@ -98,4 +141,7 @@ echo "stamped build_ref=$build_ref"
 cd "$repo_root/service"
 ./mvnw -q package -DskipTests "$@"
 
-echo "built $(ls -1 "$repo_root"/service/target/nexus-service-*.jar | grep -v original)"
+built_jar="$repo_root/service/target/$jar_name"
+test -f "$built_jar" || { echo "build-gate-jar.sh: mvnw package reported success but $built_jar does not exist" >&2; exit 1; }
+gate_jar_cache_store "$repo_root" "$cache_key" "$built_jar" "$build_ref"
+echo "built $built_jar"

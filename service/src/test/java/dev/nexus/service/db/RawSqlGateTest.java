@@ -298,9 +298,16 @@ class RawSqlGateTest {
             // method found via Context7). Deferred-constraint fix for
             // deleteCollectionTxn's chunk-before-manifest ordering under
             // fk_catalog_chunks_chunk (class-B site 2 — see the method's own
-            // javadoc for the full derivation).
+            // javadoc for the full derivation). Schema-qualified nexus-cbo4a batch 9
+            // item 1: the constraint name was UNQUALIFIED and resolved via
+            // search_path -- exactly the reliance the role-level search_path
+            // deletion was meant to surface (full Java suite run against the
+            // deletion caught it: CatalogDeleteCollectionCascadeTest,
+            // CatalogHandlerDeleteTest, ManifestChunkFkTest,
+            // RdrO8dil7GlobalManifestAntiJoinTest, StagingPromoteOpsIntegrationTest
+            // all failed with "constraint ... does not exist" until qualified).
             "deferManifestChunkFk", Map.of(
-                ".execute(\"SET CONSTRAINTS fk_catalog_chunks_chunk DEFERRED\")", 1))),
+                ".execute(\"SET CONSTRAINTS nexus.fk_catalog_chunks_chunk DEFERRED\")", 1))),
         Map.entry("PoolerModeCheck.java", Map.of(
             // `SHOW CONFIG` is a PgBouncer admin-console meta-command, not SQL against any
             // table/schema — no jOOQ DSL form exists (no bind params, no fixed column set).
@@ -872,10 +879,9 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/AspectDocIdBackfillTest.java", 19),
         Map.entry("dev/nexus/service/AspectOperatorQueryTest.java", 1),
         Map.entry("dev/nexus/service/AspectRepositoryTest.java", 6),
-        Map.entry("dev/nexus/service/AuthFilterTest.java", 6),
-        Map.entry("dev/nexus/service/Bge768ServiceEmbedIntegrationTest.java", 2),
+        Map.entry("dev/nexus/service/AuthFilterTest.java", 4),
         Map.entry("dev/nexus/service/BootstrapTokenRotationTest.java", 4),
-        Map.entry("dev/nexus/service/BridgeAddressFieldsTest.java", 8),
+        Map.entry("dev/nexus/service/BridgeAddressFieldsTest.java", 6),
         Map.entry("dev/nexus/service/Catalog013RlsReplayTest.java", 19),
         Map.entry("dev/nexus/service/Catalog016SourceUriUniqueTest.java", 8),
         Map.entry("dev/nexus/service/Catalog034TumblerGrammarTest.java", 5),
@@ -891,24 +897,19 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/CatalogManifestSweepRepositoryTest.java", 24),
         Map.entry("dev/nexus/service/CatalogPurgeTrashPopulationParityTest.java", 8),
         Map.entry("dev/nexus/service/CatalogPurgeTrashTest.java", 14),
-        Map.entry("dev/nexus/service/CatalogPurgeTrashVacuumTest.java", 7),
-        Map.entry("dev/nexus/service/CatalogRenameCollectionTest.java", 42),
+        Map.entry("dev/nexus/service/CatalogPurgeTrashVacuumTest.java", 6),
         Map.entry("dev/nexus/service/CatalogRepositoryTest.java", 6),
         Map.entry("dev/nexus/service/ChashConformanceReportIntegrationTest.java", 9),
-        Map.entry("dev/nexus/service/ChashHandlerRerouteTest.java", 5),
+        Map.entry("dev/nexus/service/ChashHandlerRerouteTest.java", 4),
         Map.entry("dev/nexus/service/ChashProbePlanShapeTest.java", 8),
         Map.entry("dev/nexus/service/ChashRepositoryTest.java", 8),
-        Map.entry("dev/nexus/service/ChashVectorConcurrencyTest.java", 2),
         Map.entry("dev/nexus/service/ChunksRlsBehavioralTest.java", 12),
-        Map.entry("dev/nexus/service/CollectionRegistryFkExtraTest.java", 40),
-        Map.entry("dev/nexus/service/CollectionRegistryFkTest.java", 63),
         Map.entry("dev/nexus/service/CollectionVectorStatsTest.java", 18),
-        Map.entry("dev/nexus/service/CombinedQueryParityIntegrationTest.java", 5),
+        Map.entry("dev/nexus/service/CombinedQueryParityIntegrationTest.java", 4),
         Map.entry("dev/nexus/service/CombinedQueryParityTest.java", 22),
         Map.entry("dev/nexus/service/CombinedWriteRepositoryTest.java", 6),
-        Map.entry("dev/nexus/service/DataTokenHandlerTest.java", 3),
+        Map.entry("dev/nexus/service/DataTokenHandlerTest.java", 1),
         Map.entry("dev/nexus/service/DenseGateScanBudgetIntegrationTest.java", 8),
-        Map.entry("dev/nexus/service/ForeignKeyConstraintTest.java", 53),
         // nexus-cbo4a batch 9 item 0: 13 -> 18 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 18 -> 20 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         Map.entry("dev/nexus/service/GrantsNexusDiagViewAccessIntegrationTest.java", 20),
@@ -918,9 +919,9 @@ class RawSqlGateTest {
         // nexus-cbo4a batch 9 item 0: 13 -> 18 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 18 -> 20 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         Map.entry("dev/nexus/service/GrantsSvcForeignOwnedRelationTest.java", 20),
-        Map.entry("dev/nexus/service/GraphHopParityIntegrationTest.java", 8),
+        Map.entry("dev/nexus/service/GraphHopParityIntegrationTest.java", 7),
         Map.entry("dev/nexus/service/GraphHopParityTest.java", 17),
-        Map.entry("dev/nexus/service/HybridSearchFunctionParityIntegrationTest.java", 7),
+        Map.entry("dev/nexus/service/HybridSearchFunctionParityIntegrationTest.java", 6),
         Map.entry("dev/nexus/service/HybridSelectiveGateTest.java", 2),
         // nexus-cbo4a batch 9 item 0: 29 -> 34 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 34 -> 36 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
@@ -933,27 +934,22 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/MigrationJobsDroppedTest.java", 1),
         Map.entry("dev/nexus/service/NextSeqSelfHealingTest.java", 1),
         Map.entry("dev/nexus/service/NextSeqSweepTest.java", 1),
-        Map.entry("dev/nexus/service/NexusServiceScheduledSweepTest.java", 9),
+        Map.entry("dev/nexus/service/NexusServiceScheduledSweepTest.java", 8),
         Map.entry("dev/nexus/service/OnjvyReadRoutesHandlerTest.java", 2),
         Map.entry("dev/nexus/service/PgBouncerTenantIsolationTest.java", 4),
         Map.entry("dev/nexus/service/PgVectorCombinedQueryContractTest.java", 7),
         Map.entry("dev/nexus/service/PgVectorEmbedSkipGcRaceTest.java", 3),
         Map.entry("dev/nexus/service/PgVectorRepositoryContractTest.java", 9),
         Map.entry("dev/nexus/service/PgVectorRepositoryRawSqlPlanShapeTest.java", 14), // nexus-cbo4a: signature qualification only, no new sites
-        Map.entry("dev/nexus/service/PgVectorServingContractTest.java", 6),
+        Map.entry("dev/nexus/service/PgVectorServingContractTest.java", 4),
         Map.entry("dev/nexus/service/PgVectorTombstoneFilterTest.java", 4),
-        Map.entry("dev/nexus/service/PgVectorUpsertDeadlockTest.java", 1),
         Map.entry("dev/nexus/service/PipelineHandlerTest.java", 1),
         Map.entry("dev/nexus/service/PlainSearchTextGatedSearchExplainTest.java", 1),
         Map.entry("dev/nexus/service/PlanRepositoryTest.java", 2),
         Map.entry("dev/nexus/service/PlansSchemaLiquibaseTest.java", 13),
         Map.entry("dev/nexus/service/Rdr71gw2CollectionNotNullTest.java", 21),
-        Map.entry("dev/nexus/service/RdrO8dil7GlobalManifestAntiJoinTest.java", 38),
-        Map.entry("dev/nexus/service/ReadShapeViewsTest.java", 32),
-        Map.entry("dev/nexus/service/ReferenceOnlyChunkUpsertTest.java", 1),
         Map.entry("dev/nexus/service/RemapHandlerTest.java", 5),
         Map.entry("dev/nexus/service/RemapSchemaLiquibaseTest.java", 10),
-        Map.entry("dev/nexus/service/RerankStageIntegrationTest.java", 2),
         Map.entry("dev/nexus/service/SchemaMigratorDateExecutedUtcTest.java", 2),
         // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): 88 -> 79
         // (net DOWN, not up -- stale comment fix, batch-9 gate pass,
@@ -974,33 +970,89 @@ class RawSqlGateTest {
         // on both SECURITY DEFINER mirrors, closing the gap between this
         // and Python's own relocate_vector_extensions_to_nexus_schema,
         // which has carried the REVOKE since commit 7d04c40cf).
-        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 81),
+        // nexus-cbo4a batch 12: 81 -> 50. Converted databasechangelog reads (typed
+        // DSL.table(DSL.name("databasechangelog"))/DSL.field(DSL.name(...), Class) --
+        // Liquibase's own bookkeeping table, no jOOQ codegen), nexus.memory INSERT/
+        // SELECT (generated MEMORY table), the mid-ladder DROP CONSTRAINT/[NO] FORCE
+        // ROW LEVEL SECURITY/ADD CONSTRAINT NOT VALID/VALIDATE CONSTRAINT sites onto
+        // PgContainerHelper's typed DDL helpers (dropConstraint/setForceRls/
+        // addFkNotValid/addFkNotValidComposite3/validateConstraint) against either
+        // the generated table or, for the per-dim 384 chunk table and chash_index (dropped at HEAD),
+        // DSL.table(DSL.name("nexus", "<table>")) -- these dedicated-container
+        // aged-box tests never call applyProductSchema, so PgContainerHelper#
+        // installTestObjects (new this batch, hoisted out of applyProductSchema)
+        // installs the nexus_test.* functions those helpers need, via the MIGRATING
+        // role's own connection (not su) so databasechangelog stays owned by
+        // whichever role's Liquibase run creates it -- installing via su would leave
+        // it superuser-owned and the migrating role's own product-changelog walk
+        // would then hit "permission denied for table databasechangelog". VALIDATE
+        // CONSTRAINT conversions switch their expected exception from PSQLException
+        // to org.jooq.exception.DataAccessException (a jOOQ Routine call wraps the
+        // underlying PSQLException), same as batch 10's review fold-in. Seed INSERTs
+        // onto generated jOOQ tables (CATALOG_DOCUMENTS/CATALOG_DOCUMENT_CHUNKS/
+        // CHUNKS/CATALOG_COLLECTIONS). changesetExecType onto the same
+        // databasechangelog schema-agnostic form.
+        //
+        // Kept raw with reasons, all documented inline at their site:
+        // bootstrapVectorExtensionsForFreshWalk's 9-site DBA bootstrap (same class as
+        // SchemaRollbackRoundTripIntegrationTest's own kept-raw copy of this exact
+        // method), 8 occurrences of a 5-site admin/svc role bootstrap against a
+        // dedicated container (bootstrap() plus 7 aged-box tests -- CREATE ROLE /
+        // GRANT CREATE ON DATABASE|SCHEMA / GRANT pg_monitor WITH ADMIN OPTION, no
+        // jOOQ typed-DSL form), and one chunks seed INSERT (test 13,
+        // lateUpgradingDeployment...) whose bare, deliberately UNQUALIFIED ::vector
+        // cast is the test's own subject (VectorBinding always renders the
+        // schema-qualified ::nexus.vector, which would silently change what that one
+        // statement proves).
+        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 50),
         // nexus-cbo4a batch 9 item 0: 32 -> 37 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 37 -> 39 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
-        Map.entry("dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java", 39),
+        // nexus-cbo4a batch 12: 39 -> 16. Converted seed inserts (10 sites: HEAD-schema
+        // generated jOOQ tables), databasechangelog reads (rollbackDepthThrough/
+        // executionTail/duplicateChangelogRows/changelogRowCount, schema-agnostic
+        // DSL.table(DSL.name("databasechangelog"))/DSL.field(DSL.name(...), Class) --
+        // Liquibase's own bookkeeping table carries no jOOQ codegen), the jsonb/
+        // timestamptz cast oracles (canonicalJsonbText/defaultTimestamptzText, typed
+        // DSL.cast chains), one DROP VIEW (typed DSLContext#dropView), and the five
+        // mid-rollback column-probe wrappers (queryOneNullableString/queryOneInt/
+        // queryOneNullableBoolean/assertNullColumn/assertTimestampEquals, now
+        // DSL.field(DSL.name(column), Class)-typed against a caller-supplied Class --
+        // the column's ACTUAL Postgres type varies by rollback depth, so a fixed
+        // generated-table Field would be WRONG at half this file's call sites; this is
+        // the ladder-file mid-walk CAUTION the task brief names, applied to reads
+        // rather than DDL). Kept raw with reasons, all documented inline at their site:
+        // bootstrapVectorExtensionsForFreshWalk's 9-site CREATE EXTENSION/CREATE SCHEMA
+        // AUTHORIZATION/CREATE OR REPLACE FUNCTION block (DBA/superuser provisioning
+        // DDL mirroring nexus.db.pg_provision.py, no jOOQ typed form for any of the
+        // three shapes -- same class as SchemaMigratorIntegrationTest's own kept-raw
+        // admin/svc bootstrap), the CREATE ROLE nexus_diag BYPASSRLS bootstrap (cluster-
+        // level DDL, no typed form), one execute(sql) that replays grants-nexus-diag-1's
+        // own <sql> body verbatim (extractChangesetSql -- a re-expression would no
+        // longer be the SAME statement Liquibase executes), and dbaBootstrap's 5-site
+        // admin/svc role bootstrap against a dedicated container (same exclusion class,
+        // already named in this file's own javadoc history above).
+        Map.entry("dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java", 16),
         // nexus-cbo4a batch 9 item 0: 98 -> 103 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 103 -> 105 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         Map.entry("dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java", 105),
-        Map.entry("dev/nexus/service/ScratchHandlerTest.java", 4),
-        Map.entry("dev/nexus/service/ScratchRepositoryTest.java", 3),
-        Map.entry("dev/nexus/service/ScratchSchemaLiquibaseTest.java", 11),
+        Map.entry("dev/nexus/service/ScratchHandlerTest.java", 3),
+        Map.entry("dev/nexus/service/ScratchRepositoryTest.java", 2),
+        Map.entry("dev/nexus/service/ScratchSchemaLiquibaseTest.java", 10),
         Map.entry("dev/nexus/service/ServiceIntegrationTest.java", 20),
-        Map.entry("dev/nexus/service/ServiceTokenSchemaLiquibaseTest.java", 16),
-        Map.entry("dev/nexus/service/ServiceTokenScopeBackfillTest.java", 6),
-        Map.entry("dev/nexus/service/SessionTokenHandlerTest.java", 5),
+        Map.entry("dev/nexus/service/ServiceTokenSchemaLiquibaseTest.java", 9),
+        Map.entry("dev/nexus/service/ServiceTokenScopeBackfillTest.java", 5),
+        Map.entry("dev/nexus/service/SessionTokenHandlerTest.java", 4),
         Map.entry("dev/nexus/service/SharedCluster.java", 3),
         Map.entry("dev/nexus/service/SharedClusterMutationFalsifyTest.java", 4),
         Map.entry("dev/nexus/service/SharedDatabaseHandle.java", 1),
-        Map.entry("dev/nexus/service/SoftDeleteTest.java", 42),
-        Map.entry("dev/nexus/service/StagingHandlerJourneyTest.java", 6),
-        Map.entry("dev/nexus/service/StagingPromoteFrecencyTtlCheckRegressionTest.java", 5),
-        Map.entry("dev/nexus/service/StagingPromoteOpsIntegrationTest.java", 47),
+        Map.entry("dev/nexus/service/StagingHandlerJourneyTest.java", 4),
+        Map.entry("dev/nexus/service/StagingPromoteFrecencyTtlCheckRegressionTest.java", 3),
         Map.entry("dev/nexus/service/StagingSchemaLiquibaseTest.java", 11),
         Map.entry("dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java", 20),
         Map.entry("dev/nexus/service/Taxonomy011ForeignOwnedDiagViewTest.java", 11),
         Map.entry("dev/nexus/service/Taxonomy014TenantFkRepointTest.java", 14),
         Map.entry("dev/nexus/service/TaxonomyAssignFromChashesRepositoryTest.java", 5),
-        Map.entry("dev/nexus/service/TaxonomyCentroidAnnPlanShapeTest.java", 12),
+        Map.entry("dev/nexus/service/TaxonomyCentroidAnnPlanShapeTest.java", 11),
         Map.entry("dev/nexus/service/TaxonomyCentroidRepositoryTest.java", 1),
         Map.entry("dev/nexus/service/TaxonomyPersistHandlerTest.java", 3),
         Map.entry("dev/nexus/service/TaxonomyRepositoryTest.java", 8),
@@ -1009,20 +1061,13 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/TenantPoolingIsolationTest.java", 3),
         Map.entry("dev/nexus/service/Tk070P6aTtlDaysCountedDeleteTest.java", 13),
         Map.entry("dev/nexus/service/Tk070P6bTtlDaysCountedUpdateTest.java", 10),
-        Map.entry("dev/nexus/service/TokenAdminHandlerTest.java", 9),
-        Map.entry("dev/nexus/service/TokenBoundaryAdversarialTest.java", 12),
-        Map.entry("dev/nexus/service/TokenScopeResolutionTest.java", 2),
-        Map.entry("dev/nexus/service/TokenStoreDataTokenSweepTest.java", 3),
+        Map.entry("dev/nexus/service/TokenAdminHandlerTest.java", 7),
+        Map.entry("dev/nexus/service/TokenBoundaryAdversarialTest.java", 10),
+        Map.entry("dev/nexus/service/TokenScopeResolutionTest.java", 1),
+        Map.entry("dev/nexus/service/TokenStoreDataTokenSweepTest.java", 2),
         Map.entry("dev/nexus/service/TokenStoreSessionSweepTest.java", 2),
         Map.entry("dev/nexus/service/TopicsDocCountDeadlockConcurrencyTest.java", 8),
         Map.entry("dev/nexus/service/UpdatedAtTriggerTest.java", 9),
-        Map.entry("dev/nexus/service/VectorHandlerAspectFieldGuardTest.java", 2),
-        Map.entry("dev/nexus/service/VectorHandlerCombinedQueryModelGuardTest.java", 2),
-        Map.entry("dev/nexus/service/VectorHandlerEmbeddingModeTest.java", 2),
-        Map.entry("dev/nexus/service/VectorHandlerTokenUsageTest.java", 2),
-        Map.entry("dev/nexus/service/VectorHandlerUpstreamRateLimitedTest.java", 2),
-        Map.entry("dev/nexus/service/VectorHandlerVoyageTooManyTokensTest.java", 2),
-        Map.entry("dev/nexus/service/VectorHybridHttpTest.java", 1),
         Map.entry("dev/nexus/service/VectorsChashIndexLiquibaseTest.java", 4),
         // nexus-cbo4a batch 9 item 0: 63 -> 68 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 68 -> 70 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
@@ -1034,7 +1079,7 @@ class RawSqlGateTest {
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 28 -> 30 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         Map.entry("dev/nexus/service/VectorsUnifyChunksIntegrationTest.java", 30),
         Map.entry("dev/nexus/service/db/BackendReaperIntegrationTest.java", 1),
-        Map.entry("dev/nexus/service/db/CollectionRegistryTest.java", 3),
+        Map.entry("dev/nexus/service/db/CollectionRegistryTest.java", 2),
         Map.entry("dev/nexus/service/db/PgSessionEfSearchReadbackIntegrationTest.java", 2),
         Map.entry("dev/nexus/service/db/PgSessionStatementTimeoutIntegrationTest.java", 7),
         Map.entry("dev/nexus/service/http/AspectHandlerEnqueueErrorTest.java", 1),
@@ -1113,8 +1158,258 @@ class RawSqlGateTest {
      * SchemaMigratorDateExecutedUtcTest} exercises {@code
      * SchemaMigrator#migrate} directly (the production entrypoint under
      * test), never a hand-rolled {@code Liquibase} call to fold.
+     *
+     * <p><b>nexus-cbo4a batch 9 item 1 (2026-09-07):</b> 1661 -&gt; 1602, -59
+     * sites across 36 files. Two shapes, one edit: (a) every remaining
+     * per-class {@code ALTER ROLE ... SET search_path} literal (Sam's
+     * directive, nexus-zrcj7, batch 9 item 0's deferred role-level half) is
+     * DELETED, not folded onto a replacement statement — {@code
+     * PgContainerHelper.bootstrapServiceRole} and {@code
+     * db.changelog-test-role.xml} now set no search_path at all, so there is
+     * nothing to convert onto, only to remove; (b) every hand-rolled {@code
+     * INSERT INTO nexus.service_tokens ...} site (prepareStatement,
+     * createStatement().execute, and the local wrapper methods several files
+     * built around one) folds onto {@code
+     * PgContainerHelper.seedServiceToken} — the existing 4-arg overload where
+     * the site is a plain token/tenant/label seed, and a new 7-arg overload
+     * ({@code scope}/{@code expiresAt}/{@code revokedAt}, each omitted from
+     * the INSERT — never set to a literal SQL NULL — when the argument is
+     * {@code null}) where the site needs those columns.
+     * {@code ServiceTokenScopeBackfillTest}/{@code
+     * ServiceTokenSchemaLiquibaseTest}/{@code ReferenceOnlyChunkUpsertTest}
+     * insert LITERAL (fake) hashes to assert on later, not a real token's
+     * sha256 -- these convert onto the typed jOOQ {@code SERVICE_TOKENS} DSL
+     * DIRECTLY instead, since {@code seedServiceToken} always hashes its
+     * token argument. Twelve files reached zero and their {@link
+     * #TEST_TREE_RAW_SQL_CEILING} entries are removed outright (145 -&gt; 133
+     * files): {@code Bge768ServiceEmbedIntegrationTest}, {@code
+     * ChashVectorConcurrencyTest}, {@code PgVectorUpsertDeadlockTest}, {@code
+     * ReferenceOnlyChunkUpsertTest}, {@code RerankStageIntegrationTest},
+     * {@code VectorHandlerAspectFieldGuardTest}, {@code
+     * VectorHandlerCombinedQueryModelGuardTest}, {@code
+     * VectorHandlerEmbeddingModeTest}, {@code VectorHandlerTokenUsageTest},
+     * {@code VectorHandlerUpstreamRateLimitedTest}, {@code
+     * VectorHandlerVoyageTooManyTokensTest}, {@code VectorHybridHttpTest}.
+     * Kept raw with reason, unchanged by this batch: {@code
+     * ServiceIntegrationTest} (hand-built spike schema with its own
+     * differently-shaped {@code service_tokens} table, documented since
+     * batch 7); {@code SharedClusterMutationFalsifyTest}'s poison-value
+     * {@code ALTER ROLE ... SET search_path TO yhmav_poison_schema, public}
+     * (a deliberate falsification proof, nexus-tyiht, exempted by {@link
+     * #scanSessionSearchPathReliance} on its distinctive target schema, not
+     * carved out of this ratchet). Verified against the real gate (not a
+     * standalone census run): {@code noRawExecuteSqlRegressionInTestSources}
+     * red on the unmodified ceiling map reported the exact "declares N, only
+     * M found" delta for all 36 files, and the reseeded map plus this
+     * constant reproduce it exactly.
+     *
+     * <p><b>nexus-cbo4a batch 10 (2026-09-07), file 1:</b> 1602 -&gt; 1565 (-37),
+     * {@code CollectionRegistryFkExtraTest.java} 40 -&gt; 3 -- seed INSERTs (backfill-
+     * stub fixtures across five FK-eligible tables), row-count reads, and cross-
+     * tenant/ON-DELETE-RESTRICT probes all onto typed jOOQ DSL over generated
+     * {@code Tables}. Two new {@code PgContainerHelper} helpers, {@code
+     * insertCollection}/{@code insertCatalogDocument}, hoisted for reuse by the
+     * same-shaped duplication in {@code CollectionRegistryFkTest} and nine other
+     * files -- not yet rewired onto it, a follow-up. The surviving 3 sites are
+     * {@code ADD CONSTRAINT .. NOT VALID} and {@code VALIDATE CONSTRAINT} x2 inside
+     * {@code assertReconcileLoadBearing} -- Postgres-only {@code ALTER TABLE}
+     * extensions with no jOOQ typed-DSL form (verified against jOOQ 3.21's manual:
+     * {@code alterConstraint().enforced()/notEnforced()} renders MySQL-style
+     * {@code [NOT] ENFORCED}, not Postgres's {@code NOT VALID}/{@code VALIDATE
+     * CONSTRAINT}); {@code DROP CONSTRAINT IF EXISTS} DOES have a typed form
+     * ({@code alterTable(table).dropConstraintIfExists(name)}) and was converted.
+     *
+     * <p><b>nexus-cbo4a batch 10, file 2:</b> 1565 -&gt; 1525 (-40), {@code
+     * CatalogRenameCollectionTest.java} 42 -&gt; 2 -- its {@code rows(Connection, String)}
+     * row-count wrapper and all 39 literal-fed call sites onto typed jOOQ {@code
+     * selectCount()}, the wrapper retired outright. The surviving 2 sites are {@code
+     * ALTER TABLE .. [NO] FORCE ROW LEVEL SECURITY} (Postgres-only RLS DDL, no jOOQ
+     * typed-DSL form). This file's seed INSERTs were already typed jOOQ from an earlier
+     * batch; only the row-count read shape remained, confirming the task's own
+     * Shape-A/Shape-B split.
+     *
+     * <p><b>nexus-cbo4a batch 10, file 3:</b> 1525 -&gt; 1465 (-60), {@code
+     * CollectionRegistryFkTest.java} 63 -&gt; 3 -- chunks/topic_assignments seed inserts
+     * across three dims, row-count reads, cross-tenant/RLS/ON-DELETE-RESTRICT probes,
+     * and six {@code @Disabled} dead-code CHECK-constraint tests targeting the DROPPED
+     * per-dim chunk tables (retired at RDR-191), all onto typed jOOQ DSL. Rewired onto {@code
+     * CollectionRegistryFkExtraTest}'s batch-10 {@code PgContainerHelper.insertCollection}/
+     * {@code insertCatalogDocument} helpers, and onto three NEW {@code PgContainerHelper}
+     * helpers ({@code insertChunk384/768/1024}) hoisted from the byte-for-byte duplicate
+     * pair already living in {@code CatalogDeleteCollectionCascadeTest} and {@code
+     * CatalogRenameCollectionTest} (those two files' own local copies are untouched --
+     * not yet rewired onto the shared version, a follow-up). The surviving 3 sites are
+     * the same {@code ADD CONSTRAINT .. NOT VALID} / {@code VALIDATE CONSTRAINT} x2
+     * shape as {@code CollectionRegistryFkExtraTest}'s identical helper.
+     *
+     * <p><b>nexus-cbo4a batch 10, file 4:</b> 1465 -&gt; 1412 (-53), {@code
+     * ForeignKeyConstraintTest.java} 53 -&gt; 0, its {@link #TEST_TREE_RAW_SQL_CEILING}
+     * entry REMOVED outright -- every seed insert, row-count read, and cascade/cross-
+     * tenant probe across topic_assignments/document_aspects/document_highlights/
+     * aspect_extraction_queue/catalog_document_chunks onto typed jOOQ DSL. Rewired
+     * onto the batch-10 {@code PgContainerHelper} helpers ({@code insertCollection}/
+     * {@code insertCatalogDocument}); {@code seedChunk}/{@code insertTopic}/{@code
+     * vector}/{@code chashAscii} stay local (this file's own dim/shape specifics).
+     * The one 32-hex-char legacy chash literal this file's own {@code hexChash}
+     * javadoc already documented as a "half-digest" oddity is preserved verbatim per
+     * this batch's no-value-change rule.
+     *
+     * <p><b>nexus-cbo4a batch 10, file 5:</b> 1412 -&gt; 1370 (-42), {@code
+     * SoftDeleteTest.java} 42 -&gt; 0, its {@link #TEST_TREE_RAW_SQL_CEILING} entry
+     * REMOVED outright. {@code document_trash}/{@code document_restore}/{@code
+     * purge_trash} calls onto the generated jOOQ {@code Routines} (typed function-call
+     * bindings), the {@code nexus.live_chunks} view onto the generated {@code
+     * LIVE_CHUNKS} Table, {@code purge_trash}'s {@code interval} argument built via
+     * {@code YearToSecond.valueOf(Duration...)}, and every seed insert/row-count read
+     * onto typed jOOQ DSL. {@code decode(chash, 'hex')} sites convert to a shared
+     * {@code chashBytes(seed)} helper (genuine hex-decoded bytes), distinct from the
+     * ASCII-escape form other files' {@code chashAscii} produces.
+     *
+     * <p><b>nexus-cbo4a batch 10, file 6:</b> 1370 -&gt; 1338 (-32), {@code
+     * ReadShapeViewsTest.java} 32 -&gt; 0, its {@link #TEST_TREE_RAW_SQL_CEILING} entry
+     * REMOVED outright. Every seed insert/update and every view read (across the six
+     * {@code security_invoker} read-shape views: {@code catalog_stats}, {@code
+     * collection_doc_counts}, {@code coverage_by_content_type}, {@code
+     * collection_health_meta}, {@code topics_with_counts}, {@code
+     * links_by_type_counts}) onto typed jOOQ DSL over their generated Tables. The
+     * {@code GROUPED_VIEWS} loop (five views sharing a {@code tenant_id} column, no
+     * common generated-Tables supertype) resolves generically via a name-to-Table map
+     * plus {@code Table#field(String, Class)}, same idiom as {@code
+     * CatalogRenameCollectionTest}'s nine-table loop.
+     *
+     * <p><b>nexus-cbo4a batch 10 review fold-in (code-review T2 [code-review-nexus-
+     * cbo4a-batch-10] ship-ready, critique [24862] 0 blockers):</b> 1338 -&gt; 1330
+     * (-8). The 8 sites files 1/2/3 above kept raw ({@code ADD CONSTRAINT .. NOT
+     * VALID}/{@code VALIDATE CONSTRAINT} x3 each in {@code CollectionRegistryFkExtraTest}'s
+     * and {@code CollectionRegistryFkTest}'s reconcile helpers, {@code ALTER TABLE ..
+     * [NO] FORCE ROW LEVEL SECURITY} x2 in {@code CatalogRenameCollectionTest}) move
+     * onto the batch-5 test-lifecycle-function pattern instead of staying raw: three
+     * new plpgsql functions in {@code nexus_test}
+     * (db/changelog-test/db.changelog-test-objects.xml changesets test-objects-3/4/5 --
+     * {@code add_fk_not_valid}, {@code validate_constraint}, {@code set_force_rls}),
+     * called from Java through the generated {@code dev.nexus.service.jooq.test
+     * Routines} exactly as {@code nexus_test.analyze_table} already was (new {@code
+     * PgContainerHelper#addFkNotValid}/{@code #validateConstraint}/{@code
+     * #setForceRls} wrappers, same {@code ctx.render(table)}-into-{@code regclass}
+     * idiom as {@code #analyzeTable}). All three files reach ZERO and their {@link
+     * #TEST_TREE_RAW_SQL_CEILING} entries are REMOVED outright -- {@code
+     * CollectionRegistryFkExtraTest.java} 3 -&gt; 0, {@code CollectionRegistryFkTest.java}
+     * 3 -&gt; 0, {@code CatalogRenameCollectionTest.java} 2 -&gt; 0. Calling a jOOQ Routine
+     * wraps the underlying {@code PSQLException} in jOOQ's own {@code
+     * DataAccessException} (same wrapping every other {@code .execute()}/insert call
+     * in these files already goes through), so the two {@code VALIDATE CONSTRAINT}
+     * must-fail assertions switch from {@code assertThrows(PSQLException.class, ...)}
+     * to {@code assertThrows(DataAccessException.class, ...)} accordingly.
+     *
+     * <p>Same fold-in, a real correctness bug the code-review round surfaced: 5
+     * {@code topic_assignments.doc_id} seed/select sites in {@code
+     * CollectionRegistryFkTest} (the {@code hexChash(seed)} value inserted as a bare
+     * quoted string literal with NO {@code decode(..., 'hex')} in the pre-batch raw
+     * SQL, per {@code git show 7cd690dde}) had been converted to genuine hex-decoded
+     * bytes ({@code HexFormat.parseHex(hexChash(seed))}) instead of the ASCII-escape-
+     * format bytes of the hex STRING the original actually stored -- fixed by renaming
+     * the helper to {@code hexChashAscii} and changing its body to {@code
+     * hexChash(seed).getBytes(US_ASCII)}. The identical mistake was found, by the same
+     * check, at ONE site in {@code ForeignKeyConstraintTest}
+     * ({@code topicAssignment_topicIdFk_stillEnforced}, also a bare literal with no
+     * {@code decode()} in the original) and fixed the same way via the file's existing
+     * {@code chashAscii(String)} helper -- neither site's assertion outcome changes
+     * (both are FK-violation negative tests unaffected by the exact doc_id bytes), but
+     * the stored value now matches the pre-conversion source exactly, per this batch's
+     * no-value-change rule. Every other {@code hexChash}/{@code decode(...)} site
+     * across all 6 batch-10 files was re-verified against its own pre-batch source at
+     * this review round and found already correct (the encoding choice is per-site,
+     * never assumed from a sibling file's convention -- see {@code
+     * CollectionRegistryFkTest}'s {@code hexChashAscii} javadoc for the full
+     * distinction from {@code hexChashBytes}-style genuine hex-decode).
+     *
+     * <p><b>nexus-cbo4a batch 11:</b> 1330 -&gt; 1283 (-47), {@code
+     * StagingPromoteOpsIntegrationTest.java} 47 -&gt; 0, its {@link
+     * #TEST_TREE_RAW_SQL_CEILING} entry REMOVED outright. {@code staging.*}
+     * (chunks/document_chunks/frecency/document_aspects/topic_assignments)
+     * carries no generated jOOQ Table at all (codegen's {@code <schemata>}
+     * covers only {@code nexus}/{@code t1}), so every staging read/write goes
+     * through the {@code DSL.field(DSL.name(colName), Type.class)} plain-column
+     * house pattern {@code StagingHandler}/{@code StagingPromoteOps}/{@code
+     * CatalogRepository} already use in production code, including the vector
+     * embedding column via {@code SQLDataType.OTHER.asConvertedDataType(new
+     * VectorBinding())} (the same idiom {@code StagingHandler.SC_EMBEDDING}
+     * uses). The {@code count(String sql)}/{@code countAs(String, String)}
+     * local wrappers (the LOCAL_SQL_WRAPPER_DECL shape batch 8's gate widening
+     * made visible) are retired onto {@code count(Function&lt;DSLContext, ?
+     * extends Number&gt;)}/{@code countAs(String, Function&lt;...&gt;)}, so
+     * every call site now builds its own typed query rather than passing a SQL
+     * string -- the same retirement {@code CatalogRenameCollectionTest}'s
+     * {@code rows(Connection, String)} went through in batch 10. The two
+     * {@code pg_advisory_xact_lock}/{@code pg_advisory_xact_lock_shared}/{@code
+     * set_config} advisory-lock helpers move onto {@code DSL.function(...)}
+     * calls over a {@code DSL.using(conn, ...)} context, the identical idiom
+     * {@code StagingPromoteOps.promoteCollection}'s own per-tenant advisory
+     * lock and {@code PgContainerHelper#setTenant} already use for these
+     * built-in Postgres functions -- a blocked acquire now surfaces as jOOQ's
+     * {@code DataAccessException} wrapping the driver {@code SQLException}
+     * (unwrap via {@code getCause()}), so the two assertions pinning the
+     * refused-lock SQLSTATE ({@code 55P03}) and the {@code
+     * topic_assignments_chunk_fk} violation ({@code 23503}, the file's one
+     * former raw-JDBC-PreparedStatement site) switch accordingly, the same
+     * wrapper-shape change batch 10's {@code VALIDATE CONSTRAINT} assertions
+     * went through. The {@code nexus.census_canary} ad hoc table (create,
+     * grant, seed, drop, all inside one test method) converts onto jOOQ's
+     * typed DDL API ({@code DSLContext#createTable/#grant/#dropTable}) instead
+     * of staying SANCTIONED RAW as batch 4 first left it -- jOOQ has full
+     * typed CREATE TABLE/GRANT/DROP TABLE support, so there was no genuine
+     * gap to sanction. The one dangling-manifest-row test's {@code
+     * fk_catalog_chunks_chunk} DROP/re-ADD NOT VALID needed a THREE-column
+     * composite FK shape ({@code (tenant_id, collection, chash)}) batch 10's
+     * two-column {@code add_fk_not_valid} cannot express: two new {@code
+     * nexus_test} plpgsql functions (db.changelog-test-objects.xml changesets
+     * test-objects-6/7, {@code drop_constraint}/{@code
+     * add_fk_not_valid_composite3}, kept as separate calls rather than one
+     * combined drop-then-add since the dangling row's INSERT must run BETWEEN
+     * them) plus matching {@code PgContainerHelper#dropConstraint}/{@code
+     * #addFkNotValidComposite3} wrappers, following the exact test-lifecycle-
+     * function pattern batch 10's review fold-in established.
+     *
+     * <p><b>nexus-cbo4a batch 11, file 2:</b> 1283 -&gt; 1245 (-38), {@code
+     * RdrO8dil7GlobalManifestAntiJoinTest.java} 38 -&gt; 0, its {@link
+     * #TEST_TREE_RAW_SQL_CEILING} entry REMOVED outright. The two hand-rolled
+     * anti-join counters ({@code globalDanglingCount}/{@code
+     * globalDanglingCountAnyOwnerState}) convert onto a typed jOOQ join over
+     * {@code CATALOG_DOCUMENT_CHUNKS.as("m")}/{@code CATALOG_DOCUMENTS.as("d")}
+     * with {@code .andNotExists(...)}/{@code .whereNotExists(...)} against
+     * {@code CHUNKS.as("c")} -- every table this query touches has a generated
+     * jOOQ {@code Table}, unlike {@code staging.*}. The {@code rows(Connection,
+     * String)} local wrapper retires onto {@code rows(Connection,
+     * Function&lt;DSLContext, ? extends Number&gt;)}, the same {@code
+     * Function}-typed retirement {@code count}/{@code countAs} went through in
+     * {@code StagingPromoteOpsIntegrationTest} this same batch. {@code
+     * chashLiteral}'s ASCII-escape convention (a bare string literal with NO
+     * {@code decode(..., 'hex')} in the pre-batch raw SQL, verified per site)
+     * converts to {@code chashLiteral(seed).getBytes(StandardCharsets
+     * .US_ASCII)} against the generated {@code byte[]}-typed {@code CHASH}
+     * fields; {@code digestHex}/{@code Chash.ofText(...).toHex()} values that
+     * WERE wrapped in {@code decode(..., 'hex')} convert to genuine {@code
+     * HexFormat.of().parseHex(...)} bytes instead -- the same per-site,
+     * never-assumed-from-a-sibling distinction batch 10's review fold-in
+     * established for this exact encoding choice. The {@code
+     * jsonb_build_object(...)} metadata literal in the GC-expire fixture
+     * converts to {@code DSL.jsonbObject(DSL.jsonEntry(...), ...)}. The two
+     * {@code fk_catalog_chunks_chunk} DROP/re-ADD NOT VALID pairs reuse the
+     * SAME {@code PgContainerHelper#dropConstraint}/{@code
+     * #addFkNotValidComposite3} wrappers this batch's file 1 added (no new
+     * database objects for this file). The two bootstrap-time {@code GRANT
+     * EXECUTE ON FUNCTION} statements move onto a NEW {@code
+     * nexus_test.grant_execute_on_function(text, text)} plpgsql wrapper
+     * (db.changelog-test-objects.xml changeset test-objects-8) plus a matching
+     * {@code PgContainerHelper#grantExecuteOnFunction} -- jOOQ's typed GRANT
+     * DSL targets tables, not a function's parenthesized argument-type
+     * signature, which Postgres's {@code GRANT ... ON FUNCTION} syntax
+     * requires. This same {@code GRANT EXECUTE ON FUNCTION} shape recurs raw
+     * across roughly 15 OTHER test files today -- out of this batch's scope,
+     * but the new function is available for a future batch to rewire them
+     * onto.
      */
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1661;
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1191;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
@@ -2200,15 +2495,17 @@ class RawSqlGateTest {
     //    its ~11 test copies (8 setConnectionInitSql call sites plus 3 "-c
     //    search_path=..." datasource-property sites across 2 files) are deleted,
     //    not sanctioned, in this same batch. This scan makes sure neither shape
-    //    can come back. DELIBERATELY does NOT scan for the ROLE-level {@code ALTER
-    //    ROLE ... SET search_path} shape ({@code db.changelog-test-role.xml}'s
-    //    {@code bootstrapServiceRole} plus its own remaining per-class literal
-    //    copies) -- that shape is real, understood, and its removal is a SEPARATE,
-    //    already-identified item (batch 9 item 1: fold the leftover per-class
-    //    literals onto {@code PgContainerHelper.bootstrapServiceRole}/{@code
-    //    seedServiceToken}), not this batch's scope; a blanket "any SET
-    //    search_path string literal" scan would fail loud today against that
-    //    known, deferred population instead of catching a genuine regression. ──
+    //    can come back. Batch 9 item 1 (2026-09-07) widened the same scan to the
+    //    ROLE-level {@code ALTER ROLE ... SET search_path} shape too -- the
+    //    remaining ~24 per-class literals plus {@code db.changelog-test-role.xml}'s
+    //    own line were all folded onto {@code PgContainerHelper.bootstrapServiceRole}
+    //    (which now sets no search_path at all) in that same batch, so this scan's
+    //    zero-tolerance claim covers all three shapes with no grandfathered
+    //    population. SharedClusterMutationFalsifyTest's poison-value {@code ALTER
+    //    ROLE ... SET search_path TO yhmav_poison_schema, public} is a deliberate
+    //    falsification proof (nexus-tyiht: proves SharedCluster's reset-at-acquire
+    //    clears a cluster-wide role GUC) and is exempted by its distinctive target
+    //    schema name, not by file name -- see {@link #scanSessionSearchPathReliance}. ──
 
     /** Per-file scan: every {@code setConnectionInitSql(...)} call site (unconditional --
      * this method sets a SESSION-level search_path/GUC string on a connection pool, and
@@ -2230,7 +2527,23 @@ class RawSqlGateTest {
      * shape via string concatenation rather than one contiguous literal, so this
      * class's own real source never spells the shape out as a single matchable run --
      * exactly how {@link #scanDslTemplates}'s field/condition/query/table matcher
-     * keeps its own risky-looking fixture text inside a blanked comment instead. */
+     * keeps its own risky-looking fixture text inside a blanked comment instead.
+     *
+     * <p><b>Third branch, added nexus-cbo4a batch 9 item 1 (2026-09-07):</b> the
+     * ROLE-level {@code ALTER ROLE <role> SET search_path TO <schema list>} shape --
+     * deferred out of batch 9 item 0's scope, folded in this batch onto {@code
+     * PgContainerHelper.bootstrapServiceRole} (which now sets no search_path at all).
+     * Same STRING-CONTENT visibility requirement as the "-c" branch above, so it also
+     * runs against {@link #blankComments} and this class's own fixture-building
+     * literals split the "ALTER ROLE" / "SET search_path" pair via concatenation for
+     * the same reason. One exemption, matched on the CAPTURED TARGET SCHEMA rather
+     * than file name (a file-name allowlist could be spoofed by a future violation
+     * added to that same file): {@code SharedClusterMutationFalsifyTest}'s
+     * {@code ALTER ROLE ... SET search_path TO yhmav_poison_schema, public} is a
+     * deliberate falsification proof (nexus-tyiht) that a poisoned cluster-wide
+     * role GUC is reset at the next {@code SharedCluster#acquireDatabase()} --
+     * not a real reliance, and the poison schema name is a value nothing else in
+     * the suite would ever set. */
     static List<String> scanSessionSearchPathReliance(String fileName, String rawSource) {
         String fullyBlanked = blank(rawSource);
         String commentsBlanked = blankComments(rawSource);
@@ -2257,16 +2570,41 @@ class RawSqlGateTest {
                 + "setConnectionInitSql; same retirement, same reason");
         }
 
+        Matcher alterRole = Pattern.compile(
+            "(?i)ALTER\\s+ROLE\\b[\\s\\S]{0,300}?SET\\s+search_path\\s*(?:TO\\b|=)\\s*\\\"?([A-Za-z0-9_]+)")
+            .matcher(commentsBlanked);
+        while (alterRole.find()) {
+            if ("yhmav_poison_schema".equals(alterRole.group(1))) {
+                // SharedClusterMutationFalsifyTest's deliberate poison-value
+                // falsification proof (nexus-tyiht) -- not a real reliance.
+                continue;
+            }
+            int line = 1 + (int) commentsBlanked.substring(0, alterRole.start()).chars()
+                .filter(c -> c == '\n').count();
+            violations.add(fileName + ":" + line + "  ALTER ROLE ... SET search_path -- "
+                + "role-level session search_path reliance is retired (Sam's directive, "
+                + "nexus-zrcj7, 2026-09-05); fold onto PgContainerHelper.bootstrapServiceRole "
+                + "(sets no search_path) and qualify every schema reference through "
+                + "generated jOOQ Tables/Routines instead");
+        }
+
         return violations;
     }
 
     /**
      * Scans BOTH {@code src/main/java} AND {@code src/test/java} for {@link
-     * #scanSessionSearchPathReliance} violations. Zero-tolerance in both trees:
-     * this batch converted every known call site (Main.java's production pool plus
-     * 8 test setConnectionInitSql copies and 3 "-c search_path=" datasource-property
-     * sites across 2 files), so there is no grandfathered population to ratchet
-     * against, unlike {@link #noRawExecuteSqlRegressionInTestSources}.
+     * #scanSessionSearchPathReliance} violations (all three branches: {@code
+     * setConnectionInitSql}, the "-c search_path=" datasource property, and
+     * ROLE-level {@code ALTER ROLE ... SET search_path}). Zero-tolerance in both
+     * trees: batch 9 item 0 converted every known connection-level call site
+     * (Main.java's production pool plus 8 test setConnectionInitSql copies and 3
+     * "-c search_path=" datasource-property sites across 2 files), and batch 9
+     * item 1 converted every known role-level call site (~24 per-class literals
+     * plus {@code db.changelog-test-role.xml}'s own line, all folded onto {@code
+     * PgContainerHelper.bootstrapServiceRole}), so there is no grandfathered
+     * population to ratchet against, unlike {@link #noRawExecuteSqlRegressionInTestSources}.
+     * The one exemption ({@code SharedClusterMutationFalsifyTest}'s poison-value
+     * falsification proof) is matched inside the scan itself, not carved out here.
      */
     @Test
     void noSessionSearchPathConnectionOptionInMainOrTestSources() throws IOException {
@@ -2286,11 +2624,11 @@ class RawSqlGateTest {
             }
         }
         assertThat(violations)
-            .as("session-level search_path connection option (setConnectionInitSql(...) or "
-                + "a PostgreSQL JDBC \"options\" property setting the same GUC) -- see "
-                + "scanSessionSearchPathReliance's own javadoc; never sanctioned, always "
-                + "convert onto schema-qualified jOOQ Tables/Routines or a function-pinned "
-                + "SET search_path")
+            .as("session- or role-level search_path reliance (setConnectionInitSql(...), a "
+                + "PostgreSQL JDBC \"options\" property setting the same GUC, or ALTER ROLE "
+                + "... SET search_path) -- see scanSessionSearchPathReliance's own javadoc; "
+                + "never sanctioned, always convert onto schema-qualified jOOQ "
+                + "Tables/Routines or a function-pinned SET search_path")
             .isEmpty();
     }
 
@@ -2351,21 +2689,92 @@ class RawSqlGateTest {
             .isEmpty();
     }
 
+    /** nexus-cbo4a batch 9 item 1: this used to be a NEGATIVE fixture
+     * ({@code searchPathReliance_alterRoleShape_isDeliberatelyNotFlagged}) proving
+     * the shape was deliberately out of scope. Batch 9 item 1 folded every real
+     * ALTER ROLE ... SET search_path call site onto {@code
+     * PgContainerHelper.bootstrapServiceRole} (which sets no search_path at all),
+     * so the deferral is over and this is now a POSITIVE detection proof. */
     @Test
-    void searchPathReliance_alterRoleShape_isDeliberatelyNotFlagged() {
+    void searchPathReliance_alterRoleShape_isFlagged() {
         String synthetic = String.join("\n",
             "public final class Whatever {",
-            "    void stillLegal() throws Exception {",
+            "    void danger() throws Exception {",
             "        su.createStatement().execute(\"ALTER ROLE nexus_svc SET search_path TO "
                 + "nexus, public\");",
             "    }",
             "}");
         assertThat(scanSessionSearchPathReliance("Whatever.java", synthetic))
-            .as("the ROLE-level ALTER ROLE ... SET search_path shape is a separate, "
-                + "already-identified, deferred item (batch 9 item 1: fold onto "
-                + "PgContainerHelper.bootstrapServiceRole/seedServiceToken) -- deliberately "
-                + "out of THIS scan's scope, not a gap")
+            .as("ALTER ROLE ... SET search_path must fail loud (Sam's directive, "
+                + "nexus-zrcj7, 2026-09-05: no session/role search_path reliance, ever)")
+            .anySatisfy(h -> assertThat(h).contains("ALTER ROLE"));
+    }
+
+    /** Spelling variants PostgreSQL accepts for the same statement (review fold-in,
+     * T2 [24827] Significant #1): {@code =} instead of {@code TO}, lowercase keywords,
+     * and a quoted target identifier all name the same role-level reliance and must
+     * all be caught; the scan is case-insensitive and accepts either assignment form. */
+    @Test
+    void searchPathReliance_alterRoleAlternateSpellings_areFlagged() {
+        // Each target is split after the assignment token so this file's OWN raw
+        // source never spells the shape contiguously (same reason as the
+        // dataSourcePropertyOptionsShape fixture above: the outer walk scans this file).
+        for (String stmt : List.of(
+                "alter role nexus_svc set search_path = " + "nexus, public",
+                "ALTER ROLE nexus_svc SET search_path=" + "\"nexus\", public",
+                "ALTER ROLE \" + role + \" SET search_path TO " + "nexus")) {
+            String synthetic = String.join("\n",
+                "public final class Whatever {",
+                "    void danger() throws Exception {",
+                "        su.createStatement().execute(\"" + stmt + "\");",
+                "    }",
+                "}");
+            assertThat(scanSessionSearchPathReliance("Whatever.java", synthetic))
+                .as("spelling variant must still fail loud: " + stmt)
+                .anySatisfy(h -> assertThat(h).contains("ALTER ROLE"));
+        }
+    }
+
+    /** The one sanctioned exception, matched on the target schema rather than file
+     * name: {@code SharedClusterMutationFalsifyTest}'s poison-value {@code ALTER
+     * ROLE ... SET search_path TO yhmav_poison_schema, public} falsifies
+     * {@code SharedCluster}'s reset-at-acquire, it does not rely on search_path. */
+    @Test
+    void searchPathReliance_alterRoleShapePoisonValue_isNotFlagged() {
+        String synthetic = String.join("\n",
+            "public final class Whatever {",
+            "    void poisonProof() throws Exception {",
+            "        su.createStatement().execute(\"ALTER ROLE nexus_svc SET search_path TO "
+                + "yhmav_poison_schema, public\");",
+            "    }",
+            "}");
+        assertThat(scanSessionSearchPathReliance("Whatever.java", synthetic))
+            .as("SharedClusterMutationFalsifyTest's poison-schema ALTER ROLE is a "
+                + "deliberate falsification proof (nexus-tyiht), not a real reliance")
             .isEmpty();
+    }
+
+    /**
+     * Resource-scan (nexus-cbo4a batch 9 item 1): {@code db.changelog-test-role.xml}
+     * is the one Liquibase changeset that used to set {@code svcRole}'s
+     * search_path, and it is not itself a {@code .java} file, so {@link
+     * #noSessionSearchPathConnectionOptionInMainOrTestSources}'s walk cannot see
+     * it. This targeted check makes sure the line cannot silently come back.
+     */
+    @Test
+    void testRoleChangelog_neverRegainsSearchPathLine() throws IOException {
+        Path xml = Path.of(
+            "src", "test", "resources", "db", "changelog-test", "db.changelog-test-role.xml");
+        assertThat(xml).exists();
+        String content = Files.readString(xml);
+        assertThat(content)
+            .as("db.changelog-test-role.xml must never set svcRole's search_path again "
+                + "(Sam's directive, nexus-zrcj7, 2026-09-05) -- "
+                + "PgContainerHelper.bootstrapServiceRole sets no search_path at all. "
+                + "(Matches \"SET search_path TO\", not the bare phrase, so this file's own "
+                + "prose explaining that a function-pinned SET search_path is still "
+                + "sanctioned stays legal.)")
+            .doesNotContain("SET search_path TO");
     }
 
     // ── nexus-zrcj7 step 4 (Sam's no-SQL-strings-in-Java directive): the checked,

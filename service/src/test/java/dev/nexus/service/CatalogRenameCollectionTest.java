@@ -7,6 +7,7 @@ import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
+import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -131,66 +132,114 @@ class CatalogRenameCollectionTest {
     @Test @Order(20)
     void renameCollection_noOrphanUnderOldName_allPresentUnderNew() throws Exception {
         try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // RDR-191 (nexus-o8dil.48): chunks_384/768/1024 and
             // taxonomy_centroids_384/768/1024 collapse to "chunks" and
             // "taxonomy_centroids" -- one orphan-check each, not three.
-            for (String tbl : List.of("chunks", "topics", "taxonomy_meta",
-                    "taxonomy_centroids",
-                    "document_aspects", "document_highlights", "aspect_extraction_queue",
-                    "relevance_log", "search_telemetry")) {
-                assertThat(rows(su, "SELECT COUNT(*) FROM nexus." + tbl
-                    + " WHERE tenant_id='" + TENANT_A + "' AND collection='" + OLD + "'"))
-                    .as("no orphan in " + tbl + " under OLD").isZero();
+            //
+            // The nine tables below share an identical (tenant_id, collection) shape but
+            // have no common generated-Tables supertype, so this loop resolves each
+            // table's TENANT_ID/COLLECTION fields generically via Table#field(String,
+            // Class) rather than unrolling nine near-identical typed calls -- still typed
+            // jOOQ DSL (the field lookup is checked against the generated Table's real
+            // column list at call time), just generic over the table list.
+            for (Table<?> table : List.of(CHUNKS, TOPICS, TAXONOMY_META, TAXONOMY_CENTROIDS,
+                    DOCUMENT_ASPECTS, DOCUMENT_HIGHLIGHTS, ASPECT_EXTRACTION_QUEUE,
+                    RELEVANCE_LOG, SEARCH_TELEMETRY)) {
+                int count = ctx.selectCount().from(table)
+                    .where(table.field("tenant_id", String.class).eq(TENANT_A))
+                    .and(table.field("collection", String.class).eq(OLD))
+                    .fetchOne(0, int.class);
+                assertThat(count).as("no orphan in " + table.getName() + " under OLD").isZero();
             }
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.hook_failures WHERE tenant_id='" + TENANT_A
-                + "' AND collection='" + OLD + "'")).as("hook_failures orphans").isZero();
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.topic_assignments WHERE tenant_id='" + TENANT_A
-                + "' AND source_collection='" + OLD + "'")).as("assignment orphans").isZero();
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_documents WHERE tenant_id='" + TENANT_A
-                + "' AND physical_collection='" + OLD + "'")).as("catalog_documents orphans").isZero();
+            assertThat(ctx.selectCount().from(HOOK_FAILURES)
+                    .where(HOOK_FAILURES.TENANT_ID.eq(TENANT_A)).and(HOOK_FAILURES.COLLECTION.eq(OLD))
+                    .fetchOne(0, int.class))
+                .as("hook_failures orphans").isZero();
+            assertThat(ctx.selectCount().from(TOPIC_ASSIGNMENTS)
+                    .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(TENANT_A)).and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(OLD))
+                    .fetchOne(0, int.class))
+                .as("assignment orphans").isZero();
+            assertThat(ctx.selectCount().from(CATALOG_DOCUMENTS)
+                    .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(OLD))
+                    .fetchOne(0, int.class))
+                .as("catalog_documents orphans").isZero();
             // nexus-cecqy: OLD is RETIRED, not deleted — a superseded tombstone that
             // records where the collection went. It carries no children (every table
             // above is asserted empty under OLD) and superseded_by != '' keeps it out of
             // collectionForTuple's live-tuple resolution.
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
-                + "' AND name='" + OLD + "' AND superseded_by='" + NEW + "' AND superseded_at IS NOT NULL"))
+            assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A))
+                    .and(CATALOG_COLLECTIONS.NAME.eq(OLD))
+                    .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(NEW))
+                    .and(CATALOG_COLLECTIONS.SUPERSEDED_AT.isNotNull())
+                    .fetchOne(0, int.class))
                 .as("old registry row retired as a tombstone").isEqualTo(1);
             // Present under NEW.
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
-                + "' AND name='" + NEW + "'")).as("new registry row present").isEqualTo(1);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chunks WHERE tenant_id='" + TENANT_A
-                + "' AND collection='" + NEW + "'")).as("chunks under NEW (unified, 2+1+1)").isEqualTo(4);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.taxonomy_meta WHERE tenant_id='" + TENANT_A
-                + "' AND collection='" + NEW + "'")).as("taxonomy_meta under NEW").isEqualTo(1);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.hook_failures WHERE tenant_id='" + TENANT_A
-                + "' AND collection='" + NEW + "'")).as("hook_failures under NEW").isEqualTo(1);
+            assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A)).and(CATALOG_COLLECTIONS.NAME.eq(NEW))
+                    .fetchOne(0, int.class))
+                .as("new registry row present").isEqualTo(1);
+            assertThat(ctx.selectCount().from(CHUNKS)
+                    .where(CHUNKS.TENANT_ID.eq(TENANT_A)).and(CHUNKS.COLLECTION.eq(NEW))
+                    .fetchOne(0, int.class))
+                .as("chunks under NEW (unified, 2+1+1)").isEqualTo(4);
+            assertThat(ctx.selectCount().from(TAXONOMY_META)
+                    .where(TAXONOMY_META.TENANT_ID.eq(TENANT_A)).and(TAXONOMY_META.COLLECTION.eq(NEW))
+                    .fetchOne(0, int.class))
+                .as("taxonomy_meta under NEW").isEqualTo(1);
+            assertThat(ctx.selectCount().from(HOOK_FAILURES)
+                    .where(HOOK_FAILURES.TENANT_ID.eq(TENANT_A)).and(HOOK_FAILURES.COLLECTION.eq(NEW))
+                    .fetchOne(0, int.class))
+                .as("hook_failures under NEW").isEqualTo(1);
             // Symmetric presence sweep for the remaining re-homed tables.
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.document_highlights WHERE tenant_id='" + TENANT_A
-                + "' AND collection='" + NEW + "'")).as("document_highlights under NEW").isEqualTo(1);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.document_aspects WHERE tenant_id='" + TENANT_A
-                + "' AND collection='" + NEW + "'")).as("document_aspects under NEW").isEqualTo(2);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.aspect_extraction_queue WHERE tenant_id='" + TENANT_A
-                + "' AND collection='" + NEW + "'")).as("aspect_extraction_queue under NEW").isEqualTo(2);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.taxonomy_centroids WHERE tenant_id='" + TENANT_A
-                + "' AND collection='" + NEW + "'")).as("centroids under NEW (unified, 1+1+1)").isEqualTo(3);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.topic_assignments WHERE tenant_id='" + TENANT_A
-                + "' AND source_collection='" + NEW + "'")).as("topic_assignments under NEW").isEqualTo(2);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.relevance_log WHERE tenant_id='" + TENANT_A
-                + "' AND collection='" + NEW + "'")).as("relevance_log under NEW").isEqualTo(2);
+            assertThat(ctx.selectCount().from(DOCUMENT_HIGHLIGHTS)
+                    .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(TENANT_A)).and(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(NEW))
+                    .fetchOne(0, int.class))
+                .as("document_highlights under NEW").isEqualTo(1);
+            assertThat(ctx.selectCount().from(DOCUMENT_ASPECTS)
+                    .where(DOCUMENT_ASPECTS.TENANT_ID.eq(TENANT_A)).and(DOCUMENT_ASPECTS.COLLECTION.eq(NEW))
+                    .fetchOne(0, int.class))
+                .as("document_aspects under NEW").isEqualTo(2);
+            assertThat(ctx.selectCount().from(ASPECT_EXTRACTION_QUEUE)
+                    .where(ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(TENANT_A)).and(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(NEW))
+                    .fetchOne(0, int.class))
+                .as("aspect_extraction_queue under NEW").isEqualTo(2);
+            assertThat(ctx.selectCount().from(TAXONOMY_CENTROIDS)
+                    .where(TAXONOMY_CENTROIDS.TENANT_ID.eq(TENANT_A)).and(TAXONOMY_CENTROIDS.COLLECTION.eq(NEW))
+                    .fetchOne(0, int.class))
+                .as("centroids under NEW (unified, 1+1+1)").isEqualTo(3);
+            assertThat(ctx.selectCount().from(TOPIC_ASSIGNMENTS)
+                    .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(TENANT_A)).and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(NEW))
+                    .fetchOne(0, int.class))
+                .as("topic_assignments under NEW").isEqualTo(2);
+            assertThat(ctx.selectCount().from(RELEVANCE_LOG)
+                    .where(RELEVANCE_LOG.TENANT_ID.eq(TENANT_A)).and(RELEVANCE_LOG.COLLECTION.eq(NEW))
+                    .fetchOne(0, int.class))
+                .as("relevance_log under NEW").isEqualTo(2);
         }
     }
 
     @Test @Order(30)
     void renameCollection_isTenantIsolated_tenantBUntouched() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_B
-                + "' AND name='" + OLD + "'")).as("tenant B old registry intact").isEqualTo(1);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_B
-                + "' AND name='" + NEW + "'")).as("tenant B has no NEW row").isZero();
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chunks WHERE tenant_id='" + TENANT_B
-                + "' AND collection='" + OLD + "'")).as("tenant B chunks intact under OLD (unified)").isEqualTo(4);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.taxonomy_meta WHERE tenant_id='" + TENANT_B
-                + "' AND collection='" + OLD + "'")).as("tenant B taxonomy_meta intact").isEqualTo(1);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_B)).and(CATALOG_COLLECTIONS.NAME.eq(OLD))
+                    .fetchOne(0, int.class))
+                .as("tenant B old registry intact").isEqualTo(1);
+            assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_B)).and(CATALOG_COLLECTIONS.NAME.eq(NEW))
+                    .fetchOne(0, int.class))
+                .as("tenant B has no NEW row").isZero();
+            assertThat(ctx.selectCount().from(CHUNKS)
+                    .where(CHUNKS.TENANT_ID.eq(TENANT_B)).and(CHUNKS.COLLECTION.eq(OLD))
+                    .fetchOne(0, int.class))
+                .as("tenant B chunks intact under OLD (unified)").isEqualTo(4);
+            assertThat(ctx.selectCount().from(TAXONOMY_META)
+                    .where(TAXONOMY_META.TENANT_ID.eq(TENANT_B)).and(TAXONOMY_META.COLLECTION.eq(OLD))
+                    .fetchOne(0, int.class))
+                .as("tenant B taxonomy_meta intact").isEqualTo(1);
         }
     }
 
@@ -205,24 +254,40 @@ class CatalogRenameCollectionTest {
         assertThat(c.get("chunks")).as("chunks back (unified, 2+1+1)").isEqualTo(4);
         assertThat(c.get("catalog_collections_superseded")).as("registry Y retired").isEqualTo(1);
         try (Connection su = pg.createConnection("")) {
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
-                + "' AND name='" + NEW + "' AND superseded_by='" + OLD + "'"))
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A))
+                    .and(CATALOG_COLLECTIONS.NAME.eq(NEW))
+                    .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(OLD))
+                    .fetchOne(0, int.class))
                 .as("NEW retired after round-trip").isEqualTo(1);
             // OLD must be REVIVED, not still carrying its own tombstone markers from the
             // forward rename — otherwise the restored collection is invisible to
             // collectionForTuple and the round trip only looks complete.
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
-                + "' AND name='" + OLD + "' AND superseded_by='' AND superseded_at IS NULL"))
+            assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A))
+                    .and(CATALOG_COLLECTIONS.NAME.eq(OLD))
+                    .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))
+                    .and(CATALOG_COLLECTIONS.SUPERSEDED_AT.isNull())
+                    .fetchOne(0, int.class))
                 .as("OLD restored and revived").isEqualTo(1);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chunks WHERE tenant_id='" + TENANT_A
-                + "' AND collection='" + OLD + "'")).as("chunks restored under OLD (unified)").isEqualTo(4);
+            assertThat(ctx.selectCount().from(CHUNKS)
+                    .where(CHUNKS.TENANT_ID.eq(TENANT_A)).and(CHUNKS.COLLECTION.eq(OLD))
+                    .fetchOne(0, int.class))
+                .as("chunks restored under OLD (unified)").isEqualTo(4);
             // Back-direction must restore the derived tables too (not just chunks/registry).
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.taxonomy_meta WHERE tenant_id='" + TENANT_A
-                + "' AND collection='" + OLD + "'")).as("taxonomy_meta restored").isEqualTo(1);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.document_highlights WHERE tenant_id='" + TENANT_A
-                + "' AND collection='" + OLD + "'")).as("document_highlights restored").isEqualTo(1);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.taxonomy_centroids WHERE tenant_id='" + TENANT_A
-                + "' AND collection='" + OLD + "'")).as("centroids restored (unified)").isEqualTo(3);
+            assertThat(ctx.selectCount().from(TAXONOMY_META)
+                    .where(TAXONOMY_META.TENANT_ID.eq(TENANT_A)).and(TAXONOMY_META.COLLECTION.eq(OLD))
+                    .fetchOne(0, int.class))
+                .as("taxonomy_meta restored").isEqualTo(1);
+            assertThat(ctx.selectCount().from(DOCUMENT_HIGHLIGHTS)
+                    .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(TENANT_A)).and(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(OLD))
+                    .fetchOne(0, int.class))
+                .as("document_highlights restored").isEqualTo(1);
+            assertThat(ctx.selectCount().from(TAXONOMY_CENTROIDS)
+                    .where(TAXONOMY_CENTROIDS.TENANT_ID.eq(TENANT_A)).and(TAXONOMY_CENTROIDS.COLLECTION.eq(OLD))
+                    .fetchOne(0, int.class))
+                .as("centroids restored (unified)").isEqualTo(3);
         }
     }
 
@@ -248,8 +313,13 @@ class CatalogRenameCollectionTest {
         Map<String, Integer> c = repo.renameCollection(TENANT_A, b, a, b);
         assertThat(c.get("catalog_collections_inserted")).as("A revived").isEqualTo(1);
         try (Connection su = pg.createConnection("")) {
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
-                + "' AND name='" + a + "' AND superseded_by=''")).as("A revived and live").isEqualTo(1);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A))
+                    .and(CATALOG_COLLECTIONS.NAME.eq(a))
+                    .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))
+                    .fetchOne(0, int.class))
+                .as("A revived and live").isEqualTo(1);
         }
     }
 
@@ -286,11 +356,16 @@ class CatalogRenameCollectionTest {
             .hasMessageContaining(b);
 
         try (Connection su = pg.createConnection("")) {
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
-                + "' AND name='" + a + "' AND superseded_by='" + b + "'"))
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A))
+                    .and(CATALOG_COLLECTIONS.NAME.eq(a))
+                    .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(b))
+                    .fetchOne(0, int.class))
                 .as("the tombstone must survive the refused revive unchanged").isEqualTo(1);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
-                + "' AND name='" + c2 + "'"))
+            assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A)).and(CATALOG_COLLECTIONS.NAME.eq(c2))
+                    .fetchOne(0, int.class))
                 .as("the source must be untouched: no half-done rename").isEqualTo(1);
         }
     }
@@ -332,13 +407,19 @@ class CatalogRenameCollectionTest {
             insertChunk384(ctx, TENANT_A, src, xmChash, vector(384));
             insertChunk768(ctx, TENANT_A, tgt, xmChash, vector(768));
             // a manifest row still homed at the SOURCE (the pre-rename state)
-            su.createStatement().execute("ALTER TABLE nexus.catalog_document_chunks NO FORCE ROW LEVEL SECURITY");
+            // ALTER TABLE .. [NO] FORCE ROW LEVEL SECURITY has no jOOQ typed-DSL form
+            // (Postgres-only RLS DDL extension; verified against jOOQ 3.21's manual,
+            // which models only ENABLE/DISABLE ROW LEVEL SECURITY-adjacent constraint
+            // enforcement, not the FORCE flag) -- runs through
+            // nexus_test.set_force_rls via PgContainerHelper#setForceRls
+            // (nexus-cbo4a batch 10 review fold-in).
+            PgContainerHelper.setForceRls(su, CATALOG_DOCUMENT_CHUNKS, false);
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                            CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
                            CATALOG_DOCUMENT_CHUNKS.COLLECTION)
                .values(TENANT_A, "xm-doc-1", 0, xmChash, src)
                .execute();
-            su.createStatement().execute("ALTER TABLE nexus.catalog_document_chunks FORCE ROW LEVEL SECURITY");
+            PgContainerHelper.setForceRls(su, CATALOG_DOCUMENT_CHUNKS, true);
         }
         Map<String, Integer> c = repo.renameCollection(TENANT_A, src, tgt);
         assertThat(c).as("cross-model branch re-homes docs AND manifests")
@@ -346,18 +427,31 @@ class CatalogRenameCollectionTest {
         assertThat(c.get("catalog_documents")).as("one doc repointed").isEqualTo(1);
         assertThat(c.get("catalog_document_chunks")).as("one manifest row re-homed").isEqualTo(1);
         try (Connection su = pg.createConnection("")) {
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
-                + "' AND name='" + src + "'")).as("source registry row KEPT").isEqualTo(1);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
-                + "' AND name='" + tgt + "'")).as("target registry row KEPT").isEqualTo(1);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_documents WHERE tenant_id='" + TENANT_A
-                + "' AND physical_collection='" + tgt + "'")).as("doc now under target").isEqualTo(1);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_documents WHERE tenant_id='" + TENANT_A
-                + "' AND physical_collection='" + src + "'")).as("no doc left under source").isZero();
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_document_chunks WHERE tenant_id='" + TENANT_A
-                + "' AND collection='" + tgt + "'")).as("manifest row homed at target").isEqualTo(1);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_document_chunks WHERE tenant_id='" + TENANT_A
-                + "' AND collection='" + src + "'")).as("no manifest row left under source").isZero();
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A)).and(CATALOG_COLLECTIONS.NAME.eq(src))
+                    .fetchOne(0, int.class))
+                .as("source registry row KEPT").isEqualTo(1);
+            assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A)).and(CATALOG_COLLECTIONS.NAME.eq(tgt))
+                    .fetchOne(0, int.class))
+                .as("target registry row KEPT").isEqualTo(1);
+            assertThat(ctx.selectCount().from(CATALOG_DOCUMENTS)
+                    .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(tgt))
+                    .fetchOne(0, int.class))
+                .as("doc now under target").isEqualTo(1);
+            assertThat(ctx.selectCount().from(CATALOG_DOCUMENTS)
+                    .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(src))
+                    .fetchOne(0, int.class))
+                .as("no doc left under source").isZero();
+            assertThat(ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+                    .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(tgt))
+                    .fetchOne(0, int.class))
+                .as("manifest row homed at target").isEqualTo(1);
+            assertThat(ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+                    .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(src))
+                    .fetchOne(0, int.class))
+                .as("no manifest row left under source").isZero();
         }
     }
 
@@ -398,17 +492,28 @@ class CatalogRenameCollectionTest {
             .as("mid-transaction PK collision propagates").isInstanceOf(Exception.class);
 
         try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // Everything rolled back: OLD intact, NEW registry never created.
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_C
-                + "' AND name='" + old + "'")).as("OLD registry intact after rollback").isEqualTo(1);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_C
-                + "' AND name='" + neu + "'")).as("NEW registry NOT created (rolled back)").isZero();
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chunks WHERE tenant_id='" + TENANT_C
-                + "' AND collection='" + old + "'")).as("chunk NOT re-homed (rolled back)").isEqualTo(1);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chunks WHERE tenant_id='" + TENANT_C
-                + "' AND collection='" + neu + "'")).as("no chunk under NEW").isZero();
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.search_telemetry WHERE tenant_id='" + TENANT_C
-                + "' AND collection='" + old + "'")).as("OLD telemetry intact").isEqualTo(1);
+            assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_C)).and(CATALOG_COLLECTIONS.NAME.eq(old))
+                    .fetchOne(0, int.class))
+                .as("OLD registry intact after rollback").isEqualTo(1);
+            assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_C)).and(CATALOG_COLLECTIONS.NAME.eq(neu))
+                    .fetchOne(0, int.class))
+                .as("NEW registry NOT created (rolled back)").isZero();
+            assertThat(ctx.selectCount().from(CHUNKS)
+                    .where(CHUNKS.TENANT_ID.eq(TENANT_C)).and(CHUNKS.COLLECTION.eq(old))
+                    .fetchOne(0, int.class))
+                .as("chunk NOT re-homed (rolled back)").isEqualTo(1);
+            assertThat(ctx.selectCount().from(CHUNKS)
+                    .where(CHUNKS.TENANT_ID.eq(TENANT_C)).and(CHUNKS.COLLECTION.eq(neu))
+                    .fetchOne(0, int.class))
+                .as("no chunk under NEW").isZero();
+            assertThat(ctx.selectCount().from(SEARCH_TELEMETRY)
+                    .where(SEARCH_TELEMETRY.TENANT_ID.eq(TENANT_C)).and(SEARCH_TELEMETRY.COLLECTION.eq(old))
+                    .fetchOne(0, int.class))
+                .as("OLD telemetry intact").isEqualTo(1);
         }
     }
 
@@ -711,9 +816,4 @@ class CatalogRenameCollectionTest {
         }
     }
 
-    private static int rows(Connection su, String sql) throws Exception {
-        var rs = su.createStatement().executeQuery(sql);
-        rs.next();
-        return rs.getInt(1);
-    }
 }

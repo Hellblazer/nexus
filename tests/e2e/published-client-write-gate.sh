@@ -269,6 +269,7 @@ _uv_sandboxed() {
     HOME="$CLIENT_HOME" \
     PATH="$PATH" \
     TERM="${TERM:-dumb}" \
+    NX_NO_TELEMETRY=1 \
     ${HTTPS_PROXY:+HTTPS_PROXY="$HTTPS_PROXY"} \
     ${HTTP_PROXY:+HTTP_PROXY="$HTTP_PROXY"} \
     uv "$@"
@@ -291,6 +292,7 @@ _client_nx() {
     HOME="$CLIENT_HOME" \
     PATH="$CLIENT_BIN_DIR:/usr/bin:/bin" \
     TERM="${TERM:-dumb}" \
+    NX_NO_TELEMETRY=1 \
     NX_LOCAL=1 \
     NX_STORAGE_BACKEND=service \
     NEXUS_CONFIG_DIR="$CLIENT_CONFIG" \

@@ -1,21 +1,28 @@
 package dev.nexus.service;
 
+import dev.nexus.service.jooq.binding.Vector;
+import org.jooq.DSLContext;
+import org.jooq.Table;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.junit.jupiter.api.*;
-import org.postgresql.util.PSQLException;
 import org.testcontainers.containers.PostgreSQLContainer;
 
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
-import java.sql.ResultSet;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -109,7 +116,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * DEFERRED pending ghost dedup; P0.2 ships NO such constraint (group 9b verifies absence).
  *
  * <p>Mirror conventions from ForeignKeyConstraintTest: PgContainerHelper.start(), master changelog
- * via Liquibase, PER_CLASS lifecycle, @Order, AssertJ + assertThrows(PSQLException.class),
+ * via Liquibase, PER_CLASS lifecycle, @Order, AssertJ + assertThrows(DataAccessException.class)
+ * (nexus-cbo4a batch 10: jOOQ's unchecked wrapper around the underlying PSQLException, since
+ * every insert/select/delete here runs through typed jOOQ DSL rather than raw JDBC),
  * superuser for direct inserts, svc role + GUC for RLS tests.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -160,7 +169,8 @@ class CollectionRegistryFkTest {
             PgContainerHelper.applyProductSchema(su);
         }
 
-        // Phase 3: bootstrap the test-local svc role (create + grant + search_path).
+        // Phase 3: bootstrap the test-local svc role (create + grant; no search_path is
+        // set -- every reference is schema-qualified, nexus-cbo4a batch 9).
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
         }
@@ -194,18 +204,14 @@ class CollectionRegistryFkTest {
         // retargeted to the unified nexus.chunks table, embedding_384 column.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, "ctrl-col-384");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "ctrl-col-384");
             // Insert succeeds — registered collection
-            su.createStatement().execute(
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
-                "VALUES ('" + TENANT_A + "', 'ctrl-col-384', " +
-                "'" + validChash("384ctrl") + "', 'text', " +
-                vectorLiteral(384) + "::nexus.vector)");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
-                "WHERE tenant_id='" + TENANT_A + "' AND collection='ctrl-col-384'");
-            rs.next();
-            assertThat(rs.getInt(1)).as("registered insert into nexus.chunks (dim=384) must succeed").isEqualTo(1);
+            PgContainerHelper.insertChunk384(ctx, TENANT_A, "ctrl-col-384", chashAscii("384ctrl"), vector(384));
+            int count = ctx.selectCount().from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(TENANT_A)).and(CHUNKS.COLLECTION.eq("ctrl-col-384"))
+                .fetchOne(0, int.class);
+            assertThat(count).as("registered insert into nexus.chunks (dim=384) must succeed").isEqualTo(1);
         }
     }
 
@@ -214,13 +220,9 @@ class CollectionRegistryFkTest {
         // RDR-191 Phase 5 (nexus-o8dil.49): chunks_collection_fk, unified.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, "
-                    + DimTables.embeddingColumn(384) + ") " +
-                    "VALUES ('" + TENANT_A + "', 'unreg-col-384', " +
-                    "'" + validChash("384bad") + "', 'text', " +
-                    vectorLiteral(384) + "::nexus.vector)")
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                PgContainerHelper.insertChunk384(ctx, TENANT_A, "unreg-col-384", chashAscii("384bad"), vector(384))
             );
             assertThat(ex.getMessage())
                 .as("chunks_collection_fk must reject unregistered collection")
@@ -234,17 +236,13 @@ class CollectionRegistryFkTest {
         // retargeted to the unified nexus.chunks table, embedding_768 column.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, "ctrl-col-768");
-            su.createStatement().execute(
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(768) + ") " +
-                "VALUES ('" + TENANT_A + "', 'ctrl-col-768', " +
-                "'" + validChash("768ctrl") + "', 'text', " +
-                vectorLiteral(768) + "::nexus.vector)");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
-                "WHERE tenant_id='" + TENANT_A + "' AND collection='ctrl-col-768'");
-            rs.next();
-            assertThat(rs.getInt(1)).as("registered insert into nexus.chunks (dim=768) must succeed").isEqualTo(1);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "ctrl-col-768");
+            PgContainerHelper.insertChunk768(ctx, TENANT_A, "ctrl-col-768", chashAscii("768ctrl"), vector(768));
+            int count = ctx.selectCount().from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(TENANT_A)).and(CHUNKS.COLLECTION.eq("ctrl-col-768"))
+                .fetchOne(0, int.class);
+            assertThat(count).as("registered insert into nexus.chunks (dim=768) must succeed").isEqualTo(1);
         }
     }
 
@@ -253,13 +251,9 @@ class CollectionRegistryFkTest {
         // RDR-191 Phase 5 (nexus-o8dil.49): chunks_collection_fk, unified.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, "
-                    + DimTables.embeddingColumn(768) + ") " +
-                    "VALUES ('" + TENANT_A + "', 'unreg-col-768', " +
-                    "'" + validChash("768bad") + "', 'text', " +
-                    vectorLiteral(768) + "::nexus.vector)")
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                PgContainerHelper.insertChunk768(ctx, TENANT_A, "unreg-col-768", chashAscii("768bad"), vector(768))
             );
             assertThat(ex.getMessage())
                 .as("chunks_collection_fk must reject unregistered collection")
@@ -273,17 +267,13 @@ class CollectionRegistryFkTest {
         // retargeted to the unified nexus.chunks table, embedding_1024 column.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, "ctrl-col-1024");
-            su.createStatement().execute(
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
-                "VALUES ('" + TENANT_A + "', 'ctrl-col-1024', " +
-                "'" + validChash("1024ctrl") + "', 'text', " +
-                vectorLiteral(1024) + "::nexus.vector)");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
-                "WHERE tenant_id='" + TENANT_A + "' AND collection='ctrl-col-1024'");
-            rs.next();
-            assertThat(rs.getInt(1)).as("registered insert into nexus.chunks (dim=1024) must succeed").isEqualTo(1);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "ctrl-col-1024");
+            PgContainerHelper.insertChunk1024(ctx, TENANT_A, "ctrl-col-1024", chashAscii("1024ctrl"), vector(1024));
+            int count = ctx.selectCount().from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(TENANT_A)).and(CHUNKS.COLLECTION.eq("ctrl-col-1024"))
+                .fetchOne(0, int.class);
+            assertThat(count).as("registered insert into nexus.chunks (dim=1024) must succeed").isEqualTo(1);
         }
     }
 
@@ -292,13 +282,9 @@ class CollectionRegistryFkTest {
         // RDR-191 Phase 5 (nexus-o8dil.49): chunks_collection_fk, unified.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, "
-                    + DimTables.embeddingColumn(1024) + ") " +
-                    "VALUES ('" + TENANT_A + "', 'unreg-col-1024', " +
-                    "'" + validChash("1024bad") + "', 'text', " +
-                    vectorLiteral(1024) + "::nexus.vector)")
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                PgContainerHelper.insertChunk1024(ctx, TENANT_A, "unreg-col-1024", chashAscii("1024bad"), vector(1024))
             );
             assertThat(ex.getMessage())
                 .as("chunks_collection_fk must reject unregistered collection")
@@ -342,6 +328,7 @@ class CollectionRegistryFkTest {
         // RED until P0.2 adds topic_assignments_collection_fk (ON UPDATE CASCADE).
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
 
             // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk (composite,
             // (tenant_id, source_collection, doc_id) -> chunks(tenant_id, collection,
@@ -357,40 +344,42 @@ class CollectionRegistryFkTest {
             // this file's own Group 13 convention (GROUP 13's header: "a future
             // @Order(>134) group must account for the residual re-added FKs" --
             // the identical shape, applied one FK earlier).
-            su.createStatement().execute(
-                "ALTER TABLE nexus.topic_assignments DROP CONSTRAINT IF EXISTS topic_assignments_chunk_fk");
+            ctx.alterTable(TOPIC_ASSIGNMENTS).dropConstraintIfExists("topic_assignments_chunk_fk").execute();
 
             // Fixture: catalog_documents row (required by fk-001 (tenant_id,doc_id) FK)
-            insertCatalogDocument(su, TENANT_A, "casc-doc-1");
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "casc-doc-1");
             // Fixture: topics row (required only for the topic_id FK). Its OWN collection must
             // NOT be the collection under rename — RDR-164 P1a's topics_collection_fk is
             // ON UPDATE NO ACTION, so a topic sitting on 'casc__old' would block the parent
             // rename. The topic's home collection is incidental to this test, which targets
             // topic_assignments.source_collection's ON UPDATE CASCADE specifically.
-            insertTopic(su, TENANT_A, 8001L, "casc-topic", "casc__topic_home");
+            insertTopic(ctx, TENANT_A, 8001L, "casc-topic", "casc__topic_home");
             // Fixture: registered collection 'casc__old'
-            insertCollection(su, TENANT_A, "casc__old");
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "casc__old");
             // Fixture: topic_assignment with source_collection='casc__old'. doc_id is
             // bytea now (nexus-tk070.p3c) -- a genuine 64-hex chash, independent of the
             // catalog_documents tumbler seeded above (topic_assignments.doc_id has no FK
             // to catalog_documents).
-            su.createStatement().execute(
-                "INSERT INTO nexus.topic_assignments " +
-                "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
-                "('" + TENANT_A + "', '" + hexChash("casc-doc-1") + "', 8001, 'hdbscan', 'casc__old', NOW())");
+            ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+                .values(TENANT_A, hexChashAscii("casc-doc-1"), 8001L, "hdbscan", "casc__old", OffsetDateTime.now())
+                .execute();
 
             // Rename collection: 'casc__old' -> 'casc__new'
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_collections " +
-                "SET name = 'casc__new' " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND name = 'casc__old'");
+            ctx.update(CATALOG_COLLECTIONS)
+                .set(CATALOG_COLLECTIONS.NAME, "casc__new")
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A)).and(CATALOG_COLLECTIONS.NAME.eq("casc__old"))
+                .execute();
 
             // Assert: topic_assignments.source_collection must now be 'casc__new'
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT source_collection FROM nexus.topic_assignments " +
-                "WHERE tenant_id='" + TENANT_A + "' AND doc_id='" + hexChash("casc-doc-1") + "' AND topic_id=8001");
-            assertThat(rs.next()).as("topic_assignment row must still exist after rename").isTrue();
-            assertThat(rs.getString("source_collection"))
+            var row = ctx.select(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).from(TOPIC_ASSIGNMENTS)
+                .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(TENANT_A))
+                .and(TOPIC_ASSIGNMENTS.DOC_ID.eq(hexChashAscii("casc-doc-1")))
+                .and(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(8001L))
+                .fetchOptional();
+            assertThat(row.isPresent()).as("topic_assignment row must still exist after rename").isTrue();
+            assertThat(row.get().value1())
                 .as("ON UPDATE CASCADE must propagate collection rename to topic_assignments.source_collection")
                 .isEqualTo("casc__new");
         }
@@ -413,13 +402,14 @@ class CollectionRegistryFkTest {
         // taxonomy-010-1's SET NOT NULL.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, "null-src-doc");
-            insertTopic(su, TENANT_A, 8002L, "null-src-topic", "null-src-col");
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.topic_assignments " +
-                    "(tenant_id, doc_id, topic_id, assigned_by, assigned_at) VALUES " +
-                    "('" + TENANT_A + "', '" + hexChash("null-src-doc") + "', 8002, 'hdbscan', NOW())")
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "null-src-doc");
+            insertTopic(ctx, TENANT_A, 8002L, "null-src-topic", "null-src-col");
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                        TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+                    .values(TENANT_A, hexChashAscii("null-src-doc"), 8002L, "hdbscan", OffsetDateTime.now())
+                    .execute()
             );
             assertThat(ex.getMessage())
                 .as("source_collection must reject NULL post-P3b -- not-null violation, "
@@ -435,16 +425,19 @@ class CollectionRegistryFkTest {
         // Non-null source_collection that has no matching catalog_collections row must be rejected.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, "unreg-src-doc");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "unreg-src-doc");
             // insertTopic registers the topic's own collection (RDR-164 P1a topics_collection_fk),
             // so the assignment must reference a DISTINCT, still-unregistered source_collection to
             // preserve this test's intent (non-null source_collection absent from catalog_collections).
-            insertTopic(su, TENANT_A, 8003L, "unreg-src-topic", "unreg-src-topic-col");
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.topic_assignments " +
-                    "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
-                    "('" + TENANT_A + "', '" + hexChash("unreg-src-doc") + "', 8003, 'hdbscan', 'truly-unreg-src-col', NOW())")
+            insertTopic(ctx, TENANT_A, 8003L, "unreg-src-topic", "unreg-src-topic-col");
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                        TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                        TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+                    .values(TENANT_A, hexChashAscii("unreg-src-doc"), 8003L, "hdbscan", "truly-unreg-src-col",
+                        OffsetDateTime.now())
+                    .execute()
             );
             assertThat(ex.getMessage())
                 .as("topic_assignments_collection_fk must reject non-null source_collection not in catalog_collections")
@@ -468,19 +461,15 @@ class CollectionRegistryFkTest {
         // RDR-191 Phase 5 (nexus-o8dil.49): chunks_collection_fk ON DELETE RESTRICT, unified.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, "restrict-col-384");
-            su.createStatement().execute(
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, "
-                + DimTables.embeddingColumn(384) + ") " +
-                "VALUES ('" + TENANT_A + "', 'restrict-col-384', " +
-                "'" + validChash("restrict384") + "', 'text', " +
-                vectorLiteral(384) + "::nexus.vector)");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "restrict-col-384");
+            PgContainerHelper.insertChunk384(ctx, TENANT_A, "restrict-col-384", chashAscii("restrict384"), vector(384));
 
             // DELETE must be rejected because a live chunk row references the collection
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "DELETE FROM nexus.catalog_collections " +
-                    "WHERE tenant_id='" + TENANT_A + "' AND name='restrict-col-384'")
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.deleteFrom(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A)).and(CATALOG_COLLECTIONS.NAME.eq("restrict-col-384"))
+                    .execute()
             );
             assertThat(ex.getMessage())
                 .as("ON DELETE RESTRICT must prevent deleting a collection with live nexus.chunks rows")
@@ -495,23 +484,18 @@ class CollectionRegistryFkTest {
         // RDR-191 Phase 4: retargeted to the unified nexus.chunks table, embedding_384 column.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, "restrict-col-after");
-            String ch = validChash("restrict-after");
-            su.createStatement().execute(
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
-                "VALUES ('" + TENANT_A + "', 'restrict-col-after', " +
-                "'" + ch + "', 'text', " +
-                vectorLiteral(384) + "::nexus.vector)");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "restrict-col-after");
+            byte[] ch = chashAscii("restrict-after");
+            PgContainerHelper.insertChunk384(ctx, TENANT_A, "restrict-col-after", ch, vector(384));
 
             // Delete the chunk row first
-            su.createStatement().execute(
-                "DELETE FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
-                "WHERE tenant_id='" + TENANT_A + "' AND chash='" + ch + "'");
+            ctx.deleteFrom(CHUNKS).where(CHUNKS.TENANT_ID.eq(TENANT_A)).and(CHUNKS.CHASH.eq(ch)).execute();
 
             // Now the collection delete must succeed
-            int deleted = su.createStatement().executeUpdate(
-                "DELETE FROM nexus.catalog_collections " +
-                "WHERE tenant_id='" + TENANT_A + "' AND name='restrict-col-after'");
+            int deleted = ctx.deleteFrom(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A)).and(CATALOG_COLLECTIONS.NAME.eq("restrict-col-after"))
+                .execute();
             assertThat(deleted)
                 .as("collection delete must succeed after all referencing chunk rows are removed")
                 .isEqualTo(1);
@@ -535,15 +519,22 @@ class CollectionRegistryFkTest {
         + "nexus/rdr-191-batch-D5-2026-08-13).")
     void chunks384_chashLenCheck_rejects31() throws Exception {
         // RED until P0.2 adds chunks_384_chash_len_check.
+        // Dead code (this test is @Disabled): the per-dim 384 chunk table was DROPPED CASCADE by
+        // vectors-004-unify-chunks.xml, so no generated jOOQ Table exists for it any
+        // more -- DSL.table(DSL.name(...))/DSL.field(DSL.name(...), Class) is the
+        // sanctioned typed-DSL form for a relation with no codegen (nexus-cbo4a batch 10).
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, "chk-col-384-31");
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding) " +
-                    "VALUES ('" + TENANT_A + "', 'chk-col-384-31', " +
-                    "'" + chashOfLen(31) + "', 'text', " +
-                    vectorLiteral(384) + "::nexus.vector)")
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var chunks384 = DSL.table(DSL.name("nexus", "chunks_384"));
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "chk-col-384-31");
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(chunks384)
+                    .columns(DSL.field(DSL.name("tenant_id"), String.class), DSL.field(DSL.name("collection"), String.class),
+                        DSL.field(DSL.name("chash"), String.class), DSL.field(DSL.name("chunk_text"), String.class),
+                        DSL.field(DSL.name("embedding"), Vector.class))
+                    .values(TENANT_A, "chk-col-384-31", chashOfLen(31), "text", vector(384))
+                    .execute()
             );
             assertThat(ex.getMessage())
                 .as("chunks_384_chash_len_check must reject chash of length 31")
@@ -557,15 +548,20 @@ class CollectionRegistryFkTest {
         + "chunks384_chashLenCheck_rejects31.")
     void chunks384_chashLenCheck_rejects33() throws Exception {
         // RED until P0.2 adds chunks_384_chash_len_check.
+        // Dead code (this test is @Disabled): see chunks384_chashLenCheck_rejects31's
+        // comment for why DSL.table(DSL.name(...)) is used here.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, "chk-col-384-33");
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding) " +
-                    "VALUES ('" + TENANT_A + "', 'chk-col-384-33', " +
-                    "'" + chashOfLen(33) + "', 'text', " +
-                    vectorLiteral(384) + "::nexus.vector)")
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var chunks384 = DSL.table(DSL.name("nexus", "chunks_384"));
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "chk-col-384-33");
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(chunks384)
+                    .columns(DSL.field(DSL.name("tenant_id"), String.class), DSL.field(DSL.name("collection"), String.class),
+                        DSL.field(DSL.name("chash"), String.class), DSL.field(DSL.name("chunk_text"), String.class),
+                        DSL.field(DSL.name("embedding"), Vector.class))
+                    .values(TENANT_A, "chk-col-384-33", chashOfLen(33), "text", vector(384))
+                    .execute()
             );
             assertThat(ex.getMessage())
                 .as("chunks_384_chash_len_check must reject chash of length 33")
@@ -579,16 +575,12 @@ class CollectionRegistryFkTest {
         // retargeted to the unified nexus.chunks table, embedding_384 column.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, "chk-col-384-32");
-            su.createStatement().execute(
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
-                "VALUES ('" + TENANT_A + "', 'chk-col-384-32', " +
-                "'" + validChash("384-32ok") + "', 'text', " +
-                vectorLiteral(384) + "::nexus.vector)");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE chash='" + validChash("384-32ok") + "'");
-            rs.next();
-            assertThat(rs.getInt(1)).as("32-char chash must be accepted by nexus.chunks").isEqualTo(1);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "chk-col-384-32");
+            byte[] ch = chashAscii("384-32ok");
+            PgContainerHelper.insertChunk384(ctx, TENANT_A, "chk-col-384-32", ch, vector(384));
+            int count = ctx.selectCount().from(CHUNKS).where(CHUNKS.CHASH.eq(ch)).fetchOne(0, int.class);
+            assertThat(count).as("32-char chash must be accepted by nexus.chunks").isEqualTo(1);
         }
     }
 
@@ -598,15 +590,20 @@ class CollectionRegistryFkTest {
         + "chunks384_chashLenCheck_rejects31.")
     void chunks768_chashLenCheck_rejects31() throws Exception {
         // RED until P0.2 adds chunks_768_chash_len_check.
+        // Dead code (this test is @Disabled): see chunks384_chashLenCheck_rejects31's
+        // comment for why DSL.table(DSL.name(...)) is used here.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, "chk-col-768-31");
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.chunks_768 (tenant_id, collection, chash, chunk_text, embedding) " +
-                    "VALUES ('" + TENANT_A + "', 'chk-col-768-31', " +
-                    "'" + chashOfLen(31) + "', 'text', " +
-                    vectorLiteral(768) + "::nexus.vector)")
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var chunks768 = DSL.table(DSL.name("nexus", "chunks_768"));
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "chk-col-768-31");
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(chunks768)
+                    .columns(DSL.field(DSL.name("tenant_id"), String.class), DSL.field(DSL.name("collection"), String.class),
+                        DSL.field(DSL.name("chash"), String.class), DSL.field(DSL.name("chunk_text"), String.class),
+                        DSL.field(DSL.name("embedding"), Vector.class))
+                    .values(TENANT_A, "chk-col-768-31", chashOfLen(31), "text", vector(768))
+                    .execute()
             );
             assertThat(ex.getMessage())
                 .as("chunks_768_chash_len_check must reject chash of length 31")
@@ -620,15 +617,20 @@ class CollectionRegistryFkTest {
         + "chunks384_chashLenCheck_rejects31.")
     void chunks768_chashLenCheck_rejects33() throws Exception {
         // RED until P0.2 adds chunks_768_chash_len_check.
+        // Dead code (this test is @Disabled): see chunks384_chashLenCheck_rejects31's
+        // comment for why DSL.table(DSL.name(...)) is used here.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, "chk-col-768-33");
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.chunks_768 (tenant_id, collection, chash, chunk_text, embedding) " +
-                    "VALUES ('" + TENANT_A + "', 'chk-col-768-33', " +
-                    "'" + chashOfLen(33) + "', 'text', " +
-                    vectorLiteral(768) + "::nexus.vector)")
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var chunks768 = DSL.table(DSL.name("nexus", "chunks_768"));
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "chk-col-768-33");
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(chunks768)
+                    .columns(DSL.field(DSL.name("tenant_id"), String.class), DSL.field(DSL.name("collection"), String.class),
+                        DSL.field(DSL.name("chash"), String.class), DSL.field(DSL.name("chunk_text"), String.class),
+                        DSL.field(DSL.name("embedding"), Vector.class))
+                    .values(TENANT_A, "chk-col-768-33", chashOfLen(33), "text", vector(768))
+                    .execute()
             );
             assertThat(ex.getMessage())
                 .as("chunks_768_chash_len_check must reject chash of length 33")
@@ -642,15 +644,20 @@ class CollectionRegistryFkTest {
         + "chunks384_chashLenCheck_rejects31.")
     void chunks1024_chashLenCheck_rejects31() throws Exception {
         // RED until P0.2 adds chunks_1024_chash_len_check.
+        // Dead code (this test is @Disabled): see chunks384_chashLenCheck_rejects31's
+        // comment for why DSL.table(DSL.name(...)) is used here.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, "chk-col-1024-31");
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) " +
-                    "VALUES ('" + TENANT_A + "', 'chk-col-1024-31', " +
-                    "'" + chashOfLen(31) + "', 'text', " +
-                    vectorLiteral(1024) + "::nexus.vector)")
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var chunks1024 = DSL.table(DSL.name("nexus", "chunks_1024"));
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "chk-col-1024-31");
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(chunks1024)
+                    .columns(DSL.field(DSL.name("tenant_id"), String.class), DSL.field(DSL.name("collection"), String.class),
+                        DSL.field(DSL.name("chash"), String.class), DSL.field(DSL.name("chunk_text"), String.class),
+                        DSL.field(DSL.name("embedding"), Vector.class))
+                    .values(TENANT_A, "chk-col-1024-31", chashOfLen(31), "text", vector(1024))
+                    .execute()
             );
             assertThat(ex.getMessage())
                 .as("chunks_1024_chash_len_check must reject chash of length 31")
@@ -664,15 +671,20 @@ class CollectionRegistryFkTest {
         + "chunks384_chashLenCheck_rejects31.")
     void chunks1024_chashLenCheck_rejects33() throws Exception {
         // RED until P0.2 adds chunks_1024_chash_len_check.
+        // Dead code (this test is @Disabled): see chunks384_chashLenCheck_rejects31's
+        // comment for why DSL.table(DSL.name(...)) is used here.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, "chk-col-1024-33");
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) " +
-                    "VALUES ('" + TENANT_A + "', 'chk-col-1024-33', " +
-                    "'" + chashOfLen(33) + "', 'text', " +
-                    vectorLiteral(1024) + "::nexus.vector)")
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var chunks1024 = DSL.table(DSL.name("nexus", "chunks_1024"));
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "chk-col-1024-33");
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(chunks1024)
+                    .columns(DSL.field(DSL.name("tenant_id"), String.class), DSL.field(DSL.name("collection"), String.class),
+                        DSL.field(DSL.name("chash"), String.class), DSL.field(DSL.name("chunk_text"), String.class),
+                        DSL.field(DSL.name("embedding"), Vector.class))
+                    .values(TENANT_A, "chk-col-1024-33", chashOfLen(33), "text", vector(1024))
+                    .execute()
             );
             assertThat(ex.getMessage())
                 .as("chunks_1024_chash_len_check must reject chash of length 33")
@@ -685,12 +697,14 @@ class CollectionRegistryFkTest {
         // RED until P0.2 adds catalog_document_chunks_chash_len_check.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, "chk-manifest-doc");
-            insertCollection(su, TENANT_A, "chk-manifest-coll");
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
-                    "VALUES ('" + TENANT_A + "', 'chk-manifest-doc', 0, '" + chashOfLen(31) + "', 'chk-manifest-coll')")
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "chk-manifest-doc");
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "chk-manifest-coll");
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                    .values(TENANT_A, "chk-manifest-doc", 0, chashOfLenBytes(31), "chk-manifest-coll")
+                    .execute()
             );
             assertThat(ex.getMessage())
                 .as("catalog_document_chunks_chash_len_check must reject chash of length 31")
@@ -703,12 +717,14 @@ class CollectionRegistryFkTest {
         // RED until P0.2 adds catalog_document_chunks_chash_len_check.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, "chk-manifest-doc");  // idempotent via ON CONFLICT
-            insertCollection(su, TENANT_A, "chk-manifest-coll");
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
-                    "VALUES ('" + TENANT_A + "', 'chk-manifest-doc', 1, '" + chashOfLen(33) + "', 'chk-manifest-coll')")
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "chk-manifest-doc");  // idempotent via ON CONFLICT
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "chk-manifest-coll");
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                    .values(TENANT_A, "chk-manifest-doc", 1, chashOfLenBytes(33), "chk-manifest-coll")
+                    .execute()
             );
             assertThat(ex.getMessage())
                 .as("catalog_document_chunks_chash_len_check must reject chash of length 33")
@@ -721,22 +737,24 @@ class CollectionRegistryFkTest {
         // CONTROL — must be GREEN before and after P0.2 lands.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, "chk-manifest-doc");  // idempotent
-            insertCollection(su, TENANT_A, "chk-manifest-coll");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "chk-manifest-doc");  // idempotent
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "chk-manifest-coll");
             // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires
             // a matching nexus.chunks row for this CONTROL insert to succeed.
-            su.createStatement().execute(
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
-                "VALUES ('" + TENANT_A + "', 'chk-manifest-coll', '" + validChash("manifestok") + "', 'text', " +
-                vectorLiteral(384) + "::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
-                "VALUES ('" + TENANT_A + "', 'chk-manifest-doc', 2, '" + validChash("manifestok") + "', 'chk-manifest-coll')");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.catalog_document_chunks " +
-                "WHERE tenant_id='" + TENANT_A + "' AND chash='" + validChash("manifestok") + "'");
-            rs.next();
-            assertThat(rs.getInt(1)).as("32-char chash must be accepted by catalog_document_chunks").isEqualTo(1);
+            byte[] ch = chashAscii("manifestok");
+            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+                .values(TENANT_A, "chk-manifest-coll", ch, "text", vector(384))
+                .onConflictDoNothing()
+                .execute();
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                .values(TENANT_A, "chk-manifest-doc", 2, ch, "chk-manifest-coll")
+                .execute();
+            int count = ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(ch))
+                .fetchOne(0, int.class);
+            assertThat(count).as("32-char chash must be accepted by catalog_document_chunks").isEqualTo(1);
         }
     }
 
@@ -745,12 +763,14 @@ class CollectionRegistryFkTest {
         // RED until P0.2 adds catalog_document_chunks_position_check.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, "pos-chk-doc");
-            insertCollection(su, TENANT_A, "pos-chk-coll");
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
-                    "VALUES ('" + TENANT_A + "', 'pos-chk-doc', -1, '" + validChash("pos-neg") + "', 'pos-chk-coll')")
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "pos-chk-doc");
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "pos-chk-coll");
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                    .values(TENANT_A, "pos-chk-doc", -1, chashAscii("pos-neg"), "pos-chk-coll")
+                    .execute()
             );
             assertThat(ex.getMessage())
                 .as("catalog_document_chunks_position_check must reject position < 0")
@@ -763,23 +783,27 @@ class CollectionRegistryFkTest {
         // CONTROL — must be GREEN before and after P0.2 lands.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, "pos-chk-doc");  // idempotent
-            insertCollection(su, TENANT_A, "pos-chk-coll");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "pos-chk-doc");  // idempotent
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "pos-chk-coll");
             // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires
             // a matching nexus.chunks row for this CONTROL insert to succeed.
-            su.createStatement().execute(
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
-                "VALUES ('" + TENANT_A + "', 'pos-chk-coll', '" + validChash("pos-zero") + "', 'text', " +
-                vectorLiteral(384) + "::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
-                "VALUES ('" + TENANT_A + "', 'pos-chk-doc', 0, '" + validChash("pos-zero") + "', 'pos-chk-coll') " +
-                "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.catalog_document_chunks " +
-                "WHERE tenant_id='" + TENANT_A + "' AND doc_id='pos-chk-doc' AND position=0");
-            rs.next();
-            assertThat(rs.getInt(1)).as("position=0 must be accepted").isEqualTo(1);
+            byte[] ch = chashAscii("pos-zero");
+            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+                .values(TENANT_A, "pos-chk-coll", ch, "text", vector(384))
+                .onConflictDoNothing()
+                .execute();
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                .values(TENANT_A, "pos-chk-doc", 0, ch, "pos-chk-coll")
+                .onConflictDoNothing()
+                .execute();
+            int count = ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT_A))
+                .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("pos-chk-doc"))
+                .and(CATALOG_DOCUMENT_CHUNKS.POSITION.eq(0))
+                .fetchOne(0, int.class);
+            assertThat(count).as("position=0 must be accepted").isEqualTo(1);
         }
     }
 
@@ -849,15 +873,20 @@ class CollectionRegistryFkTest {
         // partial unique index refuses the second LIVE row outright.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             String dupUri = "file:///docs/rdr/rdr-127-shared.md";
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, source_uri) " +
-                "VALUES ('" + TENANT_A + "', 'audit-t1', 'Audit Doc 1', '" + dupUri + "') " +
-                "ON CONFLICT (tenant_id, tumbler) DO UPDATE SET source_uri = EXCLUDED.source_uri");
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, source_uri) " +
-                    "VALUES ('" + TENANT_A + "', 'audit-t2', 'Audit Doc 2', '" + dupUri + "')"));
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.SOURCE_URI)
+                .values(TENANT_A, "audit-t1", "Audit Doc 1", dupUri)
+                .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
+                .doUpdate()
+                .set(CATALOG_DOCUMENTS.SOURCE_URI, dupUri)
+                .execute();
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                        CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.SOURCE_URI)
+                    .values(TENANT_A, "audit-t2", "Audit Doc 2", dupUri)
+                    .execute());
             assertThat(ex.getMessage())
                 .as("the catalog-016 partial unique index must refuse the live duplicate "
                     + "(the 201-uri debt class, audit 2026-06-11, dedup+constraint landed nexus-78n33)")
@@ -865,11 +894,14 @@ class CollectionRegistryFkTest {
 
             // The audit query the P0 harness shipped now finds NOTHING live —
             // uniqueness is enforced, not merely observed.
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT 1 FROM nexus.catalog_documents " +
-                "WHERE source_uri <> '' AND deleted_at IS NULL " +
-                "GROUP BY tenant_id, source_uri HAVING COUNT(*) > 1");
-            assertThat(rs.next())
+            boolean hasLiveDuplicate = ctx.select(DSL.val(1)).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.SOURCE_URI.ne(""))
+                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
+                .groupBy(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.SOURCE_URI)
+                .having(DSL.count().gt(1))
+                .fetch()
+                .isNotEmpty();
+            assertThat(hasLiveDuplicate)
                 .as("no live duplicate (tenant_id, source_uri) groups can exist post-016")
                 .isFalse();
         }
@@ -908,17 +940,13 @@ class CollectionRegistryFkTest {
         // by the composite FK (tenant_id, collection) → catalog_collections(tenant_id, name).
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_B, "xtenant-col-b");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT_B, "xtenant-col-b");
             // TENANT_A tries to insert a chunk row referencing TENANT_B's collection name.
             // The composite FK means (TENANT_A, 'xtenant-col-b') has no matching row in
             // catalog_collections — must be rejected.
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, "
-                    + DimTables.embeddingColumn(384) + ") " +
-                    "VALUES ('" + TENANT_A + "', 'xtenant-col-b', " +
-                    "'" + validChash("xtenant384") + "', 'text', " +
-                    vectorLiteral(384) + "::nexus.vector)")
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                PgContainerHelper.insertChunk384(ctx, TENANT_A, "xtenant-col-b", chashAscii("xtenant384"), vector(384))
             );
             assertThat(ex.getMessage())
                 .as("composite FK must reject cross-tenant collection reference in nexus.chunks")
@@ -934,7 +962,7 @@ class CollectionRegistryFkTest {
         // Mirrors the tenant-correctness group in ForeignKeyConstraintTest (@Order 51-53).
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_B, "xtenant-rls-col-b");
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT_B, "xtenant-rls-col-b");
         }
         // As svc role stamped as TENANT_A: insert referencing TENANT_B's collection name.
         // Use is_local=false (session-level) so the GUC persists for the INSERT statement
@@ -942,13 +970,9 @@ class CollectionRegistryFkTest {
         // and expire before the INSERT when autoCommit=true).
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                svc.createStatement().execute(
-                    "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, "
-                    + DimTables.embeddingColumn(384) + ") " +
-                    "VALUES ('" + TENANT_A + "', 'xtenant-rls-col-b', " +
-                    "'" + validChash("xtenant-rls") + "', 'text', " +
-                    vectorLiteral(384) + "::nexus.vector)")
+            DSLContext svcCtx = DSL.using(svc, SQLDialect.POSTGRES);
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                PgContainerHelper.insertChunk384(svcCtx, TENANT_A, "xtenant-rls-col-b", chashAscii("xtenant-rls"), vector(384))
             );
             assertThat(ex.getMessage())
                 .as("composite FK must reject cross-tenant collection reference via svc-role RLS posture")
@@ -1005,32 +1029,33 @@ class CollectionRegistryFkTest {
         // to the unified nexus.chunks table.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
-                "WHERE tenant_id='" + tenant + "' AND collection='" + conformantCol + "'");
-            rs.next();
-            assertThat(rs.getInt(1))
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            int chunkCount = ctx.selectCount().from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.COLLECTION.eq(conformantCol))
+                .fetchOne(0, int.class);
+            assertThat(chunkCount)
                 .as("upsertChunks must succeed (chunk row written) after auto-registration")
                 .isEqualTo(1);
 
             // Verify: (ii) catalog_collections has the row WITH parsed segments
-            ResultSet crs = su.createStatement().executeQuery(
-                "SELECT content_type, owner_id, embedding_model, model_version " +
-                "FROM nexus.catalog_collections " +
-                "WHERE tenant_id='" + tenant + "' AND name='" + conformantCol + "'");
-            assertThat(crs.next())
+            var row = ctx.select(CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                    CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
+                .from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(conformantCol))
+                .fetchOptional();
+            assertThat(row.isPresent())
                 .as("auto-registration must create a catalog_collections row for the conformant collection")
                 .isTrue();
-            assertThat(crs.getString("content_type"))
+            assertThat(row.get().value1())
                 .as("auto-registered row must store parsed content_type segment")
                 .isEqualTo("knowledge");
-            assertThat(crs.getString("owner_id"))
+            assertThat(row.get().value2())
                 .as("auto-registered row must store parsed owner_id segment")
                 .isEqualTo("auto-reg-owner");
-            assertThat(crs.getString("embedding_model"))
+            assertThat(row.get().value3())
                 .as("auto-registered row must store parsed embedding_model segment")
                 .isEqualTo("minilm-l6-v2-384");
-            assertThat(crs.getString("model_version"))
+            assertThat(row.get().value4())
                 .as("auto-registered row must store parsed model_version segment")
                 .isEqualTo("v1");
         }
@@ -1050,27 +1075,26 @@ class CollectionRegistryFkTest {
         String tenant   = "autoreg-tenant-stub";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // Insert a stub manually (simulating fk-002-0 backfill for an unregistered collection)
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                "VALUES ('" + tenant + "', '" + stubCol + "') " +
-                "ON CONFLICT (tenant_id, name) DO NOTHING");
+            PgContainerHelper.insertCollection(ctx, tenant, stubCol);
 
             // Verify stub: metadata fields must all be ''
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT content_type, owner_id, embedding_model, model_version " +
-                "FROM nexus.catalog_collections " +
-                "WHERE tenant_id='" + tenant + "' AND name='" + stubCol + "'");
-            assertThat(rs.next())
+            var row = ctx.select(CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                    CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
+                .from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(stubCol))
+                .fetchOptional();
+            assertThat(row.isPresent())
                 .as("stub row must exist in catalog_collections after minimal insert")
                 .isTrue();
-            assertThat(rs.getString("content_type"))
+            assertThat(row.get().value1())
                 .as("name-only stub must have empty content_type").isEqualTo("");
-            assertThat(rs.getString("owner_id"))
+            assertThat(row.get().value2())
                 .as("name-only stub must have empty owner_id").isEqualTo("");
-            assertThat(rs.getString("embedding_model"))
+            assertThat(row.get().value3())
                 .as("name-only stub must have empty embedding_model").isEqualTo("");
-            assertThat(rs.getString("model_version"))
+            assertThat(row.get().value4())
                 .as("name-only stub must have empty model_version").isEqualTo("");
         }
     }
@@ -1102,14 +1126,13 @@ class CollectionRegistryFkTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // Register the collection
-            insertCollection(su, tenant, oldName);
+            PgContainerHelper.insertCollection(ctx, tenant, oldName);
             // Insert a chunk row referencing the collection
-            su.createStatement().execute(
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
-                "VALUES ('" + tenant + "', '" + oldName + "', " +
-                "'" + validChash("grp12chunk1") + "', 'rename-test chunk', " +
-                vectorLiteral(384) + "::nexus.vector)");
+            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+                .values(tenant, oldName, chashAscii("grp12chunk1"), "rename-test chunk", vector(384))
+                .execute();
         }
 
         // TenantScope / CatalogRepository via svc role.
@@ -1135,24 +1158,24 @@ class CollectionRegistryFkTest {
         // Verify the move at the SQL layer: chunk + registry under NEW, and under OLD a
         // superseded tombstone with no chunks (nexus-cecqy — step 3 retires, not deletes).
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs;
-            rs = su.createStatement().executeQuery("SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE tenant_id='"
-                + tenant + "' AND collection='" + oldName + "'");
-            rs.next();
-            assertThat(rs.getInt(1)).as("no chunk orphan under old name").isZero();
-            rs = su.createStatement().executeQuery("SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE tenant_id='"
-                + tenant + "' AND collection='" + newName + "'");
-            rs.next();
-            assertThat(rs.getInt(1)).as("chunk re-homed under new name").isEqualTo(1);
-            rs = su.createStatement().executeQuery("SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='"
-                + tenant + "' AND name='" + oldName + "' AND superseded_by='" + newName + "'"
-                + " AND superseded_at IS NOT NULL");
-            rs.next();
-            assertThat(rs.getInt(1)).as("old registry row retired as a tombstone").isEqualTo(1);
-            rs = su.createStatement().executeQuery("SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='"
-                + tenant + "' AND name='" + newName + "'");
-            rs.next();
-            assertThat(rs.getInt(1)).as("new registry row present").isEqualTo(1);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            int chunksUnderOld = ctx.selectCount().from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.COLLECTION.eq(oldName)).fetchOne(0, int.class);
+            assertThat(chunksUnderOld).as("no chunk orphan under old name").isZero();
+            int chunksUnderNew = ctx.selectCount().from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.COLLECTION.eq(newName)).fetchOne(0, int.class);
+            assertThat(chunksUnderNew).as("chunk re-homed under new name").isEqualTo(1);
+            int oldTombstoned = ctx.selectCount().from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+                .and(CATALOG_COLLECTIONS.NAME.eq(oldName))
+                .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(newName))
+                .and(CATALOG_COLLECTIONS.SUPERSEDED_AT.isNotNull())
+                .fetchOne(0, int.class);
+            assertThat(oldTombstoned).as("old registry row retired as a tombstone").isEqualTo(1);
+            int newRegistryPresent = ctx.selectCount().from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(newName))
+                .fetchOne(0, int.class);
+            assertThat(newRegistryPresent).as("new registry row present").isEqualTo(1);
         }
     }
 
@@ -1184,13 +1207,10 @@ class CollectionRegistryFkTest {
         final String COL = "p03-orphan-c384";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            assertReconcileLoadBearing(su, "chunks", FK_CHUNKS_UNIFIED, "collection", "ON DELETE RESTRICT", T, COL,
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, "
-                + DimTables.embeddingColumn(384) + ") " +
-                "VALUES ('" + T + "', '" + COL + "', '" + validChash("p03c384") + "', 'text', " + vectorLiteral(384) + "::nexus.vector)",
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                "SELECT DISTINCT tenant_id, collection FROM " + DimTables.CHUNKS_TABLE_NAME
-                + " ON CONFLICT (tenant_id, name) DO NOTHING");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertReconcileLoadBearing(su, ctx, CHUNKS, FK_CHUNKS_UNIFIED, "collection", "ON DELETE RESTRICT", T, COL,
+                () -> PgContainerHelper.insertChunk384(ctx, T, COL, chashAscii("p03c384"), vector(384)),
+                () -> runCollectionBackfillStub(ctx, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, null));
         }
     }
 
@@ -1204,13 +1224,10 @@ class CollectionRegistryFkTest {
         final String COL = "p03-orphan-c768";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            assertReconcileLoadBearing(su, "chunks", FK_CHUNKS_UNIFIED, "collection", "ON DELETE RESTRICT", T, COL,
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, "
-                + DimTables.embeddingColumn(768) + ") " +
-                "VALUES ('" + T + "', '" + COL + "', '" + validChash("p03c768") + "', 'text', " + vectorLiteral(768) + "::nexus.vector)",
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                "SELECT DISTINCT tenant_id, collection FROM " + DimTables.CHUNKS_TABLE_NAME
-                + " ON CONFLICT (tenant_id, name) DO NOTHING");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertReconcileLoadBearing(su, ctx, CHUNKS, FK_CHUNKS_UNIFIED, "collection", "ON DELETE RESTRICT", T, COL,
+                () -> PgContainerHelper.insertChunk768(ctx, T, COL, chashAscii("p03c768"), vector(768)),
+                () -> runCollectionBackfillStub(ctx, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, null));
         }
     }
 
@@ -1223,13 +1240,10 @@ class CollectionRegistryFkTest {
         final String COL = "p03-orphan-c1024";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            assertReconcileLoadBearing(su, "chunks", FK_CHUNKS_UNIFIED, "collection", "ON DELETE RESTRICT", T, COL,
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, "
-                + DimTables.embeddingColumn(1024) + ") " +
-                "VALUES ('" + T + "', '" + COL + "', '" + validChash("p03c1024") + "', 'text', " + vectorLiteral(1024) + "::nexus.vector)",
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                "SELECT DISTINCT tenant_id, collection FROM " + DimTables.CHUNKS_TABLE_NAME
-                + " ON CONFLICT (tenant_id, name) DO NOTHING");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertReconcileLoadBearing(su, ctx, CHUNKS, FK_CHUNKS_UNIFIED, "collection", "ON DELETE RESTRICT", T, COL,
+                () -> PgContainerHelper.insertChunk1024(ctx, T, COL, chashAscii("p03c1024"), vector(1024)),
+                () -> runCollectionBackfillStub(ctx, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, null));
         }
     }
 
@@ -1244,31 +1258,33 @@ class CollectionRegistryFkTest {
         final String COL = "p03-orphan-ta";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk is orthogonal
             // to this test's subject (topic_assignments_collection_fk's reconcile-
-            // load-bearing VALIDATE flow) -- the orphanInsertSql below has no
+            // load-bearing VALIDATE flow) -- the orphanInsert below has no
             // matching nexus.chunks row and would otherwise violate the NEW FK
             // before ever reaching what this test verifies. Defensive IF-EXISTS
             // drop: Order(30) above already drops it for the remainder of this
             // shared container (Group 13's own convention), but this statement
             // makes THIS test robust to running standalone/out of order too.
-            su.createStatement().execute(
-                "ALTER TABLE nexus.topic_assignments DROP CONSTRAINT IF EXISTS topic_assignments_chunk_fk");
+            ctx.alterTable(TOPIC_ASSIGNMENTS).dropConstraintIfExists("topic_assignments_chunk_fk").execute();
             // topic_assignments is multiply-rooted: seed the doc (fk-001 doc_id), the topic's
             // home collection (topics_collection_fk), and the topic row (topic_id FK) so the
             // ONLY remaining VALIDATE failure is the source_collection FK under test.
-            insertCatalogDocument(su, T, "p03-ta-doc");
-            insertCollection(su, T, "p03-ta-topic-home");
-            insertTopic(su, T, 90301L, "p03-ta-topic", "p03-ta-topic-home");
+            PgContainerHelper.insertCatalogDocument(ctx, T, "p03-ta-doc");
+            PgContainerHelper.insertCollection(ctx, T, "p03-ta-topic-home");
+            insertTopic(ctx, T, 90301L, "p03-ta-topic", "p03-ta-topic-home");
             // FK on source_collection (nullable, MATCH SIMPLE) with ON UPDATE CASCADE; the
             // reconcile arm carries WHERE source_collection != '' — the materially-distinct case.
-            assertReconcileLoadBearing(su, "topic_assignments", FK_TOPIC_ASSIGN, "source_collection",
+            assertReconcileLoadBearing(su, ctx, TOPIC_ASSIGNMENTS, FK_TOPIC_ASSIGN, "source_collection",
                 "ON UPDATE CASCADE ON DELETE RESTRICT", T, COL,
-                "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) " +
-                "VALUES ('" + T + "', '" + hexChash("p03-ta-doc") + "', 90301, 'hdbscan', '" + COL + "', NOW())",
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                "SELECT DISTINCT tenant_id, source_collection FROM nexus.topic_assignments " +
-                "WHERE source_collection IS NOT NULL AND source_collection != '' ON CONFLICT (tenant_id, name) DO NOTHING");
+                () -> ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                        TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                        TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+                    .values(T, hexChashAscii("p03-ta-doc"), 90301L, "hdbscan", COL, OffsetDateTime.now())
+                    .execute(),
+                () -> runCollectionBackfillStub(ctx, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.isNotNull().and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.ne(""))));
         }
     }
 
@@ -1283,113 +1299,99 @@ class CollectionRegistryFkTest {
      * table-specific reconcile stub-registers the collection, and VALIDATE then SUCCEEDS
      * with convalidated=true. {@code fkColumn} is the referencing column (collection /
      * physical_collection / source_collection); {@code extraFkClause} is the ON UPDATE/
-     * ON DELETE clause to preserve when re-adding. {@code orphanInsertSql} and
-     * {@code reconcileInsertSql} are the table-specific arms mirroring fk-002-validate.xml.
+     * ON DELETE clause to preserve when re-adding. {@code orphanInsert} and {@code
+     * reconcileInsert} are the table-specific arms mirroring fk-002-validate.xml, now
+     * typed jOOQ closures instead of raw SQL text.
+     *
+     * <p>{@code ADD CONSTRAINT .. NOT VALID} and {@code VALIDATE CONSTRAINT} run
+     * through {@code nexus_test.add_fk_not_valid}/{@code nexus_test.validate_constraint}
+     * (db/changelog-test/db.changelog-test-objects.xml) via {@link
+     * PgContainerHelper#addFkNotValid}/{@link PgContainerHelper#validateConstraint}
+     * (nexus-cbo4a batch 10 review fold-in, same fold-in as {@code
+     * CollectionRegistryFkExtraTest}'s identical helper) — both Postgres-specific
+     * {@code ALTER TABLE} extensions with no jOOQ typed-DSL form (verified against
+     * jOOQ 3.21's manual). {@code DROP CONSTRAINT IF EXISTS} DOES have a typed form
+     * and is used by every caller before this helper runs.
      */
     private void assertReconcileLoadBearing(
-            Connection su, String table, String fkName, String fkColumn, String extraFkClause,
-            String tenant, String orphanCol, String orphanInsertSql, String reconcileInsertSql) throws Exception {
+            Connection su, DSLContext ctx, Table<?> table, String fkName, String fkColumn, String extraFkClause,
+            String tenant, String orphanCol, Runnable orphanInsert, Runnable reconcileInsert) throws Exception {
         // FK absent; seed an orphan row while it is absent.
-        su.createStatement().execute(
-            "ALTER TABLE nexus." + table + " DROP CONSTRAINT IF EXISTS " + fkName);
-        su.createStatement().execute(orphanInsertSql);
-        assertThat(countRows(su, "SELECT COUNT(*) FROM nexus.catalog_collections " +
-            "WHERE tenant_id='" + tenant + "' AND name='" + orphanCol + "'"))
-            .as(table + ": orphan collection is NOT registered before reconcile").isZero();
+        ctx.alterTable(table).dropConstraintIfExists(fkName).execute();
+        orphanInsert.run();
+        assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(orphanCol))
+                .fetchOne(0, int.class))
+            .as(table.getName() + ": orphan collection is NOT registered before reconcile").isZero();
 
         // Re-add the FK NOT VALID — succeeds (NOT VALID skips existing-row validation).
-        su.createStatement().execute(
-            "ALTER TABLE nexus." + table + " ADD CONSTRAINT " + fkName + " " +
-            "FOREIGN KEY (tenant_id, " + fkColumn + ") " +
-            "REFERENCES nexus.catalog_collections (tenant_id, name) " + extraFkClause + " NOT VALID");
+        PgContainerHelper.addFkNotValid(su, table, fkName, fkColumn, CATALOG_COLLECTIONS, "name", extraFkClause);
 
         // VALIDATE must FAIL while the orphan is unregistered — proves reconcile is load-bearing.
-        PSQLException ex = assertThrows(PSQLException.class, () ->
-            su.createStatement().execute(
-                "ALTER TABLE nexus." + table + " VALIDATE CONSTRAINT " + fkName));
+        // jOOQ wraps the underlying PSQLException in its own unchecked DataAccessException.
+        DataAccessException ex = assertThrows(DataAccessException.class, () ->
+            PgContainerHelper.validateConstraint(su, table, fkName));
         assertThat(ex.getMessage())
-            .as(table + ": VALIDATE must fail loud on a gap-window orphan before reconcile")
+            .as(table.getName() + ": VALIDATE must fail loud on a gap-window orphan before reconcile")
             .containsIgnoringCase(fkName);
 
         // Reconcile: re-run this table's stub-register arm (fk-002-6-reconcile).
-        su.createStatement().execute(reconcileInsertSql);
-        assertThat(countRows(su, "SELECT COUNT(*) FROM nexus.catalog_collections " +
-            "WHERE tenant_id='" + tenant + "' AND name='" + orphanCol + "'"))
-            .as(table + ": reconcile stub-registers the gap-window collection").isEqualTo(1);
+        reconcileInsert.run();
+        assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(orphanCol))
+                .fetchOne(0, int.class))
+            .as(table.getName() + ": reconcile stub-registers the gap-window collection").isEqualTo(1);
 
         // VALIDATE now SUCCEEDS and flips convalidated=true.
-        su.createStatement().execute(
-            "ALTER TABLE nexus." + table + " VALIDATE CONSTRAINT " + fkName);
-        PgCatalogProbes.Constraint rs = PgCatalogProbes.foreignKey(
-            DSL.using(su, SQLDialect.POSTGRES), "nexus", fkName);
+        PgContainerHelper.validateConstraint(su, table, fkName);
+        PgCatalogProbes.Constraint rs = PgCatalogProbes.foreignKey(ctx, "nexus", fkName);
         assertThat(rs).isNotNull();
         assertThat(rs.convalidated())
-            .as(table + ": VALIDATE succeeds after reconcile → convalidated=true").isTrue();
-    }
-
-    private static int countRows(Connection su, String sql) throws Exception {
-        ResultSet rs = su.createStatement().executeQuery(sql);
-        rs.next();
-        return rs.getInt(1);
+            .as(table.getName() + ": VALIDATE succeeds after reconcile → convalidated=true").isTrue();
     }
 
     /**
-     * Insert a minimal catalog_collections row. Uses ON CONFLICT DO NOTHING for idempotency.
-     * catalog_collections PK: (tenant_id, name).
-     * Columns content_type/owner_id/embedding_model/model_version/display_name all TEXT NOT NULL DEFAULT ''.
-     * created_at/superseded_at TEXT NOT NULL DEFAULT '' (current SQLite heritage; P0.2 converts to timestamptz).
+     * Runs the fk-002-6-reconcile stub-register shape for one source table via typed
+     * jOOQ: {@code INSERT INTO nexus.catalog_collections (tenant_id, name) SELECT
+     * DISTINCT tenant_id, <collectionField> FROM <source table> [WHERE <filter>] ON
+     * CONFLICT (tenant_id, name) DO NOTHING} — same idiom as {@code
+     * CollectionRegistryFkExtraTest#runBackfillStub}.
      */
-    private static void insertCollection(Connection su, String tenantId, String name)
-            throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-            "VALUES ('" + tenantId + "', '" + name + "') " +
-            "ON CONFLICT (tenant_id, name) DO NOTHING");
-    }
-
-    /**
-     * Insert a minimal catalog_documents row. Uses ON CONFLICT DO NOTHING for idempotency.
-     * Required as a parent row because topic_assignments has (tenant_id, doc_id) → catalog_documents
-     * via fk-001 (index only for topic_assignments, but the fixture must exist for topic fixture).
-     * catalog_documents PK: (tenant_id, tumbler); title NOT NULL.
-     */
-    private static void insertCatalogDocument(Connection su, String tenantId, String tumbler)
-            throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) " +
-            "VALUES ('" + tenantId + "', '" + tumbler + "', 'Test Doc " + tumbler + "') " +
-            "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+    private static void runCollectionBackfillStub(
+            DSLContext ctx, org.jooq.TableField<?, String> tenantField,
+            org.jooq.TableField<?, String> collectionField, org.jooq.Condition filter) {
+        var select = filter == null
+            ? ctx.selectDistinct(tenantField, collectionField).from(tenantField.getTable())
+            : ctx.selectDistinct(tenantField, collectionField).from(tenantField.getTable()).where(filter);
+        ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+            .select(select)
+            .onConflictDoNothing()
+            .execute();
     }
 
     /**
      * Insert a topics row. Uses explicit ID to avoid sequence gaps across tests.
      * topics PK: (id) — BIGSERIAL. Supply explicit id and use ON CONFLICT DO NOTHING.
      */
-    private static void insertTopic(Connection su, String tenantId, long id, String label, String collection)
-            throws Exception {
+    private static void insertTopic(DSLContext ctx, String tenantId, long id, String label, String collection) {
         // RDR-164 P1a: topics now carries topics_collection_fk → catalog_collections.
         // Register the topic's collection first so the fixture satisfies the NOT VALID FK.
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-            "VALUES ('" + tenantId + "', '" + collection + "') " +
-            "ON CONFLICT (tenant_id, name) DO NOTHING");
-        su.createStatement().execute(
-            "INSERT INTO nexus.topics (id, tenant_id, label, collection, doc_count, created_at, review_status) " +
-            "VALUES (" + id + ", '" + tenantId + "', '" + label + "', '" + collection + "', 0, NOW(), 'pending') " +
-            "ON CONFLICT (id) DO NOTHING");
+        PgContainerHelper.insertCollection(ctx, tenantId, collection);
+        ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
+                TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+            .values(id, tenantId, label, collection, 0, OffsetDateTime.now(), "pending")
+            .onConflictDoNothing()
+            .execute();
     }
 
     /**
-     * Generate a pgvector literal string of {@code dim} uniform 0.1 components.
-     * Format: {@code '[0.1,0.1,...,0.1]'} — safe for {@code ?::nexus.vector} and for
-     * inline literal with {@code ::nexus.vector} cast.
-     *
-     * <p>Matches the pattern from ChunksRlsBehavioralTest.vectorLiteral().
+     * Generate a 384/768/1024-dim pgvector value with every component equal to {@code 0.1}.
+     * Matches the pattern from {@code CatalogRenameCollectionTest#vector}.
      */
-    private static String vectorLiteral(int dim) {
-        return IntStream.range(0, dim)
-                        .mapToObj(i -> "0.1")
-                        .collect(Collectors.joining(",", "'[", "]'"));
+    private static Vector vector(int dim) {
+        float[] v = new float[dim];
+        java.util.Arrays.fill(v, 0.1f);
+        return Vector.of(v);
     }
 
     /**
@@ -1400,6 +1402,18 @@ class CollectionRegistryFkTest {
         // Pad seed bytes to exactly 32 hex chars by repeating and truncating
         String hex = (seed.replaceAll("[^0-9a-f]", "a") + "0".repeat(32)).substring(0, 32);
         return hex;
+    }
+
+    /** {@link #validChash}'s value, stored as its own ASCII bytes -- matches the
+     *  pre-conversion raw-SQL behavior of a bare string literal into a {@code bytea}
+     *  column via PostgreSQL's escape-format input. */
+    private static byte[] chashAscii(String seed) {
+        return validChash(seed).getBytes(StandardCharsets.US_ASCII);
+    }
+
+    /** {@link #chashOfLen}'s value, stored as its own ASCII bytes -- see {@link #chashAscii}. */
+    private static byte[] chashOfLenBytes(int len) {
+        return chashOfLen(len).getBytes(StandardCharsets.US_ASCII);
     }
 
     /** Genuine 64-lowercase-hex sha256 chash — required for topic_assignments.doc_id
@@ -1413,6 +1427,23 @@ class CollectionRegistryFkTest {
         } catch (java.security.NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
         }
+    }
+
+    /** {@link #hexChash}'s value stored as its OWN ASCII bytes -- nexus-cbo4a batch 10
+     *  review fold-in correction: the pre-conversion raw SQL for every
+     *  topic_assignments.doc_id site in THIS file inserted {@code hexChash(seed)} as a
+     *  bare quoted string literal with no {@code decode(..., 'hex')} wrapper (verified
+     *  against {@code git show 7cd690dde} for all 5 call sites), so Postgres's bytea
+     *  escape-format input stored the ASCII bytes of the 64-char hex STRING itself --
+     *  the same {@link #chashAscii} shape, at hex-string width, NOT the genuine
+     *  hex-decoded 32-byte digest a {@code decode(...)} call would produce. Distinct
+     *  from {@code ForeignKeyConstraintTest}'s/{@code CollectionRegistryFkExtraTest}'s
+     *  topic_assignments seeding, whose original SQL DOES call {@code decode(chash,
+     *  'hex')} and so genuinely needs hex-decoded bytes -- the two shapes are not
+     *  interchangeable and must be verified per file against its own pre-conversion
+     *  source, not assumed from a sibling file's convention. */
+    private static byte[] hexChashAscii(String seed) {
+        return hexChash(seed).getBytes(StandardCharsets.US_ASCII);
     }
 
     /**

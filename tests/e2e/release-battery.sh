@@ -93,6 +93,7 @@ define_leg mvv        group  "FRESH-INSTALL MVV (PASSED|FAILED)"        tests/e2
 define_leg smoke      group  "SMOKE (PASSED|FAILED)"                    env "NEXUS_SANDBOX_HOME=$WORK/sb-smoke" tests/e2e/release-sandbox.sh smoke
 define_leg upshakeout group  "UPGRADE-SHAKEOUT PASSED"                  tests/e2e/upgrade-shakeout.sh run
 define_leg genflip    group  "GEN-FLIP LIVE-HOLDER (PASSED|FAILED)"     tests/e2e/gen-flip-live-holder.sh
+define_leg pluginls   group  "PLUGIN-LOCKSTEP GATE (PASSED|FAILED|UNVERIFIED)"  tests/e2e/plugin-lockstep-gate.sh
 define_leg shakeout   alone  "CANDIDATE SHAKEOUT (PASSED|FAILED)"                tests/e2e/migration-rehearsal/run.sh --artifacts "$ARTIFACTS" --shakeout
 
 ONLY_SKIPPED=0

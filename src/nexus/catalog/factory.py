@@ -439,9 +439,21 @@ def make_catalog_writer(
 #: codebase already follows) rather than through the always-open reader.
 #: No SQLite/daemon-mode equivalent (the local catalog is gone, RDR-158
 #: P4) — same rationale as ``delete_many``/``purge_trash`` above.
+#:
+#: nexus-dkymw: ``restore_document`` (the operator-facing caller for
+#: ``nexus.document_restore``, catalog-003-soft-delete.xml — the verb
+#: nexus-xavu7 found missing) joins this set for the identical reason as
+#: ``delete_many``/``purge_trash``/``delete_collection``: it is a
+#: service-only op with no SQLite/daemon-mode equivalent, introduced long
+#: after the local catalog died (RDR-158 P4), so it never had a canonical
+#: ``Catalog`` counterpart to mirror on ``CatalogWriter`` — same disposition
+#: as its sibling reclaim verb ``purge_trash`` above, deliberately NOT added
+#: to the shared ``CATALOG_WRITE_OPS``/``catalog_protocol.py`` Protocol pair
+#: (which requires a matching canonical ``Catalog`` method to fidelity-test
+#: parameter shapes against — see ``test_catalog_protocol_fidelity.py``).
 _SERVICE_ONLY_WRITE_OPS: frozenset[str] = frozenset({
     "update_many", "delete_many", "purge_trash", "record_gc_audit",
-    "delete_collection",
+    "delete_collection", "restore_document",
 })
 
 

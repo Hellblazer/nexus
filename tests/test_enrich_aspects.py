@@ -346,7 +346,7 @@ class TestDeterministicCostEstimate:
         # Reports the no-API-cost branch, not the measured-estimate branch.
         assert "deterministic parser" in result.output
         assert "$0" in result.output
-        assert "single-sample measured estimate" not in result.output
+        assert "mean of measured" not in result.output
 
     def test_dry_run_knowledge_collection_still_reports_measured_cost(
         self, env, monkeypatch: pytest.MonkeyPatch,
@@ -366,7 +366,7 @@ class TestDeterministicCostEstimate:
             enrich, ["aspects", "knowledge__delos", "--dry-run"],
         )
         assert result.exit_code == 0, result.output
-        assert "single-sample measured estimate" in result.output
+        assert "mean of measured claude-haiku-4-5-20251001 dispatches" in result.output
         assert f"${3 * _PER_PAPER_COST_USD:.2f}" in result.output
 
 

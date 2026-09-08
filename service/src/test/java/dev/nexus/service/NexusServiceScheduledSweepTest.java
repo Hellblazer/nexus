@@ -2,7 +2,8 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
-import dev.nexus.service.db.TokenHashing;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -87,15 +88,10 @@ class NexusServiceScheduledSweepTest {
     }
 
     private void insertDataToken(String tenant, String label, Instant expiresAt) throws Exception {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label, scope, expires_at) "
-                 + "VALUES (?, ?, ?, 'data', ?)")) {
-            ps.setString(1, TokenHashing.sha256Hex(tenant + ":" + label + ":" + expiresAt));
-            ps.setString(2, tenant);
-            ps.setString(3, label);
-            ps.setObject(4, OffsetDateTime.ofInstant(expiresAt, ZoneOffset.UTC));
-            ps.executeUpdate();
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.seedServiceToken(
+                DSL.using(su, SQLDialect.POSTGRES), tenant + ":" + label + ":" + expiresAt, tenant,
+                label, "data", OffsetDateTime.ofInstant(expiresAt, ZoneOffset.UTC), null);
         }
     }
 

@@ -27,6 +27,7 @@ from __future__ import annotations
 import contextlib
 import os
 import signal
+import json
 import subprocess
 import sys
 import time
@@ -238,6 +239,63 @@ def test_default_argv_carries_strict_mcp_config(monkeypatch) -> None:
     assert len(captured_argv) == 1
     assert "--strict-mcp-config" in captured_argv[0], (
         f"default argv missing --strict-mcp-config: {captured_argv[0]!r}"
+    )
+
+
+def test_default_argv_pins_the_config_model(monkeypatch) -> None:
+    """nexus-oc98c: rows are stamped with the config's model_version, so the
+    child must run on that model rather than the ambient CLI default (which
+    was claude-fable-5 on the measuring box, ten times the cost, under a
+    haiku label)."""
+    captured: list[list[str]] = []
+
+    class _Reaped:
+        args = ["claude"]
+        returncode = 0
+
+        def communicate(self, *a, **k):
+            return ('{"result": "{}"}', "")
+
+    monkeypatch.setattr(ax.subprocess, "Popen", lambda argv, **kw: captured.append(argv) or _Reaped())
+    ax._run_claude_isolated("x", timeout=1, model="claude-haiku-4-5-20251001")
+    ax._run_claude_isolated("x", timeout=1)
+    assert captured[0][captured[0].index("--model") + 1] == "claude-haiku-4-5-20251001"
+    assert "--model" not in captured[1]
+
+
+def test_retry_paths_pass_the_config_model(monkeypatch) -> None:
+    seen: list = []
+    monkeypatch.setattr(ax, "_invoke_once", lambda prompt, *, model=None: seen.append(("single", model)) or {})
+    monkeypatch.setattr(ax, "_invoke_once_batch", lambda prompt, *, timeout, model=None: seen.append(("batch", model)) or {})
+    cfg = ax._SCHOLARLY_PAPER_CONFIG
+    ax._retry_subprocess("p", cfg)
+    ax._retry_subprocess_batch("p", cfg, timeout=5)
+    assert seen == [("single", cfg.model_version), ("batch", cfg.model_version)]
+
+
+def test_invoke_once_records_actual_model_and_cost(monkeypatch) -> None:
+    """The envelope's cost and model were discarded before nexus-oc98c."""
+    from unittest.mock import MagicMock  # noqa: PLC0415 — file pattern: deferred imports
+
+    envelope = json.dumps({
+        "result": json.dumps({"is_paper": False}),
+        "total_cost_usd": 0.1307,
+        "duration_ms": 17770,
+        "modelUsage": {"claude-haiku-4-5-20251001": {"inputTokens": 19}},
+    })
+    monkeypatch.setattr(
+        ax, "_run_claude_isolated",
+        lambda prompt, timeout, **kw: subprocess.CompletedProcess(["claude"], 0, envelope, ""),
+    )
+    log = MagicMock()
+    monkeypatch.setattr(ax, "_log", log)
+    ax._invoke_once("p", model="claude-haiku-4-5-20251001")
+    log.info.assert_any_call(
+        "aspect_extractor_usage",
+        requested_model="claude-haiku-4-5-20251001",
+        models=["claude-haiku-4-5-20251001"],
+        cost_usd=0.1307,
+        duration_ms=17770,
     )
 
 

@@ -419,11 +419,14 @@ nx dt index --uuid 8EDC855D-213F-40AD-A9CF-9543CC76476B --force
 | `--dry-run` | Print records that would be indexed; make no T3 writes |
 | `--extractor [auto\|docling\|mineru]` | PDF extraction backend for file-backed records (default `auto`). `mineru` is formula-aware but can OOM-fail on formula-dense pages; the recovery is `--extractor docling` (formula-stripped, always completes) |
 | `--force` | Force re-indexing every record, bypassing the staleness check (re-chunks and re-embeds in place) — same semantics as `nx index pdf --force`. Forwarded to `index_pdf`/`index_markdown`'s own `force` kwarg for both file-backed records and, with `--dt-content`, non-file-backed ones; catalog identity and tumbler are preserved (nexus-gup3b). Without it, an unchanged record prints `skipped: index fresh (use --force)` |
+| `--allow-page-gap` | Accept a PDF whose extracted pages do not cover DEVONthink's `pageCount` (nexus-i0cwh). By default a gap is a per-record failure listed under `Failures:` with the missing page numbers, and the run exits non-zero; either way the gap is recorded on the catalog row as `meta.page_gap` (cleared on the next full-coverage run) |
 | `--link-semantic` | After a record indexes, create `relates` edges to its DT similarity + explicit-link neighbours already indexed in nexus (RDR-139 Layer B). DT unavailable → zero edges. Opt-in |
 | `--writeback` | After a record indexes, stamp the nexus identity back onto the DT record (RDR-139 Layer F): `nx-indexed` / `nx-tumbler:<t>` tags + a tumbler backlink annotation. nexus-owned namespace only; never edits user content. Opt-in |
 | `--enrich` | After indexing, run a DT-CrossRef bibliographic gap-fill over each touched collection (RDR-139 Layer C): the `auto` primary backend, then DT's CrossRef resolver fills only still-empty `bib_*` fields (lowest precedence, never overwrites S2/OpenAlex). Opt-in |
 | `--dt-content` | Index non-file-backed records (web archives, bookmarks, formatted notes) from DT's AI-extracted text instead of skipping them (RDR-139 Layer D). Web-archive boilerplate (navigation chrome, cookie banners, footers) is stripped before chunking (nexus-mok9x). Every such chunk is stamped `extraction_source=dt_content`; file-backed records still index from their file. DT unavailable → records skipped as before. Opt-in |
 | `--highlights` | After a record indexes, ingest its DT highlights + mentions as a markdown note attached to the record's tumbler in the `document_highlights` T2 table (RDR-139 Layer E). Read back with `nx dt highlights`. Opt-in |
+
+**Page coverage and DEVONthink metadata (nexus-i0cwh).** On every fresh PDF index the verb reads the record's properties over the DEVONthink MCP (`get_record_properties`) and compares the pages the extractor produced text for (`pages_with_text`, every backend's per-page callback; never the pages chunks happen to start on) with DEVONthink's `pageCount`. A gap prints `page coverage: N of M pages produced text; missing pages …`, counts as `page-coverage failed` in the summary, and exits non-zero unless `--allow-page-gap` (then `page gap allowed`). When the MCP is unreachable, or the extraction was resumed from a pipeline buffer written before this check existed, the record counts as `page coverage unverified` with the reason printed: unverified is never covered. The same read stamps `year` (from `creationDate`, when the PDF carried none), `meta.devonthink_url` and `meta.devonthink_page_count` onto the catalog row beside the `x-devonthink-item://` identity. `/conexus:devonthink-index <uuid|/group path|smart group>` is the plugin command over this verb.
 
 **RDR-139 layered ingest.** The opt-in flags above compose: a single
 `nx dt index --selection --link-semantic --writeback --enrich --highlights`
@@ -686,6 +689,8 @@ nx enrich aspects-list --collection knowledge__delos --json --limit 0
 ```
 
 Companion to `aspects-show` at the collection level (preview / audit shape) instead of single-record detail. With `--missing` the verb inverts to gap detection: catalog rows in the collection that do not have a matching aspect row.
+
+**`--missing` refuses a collection the catalog does not know (nexus-ngpx0).** A bare subject name (e.g. `knowledge__dt-papers` written where the physical four-segment collection name belongs) returns zero catalog rows and therefore zero gaps; reporting "no missing aspects" for that state is a vacuous pass, not a real audit — measured on a collection where 54 of 58 rows had no aspect record. `--missing` now raises naming the collection and pointing at `nx collection list` for the physical name instead.
 
 **`--missing` uses the gap-fill's own key (7.21.0, nexus-bocft).** A catalog entry is matched to `document_aspects.source_path` by `file_path or title` — the identity the store hook mints and the identity `nx enrich aspects` bills by. Before 7.21.0 the audit keyed on `file_path` alone and so silently dropped every title-only note: on a 416-entry knowledge collection with 10 file-path entries it reported 1 gap where the gap-fill would dispatch 407. The audit also reports **orphaned aspect rows** — rows in T2 that no current catalog entry claims (identities recorded under an earlier registration rule); a large count there is why "437 rows but 407 gaps" can both be true, and those rows never cover a gap. `--json` emits `{collection, entries, aspect_rows, gaps: [{tumbler, title, file_path, identity}], orphaned_aspect_rows: [...]}`.
 
@@ -1389,6 +1394,29 @@ nx catalog reconcile-stale --execute tombstone-ghost-notes             # dry-run
 nx catalog reconcile-stale --execute drop-orphan-collections           # dry-run plan
 ```
 
+### nx catalog trash / restore
+
+```
+nx catalog trash [--limit N]
+nx catalog restore TUMBLER_OR_TITLE
+```
+
+nexus-dkymw — Sam's 2026-09-07 ruling on the RDR-106 Option A regression (bead nexus-dkymw): tombstones ARE the recovery story, not a resurrected backup-before-delete mechanism. `nx catalog delete` only ever soft-tombstones (`deleted_at` stamped, nothing cascaded); these two verbs are the operator door in and out of that state that nexus-xavu7 found missing — `nexus.document_restore` (`catalog-003-soft-delete.xml`, RDR-156 P1.2) had existed engine-side with zero callers anywhere in the stack until now.
+
+`nx catalog trash` lists this tenant's tombstoned documents, newest-tombstoned first: tumbler, title, and `deleted_at`. `nx catalog restore` clears the tombstone on one document (accepts a tumbler or a title — title resolution considers tombstoned rows, since the live resolver alone cannot see them) and prints whether anything was actually restored. Restoring a document that is already live, unknown, or genuinely gone (see below) is a no-op — the command says so rather than pretending success.
+
+**The recovery horizon is `nx catalog purge-trash`'s grace window — for tombstones made by `nx catalog delete` only.** A document tombstoned by `nx catalog delete` keeps its catalog row, manifest, and T3 chunks together until `--older-than-days` passes (catalog-026) — `nx catalog restore` works for the whole window. Once `purge-trash` physically reclaims a tombstone, restore returns nothing: recovery at that point means re-indexing the source, not a hand-written SQL `UPDATE` against `catalog_documents.deleted_at` — there is no supported direct-SQL recovery path, and none should be improvised.
+
+**This guarantee does NOT extend to two other paths that reach the same content** (review round 2, T2 [24834]; narrowed by Sam's second 2026-09-07 ruling on nexus-dkymw): `nx t3 gc`'s orphan sweep uses a chunk-level clock (chunk `indexed_at` vs `--orphan-window`) independent of `purge-trash`'s own window, but its alive-set now PROTECTS a tombstoned-but-not-yet-purged document's chashes — superseding nexus-mqd6t's original immediate-exclusion filter for that one read — so it can no longer reap a just-tombstoned document's chunks *inside* the grace window above. The MCP `store_delete` tool tombstones the catalog row and hard-deletes the T3 chunk in the *same* call, so there is no window at all; and `nx collection delete` / `nx collection prune` (`purge_collection_cascade`) delete without ever tombstoning — irreversible, immediate. After either of those two, recovery is a re-index, not `nx catalog restore`. `restore` reports success on the CATALOG ROW regardless of whether the T3 chunks survived — it never checks — so after restoring a document that may have gone through one of these two paths, confirm with `nx catalog show`'s chunk count before trusting the content is actually back.
+
+```
+nx catalog trash                          # what is restorable right now
+nx catalog restore 1.2.3                  # bring one document back by tumbler
+nx catalog restore "My Document Title"    # or by title
+```
+
+Requires an engine carrying the nexus-dkymw routes (`POST /v1/catalog/restore`, `GET /v1/catalog/trash`); an older engine raises a clear error naming the required release rather than a silent 404.
+
 ### nx catalog gc-audit list
 
 ```
@@ -1402,11 +1430,11 @@ Read the destructive-T3-op audit trail, `nexus.gc_audit` (nexus-jqvzk), newest f
 nx catalog purge-trash [--older-than-days N] [--dry-run/--no-dry-run] [--confirm] [--json]
 ```
 
-Physically reclaim tombstoned catalog rows and their manifest-orphaned T3 chunks (nexus-3ck2g). `nx catalog delete` soft-tombstones: it stamps `deleted_at` on the catalog row and deliberately leaves the `document_chunks` manifest and the T3 chunk rows in place, so a manual restore stays possible and the engine's own `nexus.purge_trash` orphan predicate (a manifest row exists but no live parent document does) still has something to sweep. This verb is the caller for that engine-side sweep, which previously had none.
+Physically reclaim tombstoned catalog rows and their manifest-orphaned T3 chunks (nexus-3ck2g). `nx catalog delete` soft-tombstones: it stamps `deleted_at` on the catalog row and deliberately leaves the `document_chunks` manifest and the T3 chunk rows in place, so [`nx catalog restore`](#nx-catalog-trash--restore) stays possible and the engine's own `nexus.purge_trash` orphan predicate (a manifest row exists but no live parent document does) still has something to sweep. This verb is the caller for that engine-side sweep, which previously had none.
 
 Default is a read-only dry-run: a per-dim stranded-chunk count preview plus an aged-tombstone document count (`--older-than-days`, default 30, must be >= 1), computed engine-side and printed. Nothing is deleted in this mode, and `--json` emits the same counts as machine-parseable JSON.
 
-**Age semantics are symmetric since catalog-026 (nexus-5da44, RDR-191 GATE-2; this paragraph described the earlier asymmetric behaviour for two weeks after the engine retired it — nexus-kcm6c):** both the `documents_purged` row delete AND the `chunks_<dim>_stranded` sweep honor `--older-than-days`. A tombstoned document inside the grace window keeps its catalog row, manifest rows, and chunks TOGETHER — the chunk sweep protects any chunk whose manifest row belongs to a live or still-in-window document, the exact complement of the row delete's predicate — and loses all three together once the window passes. "Manual restore stays possible" therefore genuinely holds for the whole window, even across mutating `purge-trash` runs. Consequence for reading the counts: a near-zero stranded count at 30 days next to a large one at `--older-than-days 1` means recent tombstones are being protected, by design — the 2026-08-27 shakedown read exactly that pair and concluded the counter was lying when the stale prose was (nexus-kcm6c). **The default is one day since 7.32.0** (Sam, 2026-09-05): the 30-day window held 880 tombstoned documents and 1,503 stranded chunks for months against a standing request to delete them. `nx doctor --fix` runs the one-day purge (see [garbage sweep](#nx-doctor)).
+**Age semantics are symmetric since catalog-026 (nexus-5da44, RDR-191 GATE-2; this paragraph described the earlier asymmetric behaviour for two weeks after the engine retired it — nexus-kcm6c):** both the `documents_purged` row delete AND the `chunks_<dim>_stranded` sweep honor `--older-than-days`. A tombstoned document inside the grace window keeps its catalog row, manifest rows, and chunks TOGETHER — the chunk sweep protects any chunk whose manifest row belongs to a live or still-in-window document, the exact complement of the row delete's predicate — and loses all three together once the window passes. `nx catalog restore` therefore genuinely works for the whole window, even across mutating `purge-trash` runs — past it, restore returns nothing and recovery means re-indexing. This holds for tombstones `nx catalog delete` made, and — since the nexus-dkymw alive-set fix — for `nx t3 gc`'s orphan sweep too: its alive-set now protects a tombstoned-but-not-yet-purged document's chashes (superseding nexus-mqd6t's original immediate-exclusion filter for that one read), so its independent chunk-`indexed_at` clock can no longer reap chunks inside this window. The MCP `store_delete` tool (tombstones and hard-deletes the T3 chunk in one call) and `nx collection delete`/`nx collection prune` (never tombstones, irreversible) still bypass this window entirely — see [nx catalog trash / restore](#nx-catalog-trash--restore) for the full carve-out. Consequence for reading the counts: a near-zero stranded count at 30 days next to a large one at `--older-than-days 1` means recent tombstones are being protected, by design — the 2026-08-27 shakedown read exactly that pair and concluded the counter was lying when the stale prose was (nexus-kcm6c). **The default is one day since 7.32.0** (Sam, 2026-09-05): the 30-day window held 880 tombstoned documents and 1,503 stranded chunks for months against a standing request to delete them. `nx doctor --fix` runs the one-day purge (see [garbage sweep](#nx-doctor)).
 
 Mutation is gated behind BOTH `--no-dry-run` AND `--confirm` (same gate as `nx catalog reconcile-stale`): `--no-dry-run` alone still reports only, and `--json` cannot be combined with `--no-dry-run` (the mutation path prints a plain-text report, not JSON).
 
@@ -1484,9 +1512,11 @@ Garbage-collect orphaned T3 chunks via the catalog manifest (RDR-108 Phase 4). A
 
 Default is report-only; both `--no-dry-run` AND `--yes` are required to actually delete. Chunks missing `chunk_text_hash` (pre-RDR-053 relics — post-Phase-3 chunks have no `doc_id` at all, so that is no longer the skip criterion) are undecidable here and skipped with a warning; re-index the source or run `nx t3 reidentify` to populate the field.
 
-**Audit record (7.22.0, nexus-fduai).** The engine's background reaps (`sweepChunks`, `purge_trash`, `gc_quarantine_orphans`) write their own `nexus.gc_audit` rows server-side; the delete this verb performs is client-side, so the verb reports it through the engine's client-facing producer (`POST /v1/catalog/gc_audit/record`). A successful `--no-dry-run --yes` run records one row — `operation=t3_gc`, `actor="nx t3 gc"`, the full `chashes` list (the engine caps it and keeps `chash_count` exact), and `details` with `deleted`, `requested`, `chunk_ids_sample` (first 50) and `chunk_ids_truncated` — readable with `nx catalog gc-audit list --operation t3_gc`, and mirrors it as a structured `t3_gc_chunks_deleted` log event carrying the same fields plus `gc_audit_id`. If the audit write fails after the delete succeeded the run prints a WARNING and exits 1 (the delete stands; the event carries `gc_audit_error`). Dry runs record nothing.
+**Audit record (7.22.0, nexus-fduai).** The engine's background reaps (`sweepChunks`, `purge_trash`, `gc_quarantine_orphans`) write their own `nexus.gc_audit` rows server-side; the delete this verb performs is client-side, so the verb reports it through the engine's client-facing producer (`POST /v1/catalog/gc_audit/record`). A successful `--no-dry-run --yes` run records one row — `operation=t3_gc`, `actor="nx t3 gc"`, the full `chashes` list (the engine caps it and keeps `chash_count` exact), and `details` with `deleted`, `requested`, `chunk_ids_sample` (first 50), `chunk_ids_truncated`, and (nexus-zewg3) `tombstone_protected` (an integer count, or `null` when the engine could not answer — see below) — readable with `nx catalog gc-audit list --operation t3_gc`, and mirrors it as a structured `t3_gc_chunks_deleted` log event carrying the same fields plus `gc_audit_id`. If the audit write fails after the delete succeeded the run prints a WARNING and exits 1 (the delete stands; the event carries `gc_audit_error`). Dry runs record nothing.
 
 **Manifest-less notes are protected (nexus-39upx, RDR-145).** A `store_put` / `nx store put` note's chunk never gets a `document_chunks` manifest row — RDR-145 defers manifest-backed identity for notes, and `catalog-003-soft-delete.xml`'s `live_chunks` view treats a manifest-less chunk as live by design. Without a second check that would be indistinguishable from a chash that fell out of a live document's manifest via re-index (both simply read "not referenced"). Before computing orphan candidates, `nx t3 gc` fetches every catalog document registered under `--collection` (one server-scoped `list_by_collection` call) and excludes the chashes of any that are note-shaped (no `file_path`, `meta["doc_id"]` set — the same identity `nx catalog doctor --store-put-integrity` reads). A collection holding protected notes prints `protecting N manifest-less note chunk(s) from orphan classification (RDR-145)`. This lookup is fail-loud, not fail-open — unlike the orphan scan itself, an unverifiable note-set REFUSES the run (exit 1) rather than risk deleting live notes, since this is the operator-driven `--yes` path.
+
+**Chunks protected only by a pending tombstone are counted separately (nexus-zewg3).** Since the nexus-dkymw alive-set fix (see [nx catalog trash / restore](#nx-catalog-trash--restore) above), the manifest-vs-T3 diff this verb performs cannot tell a chash kept alive by a LIVE document from one kept alive ONLY by a tombstoned-but-not-yet-purged document — both simply read "referenced". Every run (dry-run and `--no-dry-run --yes` alike) now prints a second, always-present line naming exactly how many chunks fall into that second class: `Protected by pending tombstones: N chunk(s) (reclaimed by 'nx catalog purge-trash' once past its --older-than-days window, never by t3 gc)`. The count is ENGINE-computed, not client-derived: `GET /v1/catalog/manifest/chashes` (the same call that returns the alive-set itself, one round trip, no second request) carries an additive `tombstone_protected_count` field, backed by `CatalogRepository.tombstoneProtectedChunkCount` — the identical anti-join `nexus.purge_trash`'s own chunk sweep uses, tenant-wide and collection-blind on the manifest side, so it can never disagree with what a real purge actually reclaims. A non-zero count means `nx t3 gc` will never reclaim that storage on its own, no matter how many times it runs; `nx catalog purge-trash` is the verb that does, once the tombstone ages past its own `--older-than-days` window. On an engine that predates this field the line reads `Protected by pending tombstones: unavailable on this engine` — never a confident zero. The count also lands in the `nx t3 gc` audit trail above (`details.tombstone_protected`) and the structured `t3_gc_chunks_deleted` log event's `tombstone_protected` field, both `null` (not `0`) when unavailable.
 
 **RUNFENCE index-state precondition (nexus-g6k6b).** A T3 chunk carries no `doc_id` (post-RDR-108), so an orphan candidate cannot be attributed to the specific document that most recently owned it. Since a document mid-reindex (`index_state='indexing'`) or one whose reindex fenced a failure (`'failed'`) may leave a manifest that is a partial, in-progress artifact — and since which candidate belongs to which document cannot be determined — `nx t3 gc` refuses the WHOLE collection's `--no-dry-run --yes` run when it contains ANY document that is not `index_state='complete'` (`'indexing'`, `'failed'`, or explicitly-reported `NULL`; manifest-less notes are excluded from this check — they never carry `index_state` by design and are already, separately, always protected). A pre-RUNFENCE engine that does not report `index_state` at all is floor-tolerated: the check is skipped entirely, matching the RUNFENCE arc's behavior everywhere else. A report line names the count and states when it applies, in both dry-run and a real run.
 
@@ -3249,6 +3279,25 @@ nx upgrade --yes                  # Unattended: pre-approve the billed re-embed 
 | `--skip-t3` | Skip T3 upgrade steps for a fast T2-only run. Also suppresses the precondition stage's engine install and process cycle (verdicts are still reported) |
 | `--yes` | Assume yes to the **billed re-embed** consent prompt only (equivalent to `NX_ASSUME_YES=1`) — the unattended channel for a walk that would otherwise block on the cost preview. Not a blanket "say yes to everything": a vanished source still defers rather than guessing, and rollback is never automatic |
 
+**Plugin update (nexus-2uwag).** After the ladder, `nx upgrade` reads
+Claude Code's plugin registry (`~/.claude/plugins/installed_plugins.json`)
+and, for each installed `conexus` / `sn` plugin strictly behind this wheel,
+runs `claude plugin update <plugin>@<marketplace> -s <scope> -y` at the
+scope the registry records for it. One line per plugin
+touched; silent when already in lockstep or on a box without the plugins.
+The updated plugin loads at the next session start (the CLI says "Restart
+to apply", and so does this step, once). Advisory by design: a failed
+update prints the reason and the manual command and the upgrade still
+exits 0, because the data convergence above already happened; an exit 0
+the parser does not recognise is reported as "not confirmed", never as
+done. Distinct from the `Precondition [plugin-lockstep]` line above it,
+which reports the RDR-143 marker state read-only. Skipped
+under `--auto` (the budgeted SessionStart-hook invocation; the detached
+RDR-143 lockstep action calls plain `nx upgrade`, where it runs) and
+reported without running under `--dry-run`. This is the reverse of the
+RDR-143 hook, which drives `nx self install` + `nx upgrade` from a plugin
+update; together they make either entry point converge all three.
+
 **Plan-library precondition runs on every invocation, never skipped.**
 Beside package/engine/process/lockstep, `nx upgrade` also converges the
 builtin plan-template library (reconciling it against the templates this
@@ -3438,7 +3487,18 @@ Start a persistent `mineru-api` FastAPI process for PDF extraction. Stores PID f
 nx mineru stop
 ```
 
-Stop the running MinerU server. Sends SIGTERM, waits up to 10s.
+Stop the running MinerU server: SIGTERM, then SIGKILL after 10s, sent to
+the PID file's whole process group — MinerU's multiprocessing workers and
+their `resource_tracker` children need the signal too, or POSIX semaphores
+leak into the global namespace (nexus-ze2a). The PID is judged before it
+is signalled (nexus-5yrob): a PID file left by an unclean death can name a
+PID the OS has since reused for something else, so `stop` re-checks the
+live command line first and refuses to signal it if it is no longer a
+`mineru-api` (the stale PID file is removed instead). When the command
+line cannot be read at all — a `ps` timeout reads the same as a vanished
+process — `stop` signals nothing and keeps the PID file rather than risk
+orphaning a server that is still ours; re-run `nx mineru stop`, or signal
+the group yourself.
 
 ### nx mineru status
 
@@ -3944,7 +4004,7 @@ RDR (Research-Design-Review) authoring helpers.
 |------------|-------------|
 | `lint [PATHS]` | Lint RDR frontmatter/structure; reports findings per file. `--root DIR` scans a directory other than `docs/rdr/` |
 | `set-status STATUS` | Flip an RDR's `status:` frontmatter field and README row (refused unless the lifecycle table allows the transition); then append `needs-reexamination` to the T2 entry of every RDR joined to it by a `supersedes` edge (RDR-201 P3.3). A flip to `superseded` first writes the `superseded_by` successor's `supersedes` catalog edge itself (idempotent; the walk never waits for an index run), and `nx index repo` re-feeds an RDR whose content changed to the dependency link generator, so a frontmatter edit seeds its edges at the next index. `--date YYYY-MM-DD` sets `accepted_date`/`closed_date` (default today, UTC); `--root DIR` names the repo root (default git toplevel) |
-| `preamble` | Subgroup backing the RDR lifecycle skills (`rdr-list`, `rdr-create`, `rdr-show`, `rdr-gate`, `rdr-accept`, `rdr-close`, `rdr-research`, `rdr-audit`, `phase-review-gate`) |
+| `preamble` | Subgroup backing the RDR lifecycle skills (`rdr-list`, `rdr-create`, `rdr-show`, `rdr-gate`, `rdr-fix`, `rdr-accept`, `rdr-close`, `rdr-research`, `rdr-audit`, `phase-review-gate`). `rdr-fix <id>` prints the latest gate's findings with their `Sites:` lists, the diff range and fix commits since the gated commit, whether a fix-check record exists for the file's tip, the pre-edit research title, and the fix rules (nexus-zbdm0). `rdr-verdict <id> <critique-title>` computes a gate's outcome from the stored critique and the derived round (issue blocks and `Ship-blocker: yes` marks counted, the larger of each self-reported and counted number used, a missing `ship_blockers` line read as `critical_count`) under `review-rounds.toml`'s rdr-gate rows, and prints the gate record to write with the `prior:` chain pre-filled (nexus-yxo2l). `rdr-audit` in default mode leads with a Gate loop health block: per gated RDR, rounds, Criticals per round from the `prior:` chain, residual count, and a flag when the loop ran past the round cap |
 | `repeat RDR` | Multi-model repeatability diff (nexus-axwpn): send the RDR's Technical Design (or `Proposed Design` / `Design`) section to two claude -p models (`--models haiku,sonnet`, never the operator tier table), ask each for an implementation plan, and report where the plans diverge in steps, files and decisions. A divergence is a place the text left open, not a verdict on a model. `RDR` is a path or a number resolved under `--root` (default `docs/rdr/`); `--timeout` (seconds per dispatch, default 300) and `--max-budget-usd` (per dispatch, default 0.50) bound each reader; `--json` emits both plans and the diff. Exits 0 with the report, 2 when the RDR has no design section, 1 when a dispatch fails. Writes nothing |
 
 Run `nx rdr --help` / `nx rdr preamble --help` for the full subcommand list. The `preamble` subcommands are primarily invoked by the conexus RDR-lifecycle skills.

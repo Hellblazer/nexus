@@ -26,7 +26,7 @@ the condition that ends the gate — never "no criticals," which is unfalsifiabl
 against an adversarial reviewer. Example: "Ship when the local-upgrade path cannot
 wedge and the migration walk is proven atomic; anything else becomes a bead."
 
-## Rounds (bounded — see also `orchestration/SKILL.md` § Review Rounds)
+## Rounds (bounded — see also `orchestration/SKILL.md` § Review Rounds; the numbers are `review-rounds.toml`'s, contract `code-review`)
 
 Round 1: full review, report everything (see § Prompt Rigour below) — recall is
 the reviewer's job, triage is the orchestrator's.

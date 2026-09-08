@@ -103,14 +103,26 @@ def _ch(seed: str) -> str:
 
 
 class TestT3GcTombstoneSafety:
-    """A tombstoned document's chunks must vanish from both catalog reads
-    that feed T3 GC and search attribution.
+    """Two catalog reads that feed T3 GC and search attribution, with
+    DIFFERENT tombstone contracts.
 
-    nexus-mqd6t: two engine reads miss the ``deleted_at IS NULL`` filter that
-    nexus-23wlw added to their twenty siblings. The old local-catalog test
-    (tests/test_catalog_manifest_read_api.py::TestChashesForCollection::
-    test_chashes_for_collection_skips_deleted_documents) passed for a
-    SUBSTRATE accident — SQLite hard-deletes — not a behavioural guarantee.
+    nexus-mqd6t (ORIGINAL, Hal ruling): two engine reads missed the
+    ``deleted_at IS NULL`` filter that nexus-23wlw added to their twenty
+    siblings, so a tombstoned document's chunks stayed visible to both. The
+    old local-catalog test (tests/test_catalog_manifest_read_api.py::
+    TestChashesForCollection::test_chashes_for_collection_skips_deleted_documents)
+    passed for a SUBSTRATE accident — SQLite hard-deletes — not a
+    behavioural guarantee.
+
+    nexus-dkymw (Sam's second 2026-09-07 ruling, SUPERSEDES mqd6t for
+    ``chashesForCollection`` only): that immediate exclusion let ``nx t3
+    gc``'s own ``--orphan-window`` clock reap a just-tombstoned document's
+    chunks inside ``nx catalog restore``'s recovery window. The T3 GC
+    alive-set (``chashes_for_collection``) now PROTECTS a
+    tombstoned-but-not-yet-purged document's chashes until ``nx catalog
+    purge-trash`` physically reclaims the row. Search attribution
+    (``docs_for_chashes``) is UNCHANGED — it is a read surface, not a GC
+    input, and still excludes tombstoned documents immediately.
     """
 
     _OWNER_PREFIX = "1.5"
@@ -123,8 +135,19 @@ class TestT3GcTombstoneSafety:
         )
         return self._OWNER_PREFIX
 
-    # nexus-i711w.1 item 13 -> nexus-mqd6t (BUG 1)
-    def test_chashes_for_collection_excludes_tombstoned_doc(self, cat, pg_instance) -> None:
+    # nexus-i711w.1 item 13 -> nexus-mqd6t (BUG 1, ORIGINAL) -> nexus-dkymw (SUPERSEDES)
+    def test_chashes_for_collection_protects_tombstoned_doc_until_purge(self, cat, pg_instance) -> None:
+        """ORIGINAL (nexus-mqd6t, Hal ruling): a tombstoned document's chunks
+        left the T3 GC alive-set immediately.
+
+        SUPERSEDED (nexus-dkymw, Sam's second 2026-09-07 ruling): that
+        immediate exclusion let ``nx t3 gc``'s own ``--orphan-window`` clock
+        reap a just-tombstoned document's chunks inside ``nx catalog
+        restore``'s recovery window, resurrecting an empty shell. The
+        alive-set now PROTECTS a tombstoned-but-not-yet-purged document's
+        chashes -- they leave the alive-set only once ``nx catalog
+        purge-trash`` physically reclaims the row.
+        """
         owner = self._owner(cat)
         coll = "code__i711w-gc1__voyage-code-3__v1"
         t = cat.register(
@@ -145,9 +168,22 @@ class TestT3GcTombstoneSafety:
 
         assert cat.delete_document(t) is True
 
-        # CORRECT CONTRACT: a deleted document contributes nothing to the
-        # T3 GC alive-set.
-        assert h not in cat.chashes_for_collection(coll)
+        # CORRECT CONTRACT (nexus-dkymw): a tombstoned-but-not-yet-purged
+        # document must STAY in the T3 GC alive-set.
+        assert h in cat.chashes_for_collection(coll), (
+            "a tombstoned-but-not-yet-purged doc's chunks must stay in the "
+            "T3 GC alive-set (nexus-dkymw, superseding nexus-mqd6t's "
+            "original exclusion)"
+        )
+        # The actual physical-reclaim half (purge_trash removes the row and
+        # the join then yields nothing) is pinned at the engine layer —
+        # CatalogEngineDefects70Test.mqd6t_chashesForCollection_protects
+        # TombstonedDocUntilPurge and CatalogRestoreTrashTest.restore_
+        # chashesForCollection_protectsTombstonedDocUntilRestore — since the
+        # wire-level purge-trash endpoint refuses older_than_days < 1
+        # (no way to reclaim a moments-old tombstone from this client
+        # without backdating deleted_at, which this fixture has no helper
+        # for).
 
     # nexus-i711w.1 item 13 -> nexus-mqd6t (BUG 2)
     def test_docs_for_chashes_excludes_tombstoned_doc(self, cat, pg_instance) -> None:
@@ -306,12 +342,20 @@ class TestT3GcTombstoneSafety:
         )
         assert "live-0" in surviving, result.output
 
-        # CORRECT CONTRACT: the tombstoned doc's chunk is an orphan and gets
-        # collected. (Service today: h_dead is still in the alive-set the
-        # verb reads, so the chunk survives — this is the assertion that
-        # xfails.)
-        assert "dead-0" not in surviving, (
-            "tombstoned document's chunk must be GC'd by the verb; "
+        # CONTRACT OF RECORD (Sam's ruling 2026-09-07, nexus-dkymw, superseding
+        # nexus-mqd6t for the alive-set read): a tombstoned document's chunk is
+        # PROTECTED from nx t3 gc until nexus.purge_trash reclaims the row, so
+        # nx catalog restore can bring the document back whole inside the
+        # purge window. The verb must therefore leave dead-0 in place and say
+        # why on its report line (engine field tombstone_protected_count,
+        # nexus-zewg3). This assertion used to be the inverse (the chunk is an
+        # orphan and gets collected); that was the pre-ruling contract.
+        assert "dead-0" in surviving, (
+            "tombstoned document's chunk must SURVIVE the verb until purge-trash "
+            f"reclaims the row (nexus-dkymw); gc output:\n{result.output}"
+        )
+        assert "Protected by pending tombstones: 1 chunk" in result.output, (
+            "the verb must name the tombstone-protected chunk on its report line; "
             f"gc output:\n{result.output}"
         )
 

@@ -2809,7 +2809,7 @@ def _check_catalog(cat: "CatalogReader | None", cat_path: "Path") -> list[Health
             )]
         return [HealthResult(
             label="Catalog", ok=True,
-            detail="not initialized (optional — run: nx catalog setup)",
+            detail="empty (optional — populate with: nx index repo <path>)",
         )]
     except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
         return [HealthResult(label="Catalog", ok=True, detail="check failed (non-critical)")]
@@ -4523,30 +4523,21 @@ _ORCH_HOOKS_PLUGIN_FLOOR: tuple[int, int, int] = (6, 14, 0)
 
 def _installed_conexus_plugin_versions(registry_path: Path | None = None) -> list[str] | None:
     """Versions of the installed conexus plugin per Claude Code's
-    ``installed_plugins.json`` (v2 schema: ``"<plugin>@<marketplace>":
-    [{"installPath": ..., "version": ...}, ...]``). ``None`` when the
-    registry is absent/unreadable or carries no conexus entry — callers
-    treat that as "not a plugin box", never a failure."""
-    if registry_path is None:
-        registry_path = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
-    try:
-        data = json.loads(registry_path.read_text())
-    except (OSError, ValueError):
+    ``installed_plugins.json``. ``None`` when the registry is absent/unreadable
+    or carries no conexus entry — callers treat that as "not a plugin box",
+    never a failure. Unparseable version strings are RETURNED (the caller
+    reports "cannot verify"). Built on :func:`nexus.plugin_lockstep.registry_entries`,
+    the one reader of that file (nexus-2uwag; a second parser drifts)."""
+    from nexus.plugin_lockstep import registry_entries  # noqa: PLC0415 — deferred, keeps health import light
+
+    raw = registry_entries(registry_path)
+    if not raw:
         return None
-    plugins = data.get("plugins") if isinstance(data.get("plugins"), dict) else data
-    if not isinstance(plugins, dict):
-        return None
-    versions: list[str] = []
-    for key, entries in plugins.items():
-        if not (isinstance(key, str) and key.split("@")[0] == "conexus"):
-            continue
-        if isinstance(entries, dict):
-            entries = [entries]
-        if not isinstance(entries, list):
-            continue
-        for entry in entries:
-            if isinstance(entry, dict) and isinstance(entry.get("version"), str):
-                versions.append(entry["version"])
+    versions = [
+        e["version"]
+        for key, entries in raw.items() if key.split("@", 1)[0] == "conexus"
+        for e in entries if isinstance(e.get("version"), str)
+    ]
     return versions or None
 
 

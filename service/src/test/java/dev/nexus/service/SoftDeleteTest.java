@@ -2,19 +2,27 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.DSLContext;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
+import org.jooq.types.YearToSecond;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.DimTables;
+import dev.nexus.service.jooq.binding.Vector;
+import dev.nexus.service.jooq.nexus.Routines;
 import org.junit.jupiter.api.*;
-import org.postgresql.util.PSQLException;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
-import java.util.stream.Collectors;
-import java.util.stream.IntStream;
+import java.time.Duration;
+import java.time.OffsetDateTime;
+import java.util.HexFormat;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
+import static dev.nexus.service.jooq.nexus.Tables.LIVE_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -132,30 +140,10 @@ class SoftDeleteTest {
     private static final String SVC_ROLE = "svc_sd_test";
     private static final String SVC_PASS = "svc_sd_test_pass";
 
-    // ── Function / view names (pinned contract for P1.2 to honor) ─────────────
-    /**
-     * Tombstones a document: {@code nexus.document_trash(tumbler text) RETURNS void}.
-     * SECURITY INVOKER; tenant scoped via nexus.tenant GUC.
-     */
-    private static final String FN_TRASH   = "nexus.document_trash";
-
-    /**
-     * Restores a tombstoned document: {@code nexus.document_restore(tumbler text) RETURNS void}.
-     * SECURITY INVOKER; tenant scoped via nexus.tenant GUC.
-     */
-    private static final String FN_RESTORE = "nexus.document_restore";
-
-    /**
-     * Purges trash: {@code nexus.purge_trash(older_than interval) RETURNS bigint}.
-     * SECURITY INVOKER; must RAISE when nexus.tenant GUC is unset.
-     */
-    private static final String FN_PURGE   = "nexus.purge_trash";
-
-    /**
-     * Anti-join view excluding chunks whose only referencing manifest doc is tombstoned.
-     * {@code nexus.live_chunks} — consumers never see {@code deleted_at}.
-     */
-    private static final String VIEW_LIVE_CHUNKS = "nexus.live_chunks";
+    // Function / view identities (nexus-cbo4a batch 10): document_trash/document_restore/
+    // purge_trash are called via the generated jOOQ Routines (typed DSL), and live_chunks
+    // via the generated LIVE_CHUNKS Table -- the FN_*/VIEW_* string constants that used to
+    // back raw `SELECT nexus.xxx(...)` calls are retired along with those calls.
 
     // ── Test collection (post-P0: must be registered in catalog_collections) ──
     private static final String COLLECTION_A = "knowledge__sd-owner-a__voyage-context-3__v1";
@@ -259,56 +247,57 @@ class SoftDeleteTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, tumbler);
-            insertCollection(su, TENANT_A, "knowledge__sd-tomb__v1");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, tumbler);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "knowledge__sd-tomb__v1");
 
             // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires a
             // matching nexus.chunks row for every manifest insert below.
-            insertChunk384(su, TENANT_A, "knowledge__sd-tomb__v1", validChash("tomb-chunk-0"), "tomb chunk 0");
-            insertChunk384(su, TENANT_A, "knowledge__sd-tomb__v1", validChash("tomb-chunk-1"), "tomb chunk 1");
+            insertChunk384(ctx, TENANT_A, "knowledge__sd-tomb__v1", chashBytes("tomb-chunk-0"), "tomb chunk 0");
+            insertChunk384(ctx, TENANT_A, "knowledge__sd-tomb__v1", chashBytes("tomb-chunk-1"), "tomb chunk 1");
 
             // 2 manifest rows — post-P0: needs 32-char chash
-            insertManifestRow(su, TENANT_A, tumbler, 0, validChash("tomb-chunk-0"), "knowledge__sd-tomb__v1");
-            insertManifestRow(su, TENANT_A, tumbler, 1, validChash("tomb-chunk-1"), "knowledge__sd-tomb__v1");
+            insertManifestRow(ctx, TENANT_A, tumbler, 0, chashBytes("tomb-chunk-0"), "knowledge__sd-tomb__v1");
+            insertManifestRow(ctx, TENANT_A, tumbler, 1, chashBytes("tomb-chunk-1"), "knowledge__sd-tomb__v1");
 
             // 1 document_aspects row (fk-001 ON DELETE CASCADE target)
-            insertAspectRow(su, TENANT_A, tumbler, "knowledge__sd-asp__v1", "sd-aspect-path-1");
+            insertAspectRow(ctx, TENANT_A, tumbler, "knowledge__sd-asp__v1", "sd-aspect-path-1");
         }
 
         // CONTROL: confirm fixture rows present
         try (Connection su = pg.createConnection("")) {
-            assertThat(countManifest(su, TENANT_A, tumbler))
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(countManifest(ctx, TENANT_A, tumbler))
                 .as("CONTROL: 2 manifest rows must be present before tombstone")
                 .isEqualTo(2);
-            assertThat(countAspects(su, TENANT_A, tumbler))
+            assertThat(countAspects(ctx, TENANT_A, tumbler))
                 .as("CONTROL: 1 aspect row must be present before tombstone")
                 .isEqualTo(1);
         }
 
-        // Call document_trash via svc role with GUC set — this is the RED trigger.
-        // The function nexus.document_trash(text) does not exist yet; PSQLException propagates.
+        // Call document_trash via svc role with GUC set.
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            svc.createStatement().execute(
-                "SELECT " + FN_TRASH + "('" + tumbler + "')");
+            Routines.documentTrash(DSL.using(svc, SQLDialect.POSTGRES).configuration(), tumbler);
         }
 
         // Post-tombstone assertions (green after P1.2 lands):
         try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // deleted_at must be set
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT deleted_at FROM nexus.catalog_documents " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + tumbler + "'");
-            assertThat(rs.next()).as("document row must still exist after tombstone").isTrue();
-            assertThat(rs.getTimestamp("deleted_at"))
+            var row = ctx.select(CATALOG_DOCUMENTS.DELETED_AT).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                .fetchOptional();
+            assertThat(row.isPresent()).as("document row must still exist after tombstone").isTrue();
+            assertThat(row.get().value1())
                 .as("deleted_at must be set (not NULL) after document_trash")
                 .isNotNull();
 
             // CASCADE chains must NOT have fired — children stay intact
-            assertThat(countManifest(su, TENANT_A, tumbler))
+            assertThat(countManifest(ctx, TENANT_A, tumbler))
                 .as("manifest count must be == 2 after tombstone (CASCADE did not fire)")
                 .isEqualTo(2);
-            assertThat(countAspects(su, TENANT_A, tumbler))
+            assertThat(countAspects(ctx, TENANT_A, tumbler))
                 .as("aspect count must be == 1 after tombstone (CASCADE did not fire)")
                 .isEqualTo(1);
         }
@@ -328,42 +317,40 @@ class SoftDeleteTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, tumbler);
+            PgContainerHelper.insertCatalogDocument(DSL.using(su, SQLDialect.POSTGRES), TENANT_A, tumbler);
         }
 
         // Tombstone first (also triggers RED if trash absent — acceptable; restore test
         // is the primary target; both are RED for the same reason: function absent).
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            svc.createStatement().execute(
-                "SELECT " + FN_TRASH + "('" + tumbler + "')");
+            Routines.documentTrash(DSL.using(svc, SQLDialect.POSTGRES).configuration(), tumbler);
         }
 
         // Now restore
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            svc.createStatement().execute(
-                "SELECT " + FN_RESTORE + "('" + tumbler + "')");
+            Routines.documentRestore(DSL.using(svc, SQLDialect.POSTGRES).configuration(), tumbler);
         }
 
         // After restore: deleted_at IS NULL; document appears in live-path SELECT
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT deleted_at FROM nexus.catalog_documents " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + tumbler + "'");
-            assertThat(rs.next()).as("document row must still exist after restore").isTrue();
-            assertThat(rs.getTimestamp("deleted_at"))
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var row = ctx.select(CATALOG_DOCUMENTS.DELETED_AT).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                .fetchOptional();
+            assertThat(row.isPresent()).as("document row must still exist after restore").isTrue();
+            assertThat(row.get().value1())
                 .as("deleted_at must be NULL after document_restore (document is live again)")
                 .isNull();
 
             // Live-path query: SELECT WHERE deleted_at IS NULL
-            ResultSet live = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.catalog_documents " +
-                "WHERE tenant_id = '" + TENANT_A + "' " +
-                "  AND tumbler = '" + tumbler + "' " +
-                "  AND deleted_at IS NULL");
-            live.next();
-            assertThat(live.getInt(1))
+            int liveCount = ctx.selectCount().from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A))
+                .and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
+                .fetchOne(0, int.class);
+            assertThat(liveCount)
                 .as("live-path SELECT must find exactly 1 row after restore")
                 .isEqualTo(1);
         }
@@ -392,35 +379,36 @@ class SoftDeleteTest {
         // RED until P1.2 adds nexus.purge_trash(interval).
         String tumblerA = "sd-purge-doc-a";
         String tumblerB = "sd-purge-doc-b";
-        String chashA      = validChash("purge-only-a");     // referenced by A only
-        String chashShared = validChash("purge-shared");     // referenced by A and B
+        byte[] chashA      = chashBytes("purge-only-a");     // referenced by A only
+        byte[] chashShared = chashBytes("purge-shared");     // referenced by A and B
 
         // Fixture setup via superuser (bypasses FORCE RLS + fk-002 check needs su for collection)
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
 
             // Register collection so fk-002 NOT VALID FK is satisfied for new inserts
-            insertCollection(su, TENANT_A, COLLECTION_A);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, COLLECTION_A);
 
             // Insert the actual chunk rows into nexus.chunks (embedding_384) FIRST —
             // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires a
             // matching nexus.chunks row before any manifest row can reference it.
-            insertChunk384(su, TENANT_A, COLLECTION_A, chashA,      "text for chunk A only");
-            insertChunk384(su, TENANT_A, COLLECTION_A, chashShared, "shared chunk text");
+            insertChunk384(ctx, TENANT_A, COLLECTION_A, chashA,      "text for chunk A only");
+            insertChunk384(ctx, TENANT_A, COLLECTION_A, chashShared, "shared chunk text");
 
             // Doc A (will be tombstoned)
-            insertCatalogDocument(su, TENANT_A, tumblerA);
-            insertManifestRow(su, TENANT_A, tumblerA, 0, chashA, COLLECTION_A);
-            insertManifestRow(su, TENANT_A, tumblerA, 1, chashShared, COLLECTION_A);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, tumblerA);
+            insertManifestRow(ctx, TENANT_A, tumblerA, 0, chashA, COLLECTION_A);
+            insertManifestRow(ctx, TENANT_A, tumblerA, 1, chashShared, COLLECTION_A);
 
             // Doc B (live — keeps chash_shared alive)
-            insertCatalogDocument(su, TENANT_A, tumblerB);
-            insertManifestRow(su, TENANT_A, tumblerB, 0, chashShared, COLLECTION_A);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, tumblerB);
+            insertManifestRow(ctx, TENANT_A, tumblerB, 0, chashShared, COLLECTION_A);
         }
 
         // CONTROL: verify fixture
         try (Connection su = pg.createConnection("")) {
-            assertThat(countChunks384(su, TENANT_A, COLLECTION_A))
+            assertThat(countChunks384(DSL.using(su, SQLDialect.POSTGRES), TENANT_A, COLLECTION_A))
                 .as("CONTROL: 2 chunk rows must exist before tombstone+purge")
                 .isEqualTo(2);
         }
@@ -428,48 +416,46 @@ class SoftDeleteTest {
         // Tombstone doc A via svc role
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            svc.createStatement().execute(
-                "SELECT " + FN_TRASH + "('" + tumblerA + "')");
+            Routines.documentTrash(DSL.using(svc, SQLDialect.POSTGRES).configuration(), tumblerA);
         }
 
         // Purge (older_than = 0 seconds: tombstone is always older than "now - 0s")
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            svc.createStatement().execute(
-                "SELECT " + FN_PURGE + "('0 seconds'::interval)");
+            Routines.purgeTrash(DSL.using(svc, SQLDialect.POSTGRES).configuration(),
+                YearToSecond.valueOf(Duration.ofSeconds(0)));
         }
 
         // Post-purge assertions
         try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // Doc A must be gone (physically deleted by purge)
-            ResultSet rsA = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.catalog_documents " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + tumblerA + "'");
-            rsA.next();
-            assertThat(rsA.getInt(1))
+            int countA = ctx.selectCount().from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumblerA))
+                .fetchOne(0, int.class);
+            assertThat(countA)
                 .as("doc A must be physically deleted by purge_trash")
                 .isEqualTo(0);
 
             // Doc B must still be live
-            ResultSet rsB = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.catalog_documents " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + tumblerB + "' AND deleted_at IS NULL");
-            rsB.next();
-            assertThat(rsB.getInt(1))
+            int countB = ctx.selectCount().from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumblerB))
+                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
+                .fetchOne(0, int.class);
+            assertThat(countB)
                 .as("doc B must still be live after purge")
                 .isEqualTo(1);
 
             // Only 1 chunk row must survive: chash_shared (referenced by live doc B)
-            assertThat(countChunks384(su, TENANT_A, COLLECTION_A))
+            assertThat(countChunks384(ctx, TENANT_A, COLLECTION_A))
                 .as("chunk count must be == 1 after purge: chash_shared survives (live doc B), chash_A swept")
                 .isEqualTo(1);
 
             // The surviving chunk must be chash_shared
-            ResultSet rsChunk = su.createStatement().executeQuery(
-                "SELECT encode(chash, 'hex') AS chash FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND collection = '" + COLLECTION_A + "'");
-            assertThat(rsChunk.next()).isTrue();
-            assertThat(rsChunk.getString("chash"))
+            byte[] survivingChash = ctx.select(CHUNKS.CHASH).from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(TENANT_A)).and(CHUNKS.COLLECTION.eq(COLLECTION_A))
+                .fetchOne(CHUNKS.CHASH);
+            assertThat(survivingChash)
                 .as("surviving chunk must be chash_shared (the chunk still referenced by live doc B)")
                 .isEqualTo(chashShared);
         }
@@ -491,29 +477,22 @@ class SoftDeleteTest {
         // Superuser connection: BYPASSRLS role, no nexus.tenant GUC set.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // Confirm GUC is not set (returns '' or null for missing)
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT current_setting('nexus.tenant', true) AS t");
-            rs.next();
-            String guc = rs.getString("t");
+            String guc = ctx.select(DSL.function("current_setting", String.class,
+                    DSL.val("nexus.tenant"), DSL.val(true)))
+                .fetchOne(0, String.class);
             assertThat(guc == null || guc.isEmpty())
                 .as("CONTROL: nexus.tenant GUC must be unset on fresh superuser connection")
                 .isTrue();
 
             // Call purge_trash — must RAISE with a message mentioning "tenant" (the GUC guard).
-            // RED now: PSQLException fires because the function does not exist yet;
-            //   message = "function nexus.purge_trash(interval) does not exist" — names the artifact.
-            //   The .contains("tenant") assertion then FAILS, which is the RED signal.
-            // GREEN after P1.2: function exists; raises with message containing "tenant".
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "SELECT " + FN_PURGE + "('1 hour'::interval)")
+            DataAccessException ex = assertThrows(DataAccessException.class, () ->
+                Routines.purgeTrash(ctx.configuration(), YearToSecond.valueOf(Duration.ofHours(1)))
             );
             assertThat(ex.getMessage().toLowerCase())
                 .as("purge_trash must raise an error mentioning 'tenant' when GUC is unset " +
-                    "(Decision 6: cross-tenant purge must be impossible via unscoped call). " +
-                    "RED now because nexus.purge_trash does not exist yet; " +
-                    "GREEN after P1.2 when the function exists and enforces the GUC guard.")
+                    "(Decision 6: cross-tenant purge must be impossible via unscoped call).")
                 .contains("tenant");
         }
     }
@@ -533,46 +512,47 @@ class SoftDeleteTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, tumbler);
-            insertCollection(su, TENANT_A, "knowledge__sd-age__v1");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, tumbler);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "knowledge__sd-age__v1");
             // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires a
             // matching nexus.chunks row before the manifest insert below.
-            insertChunk384(su, TENANT_A, "knowledge__sd-age__v1", validChash("age-filter-chunk0"), "age filter chunk 0");
-            insertManifestRow(su, TENANT_A, tumbler, 0, validChash("age-filter-chunk0"), "knowledge__sd-age__v1");
-            insertAspectRow(su, TENANT_A, tumbler, "knowledge__sd-age__v1", "sd-age-asp-path-1");
+            insertChunk384(ctx, TENANT_A, "knowledge__sd-age__v1", chashBytes("age-filter-chunk0"), "age filter chunk 0");
+            insertManifestRow(ctx, TENANT_A, tumbler, 0, chashBytes("age-filter-chunk0"), "knowledge__sd-age__v1");
+            insertAspectRow(ctx, TENANT_A, tumbler, "knowledge__sd-age__v1", "sd-age-asp-path-1");
         }
 
         // Tombstone the document (just now — it will be "new")
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            svc.createStatement().execute(
-                "SELECT " + FN_TRASH + "('" + tumbler + "')");
+            Routines.documentTrash(DSL.using(svc, SQLDialect.POSTGRES).configuration(), tumbler);
         }
 
         // Purge with a very long older_than (e.g. 30 days) — the recent tombstone must NOT be purged
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            svc.createStatement().execute(
-                "SELECT " + FN_PURGE + "('30 days'::interval)");
+            Routines.purgeTrash(DSL.using(svc, SQLDialect.POSTGRES).configuration(),
+                YearToSecond.valueOf(Duration.ofDays(30)));
         }
 
         // Document must still exist with deleted_at set (tombstoned but not purged)
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT deleted_at FROM nexus.catalog_documents " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + tumbler + "'");
-            assertThat(rs.next())
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var row = ctx.select(CATALOG_DOCUMENTS.DELETED_AT).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                .fetchOptional();
+            assertThat(row.isPresent())
                 .as("tombstoned-but-new doc must still exist (age filter: 30 days, tombstone just set)")
                 .isTrue();
-            assertThat(rs.getTimestamp("deleted_at"))
+            assertThat(row.get().value1())
                 .as("deleted_at must still be set (doc tombstoned, not purged by age filter)")
                 .isNotNull();
 
             // Children must also still be intact (cascade did not fire — doc not yet purged)
-            assertThat(countManifest(su, TENANT_A, tumbler))
+            assertThat(countManifest(ctx, TENANT_A, tumbler))
                 .as("manifest count must be == 1 (doc not purged — age filter held)")
                 .isEqualTo(1);
-            assertThat(countAspects(su, TENANT_A, tumbler))
+            assertThat(countAspects(ctx, TENANT_A, tumbler))
                 .as("aspect count must be == 1 (doc not purged — age filter held)")
                 .isEqualTo(1);
         }
@@ -596,29 +576,30 @@ class SoftDeleteTest {
         // RED until P1.2 creates nexus.live_chunks view.
         String tumblerX = "sd-lc-doc-x";
         String tumblerY = "sd-lc-doc-y";
-        String chashOrphan = validChash("lc-orphan-chunk");  // only in tombstoned doc X
-        String chashLive   = validChash("lc-live-chunk");    // in both X (tombstoned) and Y (live)
+        byte[] chashOrphan = chashBytes("lc-orphan-chunk");  // only in tombstoned doc X
+        byte[] chashLive   = chashBytes("lc-live-chunk");    // in both X (tombstoned) and Y (live)
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, COLLECTION_B);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, COLLECTION_B);
 
             // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires a
             // matching nexus.chunks row before any manifest row can reference it.
-            insertChunk384(su, TENANT_A, COLLECTION_B, chashOrphan, "orphan chunk text");
-            insertChunk384(su, TENANT_A, COLLECTION_B, chashLive,   "live shared chunk text");
+            insertChunk384(ctx, TENANT_A, COLLECTION_B, chashOrphan, "orphan chunk text");
+            insertChunk384(ctx, TENANT_A, COLLECTION_B, chashLive,   "live shared chunk text");
 
-            insertCatalogDocument(su, TENANT_A, tumblerX);
-            insertManifestRow(su, TENANT_A, tumblerX, 0, chashOrphan, COLLECTION_B);
-            insertManifestRow(su, TENANT_A, tumblerX, 1, chashLive, COLLECTION_B);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, tumblerX);
+            insertManifestRow(ctx, TENANT_A, tumblerX, 0, chashOrphan, COLLECTION_B);
+            insertManifestRow(ctx, TENANT_A, tumblerX, 1, chashLive, COLLECTION_B);
 
-            insertCatalogDocument(su, TENANT_A, tumblerY);
-            insertManifestRow(su, TENANT_A, tumblerY, 0, chashLive, COLLECTION_B);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, tumblerY);
+            insertManifestRow(ctx, TENANT_A, tumblerY, 0, chashLive, COLLECTION_B);
         }
 
         // CONTROL: both chunks present before tombstone
         try (Connection su = pg.createConnection("")) {
-            assertThat(countChunks384(su, TENANT_A, COLLECTION_B))
+            assertThat(countChunks384(DSL.using(su, SQLDialect.POSTGRES), TENANT_A, COLLECTION_B))
                 .as("CONTROL: 2 chunk rows must be present before tombstone")
                 .isEqualTo(2);
         }
@@ -626,18 +607,16 @@ class SoftDeleteTest {
         // Tombstone doc X
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            svc.createStatement().execute(
-                "SELECT " + FN_TRASH + "('" + tumblerX + "')");
+            Routines.documentTrash(DSL.using(svc, SQLDialect.POSTGRES).configuration(), tumblerX);
         }
 
         // (a) Orphan chunk (only X references it; X is tombstoned) must be ABSENT from live_chunks
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM " + VIEW_LIVE_CHUNKS +
-                " WHERE chash = decode('" + chashOrphan + "', 'hex')");
-            rs.next();
-            assertThat(rs.getInt(1))
+            int count = DSL.using(svc, SQLDialect.POSTGRES).selectCount().from(LIVE_CHUNKS)
+                .where(LIVE_CHUNKS.CHASH.eq(chashOrphan))
+                .fetchOne(0, int.class);
+            assertThat(count)
                 .as("orphan chunk (only tombstoned doc X references it) must be ABSENT from live_chunks")
                 .isEqualTo(0);
         }
@@ -645,11 +624,10 @@ class SoftDeleteTest {
         // (b) Shared chunk (live doc Y still references it) must be PRESENT in live_chunks
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM " + VIEW_LIVE_CHUNKS +
-                " WHERE chash = decode('" + chashLive + "', 'hex')");
-            rs.next();
-            assertThat(rs.getInt(1))
+            int count = DSL.using(svc, SQLDialect.POSTGRES).selectCount().from(LIVE_CHUNKS)
+                .where(LIVE_CHUNKS.CHASH.eq(chashLive))
+                .fetchOne(0, int.class);
+            assertThat(count)
                 .as("shared chunk (live doc Y references it) must be PRESENT in live_chunks")
                 .isEqualTo(1);
         }
@@ -686,7 +664,7 @@ class SoftDeleteTest {
         // Fixture: insert doc owned by TENANT_B
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_B, tumblerTenantB);
+            PgContainerHelper.insertCatalogDocument(DSL.using(su, SQLDialect.POSTGRES), TENANT_B, tumblerTenantB);
         }
 
         // As TENANT_A (svc role, GUC=A): call document_trash targeting TENANT_B's tumbler.
@@ -695,19 +673,19 @@ class SoftDeleteTest {
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             // This call should succeed (no exception) but affect 0 rows.
-            svc.createStatement().execute(
-                "SELECT " + FN_TRASH + "('" + tumblerTenantB + "')");
+            Routines.documentTrash(DSL.using(svc, SQLDialect.POSTGRES).configuration(), tumblerTenantB);
         }
 
         // Verify: TENANT_B's document is NOT tombstoned (deleted_at IS NULL)
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT deleted_at FROM nexus.catalog_documents " +
-                "WHERE tenant_id = '" + TENANT_B + "' AND tumbler = '" + tumblerTenantB + "'");
-            assertThat(rs.next())
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var row = ctx.select(CATALOG_DOCUMENTS.DELETED_AT).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_B)).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumblerTenantB))
+                .fetchOptional();
+            assertThat(row.isPresent())
                 .as("TENANT_B's document must still exist after cross-tenant trash attempt")
                 .isTrue();
-            assertThat(rs.getTimestamp("deleted_at"))
+            assertThat(row.get().value1())
                 .as("TENANT_B's document.deleted_at must remain NULL after cross-tenant trash attempt " +
                     "(RLS contract: 0 rows affected — svc role under GUC=A cannot tombstone B's docs)")
                 .isNull();
@@ -723,25 +701,25 @@ class SoftDeleteTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_B, tumblerTenantB);
+            PgContainerHelper.insertCatalogDocument(DSL.using(su, SQLDialect.POSTGRES), TENANT_B, tumblerTenantB);
         }
 
         // Attempt restore on TENANT_B's doc via GUC=A — must silently affect 0 rows
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            svc.createStatement().execute(
-                "SELECT " + FN_RESTORE + "('" + tumblerTenantB + "')");
+            Routines.documentRestore(DSL.using(svc, SQLDialect.POSTGRES).configuration(), tumblerTenantB);
         }
 
         // Verify: TENANT_B's document is unaffected (deleted_at still NULL)
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT deleted_at FROM nexus.catalog_documents " +
-                "WHERE tenant_id = '" + TENANT_B + "' AND tumbler = '" + tumblerTenantB + "'");
-            assertThat(rs.next())
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var row = ctx.select(CATALOG_DOCUMENTS.DELETED_AT).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_B)).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumblerTenantB))
+                .fetchOptional();
+            assertThat(row.isPresent())
                 .as("TENANT_B's document must still exist after cross-tenant restore attempt")
                 .isTrue();
-            assertThat(rs.getTimestamp("deleted_at"))
+            assertThat(row.get().value1())
                 .as("TENANT_B's document.deleted_at must remain NULL after cross-tenant restore attempt")
                 .isNull();
         }
@@ -765,28 +743,28 @@ class SoftDeleteTest {
     void purgeTrash_manifestlessChunk_survives() throws Exception {
         // Arrange: insert a chunk_384 row with NO catalog_document_chunks manifest row.
         // This simulates an MCP store_put / nx store put note — no associated catalog doc.
-        final String manifestlessChash = validChash("manifestless9090");
+        byte[] manifestlessChash = chashBytes("manifestless9090");
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, COLLECTION_A);
-            insertChunk384(su, TENANT_A, COLLECTION_A, manifestlessChash, "manifest-less note chunk");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, COLLECTION_A);
+            insertChunk384(ctx, TENANT_A, COLLECTION_A, manifestlessChash, "manifest-less note chunk");
         }
 
         // Verify the chunk exists and has NO manifest rows (precondition)
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND chash = decode('" + manifestlessChash + "', 'hex')");
-            rs.next();
-            assertThat(rs.getInt(1))
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            int chunkCount = ctx.selectCount().from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(TENANT_A)).and(CHUNKS.CHASH.eq(manifestlessChash))
+                .fetchOne(0, int.class);
+            assertThat(chunkCount)
                 .as("precondition: manifest-less chunk must exist before purge")
                 .isEqualTo(1);
 
-            ResultSet mf = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.catalog_document_chunks " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND chash = decode('" + manifestlessChash + "', 'hex')");
-            mf.next();
-            assertThat(mf.getInt(1))
+            int manifestCount = ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(manifestlessChash))
+                .fetchOne(0, int.class);
+            assertThat(manifestCount)
                 .as("precondition: no manifest rows for this chash")
                 .isEqualTo(0);
         }
@@ -794,17 +772,16 @@ class SoftDeleteTest {
         // Act: purge_trash with 0-second interval (would sweep anything eligible)
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            svc.createStatement().execute(
-                "SELECT " + FN_PURGE + "('0 seconds'::interval)");
+            Routines.purgeTrash(DSL.using(svc, SQLDialect.POSTGRES).configuration(),
+                YearToSecond.valueOf(Duration.ofSeconds(0)));
         }
 
         // Assert: the manifest-less chunk MUST still exist (exact == 1)
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND chash = decode('" + manifestlessChash + "', 'hex')");
-            rs.next();
-            assertThat(rs.getInt(1))
+            int chunkCount = DSL.using(su, SQLDialect.POSTGRES).selectCount().from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(TENANT_A)).and(CHUNKS.CHASH.eq(manifestlessChash))
+                .fetchOne(0, int.class);
+            assertThat(chunkCount)
                 .as("manifest-less chunk must survive purge_trash " +
                     "(no manifest rows → not eligible for orphan sweep)")
                 .isEqualTo(1);
@@ -814,22 +791,22 @@ class SoftDeleteTest {
     @Test @Order(91)
     void liveChunks_includesManifestlessChunk() throws Exception {
         // Arrange: insert a fresh manifest-less chunk (no catalog_document_chunks row).
-        final String manifestlessChash = validChash("manifestless9191");
+        byte[] manifestlessChash = chashBytes("manifestless9191");
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, COLLECTION_A);
-            insertChunk384(su, TENANT_A, COLLECTION_A, manifestlessChash, "manifest-less live_chunks note");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, COLLECTION_A);
+            insertChunk384(ctx, TENANT_A, COLLECTION_A, manifestlessChash, "manifest-less live_chunks note");
         }
 
         // Assert: the chunk appears in live_chunks (NOT EXISTS(manifest) → visible)
         // The svc role reads via GUC-scoped RLS; live_chunks is SECURITY INVOKER.
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM " + VIEW_LIVE_CHUNKS + " " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND chash = decode('" + manifestlessChash + "', 'hex')");
-            rs.next();
-            assertThat(rs.getInt(1))
+            int count = DSL.using(svc, SQLDialect.POSTGRES).selectCount().from(LIVE_CHUNKS)
+                .where(LIVE_CHUNKS.TENANT_ID.eq(TENANT_A)).and(LIVE_CHUNKS.CHASH.eq(manifestlessChash))
+                .fetchOne(0, int.class);
+            assertThat(count)
                 .as("manifest-less chunk must appear in live_chunks " +
                     "(NOT EXISTS(manifest row) → always live)")
                 .isEqualTo(1);
@@ -849,24 +826,24 @@ class SoftDeleteTest {
         final String tumbler = "sd-owner-a.92";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, tumbler);
+            PgContainerHelper.insertCatalogDocument(DSL.using(su, SQLDialect.POSTGRES), TENANT_A, tumbler);
         }
 
         // First trash — sets deleted_at
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            svc.createStatement().execute(
-                "SELECT " + FN_TRASH + "('" + tumbler + "')");
+            Routines.documentTrash(DSL.using(svc, SQLDialect.POSTGRES).configuration(), tumbler);
         }
 
         // Capture the timestamp after the FIRST trash call
-        java.sql.Timestamp firstDeletedAt;
+        OffsetDateTime firstDeletedAt;
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT deleted_at FROM nexus.catalog_documents " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + tumbler + "'");
-            assertThat(rs.next()).as("document must exist after first trash").isTrue();
-            firstDeletedAt = rs.getTimestamp("deleted_at");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var row = ctx.select(CATALOG_DOCUMENTS.DELETED_AT).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                .fetchOptional();
+            assertThat(row.isPresent()).as("document must exist after first trash").isTrue();
+            firstDeletedAt = row.get().value1();
             assertThat(firstDeletedAt)
                 .as("deleted_at must be non-null after first trash")
                 .isNotNull();
@@ -875,18 +852,17 @@ class SoftDeleteTest {
         // Second trash — must NOT change deleted_at (AND deleted_at IS NULL guard)
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            svc.createStatement().execute(
-                "SELECT " + FN_TRASH + "('" + tumbler + "')");
+            Routines.documentTrash(DSL.using(svc, SQLDialect.POSTGRES).configuration(), tumbler);
         }
 
         // Assert: deleted_at timestamp unchanged after second call (exact same value)
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT deleted_at FROM nexus.catalog_documents " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + tumbler + "'");
-            assertThat(rs.next()).as("document must still exist after second trash").isTrue();
-            java.sql.Timestamp secondDeletedAt = rs.getTimestamp("deleted_at");
-            assertThat(secondDeletedAt)
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var row = ctx.select(CATALOG_DOCUMENTS.DELETED_AT).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                .fetchOptional();
+            assertThat(row.isPresent()).as("document must still exist after second trash").isTrue();
+            assertThat(row.get().value1())
                 .as("deleted_at must not be reset by a second document_trash call " +
                     "(AND deleted_at IS NULL guard must prevent clock reset)")
                 .isEqualTo(firstDeletedAt);
@@ -997,14 +973,15 @@ class SoftDeleteTest {
 
             // Verify the title was NOT changed (tombstone is intact; title is pre-tombstone value)
             try (Connection su = pg.createConnection("")) {
-                ResultSet rs = su.createStatement().executeQuery(
-                    "SELECT title, deleted_at FROM nexus.catalog_documents " +
-                    "WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + tumbler + "'");
-                assertThat(rs.next()).as("tombstoned doc row must still exist").isTrue();
-                assertThat(rs.getString("title"))
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                var row = ctx.select(CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.DELETED_AT).from(CATALOG_DOCUMENTS)
+                    .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                    .fetchOptional();
+                assertThat(row.isPresent()).as("tombstoned doc row must still exist").isTrue();
+                assertThat(row.get().value1())
                     .as("title must remain at pre-tombstone value; update on dead doc must not apply")
                     .isEqualTo("Upd94 Updated");
-                assertThat(rs.getTimestamp("deleted_at"))
+                assertThat(row.get().value2())
                     .as("deleted_at must remain non-null (doc is still tombstoned)")
                     .isNotNull();
             }
@@ -1016,42 +993,17 @@ class SoftDeleteTest {
     // ══════════════════════════════════════════════════════════════════════════
 
     /**
-     * Insert a minimal catalog_documents row. Idempotent via ON CONFLICT DO NOTHING.
-     * catalog_documents PK: (tenant_id, tumbler); title NOT NULL.
-     */
-    private static void insertCatalogDocument(Connection su, String tenantId, String tumbler)
-            throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) " +
-            "VALUES ('" + tenantId + "', '" + tumbler + "', 'Test Doc " + tumbler + "') " +
-            "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
-    }
-
-    /**
-     * Insert a catalog_collections row. Required by fk-002 NOT VALID FKs for new chunk inserts.
-     * Idempotent via ON CONFLICT DO NOTHING.
-     */
-    private static void insertCollection(Connection su, String tenantId, String name)
-            throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-            "VALUES ('" + tenantId + "', '" + name + "') " +
-            "ON CONFLICT (tenant_id, name) DO NOTHING");
-    }
-
-    /**
      * Insert a catalog_document_chunks manifest row.
-     * chash MUST be exactly 32 hex characters (catalog-002-hygiene CHECK, NOT VALID).
      * PK: (tenant_id, doc_id, position). Idempotent via ON CONFLICT DO NOTHING.
      * doc_id is the tumbler of the parent catalog_documents row (fk-001 FK).
      */
-    private static void insertManifestRow(Connection su, String tenantId, String docId,
-                                           int position, String chash, String collection) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
-            "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", decode('" + chash + "', 'hex'), '"
-            + collection + "') " +
-            "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+    private static void insertManifestRow(DSLContext ctx, String tenantId, String docId,
+                                           int position, byte[] chash, String collection) {
+        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+            .values(tenantId, docId, position, chash, collection)
+            .onConflictDoNothing()
+            .execute();
     }
 
     /**
@@ -1059,82 +1011,67 @@ class SoftDeleteTest {
      * doc_id must match an existing catalog_documents(tenant_id, tumbler) row (fk-001 FK ON DELETE CASCADE).
      * Unique on (tenant_id, collection, source_path).
      */
-    private static void insertAspectRow(Connection su, String tenantId, String tumbler,
-                                         String collection, String sourcePath) throws Exception {
+    private static void insertAspectRow(DSLContext ctx, String tenantId, String tumbler,
+                                         String collection, String sourcePath) {
         // RDR-164 P1a: register the collection (document_aspects_collection_fk).
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenantId + "', '"
-            + collection + "') ON CONFLICT (tenant_id, name) DO NOTHING");
+        PgContainerHelper.insertCollection(ctx, tenantId, collection);
         // hygiene-001 step 1 (nexus-tk070.p6a follow-on): source_uri is NOT NULL now too.
-        su.createStatement().execute(
-            "INSERT INTO nexus.document_aspects " +
-            "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) " +
-            "VALUES ('" + tenantId + "', '" + collection + "', '" + sourcePath + "', NOW(), 'v1', 'docling', '" + tumbler + "', " +
-            "'file:///" + sourcePath + "') " +
-            "ON CONFLICT (tenant_id, collection, source_path) DO NOTHING");
+        ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+            .values(tenantId, collection, sourcePath, OffsetDateTime.now(), "v1", "docling", tumbler,
+                "file:///" + sourcePath)
+            .onConflictDoNothing()
+            .execute();
     }
 
     /**
      * Insert a nexus.chunks row with embedding_384 populated (RDR-191 unified;
      * formerly a chunks_384 row). Collection must be pre-registered (fk-002 NOT VALID
-     * FK). chash MUST be exactly 32 hex characters. PK: (tenant_id, collection, chash).
-     * Superuser insert bypasses FORCE RLS so direct fixture setup is possible.
+     * FK). PK: (tenant_id, collection, chash). Superuser insert bypasses FORCE RLS
+     * so direct fixture setup is possible.
      */
-    private static void insertChunk384(Connection su, String tenantId, String collection,
-                                        String chash, String chunkText) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
-            "VALUES ('" + tenantId + "', '" + collection + "', decode('" + chash + "', 'hex'), " +
-            "'" + chunkText + "', " + vectorLiteral(384) + "::nexus.vector) " +
-            "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+    private static void insertChunk384(DSLContext ctx, String tenantId, String collection,
+                                        byte[] chash, String chunkText) {
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+            .values(tenantId, collection, chash, chunkText, vector(384))
+            .onConflictDoNothing()
+            .execute();
     }
 
     /**
      * Count catalog_document_chunks rows for (tenantId, docId).
      */
-    private static int countManifest(Connection conn, String tenantId, String docId)
-            throws Exception {
-        ResultSet rs = conn.createStatement().executeQuery(
-            "SELECT COUNT(*) FROM nexus.catalog_document_chunks " +
-            "WHERE tenant_id = '" + tenantId + "' AND doc_id = '" + docId + "'");
-        rs.next();
-        return rs.getInt(1);
+    private static int countManifest(DSLContext ctx, String tenantId, String docId) {
+        return ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
+            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenantId)).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
+            .fetchOne(0, int.class);
     }
 
     /**
      * Count document_aspects rows for (tenantId, docId).
      */
-    private static int countAspects(Connection conn, String tenantId, String tumbler)
-            throws Exception {
-        ResultSet rs = conn.createStatement().executeQuery(
-            "SELECT COUNT(*) FROM nexus.document_aspects " +
-            "WHERE tenant_id = '" + tenantId + "' AND doc_id = '" + tumbler + "'");
-        rs.next();
-        return rs.getInt(1);
+    private static int countAspects(DSLContext ctx, String tenantId, String tumbler) {
+        return ctx.selectCount().from(DOCUMENT_ASPECTS)
+            .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenantId)).and(DOCUMENT_ASPECTS.DOC_ID.eq(tumbler))
+            .fetchOne(0, int.class);
     }
 
     /**
      * Count nexus.chunks rows with embedding_384 populated for (tenantId, collection).
      */
-    private static int countChunks384(Connection conn, String tenantId, String collection)
-            throws Exception {
-        ResultSet rs = conn.createStatement().executeQuery(
-            "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
-            "WHERE tenant_id = '" + tenantId + "' AND collection = '" + collection + "'" +
-            " AND " + DimTables.embeddingColumn(384) + " IS NOT NULL");
-        rs.next();
-        return rs.getInt(1);
+    private static int countChunks384(DSLContext ctx, String tenantId, String collection) {
+        return ctx.selectCount().from(CHUNKS)
+            .where(CHUNKS.TENANT_ID.eq(tenantId)).and(CHUNKS.COLLECTION.eq(collection))
+            .and(CHUNKS.EMBEDDING_384.isNotNull())
+            .fetchOne(0, int.class);
     }
 
-    /**
-     * Generate a pgvector literal string of {@code dim} uniform 0.1 components.
-     * Format: {@code '[0.1,0.1,...,0.1]'} — safe for inline {@code ::nexus.vector} cast.
-     * Matches the pattern from CollectionRegistryFkTest.vectorLiteral().
-     */
-    private static String vectorLiteral(int dim) {
-        return IntStream.range(0, dim)
-                        .mapToObj(i -> "0.1")
-                        .collect(Collectors.joining(",", "'[", "]'"));
+    /** A pgvector value with every one of {@code dim} components equal to {@code 0.1}. */
+    private static Vector vector(int dim) {
+        float[] v = new float[dim];
+        java.util.Arrays.fill(v, 0.1f);
+        return Vector.of(v);
     }
 
     /**
@@ -1144,5 +1081,12 @@ class SoftDeleteTest {
      */
     private static String validChash(String seed) {
         return dev.nexus.service.db.Chash.ofText(seed).toHex();
+    }
+
+    /** {@link #validChash}'s genuine hex-decoded bytes -- matches the pre-conversion
+     *  raw SQL's {@code decode(chash, 'hex')} calls exactly (as opposed to storing the
+     *  hex STRING's own ASCII bytes via bytea escape-format input). */
+    private static byte[] chashBytes(String seed) {
+        return HexFormat.of().parseHex(validChash(seed));
     }
 }

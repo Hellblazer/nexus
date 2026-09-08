@@ -27,8 +27,10 @@ inside the ``--older-than-days`` grace window — the exact complement of
 Step 4's document-delete predicate. A tombstoned document inside its
 window keeps its catalog row, manifest rows, and chunks TOGETHER until
 the window passes, then loses all three together on the next execute.
-``nx catalog delete``'s "a manual restore stays possible" note
-(nexus-xavu7) is therefore genuinely true for the whole grace window.
+``nx catalog restore`` (nexus-dkymw — the operator-facing caller
+nexus-xavu7 found missing) is therefore genuinely usable for the whole
+grace window; past it, restore returns nothing and recovery means
+re-indexing.
 Consequence for the counts: the stranded-chunk preview IS scoped by
 ``--older-than-days`` — a small number at the then-default 30d alongside a
 large one at 1d means recent tombstones are being protected, exactly as

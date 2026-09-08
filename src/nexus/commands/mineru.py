@@ -189,6 +189,30 @@ def _stop_under_election() -> None:
         pid_path.unlink(missing_ok=True)
         return
 
+    # Alive is not ours (nexus-5yrob): a pid file left by an unclean death
+    # can name a pid the OS has reused, and the signal below goes to that
+    # pid's whole process group. Judge the live command before signalling.
+    from nexus.upgrade_finish import _classify, process_command  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    live_cmd = process_command(pid)
+    if not live_cmd:
+        # An empty read is inconclusive (a ps timeout looks the same as a
+        # vanished process), and deleting the pid file on it would orphan a
+        # server that is still ours. Keep the file, signal nothing, say so.
+        click.echo(
+            f"MinerU server PID {pid} is alive but its command line could not "
+            "be read; not signalling and keeping the PID file. Re-run `nx "
+            f"mineru stop`, or stop it yourself: kill -TERM -{pid}"
+        )
+        return
+    if _classify(live_cmd) != "mineru":
+        click.echo(
+            f"MinerU server not running (PID {pid} is no longer a mineru-api; "
+            "removing the stale PID file)"
+        )
+        pid_path.unlink(missing_ok=True)
+        return
+
     # SIGTERM the entire process group owned by *pid*. MinerU's
     # multiprocessing workers and their ``resource_tracker`` children
     # must receive the signal too — otherwise the tracker never gets

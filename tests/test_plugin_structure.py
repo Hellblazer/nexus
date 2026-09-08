@@ -1340,3 +1340,154 @@ def test_changelog_has_a_section_for_pyprojects_version() -> None:
         f"CHANGELOG.md's '## [{version}]' section is empty — a heading with "
         "no content is the same stub-body problem one level down"
     )
+
+
+class TestRdrGateLoopRemedies:
+    """nexus-g7zgw: the five process remedies for the RDR gate/fix loop
+    (T2 nexus/deep-analysis-rdr-gate-fix-loop-2026-09-07) are stated in the
+    plugin surfaces that run the loop, so a session inherits them from the
+    installed skill rather than from a memory file."""
+
+    GATE_SKILL = SKILLS_DIR / "rdr-gate" / "SKILL.md"
+    GATE_CMD = PLUGIN_DIR / "commands" / "rdr-gate.md"
+    RESEARCH_SKILL = SKILLS_DIR / "rdr-research" / "SKILL.md"
+    ACCEPT_SKILL = SKILLS_DIR / "rdr-accept" / "SKILL.md"
+
+    def test_fix_check_layer_in_gate_skill_and_command(self) -> None:
+        """Remedy 1: a diff-scoped fix check stands between a fix and Layer 3."""
+        for path in (self.GATE_SKILL, self.GATE_CMD):
+            text = path.read_text()
+            assert "Fix check" in text, path
+            assert "with ONLY th" in text and "diff" in text, f"{path}: the fix check reads only the diff"
+            assert "fix-check-" in text, f"{path}: names the T2 title shape"
+            assert "fix_check:" in text, f"{path}: the gate record carries the pointer"
+        skill = self.GATE_SKILL.read_text()
+        for phrase in ("contradicted by any other line", "enumeration", "universal", "research entry"):
+            assert phrase in skill, f"rdr-gate/SKILL.md: fix-check brief lacks '{phrase}'"
+        assert "never counts toward the round" in skill
+
+    def test_termination_rule_and_ship_blockers_in_gate_skill(self) -> None:
+        """Remedy 2: rounds 1-2 block on any Critical; from round 3 only a
+        ship-blocker blocks; Criterion 6 never becomes a finding."""
+        skill = self.GATE_SKILL.read_text()
+        assert "Any **fail** → gate fails" not in skill, "the old aggregation line contradicts the critic contract"
+        assert "ship_blockers" in skill
+        assert "round 3" in skill.lower() or "round three" in skill.lower()
+        assert "residual" in skill
+        assert "prior:" in skill, "the gate record carries the prior chain the round number is derived from"
+        assert "would build the wrong thing" in skill, "RDR-specific ship-blocker definition in the brief"
+        assert "Criterion 6 output is never a finding" in skill
+        cmd = self.GATE_CMD.read_text()
+        assert "ship_blockers" in cmd and "residual" in cmd
+        critic = (PLUGIN_DIR / "agents" / "substantive-critic.md").read_text()
+        assert "may block on `critical_count`" in critic, "the critic contract names the caller's own rule"
+
+    def test_layer_zero_always_on_and_sites_list(self) -> None:
+        """Remedy 4: Layer 0 fires whenever a prior gate record exists, and the
+        critic emits a Sites: list per finding so the sweep is by fact."""
+        skill = self.GATE_SKILL.read_text()
+        assert "only when the prior gate was BLOCKED" not in skill
+        assert "re-gate after a PASSED result, has no Layer 0" not in skill
+        assert "Sites:" in skill
+        cmd = self.GATE_CMD.read_text()
+        assert "i.e. the prior gate was BLOCKED" not in cmd
+        assert "Sites:" in cmd
+        critic = (PLUGIN_DIR / "agents" / "substantive-critic.md").read_text()
+        assert "- **Sites**:" in critic, "the canonical Issue format carries the Sites line"
+
+    def test_command_and_skill_agree_on_fix_check_scope(self) -> None:
+        cmd = self.GATE_CMD.read_text()
+        assert "research entry" in cmd, "the enumeration rule covers the cited research entry"
+        skill = self.GATE_SKILL.read_text()
+        assert "ship_blockers = critical_count" in skill, "a missing ship_blockers line defaults conservatively"
+        assert "Fix check pointer mismatch" in skill
+        accept = self.ACCEPT_SKILL.read_text()
+        assert "fix_check:" in accept and "not the record's `commit:`" in accept
+        assert "no `fix_check:`" in accept, "a skipped fix check blocks accept"
+        assert "mandatory on every re-gate" in skill and "mandatory on every re-gate" in self.GATE_CMD.read_text()
+
+    def test_fix_commit_rule_in_research_and_gate_skills(self) -> None:
+        """Remedy 5: a fix changes the fact named and nothing else; glosses and
+        counts go to the research entry first, with a quote or enumeration."""
+        for path in (self.GATE_SKILL, self.RESEARCH_SKILL):
+            text = path.read_text()
+            assert "nothing else" in text, f"{path}: fix-commit rule missing"
+            assert "before the edit" in text.lower(), f"{path}: research entry precedes the edit"
+            assert "inferred, not read" in text, f"{path}: unquoted clauses are marked"
+            assert "census" in text, f"{path}: universals need a census"
+
+    def test_remedy_skills_carry_no_incident_narrative(self) -> None:
+        """Skills are instructions; the why lives in the RDR and T2
+        (feedback_no_prose_in_skills). No bead pointers or RDR-204 history in
+        the sections the remedies added."""
+        fix_skill = SKILLS_DIR / "rdr-fix" / "SKILL.md"
+        fix_cmd = PLUGIN_DIR / "commands" / "rdr-fix.md"
+        for path in (self.GATE_SKILL, self.RESEARCH_SKILL, self.ACCEPT_SKILL):
+            text = path.read_text()
+            assert "nexus-g7zgw" not in text, f"{path}: bead pointer in a skill"
+            assert "RDR-204" not in text, f"{path}: incident narrative in a skill"
+        # The new surfaces start clean: no bead pointer of any kind.
+        for path in (fix_skill, fix_cmd):
+            text = path.read_text()
+            assert not re.search(r"\bnexus-[0-9a-z]{5}\b", text), f"{path}: bead pointer in a skill"
+            assert "RDR-204" not in text, f"{path}: incident narrative in a skill"
+
+    def test_fix_step_has_its_own_surface(self) -> None:
+        """nexus-zbdm0: the fix step is a command and a skill, and the gate
+        skill points at it instead of carrying the rules alone."""
+        fix_skill = SKILLS_DIR / "rdr-fix" / "SKILL.md"
+        fix_cmd = PLUGIN_DIR / "commands" / "rdr-fix.md"
+        assert fix_skill.exists() and fix_cmd.exists()
+        assert "nx rdr preamble rdr-fix" in fix_cmd.read_text()
+        skill = fix_skill.read_text()
+        for phrase in ("nothing else", "inferred, not read", "census", "before the edit", "fix-check-"):
+            assert phrase in skill, f"rdr-fix/SKILL.md lacks '{phrase}'"
+        assert "/conexus:rdr-fix" in self.GATE_SKILL.read_text()
+        lifecycle = (SKILLS_DIR / "using-nx-skills" / "SKILL.md").read_text()
+        assert "/conexus:rdr-fix" in lifecycle
+        registry = (PLUGIN_DIR / "registry.yaml").read_text()
+        assert "rdr-fix:" in registry and "commands/rdr-fix.md" in registry
+
+    def test_accept_dispositions_residuals(self) -> None:
+        text = self.ACCEPT_SKILL.read_text()
+        assert "residuals:" in text
+        assert "disposition" in text
+        assert "bead" in text and "commit" in text
+
+
+class TestReviewRoundContracts:
+    """nexus-dv7gw: every skill that states a round number states the table's."""
+
+    def test_skills_quote_the_table(self) -> None:
+        from nexus.tables.review_rounds import blocking_rounds, rule_for
+
+        gate = (SKILLS_DIR / "rdr-gate" / "SKILL.md").read_text()
+        n = blocking_rounds("rdr-gate", "any-critical")
+        assert f"Rounds 1 and {n}: BLOCKED iff `critical_count > 0`" in gate
+        assert f"Round {n + 1} onward: BLOCKED iff `ship_blockers > 0`" in gate
+        assert "review-rounds.toml" in gate
+
+        review = (SKILLS_DIR / "code-review" / "SKILL.md").read_text()
+        first_human = next(r for r in (1, 2, 3) if rule_for("code-review", r).next_round_by == "human")
+        assert f"Round {first_human + 1}+: requires the human" in review
+        assert "review-rounds.toml" in review
+
+        orchestration = (SKILLS_DIR / "orchestration" / "SKILL.md").read_text()
+        assert f"round N of at most {first_human}" in orchestration
+        assert "review-rounds.toml" in orchestration
+
+        planner = (PLUGIN_DIR / "agents" / "strategic-planner.md").read_text()
+        assert "review-rounds.toml" in planner
+
+
+class TestCompletionOverDeferral:
+    """Sam, 2026-09-07: a strong preference for completing work over filing
+    it, and for executing the laid plan over opening another round. The
+    rule lives in the skill every session loads."""
+
+    def test_red_flags_name_both_pathologies(self) -> None:
+        text = (SKILLS_DIR / "using-nx-skills" / "SKILL.md").read_text()
+        assert "I'll file a bead for that and move on" in text
+        assert "Filing is deferral that reads as progress" in text
+        assert "One more pass would tighten this" in text
+        assert "review-rounds.toml" in text

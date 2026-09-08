@@ -1,0 +1,44 @@
+2026-09-07 14:45:12 [debug    ] catalog_reader_service_mode
+2026-09-07 14:45:12 [debug    ] catalog_reader_service_mode
+2026-09-07 14:45:12 [debug    ] managed_service_probe_ok       app_version=1.0-SNAPSHOT base_url=https://api.conexus-nexus.com embedding_mode=voyage release_version=0.1.107
+2026-09-07 14:45:12 [debug    ] cloud_engine_version_probe_ok
+2026-09-07 14:45:12 [info     ] data_token_lease_reused        endpoint=api.conexus-nexus.com tenant=default
+2026-09-07 14:45:14 [debug    ] http_catalog_client.init       base_url=https://api.conexus-nexus.com tenant=default
+2026-09-07 14:45:33 [debug    ] operator_dispatch_first_event_latency first_event_latency_s=0.00010224990546703339 model=haiku operator=None
+2026-09-07 14:45:41 [debug    ] operator_dispatch_first_event_latency first_event_latency_s=5.320901982486248e-05 model=haiku operator=None
+2026-09-07 14:45:45 [debug    ] operator_dispatch_first_event_latency first_event_latency_s=0.5169768750201911 model=haiku operator=None
+[
+ {
+  "tumbler": "1.12.53",
+  "chunks": 100,
+  "prompt_chars": 117645,
+  "cost_usd": 0.13077380000000002,
+  "input_tokens": 19,
+  "cache_read": 53728,
+  "output_tokens": 1634,
+  "duration_ms": 17770,
+  "model": "claude-haiku-4-5"
+ },
+ {
+  "tumbler": "1.12.113",
+  "chunks": 133,
+  "prompt_chars": 161547,
+  "cost_usd": 0.1593554,
+  "input_tokens": 19,
+  "cache_read": 61814,
+  "output_tokens": 2245,
+  "duration_ms": 23645,
+  "model": "claude-haiku-4-5"
+ },
+ {
+  "tumbler": "1.12.9",
+  "chunks": 216,
+  "prompt_chars": 273098,
+  "cost_usd": 0.3058303,
+  "input_tokens": 19,
+  "cache_read": 108953,
+  "output_tokens": 2238,
+  "duration_ms": 25316,
+  "model": "claude-haiku-4-5"
+ }
+]

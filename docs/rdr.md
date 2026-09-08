@@ -92,7 +92,7 @@ RDR works in any repository; it doesn't require the Nexus CLI or plugin. The too
 **With Nexus CLI + plugin:**
 
 1. `/conexus:rdr-create` bootstraps the directory, templates, and README automatically on first use
-2. `/conexus:rdr-research`, `/conexus:rdr-gate`, `/conexus:rdr-accept`, `/conexus:rdr-close` manage the full lifecycle
+2. `/conexus:rdr-research`, `/conexus:rdr-gate`, `/conexus:rdr-fix`, `/conexus:rdr-accept`, `/conexus:rdr-close` manage the full lifecycle
 3. RDRs are auto-indexed by `nx index repo` and searchable via `nx search --corpus rdr`
 
 ---
@@ -181,7 +181,11 @@ Three-layer validation. Optional but recommended before committing to irreversib
 
 **Layer 3, AI critique**: Delegates to the `substantive-critic` agent, which evaluates logical coherence, missing alternatives, unstated assumptions, and evidence gaps. Findings are appended to the RDR.
 
-The gate either **BLOCKS** (critical issues; fix and re-gate) or **PASSES** (no critical issues, may have observations). No conditional outcomes. The result is stored in T2 for `/conexus:rdr-accept` to verify.
+The gate either **BLOCKS** or **PASSES**. No conditional outcomes. Rounds 1 and 2 block on any Critical; from round 3 only a ship-blocker (an implementer would build the wrong thing, or the decision rests on a refuted assumption) blocks, and every other finding is a residual recorded in the gate record for `/conexus:rdr-accept` to disposition. The round number is derived from the gate records themselves and never resets. A re-gate leads with the prior findings (Layer 0) and, when the file changed since the gated commit, a diff-scoped fix check that has to store its verdict before the full critique runs. The result is stored in T2 for `/conexus:rdr-accept` to verify.
+
+## Fix (`/conexus:rdr-fix`)
+
+The step between a gate's findings and the next gate. Prints the findings with the sites where each fact lives, the diff and fix commits since the gated commit, and the title the pre-edit research entry will get. A fix changes the fact the critic named and nothing else; every added clause carries a quote read by a tool or is marked as inferred; a count or a universal needs a census, not a spot read. The research entry is recorded before the edit, and the fix check runs on the committed diff before any re-gate. Session start names any draft RDR whose file has moved past its gated commit.
 
 ## Accept (`/conexus:rdr-accept`)
 

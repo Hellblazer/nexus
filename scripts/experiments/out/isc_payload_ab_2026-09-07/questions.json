@@ -1,0 +1,362 @@
+[
+ {
+  "qid": "1.12.53-0",
+  "tumbler": "1.12.53",
+  "title": "Mandol: An Agglomerative Agent Memory System for Long-Term Conversations",
+  "kind": "method_result",
+  "question": "What system addresses the cross-database I/O latency and noise problems of heterogeneous vector and graph memory stores for long-term conversational agents, and what are its three core components?",
+  "gold_answer": "Mandol is an agglomerative memory system that unifies memory representation and storage into a single memory-native architecture. Its three core components are a hierarchical memory model (basic and abstract layers as structured semantic graphs), an agglomerative semantic data structure combining SemanticMap and SemanticGraph for unified hybrid retrieval, and a quantitative query mechanism with query-adaptive routing, denoising, conflict resolution, and token-constrained context generation.",
+  "supporting_quote": "We propose Mandol, an agglomerative memory system that consolidates fragmented memory representations and storage into a unified memory-native architecture. Its core components include: (1) a hierarchical memory model that organizes memory into a basic layer representing raw memory information and a high-level abstract layer that agglomerates basic memories into traceable abstract memories, both uniformly represented as structured semantic graphs; (2) an agglomerative semantic data structure combining SemanticMap and SemanticGraph, which natively fuses key-value, vector, and graph structures and provides unified hybrid retrieval operators to eliminate cross-database I/O; and (3) a quantitative query mechanism with query-adaptive routing, quantitative denoising and conflict resolution, and token-constrained context generation, all without involving LLMs during retrieval"
+ },
+ {
+  "qid": "1.12.53-1",
+  "tumbler": "1.12.53",
+  "title": "Mandol: An Agglomerative Agent Memory System for Long-Term Conversations",
+  "kind": "detail",
+  "question": "In an agentic memory system's denoising step, what statistical measure is used to set a dynamic score threshold that robustly filters low-scoring noisy retrieval candidates without assuming a normal score distribution?",
+  "gold_answer": "A dynamic threshold based on the median absolute deviation (MAD), computed as the median relevance score minus a scaling factor kappa times the MAD of the scores.",
+  "supporting_quote": "we apply a dynamic threshold based on the median absolute deviation (MAD), which robustly filters low-scoring noisy candidates without assuming normality"
+ },
+ {
+  "qid": "1.12.105-0",
+  "tumbler": "1.12.105",
+  "title": "An introduction to reservoir computing",
+  "kind": "method_result",
+  "question": "What machine learning demonstration used a physical container of water as the computational reservoir, and how was input provided to it?",
+  "gold_answer": "A bucket of water was used as a reservoir computing system for classification tasks; input data was mechanically fed into the bucket and recordings of the resulting water surface were used for classification.",
+  "supporting_quote": "You know that it is possible to perform machine learning tasks on a computer, but did you know that it is also possible to do so with a bucket of water? Precisely that was demonstrated in Ref. [12]. Input data was mechanically fed into a bucket, recordings of the water surface then could be used for classification tasks."
+ },
+ {
+  "qid": "1.12.105-1",
+  "tumbler": "1.12.105",
+  "title": "An introduction to reservoir computing",
+  "kind": "method_result",
+  "question": "In an approach to energy-efficient computing that exploits Brownian motion of magnetic skyrmions, what advantage was experimentally demonstrated for this reservoir computing scheme?",
+  "gold_answer": "Brownian reservoir computing based on skyrmions was realized experimentally and shown to be very promising for energy-efficient computing, since it exploits thermal fluctuations that are already present in the system.",
+  "supporting_quote": "Brownian RC based on skyrmions was realized experimentally by Raab et al. [41], who demonstrated that this approach is very promising for energy-efficient computing."
+ },
+ {
+  "qid": "1.14.31-0",
+  "tumbler": "1.14.31",
+  "title": "CacheRAG- A Semantic Caching System for Retrieval-Augmented Generation in Knowledge Graph Question Answering",
+  "kind": "method_result",
+  "question": "What system architecture addresses schema hallucination and limited retrieval coverage in LLM-driven knowledge graph question answering by caching past retrieval plans instead of generating them from scratch each time, and what are its three core design principles?",
+  "gold_answer": "The system is a cache-augmented architecture (CacheRAG) for LLM-based KGQA that turns stateless planners into continual learners. Its three design principles are a schema-agnostic user interface via a two-stage semantic parsing framework with an Intermediate Semantic Representation and Backend Adapter, diversity-optimized cache retrieval using a two-layer hierarchical index with Maximal Marginal Relevance, and bounded heuristic expansion via deterministic depth/breadth subgraph operators.",
+  "supporting_quote": "We propose CacheRAG, a systematic cache-augmented architecture for LLM-based KGQA that transforms stateless planners into continual learners."
+ },
+ {
+  "qid": "1.14.31-1",
+  "tumbler": "1.14.31",
+  "title": "CacheRAG- A Semantic Caching System for Retrieval-Augmented Generation in Knowledge Graph Question Answering",
+  "kind": "detail",
+  "question": "In a cache-augmented KGQA retrieval system using Maximal Marginal Relevance over cached query plans, what is the default value of the MMR penalty parameter and how many structurally diverse plans are sampled for the LLM query compiler?",
+  "gold_answer": "The default MMR penalty parameter \u03bb is set to 0.5, and the sample size k of structurally diverse plans provided to the LLM Query Compiler is set to 5.",
+  "supporting_quote": "The default MMR penalty parameter \u03bb is set to 0.5. The sample size k for the struc-turally diverse plans provided to the LLM Query Compiler is set to 5."
+ },
+ {
+  "qid": "1.12.29-0",
+  "tumbler": "1.12.29",
+  "title": "Symbolic local refinement of tetrahedral grids",
+  "kind": "method_result",
+  "question": "How can geometric information about tetrahedra in a local grid refinement tree be represented so that vertex locations and neighbor addresses are computed by symbolic manipulation rather than numerical computation?",
+  "gold_answer": "An addressing scheme stores all geometric information about the tetrahedra as symbolic labels (expressions in an algebra of translations, permutations, rotations, and scalings), and vertex locations and nearest-neighbor addresses are found by decoding these symbols, with bisection and face-compatible refinement performed via symbolic and logical operations on the tree's leaves.",
+  "supporting_quote": "An addressing scheme stores all the geometric information about the tetrahedra in the refinement tree. Location of vertices and the addresses of physically nearest neighbors are computed by decoding the symbols of the simplex address."
+ },
+ {
+  "qid": "1.12.29-1",
+  "tumbler": "1.12.29",
+  "title": "Symbolic local refinement of tetrahedral grids",
+  "kind": "method_result",
+  "question": "What prior bisection algorithm for local refinement of simplicial grids in n-dimensional space serves as the basis for a 3-dimensional symbolic addressing scheme?",
+  "gold_answer": "Maubach's algorithm, a simple bisection algorithm for local refinement of simplicial grids in n-dimensional space that bisects a chosen edge starting from a reference simplex, is the basis extended to a 3D symbolic addressing scheme.",
+  "supporting_quote": "In (Maubach [1994)), Maubach develops a simple bisection algorithm for local refinement of simplicial grids in n-dimensional space."
+ },
+ {
+  "qid": "1.14.17-0",
+  "tumbler": "1.14.17",
+  "title": "mach-batlle-magnetic-replicator",
+  "kind": "method_result",
+  "question": "What strategy is proposed for remotely shaping magnetic fields in regions that are physically inaccessible to sources or magnetic materials?",
+  "gold_answer": "The paper proposes using active magnetic metamaterials with negative permeability to remotely shape magnetic fields, theoretically and experimentally demonstrating the emulation and cancellation of magnetic sources at a distance, providing field focusing deep into inaccessible volumes.",
+  "supporting_quote": "we present a strategy for remotely shaping magnetic fields based on active magnetic metamaterials with negative permeability and we theoretically and experimentally demonstrate the possibility of emulating and cancelling magnetic sources at distance."
+ },
+ {
+  "qid": "1.14.17-1",
+  "tumbler": "1.14.17",
+  "title": "mach-batlle-magnetic-replicator",
+  "kind": "method_result",
+  "question": "How was the field created by a long current-carrying wire experimentally cancelled at a distance using a fabricated device made of many wires?",
+  "gold_answer": "The target wire's field was fed alongside 21 wires forming a 'magnetic replicator,' and measurements showed a great reduction of the magnetic field, with cancellation confirmed along a 1D measurement line up to large distances.",
+  "supporting_quote": "We then fed the same wire together with the 21 wires forming the magnetic replicator. Results are shown on the right column of Fig. S10 (\u201dcancellation\u201d) and demonstrate a great reduction of the magnetic field."
+ },
+ {
+  "qid": "1.12.31-0",
+  "tumbler": "1.12.31",
+  "title": "Local bisection refinement for $n$-simplicial grids generated by reflection",
+  "kind": "method_result",
+  "question": "For a local bisection refinement algorithm on n-simplicial grids, how does the number of congruency classes produced scale with the dimension n and the level of refinement?",
+  "gold_answer": "The number of congruency classes created by the bisection method is bounded above by n (in fact shown to equal n), independent of the level of refinement.",
+  "supporting_quote": "Further, the number of congruency classes in a locally refined grid turns out to be bounded above by n, independent of the level of refinement."
+ },
+ {
+  "qid": "1.12.31-1",
+  "tumbler": "1.12.31",
+  "title": "Local bisection refinement for $n$-simplicial grids generated by reflection",
+  "kind": "method_result",
+  "question": "What structural requirement must be satisfied by the vertex ordering of simplices in a bisection-based local grid refinement algorithm for n-simplicial grids?",
+  "gold_answer": "The algorithm requires that the vertices of each simplex be ordered in a special way relative to those in neighboring simplices, with the edges to be bisected determined solely by this vertex ordering, without any local or global computation or communication.",
+  "supporting_quote": "The algorithm requires that the vertices of each simplex be ordered in a special way relative to those in neighboring simplices. It is proven that certain regular simplicial grids on [0, 1]n have this property, and the more general grids to which this method is applicable are discussed. The edges to be bisected are determined by an ordering of the simplex vertices, without local or global computation or communication."
+ },
+ {
+  "qid": "1.12.34-0",
+  "tumbler": "1.12.34",
+  "title": "Recursive Algorithms for Distributed Forests of Octrees",
+  "kind": "method_result",
+  "question": "What scale of parallel scaling (in number of cores) has been demonstrated for recursive algorithms operating on distributed forests of octrees for adaptive mesh refinement?",
+  "gold_answer": "The algorithms demonstrate good weak and strong scaling up to 458,000 cores of the JUQUEEN supercomputer.",
+  "supporting_quote": "demonstrating good weak and strong scaling up to 458k cores of the JUQUEEN supercomputer."
+ },
+ {
+  "qid": "1.12.34-1",
+  "tumbler": "1.12.34",
+  "title": "Recursive Algorithms for Distributed Forests of Octrees",
+  "kind": "method_result",
+  "question": "What three recursive algorithms are presented for handling topology and search in forest-of-octrees mesh data structures?",
+  "gold_answer": "A parallel search for leaves matching multiple search criteria (e.g., points or polytopes), a ghost layer construction algorithm that works on arbitrarily refined octrees without requiring a 2:1 balance condition, and a universal mesh topology iterator that visits every cell and interface and computes local topological information.",
+  "supporting_quote": "We present three important algorithms with recursive implementations. The first is a parallel search for leaves matching any of a set of multiple search criteria, such as leaves that contain points or intersect polytopes. The second is a ghost layer construction algorithm that handles arbitrarily refined octrees that are not covered by previous algorithms, which require a 2:1 condition between neighboring leaves. The third is a universal mesh topology iterator."
+ },
+ {
+  "qid": "1.12.111-0",
+  "tumbler": "1.12.111",
+  "title": "Recent Advances in Physical Reservoir Computing: A Review",
+  "kind": "method_result",
+  "question": "What physical device structure was proposed for a spin-wave-based reservoir computing system, and what did numerical demonstration show about its ability to characterize input patterns?",
+  "gold_answer": "The proposed device uses a thin Yttrium iron garnet (YIG) film sandwiched between a magneto-electric coupling layer and a conductive substrate, where input voltages alter the film's magnetic anisotropy to generate spin waves; simulations showed the input pattern could be well estimated when electrode positions and the duration of spin motions used for computation were appropriately selected.",
+  "supporting_quote": "The proposed reservoir device structure consists of a thin Yttrium iron garnet (YIG) film between a magneto-electric coupling layer and a conductive substrate"
+ },
+ {
+  "qid": "1.12.111-1",
+  "tumbler": "1.12.111",
+  "title": "Recent Advances in Physical Reservoir Computing: A Review",
+  "kind": "detail",
+  "question": "In a mass-spring network proposed as a mechanical reservoir, what pair of differential equations describes the motion of each nonlinear spring, and what do the variables x1, x2, and u represent?",
+  "gold_answer": "The motion is described by dx1/dt = x2 and dx2/dt = -p(x1) - q(x2) + u, where x1 is the spring's displacement from its rest length, x2 is the spring's velocity, p and q are nonlinear functions representing spring properties, and u is the sum of external forces.",
+  "supporting_quote": "x1 is the displacement of the spring from\nits rest length, x2 is the velocity of the spring motion, p and q are nonlinear\nfunctions representing the properties of the spring, and u is the sum of external\nfo"
+ },
+ {
+  "qid": "1.14.18-0",
+  "tumbler": "1.14.18",
+  "title": "Fast intersections on nested tetrahedrons (FINT): An algorithm for adaptive finite element based distributed parameter estimation",
+  "kind": "method_result",
+  "question": "What problem does an algorithm for handling independently refined dual tetrahedral meshes in finite-element based tomographic reconstruction solve, and how is its computational efficiency demonstrated?",
+  "gold_answer": "The algorithm identifies and resolves intersections between tetrahedrons in independently refined or coarsened dual meshes, which previously had no efficient solution, enabling fully adaptive dual-mesh finite elements. Its efficiency is demonstrated via diffuse photon density wave solutions from single- and dual-mesh computations and by reconstructing a fluorescent inclusion in a simulated phantom from boundary frequency-domain fluorescence measurements.",
+  "supporting_quote": "Till date, no efficient method has been reported to identify and resolve intersection between tetrahedrons in independently refined or coarsened dual meshes."
+ },
+ {
+  "qid": "1.14.18-1",
+  "tumbler": "1.14.18",
+  "title": "Fast intersections on nested tetrahedrons (FINT): An algorithm for adaptive finite element based distributed parameter estimation",
+  "kind": "detail",
+  "question": "What subdivision scheme is used to generate the nested tetrahedral meshes on which the tetrahedron intersection algorithm operates?",
+  "gold_answer": "The nested dual meshes are generated using an 8-similar subtetrahedron subdivision scheme.",
+  "supporting_quote": "we report a fast and robust algorithm to identify and resolve intersection of tetrahedrons within nested dual meshes generated by 8-similar subtetrahedron subdivision scheme."
+ },
+ {
+  "qid": "1.12.6-0",
+  "tumbler": "1.12.6",
+  "title": "Random-Access Ranked Retrieval and Similarity Search",
+  "kind": "method_result",
+  "question": "What relaxed version of exact rank retrieval returns a small guaranteed superset of size kappa containing the target tuple, and why was it introduced instead of solving exact rank retrieval directly?",
+  "gold_answer": "It is called kappa-Random-Access Ranked Retrieval; it was introduced because exactly locating the tuple at a specific rank is challenging due to its connection to the range counting problem.",
+  "supporting_quote": "Since exactly locating the tuple at a specific rank is challenging due to its connection to the range counting problem, we introduce a relaxed variant called \ud835\udf05-Random-Access Ranked Retrieval, which returns a small subset of size \ud835\udf05 guaranteed to contain the target tuple."
+ },
+ {
+  "qid": "1.12.6-1",
+  "tumbler": "1.12.6",
+  "title": "Random-Access Ranked Retrieval and Similarity Search",
+  "kind": "detail",
+  "question": "What is the name of the intermediate problem defined together with a hierarchical sampling data structure tailored for narrow stripe range queries?",
+  "gold_answer": "Stripe Range Retrieval (SRR).",
+  "supporting_quote": "we define an intermediate problem, Stripe Range Retrieval (SRR), and design a hierarchical sampling data structure tailored for narrow stripe range queries."
+ },
+ {
+  "qid": "1.12.9-0",
+  "tumbler": "1.12.9",
+  "title": "Scalable Algorithms for Parallel Tree-based Adaptive Mesh Refinement with General Element Types",
+  "kind": "method_result",
+  "question": "What repartitioning throughput was demonstrated for a coarse mesh partitioning algorithm on a large-scale supercomputer run?",
+  "gold_answer": "A coarse mesh repartitioning method was shown to repartition a coarse mesh of 371e9 trees across 917,504 processes (405,000 trees per process) on the Juqueen supercomputer in 1.2 seconds.",
+  "supporting_quote": "we demonstrate that our method repartitions a coarse mesh of 371e9 trees on 917,504 processes (405,000 trees per process) on the Juqueen supercomputer in 1.2 seconds."
+ },
+ {
+  "qid": "1.12.9-1",
+  "tumbler": "1.12.9",
+  "title": "Scalable Algorithms for Parallel Tree-based Adaptive Mesh Refinement with General Element Types",
+  "kind": "detail",
+  "question": "How many bytes are required to store a triangle and a tetrahedron using a space-filling curve encoding based on an anchor node and a type value?",
+  "gold_answer": "The encoding requires 10 bytes per triangle and 14 bytes per tetrahedron, only one byte more than the classical Morton index (9 bytes for quadrilaterals, 13 bytes for hexahedra).",
+  "supporting_quote": "we require 10 bytes per triangle and 14 bytes per tetrahedron, which is only one byte more than used in the classical Morton index for quadrilaterals (9 bytes) and hexahedra (13 bytes)."
+ },
+ {
+  "qid": "1.12.2-0",
+  "tumbler": "1.12.2",
+  "title": "Open Ontologies- Tool-Augmented Ontology Engineering with Stable Matching Alignment",
+  "kind": "method_result",
+  "question": "What method achieves F1 = 0.832 on the OAEI Anatomy ontology alignment track, and how does removing it affect performance?",
+  "gold_answer": "A stable 1-to-1 matching method achieves F1 = 0.832 (P = 0.963, R = 0.733) on OAEI Anatomy; removing stable matching drops F1 to 0.728, while signal weight configurations barely matter (F1 varies by less than 0.004).",
+  "supporting_quote": "Our primary finding is that stable 1-to-1 matching is the dominant factor in ontology alignment quality: on the OAEI Anatomy track, it achieves F1 = 0.832 (P = 0.963, R = 0.733), competitive with state-of-the-art systems and exceeding all in precision."
+ },
+ {
+  "qid": "1.12.2-1",
+  "tumbler": "1.12.2",
+  "title": "Open Ontologies- Tool-Augmented Ontology Engineering with Stable Matching Alignment",
+  "kind": "method_result",
+  "question": "In an ablation comparing how an LLM accesses an ontology (no file, raw OWL file, or structured tool access), which access modality performed best and which performed worst on an axiom-identification benchmark?",
+  "gold_answer": "Structured MCP tool access achieved the best F1 (0.717), while an LLM reading a raw OWL file performed worst (F1 = 0.323), even worse than the LLM given no file at all (F1 = 0.431).",
+  "supporting_quote": "an LLM reading a raw OWL file (F1 = 0.323) performs worse than the same LLM with no file at all (F1 = 0.431), while structured MCP tool access achieves F1 = 0.717"
+ },
+ {
+  "qid": "1.14.4-0",
+  "tumbler": "1.14.4",
+  "title": "MemForest- An Efficient Agent Memory System with Hierarchical Temporal Indexing",
+  "kind": "method_result",
+  "question": "How does a recent agent memory system address the maintenance overhead caused by coarse-grained state management and sequential update pipelines in existing long-context memory frameworks?",
+  "gold_answer": "It reformulates agent memory as a write-efficient temporal data management problem and breaks the sequential bottleneck via parallel chunk extraction, decoupling memory construction into concurrent, independent operations.",
+  "supporting_quote": "we present MemForest, a memory framework that reformulates agent memory as a write-efficient temporal data management problem. MemForest breaks the sequential bottleneck via parallel chunk extraction, decoupling memory construction into concurrent, independent operations."
+ },
+ {
+  "qid": "1.14.4-1",
+  "tumbler": "1.14.4",
+  "title": "MemForest- An Efficient Agent Memory System with Hierarchical Temporal Indexing",
+  "kind": "detail",
+  "question": "Under what shared recall budget are the LongMemEval and LoCoMo pass@k evaluation curves reported for agent memory systems?",
+  "gold_answer": "A shared recall budget of top-10.",
+  "supporting_quote": "Figure 9: LoCoMo pass@\ud835\udc58 curves for \ud835\udc58 = 1, . . . , 8 under the shared recall budget of top-10."
+ },
+ {
+  "qid": "1.12.113-0",
+  "tumbler": "1.12.113",
+  "title": "Real-Time Computing Without Stable States: A New Framework for Neural Computation Based on Perturbations",
+  "kind": "method_result",
+  "question": "What computational model has been proposed as an alternative to Turing machines and attractor neural networks for real-time processing of time-varying input by recurrent circuits of spiking neurons?",
+  "gold_answer": "The liquid state machine, which exploits the transient dynamics of a high-dimensional recurrent circuit as a universal analog fading memory, with readout neurons trained to extract task-relevant information from the circuit's current state without requiring stable internal states.",
+  "supporting_quote": "Our approach is based on a rigorous computational model, the liquid state machine, that, unlike Turing machines, does not require sequential transitions between well-defined discrete internal states."
+ },
+ {
+  "qid": "1.12.113-1",
+  "tumbler": "1.12.113",
+  "title": "Real-Time Computing Without Stable States: A New Framework for Neural Computation Based on Perturbations",
+  "kind": "detail",
+  "question": "In simulations testing how the spatial distribution of connections affects a recurrent liquid circuit's separation property, how many integrate-and-fire neurons made up each of the six types of liquid circuits compared, and what parameter was varied between them?",
+  "gold_answer": "Each of the six liquid circuit types consisted of 135 integrate-and-fire neurons, and they differed in the parameter \u03bb, which regulated the average number of connections and the average spatial length of connections.",
+  "supporting_quote": "Six types of liquid circuits, each consisting of 135 I&F neurons but with different values of the param-\neter \u03bb that regulated the average number of connections and the average\nspatial length of connections (see appendix B), were trained and evaluated\naccording to the same protocol and for the same task as in Figure 5."
+ },
+ {
+  "qid": "1.12.107-0",
+  "tumbler": "1.12.107",
+  "title": "Effects of cavity nonlinearities and linear losses on silicon microring-based reservoir computing",
+  "kind": "method_result",
+  "question": "In numerical studies of time-delay reservoir computing using a silicon microring resonator on the NARMA-10 task, what happens when the microring is run in a purely linear regime with only the photodiode acting as the nonlinear node?",
+  "gold_answer": "When MRR nonlinearities are absent and only the photodiode at the detection stage provides nonlinearity (photodiode-based RC), the system converges to an NMSE of approximately 0.3475, matching the constant value that region A approaches at large positive or negative detuning.",
+  "supporting_quote": "For such a setup, we obtain approximately the same NMSE threshold as the one to which region A converges in Fig. 3 (NMSE \u2248 0.3475)."
+ },
+ {
+  "qid": "1.12.107-1",
+  "tumbler": "1.12.107",
+  "title": "Effects of cavity nonlinearities and linear losses on silicon microring-based reservoir computing",
+  "kind": "detail",
+  "question": "For a silicon microring resonator reservoir computer, what minimum NMSE on the NARMA-10 testing set was obtained with a thermo-optic relaxation time of 50 ns, and at what detuning and input power was it achieved?",
+  "gold_answer": "With a thermo-optic decay time of 50 ns (and free-carrier lifetime 10 ns, loss 0.8 dB/cm), the minimum NMSE was 0.0178 \u00b1 0.0018, obtained at a frequency detuning of -30 GHz and an input power of -5.0 dBm.",
+  "supporting_quote": "0.0178 \u00b1 0.0018            50              -30             -5.0"
+ },
+ {
+  "qid": "1.12.19-0",
+  "tumbler": "1.12.19",
+  "title": "A tetrahedral space-filling curve via bitwise interleaving",
+  "kind": "method_result",
+  "question": "What set of values is used to uniquely identify a tetrahedral element within a refinement for constructing a space-filling curve on tetrahedral meshes?",
+  "gold_answer": "A tetrahedron is uniquely identified by the tuple of its node coordinates (x, y, z), its type, and its refinement level.",
+  "supporting_quote": "The tuple (x(T ), y (T ), z(T ), type(T ), `(T )) uniquely identifies a simplex in a refinement of S0."
+ },
+ {
+  "qid": "1.12.19-1",
+  "tumbler": "1.12.19",
+  "title": "A tetrahedral space-filling curve via bitwise interleaving",
+  "kind": "detail",
+  "question": "How many distinct types are used to classify tetrahedra produced by refining a reference tetrahedron in three dimensions?",
+  "gold_answer": "Six distinct types (S0 through S5) are used.",
+  "supporting_quote": "Here we have six different types."
+ },
+ {
+  "qid": "1.12.15-0",
+  "tumbler": "1.12.15",
+  "title": "MESH REFINEMENT BASED ON THE 8-TETRAHEDRA LONGEST-EDGE PARTITION",
+  "kind": "method_result",
+  "question": "What is the asymptotic average number of tetrahedra sharing a fixed vertex in meshes globally refined using an 8-tetrahedra longest-edge partition scheme?",
+  "gold_answer": "The asymptotic average number of tetrahedra sharing a fixed vertex is equal to 24.",
+  "supporting_quote": "the asymptotic average number of tetrahedra sharing a \ufb01xed vertex is equal to 24."
+ },
+ {
+  "qid": "1.12.15-1",
+  "tumbler": "1.12.15",
+  "title": "MESH REFINEMENT BASED ON THE 8-TETRAHEDRA LONGEST-EDGE PARTITION",
+  "kind": "detail",
+  "question": "How many distinct partition patterns, invariant under translation, rotation, reflection, and uniform scaling, are associated with the 8-tetrahedra partition of any tetrahedron?",
+  "gold_answer": "There are exactly 30 different partition patterns associated with the 8-tetrahedra partition of any tetrahedron.",
+  "supporting_quote": "It can be proved that the are exactly 30 di\ufb00erent partition patterns (invariant under translation, rotation, re\ufb02ection, and uniform scaling) associated to the 8-tetrahedra partition of any tetrahedron."
+ },
+ {
+  "qid": "1.12.102-0",
+  "tumbler": "1.12.102",
+  "title": "Formal Reasoning Meets LLMs: Toward AI for Mathematics and Verification",
+  "kind": "method_result",
+  "question": "What approach did AlphaProof use to generate training data for theorem proving from a large set of informal math competition problems?",
+  "gold_answer": "AlphaProof combined autoformalization and synthetic data generation: it autoformalized one million informal math competition problems into 100 million formal theorems, and generated proofs for them synthetically using expert iteration.",
+  "supporting_quote": "Autoformalization and synthetic data were combined in AlphaProof, which autoformalized one million informal math competition problems into 100 million formal theorems, whose proofs were synthetically generated using expert iteration."
+ },
+ {
+  "qid": "1.12.102-1",
+  "tumbler": "1.12.102",
+  "title": "Formal Reasoning Meets LLMs: Toward AI for Mathematics and Verification",
+  "kind": "detail",
+  "question": "How much formal proof data did the Proof Pile dataset collect after aggregating proofs from six different formal languages?",
+  "gold_answer": "The Proof Pile dataset collected only 500MB of formal proofs, orders of magnitude smaller than comparable informal math datasets.",
+  "supporting_quote": "The Proof Pile dataset, which aggregated proofs from six different formal languages, collected only 500MB of formal proofs\u2014orders of magnitude smaller than its informal counterparts."
+ },
+ {
+  "qid": "1.12.52-0",
+  "tumbler": "1.12.52",
+  "title": "VADAOrchestra- Neurosymbolic Orchestration of Adaptive Reasoning Workflows",
+  "kind": "method_result",
+  "question": "What kind of framework combines an LLM-driven orchestrator with a symbolic logic-programming representation to model workflows as evolving reasoning processes, and how was it evaluated?",
+  "gold_answer": "A neurosymbolic framework that encodes tool invocations and workflow decisions as a Datalog+/- logic program while an LLM-based orchestrator incrementally plans and adapts the workflow; it was evaluated on a real-world financial dataset, showing strong accuracy and auditability compared to purely agentic baselines.",
+  "supporting_quote": "Experimental results on a real-world financial dataset demonstrate strong accuracy and auditability compared to purely agentic baselines."
+ },
+ {
+  "qid": "1.12.52-1",
+  "tumbler": "1.12.52",
+  "title": "VADAOrchestra- Neurosymbolic Orchestration of Adaptive Reasoning Workflows",
+  "kind": "detail",
+  "question": "What tool does an orchestrator invoke to check the cardinality of materialized predicates after each execution stage, in order to decide whether to trigger a smart data retrieval procedure?",
+  "gold_answer": "The orchestrator invokes the get_cardinality() tool to inspect predicate cardinality, and predicates exceeding a configurable threshold \u03c4 trigger the smart data retrieval procedure.",
+  "supporting_quote": "the orchestrator inspects the cardinality of the materialized predicates via the get_cardinality() tool. Pred-\nicates whose cardinality exceeds a configurable threshold \u03c4\ntrigger the smart data retrieval procedure"
+ },
+ {
+  "qid": "1.12.110-0",
+  "tumbler": "1.12.110",
+  "title": "Reservoir Transformers",
+  "kind": "method_result",
+  "question": "What happens to transformer performance when some layers are randomly initialized and never updated during training, and what efficiency benefit does this provide?",
+  "gold_answer": "Transformers obtain impressive performance even with some layers randomly initialized and never updated (frozen 'reservoir' layers interspersed with regular layers), and this can actually improve performance while yielding gains in wall-clock compute time until convergence on machine translation and masked language modeling tasks.",
+  "supporting_quote": "We demonstrate that transformers obtain impressive performance even when some of the layers are randomly initialized and never updated."
+ },
+ {
+  "qid": "1.12.110-1",
+  "tumbler": "1.12.110",
+  "title": "Reservoir Transformers",
+  "kind": "detail",
+  "question": "In the IWSLT translation experiment comparing regular, reservoir, and backskipped transformer architectures, how many layers does the encoder have and how many of those are frozen?",
+  "gold_answer": "The encoder has 8 layers, with 2 of them frozen (if any).",
+  "supporting_quote": "Figure 13: IWSLT comparison of the regular, reservoir and backskipped transformer architectures (encoder has 8 layers with 2 frozen, if any)."
+ }
+]

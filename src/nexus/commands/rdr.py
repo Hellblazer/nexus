@@ -14,6 +14,7 @@ import sys
 import tomllib
 from collections import Counter
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,6 +23,7 @@ import yaml
 
 from nexus.tables.load import Table, TableLoadError, load_packaged_table
 from nexus.tables.resolve import resolve
+from nexus.tables.review_rounds import blocking_rounds, rule_for
 
 
 # ---------------------------------------------------------------------------
@@ -1649,6 +1651,7 @@ def preamble_rdr_gate(args: tuple[str, ...]) -> None:
     # findings and the diff since the gated commit.
     for _line in _preamble_regate_block(
         repo_root=repo_root, repo_name=repo_name, t2_key=t2_key, rdr_file=rdr_file,
+        status=str(fm.get("status", "")),
     ):
         print(_line)
 
@@ -1701,8 +1704,14 @@ def preamble_rdr_gate(args: tuple[str, ...]) -> None:
 
 _CRITIQUE_SECTION_RE = re.compile(r"^\s*#{1,3}\s*(critical|significant)\b", re.IGNORECASE)
 _CRITIQUE_ISSUE_RE = re.compile(r"^\s*#{1,6}\s*issue:\s*(.+)$", re.IGNORECASE)
-_CRITIQUE_DETAIL_RE = re.compile(r"^\s*[-*]\s*\*{0,2}(location|problem|recommendation|issue)\*{0,2}\s*:\s*(.+)$", re.IGNORECASE)
-_CRITIQUE_INLINE_RE = re.compile(r"^[-*#\s]*(?:\*\*)?(?:new\s+)?(?:critical|significant)\b", re.IGNORECASE)
+_CRITIQUE_DETAIL_RE = re.compile(r"^\s*[-*]\s*\*{0,2}(location|problem|recommendation|issue|sites)\*{0,2}\s*:\s*(.+)$", re.IGNORECASE)
+# A free-form finding opens with the severity and then a number, a colon, a
+# bold close or the word "issue"; "Critical mass of the aspect queue" and
+# "Significant prior art exists" are prose (deep critique [24873] S1).
+_CRITIQUE_INLINE_RE = re.compile(
+    r"^[-*#\s]*(?:\*\*)?(?:new\s+)?(?:critical|significant)(?:\s+issue)?(?:\s*\d+)?\s*(?::|\*\*|$)",
+    re.IGNORECASE,
+)
 
 
 def _critique_findings(text: str) -> list[str]:
@@ -1739,7 +1748,7 @@ def _critique_findings(text: str) -> list[str]:
                 out.append(f"Issue: {m.group(1).strip()}")
                 continue
             d = _CRITIQUE_DETAIL_RE.match(line)
-            if d and d.group(1).lower() in ("location", "recommendation", "issue"):
+            if d and d.group(1).lower() in ("location", "recommendation", "issue", "sites"):
                 out.append(f"  {d.group(1).capitalize()}: {d.group(2).strip()}")
                 continue
     if saw_sections:
@@ -1755,7 +1764,7 @@ def _critique_findings(text: str) -> list[str]:
 
 
 def _preamble_regate_block(
-    *, repo_root: str, repo_name: str, t2_key: str, rdr_file: Path,
+    *, repo_root: str, repo_name: str, t2_key: str, rdr_file: Path, status: str = "",
 ) -> list[str]:
     """Lines for the re-gate block of ``nx rdr preamble rdr-gate`` (nexus-7vdf9).
 
@@ -1769,10 +1778,17 @@ def _preamble_regate_block(
     the RDR file since the gated commit (when the record carries
     ``commit:``), and the Layer 0 survivor-sweep instruction.
 
-    Returns ``[]`` when there is no gate record or it is not BLOCKED (a
-    first gate, or a re-gate after a pass, prints nothing extra). A T2 read
-    failure returns a single named note rather than nothing, so an
-    unreachable T2 is visible and never mistaken for "no prior round".
+    Returns ``[]`` only when there is no gate record (a first gate). The
+    block fires after a PASSED gate too (nexus-g7zgw.4): of RDR-204's four
+    rounds that introduced new Criticals (passes 3, 4, 7 and 9), the two
+    after the design had stabilised (7 and 9) were fixes authored against a
+    PASSED gate's Significants, and the sweep was structurally off for
+    them. It also carries the gate round number, derived from the record's
+    ``prior:`` chain (nexus-g7zgw.2), and the Fix check section naming the
+    exact diff range whenever the file changed since the gated commit
+    (nexus-g7zgw.1). A T2 read failure returns a single named note rather
+    than nothing, so an unreachable T2 is visible and never mistaken for
+    "no prior round".
     """
     project = f"{repo_name}_rdr"
     try:
@@ -1781,9 +1797,7 @@ def _preamble_regate_block(
             if not latest:
                 return []
             content = latest.get("content", "") if isinstance(latest, dict) else ""
-            outcome = (_preamble_parse_t2_field(content, "outcome") or "").strip().upper()
-            if outcome != "BLOCKED":
-                return []
+            outcome = (_preamble_parse_t2_field(content, "outcome") or "").strip().upper() or "?"
             critique_title = (_preamble_parse_t2_field(content, "critique") or "").strip()
             # Tolerate the "project/title [id]" form the skill writes into the pointer.
             critique_title = re.sub(r"\s*\[\d+\]\s*$", "", critique_title)
@@ -1791,6 +1805,21 @@ def _preamble_regate_block(
             # title is what T2 keys on within this project.
             critique_title = critique_title.rsplit("/", 1)[-1]
             gated_commit = (_preamble_parse_t2_field(content, "commit") or "").strip()
+            fix_check_field = (_preamble_parse_t2_field(content, "fix_check") or "").strip()
+            fix_check_exists: bool | None = None
+            fc = re.search(r"fix-check-([0-9a-f]{6,40})", fix_check_field)
+            if fc:
+                fix_check_exists = client.get(project=project, title=f"{t2_key}-fix-check-{fc.group(1)}") is not None
+            # Every gate round writes a critique record; their count is the
+            # round count nobody retypes (deep critique [24873] Critical 1).
+            critique_count = 0
+            get_all = getattr(client, "get_all", None)
+            if callable(get_all):
+                prefix = f"{t2_key}-gate-critique-"
+                critique_count = sum(
+                    1 for row in (get_all(project=project) or [])
+                    if isinstance(row, dict) and str(row.get("title", "")).startswith(prefix)
+                )
             critique = None
             fetch_failed = False
             if critique_title:
@@ -1810,20 +1839,37 @@ def _preamble_regate_block(
             "",
         ]
 
-    lines = ["### Re-gate: the previous gate was BLOCKED", ""]
+    lines = [f"### Re-gate: the previous gate was {outcome}", ""]
     date = _preamble_parse_t2_field(content, "date") or "?"
     summary = _preamble_parse_t2_field(content, "summary") or ""
-    lines.append(f"Prior gate {date}: BLOCKED. {summary}".rstrip())
+    lines.append(f"Prior gate {date}: {outcome}. {summary}".rstrip())
     if critique_title:
         lines.append(f"Critique: `{project}/{critique_title}`")
     lines.append("")
+    lines.extend(_gate_round_lines(content, critique_count))
+    lines.extend(_fix_check_pointer_lines(
+        fix_check_field, gated_commit,
+        is_regate=bool(_t2_field_block(content, "prior")), record_exists=fix_check_exists,
+    ))
 
     findings = _critique_findings(str(critique.get("content", ""))) if isinstance(critique, dict) else []
     if findings:
         lines.append("Prior findings (each must be closed EVERYWHERE in the file, not at the quoted line):")
-        lines.extend(f"- {f}" for f in findings[:30])
-        if len(findings) > 30:
-            lines.append(f"- ... and {len(findings) - 30} more in the critique")
+        # Cap on FINDINGS, not lines: a canonical issue is four lines (Issue,
+        # Location, Recommendation, Sites) and a line cap dropped the Sites
+        # lists Layer 0 sweeps (deep critique [24873] S2).
+        shown = 0
+        cut = len(findings)
+        for i, f in enumerate(findings):
+            if not f.startswith("  "):
+                shown += 1
+                if shown > _REGATE_MAX_FINDINGS:
+                    cut = i
+                    break
+        lines.extend(f"- {f}" for f in findings[:cut])
+        hidden = sum(1 for f in findings[cut:] if not f.startswith("  "))
+        if hidden:
+            lines.append(f"- ... and {hidden} more findings in the critique")
     elif fetch_failed:
         lines.append(f"The `critique:` pointer names `{critique_title}` but no such T2 record was found; "
                      "locate the prior critique by hand before Layer 3.")
@@ -1848,24 +1894,237 @@ def _preamble_regate_block(
                     f"Changed since the gated commit `{gated_commit}`: unknown "
                     f"(git diff exited {diff.returncode}: {diff.stderr.strip()[:160]})"
                 )
+                lines.append("")
+                lines.append(
+                    f"Fix check: the gated commit `{gated_commit}` does not resolve, so the "
+                    "diff to verify is unknown. Find the gated tree by hand (the critique "
+                    "names its commit) before Layer 3."
+                )
             else:
                 stat = diff.stdout.strip().splitlines()
                 lines.append(
                     f"Changed since the gated commit `{gated_commit}`: "
                     + (stat[-1].strip() if stat else "no changes to the RDR file")
                 )
+                lines.append("")
+                if stat and status.strip().lower() not in ("", "draft", "open"):
+                    # Post-accept edits (the status flip itself, residual
+                    # dispositions) are not gate fixes (deep critique [24873]).
+                    lines.append(
+                        f"Fix check: not applicable (RDR status is `{status.strip()}`; the "
+                        "fix check gates re-gates of a draft, and this RDR is past the gate)."
+                    )
+                else:
+                    lines.extend(_fix_check_lines(
+                        repo_root=repo_root, t2_key=t2_key, rel=rel,
+                        gated_commit=gated_commit, changed=bool(stat),
+                    ))
         except (OSError, subprocess.SubprocessError) as exc:
             lines.append(f"Changed since the gated commit `{gated_commit}`: (git diff failed: {exc})")
         lines.append("")
 
     lines.extend([
-        "**Layer 0 (survivor sweep, before Layer 3):** for every prior finding, grep the RDR "
-        "for the refuted phrasing AND the corrected one; every occurrence must agree. A "
+        "**Layer 0 (survivor sweep, before Layer 3):** for every prior finding, sweep every "
+        "site in its `Sites:` list; where a finding has none, grep the RDR for the refuted "
+        "phrasing AND the corrected one; every occurrence must agree. A "
         "fact lives in Problem Statement, Research Findings, Technical Design and the "
         "Implementation Plan at once, and the last two are where survivors hide. Brief "
         "the critic to verify each prior finding closed everywhere, then run a full-document "
         "consistency pass; re-read related RDRs only if the Relationship section changed.",
         "",
+    ])
+    return lines
+
+
+#: Prior findings printed in full by the re-gate block before "... and N more".
+_REGATE_MAX_FINDINGS: int = 12
+
+#: Gate rounds that may block on any Critical. From the next round on only
+#: a ship-blocker blocks and everything else is a residual recorded for
+#: accept (nexus-g7zgw.2). Derived from the review-rounds table
+#: (nexus-dv7gw), the one statement of every review bound in this project.
+GATE_MAX_ANY_CRITICAL_ROUNDS: int = blocking_rounds("rdr-gate", "any-critical")
+
+
+def _t2_field_block(content: str, field: str) -> str:
+    """The value of *field* including wrapped continuation lines: everything
+    from ``field:`` up to the next ``word:`` line. ``_preamble_parse_t2_field``
+    reads one line, which truncated a wrapped ``prior:`` chain to its first
+    line and undercounted rounds (deep critique [24873] Critical 1)."""
+    out: list[str] = []
+    active = False
+    for line in content.splitlines():
+        stripped = line.strip()
+        if active and re.match(r"^[A-Za-z_][A-Za-z0-9_]*:", stripped):
+            break
+        if stripped.startswith(f"{field}:"):
+            out.append(stripped.split(":", 1)[1])
+            active = True
+        elif active:
+            out.append(stripped)
+    return " ".join(out).strip()
+
+
+def _gate_round_lines(gate_record: str, critique_count: int = 0) -> list[str]:
+    """The gate round number and its rule.
+
+    Two sources, the larger wins: the number of ``{id}-gate-critique-*``
+    records in T2 (*critique_count*, written by every gate round and never
+    hand-retyped), and the record's ``prior:`` chain plus the record itself.
+    The chain counts every ``[id]`` token whether or not it carries an
+    outcome in parentheses; entries with no outcome word are tallied as
+    unlabelled so the tally always sums. The count never resets for the
+    RDR's life.
+    """
+    prior = _t2_field_block(gate_record, "prior")
+    ids = re.findall(r"\[\d+\]", prior)
+    labelled = re.findall(r"\[\d+\]\s*\(([^)]*)\)", prior)
+    # A partition: an entry naming both words counts once, as BLOCKED.
+    blocked = sum(1 for e in labelled if "BLOCKED" in e.upper())
+    passed = sum(1 for e in labelled if "PASSED" in e.upper() and "BLOCKED" not in e.upper())
+    this_outcome = (_preamble_parse_t2_field(gate_record, "outcome") or "").strip().upper()
+    if this_outcome == "BLOCKED":
+        blocked += 1
+    elif this_outcome == "PASSED":
+        passed += 1
+    n_chain = 1 + len(ids)
+    round_no = _gate_round_number(gate_record, critique_count)
+    n_prior = round_no - 1
+    unlabelled = n_prior - blocked - passed
+    source = "critique records" if critique_count > n_chain else "prior chain"
+    lines = [
+        f"**Gate round {round_no}** (prior rounds: {n_prior} ({blocked} BLOCKED, {passed} PASSED, "
+        f"{unlabelled} unlabelled; from the {source}); the count never resets for this RDR)."
+    ]
+    hand_typed = (_preamble_parse_t2_field(gate_record, "round") or "").strip()
+    if hand_typed.isdigit() and int(hand_typed) != n_prior:
+        lines.append(
+            f"The record's hand-typed `round: {hand_typed}` disagrees with the derived count "
+            f"({n_prior} rounds so far); the derived count is the one that applies. Drop the "
+            "field or write the derived value."
+        )
+    if round_no > GATE_MAX_ANY_CRITICAL_ROUNDS:
+        lines.append(
+            f"From round {GATE_MAX_ANY_CRITICAL_ROUNDS + 1} only a ship-blocker blocks "
+            "(`ship_blockers > 0` in the critic's Verdict; a Verdict with no `ship_blockers` "
+            "line reads as `ship_blockers = critical_count`, never zero); every other Critical "
+            "and Significant is a residual: record it in the gate record's `residuals:` lines "
+            "and in Revision History, and disposition it at accept."
+        )
+    else:
+        lines.append(
+            f"Rounds 1 to {GATE_MAX_ANY_CRITICAL_ROUNDS} block on any Critical "
+            "(`critical_count > 0`); Significants never block."
+        )
+    lines.append("")
+    return lines
+
+
+def _fix_check_pointer_lines(
+    fix_check_field: str, gated_commit: str, *, is_regate: bool, record_exists: bool | None,
+) -> list[str]:
+    """Flag a gate record whose ``fix_check:`` is missing on a re-gate, names
+    a sha other than its ``commit:``, or points at a T2 record that does not
+    exist. Critique [24865] Critical 1 found the sha invariant prose-only and
+    already violated live; deep critique [24873] Critical 3 found that
+    omitting the field entirely was indistinguishable from a clean check.
+    The field may carry the pointer form ``<project>/<id>-fix-check-<sha>
+    (note)`` or the literal ``none (no change since <sha>)``.
+    *record_exists* is None when the field named no sha."""
+    if not fix_check_field:
+        if is_regate:
+            return [
+                "**Fix check missing:** this gate record has a `prior:` chain, so it is a "
+                "re-gate, and it carries no `fix_check:` field. Every re-gated record names "
+                "either `{id}-fix-check-<sha>` (sha equal to `commit:`) or `none (no change "
+                "since <sha>)`; a skipped fix check is not a clean one. Run the fix check on the "
+                "current diff before Layer 3, and accept refuses this record until it is named.",
+                "",
+            ]
+        return []
+    if fix_check_field.lower().startswith("none"):
+        return []
+    if not gated_commit:
+        return []
+    m = re.search(r"fix-check-([0-9a-f]{6,40})", fix_check_field)
+    sha = m.group(1) if m else fix_check_field.split()[0]
+    shorter = min(len(sha), len(gated_commit))
+    if not (shorter >= 7 and sha[:shorter] == gated_commit[:shorter]):
+        return [
+            f"**Fix check pointer mismatch:** the gate record's `fix_check:` names `{sha}` but "
+            f"its `commit:` is `{gated_commit}`. The prior gate cited a fix check of an older "
+            "tree; run the fix check on the current diff before Layer 3, and accept refuses "
+            "this record until the two agree.",
+            "",
+        ]
+    if record_exists is False:
+        return [
+            f"**Fix check record missing:** `fix_check:` names `{sha}` but no T2 record "
+            f"`*-fix-check-{sha}` exists. The pointer is not evidence; the verdict is. Run "
+            "the fix check and store its verdict before Layer 3.",
+            "",
+        ]
+    return []
+
+
+def _fix_check_lines(
+    *, repo_root: str, t2_key: str, rel: str, gated_commit: str, changed: bool,
+) -> list[str]:
+    """The Fix check section (nexus-g7zgw.1): the exact diff range, the fix
+    commits, the T2 title the verdict goes under, and the obligation.
+
+    The T2 title carries the RDR file's tip sha, which is the sha the next
+    gate record's ``commit:`` field will name, so a gate can never cite a
+    fix check of an older tree.
+    """
+    if not changed:
+        return [
+            f"Fix check: not required (no change to the RDR file since `{gated_commit}`).",
+        ]
+    try:
+        log = subprocess.run(
+            ["git", "-C", repo_root, "log", "--format=%h %s", f"{gated_commit}..HEAD", "--", rel],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        tip = subprocess.run(
+            ["git", "-C", repo_root, "log", "-1", "--format=%h", "--", rel],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return [f"Fix check: git log failed ({exc}); list the fix commits by hand."]
+    if log.returncode != 0 or tip.returncode != 0 or not tip.stdout.strip():
+        err = (log.stderr or tip.stderr).strip()[:160]
+        return [
+            "### Fix check (required before Layer 1)",
+            "",
+            f"Range: `git diff {gated_commit}..HEAD -- {rel}`",
+            f"The fix commits and the RDR file's tip sha could not be read (git log failed: {err}); "
+            "read them by hand with `git log --format=%h %s` on that range before dispatching the "
+            "fix check, and name the tip sha in the T2 title `{id}-fix-check-<sha>` yourself.",
+        ]
+    commits = [ln for ln in log.stdout.strip().splitlines() if ln.strip()]
+    tip_sha = tip.stdout.strip()
+    lines = [
+        "### Fix check (required before Layer 1)",
+        "",
+        f"Range: `git diff {gated_commit}..HEAD -- {rel}`",
+        "Fix commits:",
+    ]
+    lines.extend(f"- {c}" for c in commits)
+    lines.extend([
+        "",
+        "Dispatch substantive-critic with ONLY that diff and the RDR file. For every ADDED "
+        "or CHANGED clause (a parenthetical or a trailing 'and X' is its own item):",
+        "1. Is it contradicted by any other line in this file? Cite both lines.",
+        "2. Is it an attribution (X created / set / owns / defines Y), a count, or a universal "
+        "(never / always / only / nothing / every / the one / all)? Then it needs an "
+        "enumeration or the artifact's own text, quoted; two sites that agree are not a "
+        "source. The same enumeration requirement applies to the research entry the fix cites.",
+        "3. Does its cited source (changeset, file:line, RDR, T2 entry) contain the claim as stated?",
+        "",
+        f"Verdict goes to T2 `{t2_key}-fix-check-{tip_sha}` (project `<repo>_rdr`); the gate "
+        f"record's `fix_check:` must name `{tip_sha}`, equal to its `commit:`. Any FAIL: fix, "
+        "re-run the fix check on the new diff. Do not enter Layer 1 or Layer 3 with a FAIL open.",
     ])
     return lines
 
@@ -1964,6 +2223,11 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
     )
     print(
         f"   If no gate record exists, run `nx rdr preamble rdr-gate -- {t2_key}` first."
+    )
+    print(
+        "   Every `residuals:` line in that record needs a disposition (the commit sha "
+        "that fixed it, or the bead id that carries it) recorded in Revision History "
+        "before the T2 write; a residual with no disposition blocks accept (nexus-g7zgw.2)."
     )
     print()
     print(f"**RDR file path:** `{rdr_file}`")
@@ -2311,7 +2575,10 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
 # ---------------------------------------------------------------------------
 
 #: Matches a T2 research-finding title, e.g. "201-research-3".
-_RDR_RESEARCH_TITLE_RE = re.compile(r"^(\d+)-research-(\d+)$")
+# A title may carry a ": <summary>" suffix ("204-research-16: the Key
+# Discoveries bullet"); the seq scan must see it, or the next add lands on
+# seq 1 over sixteen existing entries (measured live, nexus-zbdm0).
+_RDR_RESEARCH_TITLE_RE = re.compile(r"^(\d+)-research-(\d+)(?::.*)?$")
 
 #: Bound on the "advance past a collision" retry loop in
 #: :func:`_rdr_research_add` — a defensive ceiling against looping forever
@@ -2488,6 +2755,547 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
             "> **Usage**: `nx rdr preamble rdr-research -- <id>` or "
             "`nx rdr preamble rdr-research -- add <id>`"
         )
+
+
+# ---------------------------------------------------------------------------
+# preamble rdr-fix — the fix step's own surface (nexus-zbdm0)
+# ---------------------------------------------------------------------------
+
+_FIX_RULES: tuple[str, ...] = (
+    "A fix changes the fact the critic named and nothing else; a gloss, rationale, "
+    "parenthetical or count is a separate commit with its own fix check.",
+    "Every clause the fix adds carries a tool-produced quote from its source, or the "
+    "marker \"inferred, not read\".",
+    "A count or a universal (never / always / only / nothing / every / the one / all) "
+    "needs a census of the whole surface, captured in the research entry as an enumeration.",
+    "Sweep every site in the finding's Sites: list; a fact lives in Problem Statement, "
+    "Research Findings, Technical Design and the Implementation Plan at once.",
+    "A Criterion 6 readability WARN is never closed inside a fix commit.",
+)
+
+
+def _git_out(repo_root: str, *args: str) -> str | None:
+    """stdout of a git command, or None when it fails."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", repo_root, *args], capture_output=True, text=True, timeout=20, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+@preamble.command("rdr-fix")
+@click.argument("args", nargs=-1)
+def preamble_rdr_fix(args: tuple[str, ...]) -> None:
+    """Print the fix-step context for an RDR: the latest gate's findings with
+    their Sites, the diff and fix commits since the gated commit, the
+    pre-edit research title, and the fix rules."""
+    repo_root, repo_name = _preamble_resolve_repo()
+    rdr_dir = _preamble_rdr_dir(repo_root)
+    rdr_path = Path(repo_root) / rdr_dir
+    args_str = " ".join(args).strip()
+    id_match = re.search(r"\d+", args_str)
+    if not id_match:
+        print("> **Usage**: `nx rdr preamble rdr-fix <id>`")
+        return
+    rdr_file = _preamble_find_rdr_file(rdr_path, id_match.group(0))
+    if not rdr_file:
+        print(f"> RDR not found for ID: `{id_match.group(0)}`")
+        return
+    fm, _text = _preamble_parse_frontmatter(rdr_file)
+    rdr_num = re.search(r"\d+", rdr_file.stem)
+    t2_key = rdr_num.group(0) if rdr_num else rdr_file.stem
+    status = str(fm.get("status", "")).strip()
+    rel = os.path.relpath(str(rdr_file), repo_root)
+    project = f"{repo_name}_rdr"
+
+    print(f"### Fix RDR-{t2_key} ({rdr_file.name}, status `{status or '?'}`)")
+    print()
+    if status.lower() not in ("", "draft", "open"):
+        print(
+            f"> RDR-{t2_key} is past the gate (status `{status}`). Post-accept edits are "
+            "not gate fixes; residual dispositions go through rdr-accept, and a design "
+            "change reopens the RDR. Nothing to fix here."
+        )
+        return
+
+    try:
+        with _t2_client_factory() as client:
+            latest = client.get(project=project, title=f"{t2_key}-gate-latest")
+            if not latest:
+                print(
+                    f"> No gate record for RDR-{t2_key}; there is nothing to fix. A finding "
+                    f"from a review goes through `nx rdr preamble rdr-research -- add {t2_key} ...`."
+                )
+                return
+            content = latest.get("content", "") if isinstance(latest, dict) else ""
+            outcome = (_preamble_parse_t2_field(content, "outcome") or "?").strip().upper()
+            date = _preamble_parse_t2_field(content, "date") or "?"
+            gated_commit = (_preamble_parse_t2_field(content, "commit") or "").strip()
+            critique_title = (_preamble_parse_t2_field(content, "critique") or "").strip()
+            critique_title = re.sub(r"\s*\[\d+\]\s*$", "", critique_title).rsplit("/", 1)[-1]
+            rows = client.get_all(project=project) or [] if callable(getattr(client, "get_all", None)) else []
+            prefix = f"{t2_key}-gate-critique-"
+            critique_count = sum(
+                1 for r in rows if isinstance(r, dict) and str(r.get("title", "")).startswith(prefix)
+            )
+            next_seq = _rdr_research_next_seq(rows, t2_key)
+            critique = client.get(project=project, title=critique_title) if critique_title else None
+            tip = (_git_out(repo_root, "log", "-1", "--format=%h", "--", rel) or "").strip()
+            fix_check_exists = (
+                client.get(project=project, title=f"{t2_key}-fix-check-{tip}") is not None if tip else False
+            )
+    except Exception as exc:  # noqa: BLE001 — T2 unreachable must be a visible note, never silence
+        print(f"> T2 unreachable ({type(exc).__name__}: {exc}); load `{project}/{t2_key}-gate-latest` by hand.")
+        return
+
+    print(f"Latest gate {date}: {outcome}." + (f" Critique: `{project}/{critique_title}`" if critique_title else ""))
+    print()
+    for line in _gate_round_lines(content, critique_count):
+        print(line)
+
+    findings = _critique_findings(str(critique.get("content", ""))) if isinstance(critique, dict) else []
+    print("#### Findings to fix (each at every site named)")
+    print()
+    if findings:
+        for f in findings:
+            print(f"- {f}")
+    elif critique_title:
+        print(f"The critique `{critique_title}` could not be loaded or holds no Critical/Significant findings; read it in full.")
+    else:
+        print("The gate record carries no `critique:` pointer; find the prior critique by hand.")
+    print()
+
+    print("#### Tree state")
+    print()
+    if gated_commit:
+        stat = (_git_out(repo_root, "diff", "--stat", f"{gated_commit}..HEAD", "--", rel) or "").strip().splitlines()
+        log = (_git_out(repo_root, "log", "--format=%h %s", f"{gated_commit}..HEAD", "--", rel) or "").strip().splitlines()
+        print(f"Gated commit `{gated_commit}`; RDR file tip `{tip or '?'}`.")
+        print(f"Range the fix check will read: `git diff {gated_commit}..HEAD -- {rel}`")
+        print("Changed since the gated commit: " + (stat[-1].strip() if stat else "no changes to the RDR file"))
+        if log:
+            print("Fix commits so far:")
+            for ln in log:
+                print(f"- {ln}")
+        if tip:
+            if fix_check_exists:
+                print(f"Fix-check record `{t2_key}-fix-check-{tip}` exists for the current tip.")
+            else:
+                print(f"No fix-check record yet for the current tip (`{t2_key}-fix-check-{tip}`).")
+    else:
+        print("The gate record carries no `commit:`; the fix check has no range. Name the gated tree by hand.")
+    print()
+
+    print("#### Before the edit")
+    print()
+    print(
+        f"1. Record the research entry first: `nx rdr preamble rdr-research -- add {t2_key} "
+        f"<finding tokens>` (it becomes `{project}/{t2_key}-research-{next_seq}`); the quote or "
+        "enumeration for every clause the fix will add lives there."
+    )
+    print("2. Edit the RDR at every site the finding names.")
+    print(
+        f"3. Commit, then `nx rdr preamble rdr-gate -- {t2_key}` prints the Fix check section; "
+        "dispatch it and store the verdict under the title it names before any re-gate."
+    )
+    print()
+    print("#### Rules")
+    print()
+    for rule in _FIX_RULES:
+        print(f"- {rule}")
+    print()
+
+
+def _residual_count(content: str) -> int:
+    """Residuals in a gate record: bullets under ``residuals:`` (the live
+    shape), or one per ``residuals:`` key line carrying inline text. Never a
+    split on punctuation inside a residual's own prose (code review [24883]
+    finding 1)."""
+    count = 0
+    active = False
+    inline = 0
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("residuals:"):
+            active = True
+            if stripped.split(":", 1)[1].strip():
+                inline += 1
+            continue
+        if active and re.match(r"^[A-Za-z_][A-Za-z0-9_]*:", stripped):
+            active = False
+            continue
+        if active and stripped.startswith("-"):
+            count += 1
+    return count + inline
+
+
+#: The day the round cap shipped (nexus-g7zgw.2). Gate records dated before
+#: it are the uncapped baseline the doctrine's rise/fall test compares against.
+GATE_CAP_SHIPPED: str = "2026-09-07"
+
+
+def _gate_loop_health_lines(rows: list[dict]) -> list[str]:
+    """Per gated RDR: rounds, the Criticals-per-round series read from the
+    prior chain plus the record itself, the residual count, and a flag when
+    the loop ran past the round cap. Then the doctrine's own test
+    (conexus/skills/orchestration/SKILL.md § bounds): across RDRs gated
+    before and since :data:`GATE_CAP_SHIPPED`, findings per round must rise
+    while rounds per RDR fall; when both fall the bound is suppressing recall
+    (nexus-zbdm0; critique [24884] Critical 1)."""
+    out: list[str] = []
+    before: list[tuple[int, float]] = []
+    since: list[tuple[int, float]] = []
+    for row in sorted(rows, key=lambda r: str(r.get("title", ""))):
+        title = str(row.get("title", ""))
+        m = re.match(r"^(\d+)-gate-latest$", title)
+        if not m:
+            continue
+        rdr_id = m.group(1)
+        content = str(row.get("content", ""))
+        prior = _t2_field_block(content, "prior")
+        entries = re.findall(r"\[\d+\]\s*(?:\(([^)]*)\))?", prior)
+        series: list[str] = []
+        for e in reversed(entries):
+            c = re.search(r"(\d+)C\b", e or "")
+            series.append(c.group(1) if c else "?")
+        latest_c = (_preamble_parse_t2_field(content, "critical_count") or "").strip()
+        series.append(latest_c if latest_c.isdigit() else "?")
+        # The critique records are the count nobody retypes; the chain can
+        # undercount (deep critique [24873]), so the larger wins, exactly as
+        # in _gate_round_lines.
+        prefix = f"{rdr_id}-gate-critique-"
+        critique_count = sum(
+            1 for r in rows if isinstance(r, dict) and str(r.get("title", "")).startswith(prefix)
+        )
+        rounds = max(len(entries) + 1, critique_count)
+        n_res = _residual_count(content)
+        line = (
+            f"- RDR-{rdr_id}: {rounds} round{'s' if rounds != 1 else ''}; "
+            f"Criticals per round: {', '.join(series)}; residuals: {n_res}"
+        )
+        if rounds > GATE_MAX_ANY_CRITICAL_ROUNDS + 1:
+            line += (
+                f"; the cap did not end the loop (more than {GATE_MAX_ANY_CRITICAL_ROUNDS + 1} rounds): "
+                "check whether findings per round fell while rounds kept coming"
+            )
+        out.append(line)
+        known = [int(x) for x in series if x.isdigit()]
+        if known:
+            date = (_preamble_parse_t2_field(content, "date") or "").strip()
+            bucket = since if date >= GATE_CAP_SHIPPED else before
+            bucket.append((rounds, sum(known) / len(known)))
+    if not out:
+        return out
+    out.append("")
+
+    def _mean(pairs: list[tuple[int, float]], i: int) -> float:
+        return sum(p[i] for p in pairs) / len(pairs)
+
+    if before and since:
+        r_b, r_s = _mean(before, 0), _mean(since, 0)
+        f_b, f_s = _mean(before, 1), _mean(since, 1)
+        out.append(
+            f"Bound test (RDRs gated before {GATE_CAP_SHIPPED}: {len(before)}; since: {len(since)}): "
+            f"rounds per RDR {r_b:.1f} -> {r_s:.1f}; Criticals per round {f_b:.2f} -> {f_s:.2f}."
+        )
+        if r_s < r_b and f_s < f_b:
+            out.append(
+                "BOTH FELL: the round cap may be suppressing recall. Revert to full-review "
+                "rounds for the next gate and surface it (orchestration doctrine)."
+            )
+        elif r_s <= r_b and f_s >= f_b:
+            out.append("Rounds fell and findings per round did not: the bound is doing its job.")
+        else:
+            out.append("Mixed: rounds did not fall; the cap is not the limiting factor yet.")
+    else:
+        out.append(
+            f"Bound test: not yet measurable ({len(before)} RDRs gated before {GATE_CAP_SHIPPED}, "
+            f"{len(since)} since); it needs both sides."
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# preamble rdr-verdict — the gate outcome computed from the critique (nexus-yxo2l)
+# ---------------------------------------------------------------------------
+
+_VERDICT_FIELD_RE = re.compile(r"^\s*-\s*\*\*(outcome|critical_count|significant_count|ship_blockers)\*\*\s*:\s*(\S+)", re.IGNORECASE | re.MULTILINE)
+_VERDICT_INLINE_RE = re.compile(r"\b(critical_count|significant_count|ship_blockers)\s*=\s*(\d+)", re.IGNORECASE)
+_SHIP_BLOCKER_RE = re.compile(r"^\s*(?:-\s*)?\*{0,2}Ship-blocker\*{0,2}\s*:\s*\*{0,2}(yes|no)\b", re.IGNORECASE | re.MULTILINE)
+
+
+@dataclass(frozen=True)
+class CritiqueTally:
+    """What a critique says and what it contains, side by side."""
+
+    criticals: list[str]
+    significants: list[str]
+    ship_blocker_titles: list[str]
+    reported_critical: int | None
+    reported_significant: int | None
+    reported_ship_blockers: int | None
+
+
+def _critique_tally(text: str) -> CritiqueTally:
+    """Count the issues in a critique and read its Verdict.
+
+    Canonical shape: ``## Critical Issues`` / ``## Significant Issues``
+    sections holding ``### Issue: <title>`` blocks, each with a
+    ``- **Ship-blocker**: yes|no`` line. Free-form shape (the RDR-204
+    seventh gate): paragraphs opening ``CRITICAL — <title>`` /
+    ``SIGNIFICANT — <title>`` with a bare ``Ship-blocker: yes`` line, and
+    a ``VERDICT: ... critical_count=N ... ship_blockers=N`` line.
+    """
+    criticals: list[str] = []
+    significants: list[str] = []
+    blockers: list[str] = []
+    section: str | None = None
+    current: str | None = None
+    current_kind: str | None = None
+
+    def _mark(kind: str | None, title: str | None, yes: bool) -> None:
+        # One mark per issue: a second Ship-blocker line under the same
+        # block must not count twice (code review [24900] finding 2).
+        if yes and title is not None and kind in ("critical", "significant") and title not in blockers:
+            blockers.append(title)
+
+    # Canonical critiques carry section headings; free-form ones do not.
+    # A ``CRITICAL —`` paragraph counts only in a free-form critique and
+    # never inside its OBSERVATIONS block (code review [24900] finding 3).
+    canonical = bool(re.search(r"^\s*#{1,3}\s*(critical|significant)", text, re.IGNORECASE | re.MULTILINE))
+    freeform_off = False
+
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            continue
+        sec = re.match(r"^\s*#{1,3}\s*(critical|significant|observation|verification|verdict)", line, re.IGNORECASE)
+        if sec and not _CRITIQUE_ISSUE_RE.match(line):
+            word = sec.group(1).lower()
+            section = word if word in ("critical", "significant") else None
+            current = None
+            continue
+        issue = _CRITIQUE_ISSUE_RE.match(line)
+        if issue and section:
+            current = issue.group(1).strip()
+            current_kind = section
+            (criticals if section == "critical" else significants).append(current)
+            continue
+        if not canonical and re.match(r"^[A-Z][A-Z0-9 ,()'/-]+$", stripped):
+            # An all-caps free-form heading: OBSERVATIONS (and anything after
+            # it until the next heading) is not a findings block.
+            freeform_off = stripped.startswith("OBSERVATION") or stripped.startswith("VERIFICATION")
+            current = None
+            continue
+        free = re.match(r"^\s*(CRITICAL|SIGNIFICANT)\s*[—-]+\s*(.+)$", stripped)
+        if free and not canonical and not freeform_off:
+            current = free.group(2).strip()
+            current_kind = free.group(1).lower()
+            (criticals if current_kind == "critical" else significants).append(current)
+            continue
+        sb = _SHIP_BLOCKER_RE.match(line)
+        if sb:
+            _mark(current_kind, current, sb.group(1).lower() == "yes")
+    # The Verdict is read from the LAST ``## Verdict`` section (or the last
+    # ``VERDICT:`` line), with fenced code stripped first, so a quoted or
+    # example verdict earlier in the text cannot poison the counts (code
+    # review [24900] finding 1).
+    unfenced = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+    verdict_slice = ""
+    heads = list(re.finditer(r"^\s*#{1,3}\s*Verdict\b.*$", unfenced, re.IGNORECASE | re.MULTILINE))
+    if heads:
+        verdict_slice = unfenced[heads[-1].end():]
+    else:
+        inline = list(re.finditer(r"^\s*VERDICT\s*:.*$", unfenced, re.IGNORECASE | re.MULTILINE))
+        if inline:
+            verdict_slice = inline[-1].group(0)
+    reported: dict[str, str] = {k.lower(): v for k, v in _VERDICT_FIELD_RE.findall(verdict_slice)}
+    for k, v in _VERDICT_INLINE_RE.findall(verdict_slice):
+        reported.setdefault(k.lower(), v)
+
+    def _int(key: str) -> int | None:
+        v = reported.get(key, "").strip().rstrip(".,")
+        return int(v) if v.isdigit() else None
+
+    return CritiqueTally(
+        criticals=criticals,
+        significants=significants,
+        ship_blocker_titles=blockers,
+        reported_critical=_int("critical_count"),
+        reported_significant=_int("significant_count"),
+        reported_ship_blockers=_int("ship_blockers"),
+    )
+
+
+def _gate_round_number(gate_record: str, critique_count: int) -> int:
+    """The round the NEXT gate is: gate records so far plus one."""
+    if not gate_record:
+        return max(1, critique_count + 1) if critique_count else 1
+    prior = _t2_field_block(gate_record, "prior")
+    n_prior = max(1 + len(re.findall(r"\[\d+\]", prior)), critique_count)
+    return n_prior + 1
+
+
+@preamble.command("rdr-verdict")
+@click.argument("args", nargs=-1)
+def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
+    """Compute a gate's outcome from its critique and its round, and print
+    the gate record to write. The critic reports; this decides."""
+    repo_root, repo_name = _preamble_resolve_repo()
+    rdr_dir = _preamble_rdr_dir(repo_root)
+    rdr_path = Path(repo_root) / rdr_dir
+    tokens = [a for a in args if a.strip()]
+    if len(tokens) < 2 or not re.search(r"\d+", tokens[0]):
+        print("> **Usage**: `nx rdr preamble rdr-verdict <id> <critique-title>`")
+        return
+    id_match = re.search(r"\d+", tokens[0])
+    critique_title = tokens[1].strip()
+    critique_title = re.sub(r"\s*\[\d+\]\s*$", "", critique_title).rsplit("/", 1)[-1]
+    rdr_file = _preamble_find_rdr_file(rdr_path, id_match.group(0))
+    if not rdr_file:
+        print(f"> RDR not found for ID: `{id_match.group(0)}`")
+        return
+    rdr_num = re.search(r"\d+", rdr_file.stem)
+    t2_key = rdr_num.group(0) if rdr_num else rdr_file.stem
+    rel = os.path.relpath(str(rdr_file), repo_root)
+    project = f"{repo_name}_rdr"
+
+    try:
+        with _t2_client_factory() as client:
+            critique = client.get(project=project, title=critique_title)
+            if not critique:
+                print(f"> The critique `{project}/{critique_title}` names no such T2 record; store the critique first.")
+                return
+            latest = client.get(project=project, title=f"{t2_key}-gate-latest")
+            latest_content = latest.get("content", "") if isinstance(latest, dict) else ""
+            latest_id = latest.get("id") if isinstance(latest, dict) else None
+            rows = client.get_all(project=project) or [] if callable(getattr(client, "get_all", None)) else []
+            prefix = f"{t2_key}-gate-critique-"
+            critique_count = sum(
+                1 for r in rows if isinstance(r, dict) and str(r.get("title", "")).startswith(prefix)
+                and str(r.get("title", "")) != critique_title
+            )
+    except Exception as exc:  # noqa: BLE001 — T2 unreachable must be a visible note, never silence
+        print(f"> T2 unreachable ({type(exc).__name__}: {exc}); the verdict cannot be computed.")
+        return
+
+    critique_text = str(critique.get("content", ""))
+    tally = _critique_tally(critique_text)
+    recognised = bool(
+        re.search(r"^\s*#{1,3}\s*(critical|significant)", critique_text, re.IGNORECASE | re.MULTILINE)
+        or re.search(r"^\s*(CRITICAL|SIGNIFICANT)\s*[—-]", critique_text, re.MULTILINE)
+        or tally.reported_critical is not None
+    )
+    if not recognised:
+        print(
+            f"> The critique `{critique_title}` is in neither recognised shape (no `## Critical Issues` / "
+            "`## Significant Issues` sections, no `CRITICAL —` paragraphs, no Verdict counts), so its "
+            "findings cannot be counted. No outcome is computed. Re-store it in the canonical format "
+            "(conexus/agents/substantive-critic.md § Output Format) and run this again."
+        )
+        return
+    round_no = _gate_round_number(latest_content, critique_count)
+    rule = rule_for("rdr-gate", round_no)
+    already_gated = (
+        critique_title in (_preamble_parse_t2_field(latest_content, "critique") or "")
+    )
+
+    notes: list[str] = []
+    critical_count = len(tally.criticals)
+    if tally.reported_critical is not None and tally.reported_critical != critical_count:
+        notes.append(
+            f"critical_count: self-reported {tally.reported_critical}, counted {critical_count} "
+            f"Critical issue block(s); the larger is used."
+        )
+        critical_count = max(critical_count, tally.reported_critical)
+    significant_count = len(tally.significants)
+    if tally.reported_significant is not None and tally.reported_significant != significant_count:
+        notes.append(
+            f"significant_count: self-reported {tally.reported_significant}, counted {significant_count}; the larger is used."
+        )
+        significant_count = max(significant_count, tally.reported_significant)
+    counted_sb = len(tally.ship_blocker_titles)
+    if tally.reported_ship_blockers is None:
+        ship_blockers = max(counted_sb, critical_count)
+        notes.append(
+            f"ship_blockers: the Verdict has no ship_blockers line; read as critical_count ({critical_count}), never zero."
+        )
+    else:
+        ship_blockers = max(counted_sb, tally.reported_ship_blockers)
+        if tally.reported_ship_blockers != counted_sb:
+            notes.append(
+                f"ship_blockers: self-reported {tally.reported_ship_blockers}, counted {counted_sb} "
+                f"issue(s) marked Ship-blocker: yes; the larger is used."
+            )
+
+    if rule.blocks_on == "any-critical":
+        blocked = critical_count > 0
+    elif rule.blocks_on == "ship-blocker":
+        blocked = ship_blockers > 0
+    else:
+        blocked = False
+    outcome = "BLOCKED" if blocked else "PASSED"
+    residuals: list[str] = []
+    if rule.blocks_on == "ship-blocker":
+        residuals = [t for t in tally.criticals + tally.significants if t not in tally.ship_blocker_titles]
+
+    commit = (_git_out(repo_root, "log", "-1", "--format=%h", "--", rel) or "").strip()
+    prev_outcome = (_preamble_parse_t2_field(latest_content, "outcome") or "").strip().upper()
+    prev_c = (_preamble_parse_t2_field(latest_content, "critical_count") or "?").strip()
+    prev_s = (_preamble_parse_t2_field(latest_content, "significant_count") or "?").strip()
+    prev_chain = _t2_field_block(latest_content, "prior")
+    prior_parts: list[str] = []
+    if latest_content:
+        prior_parts.append(f"[{latest_id if latest_id is not None else '?'}] ({prev_outcome or '?'} {prev_c}C {prev_s}S)")
+    if prev_chain:
+        prior_parts.append(prev_chain)
+
+    print(f"### Gate verdict for RDR-{t2_key} from `{project}/{critique_title}`")
+    print()
+    print(f"**Gate round {round_no}**; rule: {rule.blocks_on} (review-rounds.toml, rdr-gate); next round by: {rule.next_round_by}.")
+    if already_gated:
+        print(
+            f"This critique is already the one `{t2_key}-gate-latest` records, so the round above is the "
+            "NEXT gate's, not this critique's historical round; the outcome below is a recomputation, "
+            "not a new gate."
+        )
+    else:
+        print("The round assumes this critique is the new, not yet recorded, gate.")
+    print(f"Counted: {len(tally.criticals)} Critical, {len(tally.significants)} Significant, {counted_sb} marked Ship-blocker: yes.")
+    for n in notes:
+        print(f"- {n}")
+    print()
+    print(f"**Outcome: {outcome}**")
+    if residuals:
+        print(f"Residuals ({len(residuals)}), recorded for accept to disposition:")
+        for r in residuals:
+            print(f"- {r}")
+    print()
+    print("Gate record to write (memory_put project=\"" + project + f"\", title=\"{t2_key}-gate-latest\", ttl=\"permanent\", tags=\"rdr,gate\"):")
+    print()
+    print("```")
+    print(f'outcome: "{outcome}"')
+    print(f'date: "{datetime.now(timezone.utc).date().isoformat()}"')
+    print(f"critical_count: {critical_count}")
+    print(f"significant_count: {significant_count}")
+    print(f"ship_blockers: {ship_blockers}")
+    print(f"round: {round_no}")
+    print("summary: <one sentence>")
+    print(f"critique: {project}/{critique_title}")
+    print(f"commit: {commit or '<git log -1 --format=%h -- ' + rel + '>'}")
+    print(f"fix_check: {'<' + project + '/' + t2_key + '-fix-check-' + (commit or '<sha>') + ', or none (no change since <sha>)>' if latest_content else 'none (first gate)'}")
+    if residuals:
+        print("residuals:")
+        for r in residuals:
+            print(f"  - {r}")
+    if prior_parts:
+        print("prior: " + ", ".join(prior_parts))
+    print("```")
+    print()
+    print("Write these fields as printed; the outcome is not recomputed by hand.")
 
 
 # ---------------------------------------------------------------------------
@@ -2757,6 +3565,20 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
             f"**Target project:** `{target}`"
             + (" (derived from current repo)" if not first_token else "")
         )
+        print()
+        print("### Gate loop health")
+        print()
+        try:
+            with _t2_client_factory() as client:
+                rows = client.get_all(project=f"{target}_rdr") or []
+            health = _gate_loop_health_lines([r for r in rows if isinstance(r, dict)])
+            if health:
+                for line in health:
+                    print(line)
+            else:
+                print(f"No gate records in `{target}_rdr`.")
+        except Exception as exc:  # noqa: BLE001 — an unreachable T2 is a named note, never a silent skip
+            print(f"Gate loop health: T2 unreachable ({type(exc).__name__}: {exc}).")
         print()
 
         home = Path.home()

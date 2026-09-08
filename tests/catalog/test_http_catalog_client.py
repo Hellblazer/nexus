@@ -196,6 +196,8 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
     last_owner_reactivate_body: dict[str, Any] = {}
     #: nexus-cw262 round-3 critique: last body POSTed to /owners/by_type.
     last_owners_by_type_body: dict[str, Any] = {}
+    #: nexus-dkymw: last body POSTed to /restore.
+    last_restore_body: dict[str, Any] = {}
 
     @classmethod
     def reset_log(cls) -> None:
@@ -214,6 +216,7 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         cls.last_owner_deactivate_body = {}
         cls.last_owner_reactivate_body = {}
         cls.last_owners_by_type_body = {}
+        cls.last_restore_body = {}
 
     def log_message(self, *args: Any) -> None:
         pass  # suppress test noise
@@ -297,6 +300,20 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                     ],
                     "count": 2,
                 })
+        elif op == "/trash":
+            # nexus-dkymw: mirrors CatalogHandler.handleTrash — same envelope
+            # shape as /list ({"documents": [...], "count": N}), each entry
+            # carrying tumbler/title/physical_collection/corpus/content_type/
+            # deleted_at (CatalogRepository.listTrash's field set).
+            self._send_json({
+                "documents": [{
+                    "tumbler": "1.1.9", "title": "Trashed Doc",
+                    "physical_collection": "code__test__voyage-code-3__v1",
+                    "corpus": "code", "content_type": "code",
+                    "deleted_at": "2026-09-01T00:00:00+00:00",
+                }],
+                "count": 1,
+            })
         elif op == "/descendants":
             # T2 nexus/chroma-residue-plan-2026-08-10 §C1: the dedicated
             # descendants route. Mirrors CatalogHandler.handleDescendants —
@@ -751,6 +768,11 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                 if body.get("include_deactivated"):
                     owner_row["deactivated_at"] = "2026-08-05T00:00:00Z"
                 self._send_json({"owners": [owner_row]})
+        elif op == "/restore":
+            # nexus-dkymw: mirrors CatalogHandler.handleRestore —
+            # {"tumbler": str} in; {"restored": 0|1} out.
+            FakeCatalogHandler.last_restore_body = body
+            self._send_json({"restored": 1})
         elif op == "/purge-trash":
             # nexus-3ck2g E3: mirrors CatalogHandler.handlePurgeTrash —
             # {older_than_days: int >= 1 (default 30), dry_run: bool

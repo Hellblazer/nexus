@@ -65,7 +65,7 @@ Two return shapes (RDR-200, landing with the Phase 1 go-live; headless is the on
 - 3+ validated findings to keep → `/conexus:knowledge-tidy`
 - PDF to index → `/conexus:pdf-process`
 
-RDR lifecycle: `/conexus:rdr-create` → `/conexus:rdr-research` → `/conexus:rdr-gate` → `/conexus:rdr-accept` → (implementation phases) → `/conexus:rdr-close`. List and show: `/conexus:rdr-list`, `/conexus:rdr-show NNN`. Audit: `/conexus:rdr-audit`.
+RDR lifecycle: `/conexus:rdr-create` → `/conexus:rdr-research` → `/conexus:rdr-gate` → (`/conexus:rdr-fix` per finding, then re-gate) → `/conexus:rdr-accept` → (implementation phases) → `/conexus:rdr-close`. List and show: `/conexus:rdr-list`, `/conexus:rdr-show NNN`. Audit: `/conexus:rdr-audit`.
 
 Phase boundary inside an implementation arc: every phase-review bead, before close, runs `/conexus:phase-review-gate <rdr-id> --phase N`. Pass 1 enumerates the RDR's numbered §Approach items; Pass 2 validates that each has a closing-bead pointer (`ItemN=nexus-xxxx`) or an explicit `none` deferral. BLOCKED on any unaccounted item. Not optional. It prevents the silent scope reduction class (RDR-112 Phase 1 / nexus-52lb, 2026-05-15: the T3 daemon was silently dropped from a 6-bead close, found three phases later, at a cost of 2 to 3 days of replanning).
 
@@ -113,3 +113,5 @@ Thoughts that mean STOP, because you are rationalizing past a tier check:
 | "I'll just answer this quickly" | Fine when the answer is local and you can point at it. If it has to be reduced from many documents, that is `nx_answer`, and it costs minutes. |
 | "I know what that means" | Knowing the concept is not knowing this project's history with it. Check T2/T3. |
 | "This finding isn't worth storing" | Findings not stored are findings lost. The next session will redo your work. |
+| "I'll file a bead for that and move on" | Filing is deferral that reads as progress. A gap in the work in hand is closed in this session; file only what cannot finish here (blocked on the user, another instance, or evidence that does not exist yet), and a filed bead is the next thing worked. |
+| "One more pass would tighten this" | The plan was laid once; execute it to done. No new round on finished work, no hop to an adjacent item mid-plan. Rounds are bounded by `review-rounds.toml`. |

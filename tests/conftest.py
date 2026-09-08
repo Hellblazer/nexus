@@ -1969,6 +1969,24 @@ def _reset_lease_resolution_history() -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_plugin_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point ``nexus.plugin_lockstep`` at a per-test registry path that does
+    not exist (nexus-2uwag).
+
+    The suite does not isolate ``HOME``, and ``nx upgrade`` now reads
+    ``~/.claude/plugins/installed_plugins.json`` and runs the REAL
+    ``claude plugin update`` for a plugin behind the wheel. On a developer
+    box whose plugin lags the dev tree, any test invoking ``nx upgrade``
+    would otherwise update the developer's live Claude Code plugin. With
+    the registry absent the step reports "not a plugin box" and runs
+    nothing. The seam is the ``NX_PLUGIN_REGISTRY`` env var, so a
+    subprocess-spawned ``nx upgrade`` inherits it too;
+    ``tests/test_plugin_lockstep.py`` re-points it at its own sandbox registry.
+    """
+    monkeypatch.setenv("NX_PLUGIN_REGISTRY", str(tmp_path / "isolated-claude-plugins" / "installed_plugins.json"))
+
+
+@pytest.fixture(autouse=True)
 def _isolate_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect NEXUS_CONFIG_DIR so child processes write under tmp_path.
 

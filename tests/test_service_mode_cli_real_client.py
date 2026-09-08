@@ -189,7 +189,7 @@ def test_t3_gc_service_mode_real_client(tmp_path, runner, real_client, monkeypat
     # crashed with AttributeError on every real service-mode --no-dry-run.
     from nexus.catalog.http_catalog_client import HttpCatalogClient
     fake_cat = MagicMock(spec=HttpCatalogClient)
-    fake_cat.chashes_for_collection.return_value = set()
+    fake_cat.chashes_for_collection_with_tombstone_protected.return_value = (set(), None)
 
     # nexus-fduai: the audit write goes through the catalog WRITER proxy,
     # not the reader — fake it at the verb's own seam.

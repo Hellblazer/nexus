@@ -80,6 +80,7 @@ _nx() {
         HOME="$HOME_DIR" \
         PATH="$VENV/bin:/usr/bin:/bin" \
         TERM="${TERM:-dumb}" \
+        NX_NO_TELEMETRY=1 \
         NX_LOCAL=1 \
         ${HTTPS_PROXY:+HTTPS_PROXY="$HTTPS_PROXY"} \
         ${HTTP_PROXY:+HTTP_PROXY="$HTTP_PROXY"} \
@@ -95,6 +96,7 @@ _py() {
         HOME="$HOME_DIR" \
         PATH="$VENV/bin:/usr/bin:/bin" \
         TERM="${TERM:-dumb}" \
+        NX_NO_TELEMETRY=1 \
         NX_LOCAL=1 \
         ${HTTPS_PROXY:+HTTPS_PROXY="$HTTPS_PROXY"} \
         ${HTTP_PROXY:+HTTP_PROXY="$HTTP_PROXY"} \

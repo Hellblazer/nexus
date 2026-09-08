@@ -69,7 +69,7 @@ echo "[artifacts] tree $(python3 -c 'import json,sys;d=json.loads(sys.argv[1]);p
 
 # shellcheck source=../../../scripts/lib/build-lease.sh disable=SC1091
 source "$REPO_ROOT/scripts/lib/build-lease.sh"
-build_lease_acquire service build-artifacts.sh "$OUT"
+build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" build-artifacts.sh "$OUT"
 PROPS_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/release.properties.snapshot.XXXXXX")"
 cp "$RELEASE_PROPS" "$PROPS_SNAPSHOT"
 _restore() {

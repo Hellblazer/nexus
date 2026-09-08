@@ -6,6 +6,8 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TokenHashing;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Liquibase;
 import org.junit.jupiter.api.AfterAll;
@@ -60,15 +62,9 @@ class DataTokenHandlerTest {
         }
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label, scope) VALUES (?, ?, ?, ?) "
-                + "ON CONFLICT (token_hash) DO NOTHING")) {
-                ps.setString(1, TokenHashing.sha256Hex(BOOT));
-                ps.setString(2, TenantConstants.DEFAULT_TENANT);
-                ps.setString(3, dev.nexus.service.db.TokenStore.ROOT_TOKEN_LABEL);
-                ps.setString(4, dev.nexus.service.db.TokenStore.SCOPE_ROOT);
-                ps.executeUpdate();
-            }
+            PgContainerHelper.seedServiceToken(DSL.using(su, SQLDialect.POSTGRES), BOOT,
+                TenantConstants.DEFAULT_TENANT, dev.nexus.service.db.TokenStore.ROOT_TOKEN_LABEL,
+                dev.nexus.service.db.TokenStore.SCOPE_ROOT, null, null);
         }
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
@@ -501,22 +497,12 @@ class DataTokenHandlerTest {
         String revokedTenant = "sweep-enum-revoked-" + System.nanoTime();
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label, scope, revoked_at) "
-                + "VALUES (?, ?, ?, ?, ?)")) {
-                ps.setString(1, TokenHashing.sha256Hex("live-" + liveTenant));
-                ps.setString(2, liveTenant);
-                ps.setString(3, "sweep-enum live");
-                ps.setString(4, dev.nexus.service.db.TokenStore.SCOPE_TENANT);
-                ps.setObject(5, null);
-                ps.executeUpdate();
-                ps.setString(1, TokenHashing.sha256Hex("revoked-" + revokedTenant));
-                ps.setString(2, revokedTenant);
-                ps.setString(3, "sweep-enum revoked");
-                ps.setString(4, dev.nexus.service.db.TokenStore.SCOPE_TENANT);
-                ps.setObject(5, java.time.OffsetDateTime.now());
-                ps.executeUpdate();
-            }
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.seedServiceToken(dsl, "live-" + liveTenant, liveTenant,
+                "sweep-enum live", dev.nexus.service.db.TokenStore.SCOPE_TENANT, null, null);
+            PgContainerHelper.seedServiceToken(dsl, "revoked-" + revokedTenant, revokedTenant,
+                "sweep-enum revoked", dev.nexus.service.db.TokenStore.SCOPE_TENANT, null,
+                java.time.OffsetDateTime.now());
         }
         var store = new dev.nexus.service.db.TokenStore(ds, java.time.Clock.systemUTC());
         var tenants = store.listKnownTenants();

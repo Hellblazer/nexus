@@ -15,6 +15,8 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -24,6 +26,8 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.sql.Connection;
 import java.util.List;
 import java.util.Map;
+
+import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 
 /**
  * Phase-A guard + integration tests for {@link PgVectorRepository#upsertReferenceOnlyChunk}
@@ -80,12 +84,15 @@ class ReferenceOnlyChunkUpsertTest {
             }
         }
 
-        // Register TENANT so TenantScope can resolve RLS.
+        // Register TENANT so TenantScope can resolve RLS. Literal (fake) hash, not a
+        // real token's sha256 -- typed jOOQ DSL directly, not
+        // PgContainerHelper.seedServiceToken (which always hashes its token argument).
         try (Connection conn = ds.getConnection()) {
-            conn.createStatement().execute(
-                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label)"
-                + " VALUES ('fakehash-refonly', '" + TENANT + "', 'test-refonly')"
-                + " ON CONFLICT (token_hash) DO NOTHING");
+            DSL.using(conn, SQLDialect.POSTGRES).insertInto(SERVICE_TOKENS)
+                .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.LABEL)
+                .values("fakehash-refonly", TENANT, "test-refonly")
+                .onConflictDoNothing()
+                .execute();
         }
 
         TenantScope scope = new TenantScope(ds);

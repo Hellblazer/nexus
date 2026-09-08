@@ -57,6 +57,8 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+from nexus.tables.review_rounds import blocking_rounds
+
 #: A finding whose defect would make someone build the wrong thing, or
 #: whose sequencing error makes the plan unexecutable as written. Only
 #: this class can hold a plan back.
@@ -68,8 +70,10 @@ DISCOVER_AT_IMPLEMENTATION: Final = "DISCOVER-AT-IMPLEMENTATION"
 
 VALID_CLASSIFICATIONS: Final = (BLOCKS_PLANNING, DISCOVER_AT_IMPLEMENTATION)
 
-#: Rounds that may return a blocking verdict. Round 3 and later cannot.
-MAX_BLOCKING_ROUNDS: Final = 2
+#: Rounds that may return a blocking verdict; later rounds cannot. Derived
+#: from the review-rounds table (nexus-dv7gw), the one statement of every
+#: review bound in this project.
+MAX_BLOCKING_ROUNDS: Final = blocking_rounds("plan-audit")
 
 #: Verdict emitted once the cap (or the caller's own budget) is reached.
 #: Deliberately not "READY": the plan is releasable to implementation, but

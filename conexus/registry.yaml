@@ -302,6 +302,16 @@ rdr_skills:
       - "is this RDR ready"
     dispatches_to: [substantive-critic]
 
+  rdr-fix:
+    slash_command: /rdr-fix
+    command_file: commands/rdr-fix.md
+    description: "Fix a gated RDR's findings: sites, diff since the gated commit, pre-edit research entry, fix check"
+    triggers:
+      - "fix the gate findings"
+      - "address the critique"
+      - "fix RDR"
+    dispatches_to: [substantive-critic]
+
   rdr-accept:
     slash_command: /rdr-accept
     command_file: commands/rdr-accept.md
@@ -644,6 +654,11 @@ utility_commands:
   pdf-process:
     slash_command: /pdf-process
     description: "Index PDF files into the T3 knowledge store via nx index pdf"
+    disable_model_invocation: false
+
+  devonthink-index:
+    slash_command: /devonthink-index
+    description: "Index DEVONthink records through nx dt index: URI identity, DT metadata, page-coverage check"
     disable_model_invocation: false
 
   continuation:

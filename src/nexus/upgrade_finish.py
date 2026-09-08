@@ -391,8 +391,9 @@ def _classify(command: str) -> str:
     ``nx index /papers/mineru-benchmarks/`` a mineru daemon and
     ``nx search aspect-worker`` an aspect-worker. Worse, the aspect-worker
     TOCTOU re-verify re-checks the SAME predicate, so a misclassified process
-    passes the one check placed there to catch exactly this -- and the mineru
-    branch has no pid re-verify at all before running a 300s stop/start.
+    passes the one check placed there to catch exactly this. The mineru
+    branch re-verifies through this function too (nexus-ho9d2), as does
+    ``nx mineru stop`` itself (nexus-5yrob), so the predicate is structural.
 
     Structural instead: the EXECUTABLE decides, and for `nx` the verb sequence
     decides. An argument is not a daemon.
@@ -615,7 +616,69 @@ def detect_stale_processes(
                 pid=pid, kind=_classify(command),
                 command=command, age_s=age_s,
             ))
+    outside = _registered_mineru_outside_generation(current, now=now)
+    if outside is not None and all(p.pid != outside.pid for p in report.stale):
+        report.stale.append(outside)
     return report
+
+
+def _registered_mineru_outside_generation(
+    current: Path | None, *, now: float,
+) -> StaleProcess | None:
+    """The pid-file MinerU server, as a stale row, when its interpreter is
+    outside the current generation (nexus-ydqwo).
+
+    The marker regime above enumerates only rows whose command names a
+    generation, so a server spawned from a develop checkout's ``.venv`` is
+    never judged at all: one such server survived three generation flips
+    with ``nx doctor`` silent. The pid file already records the interpreter
+    (``python``, nexus-yq3vk); this is the consumer that compares it to
+    ``current``. A server INSIDE the current generation is fresh by
+    identity, one inside an older generation is already reported by the
+    marker regime (the caller dedupes by pid), and one anywhere else is
+    stale: the install that would serve the next PDF is not the install
+    that started it. With no resolvable generation there is nothing to
+    compare against, and the age regime on the marker rows stands alone.
+    """
+    if current is None:
+        return None
+    try:
+        from nexus._mineru_pid import is_process_alive, read_pid_file  # noqa: PLC0415 — deferred, avoids an import cycle
+    except Exception:  # noqa: BLE001 — pid-file helpers unavailable: nothing to judge
+        return None
+    info = read_pid_file()
+    if not info:
+        return None
+    pid = info.get("pid")
+    python = info.get("python")
+    if not isinstance(pid, int) or not isinstance(python, str) or not python:
+        return None
+    if not is_process_alive(pid):
+        return None
+    # Liveness is not identity: a pid file left by an unclean death can name
+    # a pid the OS has since handed to something else, and this row feeds an
+    # automatic SIGTERM. Judge the live command, as the marker regime does.
+    if _classify(process_command(pid)) != "mineru":
+        return None
+    try:
+        Path(python).relative_to(current)
+        return None
+    except ValueError:
+        pass
+    age_s = 0
+    started = info.get("started_at")
+    if isinstance(started, str):
+        try:
+            from datetime import datetime  # noqa: PLC0415 — stdlib, deferred
+
+            age_s = max(0, int(now - datetime.fromisoformat(started).timestamp()))
+        except ValueError:
+            age_s = 0
+    return StaleProcess(
+        pid=pid, kind="mineru",
+        command=f"mineru-api under {python} (registered in mineru.pid, outside {current.name})",
+        age_s=age_s,
+    )
 
 
 def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
@@ -723,6 +786,12 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                     "off (pdf.mineru_autostart / NX_MINERU_AUTOSTART) — cycle "
                     "it yourself: `nx mineru stop && nx mineru start`"
                 )
+                continue
+            # Same pid-recycle re-check as the aspect-worker branch: the
+            # stop verb kills the pid file's process group, so confirm the
+            # pid is still a mineru-api immediately before asking it to.
+            if _classify(process_command(proc.pid)) != "mineru":
+                actions.append(f"{proc.kind} pid {proc.pid}: gone or recycled; skipped")
                 continue
             try:
                 subprocess.run(["nx", "mineru", "stop"], capture_output=True,

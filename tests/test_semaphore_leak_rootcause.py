@@ -70,6 +70,9 @@ def test_mineru_stop_uses_killpg(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(_mineru_pid, "_pid_file_path", lambda: pid_path)
     monkeypatch.setattr(mineru, "_is_process_alive", _alive)
     monkeypatch.setattr(_mineru_pid, "is_process_alive", _alive)
+    from nexus import upgrade_finish as _uf  # noqa: PLC0415 — file pattern: deferred imports
+
+    monkeypatch.setattr(_uf, "process_command", lambda pid: "python3 mineru-api --host 127.0.0.1")
     monkeypatch.setattr(mineru.os, "killpg", _fake_killpg)
     monkeypatch.setattr(mineru.os, "kill", _fake_kill)
     monkeypatch.setattr(mineru.os, "getpgid", lambda pid: pid)

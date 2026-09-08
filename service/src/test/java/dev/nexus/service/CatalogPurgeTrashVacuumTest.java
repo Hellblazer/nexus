@@ -117,17 +117,13 @@ class CatalogPurgeTrashVacuumTest {
                 "GRANT EXECUTE ON FUNCTION nexus.purge_trash(interval) TO " + SVC_ROLE_NO_MAINTAIN);
         }
 
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            // nexus_svc gets NO manual grants here — grants-nexus-svc-1 (base DML,
-            // EXECUTE on purge_trash) and grants-005-chunks-unify-maintain (MAINTAIN on
-            // the three unified purge-vacuum tables, RDR-191) already ran as part of
-            // applyProductSchema's master changelog above (which also creates nexus_svc
-            // itself, via role-001-nexus-svc.xml), exactly as they would against a real
-            // deploy. Only search_path, the one thing every other test class's connecting
-            // role also sets and which no changeset can set for a role it does not create.
-            su.createStatement().execute("ALTER ROLE " + NEXUS_SVC + " SET search_path TO nexus, public");
-        }
+        // nexus_svc gets NO manual grants here — grants-nexus-svc-1 (base DML,
+        // EXECUTE on purge_trash) and grants-005-chunks-unify-maintain (MAINTAIN on
+        // the three unified purge-vacuum tables, RDR-191) already ran as part of
+        // applyProductSchema's master changelog above (which also creates nexus_svc
+        // itself, via role-001-nexus-svc.xml), exactly as they would against a real
+        // deploy. No session search_path is set for it (Sam's directive, nexus-zrcj7):
+        // production and this test's own queries are schema-qualified.
 
         dsPlain      = pooledDataSource(SVC_ROLE, SVC_PASS);
         dsNexusSvc   = pooledDataSource(NEXUS_SVC, NEXUS_SVC_PASS);

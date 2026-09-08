@@ -448,6 +448,21 @@ def _desired_candidate_count(cols: list[str], n_results: int) -> int:
     themselves (:func:`_search_batch` for the actual request size; the
     batching loop uses the UNCAPPED value to decide whether/how many ways
     to split a group via :func:`_chunked_collections`).
+
+    ACCEPTED COST of splitting (nexus-atylb, Sam's ruling 2026-09-07, to be
+    revisited): when a group is split into sub-batches, each sub-batch is a
+    separately filtered HNSW search, and pgvector's approximate top-K for a
+    filtered query depends on which other vectors the filter excludes. Two
+    partitions of the same collections can therefore rank near-tied
+    candidates at the tail differently from one another and from the old
+    one-call-per-collection fan-out, even though the candidate union is the
+    same. Measured live on the 9-collection rdr corpus: Jaccard 0.667
+    against the pre-batching design, the four differing ids all at ranks
+    7-10 inside a 0.005 distance band, every home collection still
+    contributing other rows. That is tail reordering among near-ties, not
+    lost recall, and it is accepted rather than avoided by not splitting;
+    ``tests/test_search_fanout_recall_parity.py`` holds split corpora to an
+    evidence-based floor for that reason.
     """
     mult = max((_overfetch_multiplier(c) for c in cols), default=2)
     return max(n_results * mult, len(cols) * _per_collection_floor(n_results, mult))

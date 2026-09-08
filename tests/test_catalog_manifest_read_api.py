@@ -487,11 +487,20 @@ class TestChashesForCollection:
         result = cat.chashes_for_collection("code__mtest__bge-base-en-v15-768__v1")
         assert result == set()
 
-    def test_chashes_for_collection_skips_deleted_documents(self, tmp_path):
-        """ON DELETE CASCADE removes manifest rows when the document is
-        deleted, so ``chashes_for_collection`` returns an empty set after
-        the only contributing doc is removed (deleted-file → all chunks
-        become orphans, the GC contract)."""
+    def test_chashes_for_collection_protects_tombstoned_doc_until_purge(self, tmp_path):
+        """ORIGINAL (nexus-mqd6t, Hal ruling; this test used to be named
+        ``test_chashes_for_collection_skips_deleted_documents``): a soft
+        delete (tombstone, not a hard delete — ``ON DELETE CASCADE`` never
+        fires) was made to remove the doc's chashes from this set
+        immediately, so a deleted-file's chunks became orphans right away.
+
+        SUPERSEDED (nexus-dkymw, Sam's second 2026-09-07 ruling): that
+        immediate exclusion let ``nx t3 gc``'s own ``--orphan-window`` clock
+        reap a just-tombstoned document's chunks inside ``nx catalog
+        restore``'s recovery window, resurrecting an empty shell. The set
+        now PROTECTS a tombstoned-but-not-yet-purged document's chashes —
+        they leave the set only once ``purge_trash`` physically reclaims the
+        row."""
         cat = _make_catalog(tmp_path)
         d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
         _write_manifest(cat, d1, [_make_chunk("a" * 64, 0)], collection="code__mtest__bge-base-en-v15-768__v1")
@@ -501,7 +510,20 @@ class TestChashesForCollection:
         cat.delete_document(Tumbler.parse(d1))
 
         result = cat.chashes_for_collection("code__mtest__bge-base-en-v15-768__v1")
-        assert result == set()
+        assert result == {"a" * 64}, (
+            "a tombstoned-but-not-yet-purged doc's chunks must stay in the "
+            "T3 GC alive-set (nexus-dkymw, superseding nexus-mqd6t's "
+            "original exclusion)"
+        )
+        # The actual physical-reclaim half (purge_trash removes the row and
+        # the join then yields nothing) is pinned at the engine layer —
+        # CatalogEngineDefects70Test.mqd6t_chashesForCollection_protects
+        # TombstonedDocUntilPurge and CatalogRestoreTrashTest.restore_
+        # chashesForCollection_protectsTombstonedDocUntilRestore — since the
+        # wire-level purge-trash endpoint refuses older_than_days < 1
+        # (no way to reclaim a moments-old tombstone from this client
+        # without backdating deleted_at, which this file has no fixture
+        # for).
 
 # TestEventSourcedCollectionBackfill removed (nexus-i711w Stage 2 sub-stage
 # C-store): its subject was CollectionCreated events landing in events.jsonl

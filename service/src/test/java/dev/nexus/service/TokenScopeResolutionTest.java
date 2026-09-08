@@ -4,6 +4,8 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TokenHashing;
 import dev.nexus.service.db.TokenStore;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Liquibase;
 import org.junit.jupiter.api.AfterAll;
@@ -64,10 +66,8 @@ class TokenScopeResolutionTest {
             throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label, scope) "
-                + "VALUES ('" + TokenHashing.sha256Hex(rawToken) + "', '" + tenant
-                + "', '" + label + "', '" + scope + "')");
+            PgContainerHelper.seedServiceToken(
+                DSL.using(su, SQLDialect.POSTGRES), rawToken, tenant, label, scope, null, null);
         }
     }
 

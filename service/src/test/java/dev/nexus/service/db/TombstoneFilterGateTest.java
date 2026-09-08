@@ -291,7 +291,35 @@ class TombstoneFilterGateTest {
             + "DELETE CASCADE), only a tumbler with NO row is a dangling_endpoint. Adding "
             + "DELETED_AT.isNull() here would reject rows the FK accepts, diverging the "
             + "precheck's 400 from the constraint of record; the FK remains the enforcement, "
-            + "this SELECT only names the offending row before the INSERT would abort the tx")
+            + "this SELECT only names the offending row before the INSERT would abort the tx"),
+        new ExemptEntry("CatalogRepository.java", "restoreDocument",
+            "nexus-dkymw (POST /v1/catalog/restore, Sam's 2026-09-07 tombstone-is-the-recovery-"
+            + "story ruling): the SECOND sanctioned un-tombstone alongside upsertDocument's ON "
+            + "CONFLICT arm. Its idempotency guard is DELETED_AT.isNotNull() — the mirror image "
+            + "of deleteDocument's DELETED_AT.isNull() guard — which scanSetDeletedSites's "
+            + "literal self-guard token \"DELETED_AT.isNull(\" does not recognize as a substring "
+            + "of \"DELETED_AT.isNotNull(\", so it needs this named entry rather than passing on "
+            + "the literal-token self-guard deleteDocument gets for free"),
+        new ExemptEntry("CatalogRepository.java", "listTrash",
+            "nexus-dkymw (GET /v1/catalog/trash): this read's whole PURPOSE is listing the "
+            + "TOMBSTONED population itself (deleted_at IS NOT NULL), the read-only counterpart "
+            + "to restoreDocument — same direction and same rationale as agedTombstoneCount above"),
+        new ExemptEntry("CatalogRepository.java", "chashesForCollection",
+            "nexus-dkymw (Sam's 2026-09-07 ruling, SUPERSEDING nexus-mqd6t's original "
+            + "DELETED_AT.isNull() fix for this ONE read): this is the T3 GC alive-set for the "
+            + "nx t3 gc CLI verb, which diffs T3 chunk chashes against this exact returned set "
+            + "-- a tombstoned-but-not-yet-purged document's chashes must stay in the alive-set "
+            + "until nexus.purge_trash physically reclaims the catalog_documents row, or nx t3 "
+            + "gc's own --orphan-window clock can reap its chunks inside nx catalog restore's "
+            + "recovery window, resurrecting an empty shell. NOT the indexer's own orphan-"
+            + "quarantine prune: that path's delete decision runs through the server-side "
+            + "anti-join nexus.gc_quarantine_orphans (catalog-023), which checks "
+            + "catalog_document_chunks row existence only and never joined deleted_at, so it "
+            + "was already tombstone-tolerant by construction and was never at this risk -- the "
+            + "indexer calls this method only as an empty-manifest skip guard (nexus-oqku), not "
+            + "for orphan classification (the client-side fallback that once did was retired at "
+            + "RDR-191 Phase 6, 2026-08-15). Read-invisibility (search results, getManifest) is "
+            + "unaffected -- this is a GC input, not a read surface")
     );
 
     record WidenEntry(String file, String method, String rationale) {}
@@ -700,11 +728,12 @@ class TombstoneFilterGateTest {
 
     @Test
     void floor_setDeletedAtSites() throws IOException {
-        // 3 distinct .set(CATALOG_DOCUMENTS.DELETED_AT, ...) call sites on the
+        // 4 distinct .set(CATALOG_DOCUMENTS.DELETED_AT, ...) call sites on the
         // final tree: upsertDocument's un-tombstone, deleteDocument's
-        // tombstone, deleteDocumentsMany's batch tombstone.
+        // tombstone, deleteDocumentsMany's batch tombstone, restoreDocument's
+        // un-tombstone (nexus-dkymw).
         var result = scan();
-        assertThat(result.setDeletedSites().size()).isGreaterThanOrEqualTo(3);
+        assertThat(result.setDeletedSites().size()).isGreaterThanOrEqualTo(4);
     }
 
     // floor_rawChunksReadSites: RETIRED (nexus-zrcj7, 2026-09-03), not adjusted to

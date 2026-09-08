@@ -5,14 +5,18 @@
     strings in Java, tests included).
 
     WHY THIS FILE EXISTS: 84 test classes under service/src/test each copied
-    the SAME five-statement bootstrap block by hand — a DO-block CREATE ROLE
-    for a per-class throwaway service role (plus a redundant CREATE ROLE for
-    nexus_svc, harmless: role-001-nexus-svc.xml already creates nexus_svc as
-    part of the master changelog itself, so this second creation is always a
-    no-op IF-NOT-EXISTS), GRANT USAGE/DML/sequence access on the nexus and
-    staging schemas, and ALTER ROLE ... SET search_path. This changelog
-    consolidates that block into ONE reusable Liquibase artifact, parameterized
-    by ${svcRole}/${svcPass}, applied via PgContainerHelper#bootstrapServiceRole.
+    the SAME bootstrap block by hand — a DO-block CREATE ROLE for a per-class
+    throwaway service role (plus a redundant CREATE ROLE for nexus_svc,
+    harmless: role-001-nexus-svc.xml already creates nexus_svc as part of the
+    master changelog itself, so this second creation is always a no-op
+    IF-NOT-EXISTS) and GRANT USAGE/DML/sequence access on the nexus and
+    staging schemas. This changelog consolidates that block into ONE reusable
+    Liquibase artifact, parameterized by ${svcRole}/${svcPass}, applied via
+    PgContainerHelper#bootstrapServiceRole. It DELIBERATELY does not set a
+    role-level search_path (Sam's directive, nexus-zrcj7, 2026-09-05: no
+    session/role search_path reliance, ever) — every legitimate query already
+    goes through schema-qualified jOOQ generated Tables/Routines or a
+    function-pinned SET search_path in the function definition itself.
 
     WHY runAlways="true": mirrors grants-nexus-svc.xml's own choice (see that
     file's header) — this changeset must re-execute every time a test class
@@ -90,8 +94,6 @@ GRANT UPDATE ON SEQUENCE nexus.topics_id_seq TO ${svcRole};
 
 GRANT USAGE ON SCHEMA staging TO ${svcRole};
 GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA staging TO ${svcRole};
-
-ALTER ROLE ${svcRole} SET search_path TO nexus, public;
         </sql>
         <rollback>
             <!-- Test-only role/grant bootstrap; not automated, same as

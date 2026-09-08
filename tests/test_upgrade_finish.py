@@ -146,6 +146,104 @@ class TestEnumerate:
         assert report.stale == []
 
 
+class TestRegisteredMineruOutsideGeneration:
+    """nexus-ydqwo: the MinerU server the pid file registers is stale when
+    its interpreter lives outside the current generation, even though no
+    generation marker matches its command line.
+
+    Measured 2026-09-07: a server spawned from a develop checkout's .venv
+    survived three generation flips unreported, because enumeration only
+    sees generation-marked rows and the pid file's ``python`` field had no
+    consumer that compared it to ``current``.
+    """
+
+    _GEN = "/Users/u/.local/share/nexus/tools/gen-01"
+    _PS_HEADER = "  PID ELAPSED COMMAND\n"
+
+    def _detect(self, pid_info, *, alive=True, current=_GEN, ps_rows="", pairs=None,
+                live_command="python3 mineru-api --host 127.0.0.1"):
+        from pathlib import Path as _P  # noqa: PLC0415
+
+        pairs = pairs if pairs is not None else [(self._GEN, _P(self._GEN))]
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(1_000_000.0, "7.35.0"),
+        ), patch(
+            "nexus.upgrade_finish._current_generation",
+            return_value=_P(current) if current else None,
+        ), patch(
+            "nexus.install_census.generation_match_pairs", return_value=pairs,
+        ), patch(
+            "nexus._mineru_pid.read_pid_file", return_value=pid_info,
+        ), patch(
+            "nexus._mineru_pid.is_process_alive", return_value=alive,
+        ), patch(
+            "nexus.upgrade_finish.process_command", return_value=live_command,
+        ):
+            return detect_stale_processes(
+                self._PS_HEADER + ps_rows, now=1_000_000.0 + 10 * 86400,
+            )
+
+    def test_checkout_interpreter_is_stale_and_restartable(self):
+        info = {
+            "pid": 64778, "port": 62389, "mineru_version": "3.1.11",
+            "python": "/Users/u/git/nexus/.venv/bin/python3",
+        }
+        report = self._detect(
+            info,
+            ps_rows="  64778 4-01:00:00 /Users/u/git/nexus/.venv/bin/python "
+                    "/Users/u/git/nexus/.venv/bin/mineru-api --host 127.0.0.1\n",
+        )
+        assert [(p.pid, p.kind) for p in report.stale] == [(64778, "mineru")]
+        assert [p.pid for p in report.restartable] == [64778]
+        assert "/Users/u/git/nexus/.venv/bin/python3" in report.stale[0].command
+
+    def test_current_generation_interpreter_is_fresh(self):
+        info = {"pid": 300, "port": 1, "python": f"{self._GEN}/bin/python3"}
+        report = self._detect(
+            info,
+            ps_rows=f"  300 4-01:00:00 {self._GEN}/bin/python3 "
+                    f"{self._GEN}/bin/mineru-api --host 127.0.0.1\n",
+        )
+        assert report.stale == []
+
+    def test_older_generation_is_reported_once(self):
+        # The marker path already reports a gen-00 holder; the pid-file
+        # path must not add a second row for the same pid.
+        old = "/Users/u/.local/share/nexus/tools/gen-00"
+        info = {"pid": 300, "port": 1, "python": f"{old}/bin/python3"}
+        from pathlib import Path as _P  # noqa: PLC0415
+
+        report = self._detect(
+            info,
+            ps_rows=f"  300 00:05 {old}/bin/python3 {old}/bin/mineru-api\n",
+            pairs=[(old, _P(old)), (self._GEN, _P(self._GEN))],
+        )
+        assert [p.pid for p in report.stale] == [300]
+        assert report.stale[0].command.startswith(f"{old}/bin/python3")
+
+    def test_dead_pid_is_ignored(self):
+        info = {"pid": 64778, "port": 1, "python": "/Users/u/git/nexus/.venv/bin/python3"}
+        assert self._detect(info, alive=False).stale == []
+
+    def test_no_layout_defers_to_marker_regime(self):
+        # A box with no generation pointer cannot judge the interpreter;
+        # the age regime on the marker rows is the only evidence there.
+        info = {"pid": 64778, "port": 1, "python": "/Users/u/git/nexus/.venv/bin/python3"}
+        assert self._detect(info, current=None).stale == []
+
+    def test_recycled_pid_is_ignored(self):
+        # The pid file outlived its server and the OS reused the pid: the
+        # live command is not a mineru-api, so no SIGTERM row is produced.
+        info = {"pid": 64778, "port": 1, "python": "/Users/u/git/nexus/.venv/bin/python3"}
+        report = self._detect(info, live_command="/usr/bin/vim unrelated.txt")
+        assert report.stale == []
+
+    def test_pid_file_without_interpreter_is_ignored(self):
+        info = {"pid": 64778, "port": 1}
+        assert self._detect(info).stale == []
+
+
 class TestRestartStale:
     @staticmethod
     def _report() -> SkewReport:
@@ -239,11 +337,27 @@ class TestRestartStale:
 
         with patch("nexus.daemon.mineru_lifecycle.spawn_policy_allows",
                    return_value=True), \
+                patch("nexus.upgrade_finish.process_command",
+                      return_value="mineru-api --host 127.0.0.1"), \
                 patch("nexus.upgrade_finish.subprocess.run",
                       return_value=MagicMock(returncode=0)) as sp:
             actions = restart_stale(r)
         assert sp.call_count == 2  # stop && start
         assert any("cycled MinerU" in a for a in actions)
+
+    def test_mineru_cycle_skips_recycled_pid(self):
+        """nexus-ho9d2: the stop verb kills the pid file's process group, so
+        a pid the OS has reused since the scan must not be signalled."""
+        r = SkewReport(installed_version="6.7.1")
+        r.stale = [StaleProcess(pid=300, kind="mineru", command="mineru-api", age_s=99)]
+        with patch("nexus.daemon.mineru_lifecycle.spawn_policy_allows",
+                   return_value=True), \
+                patch("nexus.upgrade_finish.process_command",
+                      return_value="/usr/bin/vim unrelated.txt"), \
+                patch("nexus.upgrade_finish.subprocess.run") as sp:
+            actions = restart_stale(r)
+        sp.assert_not_called()
+        assert any("gone or recycled" in a for a in actions)
 
 
 class TestVersionTransition:

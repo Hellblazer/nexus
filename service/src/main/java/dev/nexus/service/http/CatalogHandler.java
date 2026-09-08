@@ -151,6 +151,8 @@ public final class CatalogHandler implements HttpHandler {
                 case "/update_many"           -> handleUpdateMany(exchange, tenant, method);
                 case "/delete"                -> handleDelete(exchange, tenant, method);
                 case "/delete_many"           -> handleDeleteMany(exchange, tenant, method);
+                case "/restore"               -> handleRestore(exchange, tenant, method);
+                case "/trash"                 -> handleTrash(exchange, tenant, method);
                 case "/purge-trash"           -> handlePurgeTrash(exchange, tenant, method);
                 case "/resolve"               -> handleResolve(exchange, tenant, method);
                 case "/stats"                 -> handleStats(exchange, tenant, method);
@@ -645,6 +647,49 @@ public final class CatalogHandler implements HttpHandler {
     }
 
     /**
+     * POST /v1/catalog/restore (nexus-dkymw) — undo a soft delete. The caller
+     * {@code nexus.document_restore} (catalog-003-soft-delete.xml, RDR-156
+     * P1.2) never had, mirroring {@code /purge-trash}'s own history (nexus-
+     * 3ck2g E3 gave {@code nexus.purge_trash} its first caller the same way).
+     *
+     * <p>Body: {@code {"tumbler": "1.2.3"}}. Response: {@code {"restored": 0|1}}
+     * — 1 if a tombstoned row was cleared, 0 if the tumbler is unknown,
+     * already live, or its tombstone was already physically reclaimed by
+     * {@code nx catalog purge-trash} (nothing left to restore once that has
+     * run past the grace window).
+     */
+    private void handleRestore(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        String tumbler = queryParam(exchange, "tumbler");
+        if (tumbler == null || tumbler.isBlank()) {
+            Map<String, Object> body = readBody(exchange);
+            tumbler = (String) body.get("tumbler");
+        }
+        if (tumbler == null || tumbler.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'tumbler' required\"}"); return;
+        }
+        int restored = repo.restoreDocument(tenant, tumbler);
+        HttpUtil.send(exchange, 200, "{\"restored\":" + restored + "}");
+    }
+
+    /**
+     * GET /v1/catalog/trash?limit=&amp;offset= (nexus-dkymw) — this tenant's
+     * tombstoned documents, newest-tombstoned first. Read-only counterpart to
+     * {@code /restore}: lets an operator see what is restorable before
+     * calling {@code nx catalog restore}. Response shape mirrors {@link
+     * #handleList}: {@code {"documents": [...], "count": N}}, each entry
+     * carrying {@code tumbler}, {@code title}, {@code physical_collection},
+     * {@code corpus}, {@code content_type}, and {@code deleted_at}.
+     */
+    private void handleTrash(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        int limit  = intParam(exchange, "limit", 200);
+        int offset = intParam(exchange, "offset", 0);
+        var docs = repo.listTrash(tenant, limit, offset);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("documents", docs, "count", docs.size())));
+    }
+
+    /**
      * POST /v1/catalog/purge-trash (nexus-3ck2g E3) — the caller {@code
      * nexus.purge_trash} never had (catalog-003-soft-delete.xml:200-296 defined the
      * SECURITY INVOKER function; nothing in the service invoked it, so the stranded-
@@ -1129,7 +1174,28 @@ public final class CatalogHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, "{\"deleted\":" + deleted + "}");
     }
 
-    /** GET /v1/catalog/manifest/chashes?collection=X */
+    /**
+     * GET /v1/catalog/manifest/chashes?collection=X[&with_tombstone_protected=1]
+     *
+     * <p>nexus-zewg3 (ADDITIVE wire change, OPT-IN): passing
+     * {@code with_tombstone_protected=1} (or {@code =true}) makes the envelope
+     * also carry {@code tombstone_protected_count} — of the chashes above, how
+     * many are held alive ONLY by a pending tombstone (never by a live
+     * document, tenant-wide) rather than a live document, per {@link
+     * CatalogRepository#tombstoneProtectedChunkCount}. {@code nx t3 gc}'s own
+     * alive-set diff cannot make this distinction (both classes stay in
+     * {@code chashes} equally per nexus-dkymw), so the client reads this
+     * field to report it instead of re-deriving it client-side. Old clients
+     * that don't know the key simply ignore it (same pattern as
+     * nexus-kzso5's per-row {@code collection} addition above).
+     *
+     * <p>The count is computed ONLY when requested: this route is not
+     * {@code nx t3 gc}-exclusive — {@code nexus.indexer._prune_deleted_files}
+     * calls the plain (no-param) form on EVERY {@code nx index repo} run, and
+     * that caller never reads the field, so it must not pay for the three
+     * extra {@code strandedChunkCount} queries the count costs (critique T2
+     * nexus/critique-nexus-zewg3-engine-side Significant 1).
+     */
     private void handleManifestChashes(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         String collection = queryParam(exchange, "collection");
@@ -1145,8 +1211,14 @@ public final class CatalogHandler implements HttpHandler {
         // all. The client reconciles len(chashes) == count before any orphan
         // classification and aborts on mismatch.
         var list = new ArrayList<>(chashes);
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
-            Map.of("chashes", list, "count", list.size())));
+        String withTombstoneProtectedParam = queryParam(exchange, "with_tombstone_protected");
+        boolean withTombstoneProtected = "1".equals(withTombstoneProtectedParam)
+            || "true".equalsIgnoreCase(withTombstoneProtectedParam);
+        Map<String, Object> envelope = withTombstoneProtected
+            ? Map.of("chashes", list, "count", list.size(),
+                     "tombstone_protected_count", repo.tombstoneProtectedChunkCount(tenant, collection))
+            : Map.of("chashes", list, "count", list.size());
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(envelope));
     }
 
     /** POST /v1/catalog/manifest/docs_for_chashes */

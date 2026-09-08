@@ -7,9 +7,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.db.TokenHashing;
 import dev.nexus.service.vectors.PgVectorRepository;
 import dev.nexus.service.PgVectorRepositoryContractTest.FakeEmbedder;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -89,27 +90,12 @@ class BridgeAddressFieldsTest {
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
         }
-        // search_path for nexus_svc
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "ALTER ROLE nexus_svc SET search_path TO nexus, public");
-        }
         // Tokens — one per tenant (TENANT and TENANT2 for H2 isolation test)
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                     "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label)"
-                     + " VALUES (?, ?, ?) ON CONFLICT (token_hash) DO NOTHING")) {
-                ps.setString(1, TokenHashing.sha256Hex(TOKEN));
-                ps.setString(2, TENANT);
-                ps.setString(3, "g5-addr-test");
-                ps.executeUpdate();
-                ps.setString(1, TokenHashing.sha256Hex(TOKEN2));
-                ps.setString(2, TENANT2);
-                ps.setString(3, "g5-addr-test-2");
-                ps.executeUpdate();
-            }
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.seedServiceToken(dsl, TOKEN, TENANT, "g5-addr-test");
+            PgContainerHelper.seedServiceToken(dsl, TOKEN2, TENANT2, "g5-addr-test-2");
         }
 
         var cfg = new HikariConfig();

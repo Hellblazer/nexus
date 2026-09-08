@@ -999,8 +999,8 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # dist-info sniffing. The former third entry (the `--version`
         # banner sniff) was FIXED rather than exempted -- it needed no
         # live infra, being a plain capture-then-parameter-expansion.
-        "tests/e2e/fresh-install-mvv.sh:577",
-        "tests/e2e/fresh-install-mvv.sh:603",
+        "tests/e2e/fresh-install-mvv.sh:579",
+        "tests/e2e/fresh-install-mvv.sh:605",
         # --- tests/e2e/local-index-memory-gate.sh (1 entry): owned by a
         # concurrent agent in the authoring session (nexus-wbeyi itself)
         # -- reported to that hand-off, not fixed here. This is a
@@ -1008,7 +1008,7 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # already-fixed line 555: a `| head -1` inside a bare
         # `VAR=$(...)` assignment (propagates through errexit) found by
         # this lint's own authoring sweep.
-        "tests/e2e/local-index-memory-gate.sh:912",
+        "tests/e2e/local-index-memory-gate.sh:916",
         # --- tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh
         # (10 entries, nexus-z0ylb): the CANDIDATE-MIGRATION rehearsal --
         # a locally-built candidate's Liquibase walk over a POPULATED
@@ -1208,9 +1208,9 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         #   can be appended only for --check-schema, +11 lines before this
         #   region): :1130 -> :1141, :1134 -> :1145, :1182 -> :1193. Same 3
         #   sites, same rationale -- only an earlier, unrelated loop grew.
-        "tests/e2e/release-sandbox.sh:1238",
         "tests/e2e/release-sandbox.sh:1242",
-        "tests/e2e/release-sandbox.sh:1290",
+        "tests/e2e/release-sandbox.sh:1246",
+        "tests/e2e/release-sandbox.sh:1294",
     }
 )
 _PIPEFAIL_OR_TRUE_SITES_CEILING = 9

@@ -1,5 +1,7 @@
 package dev.nexus.service;
 
+import org.jooq.Field;
+import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
 import org.jooq.DSLContext;
@@ -14,16 +16,21 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
-import org.postgresql.util.PSQLException;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.*;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.time.OffsetDateTime;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -129,6 +136,13 @@ class SchemaMigratorIntegrationTest {
      * @param migratingRole the NOSUPERUSER role that will run the Liquibase
      *                      walk and therefore needs EXECUTE on the function
      */
+    // SANCTIONED RAW (nexus-cbo4a): DBA/superuser provisioning DDL simulating
+    // nexus.db.pg_provision.py's real bootstrap step -- CREATE EXTENSION (no jOOQ
+    // typed form for extension DDL), CREATE SCHEMA ... AUTHORIZATION (no typed
+    // AUTHORIZATION clause in jOOQ's fluent schema DSL), and CREATE OR REPLACE
+    // FUNCTION with a plpgsql SECURITY DEFINER body (no typed DSL for authoring an
+    // arbitrary function body). Same class as this file's own admin/svc role
+    // bootstrap below, kept raw by decision per RawSqlGateTest's own javadoc.
     private static void bootstrapVectorExtensionsForFreshWalk(
             Connection su, String migratingRole) throws Exception {
         su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
@@ -193,6 +207,13 @@ class SchemaMigratorIntegrationTest {
         //   3. Create the schemas and transfer ownership to nexus_admin_test.
         //      (In real provisioning: CREATE DATABASE nexus; CREATE SCHEMA nexus
         //       AUTHORIZATION nexus_admin; Liquibase then runs as nexus_admin.)
+        // SANCTIONED RAW (this whole Phase A block, all 8 occurrences of this shape in
+        // this file): bespoke admin/svc role bootstrap against a dedicated container
+        // (PgContainerHelper.startDedicated(), never applyProductSchema's
+        // role-001-created nexus_admin) -- CREATE ROLE / GRANT CREATE ON DATABASE|SCHEMA
+        // / GRANT pg_monitor WITH ADMIN OPTION are cluster-level DDL with no jOOQ
+        // typed-DSL form. RawSqlGateTest's own javadoc names this file's admin/svc role
+        // bootstrap as kept-raw-by-decision.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
 
@@ -331,10 +352,7 @@ class SchemaMigratorIntegrationTest {
         // nothing pre-existed to re-stamp.
         long changelogRows;
         try (Connection conn = adminDs.getConnection()) {
-            ResultSet crs = conn.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM public.\"databasechangelog\"");
-            crs.next();
-            changelogRows = crs.getLong(1);
+            changelogRows = changelogRowCount(conn);
         }
         assertThat(first.newChangesets())
             .as("fresh walk: new_changesets == every changelog row")
@@ -366,10 +384,7 @@ class SchemaMigratorIntegrationTest {
 
         // DATABASECHANGELOG must have records (not wiped).
         try (Connection conn = adminDs.getConnection()) {
-            ResultSet rs = conn.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM public.\"databasechangelog\"");
-            rs.next();
-            assertThat(rs.getLong(1))
+            assertThat(changelogRowCount(conn))
                 .as("DATABASECHANGELOG must be non-empty after migration")
                 .isGreaterThan(0);
         }
@@ -441,26 +456,24 @@ class SchemaMigratorIntegrationTest {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, tenant, true);
 
             // INSERT: proves nexus_svc has INSERT privilege on nexus.memory.
-            try (var ps = svc.prepareStatement(
-                    "INSERT INTO nexus.memory " +
-                    "(tenant_id, project, title, content, tags, timestamp, access_count) " +
-                    "VALUES (?, ?, ?, ?, ?, now(), 0) " +
-                    "ON CONFLICT (tenant_id, project, title) DO NOTHING")) {
-                ps.setString(1, tenant);
-                ps.setString(2, project);
-                ps.setString(3, title);
-                ps.setString(4, "content body for DML proof");
-                ps.setString(5, "test,migration");
-                ps.executeUpdate();
-            }
+            dsl(svc).insertInto(MEMORY,
+                    MEMORY.TENANT_ID, MEMORY.PROJECT, MEMORY.TITLE, MEMORY.CONTENT, MEMORY.TAGS,
+                    MEMORY.TIMESTAMP, MEMORY.ACCESS_COUNT)
+                .values(tenant, project, title, "content body for DML proof", "test,migration",
+                    OffsetDateTime.now(), 0)
+                .onConflict(MEMORY.TENANT_ID, MEMORY.PROJECT, MEMORY.TITLE)
+                .doNothing()
+                .execute();
 
             // SELECT: proves nexus_svc has SELECT privilege AND RLS lets the row through.
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT title FROM nexus.memory WHERE project = '" + project + "'");
-            assertThat(rs.next())
+            List<String> titles = dsl(svc).select(MEMORY.TITLE)
+                .from(MEMORY)
+                .where(MEMORY.PROJECT.eq(project))
+                .fetch(MEMORY.TITLE);
+            assertThat(titles)
                 .as("nexus_svc must be able to SELECT its own row via RLS (GUC stamped)")
-                .isTrue();
-            assertThat(rs.getString("title"))
+                .hasSize(1);
+            assertThat(titles.get(0))
                 .as("selected row title must match inserted row")
                 .isEqualTo(title);
 
@@ -485,18 +498,14 @@ class SchemaMigratorIntegrationTest {
             admin.setAutoCommit(false);
             // Owner must stamp GUC even for themselves when FORCE RLS is set.
             PgContainerHelper.setTenant(admin, TenantScope.DEFAULT_TENANT_GUC, "failclosed-tenant", true);
-            try (var ps = admin.prepareStatement(
-                    "INSERT INTO nexus.memory " +
-                    "(tenant_id, project, title, content, tags, timestamp, access_count) " +
-                    "VALUES (?, ?, ?, ?, ?, now(), 0) " +
-                    "ON CONFLICT (tenant_id, project, title) DO NOTHING")) {
-                ps.setString(1, "failclosed-tenant");
-                ps.setString(2, "fc-proj");
-                ps.setString(3, "Fail-closed sentinel row");
-                ps.setString(4, "sentinel content");
-                ps.setString(5, "sentinel");
-                ps.executeUpdate();
-            }
+            dsl(admin).insertInto(MEMORY,
+                    MEMORY.TENANT_ID, MEMORY.PROJECT, MEMORY.TITLE, MEMORY.CONTENT, MEMORY.TAGS,
+                    MEMORY.TIMESTAMP, MEMORY.ACCESS_COUNT)
+                .values("failclosed-tenant", "fc-proj", "Fail-closed sentinel row", "sentinel content",
+                    "sentinel", OffsetDateTime.now(), 0)
+                .onConflict(MEMORY.TENANT_ID, MEMORY.PROJECT, MEMORY.TITLE)
+                .doNothing()
+                .execute();
             admin.commit();
         }
 
@@ -504,10 +513,8 @@ class SchemaMigratorIntegrationTest {
         try (Connection svc = svcDs.getConnection()) {
             svc.setAutoCommit(true);
             // Deliberately do NOT stamp nexus.tenant GUC.
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT COUNT(*) AS cnt FROM nexus.memory");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getLong("cnt"))
+            long count = dsl(svc).selectCount().from(MEMORY).fetchOne(0, long.class);
+            assertThat(count)
                 .as("nexus_svc with no GUC stamp must see zero rows (RLS fail-closed)")
                 .isEqualTo(0L);
         }
@@ -551,6 +558,8 @@ class SchemaMigratorIntegrationTest {
             // the migration role would need CREATEROLE just to no-op past it.
             try (Connection su = agedPg.createConnection("")) {
                 su.setAutoCommit(true);
+                // SANCTIONED RAW: see bootstrap()'s own comment above -- same admin/svc
+                // role bootstrap class, no jOOQ typed-DSL form.
                 su.createStatement().execute(
                     "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
@@ -588,6 +597,17 @@ class SchemaMigratorIntegrationTest {
             cfg.setPoolName("nexus-admin-aged-test");
 
             try (var agedDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
+
+                // nexus_test.* schema objects this Phase C's typed DDL helpers
+                // (dropConstraint/addFkNotValid/setForceRls) need -- installed via the
+                // MIGRATING role's own connection (not su): whichever Liquibase run
+                // creates databasechangelog first OWNS it, so installing test objects
+                // as su here would leave databasechangelog superuser-owned and the
+                // migrating role's own product-changelog walk below would then hit
+                // "permission denied for table databasechangelog".
+                try (Connection testObjConn = agedDs.getConnection()) {
+                    PgContainerHelper.installTestObjects(testObjConn);
+                }
 
                 // Phase B: migrate only up through catalog-002-2-chash-checks (the
                 // last changeset that ADDS the five chash-length CHECK constraints),
@@ -628,8 +648,11 @@ class SchemaMigratorIntegrationTest {
                 // catalog-013-3's inline comment. The fix must be defensive
                 // regardless of how the divergence arose.)
                 try (Connection conn = agedDs.getConnection()) {
-                    conn.createStatement().execute(
-                        "ALTER TABLE nexus.chunks_384 DROP CONSTRAINT chunks_384_chash_len_check");
+                    // the per-dim 384 chunk table no longer exists at HEAD (RDR-191 Phase 4 unify) --
+                    // schema-agnostic mid-ladder table reference, per the ladder-file
+                    // CAUTION (task brief; RawSqlGateTest's own javadoc history).
+                    PgContainerHelper.dropConstraint(conn, DSL.table(DSL.name("nexus", "chunks_384")),
+                        "chunks_384_chash_len_check");
                 }
 
                 // Phase D: resume the rest of the migration chain (catalog-003
@@ -731,6 +754,8 @@ class SchemaMigratorIntegrationTest {
             // Phase A: same minimal DBA-equivalent bootstrap as test 5.
             try (Connection su = agedPg.createConnection("")) {
                 su.setAutoCommit(true);
+                // SANCTIONED RAW: see bootstrap()'s own comment above -- same admin/svc
+                // role bootstrap class, no jOOQ typed-DSL form.
                 su.createStatement().execute(
                     "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
@@ -769,6 +794,17 @@ class SchemaMigratorIntegrationTest {
 
             try (var agedDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
 
+                // nexus_test.* schema objects this Phase C's typed DDL helpers
+                // (dropConstraint/addFkNotValid/setForceRls) need -- installed via the
+                // MIGRATING role's own connection (not su): whichever Liquibase run
+                // creates databasechangelog first OWNS it, so installing test objects
+                // as su here would leave databasechangelog superuser-owned and the
+                // migrating role's own product-changelog walk below would then hit
+                // "permission denied for table databasechangelog".
+                try (Connection testObjConn = agedDs.getConnection()) {
+                    PgContainerHelper.installTestObjects(testObjConn);
+                }
+
                 // Phase B: migrate only up through catalog-013-1 — the changeset that
                 // ADDS chash_index_chash_len_check (unlike the other four, added in
                 // catalog-002-hygiene.xml) — so the divergence can be injected BEFORE
@@ -802,8 +838,10 @@ class SchemaMigratorIntegrationTest {
                 // Phase C: simulate the divergence — drop chash_index's chash-length
                 // CHECK right after it was added.
                 try (Connection conn = agedDs.getConnection()) {
-                    conn.createStatement().execute(
-                        "ALTER TABLE nexus.chash_index DROP CONSTRAINT chash_index_chash_len_check");
+                    // chash_index dropped at HEAD (RDR-187) -- schema-agnostic mid-ladder
+                    // table reference, per the ladder-file CAUTION.
+                    PgContainerHelper.dropConstraint(conn, DSL.table(DSL.name("nexus", "chash_index")),
+                        "chash_index_chash_len_check");
                 }
 
                 // Phase D: resume the rest of the migration chain (catalog-013-1b
@@ -944,6 +982,8 @@ class SchemaMigratorIntegrationTest {
             // Phase A: same minimal DBA-equivalent bootstrap as tests 5/6.
             try (Connection su = agedPg.createConnection("")) {
                 su.setAutoCommit(true);
+                // SANCTIONED RAW: see bootstrap()'s own comment above -- same admin/svc
+                // role bootstrap class, no jOOQ typed-DSL form.
                 su.createStatement().execute(
                     "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
@@ -982,6 +1022,17 @@ class SchemaMigratorIntegrationTest {
 
             try (var agedDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
 
+                // nexus_test.* schema objects this Phase C's typed DDL helpers
+                // (dropConstraint/addFkNotValid/setForceRls) need -- installed via the
+                // MIGRATING role's own connection (not su): whichever Liquibase run
+                // creates databasechangelog first OWNS it, so installing test objects
+                // as su here would leave databasechangelog superuser-owned and the
+                // migrating role's own product-changelog walk below would then hit
+                // "permission denied for table databasechangelog".
+                try (Connection testObjConn = agedDs.getConnection()) {
+                    PgContainerHelper.installTestObjects(testObjConn);
+                }
+
                 // Phase B: migrate only up through fk-002-1 — the changeset that ADDS
                 // chunks_384_collection_fk NOT VALID — so the divergence can be injected
                 // BEFORE fk-002-7 gets a chance to run.
@@ -1014,8 +1065,10 @@ class SchemaMigratorIntegrationTest {
                 // Phase C: simulate the divergence — drop chunks_384_collection_fk right
                 // after fk-002-1 added it NOT VALID.
                 try (Connection conn = agedDs.getConnection()) {
-                    conn.createStatement().execute(
-                        "ALTER TABLE nexus.chunks_384 DROP CONSTRAINT chunks_384_collection_fk");
+                    // the per-dim 384 chunk table no longer exists at HEAD (RDR-191 Phase 4 unify) --
+                    // schema-agnostic mid-ladder table reference.
+                    PgContainerHelper.dropConstraint(conn, DSL.table(DSL.name("nexus", "chunks_384")),
+                        "chunks_384_collection_fk");
                 }
 
                 // Phase D: resume the rest of the migration chain (fk-002-2 onward,
@@ -1169,6 +1222,8 @@ class SchemaMigratorIntegrationTest {
             // Phase A: same minimal DBA-equivalent bootstrap as tests 5/6/8.
             try (Connection su = agedPg.createConnection("")) {
                 su.setAutoCommit(true);
+                // SANCTIONED RAW: see bootstrap()'s own comment above -- same admin/svc
+                // role bootstrap class, no jOOQ typed-DSL form.
                 su.createStatement().execute(
                     "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
@@ -1206,6 +1261,17 @@ class SchemaMigratorIntegrationTest {
             cfg.setPoolName("nexus-admin-aged-viol-test");
 
             try (var agedDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
+
+                // nexus_test.* schema objects this Phase C's typed DDL helpers
+                // (dropConstraint/addFkNotValid/setForceRls) need -- installed via the
+                // MIGRATING role's own connection (not su): whichever Liquibase run
+                // creates databasechangelog first OWNS it, so installing test objects
+                // as su here would leave databasechangelog superuser-owned and the
+                // migrating role's own product-changelog walk below would then hit
+                // "permission denied for table databasechangelog".
+                try (Connection testObjConn = agedDs.getConnection()) {
+                    PgContainerHelper.installTestObjects(testObjConn);
+                }
 
                 // Phase B: migrate only up through catalog-013-0 -- the LAST changeset that
                 // runs BEFORE chash_index_chash_len_check is added. The chash_index TABLE
@@ -1251,29 +1317,24 @@ class SchemaMigratorIntegrationTest {
                 // requires a matching (tenant_id, name) row in catalog_collections first.
                 try (Connection conn = agedDs.getConnection()) {
                     conn.setAutoCommit(true);
-                    conn.createStatement().execute(
-                        "ALTER TABLE nexus.catalog_collections NO FORCE ROW LEVEL SECURITY");
-                    try (var ps = conn.prepareStatement(
-                            "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?)")) {
-                        ps.setString(1, "c4143-viol-tenant");
-                        ps.setString(2, "c4143-viol-collection");
-                        ps.executeUpdate();
-                    }
-                    conn.createStatement().execute(
-                        "ALTER TABLE nexus.catalog_collections FORCE ROW LEVEL SECURITY");
+                    PgContainerHelper.setForceRls(conn, CATALOG_COLLECTIONS, false);
+                    PgContainerHelper.insertCollection(dsl(conn), "c4143-viol-tenant", "c4143-viol-collection");
+                    PgContainerHelper.setForceRls(conn, CATALOG_COLLECTIONS, true);
 
-                    conn.createStatement().execute(
-                        "ALTER TABLE nexus.chash_index NO FORCE ROW LEVEL SECURITY");
-                    try (var ps = conn.prepareStatement(
-                            "INSERT INTO nexus.chash_index (tenant_id, chash, physical_collection, created_at) "
-                            + "VALUES (?, ?, ?, now())")) {
-                        ps.setString(1, "c4143-viol-tenant");
-                        ps.setString(2, "shortchash1"); // length 11 -- genuinely malformed
-                        ps.setString(3, "c4143-viol-collection");
-                        ps.executeUpdate();
-                    }
-                    conn.createStatement().execute(
-                        "ALTER TABLE nexus.chash_index FORCE ROW LEVEL SECURITY");
+                    // chash_index dropped at HEAD (RDR-187) -- schema-agnostic mid-ladder
+                    // table/field references, per the ladder-file CAUTION. chash is still
+                    // TEXT at this point in the walk (pre-rdr180 bytea conversion).
+                    Table<?> chashIndex = DSL.table(DSL.name("nexus", "chash_index"));
+                    PgContainerHelper.setForceRls(conn, chashIndex, false);
+                    Field<String> tenantIdF = DSL.field(DSL.name("tenant_id"), String.class);
+                    Field<String> chashF = DSL.field(DSL.name("chash"), String.class);
+                    Field<String> physicalCollectionF = DSL.field(DSL.name("physical_collection"), String.class);
+                    Field<OffsetDateTime> createdAtF = DSL.field(DSL.name("created_at"), OffsetDateTime.class);
+                    dsl(conn).insertInto(chashIndex, tenantIdF, chashF, physicalCollectionF, createdAtF)
+                        // length 11 -- genuinely malformed
+                        .values("c4143-viol-tenant", "shortchash1", "c4143-viol-collection", OffsetDateTime.now())
+                        .execute();
+                    PgContainerHelper.setForceRls(conn, chashIndex, true);
                 }
 
                 // Phase C2: run catalog-013-1 (ADD CONSTRAINT ... NOT VALID) via Liquibase's
@@ -1462,6 +1523,8 @@ class SchemaMigratorIntegrationTest {
             // Phase A: same minimal DBA-equivalent bootstrap as tests 5/6/8/10.
             try (Connection su = agedPg.createConnection("")) {
                 su.setAutoCommit(true);
+                // SANCTIONED RAW: see bootstrap()'s own comment above -- same admin/svc
+                // role bootstrap class, no jOOQ typed-DSL form.
                 su.createStatement().execute(
                     "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
@@ -1535,11 +1598,13 @@ class SchemaMigratorIntegrationTest {
                 final String danglingChash = "b".repeat(64);
                 try (Connection su = agedPg.createConnection("")) {
                     su.setAutoCommit(true);
-                    su.createStatement().execute(
-                        "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-                        + "VALUES ('" + tenant + "', 'o8dil29-doc', 'late upgrade doc', '" + collection + "')");
-                    // Bare (unqualified) ::vector, deliberately NOT ::nexus.vector: this
-                    // INSERT runs at Phase C, mid-walk, BEFORE catalog-029-0 and therefore
+                    dsl(su).insertInto(CATALOG_DOCUMENTS,
+                            CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
+                            CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                        .values(tenant, "o8dil29-doc", "late upgrade doc", collection)
+                        .execute();
+                    // SANCTIONED RAW: bare (unqualified) ::vector, deliberately NOT ::nexus.vector.
+                    // This INSERT runs at Phase C, mid-walk, BEFORE catalog-029-0 and therefore
                     // well before search-path-001 (placed near the end of the changelog)
                     // has relocated the extension -- it is still in `public` at this exact
                     // point, resolvable only via the connecting role's default search_path
@@ -1548,23 +1613,31 @@ class SchemaMigratorIntegrationTest {
                     // reference in this file that runs AFTER a full migrate() call is
                     // correctly qualified as nexus.vector; this one site is the sole
                     // exception, and is exempt from that qualification for exactly this
-                    // reason (nexus-cbo4a batch 9 item 0 discovery).
+                    // reason (nexus-cbo4a batch 9 item 0 discovery). This is why it cannot
+                    // convert onto the generated CHUNKS.EMBEDDING_384 field: VectorBinding
+                    // (dev.nexus.service.jooq.binding.VectorBinding#sql) ALWAYS renders the
+                    // schema-qualified ::nexus.vector cast, which would silently change what
+                    // this exact statement proves (that a bare cast still resolves here).
                     su.createStatement().execute(
                         "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) VALUES "
                         + "('" + tenant + "', '" + collection + "', decode('" + goodChash + "', 'hex'), 'good text', "
                         + "('[" + "0.1,".repeat(383) + "0.1]')::vector)");
-                    su.createStatement().execute(
-                        "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-                        + "VALUES ('" + tenant + "', 'o8dil29-doc', 0, decode('" + goodChash + "', 'hex'), '"
-                        + collection + "')");
+                    dsl(su).insertInto(CATALOG_DOCUMENT_CHUNKS,
+                            CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                            CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                            CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                        .values(tenant, "o8dil29-doc", 0, java.util.HexFormat.of().parseHex(goodChash), collection)
+                        .execute();
                     // The dangling row: no matching nexus.chunks row exists for
                     // danglingChash. Legal to insert here ONLY because the FK does
                     // not exist yet on this pre-catalog-029-0 schema -- exactly the
                     // pre-existing drift this test's remediation step must clean up.
-                    su.createStatement().execute(
-                        "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-                        + "VALUES ('" + tenant + "', 'o8dil29-doc', 1, decode('" + danglingChash + "', 'hex'), '"
-                        + collection + "')");
+                    dsl(su).insertInto(CATALOG_DOCUMENT_CHUNKS,
+                            CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                            CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                            CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                        .values(tenant, "o8dil29-doc", 1, java.util.HexFormat.of().parseHex(danglingChash), collection)
+                        .execute();
                 }
 
                 // Phase D: resume the rest of the migration chain -- catalog-029-0
@@ -1604,14 +1677,12 @@ class SchemaMigratorIntegrationTest {
                             + "(pg_constraint.convalidated=true) after the full walk")
                         .isTrue();
 
-                    assertThat(rows(conn, "SELECT COUNT(*) FROM nexus.catalog_document_chunks "
-                        + "WHERE tenant_id = '" + tenant + "' AND chash = decode('" + danglingChash + "', 'hex')"))
+                    assertThat(catalogDocumentChunksCount(conn, tenant, danglingChash))
                         .as("the dangling row must have been remediated (deleted) by catalog-029-1 "
                             + "before catalog-029-2's VALIDATE ran")
                         .isEqualTo(0);
 
-                    assertThat(rows(conn, "SELECT COUNT(*) FROM nexus.catalog_document_chunks "
-                        + "WHERE tenant_id = '" + tenant + "' AND chash = decode('" + goodChash + "', 'hex')"))
+                    assertThat(catalogDocumentChunksCount(conn, tenant, goodChash))
                         .as("the non-dangling (chunk-backed) manifest row must be untouched by "
                             + "remediation -- the anti-join must not over-delete")
                         .isEqualTo(1);
@@ -1645,6 +1716,8 @@ class SchemaMigratorIntegrationTest {
 
             try (Connection su = agedPg.createConnection("")) {
                 su.setAutoCommit(true);
+                // SANCTIONED RAW: see bootstrap()'s own comment above -- same admin/svc
+                // role bootstrap class, no jOOQ typed-DSL form.
                 su.createStatement().execute(
                     "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
@@ -1676,6 +1749,17 @@ class SchemaMigratorIntegrationTest {
             cfg.setPoolName("nexus-admin-o8dil29-neg-test");
 
             try (var agedDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
+
+                // nexus_test.* schema objects this Phase C's typed DDL helpers
+                // (dropConstraint/addFkNotValid/setForceRls) need -- installed via the
+                // MIGRATING role's own connection (not su): whichever Liquibase run
+                // creates databasechangelog first OWNS it, so installing test objects
+                // as su here would leave databasechangelog superuser-owned and the
+                // migrating role's own product-changelog walk below would then hit
+                // "permission denied for table databasechangelog".
+                try (Connection testObjConn = agedDs.getConnection()) {
+                    PgContainerHelper.installTestObjects(testObjConn);
+                }
 
                 // Migrate through catalog-029-0 INCLUSIVE (idx+1) -- the FK exists,
                 // NOT VALID, but catalog-029-1's remediation has NOT run.
@@ -1710,9 +1794,11 @@ class SchemaMigratorIntegrationTest {
                 final String danglingChash = "c".repeat(64);
                 try (Connection su = agedPg.createConnection("")) {
                     su.setAutoCommit(true);
-                    su.createStatement().execute(
-                        "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-                        + "VALUES ('" + tenant + "', 'o8dil29-neg-doc', 'neg doc', '" + collection + "')");
+                    dsl(su).insertInto(CATALOG_DOCUMENTS,
+                            CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
+                            CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                        .values(tenant, "o8dil29-neg-doc", "neg doc", collection)
+                        .execute();
                     // Legal here: the FK is NOT VALID (added by catalog-029-0
                     // above) but has not yet had its pre-existing rows checked --
                     // NOT VALID only enforces NEW writes going forward, and this
@@ -1722,31 +1808,36 @@ class SchemaMigratorIntegrationTest {
                     // SAME bypass idiom used elsewhere in this suite: drop, insert,
                     // re-add NOT VALID -- reproducing exactly what a genuinely aged
                     // box looks like immediately before its own first VALIDATE.
-                    su.createStatement().execute(
-                        "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
-                    su.createStatement().execute(
-                        "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-                        + "VALUES ('" + tenant + "', 'o8dil29-neg-doc', 0, decode('" + danglingChash + "', 'hex'), '"
-                        + collection + "')");
-                    su.createStatement().execute(
-                        "ALTER TABLE nexus.catalog_document_chunks "
-                        + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                        + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
-                        + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+                    dsl(su).alterTable(CATALOG_DOCUMENT_CHUNKS)
+                        .dropConstraintIfExists("fk_catalog_chunks_chunk")
+                        .execute();
+                    dsl(su).insertInto(CATALOG_DOCUMENT_CHUNKS,
+                            CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                            CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                            CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                        .values(tenant, "o8dil29-neg-doc", 0, java.util.HexFormat.of().parseHex(danglingChash),
+                            collection)
+                        .execute();
+                    PgContainerHelper.addFkNotValidComposite3(su, CATALOG_DOCUMENT_CHUNKS,
+                        "fk_catalog_chunks_chunk", "collection", "chash", CHUNKS, "collection", "chash",
+                        "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
                 }
 
                 // The naive two-step shape: VALIDATE alone, skipping remediation.
                 // Must throw against the dangling row seeded above.
                 try (Connection su = agedPg.createConnection("")) {
                     su.setAutoCommit(true);
-                    assertThatThrownBy(() -> su.createStatement().execute(
-                            "ALTER TABLE nexus.catalog_document_chunks VALIDATE CONSTRAINT fk_catalog_chunks_chunk"))
+                    // A jOOQ Routine call wraps the underlying PSQLException in jOOQ's own
+                    // DataAccessException (same as every other typed-DSL call in this file's
+                    // sibling batch-10/11 conversions).
+                    assertThatThrownBy(() -> PgContainerHelper.validateConstraint(su, CATALOG_DOCUMENT_CHUNKS,
+                            "fk_catalog_chunks_chunk"))
                         .as("VALIDATE CONSTRAINT alone, without catalog-029-1's anti-join remediation, "
                             + "must fail loud against a genuinely dangling row -- this is the naive "
                             + "two-step shape the three-step decision (T2 "
                             + "nexus/rdr-191-validate-placement-decision [22557]) exists to avoid, and "
                             + "the falsification proof that the sibling test's success is not vacuous")
-                        .isInstanceOf(PSQLException.class)
+                        .isInstanceOf(org.jooq.exception.DataAccessException.class)
                         .hasMessageContaining("fk_catalog_chunks_chunk");
                 }
             }
@@ -1807,6 +1898,8 @@ class SchemaMigratorIntegrationTest {
 
             try (Connection su = agedPg.createConnection("")) {
                 su.setAutoCommit(true);
+                // SANCTIONED RAW: see bootstrap()'s own comment above -- same admin/svc
+                // role bootstrap class, no jOOQ typed-DSL form.
                 su.createStatement().execute(
                     "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
@@ -1838,6 +1931,17 @@ class SchemaMigratorIntegrationTest {
             cfg.setPoolName("nexus-admin-o8dil49-neg-test");
 
             try (var agedDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
+
+                // nexus_test.* schema objects this Phase C's typed DDL helpers
+                // (dropConstraint/addFkNotValid/setForceRls) need -- installed via the
+                // MIGRATING role's own connection (not su): whichever Liquibase run
+                // creates databasechangelog first OWNS it, so installing test objects
+                // as su here would leave databasechangelog superuser-owned and the
+                // migrating role's own product-changelog walk below would then hit
+                // "permission denied for table databasechangelog".
+                try (Connection testObjConn = agedDs.getConnection()) {
+                    PgContainerHelper.installTestObjects(testObjConn);
+                }
                 // Full migration first (simplest reliable way to reach a schema with
                 // nexus.chunks + chunks_collection_fk already VALIDATED) -- then
                 // reproduce the violating scenario directly against it, the same
@@ -1850,29 +1954,30 @@ class SchemaMigratorIntegrationTest {
                 final String chash = "d".repeat(64);
                 try (Connection su = agedPg.createConnection("")) {
                     su.setAutoCommit(true);
-                    su.createStatement().execute(
-                        "ALTER TABLE nexus.chunks DROP CONSTRAINT IF EXISTS chunks_collection_fk");
+                    dsl(su).alterTable(CHUNKS).dropConstraintIfExists("chunks_collection_fk").execute();
                     // Legal here: the FK is absent. A genuinely unregistered
                     // collection -- no catalog_collections row for (tenant, name).
-                    su.createStatement().execute(
-                        "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_1024) "
-                        + "VALUES ('" + tenant + "', '" + unregCollection + "', decode('" + chash + "', 'hex'), "
-                        + "'neg text', ('[" + "0.1,".repeat(1023) + "0.1]')::nexus.vector)");
-                    su.createStatement().execute(
-                        "ALTER TABLE nexus.chunks "
-                        + "ADD CONSTRAINT chunks_collection_fk "
-                        + "FOREIGN KEY (tenant_id, collection) REFERENCES nexus.catalog_collections (tenant_id, name) "
-                        + "ON DELETE RESTRICT NOT VALID");
+                    dsl(su).insertInto(CHUNKS,
+                            CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                            CHUNKS.EMBEDDING_1024)
+                        .values(tenant, unregCollection, java.util.HexFormat.of().parseHex(chash), "neg text",
+                            dev.nexus.service.jooq.binding.Vector.parse(
+                                "[" + "0.1,".repeat(1023) + "0.1]"))
+                        .execute();
+                    PgContainerHelper.addFkNotValid(su, CHUNKS, "chunks_collection_fk", "collection",
+                        CATALOG_COLLECTIONS, "name", "ON DELETE RESTRICT");
 
                     // The naive shape: VALIDATE alone, skipping fk-004-1-reconcile's
                     // additive stub-register. Must throw against the unregistered row.
-                    assertThatThrownBy(() -> su.createStatement().execute(
-                            "ALTER TABLE nexus.chunks VALIDATE CONSTRAINT chunks_collection_fk"))
+                    // A jOOQ Routine call wraps the underlying PSQLException in jOOQ's own
+                    // DataAccessException.
+                    assertThatThrownBy(() -> PgContainerHelper.validateConstraint(su, CHUNKS,
+                            "chunks_collection_fk"))
                         .as("VALIDATE CONSTRAINT alone, without fk-004-1-reconcile's additive "
                             + "stub-register, must fail loud against a genuinely unregistered "
                             + "collection -- proves the VALIDATE changeset actually enforces the "
                             + "invariant rather than trivially passing (nexus-o8dil.49)")
-                        .isInstanceOf(PSQLException.class)
+                        .isInstanceOf(org.jooq.exception.DataAccessException.class)
                         .hasMessageContaining("chunks_collection_fk");
                 }
             }
@@ -1916,10 +2021,27 @@ class SchemaMigratorIntegrationTest {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private int rows(Connection conn, String sql) throws Exception {
-        ResultSet rs = conn.createStatement().executeQuery(sql);
-        rs.next();
-        return rs.getInt(1);
+    private static DSLContext dsl(Connection c) {
+        return DSL.using(c, SQLDialect.POSTGRES);
+    }
+
+    /** Liquibase's own bookkeeping table -- not jOOQ-generated (outside the nexus/t1
+     * application schemas codegen covers), so every reference is the schema-agnostic
+     * typed form: {@code DSL.table(DSL.name(...))} / {@code DSL.field(DSL.name(...), Class)}. */
+    private static Table<?> databaseChangeLog() {
+        return DSL.table(DSL.name("databasechangelog"));
+    }
+
+    private static long changelogRowCount(Connection c) throws Exception {
+        return dsl(c).selectCount().from(databaseChangeLog()).fetchOne(0, long.class);
+    }
+
+    private int catalogDocumentChunksCount(Connection conn, String tenant, String hexChash) {
+        return dsl(conn).selectCount()
+            .from(CATALOG_DOCUMENT_CHUNKS)
+            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant))
+            .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(hexChash)))
+            .fetchOne(0, int.class);
     }
 
     private Set<String> tablesInSchema(Connection conn, String schema) throws Exception {
@@ -1954,13 +2076,13 @@ class SchemaMigratorIntegrationTest {
      */
     private String changesetExecType(Connection conn, String id, String author, String filename)
             throws Exception {
-        try (var ps = conn.prepareStatement(
-                "SELECT exectype FROM databasechangelog WHERE id = ? AND author = ? AND filename = ?")) {
-            ps.setString(1, id);
-            ps.setString(2, author);
-            ps.setString(3, filename);
-            ResultSet rs = ps.executeQuery();
-            return rs.next() ? rs.getString("exectype") : null;
-        }
+        Field<String> exectype = DSL.field(DSL.name("exectype"), String.class);
+        Field<String> idField = DSL.field(DSL.name("id"), String.class);
+        Field<String> authorField = DSL.field(DSL.name("author"), String.class);
+        Field<String> filenameField = DSL.field(DSL.name("filename"), String.class);
+        return dsl(conn).select(exectype)
+            .from(databaseChangeLog())
+            .where(idField.eq(id)).and(authorField.eq(author)).and(filenameField.eq(filename))
+            .fetchOne(exectype);
     }
 }

@@ -12,7 +12,8 @@ nexus-70r3c.13):
 
 - ``collection_rename.py``'s ``rename_collection_data_plane`` -- refusing a
   rename of a tombstoned ``old`` with "not found" hides the real remedy
-  ("restore the trashed documents first"); and treating a tombstoned ``new``
+  (``nx catalog restore`` the trashed document(s) first, nexus-dkymw); and
+  treating a tombstoned ``new``
   as free-to-claim would let a plain rename (no ``cross_model`` escape
   valve) silently land live data on top of dead rows under one name.
 - ``commands/catalog_cmds/collections.py``'s ``rename_collection_cmd`` --

@@ -133,6 +133,79 @@ class TestManifestChashesCountReconciled:
         assert c.chashes_for_collection("code__x__stub-code-1024__v1") == set()
 
 
+# ── 3a2. manifest/chashes: tombstone_protected_count key-present/absent ──────
+
+
+class TestManifestChashesTombstoneProtectedCount:
+    """nexus-zewg3 client half: ``chashes_for_collection_with_tombstone_protected``
+    shares :meth:`_manifest_chashes_reconciled` with the sibling
+    ``chashes_for_collection`` (same reconciliation contract, see
+    ``TestManifestChashesCountReconciled`` above) but ALSO parses the
+    additive, opt-in ``tombstone_protected_count`` field through the real
+    ``_get()`` boundary — no test anywhere in the diff or the pre-existing
+    suite invoked that parsing directly before this class (code review T2
+    nexus/code-review-nexus-zewg3-engine-side, Important finding)."""
+
+    def _client_with(self, monkeypatch: pytest.MonkeyPatch, response: Any):
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+        c = object.__new__(HttpCatalogClient)
+        monkeypatch.setattr(
+            c, "_get", lambda path, **params: response, raising=False,
+        )
+        return c
+
+    def test_field_present_returns_int(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        c = self._client_with(
+            monkeypatch,
+            {"chashes": ["a" * 64], "count": 1, "tombstone_protected_count": 3},
+        )
+        chashes, tombstone_protected = c.chashes_for_collection_with_tombstone_protected(
+            "code__x__stub-code-1024__v1",
+        )
+        assert chashes == {"a" * 64}
+        assert tombstone_protected == 3
+
+    def test_field_absent_returns_none_never_zero(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An engine that predates nexus-zewg3, or a caller that omitted
+        ``with_tombstone_protected`` (the field is opt-in), must read as
+        UNKNOWN, never as a confident zero (the nexus-znwc2 doctrine)."""
+        c = self._client_with(
+            monkeypatch, {"chashes": ["a" * 64], "count": 1},
+        )
+        chashes, tombstone_protected = c.chashes_for_collection_with_tombstone_protected(
+            "code__x__stub-code-1024__v1",
+        )
+        assert chashes == {"a" * 64}
+        assert tombstone_protected is None
+
+    def test_missing_count_raises_even_with_tombstone_field_present(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The count-reconciliation guard is shared with the sibling method
+        by construction (both delegate to ``_manifest_chashes_reconciled``)
+        — a present ``tombstone_protected_count`` must not paper over a
+        missing ``count``."""
+        c = self._client_with(
+            monkeypatch,
+            {"chashes": ["a" * 64], "tombstone_protected_count": 0},
+        )
+        with pytest.raises(RuntimeError, match="count"):
+            c.chashes_for_collection_with_tombstone_protected("code__x__stub-code-1024__v1")
+
+    def test_truncated_list_raises_even_with_tombstone_field_present(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        c = self._client_with(
+            monkeypatch,
+            {"chashes": ["a" * 64], "count": 2, "tombstone_protected_count": 0},
+        )
+        with pytest.raises(RuntimeError, match="chashes"):
+            c.chashes_for_collection_with_tombstone_protected("code__x__stub-code-1024__v1")
+
+
 # ── 3b. manifest/docs_for_chashes: count reconciled + paged (nexus-ocf52) ────
 
 

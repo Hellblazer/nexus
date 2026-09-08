@@ -7,8 +7,13 @@
 #
 # usage: scripts/mvnw-leased.sh [mvnw args...]
 #
-# Exits 75 (EX_TEMPFAIL) without running mvnw at all if another live process
-# already holds the lease — the refusal message names that holder.
+# A live holder is WAITED FOR (nexus-g6xpa): the lease is shared by every
+# worktree of this repo (see scripts/lib/build-lease.sh § LEASE LOCATION),
+# so a second engine build or suite on this box queues behind the first
+# instead of running beside it. NX_BUILD_LEASE_WAIT=<seconds> bounds the
+# wait (default 3600); 0 restores the old refuse-immediately behaviour.
+# Exits 75 (EX_TEMPFAIL) without running mvnw at all only once that bound
+# is exhausted — the refusal message names the holder.
 #
 # SIGNAL HANDLING (review finding round 3, nexus-c00dw). A plain
 # `trap '...release...' EXIT` is UNSAFE here. Under `set -m` the
@@ -45,7 +50,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=./lib/build-lease.sh disable=SC1091
 source "$repo_root/scripts/lib/build-lease.sh"
 
-build_lease_acquire service ./mvnw "$@"
+build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" ./mvnw "$@"
 
 # Initialized before any trap is installed, so a trap can always reference
 # it safely under `set -u` even if a signal lands in the brief window

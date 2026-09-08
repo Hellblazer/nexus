@@ -150,7 +150,8 @@ class CatalogRepositoryTest {
             PgContainerHelper.applyProductSchema(su);
         }
 
-        // Phase 3: bootstrap the test-local svc role (create + grant + search_path).
+        // Phase 3: bootstrap the test-local svc role (create + grant; no search_path is
+        // set -- every reference is schema-qualified, nexus-cbo4a batch 9).
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
         }

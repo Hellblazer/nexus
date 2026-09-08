@@ -201,7 +201,7 @@ mcp__plugin_conexus_nexus__nx_plan_audit(
 )
 ```
 
-**Count the rounds. The tool cannot.** It is one stateless subprocess
+**Count the rounds. The tool cannot.** (The cap is `review-rounds.toml`'s, contract `plan-audit`.) It is one stateless subprocess
 call with no memory between invocations, so `round_number` is yours to
 track. Leaving it at 1 forever reproduces the unterminated audit loop
 this parameter exists to break (nexus-ll7zm). A revision produced by an

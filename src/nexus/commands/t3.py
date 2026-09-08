@@ -161,7 +161,7 @@ def _make_catalog():
     cat = make_catalog_reader()
     if cat is None:
         raise click.ClickException(
-            "Catalog not initialized. Run 'nx catalog setup' before 'nx t3 gc'."
+            "Catalog is empty. Index or store documents before 'nx t3 gc' (nx index repo / nx store put)."
         )
     return cat
 
@@ -327,6 +327,32 @@ def gc_cmd(
     event emission for audit trail.
 
     \b
+    TOMBSTONE PROTECTION (nexus-dkymw, Sam's second 2026-09-07 ruling,
+    superseding nexus-mqd6t's original immediate-exclusion filter): the
+    "referenced by any manifest entry" set above is read from the
+    catalog's ``chashesForCollection`` alive-set, which now includes a
+    tombstoned-but-not-yet-purged document's chashes, not just live
+    documents'. Deleting a document with ``nx catalog delete`` does NOT
+    make its chunks orphan-eligible here — only ``nx catalog purge-trash``
+    physically reclaiming the row does. This keeps ``nx catalog restore``
+    honest: without it, this command's own ``--orphan-window`` clock
+    (independent of purge-trash's ``--older-than-days``) could reap a
+    just-tombstoned document's chunks inside the restore window, and
+    restore would resurrect an empty shell.
+
+    \b
+    Every run (dry-run and ``--no-dry-run --yes`` alike, nexus-zewg3)
+    reports "Protected by pending tombstones: N chunk(s)" — the count of
+    chunks in ``--collection`` kept alive ONLY by a tombstone, distinct
+    from chunks a live document still references. The engine computes
+    this count itself (``CatalogRepository.tombstoneProtectedChunkCount``,
+    the same anti-join ``nexus.purge_trash``'s own chunk sweep uses); an
+    engine that predates the field reports the line as unavailable rather
+    than a confident zero. This is a distinct signal from the note-shaped
+    and RUNFENCE protections below: only ``nx catalog purge-trash``
+    reclaims this class, never another ``nx t3 gc`` run.
+
+    \b
     Per RF-101-3, ``nx t3 gc`` is the SOLE emitter of ``ChunkOrphaned``
     events. The strict order on each candidate is:
 
@@ -391,7 +417,27 @@ def gc_cmd(
         # orphan when its content hash is not referenced by any
         # manifest row for this collection's documents. Same SQL the
         # indexer's _prune_deleted_files uses.
-        referenced = cat.chashes_for_collection(collection)
+        #
+        # nexus-dkymw (Sam's second 2026-09-07 ruling, superseding
+        # nexus-mqd6t's original DELETED_AT.isNull() filter for this one
+        # read): "referenced" here includes a tombstoned-but-not-yet-
+        # purged document's chashes, not just live documents' -- the
+        # alive-set protects them until nx catalog purge-trash physically
+        # reclaims the row, so this --orphan-window clock cannot reap a
+        # just-tombstoned document's chunks inside nx catalog restore's
+        # recovery window.
+        #
+        # nexus-zewg3: of `referenced`, how many chashes are held alive
+        # ONLY by a pending tombstone (never by a live document) -- the
+        # engine computes this with the SAME anti-join
+        # nexus.purge_trash's own chunk sweep uses
+        # (CatalogRepository.tombstoneProtectedChunkCount), in the SAME
+        # round trip as `referenced` itself. `None` means an engine older
+        # than the one that shipped this field -- see the report line
+        # below, which never prints a confident 0 for that case.
+        referenced, tombstone_protected_count = (
+            cat.chashes_for_collection_with_tombstone_protected(collection)
+        )
     except Exception as exc:  # noqa: BLE001 — boundary catch; logged then re-raised as a domain error
         click.echo(f"Failed to read catalog manifest: {exc}")
         raise click.exceptions.Exit(1)
@@ -505,6 +551,24 @@ def gc_cmd(
     if skipped_within_window:
         click.echo(
             f"  skipped {skipped_within_window} chunk(s) inside the orphan window"
+        )
+
+    # nexus-zewg3: always printed, dry-run and --no-dry-run --yes alike --
+    # a chash referenced ONLY by a pending tombstone is in `referenced`
+    # exactly like a live-referenced one (nexus-dkymw dropped that
+    # distinction from chashes_for_collection), so t3 gc will never
+    # reclaim it on its own no matter how many times it runs; only
+    # nx catalog purge-trash does, once the tombstone ages past its own
+    # --older-than-days window. An engine that cannot answer the question
+    # (tombstone_protected_count is None) says so honestly instead of
+    # printing a confident zero.
+    if tombstone_protected_count is None:
+        click.echo("  Protected by pending tombstones: unavailable on this engine")
+    else:
+        click.echo(
+            f"  Protected by pending tombstones: {tombstone_protected_count} "
+            f"chunk(s) (reclaimed by 'nx catalog purge-trash' once past its "
+            f"--older-than-days window, never by t3 gc)"
         )
 
     for chunk_id, chash in candidates:
@@ -636,6 +700,11 @@ def gc_cmd(
                     "chunk_ids_truncated": max(
                         len(pending_chunk_ids) - _GC_AUDIT_ID_SAMPLE, 0,
                     ),
+                    # nexus-zewg3: how many OTHER chunks in this collection
+                    # (not part of this run's deletes) are held alive only
+                    # by a pending tombstone, not by any live document.
+                    # None (never 0) when the engine could not answer.
+                    "tombstone_protected": tombstone_protected_count,
                 },
             )
         except Exception as exc:  # noqa: BLE001 — the delete already happened; surface the missing audit row loudly, never a traceback
@@ -653,6 +722,7 @@ def gc_cmd(
             requested=len(pending_chunk_ids),
             chunk_ids_sample=pending_chunk_ids[:_GC_AUDIT_ID_SAMPLE],
             chunk_ids_truncated=max(len(pending_chunk_ids) - _GC_AUDIT_ID_SAMPLE, 0),
+            tombstone_protected=tombstone_protected_count,
             gc_audit_id=audit_id,
             gc_audit_error=audit_error,
         )

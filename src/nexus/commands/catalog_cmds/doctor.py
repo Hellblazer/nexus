@@ -277,7 +277,8 @@ def _run_collections_drift() -> dict:
       - ABSENT -> ``projection_not_in_t3`` (the supersede recipe remains
         correct there — the data really is gone).
       - TOMBSTONED -> ``projection_tombstoned`` (never the supersede
-        recipe; see nexus-xavu7 for the current lack of a restore path).
+        recipe; the remedy is ``nx catalog restore``, nexus-dkymw — the
+        verb nexus-xavu7 found missing).
         Superseding a tombstoned name would set ``superseded_by`` and
         permanently exclude it from name resolution before the operator
         gets a chance to restore, turning a reversible trash into an
@@ -416,23 +417,20 @@ def _print_collections_drift_text(report: dict) -> None:
         # may revive it) -- so superseding here turns a reversible trash
         # into an unreachable orphan.
         #
-        # nexus-xavu7: there is currently NO CLI/MCP/REST verb that
-        # restores a trashed document -- document_restore is a PG
-        # function (catalog-003-soft-delete.xml) with zero operator-
-        # facing callers anywhere in the codebase. Do not dangle a verb
-        # that doesn't exist; say so plainly instead.
+        # nexus-dkymw: nexus-xavu7's gap is closed -- document_restore
+        # (catalog-003-soft-delete.xml) now has an operator-facing caller,
+        # `nx catalog restore`. Point at it instead of a hand-written SQL
+        # UPDATE.
         click.echo(
             "  Remediate: do NOT supersede this name -- every chunk here "
             "belongs to a soft-deleted (trashed) document, not to real "
-            "data loss. There is currently no CLI/MCP/REST verb to "
-            "restore a trashed document (nexus-xavu7); until one exists, "
-            "recovery means a direct SQL UPDATE against "
-            "catalog_documents.deleted_at, scoped to the correct "
-            "tenant_id -- do not run that without an explicit WHERE "
-            "tenant_id = <this tenant> AND collection = <this name> "
-            "scope, and only with production DB access. Once restored, "
-            "the chunks reappear in the live T3 view and this "
-            "collection drops out of this report on its own."
+            "data loss. Run `nx catalog trash` to list the tombstoned "
+            "document(s) in this collection, then `nx catalog restore "
+            "<tumbler>` for each one you want back. Once restored, the "
+            "chunks reappear in the live T3 view and this collection "
+            "drops out of this report on its own. Past the "
+            "`nx catalog purge-trash` grace window, restore is no longer "
+            "possible and recovery means re-indexing the source."
         )
     if report["projection_not_in_t3"]:
         click.echo(

@@ -960,14 +960,20 @@ def _enrich_apply(
 # ``TestLiveMeasurement`` -- one real dispatch of the SAME
 # ``_SCHOLARLY_PAPER_PROMPT`` template production uses, filled with a
 # ~1000-word synthetic paper, through ``claude_dispatch`` with NO
-# ``--model`` override (matching production: ``_run_claude_isolated``'s
-# default argv never passes ``--model`` either, so both this measurement
-# and production run whatever the ambient CLI default model is).
+# ``--model`` override, which matched production at the time.
 # Result: cost_usd=1.179986, canonical model=claude-fable-5,
-# output_tokens=1087, duration_ms=13444. Re-run that test (``-m
-# integration -k LiveMeasurement -s``) to refresh this figure if the
-# ambient default model or its pricing changes.
-_PER_PAPER_COST_USD = 1.18
+# output_tokens=1087, duration_ms=13444.
+#
+# Since nexus-oc98c production passes the config's model_version as
+# ``--model`` (haiku for scholarly-paper-v1) and logs each extraction's
+# actual cost and model (``aspect_extractor_usage``), so that 1.18 figure
+# is from the wrong model. Re-measured 2026-09-07 on haiku through the
+# production prompt over three real papers reassembled from T3 (100, 133
+# and 216 chunks; 54k, 62k and 109k prompt tokens): $0.131, $0.159 and
+# $0.306. The constant is their mean; the per-document actual is the log
+# line, and this is refreshed by re-running ``-m integration -k
+# LiveMeasurement -s`` when the model or its pricing changes.
+_PER_PAPER_COST_USD = 0.20
 
 # Default per the RDR's original Phase 2 spec. The P1.3 spike's
 # 16.7% strict-equality "stability" rate measures whether the model
@@ -1154,12 +1160,13 @@ def enrich_aspects(
         cost_str = "Estimated cost: $0 (deterministic parser, no API calls)"
     else:
         cost_estimate = len(entries) * _PER_PAPER_COST_USD
-        # RDR-196 .p0b (nexus-nyry9.6): "at Haiku rates" was FALSE -- the
-        # extractor never passes --model, so it runs the CLI's ambient
-        # default model, not Haiku. Name the real basis instead: a single
-        # measured sample dispatch (see _PER_PAPER_COST_USD's docstring),
-        # not a live-metered per-run figure.
-        cost_str = f"Estimated cost: ~${cost_estimate:.2f} (single-sample measured estimate, default model)"
+        # A per-paper mean from measured dispatches on the config's model
+        # (see _PER_PAPER_COST_USD), not a live-metered per-run figure;
+        # the per-document actual lands in the aspect_extractor_usage log.
+        cost_str = (
+            f"Estimated cost: ~${cost_estimate:.2f} "
+            f"(mean of measured {config.model_version} dispatches)"
+        )
     click.echo(
         f"{len(entries)} document(s) in '{collection}' "
         f"(extractor={config.extractor_name}, "
@@ -1185,6 +1192,28 @@ def enrich_aspects(
             sample_pct=validate_sample,
             validation_out=validation_out,
         )
+
+
+def _no_catalog_rows_message(collection: str, orphan_rows: int | None = None) -> str:
+    """The refusal both aspect verbs raise when the catalog holds no rows
+    for *collection* (nexus-ngpx0, nexus-3ygp3). Three causes share this
+    symptom: a bare subject name where the catalog keys on the physical
+    four-segment name, a collection never indexed, or one whose rows were
+    all tombstoned. The remedy line covers the first, which is the one
+    measured; the other two are visible from ``nx collection list`` and
+    ``nx catalog stats``.
+    """
+    msg = (
+        f"No catalog rows in '{collection}'. Pass the physical collection "
+        "name as `nx collection list` prints it; a collection that is "
+        "genuinely empty has nothing to audit or extract."
+    )
+    if orphan_rows:
+        msg += (
+            f" {orphan_rows} aspect row(s) exist under that exact name and "
+            "match no catalog entry."
+        )
+    return msg
 
 
 def _aspect_identity(entry) -> str:
@@ -1226,9 +1255,18 @@ def _select_entries(
     # nexus-kmo9h: factory delegation — None ⇔ sqlite opt-out + uninitialised.
     cat = make_catalog_reader()
     if cat is None:
-        click.echo("Catalog not initialized — run 'nx catalog setup' first.")
+        click.echo("Catalog is empty — index or store documents first (nx index repo / nx store put).")
         return None
     entries = cat.list_by_collection(collection)
+    # nexus-3ygp3: zero catalog rows is a refusal, never "No documents to
+    # process" at exit 0 (a bare name select_config prefix-matched but the
+    # catalog does not know read as a completed, zero-cost extraction).
+    # The refusal is raised after the aspect-side read below so it can
+    # name the rows that exist under this name with no entry to claim
+    # them, as the --missing audit does; --all takes no such read and
+    # refuses without the count.
+    orphan_rows: int | None = None
+    raw_empty = not entries
 
     if re_extract or not extract_all:
         # ONE T2 open serves both filters. nexus-ym9ey originally added a
@@ -1248,6 +1286,9 @@ def _select_entries(
                     config_extractor_name, extractor_version,
                 )
             } if re_extract else set()
+        orphan_rows = len(existing_paths)
+        if not entries:
+            raise click.ClickException(_no_catalog_rows_message(collection, orphan_rows))
 
         if re_extract:
             # "Ensure every entry is at >= version": rows below the threshold,
@@ -1280,6 +1321,8 @@ def _select_entries(
                     f"--extractor-version X to refresh only outdated rows."
                 )
 
+    if raw_empty:
+        raise click.ClickException(_no_catalog_rows_message(collection, orphan_rows))
     return entries
 
 
@@ -1425,7 +1468,7 @@ def _dry_run_predict_skips(
         actual_cost = (len(entries) - skipped) * _PER_PAPER_COST_USD
         click.echo(
             f"  Predicted actual cost (excluding skips): ~${actual_cost:.2f} "
-            f"(single-sample measured estimate, default model)"
+            "(mean of measured dispatches on the configured model)"
         )
 
 
@@ -2147,7 +2190,7 @@ def _resolve_catalog_entry(tumbler_or_title: str):
     cat = make_catalog_reader()
     if cat is None:
         raise click.ClickException(
-            "Catalog not initialized. Run 'nx catalog setup' first."
+            "Catalog is empty. Index or store documents first (nx index repo / nx store put)."
         )
     t, err = resolve_tumbler(cat, tumbler_or_title)
     if err:
@@ -2339,7 +2382,7 @@ def aspects_list_cmd(
         cat = make_catalog_reader()
         if cat is None:
             raise click.ClickException(
-                "Catalog not initialized. Run 'nx catalog setup' first."
+                "Catalog is empty. Index or store documents first (nx index repo / nx store put)."
             )
         entries = cat.list_by_collection(collection)
         with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
@@ -2348,6 +2391,14 @@ def aspects_list_cmd(
                     collection,
                 )
             }
+        if not entries:
+            # Zero catalog rows means zero gaps by construction, and
+            # "no missing aspects" for that is the vacuous pass the gate
+            # doctrine bans (measured 2026-09-07: a bare subject name
+            # reported full coverage while 54 of 58 rows had no aspect
+            # record). Refuse, and still say what the aspect side holds,
+            # since every one of those rows is an orphan of this name.
+            raise click.ClickException(_no_catalog_rows_message(collection, len(existing)))
         # THE SAME KEY THE GAP-FILL USES (nexus-bocft). This read
         # `e.file_path and e.file_path not in existing`, which is not a gap
         # test -- it is a gap test over the subset of entries that happen to
