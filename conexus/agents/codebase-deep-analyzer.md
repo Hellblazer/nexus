@@ -71,7 +71,7 @@ The only valid skip is structural inapplicability (a tier physically cannot have
 **Findings not stored are findings lost.** Before returning your result, persist what downstream consumers would benefit from. Pick the tier(s) that match the audience:
 
 - **Sibling agents downstream THIS session** (T1, narrowest scope, cheapest write) → `mcp__plugin_conexus_nexus__scratch(action="put", content=..., tags="<topic>")`. The next sibling the caller dispatches finds your work via `scratch search` and skips re-derivation.
-- **Permanent cross-project knowledge** (T3, future sessions everywhere) → `mcp__plugin_conexus_nexus__store_put(content=..., collection="knowledge", title=..., tags=..., agent="codebase-deep-analyzer")`. The `agent` kwarg mirrors `memory_put`'s attribution (nexus-4ftd7) — an unmarked write collapses onto the shared `"mcp"` fallback and defeats `_flag_contradictions`'s agent-diversity precondition. AUTO-LINKS via T1 scratch tag `link-context` — seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
+- **Permanent cross-project knowledge** (T3, future sessions everywhere) → `mcp__plugin_conexus_nexus__store_put(content=..., collection="<subject>", title=..., tags=..., agent="codebase-deep-analyzer")`. The `agent` kwarg mirrors `memory_put`'s attribution (nexus-4ftd7) — an unmarked write collapses onto the shared `"mcp"` fallback and defeats `_flag_contradictions`'s agent-diversity precondition. AUTO-LINKS via T1 scratch tag `link-context` — seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
 - **Project-scoped decisions / findings** (T2, future sessions this project) → `mcp__plugin_conexus_nexus__memory_put(content=..., project="<repo>", title=..., agent="codebase-deep-analyzer", ttl=30)`. The `agent` kwarg attributes this write to the codebase-deep-analyzer role so `nx tier-status` slices by agent (nexus-9clx).
 
 **Don't dismiss insights as "low-signal noise" because the surrounding work was structural.** If you noticed a bug, a race, a perf gap, an architectural observation, or a non-obvious cross-module connection while doing your primary task, that IS a finding worth persisting — for sibling agents this session (T1), or future sessions in this project (T2) or any project (T3). Bug-discoveries-in-passing are exactly the class of finding downstream work benefits from.
@@ -156,7 +156,7 @@ Thought 8: Synthesize findings into a coherent architectural picture
 Set `needsMoreThoughts: true` to continue, use `branchFromThought`/`branchId` to explore separate concerns in parallel.
 
 4. **Nexus Knowledge Management**: Use store_put and search tools as documentation repository and coordination hub:
-   - Store findings: mcp__plugin_conexus_nexus__store_put(content="content", collection="knowledge", title="ID", tags="category"
+   - Store findings: mcp__plugin_conexus_nexus__store_put(content="content", collection="<subject>", title="ID", tags="category"
    - Query findings: mcp__plugin_conexus_nexus__search(query="query", corpus="knowledge", limit=5
    - Document relationships between components
    - Track analysis progress and coverage gaps
@@ -223,7 +223,7 @@ You MUST persist your analysis findings BEFORE returning — **unless the dispat
 ```
 mcp__plugin_conexus_nexus__store_put(
     content="# Codebase Analysis: {topic}\n\n{findings}",
-    collection="knowledge",
+    collection="<subject>",
     title="analysis-codebase-{topic}-{date}",
     tags="analysis,codebase-deep-analyzer,{domain}"
 )
@@ -250,10 +250,10 @@ When your analysis reveals work that needs to be planned (e.g., refactoring, new
 This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
-- **Architecture Maps**: mcp__plugin_conexus_nexus__store_put(content="...", collection="knowledge", title="architecture-{scope}-{date}", tags="architecture"
+- **Architecture Maps**: mcp__plugin_conexus_nexus__store_put(content="...", collection="<subject>", title="architecture-{scope}-{date}", tags="architecture"
 - **Dependency Analysis**: Include in response
 - **Technical Debt**: Create chore beads for significant debt
-- **Pattern Catalog**: mcp__plugin_conexus_nexus__store_put(content="...", collection="knowledge", title="pattern-codebase-{name}", tags="pattern"
+- **Pattern Catalog**: mcp__plugin_conexus_nexus__store_put(content="...", collection="<subject>", title="pattern-codebase-{name}", tags="pattern"
 - **Catalog Links** (if catalog tools available): After storing architecture maps or pattern catalogs:
   1. `mcp__plugin_conexus_nexus-catalog__search(query="{scope} architecture", content_type="knowledge")` — find related prior analyses
   2. For related architecture maps on interconnected modules: `mcp__plugin_conexus_nexus-catalog__link(from_tumbler="{this-map-title}", to_tumbler="{related-map-title}", link_type="relates", created_by="codebase-deep-analyzer")`

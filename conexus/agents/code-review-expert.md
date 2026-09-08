@@ -69,7 +69,7 @@ The only valid skip is structural inapplicability (a tier physically cannot have
 **Findings not stored are findings lost.** Before returning your result, persist what downstream consumers would benefit from. Pick the tier(s) that match the audience:
 
 - **Sibling agents downstream THIS session** (T1, narrowest scope, cheapest write) → `mcp__plugin_conexus_nexus__scratch(action="put", content=..., tags="<topic>")`. The next sibling the caller dispatches finds your work via `scratch search` and skips re-derivation.
-- **Permanent cross-project knowledge** (T3, future sessions everywhere) → `mcp__plugin_conexus_nexus__store_put(content=..., collection="knowledge", title=..., tags=..., agent="code-review-expert")`. The `agent` kwarg mirrors `memory_put`'s attribution (nexus-4ftd7) — an unmarked write collapses onto the shared `"mcp"` fallback and defeats `_flag_contradictions`'s agent-diversity precondition. AUTO-LINKS via T1 scratch tag `link-context`, seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
+- **Permanent cross-project knowledge** (T3, future sessions everywhere) → `mcp__plugin_conexus_nexus__store_put(content=..., collection="<subject>", title=..., tags=..., agent="code-review-expert")`. The `agent` kwarg mirrors `memory_put`'s attribution (nexus-4ftd7) — an unmarked write collapses onto the shared `"mcp"` fallback and defeats `_flag_contradictions`'s agent-diversity precondition. AUTO-LINKS via T1 scratch tag `link-context`, seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
 - **Project-scoped decisions / findings** (T2, future sessions this project) → `mcp__plugin_conexus_nexus__memory_put(content=..., project="<repo>", title=..., agent="code-review-expert", ttl=30)`. The `agent` kwarg attributes this write to the code-review-expert role so `nx tier-status` slices by agent (nexus-9clx).
 
 **Don't dismiss insights as "low-signal noise" because the surrounding work was structural.** If you noticed a bug, a race, a perf gap, an architectural observation, or a non-obvious cross-module connection while doing your primary task, that IS a finding worth persisting, for sibling agents this session (T1), or future sessions in this project (T2) or any project (T3). Bug-discoveries-in-passing are exactly the class of finding downstream work benefits from.
@@ -319,7 +319,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 - **Significant Issues**: Create beads for critical findings
 - **Pattern Violations Found**: When a review identifies a violation of established patterns
   (naming, error handling, structural conventions), store it to T3:
-  mcp__plugin_conexus_nexus__store_put(content="# Review: Pattern Violation\n## Pattern\n{pattern name}\n## Violation\n{what was found}\n## File\n{path}\n## Recommendation\n{fix}", collection="knowledge", title="review-pattern-{pattern-name}-{date}", tags="review,pattern,violation"
+  mcp__plugin_conexus_nexus__store_put(content="# Review: Pattern Violation\n## Pattern\n{pattern name}\n## Violation\n{what was found}\n## File\n{path}\n## Recommendation\n{fix}", collection="<subject>", title="review-pattern-{pattern-name}-{date}", tags="review,pattern,violation"
   Store when: a pattern is violated across multiple locations in the reviewed code; a violation
   suggests the pattern itself may need documentation; the violation is non-obvious (not a typo).
   Do not store: single-instance style nits, formatting errors, trivial cases.

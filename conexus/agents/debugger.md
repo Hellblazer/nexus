@@ -71,7 +71,7 @@ The only valid skip is structural inapplicability (a tier physically cannot have
 **Findings not stored are findings lost.** Before returning your result, persist what downstream consumers would benefit from. Pick the tier(s) that match the audience:
 
 - **Sibling agents downstream THIS session** (T1, narrowest scope, cheapest write) → `mcp__plugin_conexus_nexus__scratch(action="put", content=..., tags="<topic>")`. The next sibling the caller dispatches finds your work via `scratch search` and skips re-derivation.
-- **Permanent cross-project knowledge** (T3, future sessions everywhere) → `mcp__plugin_conexus_nexus__store_put(content=..., collection="knowledge", title=..., tags=..., agent="debugger")`. The `agent` kwarg mirrors `memory_put`'s attribution (nexus-4ftd7) — an unmarked write collapses onto the shared `"mcp"` fallback and defeats `_flag_contradictions`'s agent-diversity precondition. AUTO-LINKS via T1 scratch tag `link-context`, seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
+- **Permanent cross-project knowledge** (T3, future sessions everywhere) → `mcp__plugin_conexus_nexus__store_put(content=..., collection="<subject>", title=..., tags=..., agent="debugger")`. The `agent` kwarg mirrors `memory_put`'s attribution (nexus-4ftd7) — an unmarked write collapses onto the shared `"mcp"` fallback and defeats `_flag_contradictions`'s agent-diversity precondition. AUTO-LINKS via T1 scratch tag `link-context`, seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
 - **Project-scoped decisions / findings** (T2, future sessions this project) → `mcp__plugin_conexus_nexus__memory_put(content=..., project="<repo>", title=..., agent="debugger", ttl=30)`. The `agent` kwarg attributes this write to the debugger role so `nx tier-status` slices by agent (nexus-9clx).
 
 **Don't dismiss insights as "low-signal noise" because the surrounding work was structural.** If you noticed a bug, a race, a perf gap, an architectural observation, or a non-obvious cross-module connection while doing your primary task, that IS a finding worth persisting, for sibling agents this session (T1), or future sessions in this project (T2) or any project (T3). Bug-discoveries-in-passing are exactly the class of finding downstream work benefits from.
@@ -172,7 +172,7 @@ Set `needsMoreThoughts: true` to continue, use `branchFromThought`/`branchId` to
 - **Memory Analysis**: Use memory_put/memory_get tools as persistent scratch pad for organizing findings
 
 **Documentation Strategy:**
-- Store all hypotheses, test results, and discoveries in Nexus knowledge store: mcp__plugin_conexus_nexus__store_put(content="...", collection="knowledge", title="debug-finding-{issue}", tags="debug"
+- Store all hypotheses, test results, and discoveries in Nexus knowledge store: mcp__plugin_conexus_nexus__store_put(content="...", collection="<subject>", title="debug-finding-{issue}", tags="debug"
 - Maintain a debugging journal: mcp__plugin_conexus_nexus__memory_put(content="content", project="{project}", title="debug-journal.md"
 - Create knowledge graphs linking symptoms to potential causes
 - Document patterns and anti-patterns discovered during investigation
@@ -217,7 +217,7 @@ You MUST persist your debugging findings BEFORE returning, **unless the dispatch
 ```
 mcp__plugin_conexus_nexus__store_put(
     content="# Debug: {issue}\n\n{findings}",
-    collection="knowledge",
+    collection="<subject>",
     title="debug-{issue}-{date}",
     tags="debug,debugger,{domain}"
 )
@@ -245,11 +245,11 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
 - **Root Cause Analysis**: After confirming root cause, store with structured sections:
-  mcp__plugin_conexus_nexus__store_put(content="# Debug: {symptom}\n## Root Cause\n{finding}\n## Evidence\n{key evidence}\n## Fix\n{fix applied}", collection="knowledge", title="debug-finding-{component}-{symptom}", tags="debug,rootcause"
+  mcp__plugin_conexus_nexus__store_put(content="# Debug: {symptom}\n## Root Cause\n{finding}\n## Evidence\n{key evidence}\n## Fix\n{fix applied}", collection="<subject>", title="debug-finding-{component}-{symptom}", tags="debug,rootcause"
   The structured sections make retrieved findings immediately actionable without further parsing.
 - **Hypothesis Trail**: Document in bead notes
 - **Fix Recommendations**: Include in output as "Recommended Next Step" for caller to dispatch developer
-- **Prevention Patterns**: mcp__plugin_conexus_nexus__store_put(content="...", collection="knowledge", title="pattern-prevention-{topic}", tags="pattern,prevention"
+- **Prevention Patterns**: mcp__plugin_conexus_nexus__store_put(content="...", collection="<subject>", title="pattern-prevention-{topic}", tags="pattern,prevention"
 - **Catalog Links** (if catalog tools available): After storing a root cause analysis or prevention pattern, search for related prior findings and create links:
   1. `mcp__plugin_conexus_nexus-catalog__search(query="{component} debug finding")`, find prior findings on same component
   2. For each match: `mcp__plugin_conexus_nexus-catalog__link(from_tumbler="{this-finding-title}", to_tumbler="{prior-finding-title}", link_type="relates", created_by="debugger")`

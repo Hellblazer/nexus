@@ -234,8 +234,8 @@ Store content in the T3 permanent knowledge store.
 | `session` | str | `""` | Optional explicit session_id override |
 
 ```
-mcp__plugin_conexus_nexus__store_put(content="finding text", collection="knowledge", title="research-topic", tags="arch", agent="<your-role>"
-mcp__plugin_conexus_nexus__store_put(content="notes", collection="knowledge", title="sprint-notes", ttl="30d", agent="<your-role>"
+mcp__plugin_conexus_nexus__store_put(content="finding text", collection="<subject>", title="research-topic", tags="arch", agent="<your-role>"
+mcp__plugin_conexus_nexus__store_put(content="notes", collection="<subject>", title="sprint-notes", ttl="30d", agent="<your-role>"
 ```
 
 **TTL formats**: `30d` (30 days), `4w` (4 weeks), `permanent` or `never` (no expiry).
@@ -265,7 +265,7 @@ List entries in a T3 knowledge collection.
 | `docs` | bool | `false` | Show unique documents instead of individual chunks. Deduplicates by content_hash, shows title, chunk count, page count, extraction method |
 
 ```
-mcp__plugin_conexus_nexus__store_list(collection="knowledge"                       # auto-promoted to conformant
+mcp__plugin_conexus_nexus__store_list(collection="<subject>"                       # auto-promoted to conformant
 mcp__plugin_conexus_nexus__store_list(collection="knowledge__art-1-1__voyage-context-3__v1", docs=true  # document-level view (RDR-103: 4-segment)
 mcp__plugin_conexus_nexus__store_list(collection="knowledge__notes-1-1__voyage-context-3__v1", limit=50, offset=100
 ```

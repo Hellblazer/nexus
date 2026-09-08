@@ -23,6 +23,19 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger(__name__)
 
+#: Credential-bearing phrases a service error body may echo back. The value
+#: after the key word is replaced, whatever its shape, so a rotated token or
+#: a raw api_key never reaches a log line (nexus-8ooxn / nexus-hcy4w).
+_CREDENTIAL_RE = re.compile(
+    r"(?i)\b(api[_-]?key|token|bearer|password|secret|authorization)\b(\s*[:=]?\s*)(\S+)"
+)
+
+
+def redact_credentials(text: str) -> str:
+    """*text* with the value after any credential key word replaced by
+    ``[redacted]``. Applied to error bodies before they are logged."""
+    return _CREDENTIAL_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}[redacted]", text)
+
 _CHECK = "✓"
 _WARN = "✗"
 # RDR-129 B4 (nexus-uq8a4): a third, soft state — the check could not complete
@@ -1093,8 +1106,12 @@ def _check_vector_service() -> HealthResult:
         # green "✓ Managed/remote service — release_version 0.1.55", and in
         # cloud mode there is no local service to start in the first place.
         code = getattr(exc, "code", None)
+        # nexus-8ooxn / nexus-hcy4w: the service echoes the rejected credential
+        # in its 401 body; the log line must not carry it either (under xdist
+        # the worker's console renderer lands in the CliRunner output).
+        err_text = redact_credentials(str(exc))
         if code in (401, 403):
-            _log.debug("vector_service_auth_failed", status=code, error=str(exc))
+            _log.debug("vector_service_auth_failed", status=code, error=err_text)
             return HealthResult(
                 label="Vector service (/v1/vectors)",
                 ok=False,
@@ -1113,7 +1130,7 @@ def _check_vector_service() -> HealthResult:
         if code is not None:
             # The service answered, just not successfully. Surface the status
             # instead of laundering it into a reachability claim.
-            _log.debug("vector_service_http_error", status=code, error=str(exc))
+            _log.debug("vector_service_http_error", status=code, error=err_text)
             return HealthResult(
                 label="Vector service (/v1/vectors)",
                 ok=False,
@@ -1124,7 +1141,7 @@ def _check_vector_service() -> HealthResult:
                 ],
                 fatal=True,
             )
-        _log.debug("vector_service_not_reachable", error=str(exc))
+        _log.debug("vector_service_not_reachable", error=err_text)
         # nexus-4m6i0.7: the service can crash-loop before answering any
         # request (a Liquibase VALIDATE failure on boot, GH #1390) — surface
         # the root cause from the local service log when one is available,

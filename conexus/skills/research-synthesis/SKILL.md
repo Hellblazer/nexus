@@ -96,7 +96,7 @@ The agent uses `mcp__plugin_conexus_sequential-thinking__sequentialthinking`:
 
 ## Agent-Specific PRODUCE
 
-- **Research Synthesis**: Store in T3 via store_put tool: content="# Research: {topic}\n{content}", collection="knowledge", title="research-{topic}-{date}", tags="research,{domain}"
+- **Research Synthesis**: Store in T3 via store_put tool: content="# Research: {topic}\n{content}", collection="<subject>", title="research-{topic}-{date}", tags="research,{domain}"
 - **Source Citations**: Include in document content (not separate)
 - **Knowledge Gaps**: Create research beads for follow-up
 - **Cross-Reference Maps**: Document relationships in T3 document content
