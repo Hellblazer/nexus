@@ -2546,7 +2546,9 @@ class TestStreamingReturnMetadata:
         already-complete) must still return the all-empty dict, not raise --
         the fail-loud guard is for chunks>0-but-no-metadata only."""
         result, _ = self._run(tmp_path, pipeline_count=0, populated_metadatas=[], doc_id="")
-        assert result == {"chunks": 0, "pages": [], "title": "", "author": "", "page_count": 0, "pages_with_text": []}
+        # The streaming path builds its dict from the run's extraction stats;
+        # a fake pipeline reports none, so pages_with_text is None (unverified).
+        assert result == {"chunks": 0, "pages": [], "title": "", "author": "", "page_count": 0, "pages_with_text": None}
 
     def test_streaming_return_metadata_fail_loud_on_inconsistent_empty_read_no_catalog(self, tmp_path):
         """FAIL LOUD (no-catalog branch): the pipeline reports chunks
