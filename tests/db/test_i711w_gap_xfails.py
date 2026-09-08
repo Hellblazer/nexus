@@ -342,12 +342,20 @@ class TestT3GcTombstoneSafety:
         )
         assert "live-0" in surviving, result.output
 
-        # CORRECT CONTRACT: the tombstoned doc's chunk is an orphan and gets
-        # collected. (Service today: h_dead is still in the alive-set the
-        # verb reads, so the chunk survives — this is the assertion that
-        # xfails.)
-        assert "dead-0" not in surviving, (
-            "tombstoned document's chunk must be GC'd by the verb; "
+        # CONTRACT OF RECORD (Sam's ruling 2026-09-07, nexus-dkymw, superseding
+        # nexus-mqd6t for the alive-set read): a tombstoned document's chunk is
+        # PROTECTED from nx t3 gc until nexus.purge_trash reclaims the row, so
+        # nx catalog restore can bring the document back whole inside the
+        # purge window. The verb must therefore leave dead-0 in place and say
+        # why on its report line (engine field tombstone_protected_count,
+        # nexus-zewg3). This assertion used to be the inverse (the chunk is an
+        # orphan and gets collected); that was the pre-ruling contract.
+        assert "dead-0" in surviving, (
+            "tombstoned document's chunk must SURVIVE the verb until purge-trash "
+            f"reclaims the row (nexus-dkymw); gc output:\n{result.output}"
+        )
+        assert "Protected by pending tombstones: 1 chunk" in result.output, (
+            "the verb must name the tombstone-protected chunk on its report line; "
             f"gc output:\n{result.output}"
         )
 
