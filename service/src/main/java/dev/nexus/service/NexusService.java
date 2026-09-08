@@ -374,8 +374,10 @@ public final class NexusService {
                         new dev.nexus.service.db.InstallPingRepository(dataSource, java.time.Clock.systemUTC()),
                         java.time.Clock.systemUTC()));
 
-        // /v1/* — auth filter applied
-        var authFilter = List.of(new AuthFilter(tokenCache, tokenStore));
+        // /v1/* — auth filter applied. catalogRepo wires RDR-204 Phase 1's
+        // per-tenant ghost sweep + dormant marking (bead nexus-ft04v.3), fired
+        // from AuthFilter.doFilter at each tenant's first request after boot.
+        var authFilter = List.of(new AuthFilter(tokenCache, tokenStore, catalogRepo));
 
         var whoamiCtx = server.createContext("/v1/_whoami", new WhoamiHandler(tenantScope));
         whoamiCtx.getFilters().addAll(authFilter);

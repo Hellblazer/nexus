@@ -14,6 +14,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CHASH_CONFORMANCE_REPORT;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_DOC_COUNTS;
 import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_HEALTH_META;
+import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_VECTOR_STATS;
 import static dev.nexus.service.jooq.nexus.Tables.COVERAGE_BY_CONTENT_TYPE;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
@@ -6723,7 +6724,13 @@ public final class CatalogRepository {
      * per table post-drop, so a 1:1 registration is what "correct" now means for
      * these two, not a stale 3-way split.
      */
-    private static final List<CollectionScopedTable> COLLECTION_SCOPED_TABLES = List.of(
+    // Package-private (widened from private, RDR-204 bead nexus-ft04v.3): the
+    // ghost-sweep parametrised test (GhostSweepDormantMarkingTest, same package)
+    // needs to iterate this list DIRECTLY rather than duplicate it — a copy is
+    // exactly the drift this list exists to prevent (nexus-v6za0). Deliberate,
+    // not a reflection workaround; the list itself and its element type
+    // (CollectionScopedTable, below) are both widened together.
+    static final List<CollectionScopedTable> COLLECTION_SCOPED_TABLES = List.of(
         new CollectionScopedTable("chunks",                  CHUNKS,                  CHUNKS.COLLECTION),
         new CollectionScopedTable("catalog_document_chunks", CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.COLLECTION),
         new CollectionScopedTable("topic_assignments",       TOPIC_ASSIGNMENTS,       TOPIC_ASSIGNMENTS.SOURCE_COLLECTION),
@@ -6745,8 +6752,14 @@ public final class CatalogRepository {
         // after a rename, or incident triage silently loses the collection's GC history.
         new CollectionScopedTable("gc_audit",                GC_AUDIT,                GC_AUDIT.COLLECTION));
 
-    /** One denorm-collection table: its rename-count key, the table, and its collection column. */
-    private record CollectionScopedTable(String countKey, Table<?> table, Field<String> collection) {}
+    /**
+     * One denorm-collection table: its rename-count key, the table, and its collection
+     * column. Package-private (widened from private alongside {@link
+     * #COLLECTION_SCOPED_TABLES}, RDR-204 bead nexus-ft04v.3) so the ghost-sweep
+     * parametrised test can read {@code countKey()}/{@code table()}/{@code collection()}
+     * for each entry without a reflective or copied inventory.
+     */
+    record CollectionScopedTable(String countKey, Table<?> table, Field<String> collection) {}
 
     /**
      * The rename transaction refused to merge a populated retired target.
@@ -7174,6 +7187,166 @@ public final class CatalogRepository {
             var r = ctx.select(CATALOG_META.VALUE).from(CATALOG_META).where(CATALOG_META.KEY.eq(key)).fetchOne();
             return r != null ? r.value1() : null;
         });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // RDR-204 PHASE 1 — GHOST SWEEP + DORMANT MARKING (bead nexus-ft04v.3)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Marker key in {@link #setMeta}/{@link #getMeta}'s {@code nexus.catalog_meta}
+     * (per-tenant key/value table, catalog-001 baseline) guarding {@link
+     * #ensureGhostSweepRanOnce}. Versioned deliberately (bead nexus-ft04v.3's own
+     * DECISIONS): bumping the suffix is how a FUTURE job forces a deliberate re-run
+     * across every tenant, without touching this one's logic.
+     */
+    private static final String GHOST_SWEEP_META_KEY = "rdr204_ghost_sweep_v1";
+
+    /**
+     * In-process fast path in front of {@link #GHOST_SWEEP_META_KEY}: once a tenant
+     * has been checked THIS process (swept, or found already marked from a prior
+     * boot), every later call for the same tenant costs nothing — no {@link
+     * #getMeta} round trip at all. Instance-scoped, not static: this class has
+     * exactly one live instance per process (see {@code NexusService.catalogRepo}),
+     * so instance scope already gives "once per tenant per process" without the
+     * cross-test-class JVM leakage a {@code static} set would risk (integration
+     * tests construct a fresh {@code CatalogRepository} per test class, and a
+     * static set would let one class's tenant id silently short-circuit another's).
+     */
+    private final Set<String> ghostSweepCheckedTenants = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * The per-tenant, at-most-once-per-process trigger for {@link
+     * #sweepGhostsAndMarkDormant} (RDR-204 Technical Design step 3, bead
+     * nexus-ft04v.3). The intended caller is {@code AuthFilter.doFilter} — the
+     * single per-request choke point where EVERY {@code /v1/*} route resolves its
+     * tenant, which makes this run at that tenant's first authenticated request
+     * after the process boots, whichever route that happens to be. This is
+     * deliberately NOT "first catalog/vector request": the bead's own DECISIONS
+     * (T2 {@code nexus_rdr/204-research-17}) retired tenant enumeration entirely —
+     * {@code catalog_collections}/{@code catalog_meta} are FORCE RLS and {@code
+     * nexus_svc} is NOBYPASSRLS, so there is no primitive that lists tenants; a
+     * tenant that never sends a request is never swept because it never needs to
+     * be.
+     *
+     * <p>Two gates, cheapest first: {@link #ghostSweepCheckedTenants} (in-process;
+     * every request after the first for a tenant costs nothing), then the durable
+     * {@link #GHOST_SWEEP_META_KEY} marker in {@code nexus.catalog_meta} (one
+     * {@link #getMeta} read; makes a SECOND process boot a no-op for a tenant
+     * already swept in a prior boot).
+     *
+     * <p>NEVER fails the calling request: every {@link RuntimeException} here is
+     * caught and logged, and the in-process gate is released so the NEXT request
+     * for the same tenant retries. A failure never reaches {@link #setMeta}, so a
+     * retry always re-attempts the full sweep — nothing is marked done on a
+     * partial or failed pass.
+     */
+    public void ensureGhostSweepRanOnce(String tenant) {
+        if (!ghostSweepCheckedTenants.add(tenant)) {
+            return; // already checked (in flight, or done) this process
+        }
+        try {
+            if (getMeta(tenant, GHOST_SWEEP_META_KEY) != null) {
+                return; // a prior boot already swept this tenant
+            }
+            GhostSweepResult result = sweepGhostsAndMarkDormant(tenant);
+            setMeta(tenant, GHOST_SWEEP_META_KEY, "done");
+            log.info("event=rdr204_ghost_sweep tenant={} scanned={} deleted={} dormant={}",
+                      tenant, result.scanned(), result.ghostsDeleted(), result.markedDormant());
+        } catch (RuntimeException e) {
+            ghostSweepCheckedTenants.remove(tenant);
+            log.warn("event=rdr204_ghost_sweep_failed tenant={} error={}", tenant, e.toString(), e);
+        }
+    }
+
+    /** Per-tenant ghost-sweep + dormant-marking counts (RDR-204 bead nexus-ft04v.3). */
+    public record GhostSweepResult(int scanned, int ghostsDeleted, int markedDormant) {}
+
+    /** Per-row disposition {@link #sweepGhostsAndMarkDormant} assigns during its walk. */
+    private enum SweepDisposition { DELETED, MARKED_DORMANT, UNCHANGED }
+
+    private record SweptRow(String name, SweepDisposition disposition) {}
+
+    /**
+     * THE SWEEP ITSELF (RDR-204 Technical Design step 3, bead nexus-ft04v.3's
+     * DECISIONS: "this job does two things only"). Walks every {@code
+     * catalog_collections} row for {@code tenant} and, for each:
+     * <ul>
+     *   <li>DELETEs it when {@link #collectionIsEmpty} is true — a ghost: no row
+     *       in ANY {@link #COLLECTION_SCOPED_TABLES} entry names it;</li>
+     *   <li>else, when it has no row in {@code nexus.collection_vector_stats}
+     *       (referenced elsewhere but no live chunks to embed or read), sets
+     *       {@code lifecycle_state = 'dormant'};</li>
+     *   <li>else leaves it exactly as it was.</li>
+     * </ul>
+     * The attribute walk (content_type/owner_id/embedding_model/dimension) is
+     * deliberately NOT this method's job — that is bead nexus-ft04v.4's Liquibase
+     * changeset, which also adds the constraints this method's writes must never
+     * violate. Both run strictly AFTER that changeset (never-wedge-an-upgrade
+     * ordering, RDR-204 Technical Design step 3): a DELETE cannot violate a
+     * constraint, and a bare {@code lifecycle_state} UPDATE writes only the one
+     * column the walk already filled and constrained.
+     *
+     * <p>One transaction per tenant ({@link TenantScope#withTenant}).  {@link
+     * #collectionIsEmpty}'s own javadoc already documents the narrow,
+     * intra-transaction TOCTOU window a concurrent write can open between that
+     * read and an UPDATE/DELETE that follows it, and every existing caller
+     * accepts it rather than serialising against it — {@link
+     * #renameCollectionTxn} takes only the SHARED half of the sweep-gate advisory
+     * lock around the identical check, never the EXCLUSIVE half {@code
+     * runSweepTransaction} reserves for itself. This method follows that same
+     * precedent instead of inventing a new one. Seven of the fourteen {@link
+     * #COLLECTION_SCOPED_TABLES} entries carry a real {@code ON DELETE RESTRICT}
+     * FK to {@code catalog_collections}, which backstops the worst case: a
+     * concurrent write to one of those tables either commits first (this
+     * method's read then correctly reports non-empty) or loses the race and has
+     * its OWN insert rejected by the FK trigger against a registry row this
+     * method already deleted — a real, catchable Postgres error surfaced to
+     * {@link #ensureGhostSweepRanOnce}'s catch, never silent corruption. The
+     * manifest and the four audit-only tables carry no such FK, the same
+     * residual {@link #renameCollectionTxn} already accepts.
+     *
+     * <p>Post-commit (mirrors {@link #deleteCollection}'s discipline): every
+     * ghost this method deletes is evicted from {@link CollectionRegistry} so a
+     * later write against the same, now-reusable name always re-verifies against
+     * the database instead of trusting a stale cache entry.
+     */
+    public GhostSweepResult sweepGhostsAndMarkDormant(String tenant) {
+        List<SweptRow> rows = tenantScope.withTenant(tenant, ctx -> {
+            List<String> names = ctx.select(CATALOG_COLLECTIONS.NAME)
+                .from(CATALOG_COLLECTIONS)
+                .fetch(CATALOG_COLLECTIONS.NAME);
+            List<SweptRow> out = new ArrayList<>(names.size());
+            for (String name : names) {
+                if (collectionIsEmpty(ctx, name)) {
+                    ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute();
+                    out.add(new SweptRow(name, SweepDisposition.DELETED));
+                } else if (!ctx.fetchExists(ctx.selectOne().from(COLLECTION_VECTOR_STATS)
+                        .where(COLLECTION_VECTOR_STATS.COLLECTION.eq(name)))) {
+                    ctx.update(CATALOG_COLLECTIONS)
+                       .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "dormant")
+                       .where(CATALOG_COLLECTIONS.NAME.eq(name))
+                       .execute();
+                    out.add(new SweptRow(name, SweepDisposition.MARKED_DORMANT));
+                } else {
+                    out.add(new SweptRow(name, SweepDisposition.UNCHANGED));
+                }
+            }
+            return out;
+        });
+        int deleted = 0;
+        int dormant = 0;
+        for (SweptRow r : rows) {
+            switch (r.disposition()) {
+                case DELETED -> {
+                    deleted++;
+                    CollectionRegistry.evict(tenant, r.name());
+                }
+                case MARKED_DORMANT -> dormant++;
+                case UNCHANGED -> { }
+            }
+        }
+        return new GhostSweepResult(rows.size(), deleted, dormant);
     }
 
     /** Return ACTIVE owners filtered by owner_type. Used by repos.py:list_repos_dual (nexus-qnp5s). */

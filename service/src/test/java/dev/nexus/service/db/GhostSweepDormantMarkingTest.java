@@ -1,0 +1,501 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+package dev.nexus.service.db;
+
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.jooq.binding.Vector;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.testcontainers.containers.PostgreSQLContainer;
+
+import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
+import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.stream.Stream;
+
+import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
+import static dev.nexus.service.jooq.nexus.Tables.GC_AUDIT;
+import static dev.nexus.service.jooq.nexus.Tables.HOOK_FAILURES;
+import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TELEMETRY;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_META;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * RDR-204 Phase 1 (bead nexus-ft04v.3) — {@link CatalogRepository#sweepGhostsAndMarkDormant}
+ * and {@link CatalogRepository#ensureGhostSweepRanOnce}.
+ *
+ * <p>Same-package placement (deliberate, not incidental): {@link
+ * CatalogRepository#COLLECTION_SCOPED_TABLES} and its element type {@link
+ * CatalogRepository.CollectionScopedTable} were widened from {@code private} to
+ * package-private for exactly this test — see both symbols' own javadoc. The
+ * parametrised test below iterates the REAL constant directly, so a table added
+ * there in the future is covered automatically; it is never a copied inventory
+ * (nexus-v6za0 is the standing lesson two separate table lists already drifted
+ * once).
+ *
+ * <p>Two of the fourteen {@link CatalogRepository#COLLECTION_SCOPED_TABLES}
+ * entries — {@code catalog_document_chunks} and {@code topic_assignments} —
+ * carry a REAL {@code ON DELETE RESTRICT}/{@code ON UPDATE CASCADE} FK to
+ * {@code nexus.chunks} ({@code fk_catalog_chunks_chunk} /
+ * {@code topic_assignments_chunk_fk}), so a row in either of those tables
+ * structurally REQUIRES a matching {@code chunks} row too — a collection whose
+ * only content is one of those two is never "only" that table in the strictest
+ * sense, but it still proves the same property the bead's TESTS section asks
+ * for (the row survives the sweep), and the coupling is a real schema fact, not
+ * a fixture shortcut. Both cases are also, for that reason, UNCHANGED rather
+ * than dormant (a live {@code chunks} row means {@code
+ * nexus.collection_vector_stats} has a row too — see {@code live_chunks},
+ * vectors-005-1: a chunk row with NO manifest reference at all counts as live).
+ */
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+class GhostSweepDormantMarkingTest {
+
+    private static final String SVC_ROLE = "svc_ghost_sweep";
+    private static final String SVC_PASS = "svc_ghost_sweep_pass";
+
+    private static final String TENANT_PARAM = "ghost-sweep-param";
+    private static final String ANCHOR_COLL = "knowledge__gs-param-anchor__minilm-l6-v2-384__v1";
+    private static final String ANCHOR_TOPICS_COLL = "knowledge__gs-param-anchor-topics__minilm-l6-v2-384__v1";
+    private static final String ANCHOR_DOC = "gs-anchor-doc";
+
+    PostgreSQLContainer<?> pg;
+    HikariDataSource svcDs;
+    TenantScope scope;
+    CatalogRepository repo;
+
+    @BeforeAll
+    void startAll() throws Exception {
+        pg = PgContainerHelper.start();
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.applyProductSchema(su);
+        }
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
+        }
+        var cfg = new HikariConfig();
+        cfg.setJdbcUrl(pg.getJdbcUrl());
+        cfg.setUsername(SVC_ROLE);
+        cfg.setPassword(SVC_PASS);
+        cfg.setMaximumPoolSize(6);
+        cfg.setAutoCommit(true);
+        svcDs = new HikariDataSource(cfg);
+        scope = new TenantScope(svcDs);
+        repo = new CatalogRepository(scope);
+
+        // Anchor fixtures for the parametrised test below: an existing document and
+        // two existing (never-swept-in-an-assertion) collections to hang the
+        // FK-required prerequisites of document_aspects/document_highlights/
+        // aspect_extraction_queue/catalog_document_chunks/topic_assignments/topics
+        // off of, WITHOUT registering those prerequisite rows under the collection
+        // actually under test in each parametrised case — keeping each case's own
+        // catalog_collections row isolated to (at most) the FK-coupled tables
+        // documented in the class javadoc above.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(TENANT_PARAM, ANCHOR_COLL).execute();
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(TENANT_PARAM, ANCHOR_TOPICS_COLL).execute();
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .values(TENANT_PARAM, ANCHOR_DOC, "Anchor Doc", ANCHOR_COLL).execute();
+            // nexus-ft04v.3 fix check: ANCHOR_TOPICS_COLL has NOTHING referencing it
+            // until the "topic_assignments" parametrised case runs (that case is what
+            // populates a topics row against it) -- but EVERY earlier parametrised
+            // iteration ALSO calls sweepGhostsAndMarkDormant(TENANT_PARAM), which scans
+            // every catalog_collections row for the tenant, ANCHOR_TOPICS_COLL included.
+            // Left unreferenced, the very FIRST iteration's own sweep call deletes it as
+            // a ghost, so by the time "topic_assignments" runs, topics_collection_fk has
+            // nothing to reference and the insert fails. This keep-alive row (a fixed,
+            // never-touched topic id, distinct from every per-case hash below) keeps
+            // ANCHOR_TOPICS_COLL non-empty (dormant, not deleted) from the very first
+            // sweep call onward -- the same reason ANCHOR_COLL needs no such fix: its own
+            // ANCHOR_DOC row above already keeps it non-empty from the start.
+            ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION,
+                           TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+               .values(9_000_000_000L, TENANT_PARAM, "anchor-topics-keep-alive", ANCHOR_TOPICS_COLL, 0,
+                       OffsetDateTime.now(), "pending")
+               .execute();
+        }
+    }
+
+    @AfterAll
+    void stopAll() {
+        if (svcDs != null) svcDs.close();
+        if (pg != null) pg.stop();
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // PARAMETRISED — a row referenced from table X survives the sweep
+    // (RDR-204 bead nexus-ft04v.3 TESTS bullet 1). Non-vacuity: the stream is
+    // the REAL CatalogRepository.COLLECTION_SCOPED_TABLES, so an empty or
+    // shrunk constant fails this method's own precondition assertion below,
+    // not a silently-empty parametrised run.
+    // ══════════════════════════════════════════════════════════════════════
+
+    static Stream<CatalogRepository.CollectionScopedTable> scopedTables() {
+        assertThat(CatalogRepository.COLLECTION_SCOPED_TABLES)
+            .as("non-vacuity precondition: COLLECTION_SCOPED_TABLES must not be empty")
+            .isNotEmpty();
+        return CatalogRepository.COLLECTION_SCOPED_TABLES.stream();
+    }
+
+    /** Tables whose lone row also structurally requires a {@code chunks} row (class javadoc). */
+    private static final List<String> CHUNK_COUPLED =
+        List.of("chunks", "catalog_document_chunks", "topic_assignments");
+
+    @ParameterizedTest(name = "[{index}] {0}")
+    @Order(10)
+    @MethodSource("scopedTables")
+    void rowReferencedFromTable_survivesSweep(CatalogRepository.CollectionScopedTable t) throws Exception {
+        String coll = "knowledge__gs-param-" + t.countKey().replace('_', '-') + "__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(TENANT_PARAM, coll).execute();
+            seedOneRowFor(ctx, t.countKey(), coll);
+        }
+
+        repo.sweepGhostsAndMarkDormant(TENANT_PARAM);
+
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var row = ctx.select(CATALOG_COLLECTIONS.LIFECYCLE_STATE).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_PARAM)).and(CATALOG_COLLECTIONS.NAME.eq(coll))
+                .fetchOne();
+            assertThat(row).as("row referenced only from " + t.countKey() + " must survive the sweep").isNotNull();
+            if (CHUNK_COUPLED.contains(t.countKey())) {
+                assertThat(row.value1())
+                    .as(t.countKey() + " carries a live chunks row (FK-coupled) -> UNCHANGED, not dormant")
+                    .isNull();
+            } else {
+                assertThat(row.value1())
+                    .as(t.countKey() + " has no collection_vector_stats row -> dormant")
+                    .isEqualTo("dormant");
+            }
+        }
+    }
+
+    /** One minimal row in table {@code countKey}, referencing {@code coll} under {@link #TENANT_PARAM}. */
+    private static void seedOneRowFor(DSLContext ctx, String countKey, String coll) {
+        switch (countKey) {
+            case "chunks" -> insertChunk384(ctx, TENANT_PARAM, coll, chashBytes(coll), vector(384));
+            case "catalog_document_chunks" -> {
+                insertChunk384(ctx, TENANT_PARAM, coll, chashBytes(coll + "-mf"), vector(384));
+                ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                               CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+                               CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                   .values(TENANT_PARAM, ANCHOR_DOC, 0, chashBytes(coll + "-mf"), coll)
+                   .execute();
+            }
+            case "topic_assignments" -> {
+                long topicId = Math.abs((long) (coll + "-anchor-topic").hashCode());
+                ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION,
+                               TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+                   .values(topicId, TENANT_PARAM, "anchor-topic", ANCHOR_TOPICS_COLL, 0, OffsetDateTime.now(),
+                           "pending")
+                   .execute();
+                insertChunk384(ctx, TENANT_PARAM, coll, hexChashBytes(coll + "-ta"), vector(384));
+                ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                               TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                               TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+                   .values(TENANT_PARAM, hexChashBytes(coll + "-ta"), topicId, "projection", coll,
+                           OffsetDateTime.now())
+                   .execute();
+            }
+            case "topics" -> {
+                long topicId = Math.abs((long) (coll + "-topic").hashCode());
+                ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION,
+                               TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+                   .values(topicId, TENANT_PARAM, "topic-gs", coll, 0, OffsetDateTime.now(), "pending")
+                   .execute();
+            }
+            case "taxonomy_meta" -> ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+                .values(TENANT_PARAM, coll).execute();
+            case "taxonomy_centroids" -> {
+                long topicId = Math.abs((long) (coll + "-centroid").hashCode());
+                ctx.insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                               TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL,
+                               TAXONOMY_CENTROIDS.EMBEDDING_384)
+                   .values(TENANT_PARAM, coll, topicId, "", vector(384))
+                   .execute();
+            }
+            case "document_aspects" -> ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID,
+                               DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.SOURCE_PATH,
+                               DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                               DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID,
+                               DOCUMENT_ASPECTS.SOURCE_URI)
+                .values(TENANT_PARAM, coll, "/p/" + coll + ".md", OffsetDateTime.now(), "v1", "docling", ANCHOR_DOC,
+                        "file:///p/" + coll + ".md")
+                .execute();
+            case "document_highlights" -> ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID,
+                               DOCUMENT_HIGHLIGHTS.DOC_ID, DOCUMENT_HIGHLIGHTS.COLLECTION,
+                               DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
+                               DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                .values(TENANT_PARAM, ANCHOR_DOC, coll, "file:///" + coll + "-hl", "hi", OffsetDateTime.now())
+                .execute();
+            case "aspect_extraction_queue" -> ctx.insertInto(ASPECT_EXTRACTION_QUEUE,
+                               ASPECT_EXTRACTION_QUEUE.TENANT_ID, ASPECT_EXTRACTION_QUEUE.COLLECTION,
+                               ASPECT_EXTRACTION_QUEUE.SOURCE_PATH, ASPECT_EXTRACTION_QUEUE.STATUS,
+                               ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT, ASPECT_EXTRACTION_QUEUE.DOC_ID)
+                .values(TENANT_PARAM, coll, "/p/" + coll + "-q.md", "pending", OffsetDateTime.now(), ANCHOR_DOC)
+                .execute();
+            case "catalog_documents" -> ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID,
+                               CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
+                               CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                .values(TENANT_PARAM, "gs-doc-" + coll, "Doc", coll)
+                .execute();
+            case "relevance_log" -> ctx.insertInto(RELEVANCE_LOG, RELEVANCE_LOG.TENANT_ID, RELEVANCE_LOG.QUERY,
+                               RELEVANCE_LOG.CHUNK_ID, RELEVANCE_LOG.COLLECTION, RELEVANCE_LOG.ACTION,
+                               RELEVANCE_LOG.SESSION_ID, RELEVANCE_LOG.TIMESTAMP)
+                .values(TENANT_PARAM, "q1", hexChash(coll), coll, "click", "s1", OffsetDateTime.now())
+                .execute();
+            case "search_telemetry" -> ctx.insertInto(SEARCH_TELEMETRY, SEARCH_TELEMETRY.TENANT_ID,
+                               SEARCH_TELEMETRY.TS, SEARCH_TELEMETRY.QUERY_HASH, SEARCH_TELEMETRY.COLLECTION,
+                               SEARCH_TELEMETRY.RAW_COUNT, SEARCH_TELEMETRY.KEPT_COUNT)
+                .values(TENANT_PARAM, OffsetDateTime.now(), "qh-" + coll, coll, 10, 5)
+                .execute();
+            case "hook_failures" -> ctx.insertInto(HOOK_FAILURES, HOOK_FAILURES.TENANT_ID, HOOK_FAILURES.DOC_ID,
+                               HOOK_FAILURES.COLLECTION, HOOK_FAILURES.HOOK_NAME, HOOK_FAILURES.ERROR,
+                               HOOK_FAILURES.OCCURRED_AT)
+                .values(TENANT_PARAM, "gs-hf-doc", coll, "post_store", "boom", OffsetDateTime.now())
+                .execute();
+            case "gc_audit" -> ctx.insertInto(GC_AUDIT, GC_AUDIT.TENANT_ID, GC_AUDIT.OPERATION, GC_AUDIT.COLLECTION)
+                .values(TENANT_PARAM, "purge", coll)
+                .execute();
+            default -> throw new IllegalArgumentException(
+                "no seed case for COLLECTION_SCOPED_TABLES entry '" + countKey + "' -- "
+                + "add one here (GhostSweepDormantMarkingTest.seedOneRowFor), not a skip");
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // An unreferenced row is deleted (TESTS bullet 2).
+    // ══════════════════════════════════════════════════════════════════════
+
+    @Test @Order(20)
+    void unreferencedRow_isDeleted() throws Exception {
+        String tenant = "ghost-sweep-unref";
+        String coll = "knowledge__gs-unref__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES)
+               .insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(tenant, coll).execute();
+        }
+        CollectionRegistry.markKnown(tenant, coll);
+
+        CatalogRepository.GhostSweepResult result = repo.sweepGhostsAndMarkDormant(tenant);
+
+        assertThat(result.scanned()).isEqualTo(1);
+        assertThat(result.ghostsDeleted()).isEqualTo(1);
+        assertThat(result.markedDormant()).isEqualTo(0);
+        assertThat(CollectionRegistry.isKnown(tenant, coll))
+            .as("registry cache evicted post-sweep, mirroring deleteCollection's discipline").isFalse();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(coll))))
+                .as("ghost row must be gone").isFalse();
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // MULTI-TENANT: each tenant is swept at its OWN first request; neither
+    // is swept by the other's (TESTS bullet 3).
+    // ══════════════════════════════════════════════════════════════════════
+
+    @Test @Order(30)
+    void multiTenant_eachSweptAtItsOwnFirstRequest_neitherByTheOthers() throws Exception {
+        String tenantA = "ghost-sweep-mt-a";
+        String tenantB = "ghost-sweep-mt-b";
+        String ghostA = "knowledge__gs-mt-ghost-a__minilm-l6-v2-384__v1";
+        String ghostB = "knowledge__gs-mt-ghost-b__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(tenantA, ghostA).execute();
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(tenantB, ghostB).execute();
+        }
+
+        repo.ensureGhostSweepRanOnce(tenantA);
+
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenantA)).and(CATALOG_COLLECTIONS.NAME.eq(ghostA))))
+                .as("tenant A's own ghost is swept at its first request").isFalse();
+            assertThat(ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenantB)).and(CATALOG_COLLECTIONS.NAME.eq(ghostB))))
+                .as("tenant B is untouched by tenant A's sweep").isTrue();
+        }
+
+        repo.ensureGhostSweepRanOnce(tenantB);
+
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenantB)).and(CATALOG_COLLECTIONS.NAME.eq(ghostB))))
+                .as("tenant B's own ghost is swept at ITS first request").isFalse();
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // The marker makes a second boot a no-op, per tenant (TESTS bullet 4).
+    // ══════════════════════════════════════════════════════════════════════
+
+    @Test @Order(40)
+    void markerMakesSecondBootANoOp() throws Exception {
+        String tenant = "ghost-sweep-second-boot";
+        String firstGhost = "knowledge__gs-boot1-ghost__minilm-l6-v2-384__v1";
+        String secondGhost = "knowledge__gs-boot2-ghost__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES)
+               .insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(tenant, firstGhost).execute();
+        }
+
+        // "Boot 1": a fresh CatalogRepository instance (fresh in-process gate) sweeps
+        // this tenant for the first time and writes the durable catalog_meta marker.
+        CatalogRepository boot1 = new CatalogRepository(scope);
+        boot1.ensureGhostSweepRanOnce(tenant);
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(firstGhost))))
+                .as("boot 1 sweeps the tenant's ghost").isFalse();
+        }
+
+        // A collection that becomes a ghost between boots.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES)
+               .insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(tenant, secondGhost).execute();
+        }
+
+        // "Boot 2": a SECOND fresh CatalogRepository instance (empty in-process gate,
+        // same underlying database/marker) must find the durable marker and skip the
+        // sweep entirely -- the new ghost must survive untouched.
+        CatalogRepository boot2 = new CatalogRepository(scope);
+        boot2.ensureGhostSweepRanOnce(tenant);
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(secondGhost))))
+                .as("marker makes boot 2 a no-op -- the post-boot-1 ghost is never swept").isTrue();
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Counts reported per tenant through structured logging (TESTS bullet 5).
+    // ══════════════════════════════════════════════════════════════════════
+
+    @Test @Order(50)
+    void countsLoggedPerTenant() throws Exception {
+        String tenant = "ghost-sweep-logging";
+        String ghost = "knowledge__gs-log-ghost__minilm-l6-v2-384__v1";
+        String dormant = "knowledge__gs-log-dormant__minilm-l6-v2-384__v1";
+        String unchanged = "knowledge__gs-log-unchanged__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(tenant, ghost).execute();
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(tenant, dormant).execute();
+            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+               .values(tenant, dormant).execute();
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(tenant, unchanged).execute();
+            insertChunk384(ctx, tenant, unchanged, chashBytes(unchanged), vector(384));
+        }
+
+        ch.qos.logback.classic.Logger root =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+            new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            repo.ensureGhostSweepRanOnce(tenant);
+            var matches = logs.list.stream()
+                .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                .filter(m -> m.startsWith("event=rdr204_ghost_sweep "))
+                .toList();
+            assertThat(matches).as("exactly one ghost-sweep log line for this tenant").hasSize(1);
+            String line = matches.getFirst();
+            assertThat(line).contains("tenant=" + tenant);
+            assertThat(line).contains("scanned=3");
+            assertThat(line).contains("deleted=1");
+            assertThat(line).contains("dormant=1");
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+    }
+
+    // ── fixture helpers (typed jOOQ DSL only, mirrors CatalogRenameCollectionTest) ──
+
+    private static void insertChunk384(DSLContext ctx, String tenant, String collection, byte[] chashBytes,
+                                        Vector v) {
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                       CHUNKS.EMBEDDING_384)
+           .values(tenant, collection, chashBytes, "text", v)
+           .execute();
+    }
+
+    private static Vector vector(int dim) {
+        float[] v = new float[dim];
+        java.util.Arrays.fill(v, 0.1f);
+        return Vector.of(v);
+    }
+
+    private static byte[] chashBytes(String seed) {
+        String label = (seed.replaceAll("[^0-9a-f]", "a") + "0".repeat(32)).substring(0, 32);
+        return label.getBytes(StandardCharsets.US_ASCII);
+    }
+
+    private static byte[] hexChashBytes(String seed) {
+        return java.util.HexFormat.of().parseHex(hexChash(seed));
+    }
+
+    private static String hexChash(String seed) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(seed.getBytes(StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+}

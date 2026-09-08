@@ -1,5 +1,6 @@
 package dev.nexus.service.http;
 
+import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.SessionPrincipal;
 import dev.nexus.service.db.TokenCache;
 import dev.nexus.service.db.TokenHashing;
@@ -80,6 +81,19 @@ public final class AuthFilter extends Filter {
     private final TokenStore tokenStore;
 
     /**
+     * RDR-204 Phase 1 (bead nexus-ft04v.3): the per-tenant, at-most-once-per-
+     * process ghost-sweep + dormant-marking trigger, fired from {@link
+     * #doFilter} once a request's tenant is resolved — see that call site's
+     * comment for why THIS filter is the chosen choke point. {@code null} for
+     * every constructor that predates this wiring (the test-support overloads
+     * below); {@link #doFilter} skips the call entirely when {@code null}
+     * rather than defaulting to some other behavior, so an {@code AuthFilter}
+     * built without one is simply not wired to the sweep, same as before this
+     * bead.
+     */
+    private final CatalogRepository catalogRepo;
+
+    /**
      * Request embed-deadline budget (nexus-8hdg9 phase 2), resolved ONCE at
      * construction -- mirrors {@code LocalOnnxAdmission.fromEnv()}'s resolve-
      * once-at-boot shape rather than re-parsing the env on every request.
@@ -101,7 +115,18 @@ public final class AuthFilter extends Filter {
 
     public AuthFilter(TokenCache tokenCache, TokenStore tokenStore) {
         this(tokenCache, tokenStore, RequestDeadline.deadlineMsFromEnv(),
-             RequestDeadline.deadlineMaxMsFromEnv());
+             RequestDeadline.deadlineMaxMsFromEnv(), null);
+    }
+
+    /**
+     * Production constructor carrying the RDR-204 Phase 1 (bead nexus-ft04v.3)
+     * ghost-sweep trigger. {@code NexusService} is the one call site that uses
+     * this form; every other constructor here predates the sweep and passes
+     * {@code null} for it (see {@link #catalogRepo}'s own javadoc).
+     */
+    public AuthFilter(TokenCache tokenCache, TokenStore tokenStore, CatalogRepository catalogRepo) {
+        this(tokenCache, tokenStore, RequestDeadline.deadlineMsFromEnv(),
+             RequestDeadline.deadlineMaxMsFromEnv(), catalogRepo);
     }
 
     /**
@@ -118,10 +143,9 @@ public final class AuthFilter extends Filter {
      * dev.nexus.service}, one package up, where a package-private overload
      * is not visible -- hence public, unlike {@code LocalOnnxAdmission}'s
      * same-package-private injection points. The public two-arg constructor
-     * above delegates here with the real env-resolved budget; production
-     * code has exactly one construction path
-     * ({@code NexusService} → the two-arg form), this constructor exists
-     * for tests only.
+     * above delegates here with the real env-resolved budget; this constructor
+     * exists for tests only, and (like the two-arg form) carries no {@code
+     * CatalogRepository} — see {@link #catalogRepo}.
      *
      * @param deadlineBudgetMs the embed-deadline budget in milliseconds --
      *                         what {@link RequestDeadline#deadlineMsFromEnv()}
@@ -129,7 +153,7 @@ public final class AuthFilter extends Filter {
      *                         NX_EMBED_DEADLINE_MS} value
      */
     public AuthFilter(TokenCache tokenCache, TokenStore tokenStore, long deadlineBudgetMs) {
-        this(tokenCache, tokenStore, deadlineBudgetMs, RequestDeadline.deadlineMaxMsFromEnv());
+        this(tokenCache, tokenStore, deadlineBudgetMs, RequestDeadline.deadlineMaxMsFromEnv(), null);
     }
 
     /**
@@ -142,10 +166,16 @@ public final class AuthFilter extends Filter {
      */
     public AuthFilter(TokenCache tokenCache, TokenStore tokenStore, long deadlineBudgetMs,
                       long deadlineMaxMs) {
+        this(tokenCache, tokenStore, deadlineBudgetMs, deadlineMaxMs, null);
+    }
+
+    private AuthFilter(TokenCache tokenCache, TokenStore tokenStore, long deadlineBudgetMs,
+                        long deadlineMaxMs, CatalogRepository catalogRepo) {
         this.tokenCache = Objects.requireNonNull(tokenCache, "tokenCache");
         this.tokenStore = Objects.requireNonNull(tokenStore, "tokenStore");
         this.deadlineBudgetMs = deadlineBudgetMs;
         this.deadlineMaxMs = deadlineMaxMs;
+        this.catalogRepo = catalogRepo;
     }
 
     @Override
@@ -224,6 +254,19 @@ public final class AuthFilter extends Filter {
         if (claimedTenant != null && !claimedTenant.equals(tenant)) {
             log.debug("event=tenant_header_ignored claimed={} resolved={} path={}",
                       claimedTenant, tenant, exchange.getRequestURI().getPath());
+        }
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.3): THIS is the single per-request
+        // choke point where every /v1/* route resolves its tenant -- catalog
+        // and vector requests included, but not only those -- so it is where
+        // the per-tenant, once-per-process ghost sweep + dormant marking fires,
+        // at whichever request happens to be this tenant's first since boot.
+        // catalogRepo is null only for AuthFilter instances built by a
+        // constructor that predates this wiring (see its own javadoc);
+        // ensureGhostSweepRanOnce never throws (it catches and logs
+        // internally), so this can never fail the request it rides on.
+        if (catalogRepo != null) {
+            catalogRepo.ensureGhostSweepRanOnce(tenant);
         }
 
         // 3. Per-session verification (Decision 2), require-minted.
