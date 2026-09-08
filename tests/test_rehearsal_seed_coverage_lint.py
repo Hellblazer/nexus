@@ -409,6 +409,25 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         ("hygiene-001-9b", "nexus-tk070.p6a"),
         ("hygiene-001-10", "nexus-tk070.p6a"),
         ("hygiene-001-11", "nexus-tk070.p6a"),
+        # nexus-ft04v.4 (RDR-204 Phase 1 item 1): hygiene-002-1's one-time
+        # catalog_collections attribute backfill walk (branches A-D, see the
+        # changeset's own header) plus the constraints it adds in the same
+        # changeset. Seeded as four DEDICATED rows via registerCollection(),
+        # one per branch -- at seed time lifecycle_state does not exist yet
+        # (added by catalog-036-4, later in this same hop), so the bare
+        # (tenant_id, name) insert leaves content_type/owner_id/
+        # embedding_model at their catalog-001-5 DEFAULT '', the exact blank
+        # input shape the walk fixes. hygiene-001-5 (runs earlier in this
+        # same hop) unconditionally deletes every nexus.chunks row this
+        # fixture is capable of seeding pre-hop (legacy-width, the same
+        # taxonomy-010-1 constraint), so every row resolves through its
+        # branch's zero-chunks arm; effect-asserted (content_type/owner_id/
+        # embedding_model/lifecycle_state correct per branch, dimension
+        # NULL, no row left blank, all constraints exist+VALIDATED, FORCE
+        # restored on all four toggled tables). The with-dimension
+        # agreement/disagreement sub-arm is proven separately by
+        # Hygiene002CollectionAttributesWalkTest's HEAD-schema fixture.
+        ("hygiene-002-1", "nexus-ft04v.4"),
     }
 )
 
