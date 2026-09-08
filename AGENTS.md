@@ -298,7 +298,7 @@ clone (see `docs/contributing.md` § Step 0b KNOWN LIMITATION, nexus-2zmfw).
    ```
    git checkout develop && git pull
    git merge origin/main --no-edit   # trivially clean right after a release
-   git push origin develop
+   scripts/git-push-develop.sh HEAD   # the merge commit vouches for what it merged in (nexus-9wxu6)
    ```
    Skipping this is how develop drifts behind the release-only commits and the next release branch conflicts (2026-07-23 incident; `docs/contributing.md` step 11b).
 9. **Reinstall locally.** `scripts/reinstall-tool.sh && nx --version` — `pyproject.toml` is bumped, but the shim does not point at a wheel: it resolves `<tools>/current` at spawn time and execs the generation that pointer names, so until the reinstall flips `current` every new spawn lands in the old generation (and existing holders keep running from theirs afterwards).

@@ -118,7 +118,7 @@ if [[ ${#foreign[@]} -gt 0 ]]; then
   for sha in "${foreign[@]}"; do
     git log -1 --format='  %h %an %s' "$sha"
   done
-  echo "If a commit is yours, pass its sha. If it is a peer's, leave it: they push their own range."
+  echo "Vouch only for commits this session made. A peer's commit is theirs to push; do not add its sha to unblock yourself."
   exit 2
 fi
 

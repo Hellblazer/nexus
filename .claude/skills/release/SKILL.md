@@ -463,7 +463,7 @@ Both must report `vX.Y.Z` / `X.Y.Z`. **Do not declare done before this check pas
 git checkout develop && git pull
 git merge origin/main --no-edit    # trivially clean right after a release:
                                    # the release branch just CONTAINED develop
-git push origin develop
+scripts/git-push-develop.sh HEAD   # the merge commit vouches for what it merged in (nexus-9wxu6)
 ```
 
 Why mandatory (2026-07-23 incident): from 6.12.0 through 6.17.0 no release
