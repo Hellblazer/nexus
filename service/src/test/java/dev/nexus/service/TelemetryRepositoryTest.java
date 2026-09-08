@@ -5,7 +5,9 @@ import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.*;
-import org.postgresql.util.PSQLException;
+import org.jooq.SQLDialect;
+import org.jooq.exception.DataAccessException;
+import org.jooq.impl.DSL;
 
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -15,6 +17,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static dev.nexus.service.jooq.nexus.Tables.FRECENCY;
+import static dev.nexus.service.jooq.nexus.Tables.HOOK_FAILURES;
+import static dev.nexus.service.jooq.nexus.Tables.NX_ANSWER_RUNS;
+import static dev.nexus.service.jooq.nexus.Tables.NX_ANSWER_STEPS;
+import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TELEMETRY;
+import static dev.nexus.service.jooq.nexus.Tables.TIER_WRITES;
 import static org.assertj.core.api.Assertions.*;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -227,14 +236,16 @@ class TelemetryRepositoryTest {
         // Verify via raw query
         try (Connection conn = pg.createConnection("")) {
             PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            var rs = conn.createStatement().executeQuery(
-                "SELECT ts FROM nexus.tier_writes WHERE session_id='sess-tier-fid' AND tool='memory_put'");
-            assertThat(rs.next()).as("tier_writes row must exist").isTrue();
-            var stored = rs.getTimestamp("ts").toInstant();
+            var rows = DSL.using(conn, SQLDialect.POSTGRES)
+                .select(TIER_WRITES.TS)
+                .from(TIER_WRITES)
+                .where(TIER_WRITES.SESSION_ID.eq("sess-tier-fid").and(TIER_WRITES.TOOL.eq("memory_put")))
+                .fetch();
+            assertThat(rows).as("tier_writes row must exist exactly once (DO NOTHING on re-import)").hasSize(1);
+            var stored = rows.get(0).value1().toInstant();
             assertThat(stored.toEpochMilli())
                 .as("TIMESTAMP PRESERVATION: tier_writes.ts must match source 2024-01-15T10:30:00Z")
                 .isEqualTo(PAST_ODT.toInstant().toEpochMilli());
-            assertThat(rs.next()).as("second row must not exist (DO NOTHING)").isFalse();
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }
@@ -256,14 +267,16 @@ class TelemetryRepositoryTest {
 
         try (Connection conn = pg.createConnection("")) {
             PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            var rs = conn.createStatement().executeQuery(
-                "SELECT created_at FROM nexus.nx_answer_runs WHERE question='What is the meaning of RDR-152?'");
-            assertThat(rs.next()).as("nx_answer_runs row must exist").isTrue();
-            var stored = rs.getTimestamp("created_at").toInstant();
+            var rows = DSL.using(conn, SQLDialect.POSTGRES)
+                .select(NX_ANSWER_RUNS.CREATED_AT)
+                .from(NX_ANSWER_RUNS)
+                .where(NX_ANSWER_RUNS.QUESTION.eq("What is the meaning of RDR-152?"))
+                .fetch();
+            assertThat(rows).as("nx_answer_runs row must exist exactly once (DO NOTHING on re-import)").hasSize(1);
+            var stored = rows.get(0).value1().toInstant();
             assertThat(stored.toEpochMilli())
                 .as("TIMESTAMP PRESERVATION: nx_answer_runs.created_at must match source 2024-01-15T10:30:00Z")
                 .isEqualTo(PAST_ODT.toInstant().toEpochMilli());
-            assertThat(rs.next()).as("second row must not exist (DO NOTHING)").isFalse();
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }
@@ -287,11 +300,13 @@ class TelemetryRepositoryTest {
 
         try (Connection conn = pg.createConnection("")) {
             PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            var rs = conn.createStatement().executeQuery(
-                "SELECT tier, tool FROM nexus.tier_writes "
-                + "WHERE session_id='sess-tier-live' AND tool='store_put'");
-            assertThat(rs.next()).as("recordTierWrite row must persist via the live path").isTrue();
-            assertThat(rs.getString("tier")).isEqualTo("T3");
+            var rows = DSL.using(conn, SQLDialect.POSTGRES)
+                .select(TIER_WRITES.TIER, TIER_WRITES.TOOL)
+                .from(TIER_WRITES)
+                .where(TIER_WRITES.SESSION_ID.eq("sess-tier-live").and(TIER_WRITES.TOOL.eq("store_put")))
+                .fetch();
+            assertThat(rows).as("recordTierWrite row must persist via the live path").isNotEmpty();
+            assertThat(rows.get(0).get(TIER_WRITES.TIER)).isEqualTo("T3");
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }
@@ -444,12 +459,14 @@ class TelemetryRepositoryTest {
 
         try (Connection conn = pg.createConnection("")) {
             PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            var rs = conn.createStatement().executeQuery(
-                "SELECT step_count, final_text FROM nexus.nx_answer_runs "
-                + "WHERE question='live record question?'");
-            assertThat(rs.next()).as("recordNxAnswerRun row must persist via the live path").isTrue();
-            assertThat(rs.getInt("step_count")).isEqualTo(2);
-            assertThat(rs.getString("final_text")).isEqualTo("live answer text");
+            var rows = DSL.using(conn, SQLDialect.POSTGRES)
+                .select(NX_ANSWER_RUNS.STEP_COUNT, NX_ANSWER_RUNS.FINAL_TEXT)
+                .from(NX_ANSWER_RUNS)
+                .where(NX_ANSWER_RUNS.QUESTION.eq("live record question?"))
+                .fetch();
+            assertThat(rows).as("recordNxAnswerRun row must persist via the live path").isNotEmpty();
+            assertThat(rows.get(0).get(NX_ANSWER_RUNS.STEP_COUNT)).isEqualTo(2);
+            assertThat(rows.get(0).get(NX_ANSWER_RUNS.FINAL_TEXT)).isEqualTo("live answer text");
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }
@@ -471,14 +488,16 @@ class TelemetryRepositoryTest {
 
         try (Connection conn = pg.createConnection("")) {
             PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            var rs = conn.createStatement().executeQuery(
-                "SELECT occurred_at FROM nexus.hook_failures WHERE doc_id='doc-hook-001'");
-            assertThat(rs.next()).as("hook_failures row must exist").isTrue();
-            var stored = rs.getTimestamp("occurred_at").toInstant();
+            var rows = DSL.using(conn, SQLDialect.POSTGRES)
+                .select(HOOK_FAILURES.OCCURRED_AT)
+                .from(HOOK_FAILURES)
+                .where(HOOK_FAILURES.DOC_ID.eq("doc-hook-001"))
+                .fetch();
+            assertThat(rows).as("hook_failures row must exist exactly once (DO NOTHING on re-import)").hasSize(1);
+            var stored = rows.get(0).value1().toInstant();
             assertThat(stored.toEpochMilli())
                 .as("TIMESTAMP PRESERVATION: hook_failures.occurred_at must match source 2024-01-15T10:30:00Z")
                 .isEqualTo(PAST_ODT.toInstant().toEpochMilli());
-            assertThat(rs.next()).as("second row must not exist (DO NOTHING)").isFalse();
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }
@@ -502,10 +521,9 @@ class TelemetryRepositoryTest {
         assertThat(deleted).as("trim must delete exactly the two aged rows").isEqualTo(2);
         try (Connection conn = pg.createConnection("")) {
             PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
-            var rs = conn.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.hook_failures WHERE tenant_id='" + tenant + "'");
-            rs.next();
-            assertThat(rs.getInt(1)).as("only the recent row survives").isEqualTo(1);
+            int count = DSL.using(conn, SQLDialect.POSTGRES)
+                .fetchCount(HOOK_FAILURES, HOOK_FAILURES.TENANT_ID.eq(tenant));
+            assertThat(count).as("only the recent row survives").isEqualTo(1);
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }
@@ -1233,10 +1251,13 @@ class TelemetryRepositoryTest {
 
         try (Connection conn = pg.createConnection("")) {
             PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            var rs = conn.createStatement().executeQuery(
-                "SELECT embedded_at FROM nexus.frecency WHERE chunk_id='3115d480cb3cef4722d35d5608cf43e4ae6dae56c3eedafccbb1efa83dec6efb'");
-            assertThat(rs.next()).isTrue();
-            var stored = rs.getTimestamp("embedded_at").toInstant();
+            var rows = DSL.using(conn, SQLDialect.POSTGRES)
+                .select(FRECENCY.EMBEDDED_AT)
+                .from(FRECENCY)
+                .where(FRECENCY.CHUNK_ID.eq("3115d480cb3cef4722d35d5608cf43e4ae6dae56c3eedafccbb1efa83dec6efb"))
+                .fetch();
+            assertThat(rows).hasSize(1);
+            var stored = rows.get(0).value1().toInstant();
             // embedded_at must be the OLDEST value (2023-01-01)
             long oldest = OffsetDateTime.parse("2023-01-01T00:00:00+00:00").toInstant().toEpochMilli();
             assertThat(stored.toEpochMilli())
@@ -1422,18 +1443,22 @@ class TelemetryRepositoryTest {
 
         try (Connection conn = pg.createConnection("")) {
             PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            var rs = conn.createStatement().executeQuery(
-                "SELECT agent, project, target_title " +
-                "FROM nexus.tier_writes " +
-                "WHERE session_id='sess-null-agent' AND tool='memory_put' AND tier='T2'");
-            assertThat(rs.next()).as("tier_writes null-agent row must exist").isTrue();
-            assertThat(rs.getString("agent"))
+            var rows = DSL.using(conn, SQLDialect.POSTGRES)
+                .select(TIER_WRITES.AGENT, TIER_WRITES.PROJECT, TIER_WRITES.TARGET_TITLE)
+                .from(TIER_WRITES)
+                .where(TIER_WRITES.SESSION_ID.eq("sess-null-agent")
+                    .and(TIER_WRITES.TOOL.eq("memory_put"))
+                    .and(TIER_WRITES.TIER.eq("T2")))
+                .fetch();
+            assertThat(rows).as("tier_writes null-agent row must exist").hasSize(1);
+            var row = rows.get(0);
+            assertThat(row.get(TIER_WRITES.AGENT))
                 .as("agent must be NULL in PG (not empty-string)")
                 .isNull();
-            assertThat(rs.getString("project"))
+            assertThat(row.get(TIER_WRITES.PROJECT))
                 .as("project must be NULL in PG (not empty-string)")
                 .isNull();
-            assertThat(rs.getString("target_title"))
+            assertThat(row.get(TIER_WRITES.TARGET_TITLE))
                 .as("target_title must be NULL in PG (not empty-string)")
                 .isNull();
         }
@@ -1607,13 +1632,15 @@ class TelemetryRepositoryTest {
                 conn.setAutoCommit(true);
                 PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
                 // Attempt to insert with a different tenant_id — RLS WITH CHECK must reject
-                conn.createStatement().execute(
-                    "INSERT INTO nexus.relevance_log " +
-                    "(tenant_id, query, chunk_id, action, timestamp) " +
-                    "VALUES ('" + TENANT_B + "', 'q', 'c', 'a', now())");
+                DSL.using(conn, SQLDialect.POSTGRES)
+                    .insertInto(RELEVANCE_LOG,
+                        RELEVANCE_LOG.TENANT_ID, RELEVANCE_LOG.QUERY, RELEVANCE_LOG.CHUNK_ID,
+                        RELEVANCE_LOG.ACTION, RELEVANCE_LOG.TIMESTAMP)
+                    .values(TENANT_B, "q", "c", "a", DSL.currentOffsetDateTime())
+                    .execute();
             }
         }).as("RLS WITH CHECK must reject INSERT with wrong tenant_id")
-          .isInstanceOfAny(PSQLException.class, SQLException.class);
+          .isInstanceOf(DataAccessException.class);
     }
 
     // ── importBatch: ONE multi-row INSERT per table (nexus-1usso) ───────────────
@@ -2433,11 +2460,13 @@ class TelemetryRepositoryTest {
     private long fetchNxAnswerRunId(String tenant, String question) {
         try (Connection conn = pg.createConnection("")) {
             PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
-            var rs = conn.createStatement().executeQuery(
-                "SELECT id FROM nexus.nx_answer_runs WHERE tenant_id='" + tenant
-                + "' AND question='" + question + "'");
-            assertThat(rs.next()).as("run row must exist for question=" + question).isTrue();
-            return rs.getLong("id");
+            var rows = DSL.using(conn, SQLDialect.POSTGRES)
+                .select(NX_ANSWER_RUNS.ID)
+                .from(NX_ANSWER_RUNS)
+                .where(NX_ANSWER_RUNS.TENANT_ID.eq(tenant).and(NX_ANSWER_RUNS.QUESTION.eq(question)))
+                .fetch();
+            assertThat(rows).as("run row must exist for question=" + question).isNotEmpty();
+            return rows.get(0).value1();
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }
@@ -2446,11 +2475,10 @@ class TelemetryRepositoryTest {
     private boolean nxAnswerRunExists(String tenant, String question) {
         try (Connection conn = pg.createConnection("")) {
             PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
-            var rs = conn.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.nx_answer_runs WHERE tenant_id='" + tenant
-                + "' AND question='" + question + "'");
-            rs.next();
-            return rs.getInt(1) > 0;
+            int count = DSL.using(conn, SQLDialect.POSTGRES)
+                .fetchCount(NX_ANSWER_RUNS,
+                    NX_ANSWER_RUNS.TENANT_ID.eq(tenant).and(NX_ANSWER_RUNS.QUESTION.eq(question)));
+            return count > 0;
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }
@@ -2458,32 +2486,38 @@ class TelemetryRepositoryTest {
 
     private List<Map<String, Object>> fetchNxAnswerStepRows(long runId) {
         try (Connection conn = pg.createConnection("")) {
-            var rs = conn.createStatement().executeQuery(
-                "SELECT step_index, operator, source, model, input_tokens, output_tokens, "
-                + "cache_read_input_tokens, cache_creation_input_tokens, "
-                + "cost_usd, elapsed_ms, ok, bundled_steps FROM nexus.nx_answer_steps "
-                + "WHERE run_id=" + runId + " ORDER BY step_index");
+            var records = DSL.using(conn, SQLDialect.POSTGRES)
+                .select(NX_ANSWER_STEPS.STEP_INDEX, NX_ANSWER_STEPS.OPERATOR, NX_ANSWER_STEPS.SOURCE,
+                    NX_ANSWER_STEPS.MODEL, NX_ANSWER_STEPS.INPUT_TOKENS, NX_ANSWER_STEPS.OUTPUT_TOKENS,
+                    NX_ANSWER_STEPS.CACHE_READ_INPUT_TOKENS, NX_ANSWER_STEPS.CACHE_CREATION_INPUT_TOKENS,
+                    NX_ANSWER_STEPS.COST_USD, NX_ANSWER_STEPS.ELAPSED_MS, NX_ANSWER_STEPS.OK,
+                    NX_ANSWER_STEPS.BUNDLED_STEPS)
+                .from(NX_ANSWER_STEPS)
+                .where(NX_ANSWER_STEPS.RUN_ID.eq(runId))
+                .orderBy(NX_ANSWER_STEPS.STEP_INDEX)
+                .fetch();
             List<Map<String, Object>> rows = new java.util.ArrayList<>();
-            while (rs.next()) {
+            for (var record : records) {
                 Map<String, Object> row = new java.util.LinkedHashMap<>();
-                row.put("step_index", rs.getInt("step_index"));
-                row.put("operator", rs.getString("operator"));
-                row.put("source", rs.getString("source"));
-                row.put("model", rs.getString("model"));
-                row.put("input_tokens", (Object) rs.getObject("input_tokens"));
-                row.put("output_tokens", (Object) rs.getObject("output_tokens"));
-                // nexus-ndoke: getObject, not getInt — these must round-trip NULL
-                // as null. getInt would coerce absence to 0, which is the exact
-                // "used no cached input" claim the nullable columns exist to avoid.
+                row.put("step_index", record.get(NX_ANSWER_STEPS.STEP_INDEX));
+                row.put("operator", record.get(NX_ANSWER_STEPS.OPERATOR));
+                row.put("source", record.get(NX_ANSWER_STEPS.SOURCE));
+                row.put("model", record.get(NX_ANSWER_STEPS.MODEL));
+                row.put("input_tokens", (Object) record.get(NX_ANSWER_STEPS.INPUT_TOKENS));
+                row.put("output_tokens", (Object) record.get(NX_ANSWER_STEPS.OUTPUT_TOKENS));
+                // nexus-ndoke: jOOQ's Record#get, not a primitive getter — these must
+                // round-trip NULL as null. A primitive read would coerce absence to 0,
+                // which is the exact "used no cached input" claim these nullable
+                // columns exist to avoid.
                 row.put("cache_read_input_tokens",
-                    (Object) rs.getObject("cache_read_input_tokens"));
+                    (Object) record.get(NX_ANSWER_STEPS.CACHE_READ_INPUT_TOKENS));
                 row.put("cache_creation_input_tokens",
-                    (Object) rs.getObject("cache_creation_input_tokens"));
-                row.put("cost_usd", rs.getObject("cost_usd"));
-                row.put("elapsed_ms", rs.getInt("elapsed_ms"));
-                row.put("ok", rs.getBoolean("ok"));
-                java.sql.Array arr = rs.getArray("bundled_steps");
-                row.put("bundled_steps", arr != null ? (Integer[]) arr.getArray() : new Integer[0]);
+                    (Object) record.get(NX_ANSWER_STEPS.CACHE_CREATION_INPUT_TOKENS));
+                row.put("cost_usd", record.get(NX_ANSWER_STEPS.COST_USD));
+                row.put("elapsed_ms", record.get(NX_ANSWER_STEPS.ELAPSED_MS));
+                row.put("ok", record.get(NX_ANSWER_STEPS.OK));
+                Integer[] bundled = record.get(NX_ANSWER_STEPS.BUNDLED_STEPS);
+                row.put("bundled_steps", bundled != null ? bundled : new Integer[0]);
                 rows.add(row);
             }
             return rows;
@@ -2501,14 +2535,8 @@ class TelemetryRepositoryTest {
         try (Connection conn = svcDs.getConnection()) {
             conn.setAutoCommit(false);
             PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, tenantGuc, true);
-            long count;
-            try (var ps = conn.prepareStatement(
-                    "SELECT COUNT(*) FROM nexus.nx_answer_steps WHERE run_id = ?")) {
-                ps.setLong(1, runId);
-                var rs = ps.executeQuery();
-                rs.next();
-                count = rs.getLong(1);
-            }
+            long count = DSL.using(conn, SQLDialect.POSTGRES)
+                .fetchCount(NX_ANSWER_STEPS, NX_ANSWER_STEPS.RUN_ID.eq(runId));
             conn.commit();
             return count;
         } catch (SQLException e) {
@@ -2519,10 +2547,8 @@ class TelemetryRepositoryTest {
     private int countSearchTelemetryRows(String tenant) {
         try (Connection conn = pg.createConnection("")) {
             PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
-            var rs = conn.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.search_telemetry WHERE tenant_id='" + tenant + "'");
-            rs.next();
-            return rs.getInt(1);
+            return DSL.using(conn, SQLDialect.POSTGRES)
+                .fetchCount(SEARCH_TELEMETRY, SEARCH_TELEMETRY.TENANT_ID.eq(tenant));
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }
@@ -2531,10 +2557,8 @@ class TelemetryRepositoryTest {
     private int countHookFailuresRows(String tenant) {
         try (Connection conn = pg.createConnection("")) {
             PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
-            var rs = conn.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.hook_failures WHERE tenant_id='" + tenant + "'");
-            rs.next();
-            return rs.getInt(1);
+            return DSL.using(conn, SQLDialect.POSTGRES)
+                .fetchCount(HOOK_FAILURES, HOOK_FAILURES.TENANT_ID.eq(tenant));
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }

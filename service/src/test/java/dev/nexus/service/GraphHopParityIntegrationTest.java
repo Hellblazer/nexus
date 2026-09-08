@@ -9,6 +9,8 @@ import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.OnnxEmbedder;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
@@ -18,6 +20,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -25,6 +28,9 @@ import java.util.Random;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -168,34 +174,51 @@ class GraphHopParityIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             for (GhDoc c : docs) {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_documents "
-                    + "(tenant_id, tumbler, title, author, content_type, physical_collection, deleted_at) "
-                    + "VALUES ('" + TENANT + "', '" + c.tumbler() + "', 'Doc', 'ada', 'paper', '"
-                    + COLL + "', " + (c.tombstoned() ? "now()" : "NULL") + ") "
-                    + "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+                var insert = DSL.using(su, SQLDialect.POSTGRES)
+                    .insertInto(CATALOG_DOCUMENTS)
+                    .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+                    .set(CATALOG_DOCUMENTS.TUMBLER, c.tumbler())
+                    .set(CATALOG_DOCUMENTS.TITLE, "Doc")
+                    .set(CATALOG_DOCUMENTS.AUTHOR, "ada")
+                    .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLL);
+                if (c.tombstoned()) {
+                    insert = insert.set(CATALOG_DOCUMENTS.DELETED_AT, DSL.currentOffsetDateTime());
+                }
+                insert.onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
+                    .doNothing()
+                    .execute();
                 // RDR-180: chash is bytea (32 octets) — decode the 64-hex string.
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_document_chunks "
-                    + "(tenant_id, doc_id, position, chash, collection) "
-                    + "VALUES ('" + TENANT + "', '" + c.tumbler() + "', 0, decode('" + c.chash()
-                    + "', 'hex'), '" + COLL + "') ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+                DSL.using(su, SQLDialect.POSTGRES)
+                    .insertInto(CATALOG_DOCUMENT_CHUNKS,
+                        CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                    .values(TENANT, c.tumbler(), 0, HexFormat.of().parseHex(c.chash()), COLL)
+                    .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                        CATALOG_DOCUMENT_CHUNKS.POSITION)
+                    .doNothing()
+                    .execute();
             }
             // cites chain gh-doc-0 → 1 → 2 → 3 … across the whole numbered range.
             for (int d = 0; d < GH_SIZE - 1; d++) {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_links "
-                    + "(tenant_id, from_tumbler, to_tumbler, link_type, created_by) "
-                    + "VALUES ('" + TENANT + "', 'gh-doc-" + d + "', 'gh-doc-" + (d + 1)
-                    + "', '" + LINK + "', 'test') ON CONFLICT DO NOTHING");
+                DSL.using(su, SQLDialect.POSTGRES)
+                    .insertInto(CATALOG_LINKS,
+                        CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER,
+                        CATALOG_LINKS.LINK_TYPE, CATALOG_LINKS.CREATED_BY)
+                    .values(TENANT, "gh-doc-" + d, "gh-doc-" + (d + 1), LINK, "test")
+                    .onConflictDoNothing()
+                    .execute();
             }
             // Tombstoned doc is reachable: link gh-doc-1 → tombstoned (1 hop from a
             // depth-1 node → within depth 2).
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_links "
-                + "(tenant_id, from_tumbler, to_tumbler, link_type, created_by) "
-                + "VALUES ('" + TENANT + "', 'gh-doc-1', '" + TOMB_TUMBLER + "', '" + LINK
-                + "', 'test') ON CONFLICT DO NOTHING");
+            DSL.using(su, SQLDialect.POSTGRES)
+                .insertInto(CATALOG_LINKS,
+                    CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER,
+                    CATALOG_LINKS.LINK_TYPE, CATALOG_LINKS.CREATED_BY)
+                .values(TENANT, "gh-doc-1", TOMB_TUMBLER, LINK, "test")
+                .onConflictDoNothing()
+                .execute();
             // UNREACH_TUMBLER intentionally has NO edges.
         }
 
@@ -230,17 +253,26 @@ class GraphHopParityIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             for (int i = 0; i < names.length; i++) {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_documents "
-                    + "(tenant_id, tumbler, title, author, content_type, physical_collection) "
-                    + "VALUES ('" + TENANT + "', '" + names[i] + "', 'Doc', 'ada', 'paper', '"
-                    + COLL2 + "') ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+                DSL.using(su, SQLDialect.POSTGRES)
+                    .insertInto(CATALOG_DOCUMENTS,
+                        CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
+                        CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.CONTENT_TYPE,
+                        CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                    .values(TENANT, names[i], "Doc", "ada", "paper", COLL2)
+                    .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
+                    .doNothing()
+                    .execute();
                 // RDR-180: chash is bytea (32 octets) — decode the 64-hex string.
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_document_chunks "
-                    + "(tenant_id, doc_id, position, chash, collection) "
-                    + "VALUES ('" + TENANT + "', '" + names[i] + "', 0, decode('" + chashes.get(i)
-                    + "', 'hex'), '" + COLL2 + "') ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+                DSL.using(su, SQLDialect.POSTGRES)
+                    .insertInto(CATALOG_DOCUMENT_CHUNKS,
+                        CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                    .values(TENANT, names[i], 0, HexFormat.of().parseHex(chashes.get(i)), COLL2)
+                    .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                        CATALOG_DOCUMENT_CHUNKS.POSITION)
+                    .doNothing()
+                    .execute();
             }
             String[][] edges = {
                 {"b-x", "b-a", "cites"}, {"b-a", "b-b", "cites"}, {"b-a", "b-c", "cites"},
@@ -248,11 +280,13 @@ class GraphHopParityIntegrationTest {
                 {"b-b", "b-c", "relates"}, {"b-e", "b-b", "cites"},
             };
             for (String[] e : edges) {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_links "
-                    + "(tenant_id, from_tumbler, to_tumbler, link_type, created_by) "
-                    + "VALUES ('" + TENANT + "', '" + e[0] + "', '" + e[1] + "', '" + e[2]
-                    + "', 'test') ON CONFLICT DO NOTHING");
+                DSL.using(su, SQLDialect.POSTGRES)
+                    .insertInto(CATALOG_LINKS,
+                        CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER,
+                        CATALOG_LINKS.LINK_TYPE, CATALOG_LINKS.CREATED_BY)
+                    .values(TENANT, e[0], e[1], e[2], "test")
+                    .onConflictDoNothing()
+                    .execute();
             }
         }
     }

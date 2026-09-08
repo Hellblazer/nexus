@@ -3,6 +3,8 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -11,8 +13,8 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
-import java.sql.ResultSet;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -85,14 +87,18 @@ class Catalog034TumblerGrammarTest {
         // or a raw INSERT.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) "
-                + "VALUES ('" + TENANT + "', '9999.1', 'raw-two-segment-doc')");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT deleted_at FROM nexus.catalog_documents "
-                + "WHERE tenant_id = '" + TENANT + "' AND tumbler = '9999.1'");
-            assertTrue(rs.next());
-            assertEquals(null, rs.getTimestamp(1));
+            DSL.using(su, SQLDialect.POSTGRES)
+                .insertInto(CATALOG_DOCUMENTS,
+                    CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE)
+                .values(TENANT, "9999.1", "raw-two-segment-doc")
+                .execute();
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(CATALOG_DOCUMENTS.DELETED_AT)
+                .from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq("9999.1")))
+                .fetch();
+            assertEquals(1, rows.size());
+            assertEquals(null, rows.get(0).value1());
         }
     }
 
@@ -116,29 +122,38 @@ class Catalog034TumblerGrammarTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) VALUES "
-                + "('" + TENANT + "', '8888.1', 'violator'),"
-                + "('" + TENANT + "', '8888.1.1', 'conforming-sibling')");
+            DSL.using(su, SQLDialect.POSTGRES)
+                .insertInto(CATALOG_DOCUMENTS,
+                    CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE)
+                .values(TENANT, "8888.1", "violator")
+                .values(TENANT, "8888.1.1", "conforming-sibling")
+                .execute();
 
             // splitStatements="false" in the shipped changeset -- this is a single
             // DO $$ ... $$ block whose body contains internal semicolons, so it
             // must be sent as ONE statement, not split on ';' (the PostgreSQL
             // JDBC driver's simple-query protocol accepts multiple ;-separated
-            // top-level statements in one execute() call).
+            // top-level statements in one execute() call). Kept raw: this replays
+            // the shipped changeset's own <sql> text verbatim (same class as
+            // Catalog016SourceUriUniqueTest's identical technique) -- re-expressing
+            // it in jOOQ DSL would no longer be the SAME statement Liquibase executes.
             su.createStatement().execute(dataStepSql);
 
-            ResultSet violator = su.createStatement().executeQuery(
-                "SELECT deleted_at FROM nexus.catalog_documents "
-                + "WHERE tenant_id = '" + TENANT + "' AND tumbler = '8888.1'");
-            assertTrue(violator.next());
-            assertTrue(violator.getTimestamp(1) != null, "the 2-segment row must be tombstoned");
+            var violatorRows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(CATALOG_DOCUMENTS.DELETED_AT)
+                .from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq("8888.1")))
+                .fetch();
+            assertEquals(1, violatorRows.size());
+            assertTrue(violatorRows.get(0).value1() != null, "the 2-segment row must be tombstoned");
 
-            ResultSet conforming = su.createStatement().executeQuery(
-                "SELECT deleted_at FROM nexus.catalog_documents "
-                + "WHERE tenant_id = '" + TENANT + "' AND tumbler = '8888.1.1'");
-            assertTrue(conforming.next());
-            assertEquals(null, conforming.getTimestamp(1), "the 3-segment sibling must survive untouched");
+            var conformingRows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(CATALOG_DOCUMENTS.DELETED_AT)
+                .from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq("8888.1.1")))
+                .fetch();
+            assertEquals(1, conformingRows.size());
+            assertEquals(null, conformingRows.get(0).value1(), "the 3-segment sibling must survive untouched");
         }
     }
 

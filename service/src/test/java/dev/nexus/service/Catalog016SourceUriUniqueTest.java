@@ -3,6 +3,9 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.exception.DataAccessException;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -11,7 +14,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
-import java.sql.ResultSet;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -20,6 +23,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -75,23 +79,22 @@ class Catalog016SourceUriUniqueTest {
 
     private int liveRowsForUri(String uri) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM nexus.catalog_documents "
-                + "WHERE tenant_id = '" + TENANT + "' AND source_uri = '" + uri + "' "
-                + "AND deleted_at IS NULL");
-            rs.next();
-            return rs.getInt(1);
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .fetchCount(CATALOG_DOCUMENTS,
+                    CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT)
+                        .and(CATALOG_DOCUMENTS.SOURCE_URI.eq(uri))
+                        .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()));
         }
     }
 
     private boolean liveTumblerExists(String tumbler) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM nexus.catalog_documents "
-                + "WHERE tenant_id = '" + TENANT + "' AND tumbler = '" + tumbler + "' "
-                + "AND deleted_at IS NULL");
-            rs.next();
-            return rs.getInt(1) == 1;
+            int count = DSL.using(su, SQLDialect.POSTGRES)
+                .fetchCount(CATALOG_DOCUMENTS,
+                    CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT)
+                        .and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                        .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()));
+            return count == 1;
         }
     }
 
@@ -235,11 +238,13 @@ class Catalog016SourceUriUniqueTest {
         String t = repo.registerDocument(TENANT, "18", Map.of(
             "title", "shapeless", "file_path", "notes/x.md"));
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT source_uri FROM nexus.catalog_documents "
-                + "WHERE tenant_id = '" + TENANT + "' AND tumbler = '" + t + "'");
-            rs.next();
-            assertEquals("", rs.getString(1));
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(CATALOG_DOCUMENTS.SOURCE_URI)
+                .from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq(t)))
+                .fetch();
+            assertEquals(1, rows.size());
+            assertEquals("", rows.get(0).value1());
         }
     }
 
@@ -252,10 +257,13 @@ class Catalog016SourceUriUniqueTest {
             "title", "det", "source_uri", "file:///det/a.md", "file_path", "a.md"));
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            var ex = assertThrows(java.sql.SQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, source_uri) "
-                    + "VALUES ('" + TENANT + "', '10.9999', 'dup', 'file:///det/a.md')"));
+            var ex = assertThrows(DataAccessException.class, () ->
+                DSL.using(su, SQLDialect.POSTGRES)
+                    .insertInto(CATALOG_DOCUMENTS,
+                        CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                        CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.SOURCE_URI)
+                    .values(TENANT, "10.9999", "dup", "file:///det/a.md")
+                    .execute());
             assertTrue(ex.getMessage().contains("ux_catalog_documents_live_source_uri"),
                 "expected the partial unique index to refuse: " + ex.getMessage());
         }
@@ -438,8 +446,9 @@ class Catalog016SourceUriUniqueTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DROP INDEX nexus.ux_catalog_documents_live_source_uri");
+            DSL.using(su, SQLDialect.POSTGRES)
+                .dropIndex(DSL.name("nexus", "ux_catalog_documents_live_source_uri"))
+                .execute();
             try {
                 runDedupAndAssert(su, dedupSql);
             } catch (Exception primary) {
@@ -476,25 +485,34 @@ class Catalog016SourceUriUniqueTest {
             // — 16.3's undated row uses NULL (the '' -> NULL post-migration shape), not the
             // legacy '' sentinel the pre-migration NULLIF(indexed_at,'') dedup ORDER BY was
             // written to tolerate; NULL still sorts last under "ASC NULLS LAST".
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, source_uri, chunk_count, indexed_at) VALUES "
-                + "('" + TENANT + "', '16.1', 'loser-few-chunks',  '" + uri + "', 2, '2026-01-01T00:00:00Z'),"
-                + "('" + TENANT + "', '16.2', 'winner-most-chunks','" + uri + "', 9, '2026-01-02T00:00:00Z'),"
-                + "('" + TENANT + "', '16.3', 'loser-no-chunks',   '" + uri + "', 0, NULL)");
+            DSL.using(su, SQLDialect.POSTGRES)
+                .insertInto(CATALOG_DOCUMENTS,
+                    CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
+                    CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.CHUNK_COUNT, CATALOG_DOCUMENTS.INDEXED_AT)
+                .values(TENANT, "16.1", "loser-few-chunks", uri, 2,
+                    OffsetDateTime.parse("2026-01-01T00:00:00Z"))
+                .values(TENANT, "16.2", "winner-most-chunks", uri, 9,
+                    OffsetDateTime.parse("2026-01-02T00:00:00Z"))
+                .values(TENANT, "16.3", "loser-no-chunks", uri, 0, (OffsetDateTime) null)
+                .execute();
             for (String stmt : dedupSql.split(";")) {
                 if (!stmt.isBlank()) su.createStatement().execute(stmt);
             }
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT tumbler FROM nexus.catalog_documents "
-                + "WHERE tenant_id = '" + TENANT + "' AND source_uri = '" + uri + "' AND deleted_at IS NULL");
-            assertTrue(rs.next(), "one live winner must survive");
-            assertEquals("16.2", rs.getString(1), "winner is the most-chunk-bearing row");
-            assertTrue(!rs.next(), "exactly one live row survives");
-            ResultSet tomb = su.createStatement().executeQuery(
-                "SELECT count(*) FROM nexus.catalog_documents "
-                + "WHERE tenant_id = '" + TENANT + "' AND source_uri = '" + uri + "' AND deleted_at IS NOT NULL");
-            tomb.next();
-            assertEquals(2, tomb.getInt(1), "losers are tombstoned, not deleted");
+            var winners = DSL.using(su, SQLDialect.POSTGRES)
+                .select(CATALOG_DOCUMENTS.TUMBLER)
+                .from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT)
+                    .and(CATALOG_DOCUMENTS.SOURCE_URI.eq(uri))
+                    .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                .fetch();
+            assertEquals(1, winners.size(), "exactly one live row survives");
+            assertEquals("16.2", winners.get(0).value1(), "winner is the most-chunk-bearing row");
+            int tombstoned = DSL.using(su, SQLDialect.POSTGRES)
+                .fetchCount(CATALOG_DOCUMENTS,
+                    CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT)
+                        .and(CATALOG_DOCUMENTS.SOURCE_URI.eq(uri))
+                        .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull()));
+            assertEquals(2, tombstoned, "losers are tombstoned, not deleted");
         }
     }
 
