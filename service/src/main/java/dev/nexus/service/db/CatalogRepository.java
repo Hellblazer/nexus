@@ -6842,7 +6842,12 @@ public final class CatalogRepository {
         // circuited by a stale KNOWN entry.
         if (counts.containsKey("catalog_collections_superseded")) {
             CollectionRegistry.evict(tenant, oldName);
-            CollectionRegistry.markKnown(tenant, newName);
+            // RDR-204 nexus-ft04v.14: markKnown now caches the row, not presence — read
+            // the row step 1 of the transaction just wrote (copied from oldName's
+            // metadata) so newName's cache entry carries its real attributes instead of
+            // forcing the next reader to pay a redundant SELECT.
+            CollectionRegistry.markKnown(tenant, newName,
+                CollectionRegistry.lookup(tenantScope, tenant, newName));
         }
         return counts;
     }

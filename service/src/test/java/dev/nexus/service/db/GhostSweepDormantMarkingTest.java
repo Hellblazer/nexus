@@ -309,7 +309,8 @@ class GhostSweepDormantMarkingTest {
             su.setAutoCommit(true);
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, coll);
         }
-        CollectionRegistry.markKnown(tenant, coll);
+        CollectionRegistry.markKnown(tenant, coll,
+            new CollectionRow("knowledge", "gs-unref", "minilm-l6-v2-384", 384, "live"));
 
         CatalogRepository.GhostSweepResult result = repo.sweepGhostsAndMarkDormant(tenant);
 

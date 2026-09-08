@@ -194,7 +194,8 @@ class EmbedderRouterEmbeddingProfileSeedTest {
         // this instead observes a cached TRUE flip to FALSE, i.e. the next
         // registration attempt for this exact collection must re-fetch/
         // re-verify against the database rather than trusting the stale fact.
-        CollectionRegistry.markKnown(tenant, collection);
+        CollectionRegistry.markKnown(tenant, collection,
+            new dev.nexus.service.db.CollectionRow("code", tenant, "bge-base-en-v15-768", 768, "live"));
         assertThat(CollectionRegistry.isKnown(tenant, collection)).isTrue();
 
         EmbedderRouter router = new EmbedderRouter(new FakeBge(), "document");

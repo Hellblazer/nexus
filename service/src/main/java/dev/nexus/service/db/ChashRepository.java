@@ -272,8 +272,13 @@ public final class ChashRepository {
                .execute();
             return total;
         });
-        // Post-commit (nexus-h8rf6.2): see CollectionRegistry class doc.
-        CollectionRegistry.markKnown(tenant, newCollection);
+        // Post-commit (nexus-h8rf6.2): see CollectionRegistry class doc. newCollection's
+        // row already existed before this transaction (ensureCollectionRegistered
+        // verified it above), so lookup() below is a cache hit in the common case —
+        // require() already cached it mid-transaction — and a cheap single-row read
+        // on the rare eviction race otherwise (RDR-204 nexus-ft04v.14).
+        CollectionRegistry.markKnown(tenant, newCollection,
+            CollectionRegistry.lookup(tenantScope, tenant, newCollection));
         return updated;
     }
 

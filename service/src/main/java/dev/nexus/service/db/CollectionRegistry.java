@@ -3,8 +3,10 @@
 package dev.nexus.service.db;
 
 import org.jooq.DSLContext;
+import org.jooq.Record5;
 
-import java.util.Set;
+import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
@@ -40,24 +42,44 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * pays the lock-wait cost; that window is small and bounded by however many
  * requests happen to race at that exact instant, not by the length of the run.
  *
+ * <p><strong>RDR-204 Phase 2 (bead nexus-ft04v.14): the cache holds the ROW, not
+ * presence.</strong> A caller that already has the {@code (tenant, collection)}
+ * pair confirmed registered increasingly also needs to know WHAT it says —
+ * {@code content_type}/{@code owner_id}/{@code embedding_model}/{@code dimension}/
+ * {@code lifecycle_state} — to route a write or pick an embedder without a second
+ * round trip. Presence was a strict subset of this: {@code isKnown} is now exactly
+ * {@code cached(...).isPresent()}. See {@link CollectionRow} for the field
+ * semantics.
+ *
  * <p><strong>Correctness: mark-known only after commit.</strong> Callers MUST call
  * {@link #markKnown} only after the transaction that performed the (possibly
  * skipped) registration has committed successfully — never from inside the
- * {@code TenantScope.withTenant} lambda itself. If the enclosing transaction later
- * rolls back (e.g. an unrelated error later in the same batch), the
- * {@code catalog_collections} row was never actually persisted; marking the cache
- * eagerly would cause every subsequent writer to skip re-registration forever,
- * silently starving the row. Marking post-commit means a rollback simply leaves
- * the pair unmarked, so the next writer retries registration as usual.
+ * {@code TenantScope.withTenant} lambda itself, UNLESS the row being marked was
+ * already committed by an EARLIER transaction (e.g. {@link #require} caching a row
+ * it just read mid-transaction — that row's existence predates this transaction,
+ * so marking it known cannot be undone by this transaction's own rollback). If the
+ * enclosing transaction later rolls back (e.g. an unrelated error later in the
+ * same batch), a row THIS transaction wrote was never actually persisted; marking
+ * the cache eagerly for THAT row would cause every subsequent writer to skip
+ * re-registration forever, silently starving the row. Marking post-commit means a
+ * rollback simply leaves the pair unmarked, so the next writer retries
+ * registration as usual.
  *
  * <p>Process-local and unbounded by design: {@code (tenant, collection)} pairs are
  * low-cardinality relative to write volume (one entry per physical collection ever
- * touched by this process), so an unbounded {@link ConcurrentHashMap}-backed set is
- * the right trade-off — no eviction complexity, no cache-miss storms.
+ * touched by this process — production tenant {@code nexus} carries 229 rows), so
+ * an unbounded {@link ConcurrentHashMap}-backed map is the right trade-off — no
+ * eviction complexity, no cache-miss storms. Caching the row instead of a boolean
+ * multiplies the per-entry footprint (three {@code String} references, an
+ * {@code int}, and one more {@code String} versus a single set membership) but not
+ * the CARDINALITY: the number of distinct keys is unchanged, so the map stays
+ * bounded by the same "collections this process has actually touched" argument —
+ * at real-world scale (hundreds of collections per tenant, low hundreds of
+ * tenants per process) the whole cache remains a few megabytes at most.
  */
 public final class CollectionRegistry {
 
-    private static final Set<String> KNOWN = ConcurrentHashMap.newKeySet();
+    private static final Map<String, CollectionRow> KNOWN = new ConcurrentHashMap<>();
 
     private CollectionRegistry() {}
 
@@ -71,15 +93,26 @@ public final class CollectionRegistry {
 
     /** True when {@code (tenant, collection)} is known-registered — safe to skip the INSERT. */
     public static boolean isKnown(String tenant, String collection) {
-        return KNOWN.contains(key(tenant, collection));
+        return cached(tenant, collection).isPresent();
     }
 
     /**
-     * Record {@code (tenant, collection)} as registered. Callers MUST only invoke
-     * this AFTER the enclosing transaction has committed (see class doc).
+     * The cached row for {@code (tenant, collection)}, if any is known-registered.
+     * Never touches the database — a pure in-process read.
      */
-    public static void markKnown(String tenant, String collection) {
-        KNOWN.add(key(tenant, collection));
+    public static Optional<CollectionRow> cached(String tenant, String collection) {
+        return Optional.ofNullable(KNOWN.get(key(tenant, collection)));
+    }
+
+    /**
+     * Record {@code (tenant, collection)} as registered, caching {@code row}.
+     * Callers MUST only invoke this AFTER the enclosing transaction has committed
+     * (see class doc) — unless {@code row} reflects a pair confirmed registered by
+     * an EARLIER, already-committed transaction (as {@link #require} does on a
+     * cache miss).
+     */
+    public static void markKnown(String tenant, String collection, CollectionRow row) {
+        KNOWN.put(key(tenant, collection), row);
     }
 
     /**
@@ -118,7 +151,7 @@ public final class CollectionRegistry {
      */
     public static void evictTenant(String tenant) {
         String prefix = tenant + '|';
-        KNOWN.removeIf(k -> k.startsWith(prefix));
+        KNOWN.keySet().removeIf(k -> k.startsWith(prefix));
     }
 
     /** Test-only: clears all cached entries. */
@@ -128,32 +161,68 @@ public final class CollectionRegistry {
 
     /**
      * Fail loud when {@code (tenant, collection)} has no row in {@code
-     * nexus.catalog_collections} (RDR-204 Phase 1, bead nexus-ft04v.7).
+     * nexus.catalog_collections} (RDR-204 Phase 1, bead nexus-ft04v.7); return its
+     * cached or freshly-read row otherwise (RDR-204 Phase 2, bead nexus-ft04v.14).
      *
      * <p>Replaces the seven {@code ensureCollectionRegistered}-shaped stub inserts
      * this bead retires: those wrote a blank-attribute row on first write so their
      * own {@code (tenant, collection)} FK could never fail; this checks existence
      * instead and never writes anything. Checks the in-process cache first (skips
-     * a round trip once a pair is known-registered by a real registration —
-     * {@code CatalogRepository.upsertCollection} and siblings mark it via {@link
-     * #markKnown} post-commit); on a cache miss, asks the database directly and
-     * marks the cache on a hit so repeat writes to the same collection skip the
-     * SELECT too.
+     * a round trip once a pair is known-registered — {@code CatalogRepository
+     * .upsertCollection} and siblings mark it via {@link #markKnown} post-commit);
+     * on a cache miss, reads the row from the database directly and caches it so
+     * repeat writes to the same collection skip the SELECT too.
+     *
+     * @throws UnregisteredCollectionException if no row exists for the pair
+     */
+    public static CollectionRow require(DSLContext ctx, String tenant, String collection) {
+        Optional<CollectionRow> hit = cached(tenant, collection);
+        if (hit.isPresent()) {
+            return hit.get();
+        }
+        Record5<String, String, String, Integer, String> r = ctx.select(
+                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.DIMENSION,
+                CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+            .from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                .and(CATALOG_COLLECTIONS.NAME.eq(collection)))
+            .fetchOne();
+        if (r == null) {
+            throw new UnregisteredCollectionException(tenant, collection);
+        }
+        Integer dimension = r.value4();
+        CollectionRow row = new CollectionRow(
+            r.value1(), r.value2(), r.value3(), dimension == null ? 0 : dimension, r.value5());
+        markKnown(tenant, collection, row);
+        return row;
+    }
+
+    /**
+     * Wrapper over {@link #require} for callers that only need the fail-loud
+     * existence check and do not (yet) consume the row. Kept so the seven
+     * pre-existing call sites (RDR-204 Phase 1, bead nexus-ft04v.7) keep compiling
+     * unchanged.
      *
      * @throws UnregisteredCollectionException if no row exists for the pair
      */
     public static void requireRegistered(DSLContext ctx, String tenant, String collection) {
-        if (isKnown(tenant, collection)) {
-            return;
+        require(ctx, tenant, collection);
+    }
+
+    /**
+     * {@link #require}, for callers OUTSIDE an open transaction (RDR-204 Phase 2,
+     * bead nexus-ft04v.14) — e.g. a post-commit re-cache after a write that did not
+     * itself carry the row's final attributes forward in Java. On a cache miss,
+     * opens its own short read transaction via {@code scope}.
+     *
+     * @throws UnregisteredCollectionException if no row exists for the pair
+     */
+    public static CollectionRow lookup(TenantScope scope, String tenant, String collection) {
+        Optional<CollectionRow> hit = cached(tenant, collection);
+        if (hit.isPresent()) {
+            return hit.get();
         }
-        boolean exists = ctx.fetchExists(
-            ctx.selectOne()
-               .from(CATALOG_COLLECTIONS)
-               .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
-                   .and(CATALOG_COLLECTIONS.NAME.eq(collection))));
-        if (!exists) {
-            throw new UnregisteredCollectionException(tenant, collection);
-        }
-        markKnown(tenant, collection);
+        return scope.withTenant(tenant, ctx -> require(ctx, tenant, collection));
     }
 }
