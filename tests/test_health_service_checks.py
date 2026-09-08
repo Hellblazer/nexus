@@ -941,6 +941,7 @@ _ALL_TENANT_TABLES = [
     "nexus.claude_assisted_remediation_consents",
     "nexus.document_aspects",
     "nexus.document_highlights",
+    "nexus.embedding_profile",  # RDR-204 Phase 1 (nexus-ft04v.2, catalog-036-3; mirrors health._RLS_TENANT_TABLES)
     "nexus.frecency",
     "nexus.gc_audit",  # nexus-jqvzk: destructive-T3-op audit record (catalog-018)
     "nexus.hook_failures",
