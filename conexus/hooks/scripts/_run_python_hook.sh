@@ -24,8 +24,13 @@ set -u
 if [ -n "${NX_HOOK_PYTHON:-}" ] && [ -x "$NX_HOOK_PYTHON" ] && "$NX_HOOK_PYTHON" -c '' >/dev/null 2>&1; then
   exec "$NX_HOOK_PYTHON" "$@"
 fi
+# The venv wins only when its nexus is THIS checkout's (an editable install
+# under the cwd): a stale VIRTUAL_ENV from another worktree, or a venv with
+# a packaged nexus, falls through to the generation instead of silently
+# reading a different tree.
 venv_py="${VIRTUAL_ENV:-}/bin/python"
-if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$venv_py" ] && "$venv_py" -c 'import nexus' >/dev/null 2>&1; then
+if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$venv_py" ] \
+   && "$venv_py" -c 'import os, sys, nexus; sys.exit(0 if os.path.realpath(nexus.__file__).startswith(os.path.realpath(os.getcwd()) + os.sep) else 1)' >/dev/null 2>&1; then
   exec "$venv_py" "$@"
 fi
 # ${HOME:-} so a hook launched with no HOME (a scrubbed env) falls through

@@ -141,7 +141,9 @@ def test_a_venv_without_nexus_does_not_win(tmp_path: Path) -> None:
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     bare = venv / "bin" / "python"
-    bare.write_text("#!/bin/sh\nexit 1\n")
+    # Runnable (so `-c ''` succeeds) but cannot import nexus: a weakened
+    # probe that only checks runnability would wrongly pick it.
+    bare.write_text("#!/bin/sh\ncase \"$*\" in *nexus*) exit 1;; esac\nexit 0\n")
     bare.chmod(bare.stat().st_mode | stat.S_IXUSR)
     hook = tmp_path / "hook.py"
     hook.write_text("print('hook ok')\n")

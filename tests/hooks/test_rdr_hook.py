@@ -353,3 +353,29 @@ def test_resolution_failure_is_named_on_the_verdict_line_and_in_the_log(rdr_hook
     ]
     assert "resolution failed catalog: ModuleNotFoundError" in log.read_text()
     rdr_hook_module._RESOLUTION_FAILURES.clear()
+
+
+def test_main_prints_the_resolution_failure_on_the_verdict_line(rdr_hook_module, tmp_path, monkeypatch, capsys):
+    """Reverting the verdict-line print leaves this red (nexus-4ti7e)."""
+    root = tmp_path / "repo"
+    (root / "docs" / "rdr").mkdir(parents=True)
+    (root / "docs" / "rdr" / "rdr-001-x.md").write_text("# x\n")
+    monkeypatch.setenv("NX_RDR_HOOK_LOG", str(tmp_path / "rdr_hook.log"))
+    monkeypatch.setattr(rdr_hook_module, "_repo_root", lambda: root)
+    monkeypatch.setattr(rdr_hook_module, "_rdr_files", lambda d: [root / "docs" / "rdr" / "rdr-001-x.md"])
+    monkeypatch.setattr(rdr_hook_module, "_load_all_t2_statuses", lambda name: {})
+    monkeypatch.setattr(rdr_hook_module, "_load_gated_commits", lambda name: {})
+    monkeypatch.setattr(rdr_hook_module, "_unchecked_fix_edits", lambda *a, **k: [])
+
+    def failing_resolve(repo_root):
+        rdr_hook_module._log_resolution_error("catalog", ModuleNotFoundError("No module named 'nexus'"))
+        return None
+
+    monkeypatch.setattr(rdr_hook_module, "_resolve_rdr_collection", failing_resolve)
+    rdr_hook_module._RESOLUTION_FAILURES.clear()
+    with pytest.raises(SystemExit) as exc:
+        rdr_hook_module.main()
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "but NOT indexed." in out
+    assert "(resolution failed: catalog: ModuleNotFoundError: No module named 'nexus'" in out

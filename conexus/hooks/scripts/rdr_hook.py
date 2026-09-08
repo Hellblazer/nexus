@@ -126,7 +126,10 @@ def _log_resolution_error(source: str, exc: BaseException) -> None:
     stderr, and only then handed to structlog (nexus-4ti7e: the interpreter
     that ran this hook on 2026-09-08 had neither nexus nor structlog, and an
     exit-0 SessionStart hook's stderr is never shown)."""
-    line = f"{source}: {type(exc).__name__}: {exc} [python {sys.executable}]"
+    detail = str(exc)
+    if len(detail) > 200:
+        detail = detail[:200] + "..."
+    line = f"{source}: {type(exc).__name__}: {detail} [python {sys.executable}]"
     _RESOLUTION_FAILURES.append(line)
     try:
         path = _hook_log_path()
@@ -390,7 +393,11 @@ def main() -> None:
         print(f"RDR: {status_info} in {rdr_dir.relative_to(root)} but NOT indexed.")
         if _RESOLUTION_FAILURES:
             # The verdict may be the hook's own failure, not the tree's state.
-            print(f"     (resolution failed: {'; '.join(_RESOLUTION_FAILURES)}; log: {_hook_log_path()})")
+            try:
+                where = f"; log: {_hook_log_path()}"
+            except Exception:  # noqa: BLE001 — Path.home() can raise in a scrubbed container
+                where = ""
+            print(f"     (resolution failed: {'; '.join(_RESOLUTION_FAILURES)}{where})")
         print(f"     Run: nx index repo {root}")
 
     for line in _unchecked_fix_edits(root, rdr_files, statuses, _load_gated_commits(repo_name)):
