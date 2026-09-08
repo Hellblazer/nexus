@@ -34,7 +34,10 @@ def _fake_generation(tools: Path, marker: str) -> Path:
 
 
 def _run(tools: Path, hook: Path) -> subprocess.CompletedProcess:
-    env = {**os.environ, "NX_TOOLS_DIR": str(tools)}
+    # The test's own venv imports nexus and would win over the fake
+    # generation by design; these tests pin the generation branch.
+    env = {k: v for k, v in os.environ.items() if k not in {"VIRTUAL_ENV", "NX_HOOK_PYTHON"}}
+    env["NX_TOOLS_DIR"] = str(tools)
     return subprocess.run(["bash", str(RUNNER), str(hook)], env=env, capture_output=True, text=True, timeout=30)
 
 
@@ -94,7 +97,55 @@ def test_a_generation_python_that_cannot_run_is_skipped(tmp_path: Path) -> None:
 def test_no_home_and_no_tools_dir_still_runs_the_hook(tmp_path: Path) -> None:
     hook = tmp_path / "hook.py"
     hook.write_text("print('no home ok')\n")
-    env = {k: v for k, v in os.environ.items() if k not in {"HOME", "NX_TOOLS_DIR"}}
+    env = {k: v for k, v in os.environ.items() if k not in {"HOME", "NX_TOOLS_DIR", "VIRTUAL_ENV", "NX_HOOK_PYTHON"}}
     proc = subprocess.run(["bash", str(RUNNER), str(hook)], env=env, capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "no home ok"
+
+
+def test_explicit_override_wins_over_a_generation(tmp_path: Path) -> None:
+    tools = tmp_path / "tools"
+    _fake_generation(tools, "GEN-PY-RAN")
+    override = tmp_path / "chosen"
+    override.write_text(f"#!/bin/sh\necho OVERRIDE-RAN\nexec {sys.executable} \"$@\"\n")
+    override.chmod(override.stat().st_mode | stat.S_IXUSR)
+    hook = tmp_path / "hook.py"
+    hook.write_text("print('hook ok')\n")
+    env = {k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}
+    env.update(NX_TOOLS_DIR=str(tools), NX_HOOK_PYTHON=str(override))
+    proc = subprocess.run(["bash", str(RUNNER), str(hook)], env=env, capture_output=True, text=True, timeout=30)
+    assert proc.stdout.splitlines() == ["OVERRIDE-RAN", "hook ok"]
+
+
+def test_an_active_venv_that_imports_nexus_wins_over_a_generation(tmp_path: Path) -> None:
+    """The dev checkout's venv (this test's interpreter imports nexus) beats
+    the installed generation, so hooks read the tree being edited."""
+    tools = tmp_path / "tools"
+    _fake_generation(tools, "GEN-PY-RAN")
+    # This test's own venv (sys.prefix) is one whose python imports nexus; a
+    # bare symlink elsewhere would lose the venv's site-packages.
+    venv = Path(sys.prefix)
+    assert (venv / "bin" / "python").exists()
+    hook = tmp_path / "hook.py"
+    hook.write_text("print('hook ok')\n")
+    env = {k: v for k, v in os.environ.items() if k != "NX_HOOK_PYTHON"}
+    env.update(NX_TOOLS_DIR=str(tools), VIRTUAL_ENV=str(venv))
+    proc = subprocess.run(["bash", str(RUNNER), str(hook)], env=env, capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.splitlines() == ["hook ok"]
+
+
+def test_a_venv_without_nexus_does_not_win(tmp_path: Path) -> None:
+    tools = tmp_path / "tools"
+    _fake_generation(tools, "GEN-PY-RAN")
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    bare = venv / "bin" / "python"
+    bare.write_text("#!/bin/sh\nexit 1\n")
+    bare.chmod(bare.stat().st_mode | stat.S_IXUSR)
+    hook = tmp_path / "hook.py"
+    hook.write_text("print('hook ok')\n")
+    env = {k: v for k, v in os.environ.items() if k != "NX_HOOK_PYTHON"}
+    env.update(NX_TOOLS_DIR=str(tools), VIRTUAL_ENV=str(venv))
+    proc = subprocess.run(["bash", str(RUNNER), str(hook)], env=env, capture_output=True, text=True, timeout=30)
+    assert proc.stdout.splitlines() == ["GEN-PY-RAN", "hook ok"]

@@ -32,6 +32,8 @@ if sys.version_info < (3, 12):
     )
     sys.exit(1)
 
+import datetime as _dt
+import os
 import re
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -100,11 +102,39 @@ def _resolve_rdr_collection(repo_root: Path) -> str | None:
         return None
 
 
+#: Every resolution failure this run, oldest first: the NOT-indexed verdict
+#: names them on stdout, the only channel a session sees from an exit-0
+#: SessionStart hook (nexus-4ti7e; stderr needs `claude --debug`).
+_RESOLUTION_FAILURES: list[str] = []
+
+
+def _hook_log_path() -> Path:
+    """Durable failure log beside the lockstep hook's, honouring
+    NEXUS_CONFIG_DIR: ``<config>/rdr_hook.log`` (override: NX_RDR_HOOK_LOG)."""
+    override = os.environ.get("NX_RDR_HOOK_LOG")
+    if override:
+        return Path(override)
+    cfg = os.environ.get("NEXUS_CONFIG_DIR") or str(Path.home() / ".config" / "nexus")
+    return Path(cfg) / "rdr_hook.log"
+
+
 def _log_resolution_error(source: str, exc: BaseException) -> None:
     """nexus-owna8: a blind except here forced every session onto the
     path-derived fallback, whose owner id can differ from the catalog's, and
     the hook then reported a fully indexed tree as NOT indexed. The failure
-    is logged so the next false verdict names its cause."""
+    is recorded for the verdict line, appended to a durable log, written to
+    stderr, and only then handed to structlog (nexus-4ti7e: the interpreter
+    that ran this hook on 2026-09-08 had neither nexus nor structlog, and an
+    exit-0 SessionStart hook's stderr is never shown)."""
+    line = f"{source}: {type(exc).__name__}: {exc} [python {sys.executable}]"
+    _RESOLUTION_FAILURES.append(line)
+    try:
+        path = _hook_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(f"{_dt.datetime.now(_dt.timezone.utc).isoformat()} resolution failed {line}\n")
+    except Exception:  # noqa: BLE001 — the log is best-effort in a hook
+        pass
     # stderr FIRST, with nothing but sys: on 2026-09-08 the interpreter that
     # ran this hook had neither nexus nor structlog, so the structlog line
     # below could not be written and the false NOT-indexed verdict shipped
@@ -358,10 +388,10 @@ def main() -> None:
         # single-file ``nx index rdr <file>`` now lands there too, but the
         # whole-tree remedy is the repo index.
         print(f"RDR: {status_info} in {rdr_dir.relative_to(root)} but NOT indexed.")
-        if rdr_collection:
-            print(f"     Run: nx index repo {root}")
-        else:
-            print(f"     Run: nx index repo {root}")
+        if _RESOLUTION_FAILURES:
+            # The verdict may be the hook's own failure, not the tree's state.
+            print(f"     (resolution failed: {'; '.join(_RESOLUTION_FAILURES)}; log: {_hook_log_path()})")
+        print(f"     Run: nx index repo {root}")
 
     for line in _unchecked_fix_edits(root, rdr_files, statuses, _load_gated_commits(repo_name)):
         print(line)

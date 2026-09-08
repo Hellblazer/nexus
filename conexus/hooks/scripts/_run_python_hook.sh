@@ -2,6 +2,11 @@
 # Run a Python hook script under an interpreter that can serve it.
 #
 # Order:
+#   0. $NX_HOOK_PYTHON when set and runnable (an explicit choice, for a dev
+#      box or a test), then an active $VIRTUAL_ENV whose python imports
+#      nexus (a developer's checkout venv must win over the installed
+#      generation, or every nexus-importing hook silently reads production
+#      while the developer edits the tree; critique [24988]).
 #   1. The installed conexus generation's own python
 #      (<tools>/current/bin/python; <tools> is $NX_TOOLS_DIR or
 #      ~/.local/share/nexus/tools). It is the only interpreter on a box that
@@ -16,6 +21,13 @@
 #      (3.10) that wins PATH precedence does not run the hook.
 #   3. Plain python3, so the hook's own version guard can print its error.
 set -u
+if [ -n "${NX_HOOK_PYTHON:-}" ] && [ -x "$NX_HOOK_PYTHON" ] && "$NX_HOOK_PYTHON" -c '' >/dev/null 2>&1; then
+  exec "$NX_HOOK_PYTHON" "$@"
+fi
+venv_py="${VIRTUAL_ENV:-}/bin/python"
+if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$venv_py" ] && "$venv_py" -c 'import nexus' >/dev/null 2>&1; then
+  exec "$venv_py" "$@"
+fi
 # ${HOME:-} so a hook launched with no HOME (a scrubbed env) falls through
 # instead of dying on `set -u`; the run check so a partially reaped or
 # wrong-arch generation python falls through instead of exec failing.

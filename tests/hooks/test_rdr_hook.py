@@ -337,3 +337,19 @@ def test_resolution_failure_reaches_stderr_without_structlog(rdr_hook_module, mo
     err = capsys.readouterr().err
     assert "collection resolution failed (catalog)" in err
     assert "No module named 'nexus'" in err and "[python " in err
+
+
+def test_resolution_failure_is_named_on_the_verdict_line_and_in_the_log(rdr_hook_module, tmp_path, monkeypatch):
+    """nexus-4ti7e: an exit-0 SessionStart hook shows only stdout, so the
+    NOT-indexed verdict itself names the failure; a durable log keeps it."""
+    import sys as _sys
+
+    log = tmp_path / "rdr_hook.log"
+    monkeypatch.setenv("NX_RDR_HOOK_LOG", str(log))
+    rdr_hook_module._RESOLUTION_FAILURES.clear()
+    rdr_hook_module._log_resolution_error("catalog", ModuleNotFoundError("No module named 'nexus'"))
+    assert rdr_hook_module._RESOLUTION_FAILURES == [
+        f"catalog: ModuleNotFoundError: No module named 'nexus' [python {_sys.executable}]"
+    ]
+    assert "resolution failed catalog: ModuleNotFoundError" in log.read_text()
+    rdr_hook_module._RESOLUTION_FAILURES.clear()
