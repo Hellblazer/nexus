@@ -158,10 +158,17 @@ jobs:
         # two-tag checkout (found by tests/e2e/plugin-cut-rehearsal's
         # depth-1 tag leg, 2026-08-30 — six failures, all this one cause);
         # ci.yml's lint job still runs it with full history.
+        # test_docs_reference_rot.py is EXCLUDED for the same reason: it
+        # resolves every commit sha cited under docs/ and reads
+        # origin/develop, neither of which a depth-1 single-tag checkout
+        # has (found by the rehearsal's depth-1 tag leg on the first cut
+        # after that lint landed, 2026-09-08; nexus-4ti7e cut). ci.yml's
+        # lint job runs it with full history on every PR to main.
         run: >-
           uv run pytest -m lint -q
           --ignore=tests/test_wire_contract_pairing_lint.py
           --ignore=tests/test_rehearsal_native_legs_refuse_no_build.py
+          --ignore=tests/test_docs_reference_rot.py
 
       - name: Assert PENDING_RELEASE.md carries no entry for this cut's own range
         run: |
