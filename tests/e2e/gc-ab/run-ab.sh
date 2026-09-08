@@ -71,7 +71,7 @@ build_variant() { # gc-name
   # bind mount of this host checkout, so service/target is the same
   # single-writer resource the host-side lease guards — acquire it here on
   # the host, around the docker invocation, not inside the container.
-  build_lease_acquire service docker-native-build "--gc=${gc}"
+  build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" docker-native-build "--gc=${gc}"
   docker run --rm --entrypoint bash \
     --add-host=host.docker.internal:host-gateway \
     -v "$PWD":/src -w /src/service \

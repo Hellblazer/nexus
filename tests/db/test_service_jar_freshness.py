@@ -11,6 +11,19 @@ from pathlib import Path
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _no_live_build_lease(tmp_path, monkeypatch):
+    """Isolate every test here from the BOX's build lease (nexus-pv93h).
+
+    ``jar_freshness_skip_reason`` consults the lease before it looks at the
+    jar, and the lease is shared by every worktree of the repo, so while any
+    Maven run held it these tests reported "BUILD IS IN PROGRESS" instead of
+    the jar states they exist to pin. Tests that want a lease pass an
+    explicit root.
+    """
+    monkeypatch.setenv("NX_BUILD_LEASE_ROOT", str(tmp_path / "no-lease"))
+
 from tests.db._service_fixture import (
     _SERVICE_JAR,
     build_in_progress_reason,
@@ -374,3 +387,91 @@ class TestBuildInProgressIsRefusedLoudly:
 
     def test_a_missing_lease_root_never_raises(self, tmp_path):
         assert build_in_progress_reason(tmp_path / "nope") is None
+
+
+class TestLeaseHolderLiveness:
+    """The lease directory in the git common dir never disappears on its own
+    (nexus-pv93h): a reader keys on the HOLDER, never on the path. The lease
+    lib records the real build's process group as ``pgid`` once the ./mvnw
+    child exists; that group outlives a wrapper killed directly."""
+
+    @staticmethod
+    def _lease(tmp_path, pid: int, pgid: int | None = None):
+        d = tmp_path / "root" / "service"
+        d.mkdir(parents=True)
+        (d / "pid").write_text(f"{pid}\n")
+        (d / "ts").write_text("2026-09-07T20:53:27Z\n")
+        (d / "label").write_text("someone\n")
+        (d / "command").write_text("scripts/mvnw-leased.sh ./mvnw test\n")
+        if pgid is not None:
+            (d / "pgid").write_text(f"{pgid}\n")
+        return tmp_path / "root"
+
+    def test_a_dead_wrapper_with_a_live_build_group_is_still_a_build(self, tmp_path):
+        import os
+
+        # 2^22 is above pid_max on darwin and linux: the wrapper is "dead";
+        # this test process's own group is alive.
+        root = self._lease(tmp_path, 4194304, pgid=os.getpgid(0))
+        assert build_in_progress_reason(root) is not None
+
+    def test_a_dead_build_group_clears_even_with_a_live_wrapper_pid(self, tmp_path):
+        import os
+
+        root = self._lease(tmp_path, os.getpid(), pgid=4194304)
+        assert build_in_progress_reason(root) is None
+
+
+class TestWaitForBuildLease:
+    """``wait_for_build_lease`` (nexus-pv93h): the pytest-side counterpart of
+    ``build_lease_acquire_wait`` -- polls the holder, bounded, announcing at
+    the shell lib's cadence, and never sleeps past a cleared lease."""
+
+    def _run(self, reasons: list, max_seconds: int):
+        from tests.db._service_fixture import wait_for_build_lease
+
+        seq = iter(reasons)
+        sleeps: list[int] = []
+        said: list[str] = []
+        result = wait_for_build_lease(
+            max_seconds, reason_fn=lambda: next(seq), sleep=sleeps.append, announce=said.append,
+        )
+        return result, sleeps, said
+
+    def test_clear_lease_returns_at_once_without_sleeping_or_announcing(self):
+        result, sleeps, said = self._run([None], 3600)
+        assert result is None and sleeps == [] and said == []
+
+    def test_zero_bound_is_a_single_look_that_returns_the_reason(self):
+        result, sleeps, said = self._run(["held by 1"], 0)
+        assert result == "held by 1" and sleeps == [] and said == []
+
+    def test_waits_until_the_holder_is_gone_and_says_so(self):
+        result, sleeps, said = self._run(["held", "held", None], 3600)
+        assert result is None
+        assert sleeps == [5, 5]
+        assert said[0].startswith("build lease: held — waiting (0s of 3600s). held")
+        assert said[-1] == "build lease: clear after 10s, starting."
+        assert len(said) == 2, "one announcement at the first refusal, none per poll"
+
+    def test_gives_up_at_the_bound_with_the_last_reason(self):
+        result, sleeps, said = self._run(["a", "b", "c", "d"], 10)
+        assert result == "c"
+        assert sleeps == [5, 5]
+
+    def test_announces_once_a_minute_while_held(self):
+        result, sleeps, said = self._run(["held"] * 30, 120)
+        assert result == "held"
+        assert len(said) == 2
+        assert said[0].startswith("build lease: held — waiting (0s of 120s)")
+        assert said[1].startswith("build lease: held — waiting (60s of 120s)")
+
+    def test_env_bound_is_opt_in(self, monkeypatch):
+        from tests.db._service_fixture import build_lease_wait_seconds
+
+        monkeypatch.delenv("NX_BUILD_LEASE_WAIT", raising=False)
+        assert build_lease_wait_seconds() == 0
+        monkeypatch.setenv("NX_BUILD_LEASE_WAIT", "900")
+        assert build_lease_wait_seconds() == 900
+        monkeypatch.setenv("NX_BUILD_LEASE_WAIT", "soon")
+        assert build_lease_wait_seconds() == 0

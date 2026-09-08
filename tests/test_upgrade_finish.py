@@ -365,6 +365,8 @@ class TestVersionTransition:
         with patch(
             "nexus.upgrade_finish.install_mtime_and_version",
             return_value=(0.0, "6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
         ):
             assert check_version_transition(tmp_path) is None
         assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.1"
@@ -488,6 +490,8 @@ class TestCheckVersionTransitionBackfillsInstallMode:
             "nexus.upgrade_finish.install_mtime_and_version",
             return_value=(0.0, "6.7.1"),
         ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
             "nexus.config.backfill_install_mode_record",
         ) as backfill:
             line = check_version_transition(tmp_path)
@@ -499,6 +503,8 @@ class TestCheckVersionTransitionBackfillsInstallMode:
         with patch(
             "nexus.upgrade_finish.install_mtime_and_version",
             return_value=(0.0, "6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
         ), patch(
             "nexus.config.backfill_install_mode_record",
         ) as backfill:
@@ -956,8 +962,12 @@ class TestPidAliveAmbiguousOSErrorSemantics:
 class TestCrossVenvGuard:
     def test_dev_venv_never_runs_the_finish_pass(self, tmp_path):
         """Critique 38b7db3d C2: a dev checkout's venv mtime says nothing
-        about production processes — the transition consumes the stamp but
-        the restart pass never runs from a non-tool interpreter."""
+        about production processes, so the restart pass never runs from a
+        non-tool interpreter. nexus-i24r4 tightened the other half: a dev
+        venv no longer consumes the stamp either, because a stamp written
+        with the checkout's version made the next managed-install run
+        report 'upgraded 7.34.0 -> 7.33.0' for an upgrade that never
+        happened. The stamp belongs to the managed install alone."""
         (tmp_path / "last_seen_version").write_text("6.7.0\n")
         with patch(
             "nexus.upgrade_finish.install_mtime_and_version",
@@ -970,7 +980,7 @@ class TestCrossVenvGuard:
         ) as detect:
             assert check_version_transition(tmp_path) is None
         detect.assert_not_called()
-        assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.1"
+        assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.0"
 
 
 class TestDetectEngineConvergence:
@@ -3401,3 +3411,20 @@ class TestAspectWorkerIsRestartedNotJustStopped:
             assert "restarted" not in joined.lower(), (
                 "claimed a restart while starting nothing"
             )
+
+
+class TestDevCheckoutNeverStamps:
+    """nexus-i24r4: a run that is not a managed install must not touch the
+    version stamp. A dev-checkout `uv run nx` on a release branch used to
+    write ITS version, and the next installed-tool invocation then reported
+    'upgraded 7.34.0 -> 7.33.0' for an upgrade that never happened."""
+
+    def test_dev_checkout_leaves_stamp_untouched(self, tmp_path, monkeypatch):
+        from nexus import upgrade_finish as uf
+
+        stamp = tmp_path / uf.STAMP_FILENAME
+        stamp.write_text("7.33.0\n")
+        monkeypatch.setattr(uf, "install_mtime_and_version", lambda: (0.0, "7.34.0"))
+        monkeypatch.setattr(uf, "running_from_tool_install", lambda: False)
+        assert uf.check_version_transition(tmp_path, preview=False) is None
+        assert stamp.read_text().strip() == "7.33.0"

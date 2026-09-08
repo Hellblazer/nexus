@@ -217,7 +217,7 @@ MCP tool directly and skip the agent spawn entirely.
 
 | Stub agent | Replacement | Call shape |
 |------------|-------------|------------|
-| knowledge-tidier | nx_tidy | `mcp__plugin_conexus_nexus__nx_tidy(topic=..., collection="knowledge")` |
+| knowledge-tidier | nx_tidy | `mcp__plugin_conexus_nexus__nx_tidy(topic=..., collection="<subject>")` |
 | plan-auditor | nx_plan_audit | `mcp__plugin_conexus_nexus__nx_plan_audit(plan_json=..., context="")` |
 | plan-enricher | nx_enrich_beads | `mcp__plugin_conexus_nexus__nx_enrich_beads(bead_description=..., context="")` |
 

@@ -383,13 +383,13 @@ All agents should:
 ### Storage Tools
 ```
 # Store a document
-mcp__plugin_conexus_nexus__store_put( content="content", collection="knowledge", title="research-topic-date", tags="category", agent="<your-role>"
+mcp__plugin_conexus_nexus__store_put( content="content", collection="<subject>", title="research-topic-date", tags="category", agent="<your-role>"
 
 # Search stored knowledge
 mcp__plugin_conexus_nexus__search( query="query", corpus="knowledge", limit=5
 
 # List stored documents
-mcp__plugin_conexus_nexus__store_list( collection="knowledge"
+mcp__plugin_conexus_nexus__store_list( collection="<subject>"
 ```
 
 ### Metadata

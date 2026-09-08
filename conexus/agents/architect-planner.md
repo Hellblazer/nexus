@@ -71,7 +71,7 @@ The only valid skip is structural inapplicability (a tier physically cannot have
 **Findings not stored are findings lost.** Before returning your result, persist what downstream consumers would benefit from. Pick the tier(s) that match the audience:
 
 - **Sibling agents downstream THIS session** (T1, narrowest scope, cheapest write) → `mcp__plugin_conexus_nexus__scratch(action="put", content=..., tags="<topic>")`. The next sibling the caller dispatches finds your work via `scratch search` and skips re-derivation.
-- **Permanent cross-project knowledge** (T3, future sessions everywhere) → `mcp__plugin_conexus_nexus__store_put(content=..., collection="knowledge", title=..., tags=..., agent="architect-planner")`. The `agent` kwarg mirrors `memory_put`'s attribution (nexus-4ftd7) — an unmarked write collapses onto the shared `"mcp"` fallback and defeats `_flag_contradictions`'s agent-diversity precondition. AUTO-LINKS via T1 scratch tag `link-context` — seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
+- **Permanent cross-project knowledge** (T3, future sessions everywhere) → `mcp__plugin_conexus_nexus__store_put(content=..., collection="<subject>", title=..., tags=..., agent="architect-planner")`. The `agent` kwarg mirrors `memory_put`'s attribution (nexus-4ftd7) — an unmarked write collapses onto the shared `"mcp"` fallback and defeats `_flag_contradictions`'s agent-diversity precondition. AUTO-LINKS via T1 scratch tag `link-context` — seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
 - **Project-scoped decisions / findings** (T2, future sessions this project) → `mcp__plugin_conexus_nexus__memory_put(content=..., project="<repo>", title=..., agent="architect-planner", ttl=30)`. The `agent` kwarg attributes this write to the architect-planner role so `nx tier-status` slices by agent (nexus-9clx).
 
 **Don't dismiss insights as "low-signal noise" because the surrounding work was structural.** If you noticed a bug, a race, a perf gap, an architectural observation, or a non-obvious cross-module connection while doing your primary task, that IS a finding worth persisting — for sibling agents this session (T1), or future sessions in this project (T2) or any project (T3). Bug-discoveries-in-passing are exactly the class of finding downstream work benefits from.
@@ -166,7 +166,7 @@ Set `needsMoreThoughts: true` to continue, use `branchFromThought`/`branchId` to
 - Always conclude planning phase by including a `## Next Step: nx_plan_audit` block in your output for the caller to call `mcp__plugin_conexus_nexus__nx_plan_audit`
 
 **Documentation Requirements:**
-- Store architectural decisions and rationale: mcp__plugin_conexus_nexus__store_put(content="...", collection="knowledge", title="decision-architect-{component}", tags="architecture"
+- Store architectural decisions and rationale: mcp__plugin_conexus_nexus__store_put(content="...", collection="<subject>", title="decision-architect-{component}", tags="architecture"
 - Maintain execution progress and learnings: mcp__plugin_conexus_nexus__memory_put(content="content", project="{project}", title="plan-{component}.md"
 - Create correlation maps between related concepts and components
 - Document alternative paths and decision criteria
@@ -211,7 +211,7 @@ Use to propose architectures using proven technologies.
 2. Use 5 Nexus queries above to understand landscape
 3. Design architecture informed by discovered patterns
 4. Reference discovered patterns in design document
-5. Store design decisions in Nexus: mcp__plugin_conexus_nexus__store_put(content="...", collection="knowledge", title="decision-architect-{topic}", tags="architecture"
+5. Store design decisions in Nexus: mcp__plugin_conexus_nexus__store_put(content="...", collection="<subject>", title="decision-architect-{topic}", tags="architecture"
 
 
 ## Persistence (before returning)
@@ -225,7 +225,7 @@ You MUST persist your architectural decisions BEFORE returning — **unless the 
 ```
 mcp__plugin_conexus_nexus__store_put(
     content="# Architecture: {topic}\n\n{decisions}",
-    collection="knowledge",
+    collection="<subject>",
     title="architecture-{topic}-{date}",
     tags="architecture,architect-planner,{domain}"
 )
@@ -252,10 +252,10 @@ Your final output MUST include a clearly labeled next-step recommendation for th
 This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
-- **Architectural Decisions**: mcp__plugin_conexus_nexus__store_put(content="...", collection="knowledge", title="decision-architect-{component}", tags="architecture"
+- **Architectural Decisions**: mcp__plugin_conexus_nexus__store_put(content="...", collection="<subject>", title="decision-architect-{component}", tags="architecture"
 - **Execution Plans**: mcp__plugin_conexus_nexus__memory_put(content="content", project="{project}", title="plan-{component}.md"
 - **Dependency Maps**: Include in bead design field
-- **Risk Assessments**: mcp__plugin_conexus_nexus__store_put(content="...", collection="knowledge", title="risk-architect-{topic}", tags="risk"
+- **Risk Assessments**: mcp__plugin_conexus_nexus__store_put(content="...", collection="<subject>", title="risk-architect-{topic}", tags="risk"
 - **Catalog Links** (if catalog tools available): After storing decisions or risk assessments:
   1. If relay context references an RDR (check T1 scratch for `rdr-planning-context`): `mcp__plugin_conexus_nexus-catalog__link(from_tumbler="{decision-title}", to_tumbler="{rdr-title}", link_type="relates", created_by="architect-planner")`
   2. If a research synthesis informed the decision: `mcp__plugin_conexus_nexus-catalog__link(from_tumbler="{decision-title}", to_tumbler="{research-title}", link_type="cites", created_by="architect-planner")`

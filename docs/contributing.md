@@ -177,6 +177,7 @@ Do not bump these without testing the full chunking pipeline.
 - Branch naming: `feature/<bead-id>-<short-description>`
 - **Integration branch is `develop`.** Open PRs against `develop`, not `main`. `main` carries the plugin marketplace surface; the develop split protects it from in-flight churn. Releases promote `develop` to `main` via merge (or merge-then-tag).
 - `main` is fully PR-gated, release version-bumps included (nexus-mkj6u replaced the prior direct-to-main carve-out). See Release Process below.
+- **Pushing `develop` from the shared checkout goes through `scripts/git-push-develop.sh <sha>...`** (nexus-9wxu6). Every session commits as the same git user, so the outbound range cannot be attributed by author; the script fetches, lists `origin/develop..develop`, and pushes only when that range equals the commits you vouch for on the command line. An unvouched commit, a vouched commit that is not in the range, or a diverged branch refuses with a `PUSH_REFUSED_*` line and pushes nothing. From a detached worktree based on `origin/develop`, `NX_PUSH_SOURCE=HEAD` pushes your worktree's commits and leaves the local `develop` (a peer's in-flight tree) alone. `git commit --amend` in the primary checkout is refused by the user-level policy hook when HEAD is not a commit this session made (`tests/fixtures/hal_git_policy_hook.py` rule 3); amend in a worktree you own, or make a new commit. The same hook (rule 4) denies a bare `git push` to `develop` in any repo whose toplevel carries the script, so the script is the only unblocked path; `# routing-allow: <reason>` is the audited escape.
 - Use `bd` (beads, **≥ 1.0.0**: `brew install beads` or `brew upgrade beads`) for task tracking. Earlier 0.x versions reject the comma-separated `--status` flag the close-skill preamble uses; the bead advisory will silently report no open beads on stale installs.
 - **Code review**: Plans include review tasks after implementation phases. Use `/conexus:review-code` or dispatch `code-review-expert` at the designated plan steps.
 
@@ -527,7 +528,7 @@ Every step below is **required**. Missing any one of them has caused problems in
     git checkout develop && git pull
     git merge origin/main --no-edit    # trivially clean right after a release:
                                        # the release branch just CONTAINED develop
-    git push origin develop
+    scripts/git-push-develop.sh HEAD     # the merge commit vouches for what it merged in
     ```
     Earned by the 2026-07-23 incident: from 6.12.0 through 6.17.0 no release
     was ever merged back, so develop's seven manifests froze at 6.11.0 — all
@@ -607,7 +608,7 @@ gh pr create --base main --head plugin-release/X.Y.Z-n --title "plugin release: 
 gh pr merge <N> --merge
 git tag -a plugin-vX.Y.Z-n -m "plugin-vX.Y.Z-n" <merge-commit>
 git push origin plugin-vX.Y.Z-n     # fires the verify-only plugin-release.yml
-scripts/plugin_cut_back_merge.sh . && git push origin develop
+scripts/plugin_cut_back_merge.sh . && scripts/git-push-develop.sh HEAD
 ```
 
 The back-merge is NEVER a bare `git merge origin/main`: the cut commit

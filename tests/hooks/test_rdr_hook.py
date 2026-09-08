@@ -157,9 +157,14 @@ def test_summary_prints_for_this_repos_real_tree(rdr_hook_module, monkeypatch, c
         mod.main()
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
-    m = re.search(r"^RDR: (\d+) documents \(2 closed, 1 accepted\) in docs/rdr but NOT indexed\.$", out, re.M)
+    m = re.search(r"^RDR: (\d+) documents \((\d+) RDRs: 2 closed, 1 accepted\) in docs/rdr but NOT indexed\.$", out, re.M)
     assert m, out
-    assert int(m.group(1)) > 200, out
+    documents, rdrs = int(m.group(1)), int(m.group(2))
+    assert rdrs > 200, out
+    # nexus-owna8: the document count is the indexer's own walk (recursive,
+    # joint/ and post-mortem/ included), so it reconciles with the collection.
+    assert documents == sum(1 for p in (REPO_ROOT / "docs" / "rdr").rglob("*.md") if p.is_file()), out
+    assert documents > rdrs, out
     assert "Run: nx index repo" in out
     # nexus-3o4lt: the old remedy minted curator-owner rows with absolute
     # paths for every RDR; the hook must never recommend it again.
@@ -238,3 +243,78 @@ def test_uncommitted_rdr_file_is_not_reported(rdr_hook_module, tmp_path) -> None
     f.write_text("---\nstatus: draft\n---\n")
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     assert mod._unchecked_fix_edits(tmp_path, [f], {"204": "draft"}, {"204": "abc1234"}) == []
+
+
+def test_collection_exists_asks_the_store_not_the_listing(rdr_hook_module, monkeypatch) -> None:
+    """nexus-owna8: existence comes from the T3 client's own answer."""
+    mod = rdr_hook_module
+
+    class _T3:
+        def collection_exists(self, name):
+            return name == "rdr__1-1__voyage-context-3__v1"
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _T3())
+    assert mod._collection_exists("rdr__1-1__voyage-context-3__v1")
+    assert not mod._collection_exists("rdr__other__voyage-context-3__v1")
+
+
+def test_resolution_failure_is_logged_not_swallowed(rdr_hook_module, monkeypatch, tmp_path) -> None:
+    mod = rdr_hook_module
+    logged: list[dict] = []
+
+    class _Logger:
+        def warning(self, event, **kw):
+            logged.append({"event": event, **kw})
+
+    import structlog
+    monkeypatch.setattr(structlog, "get_logger", lambda *a, **k: _Logger())
+
+    def boom():
+        raise ConnectionError("engine down")
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", boom)
+    monkeypatch.setattr("nexus.repo_identity._repo_identity", lambda r: ("isolated", "abcdef12"))
+    name = mod._resolve_rdr_collection(tmp_path)
+    assert name == "rdr__isolated-abcdef12__voyage-context-3__v1"
+    assert any(e["event"] == "rdr_hook_collection_resolution_failed" and e["source"] == "catalog" for e in logged), logged
+
+
+def test_indexed_document_count_matches_the_indexer_walk(rdr_hook_module, tmp_path) -> None:
+    rdr_dir = tmp_path / "docs" / "rdr"
+    (rdr_dir / "post-mortem").mkdir(parents=True)
+    (rdr_dir / "joint").mkdir()
+    for name in ("rdr-201-thing.md", "README.md", "AGENTS.md"):
+        (rdr_dir / name).write_text("x")
+    (rdr_dir / "post-mortem" / "rdr-191-postmortem.md").write_text("x")
+    (rdr_dir / "joint" / "JDR-001.md").write_text("x")
+    (rdr_dir / "notes.txt").write_text("x")
+    assert rdr_hook_module._indexed_document_count(rdr_dir) == 5
+    assert len(rdr_hook_module._rdr_files(rdr_dir)) == 1
+
+
+def test_slow_t3_answer_falls_back_to_the_listing_within_the_hook_budget(
+    rdr_hook_module, monkeypatch,
+) -> None:
+    """Review of a71c93e92: the T3 client's request timeout (30s) exceeds
+    the hook's 10s cap, so a slow store had the harness kill the hook before
+    the fallback ran. The T3 call now has its own deadline."""
+    import subprocess as sp
+    import time
+
+    mod = rdr_hook_module
+    monkeypatch.setattr(mod, "_T3_DEADLINE_S", 0.2)
+
+    class _SlowT3:
+        def collection_exists(self, name):
+            time.sleep(2)
+            return True
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _SlowT3())
+
+    class _Done:
+        returncode = 0
+        stdout = "rdr__1-1__voyage-context-3__v1\n"
+    monkeypatch.setattr(sp, "run", lambda *a, **k: _Done())
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _Done())
+
+    started = time.monotonic()
+    assert mod._collection_exists("rdr__1-1__voyage-context-3__v1")
+    assert not mod._collection_exists("rdr__other__voyage-context-3__v1")
+    assert time.monotonic() - started < 1.5

@@ -12,7 +12,48 @@ pinned-floor value is asserted; ``test_guided_upgrade_version_pin.py`` and
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
+import pytest
+
 from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
+
+
+_CHANGELOG = Path(__file__).resolve().parents[1] / "CHANGELOG.md"
+_ENGINE_TAG_RE = re.compile(r"engine-service-v(\d+)\.(\d+)\.(\d+)")
+
+
+def _floor_named_by_changelog(text: str) -> tuple[int, int, int]:
+    """The engine the newest RELEASED CHANGELOG section pairs with: the
+    first ``engine-service-vX.Y.Z`` under the first ``## [X.Y.Z]`` header
+    (``[Unreleased]`` is skipped, so an engine cut ahead of the client
+    never moves the floor). Fails loud on a CHANGELOG with no released
+    section or a released section naming no engine (nexus-9gggv)."""
+    sections = re.split(r"^## ", text, flags=re.MULTILINE)[1:]
+    released = [s for s in sections if not s.lstrip().startswith("[Unreleased]")]
+    assert released, "CHANGELOG.md has no released section to derive the engine floor from"
+    head, body = released[0].split("\n", 1)
+    m = _ENGINE_TAG_RE.search(body)
+    assert m, (
+        f"CHANGELOG.md section {head.strip()!r} names no engine-service-vX.Y.Z pairing; "
+        "every release records the engine it was gated with (nexus-9gggv)"
+    )
+    return tuple(int(g) for g in m.groups())  # type: ignore[return-value]
+
+
+class TestFloorNamedByChangelog:
+    def test_reads_the_first_engine_of_the_newest_released_section(self) -> None:
+        text = "## [Unreleased]\n\nPairs with engine-service-v0.1.200 (not yet)\n\n## [7.36.0] - 2026-09-07\n\nPairs with engine-service-v0.1.108 (additive). Was engine-service-v0.1.107.\n\n## [7.35.0]\n\nengine-service-v0.1.107\n"
+        assert _floor_named_by_changelog(text) == (0, 1, 108)
+
+    def test_no_released_section_fails_loud(self) -> None:
+        with pytest.raises(AssertionError, match="no released section"):
+            _floor_named_by_changelog("## [Unreleased]\n\nengine-service-v0.1.1\n")
+
+    def test_released_section_without_a_pairing_fails_loud(self) -> None:
+        with pytest.raises(AssertionError, match="names no engine-service"):
+            _floor_named_by_changelog("## [7.37.0] - 2026-09-09\n\nClient only.\n\n## [7.36.0]\n\nengine-service-v0.1.108\n")
 
 
 class TestRequiredEngineVersion:
@@ -518,7 +559,14 @@ class TestRequiredEngineVersion:
         # conexus 7.36.0; engine deployed before the client tag (additive
         # choreography). Local-mode installs get nx catalog restore and the
         # tombstone protection only through this pin.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 108)
+        # nexus-9gggv (2026-09-08): the tuple is no longer hand-typed here.
+        # Every client release records its engine pairing in CHANGELOG.md's
+        # newest released section (the first engine-service-vX.Y.Z it
+        # names), and that section is edited at release anyway, so the
+        # floor is derived from it: a bump without a CHANGELOG pairing, or a
+        # pairing without the bump, is the red. The trail above stays as
+        # the provenance history.
+        assert REQUIRED_ENGINE_VERSION == _floor_named_by_changelog(_CHANGELOG.read_text(encoding="utf-8"))
 
 
 class TestParseEngineVersion:

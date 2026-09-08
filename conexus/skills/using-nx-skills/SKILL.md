@@ -95,6 +95,7 @@ Write path: T1 (immediate, shared with siblings) → `--persist` flag to T2 (sur
 | `nx_answer` for a file:line, single-fact, or already-in-T2 question | `search` / `query` (seconds; mean about 8s, tail to about 45s) or Serena. `nx_answer`'s p50 is 80s |
 | Researching from scratch without checking T3 | `nx search` first (seconds); prior sessions may have already answered |
 | Returning findings without storing them | `store_put` (T3) or `memory_put` (T2) before returning |
+| `store_put(collection="knowledge")` or any placeholder (`default`, `test`, a session, a source app) | `collection="<subject>"`: a durable subject area a reader would browse (`distributed-systems`); reuse an existing one (`nx collection list`) before minting; rules in docs/collections.md |
 | Test fails → try a different fix | `/conexus:debug` |
 | Implement undesigned work without brainstorming-gate | `brainstorming-gate` first (unless a design of record exists) |
 | Plan exists, start implementing | `/conexus:plan-audit` first |

@@ -384,3 +384,213 @@ def test_quote_inside_the_verb_is_still_blocked(repo_on):
     work = repo_on("feature/x")
     out = _decision(_run(_bash('gi"t push origin main', str(work))))
     assert out["permissionDecision"] == "deny", out
+
+
+# ── Rule 3: `git commit --amend` on a foreign tip in the primary (nexus-9wxu6) ──
+#
+# THE INCIDENT (2026-09-07, five sessions in one checkout). An amend in the
+# shared primary rewrote a peer's commit, because HEAD had moved under the
+# session between its commit and its amend. Ownership is read from the
+# companion PostToolUse recorder's per-session file, never from the author
+# field (every session commits as the same user).
+
+RECORDER = PROJECT_ROOT / "tests" / "fixtures" / "hal_record_session_commits_hook.py"
+
+
+def _run_recorder(payload: dict, env: dict) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(RECORDER)],
+        input=json.dumps(payload),
+        capture_output=True, text=True, timeout=20, env={**os.environ, **env},
+    )
+
+
+def _run_with_env(payload: dict, env: dict) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(HOOK)],
+        input=json.dumps(payload),
+        capture_output=True, text=True, timeout=20, env={**os.environ, **env},
+    )
+
+
+def _commit(work, name: str) -> str:
+    (work / name).write_text(name)
+    _git("add", name, cwd=work)
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", name, cwd=work)
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=work, check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+@pytest.fixture()
+def primary(repo_on, tmp_path):
+    work = repo_on("develop")
+    store = tmp_path / "session_commits"
+    return work, store, {"NX_SESSION_COMMITS_DIR": str(store)}
+
+
+def _amend_payload(work, session_id: str | None = "sess-A", cmd: str = "git commit --amend --no-edit") -> dict:
+    payload = _bash(cmd, cwd=str(work))
+    if session_id is not None:
+        payload["session_id"] = session_id
+    return payload
+
+
+def test_amend_in_primary_with_unrecorded_head_is_denied(primary):
+    work, _store, env = primary
+    d = _decision(_run_with_env(_amend_payload(work), env))
+    assert d["permissionDecision"] == "deny"
+    assert "nexus-9wxu6" in d["reason"]
+
+
+def test_amend_in_primary_on_own_recorded_commit_is_allowed(primary):
+    work, store, env = primary
+    sha = _commit(work, "mine")
+    recorded = _run_recorder({**_bash("git commit -q -m mine", cwd=str(work)), "session_id": "sess-A"}, env)
+    assert recorded.returncode == 0 and recorded.stdout == ""
+    assert (store / "sess-A").read_text().split() == [sha]
+    d = _decision(_run_with_env(_amend_payload(work), env))
+    assert d["permissionDecision"] == "allow"
+
+
+def test_amend_after_a_peer_commit_on_top_is_denied(primary):
+    work, _store, env = primary
+    _commit(work, "mine")
+    _run_recorder({**_bash("git commit -q -m mine", cwd=str(work)), "session_id": "sess-A"}, env)
+    _commit(work, "peer")
+    _run_recorder({**_bash("git commit -q -m peer", cwd=str(work)), "session_id": "sess-B"}, env)
+    d = _decision(_run_with_env(_amend_payload(work, "sess-A"), env))
+    assert d["permissionDecision"] == "deny"
+    d = _decision(_run_with_env(_amend_payload(work, "sess-B"), env))
+    assert d["permissionDecision"] == "allow"
+
+
+def test_amend_without_a_session_id_is_denied(primary):
+    work, _store, env = primary
+    sha = _commit(work, "mine")
+    _run_recorder({**_bash("git commit -q -m mine", cwd=str(work)), "session_id": "sess-A"}, env)
+    d = _decision(_run_with_env(_amend_payload(work, session_id=None), env))
+    assert d["permissionDecision"] == "deny"
+    assert sha[:12] in d["reason"]
+
+
+def test_amend_in_a_linked_worktree_is_never_blocked(primary, tmp_path):
+    work, _store, env = primary
+    wt = tmp_path / "wt"
+    _git("worktree", "add", "-q", "--detach", str(wt), "HEAD", cwd=work)
+    d = _decision(_run_with_env(_amend_payload(wt), env))
+    assert d["permissionDecision"] == "allow"
+
+
+def test_amend_via_dash_C_targets_the_named_repo(primary, tmp_path):
+    work, _store, env = primary
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    payload = _bash(f"git -C {work} commit --amend --no-edit", cwd=str(elsewhere))
+    payload["session_id"] = "sess-A"
+    d = _decision(_run_with_env(payload, env))
+    assert d["permissionDecision"] == "deny"
+
+
+def test_plain_commit_in_primary_is_untouched(primary):
+    work, _store, env = primary
+    d = _decision(_run_with_env({**_bash("git commit -m x", cwd=str(work)), "session_id": "s"}, env))
+    assert d["permissionDecision"] == "allow"
+
+
+def test_amend_hidden_in_a_compound_command_is_caught(primary):
+    work, _store, env = primary
+    cmd = "git status && git commit --amend --no-edit"
+    d = _decision(_run_with_env(_amend_payload(work, cmd=cmd), env))
+    assert d["permissionDecision"] == "deny"
+
+
+def test_amend_escape_allows_and_logs(primary, tmp_path, monkeypatch):
+    work, _store, env = primary
+    log = tmp_path / "log.jsonl"
+    env = {**env, "NX_ROUTING_LOG_PATH": str(log)}
+    cmd = "git commit --amend --no-edit  # routing-allow: HEAD predates the recorder"
+    d = _decision(_run_with_env(_amend_payload(work, cmd=cmd), env))
+    assert d["permissionDecision"] == "allow"
+    events = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
+    assert [e["outcome"] for e in events] == ["escape"]
+
+
+def test_amend_outside_a_repo_fails_open(tmp_path):
+    payload = {**_bash("git commit --amend", cwd=str(tmp_path)), "session_id": "s"}
+    d = _decision(_run_with_env(payload, {"NX_SESSION_COMMITS_DIR": str(tmp_path / "sc")}))
+    assert d["permissionDecision"] == "allow"
+
+
+def test_recorder_records_dash_C_and_dedupes(primary, tmp_path):
+    work, store, env = primary
+    sha = _commit(work, "one")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    payload = {**_bash(f"git -C {work} commit -m one", cwd=str(elsewhere)), "session_id": "sess-A"}
+    _run_recorder(payload, env)
+    _run_recorder(payload, env)
+    assert (store / "sess-A").read_text().split() == [sha]
+
+
+def test_recorder_ignores_non_commit_commands(primary):
+    work, store, env = primary
+    _run_recorder({**_bash("git status", cwd=str(work)), "session_id": "sess-A"}, env)
+    assert not (store / "sess-A").exists()
+
+
+def test_amend_glued_to_a_closing_paren_is_caught(primary):
+    work, _store, env = primary
+    cmd = f"(cd {work} && git commit --amend --no-edit)"
+    d = _decision(_run_with_env(_amend_payload(work, cmd=cmd), env))
+    assert d["permissionDecision"] == "deny"
+
+
+def test_recorder_prefers_the_sha_git_commit_printed(primary):
+    work, store, env = primary
+    mine = _commit(work, "mine")
+    peer = _commit(work, "peer-landed-before-the-hook-ran")
+    payload = {**_bash("git commit -m mine", cwd=str(work)), "session_id": "sess-A",
+               "tool_response": {"stdout": f"[develop {mine[:7]}] mine\n 1 file changed\n"}}
+    _run_recorder(payload, env)
+    assert (store / "sess-A").read_text().split() == [mine]
+    assert peer not in (store / "sess-A").read_text()
+
+
+# ── Rule 4: bare `git push` to develop where the vouched script exists ──────
+
+
+def _with_script(work):
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "git-push-develop.sh").write_text("#!/bin/sh\n")
+
+
+@pytest.mark.parametrize("cmd", ["git push", "git push origin develop", "git push -u origin HEAD:develop",
+                                 "git fetch && git push origin develop"])
+def test_bare_push_to_develop_is_blocked_where_the_script_exists(cmd, repo_on):
+    work = repo_on("develop")
+    _with_script(work)
+    d = _decision(_run(_bash(cmd, cwd=str(work))))
+    assert d["permissionDecision"] == "deny"
+    assert "git-push-develop.sh" in d["reason"]
+
+
+def test_bare_push_to_develop_is_allowed_where_no_script_exists(repo_on):
+    work = repo_on("develop")
+    d = _decision(_run(_bash("git push origin develop", cwd=str(work))))
+    assert d["permissionDecision"] == "allow"
+
+
+@pytest.mark.parametrize("cmd", ["git push origin feature/x", "git push origin v1.2.3", "git push --tags",
+                                 "scripts/git-push-develop.sh abc1234"])
+def test_other_pushes_and_the_script_itself_are_allowed(cmd, repo_on):
+    work = repo_on("develop")
+    _with_script(work)
+    d = _decision(_run(_bash(cmd, cwd=str(work))))
+    assert d["permissionDecision"] == "allow"
+
+
+def test_bare_push_to_develop_escape_allows(repo_on):
+    work = repo_on("develop")
+    _with_script(work)
+    d = _decision(_run(_bash("git push origin develop  # routing-allow: release back-merge", cwd=str(work))))
+    assert d["permissionDecision"] == "allow"

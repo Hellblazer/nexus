@@ -61,6 +61,21 @@ WHAT IS BANNED: ``chunks_384`` / ``chunks_768`` / ``chunks_1024`` /
     real multi-language comment parser; that tradeoff is revisited only
     if a real incident turns on this distinction, not preemptively.
 
+    REVISITED 2026-09-08 (nexus-9gggv): the incident came, from the cost
+    side rather than the detection side. Three fix-forward commits on
+    2026-09-07 moved count pins because a COMMENT named chunks_384, each
+    one a release-battery red on prose. What is built is deliberately
+    NOT the comment parser the paragraph above declines: it is a
+    line-prefix heuristic (``_COMMENT_LINE_RE``, per file suffix: ``#``
+    for .py/.sh, ``//`` ``/*`` ``*`` for .java, ``<!--`` for .xml) that
+    the COUNT PINS consult and nothing else does. Python docstring lines
+    have no prefix and still count as code; a ``/* */`` body line without
+    a leading ``*`` still counts as code. Both errors run in the
+    over-counting direction, which never hides a reference. The trade,
+    stated plainly: comment-only growth inside an already-pinned file is
+    no longer tallied, because a comment cannot be the live query this
+    lint exists to catch; the unlisted-file guard still scans every line.
+
 ALLOWLIST DESIGN — COUNT PINS, NOT FILE-LEVEL EXEMPTIONS (nexus-bxcgh,
 substantive-critic round 1, 2026-08-14): the first version of this lint used
 a bare ``path -> reason`` file-level exemption. That has ZERO detection power
@@ -80,7 +95,10 @@ motivated the lint.
 
 The fix: every mixed-use file gets a COUNT PIN, not a blanket exemption —
 ``_COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]]`` records the
-CURRENT live hit count alongside the reason. ``test_count_pinned_allowlist_
+CURRENT live hit count ON CODE LINES alongside the reason (lines that start
+as a `#`, `//`, `/*`, `*` or `<!--` comment are not tallied, nexus-9gggv;
+Python docstring lines still are. A pin of 0 means the file's mentions are
+all prose and any code hit is a violation). ``test_count_pinned_allowlist_
 matches_live_hit_counts`` asserts the live count still equals the pin,
 bidirectionally:
 
@@ -226,7 +244,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     # ── src/nexus: straddle-era functional code (still must recognize/handle
     #    the legacy per-dim tables for a pre-unify install mid-upgrade) ────
     "src/nexus/health.py": (
-        4,
+        0,
         "Straddle-era health checks: doctor-path probes that must still "
         "recognize a pre-unify install's chunks_384/768/1024 tables while "
         "the unified-vs-legacy era is ambiguous. Named explicitly in the "
@@ -237,7 +255,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     # retired with it), so the entry retires too rather than pointing at a
     # nonexistent path.
     "src/nexus/db/chash_tables.py": (
-        17,
+        12,
         "Legacy-era chash-bearing-table emitters (CHASH_BEARING_TABLES, "
         "legacy_chash_conformance_statements): their entire job is naming "
         "the OLD per-dim tables for straddle-window diagnostics and the "
@@ -287,7 +305,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     # were fixed to name nexus.chunks; live count is now 0, entry removed
     # for the same reason.
     "src/nexus/db/t2/http_taxonomy_store.py": (
-        1,
+        0,
         "Comment narrating which legacy centroid table a bge-768/voyage-1024 "
         "collection used to land in; historical only."
     ),
@@ -306,14 +324,14 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     # ── service/src/main/java: straddle-era functional (constraint-name
     #    mapping used to validate a pre-unify install's own constraints) ──
     "service/src/main/java/dev/nexus/service/db/SchemaMigrator.java": (
-        4,
+        3,
         "CHASH_LEN_CONSTRAINTS maps each legacy per-dim table's own "
         "chash-length constraint name for straddle-era VALIDATE CONSTRAINT "
         "handling on a pre-unify install; functional, not stale."
     ),
     # ── service/src/main/java: pure historical javadoc/comment ──────────
     "service/src/main/java/dev/nexus/service/vectors/TaxonomyCentroidRepository.java": (
-        1,
+        0,
         "Javadoc narrating the pre-unify 'three per-dim tables' shape "
         "(line ~30); historical only. (Separately, this same file's "
         "dimensionProbe javadoc had a stale 'count() over-counts' claim "
@@ -321,7 +339,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "does not move this pin.)"
     ),
     "service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java": (
-        11,
+        0,
         "12 -> 11 at nexus-zrcj7 (2026-09-03): retiring the raw search SQL "
         "onto schema functions deleted one historical-prose hit with the "
         "code it annotated; still zero executable per-dim SQL. Earlier: "
@@ -335,7 +353,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "deliberately phrased without a bare banned token."
     ),
     "service/src/main/java/dev/nexus/service/db/ChashSqlIdioms.java": (
-        3,
+        0,
         "Javadoc narrating the RDR-191 unification (three occurrences, all "
         "'{@code nexus.chunks_384/768/1024} collapsed into...'); historical "
         "only."
@@ -344,21 +362,21 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     # — the whole class was deleted at nexus-lgdel.l1 (the chash-rekey rung
     # it implemented server-side retired along with the client-side rung).
     "service/src/main/java/dev/nexus/service/db/ChashCensus.java": (
-        2,
+        0,
         "Comments narrating the RDR-191 unification of the three per-dim "
         "chash-bearing tables; historical only."
     ),
     "service/src/main/java/dev/nexus/service/db/TenantScope.java": (
-        1,
+        0,
         "Javadoc narrating the RDR-191 unification; historical only."
     ),
     "service/src/main/java/dev/nexus/service/db/ChashRepository.java": (
-        2,
+        0,
         "Javadoc narrating that the (pre-unify) chunks_384/768/1024 tables "
         "ARE the chash-keyed store; historical only."
     ),
     "service/src/main/java/dev/nexus/service/db/CatalogRepository.java": (
-        23,
+        0,
         "Javadoc/comments: an incident postmortem citing 'chunks_1024 alone "
         "took 195s to VACUUM' (a historical performance number, not a live "
         "reference) plus RDR-191 unification narration; historical only, "
@@ -367,7 +385,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "// comment)."
     ),
     "service/src/main/java/dev/nexus/service/db/StagingPromoteOps.java": (
-        1,
+        0,
         "Comment narrating the pre-unify per-dim dispatch shape "
         "('(chunks_384|768|1024)'); historical only. (nexus-lgdel.l1: the "
         "'hardcoded to chunks_768/dim=768' narration this pin also used to "
@@ -388,7 +406,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "fallback; mirrors that file's own allowlist reason."
     ),
     "tests/test_health_service_checks.py": (
-        13,
+        9,
         "Fixtures for health.py's straddle-era legacy-leg probes and the "
         "chash_conformance_report wire-compat table_name labels "
         "('nexus.chunks_384' as a counts-view filter value); mirrors "
@@ -416,7 +434,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     # — deleted at nexus-lgdel.l1 alongside chash_rekey.py itself (its
     # SUBJECT was that rung's verify() correctness, the deleted capability).
     "tests/e2e/migration-rehearsal/seed_legacy.py": (
-        2,
+        1,
         "A LEGACY store-state seeding script by name and purpose: seeds a "
         "pre-unify per-dim database for upgrade-ladder rehearsal, so it "
         "must dispatch rows to chunks_384/768/1024 by construction. 3->2 at "
@@ -437,7 +455,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "worked example table/constraint name; not real changelog content."
     ),
     "tests/test_changelog_vectors005_nine_body_drift_lint.py": (
-        2,
+        0,
         "Comment citing 'chunks_384' as one example shape the drift lint's "
         "own dim-token regex must normalize across (alongside "
         "'embedding_384', 'vector(384)'); explanatory, not a live reference."
@@ -458,7 +476,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     ),
     # ── tests: pure historical comment, no functional per-dim target ──────
     "tests/test_health.py": (
-        2,
+        1,
         "Comment + a fixture psql error string narrating a straddle-era "
         "constraint-does-not-exist case for chunks_384; mirrors health.py's "
         "allowlist reason."
@@ -472,17 +490,17 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "table this code expects to exist post-unify."
     ),
     "tests/catalog/test_collection_scoped_tables_schema_parity.py": (
-        1,
+        0,
         "Comment narrating the RDR-191 Phase 4 unification "
         "(chunks_384/768/1024 collapsed to one); historical only."
     ),
     "tests/db/test_http_chash_integration.py": (
-        1,
+        0,
         "Comment narrating that a test's chosen collection segment used to "
         "route to chunks_768 pre-unify; historical only."
     ),
     "tests/test_rehearsal_seed_coverage_lint.py": (
-        9,
+        0,
         "Comments narrating which straddle-era per-dim content "
         "(chunks_384/768/1024, taxonomy_centroids_384/768/1024) the "
         "rehearsal seed must cover; historical/explanatory, matches "
@@ -514,7 +532,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     #    subject under test, not debris. Canonical LEGITIMATE per the bead's
     #    own caution. ──────────────────────────────────────────────────────
     "service/src/test/java/dev/nexus/service/VectorsUnifyChunksIntegrationTest.java": (
-        35,
+        18,
         "-1 (36->35, 2026-08-30, f472cb3f8): unRekeyedLegacyChash_bootSurvives_"
         "octetCheckStaysNotValid deleted, its premise inverted by hygiene-001-5/-8. "
         "RDR-191 Phase 4 core: the ALWAYS-COPY migration test collapsing "
@@ -529,14 +547,14 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "already use, just two more call sites of it."
     ),
     "service/src/test/java/dev/nexus/service/VectorsUnifyCentroidsIntegrationTest.java": (
-        19,
+        12,
         "The centroid-family sibling of VectorsUnifyChunksIntegrationTest: "
         "tests taxonomy-007-unify-centroids.xml collapsing "
         "taxonomy_centroids_384/768/1024 into ONE taxonomy_centroids. Same "
         "reason as that file."
     ),
     "service/src/test/java/dev/nexus/service/SchemaMigratorIntegrationTest.java": (
-        26,
+        13,
         "SchemaMigrator end-to-end integration test: runs the FULL "
         "changelog including the vectors-004/taxonomy-007 unification "
         "changesets and their rollback blocks, so it necessarily names the "
@@ -545,7 +563,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "own caution about SchemaMigratorIntegrationTest."
     ),
     "service/src/test/java/dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java": (
-        41,
+        21,
         "nexus-4m6i0.6 upgrade-rehearsal suite: injects a pre-unify schema "
         "divergence and upgrades it to HEAD across the vectors-004/"
         "taxonomy-007 changesets, then asserts the per-dim tables are GONE "
@@ -567,7 +585,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "every other entry in this pin, not a live reference."
     ),
     "service/src/test/java/dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java": (
-        3,
+        0,
         "nexus-tk070.p3b (RDR-194 P3b, 2026-08-16): class javadoc explains "
         "why this test does NOT go through SchemaUpgradeRehearsalIntegration"
         "Test's old-tag-hop seeding mechanism for its positive KEEP arm -- "
@@ -578,7 +596,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "own pin documents, not a live reference."
     ),
     "service/src/test/java/dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java": (
-        2,
+        1,
         "nexus-lelhx (2026-08-15): two new comment references, both "
         "historical narration of the pre-RDR-191 per-dim shape — the "
         "changeset that gave rdr180-3-convert-chunks-384 a real rollback "
@@ -591,7 +609,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     ),
     # ── straddle-era FK test, Phase 5 LANDED (nexus-o8dil.49) ────────────────
     "service/src/test/java/dev/nexus/service/CollectionRegistryFkTest.java": (
-        12,
+        7,
         "RDR-156 nexus-70r3c.1 FK+hygiene suite. RDR-191 Phase 5 "
         "(nexus-o8dil.49, fk-004-chunks-collection-registry.xml) landed the "
         "unified chunks_collection_fk on 2026-08-15 — every test method that "
@@ -619,7 +637,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     #    table_name column, same pattern as the Python conformance-report
     #    test and the changelog directory allowlist. ─────────────────────
     "service/src/test/java/dev/nexus/service/ChashConformanceReportIntegrationTest.java": (
-        3,
+        2,
         "tableRow(report, \"nexus.chunks_768\") reads chash_conformance_"
         "report(dim)'s DELIBERATE wire-compat table_name label — the same "
         "label test_du2dw_chash_conformance_report_engine.py and the "
@@ -644,26 +662,26 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     #    unification, mirrors the service/src/main/java historical-prose
     #    group above; no live per-dim SQL target remains in any of these) ──
     "service/src/test/java/dev/nexus/service/CatalogDeleteCollectionCascadeTest.java": (
-        7,
+        0,
         "Comments narrating the RDR-191 unification of chunks_384/768/1024 "
         "and taxonomy_centroids_384/768/1024 into nexus.chunks / "
         "nexus.taxonomy_centroids; historical only."
     ),
     "service/src/test/java/dev/nexus/service/CatalogEngineDefects70Test.java": (
-        1,
+        0,
         "Javadoc narrating a seeded nexus.chunks row as 'RDR-191 unified; "
         "formerly chunks_1024'; historical only."
     ),
     "service/src/test/java/dev/nexus/service/CatalogManifestSweepRepositoryTest.java": (
-        5,
+        0,
         "Comments narrating the RDR-191 unification of chunks_384/768/1024 "
         "into nexus.chunks; historical only."
     ),
     "service/src/test/java/dev/nexus/service/CatalogPurgeTrashTest.java": (
-        8,
+        2,
         "6 of the 8 hits are comments/javadoc narrating chunks_384 as the "
         "pre-unify fixture table (historical, mirrors "
-        "CatalogDeleteCollectionCascadeTest). The other 2 (lines 380, 540) "
+        "CatalogDeleteCollectionCascadeTest). The other 2 (lines 398, 563) "
         "are inside .as(...) AssertJ description strings in LIVE test code, "
         "not comments — corrected from an earlier 'historical prose' "
         "mis-bucketing (nexus-a66gd substantive-critic remediation, "
@@ -674,45 +692,45 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "in an assertion description rather than a map-key lookup."
     ),
     "service/src/test/java/dev/nexus/service/CatalogPurgeTrashVacuumTest.java": (
-        1,
+        0,
         "Comment narrating nexus.chunks as 'RDR-191 unified; formerly "
         "chunks_384', the table this VACUUM-observability fixture actually "
         "wrote to; historical only."
     ),
     "service/src/test/java/dev/nexus/service/CatalogRenameCollectionTest.java": (
-        5,
+        0,
         "Comments narrating the RDR-191 unification; historical only, "
         "mirrors CatalogDeleteCollectionCascadeTest's allowlist reason."
     ),
     "service/src/test/java/dev/nexus/service/CatalogRepositoryTest.java": (
-        2,
+        0,
         "Comments narrating the RDR-191 unification (chunks_384/768/1024 -> "
         "nexus.chunks, chunks_768 as a pre-unify FK-target example); "
         "historical only."
     ),
     "service/src/test/java/dev/nexus/service/ChashProbePlanShapeTest.java": (
-        1,
+        0,
         "Javadoc narrating the RDR-191 Phase 4 retarget from three per-dim "
         "tables to the unified nexus.chunks with a single index; historical "
         "only."
     ),
     "service/src/test/java/dev/nexus/service/ChashRepositoryTest.java": (
-        2,
+        0,
         "Javadoc/comment narrating the RDR-191 Phase 4 lane D5 collapse of "
         "chunks_384/768/1024; historical only."
     ),
     "service/src/test/java/dev/nexus/service/ChunksRlsBehavioralTest.java": (
-        2,
+        0,
         "Javadoc narrating the RDR-191 Phase 4 unification of "
         "nexus.chunks_384/768/1024 into nexus.chunks; historical only."
     ),
     "service/src/test/java/dev/nexus/service/CollectionRegistryFkExtraTest.java": (
-        1,
+        0,
         "Javadoc narrating chunks_384/768/1024 as unified into nexus.chunks "
         "under RDR-191 Phase 4; historical only."
     ),
     "service/src/test/java/dev/nexus/service/CollectionVectorStatsTest.java": (
-        3,
+        0,
         "Javadoc/comments narrating collection_vector_stats as aggregating "
         "across the (now-unified) chunks_384/768/1024; historical only."
     ),
@@ -736,24 +754,24 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     # (test_no_live_code_references_a_retired_per_dim_table), which will
     # catch any future re-introduction.
     "service/src/test/java/dev/nexus/service/db/RawSqlGateTest.java": (
-        3,
+        0,
         "Javadoc narrating the RAW-SQL canary's RETARGET from "
         "chunks_384/768/1024 and taxonomy_centroids_384/768/1024 onto the "
         "unified tables, plus a reference to grants-003's frozen pre-unify "
         "MAINTAIN list; historical only."
     ),
     "service/src/test/java/dev/nexus/service/db/TenantScopeVacuumAllowlistTest.java": (
-        2,
+        0,
         "Comments narrating the pre-unification five-table allowlist and "
         "its RDR-191 collapse into nexus.chunks; historical only."
     ),
     "service/src/test/java/dev/nexus/service/db/TenantScopeVacuumMaintainGrantParityTest.java": (
-        1,
+        0,
         "Javadoc narrating chunks_384/768/1024 under the pre-unify "
         "grants-003-purge-vacuum-maintain changeset; historical only."
     ),
     "service/src/test/java/dev/nexus/service/EmbeddingModeFailLoudTest.java": (
-        1,
+        0,
         "Comment narrating the live nexus-pebfx.8 failure class as a "
         "prefix-routing 400 against 'the chunks_384 table'; historical "
         "only, describes a fixed bug."
@@ -765,22 +783,22 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     # own discipline ("a pin of 0 is not a real exemption") the entry is
     # removed outright rather than pinned at 0.
     "service/src/test/java/dev/nexus/service/ManifestCollectionStampTest.java": (
-        1,
+        0,
         "Javadoc narrating a planted nexus.chunks row as 'RDR-191 unified; "
         "formerly chunks_1024'; historical only."
     ),
     "service/src/test/java/dev/nexus/service/ManifestFunctionsTest.java": (
-        1,
+        0,
         "Comment/javadoc narrating the RDR-191 unification of "
         "chunks_384/768/1024 into nexus.chunks; historical only."
     ),
     "service/src/test/java/dev/nexus/service/ManifestVerifyTest.java": (
-        2,
+        0,
         "Comment/javadoc narrating the OR-across-chunks_384/768/1024 shape "
         "the unified table's no-OR query replaced; historical only."
     ),
     "service/src/test/java/dev/nexus/service/nativeimage/JooqRecordReflectionFeatureTest.java": (
-        2,
+        0,
         "Comment narrating the RDR-191 changeset pair collapsing six "
         "per-dim tables into two unified tables; historical only."
     ),
@@ -797,29 +815,29 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     # own discipline ("a pin of 0 is not a real exemption") the entry is
     # removed outright rather than pinned at 0.
     "service/src/test/java/dev/nexus/service/PgVectorRepositoryContractTest.java": (
-        1,
+        0,
         "Comment/javadoc narrating the RDR-191 Phase 4 unification and the "
         "pre-unify 'nothing in chunks_768' assertion shape it replaced; "
         "historical only."
     ),
     "service/src/test/java/dev/nexus/service/PgVectorRepositoryRawSqlPlanShapeTest.java": (
-        1,
+        0,
         "Javadoc narrating the chunks_384/768/1024 -> nexus.chunks "
         "unification; historical only."
     ),
     "service/src/test/java/dev/nexus/service/PgVectorServingContractTest.java": (
-        1,
+        0,
         "Comment narrating a superuser fixture table as 'RDR-191 Phase 4; "
         "formerly chunks_1024'; historical only."
     ),
     "service/src/test/java/dev/nexus/service/Rdr71gw2CollectionNotNullTest.java": (
-        3,
+        0,
         "Comments/javadoc narrating that the pre-fk-002 gap ran against "
         "nexus.chunks_384/768/1024 directly, and nexus.chunks as 'RDR-191 "
         "unified; formerly chunks_384/768/1024'; historical only."
     ),
     "service/src/test/java/dev/nexus/service/RdrO8dil7GlobalManifestAntiJoinTest.java": (
-        3,
+        0,
         "Javadoc/comments narrating a manifest row as 'RDR-191 Phase 4 "
         "unified; formerly chunks_384/768/1024'; historical only."
     ),
@@ -827,13 +845,13 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     # (5 hits) — deleted at nexus-lgdel.l1 alongside RekeyOps.java itself
     # (its SUBJECT was the deleted rekey rung's server-side correctness).
     "service/src/test/java/dev/nexus/service/SoftDeleteTest.java": (
-        2,
+        0,
         "Javadoc/comments narrating the pre-unify 384/768/1024 fixture "
         "shape and nexus.chunks as 'RDR-191 Phase 4 unified; formerly a "
         "chunks_384 row'; historical only."
     ),
     "service/src/test/java/dev/nexus/service/StagingPromoteOpsIntegrationTest.java": (
-        3,
+        0,
         "Comments narrating a branch that used to be hardcoded to "
         "chunks_768 only, and the RDR-191 repoint collapsing "
         "chunks_384/768/1024; historical only."
@@ -851,12 +869,12 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     # own discipline ("a pin of 0 is not a real exemption") the entry is
     # removed outright rather than pinned at 0.
     "service/src/test/java/dev/nexus/service/TaxonomyCentroidSchemaLiquibaseTest.java": (
-        1,
+        0,
         "Javadoc narrating nexus.taxonomy_centroids_384/768/1024 as unified "
         "into ONE table; historical only."
     ),
     "service/src/test/java/dev/nexus/service/vectors/PgVectorRepositoryDimGuardTest.java": (
-        3,
+        0,
         "Javadoc narrating the pre-unify per-dim chunks_384/768/1024 tables "
         "the dim guard used to key off of; historical only."
     ),
@@ -890,17 +908,44 @@ def _iter_scope_files() -> list[Path]:
     return paths
 
 
-def _scan_text(text: str, *, file_label: str) -> list[Offender]:
+#: A line that is prose, not code, by file suffix: a shell/Python `#`
+#: comment, a Java line comment or block-comment body, or an XML comment
+#: opener. A Python
+#: docstring line is NOT recognised (no line marker), so it still counts
+#: as code: that direction over-counts and never hides a reference. The
+#: count pins tally CODE lines only (nexus-9gggv, 2026-09-08): three fix-forward
+#: commits on 2026-09-07 moved pins because a COMMENT named chunks_384, and
+#: a comment cannot be a stale reference the way a query can. The unlisted-
+#: file guard still scans every line, so prose in live code is still caught
+#: where nothing was ever exempted.
+_COMMENT_LINE_RE_BY_SUFFIX: dict[str, re.Pattern[str]] = {
+    ".py": re.compile(r"^\s*#"),
+    ".sh": re.compile(r"^\s*#"),
+    ".java": re.compile(r"^\s*(?:/\*|\*|//)"),
+    ".xml": re.compile(r"^\s*<!--"),
+}
+#: Any-language fallback for a suffix the table does not name.
+_COMMENT_LINE_RE = re.compile(r"^\s*(?:#|//|/\*|\*|<!--)")
+
+
+def _comment_line_re(file_label: str) -> re.Pattern[str]:
+    return _COMMENT_LINE_RE_BY_SUFFIX.get(Path(file_label).suffix, _COMMENT_LINE_RE)
+
+
+def _scan_text(text: str, *, file_label: str, code_only: bool = False) -> list[Offender]:
     hits: list[Offender] = []
+    comment_re = _comment_line_re(file_label)
     for i, line in enumerate(text.splitlines(), start=1):
+        if code_only and comment_re.match(line):
+            continue
         for m in _BANNED_RE.finditer(line):
             hits.append(Offender(file=file_label, line_no=i, line=line.strip()[:160], token=m.group(1)))
     return hits
 
 
-def _scan_file(path: Path, *, file_label: str | None = None) -> list[Offender]:
+def _scan_file(path: Path, *, file_label: str | None = None, code_only: bool = False) -> list[Offender]:
     label = file_label if file_label is not None else path.relative_to(REPO_ROOT).as_posix()
-    return _scan_text(path.read_text(encoding="utf-8", errors="replace"), file_label=label)
+    return _scan_text(path.read_text(encoding="utf-8", errors="replace"), file_label=label, code_only=code_only)
 
 
 def _file_has_banned_token(path: Path) -> bool:
@@ -960,11 +1005,11 @@ def test_count_pin_mechanism_catches_the_azx14_counterfactual(tmp_path) -> None:
         )
         + "\n"
     )
-    baseline_count = len(_scan_file(baseline, file_label="rehearse_like.sh"))
-    assert baseline_count == 5, "synthetic baseline setup is wrong"
-
-    # A pin AT the legitimate baseline passes.
-    assert baseline_count == 5
+    assert len(_scan_file(baseline, file_label="rehearse_like.sh")) == 5, "synthetic baseline setup is wrong"
+    # Comment-line era guards do not count toward the pin (nexus-9gggv): the
+    # legitimate baseline pins at 0 CODE hits.
+    baseline_count = len(_scan_file(baseline, file_label="rehearse_like.sh", code_only=True))
+    assert baseline_count == 0
 
     # Mutate: 3 EXTRA stale post-swap references land in the SAME file,
     # coexisting with the still-legitimate era-guard lines above (the azx14
@@ -975,7 +1020,7 @@ def test_count_pin_mechanism_catches_the_azx14_counterfactual(tmp_path) -> None:
     )
     mutated = tmp_path / "rehearse_like_mutated.sh"
     mutated.write_text(mutated_text)
-    mutated_count = len(_scan_file(mutated, file_label="rehearse_like_mutated.sh"))
+    mutated_count = len(_scan_file(mutated, file_label="rehearse_like_mutated.sh", code_only=True))
 
     assert mutated_count == baseline_count + 3, (
         "synthetic mutation should add exactly 3 hits over the era-guard baseline"
@@ -1025,19 +1070,26 @@ def test_allowlists_are_not_stale() -> None:
 
     for relpath, (expected, reason) in _COUNT_PINNED_FILE_ALLOWLIST.items():
         assert reason.strip(), f"_COUNT_PINNED_FILE_ALLOWLIST[{relpath!r}] has no reason"
-        assert expected > 0, (
-            f"_COUNT_PINNED_FILE_ALLOWLIST[{relpath!r}] has a non-positive pin ({expected}); "
-            "a pin of 0 is not an exemption, remove the entry instead."
+        assert expected >= 0, (
+            f"_COUNT_PINNED_FILE_ALLOWLIST[{relpath!r}] has a negative pin ({expected})."
         )
         path = REPO_ROOT / relpath
         assert path.is_file(), (
             f"_COUNT_PINNED_FILE_ALLOWLIST names a file that no longer exists: {relpath}"
         )
+        # A pin of 0 means "comment mentions only; any CODE hit is a
+        # violation" (nexus-9gggv). It is stale, not an exemption, once the
+        # file carries no banned token at all.
+        assert _file_has_banned_token(path), (
+            f"_COUNT_PINNED_FILE_ALLOWLIST[{relpath!r}] is stale: the file no longer contains any "
+            "banned per-dim identifier. Remove the entry so the lint covers this file again."
+        )
 
 
 def test_count_pinned_allowlist_matches_live_hit_counts() -> None:
     """The core of the count-pin mechanism (nexus-bxcgh remediation): every
-    pinned file's LIVE banned-token count must equal its pin, exactly.
+    pinned file's LIVE banned-token count on CODE lines must equal its pin,
+    exactly (comment lines are not counted, nexus-9gggv).
 
     A mismatch above the pin means something NEW landed in a mixed-use file
     — audit it: a legitimate addition gets the pin raised with an updated
@@ -1048,7 +1100,7 @@ def test_count_pinned_allowlist_matches_live_hit_counts() -> None:
     mismatches: list[str] = []
     for relpath, (expected, _reason) in sorted(_COUNT_PINNED_FILE_ALLOWLIST.items()):
         path = REPO_ROOT / relpath
-        actual = len(_scan_file(path, file_label=relpath))
+        actual = len(_scan_file(path, file_label=relpath, code_only=True))
         if actual > expected:
             mismatches.append(
                 f"  {relpath}: live count {actual} > pin {expected} "

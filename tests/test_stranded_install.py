@@ -517,9 +517,10 @@ class TestWiring:
         direct hop reports the TRUE pre-PG era even though the trigger
         clobbers the stamp in the same invocation; the second invocation
         (stamp now = running version) degrades to the fallback clause and
-        never claims the running version as the era. Safe to run for real:
-        in a dev checkout check_version_transition stamps and returns
-        before any restart logic (running_from_tool_install() is False)."""
+        never claims the running version as the era. nexus-i24r4: a dev
+        checkout no longer stamps at all (only a managed install owns the
+        stamp), so the trigger is run as a tool install with every leg after
+        the stamp write stubbed to a no-op; the stamp write itself is real."""
         config = tmp_path / "cfg"
         config.mkdir()
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config))
@@ -528,6 +529,15 @@ class TestWiring:
         (config / "t2.db").write_bytes(b"x")
         (config / STAMP_FILENAME).write_text("5.2.0\n")
         monkeypatch.setattr(stranded_install, "LAST_MIGRATION_CAPABLE", _PIN)
+        monkeypatch.setattr(upgrade_finish, "running_from_tool_install", lambda: True)
+        monkeypatch.setattr(upgrade_finish, "detect_stale_processes", lambda: None)
+        monkeypatch.setattr(upgrade_finish, "restart_stale", lambda report, dry_run=False: [])
+        for leg in (
+            "converge_engine", "converge_service_autostart_unit", "heal_diag_view",
+            "unload_stale_t2_launchagent", "unload_stale_service_launchagent",
+        ):
+            monkeypatch.setattr(upgrade_finish, leg, lambda *a, **k: [])
+        monkeypatch.setattr(upgrade_finish, "pending_data_rung_callout", lambda: [])
         runner = CliRunner()
 
         first = runner.invoke(main, ["doctor", "--help"], obj={})

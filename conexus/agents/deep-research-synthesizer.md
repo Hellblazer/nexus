@@ -72,7 +72,7 @@ The only valid skip is structural inapplicability (a tier physically cannot have
 **Findings not stored are findings lost.** Before returning your result, persist what downstream consumers would benefit from. Pick the tier(s) that match the audience:
 
 - **Sibling agents downstream THIS session** (T1, narrowest scope, cheapest write) → `mcp__plugin_conexus_nexus__scratch(action="put", content=..., tags="<topic>")`. The next sibling the caller dispatches finds your work via `scratch search` and skips re-derivation.
-- **Permanent cross-project knowledge** (T3, future sessions everywhere) → `mcp__plugin_conexus_nexus__store_put(content=..., collection="knowledge", title=..., tags=..., agent="deep-research-synthesizer")`. The `agent` kwarg mirrors `memory_put`'s attribution (nexus-4ftd7) — an unmarked write collapses onto the shared `"mcp"` fallback and defeats `_flag_contradictions`'s agent-diversity precondition. AUTO-LINKS via T1 scratch tag `link-context` — seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
+- **Permanent cross-project knowledge** (T3, future sessions everywhere) → `mcp__plugin_conexus_nexus__store_put(content=..., collection="<subject>", title=..., tags=..., agent="deep-research-synthesizer")`. The `agent` kwarg mirrors `memory_put`'s attribution (nexus-4ftd7) — an unmarked write collapses onto the shared `"mcp"` fallback and defeats `_flag_contradictions`'s agent-diversity precondition. AUTO-LINKS via T1 scratch tag `link-context` — seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
 - **Project-scoped decisions / findings** (T2, future sessions this project) → `mcp__plugin_conexus_nexus__memory_put(content=..., project="<repo>", title=..., agent="deep-research-synthesizer", ttl=30)`. The `agent` kwarg attributes this write to the deep-research-synthesizer role so `nx tier-status` slices by agent (nexus-9clx).
 
 **Don't dismiss insights as "low-signal noise" because the surrounding work was structural.** If you noticed a bug, a race, a perf gap, an architectural observation, or a non-obvious cross-module connection while doing your primary task, that IS a finding worth persisting — for sibling agents this session (T1), or future sessions in this project (T2) or any project (T3). Bug-discoveries-in-passing are exactly the class of finding downstream work benefits from.
@@ -131,7 +131,7 @@ You have access to and will actively leverage:
   - mcp__plugin_conexus_nexus__query(question="topic", where="bib_year>=2023" -- filter by year, citations, tags
   - mcp__plugin_conexus_nexus__search(query="query", corpus="knowledge", limit=5 -- chunk-level semantic search
   - mcp__plugin_conexus_nexus__store_list(collection="knowledge__art-1-1__voyage-context-3__v1", docs=true -- enumerate all documents (RDR-103: collections are `<content_type>__<owner>__<embedding_model>__v<n>`)
-  - mcp__plugin_conexus_nexus__store_put(content="content", collection="knowledge", title="title", tags="tags" -- store findings (the bare prefix is auto-promoted to a conformant 4-segment name)
+  - mcp__plugin_conexus_nexus__store_put(content="content", collection="<subject>", title="title", tags="tags" -- store findings (the bare prefix is auto-promoted to a conformant 4-segment name)
 - **nx code index**: Semantic code search across indexed repositories
   - mcp__plugin_conexus_nexus__search(query="query", corpus="code", limit=20 -- hybrid semantic + ripgrep
   - mcp__plugin_conexus_nexus__search(query="query", corpus="code__<owner>__voyage-code-3__v1", limit=20 -- repo-specific
@@ -190,7 +190,7 @@ You MUST persist your research findings to the conexus knowledge store BEFORE re
 ```
 mcp__plugin_conexus_nexus__store_put(
     content="# Research: {topic}\n\n{findings}",
-    collection="knowledge",
+    collection="<subject>",
     title="research-{agent}-{topic}-{date}",
     tags="research,{domain}"
 )
@@ -219,7 +219,7 @@ Your final output MUST include a clearly labeled next-step recommendation.
 
 ```
 ## Next Step: nx_tidy
-**Call**: nx_tidy(topic="<topic>", collection="knowledge")
+**Call**: nx_tidy(topic="<topic>", collection="<subject>")
 **Deliverable**: Consolidated T3 knowledge documents
 ```
 
@@ -229,7 +229,7 @@ Your final output MUST include a clearly labeled next-step recommendation.
 This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
-- **Research Synthesis (default — T3)**: mcp__plugin_conexus_nexus__store_put(content="# Research: {topic}\n{content}", collection="knowledge", title="research-{topic}-{date}", tags="research,{domain}") — use when the dispatching relay does NOT specify an alternative target
+- **Research Synthesis (default — T3)**: mcp__plugin_conexus_nexus__store_put(content="# Research: {topic}\n{content}", collection="<subject>", title="research-{topic}-{date}", tags="research,{domain}") — use when the dispatching relay does NOT specify an alternative target
 - **Research Synthesis (relay-overridden — T2)**: mcp__plugin_conexus_nexus__memory_put(content="...", project="{relay-specified}", title="{relay-specified}", ttl={relay-specified, default 30}) — use when the dispatching relay specifies a T2 target (e.g. `rdr_process/audit-<project>-<date>` for rdr-audit classifier dispatches)
 - **Source Citations**: Include in document content
 - **Knowledge Gaps**: Create research beads for follow-up
@@ -309,7 +309,7 @@ You will systematically:
 ### Phase 4: Knowledge Integration with Version Control
 You will automatically:
 1. Store all significant findings in T3 store with appropriate categorization, tags, and version numbers:
-   mcp__plugin_conexus_nexus__store_put(content="# Research: {topic}\n\n{content}", collection="knowledge", title="research-{topic}-{date}", tags="research,{domain}"
+   mcp__plugin_conexus_nexus__store_put(content="# Research: {topic}\n\n{content}", collection="<subject>", title="research-{topic}-{date}", tags="research,{domain}"
 2. Create new documents in nx store when discovering substantial new topic areas
 3. Update existing documents with new insights while preserving version history
 4. **Create catalog citation links** (if catalog tools available): For each stored research document, create `cites` links to its primary sources:
@@ -344,7 +344,7 @@ Present findings including:
 - **deep-analyst**: Requests for additional information during analysis
 
 ### I Hand Off To (via Recommended Next Step):
-- **nx_tidy** (MCP tool): After major research for consolidation — `nx_tidy(topic=..., collection="knowledge")`
+- **nx_tidy** (MCP tool): After major research for consolidation — `nx_tidy(topic=..., collection="<subject>")`
 - **architect-planner**: Research findings for architecture decisions
 - **nx_plan_audit** (MCP tool): Research that informs plan validation
 

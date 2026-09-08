@@ -1179,6 +1179,53 @@ class TestF3ReasonBlindIdHarvesting:
         assert _get_decision(parsed) == "deny", parsed
         assert "nexus-uncov" in _get_reason(parsed)
 
+    def test_unbalanced_quote_in_reason_still_hides_prose_ids(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        """Critique of a71c93e92: when shlex cannot tokenize the command at
+        all (an unbalanced quote), the raw-scan fallback used to read the
+        --reason prose; the flag value is blanked before that scan."""
+        env = mock_config_env({"on_close": True})
+        scratch = _marker(
+            "review-completed,nexus-target",
+            "review-completed: nexus-target -- clean",
+        )
+        fake_bin = fake_nx(scratch)
+        result = _run_hook(
+            _make_payload(
+                command='bd close nexus-target --reason="rides nexus-69\'s push; see nexus-lemv5'
+            ),
+            path_prefix=fake_bin,
+            env_overrides=env,
+        )
+        assert result.returncode == 0, result.stderr
+
+    def test_semicolon_inside_reason_does_not_leak_prose_ids(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        """nexus-fv65m: a ';' (or the word 'do') inside a quoted --reason must
+        not break the quote before tokenizing; measured 2026-09-07, a session
+        name in the prose was demanded as a close target."""
+        env = mock_config_env({"on_close": True})
+        scratch = _marker(
+            "review-completed,nexus-target",
+            "review-completed: nexus-target -- clean",
+        )
+        fake_bin = fake_nx(scratch)
+        result = _run_hook(
+            _make_payload(
+                command=(
+                    'bd close nexus-target --reason="shipped; rides nexus-69\'s push; '
+                    'nothing to do for nexus-lemv5" 2>&1 | tail -1'
+                )
+            ),
+            path_prefix=fake_bin,
+            env_overrides=env,
+        )
+        assert result.returncode == 0
+        out = json.loads(result.stdout)
+        assert out.get("hookSpecificOutput", {}).get("permissionDecision") != "deny", out
+
     def test_loop_variable_ids_still_harvested_alongside_a_reason_flag(
         self, mock_config_env, fake_nx
     ) -> None:

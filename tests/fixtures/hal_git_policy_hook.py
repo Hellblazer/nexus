@@ -17,7 +17,8 @@ contract).
 
 --------------------------------------------------------------------------
 
-Hal's personal git-policy PreToolUse hook: wildcard-add + push-to-main.
+Hal's personal git-policy PreToolUse hook: wildcard-add + push-to-main +
+foreign-tip amend.
 
 SCOPE DECISION (Hal, 2026-08-18, nexus-2mb2j): this hook is deliberately
 UNSCOPED -- it fires in EVERY repo, with no nexus-repo detection. The
@@ -112,7 +113,37 @@ the one direct-to-main-adjacent action (cutting a release tag) that is
 actually sanctioned.
 
 --------------------------------------------------------------------------
-Escape hatch (both rules): append ``# routing-allow: <reason>`` (>=8
+RULE 3: deny ``git commit --amend`` in the PRIMARY checkout when the tip
+commit is not this session's own -- nexus-9wxu6, 2026-09-07.
+
+THE INCIDENT (2026-09-07, five sessions in one checkout). A session ran
+``git commit --amend`` in the shared primary to fold a follow-up into
+"its" last commit; by then HEAD was a peer's commit, and the amend
+rewrote it (restored by SHA). Worktrees are private, so the rule only
+fires when the cwd's git dir IS the common dir (a linked worktree has a
+``.git/worktrees/<name>`` git dir and is never blocked).
+
+"This session's own" is read from a record the companion PostToolUse
+hook (``hal_record_session_commits_hook.py``) appends to after every
+``git commit``: one file per Claude Code ``session_id`` under
+``~/.config/nexus/session_commits/`` (override: ``NX_SESSION_COMMITS_DIR``),
+one HEAD sha per line. An amend is allowed when HEAD is in the current
+session's file; anything else (no session id, no file, HEAD not listed)
+is denied. Denied means the tip is not provably yours; restore-by-SHA is
+the only recovery once the rewrite has happened, so the rule fails closed.
+
+--------------------------------------------------------------------------
+RULE 4: deny a bare ``git push`` whose effective target is ``develop`` in a
+repo that ships ``scripts/git-push-develop.sh`` -- nexus-9wxu6.
+
+The vouched push script is the control; a rule that lives only in a memory
+file is the failure class rule 2 already names. Scoped by the script's
+presence at the repo toplevel so repos without it are untouched. The
+script's own inner ``git push`` is invisible to this hook (the tool
+command is the script), so the script is the only unblocked path.
+
+--------------------------------------------------------------------------
+Escape hatch (all rules): append ``# routing-allow: <reason>`` (>=8
 characters) to the command. Every escape is logged to the routing log
 (see ``_log_path`` below) so over-use stays visible.
 """
@@ -496,6 +527,219 @@ def _push_to_main_message(target_hint: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Rule 3: `git commit --amend` in the primary checkout on a foreign tip
+# (nexus-9wxu6).
+# ---------------------------------------------------------------------------
+
+_DEFAULT_SESSION_COMMITS_DIR = pathlib.Path.home() / ".config" / "nexus" / "session_commits"
+
+
+def _session_commits_dir() -> pathlib.Path:
+    override = os.environ.get("NX_SESSION_COMMITS_DIR")
+    return pathlib.Path(override) if override else _DEFAULT_SESSION_COMMITS_DIR
+
+
+def _git_verb_segments(command: str, verb: str) -> list[tuple[list[str], str | None]]:
+    """Every ``git [-C dir] <verb> ...`` segment in *command*: the tokens
+    from the verb onward, plus the ``-C`` directory if one was given."""
+    out: list[tuple[list[str], str | None]] = []
+    for segment in re.split(_SEGMENT_SPLIT_RE, command):
+        try:
+            candidates = [shlex.split(segment, posix=True)]
+        except ValueError:
+            candidates = _degraded_token_variants(segment)  # nexus-2e874
+        for tokens in candidates:
+            i = 0
+            while i < len(tokens) and _ENV_ASSIGN_RE.match(tokens[i]):
+                i += 1
+            tokens = tokens[i:]
+            if len(tokens) < 2 or tokens[0] != "git":
+                continue
+            c_dir: str | None = None
+            j = 1
+            while j < len(tokens) and tokens[j].startswith("-"):
+                if tokens[j] in {"-C", "-c"}:
+                    if tokens[j] == "-C" and j + 1 < len(tokens):
+                        c_dir = tokens[j + 1]
+                    j += 2
+                else:
+                    j += 1
+            if j < len(tokens) and tokens[j] == verb:
+                out.append((tokens[j:], c_dir))
+                break
+    return out
+
+
+def _amend_segments(command: str) -> list[tuple[list[str], str | None]]:
+    return [
+        (tokens, c_dir)
+        for tokens, c_dir in _git_verb_segments(command, "commit")
+        if "--amend" in [t.rstrip(")") for t in _strip_shell_redirections(tokens)]
+    ]
+
+
+def _effective_cwd(payload_cwd: str, c_dir: str | None) -> str:
+    if c_dir is None:
+        return payload_cwd
+    return c_dir if os.path.isabs(c_dir) else os.path.join(payload_cwd, c_dir)
+
+
+def _is_primary_checkout(cwd: str) -> bool:
+    """True iff *cwd* is inside the primary checkout of a repo (its git dir
+    is the common dir). A linked worktree, or a non-repo, returns False."""
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--git-dir", "--git-common-dir"],
+            cwd=cwd, capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return False
+    if r.returncode != 0:
+        return False
+    lines = r.stdout.strip().splitlines()
+    if len(lines) != 2:
+        return False
+    git_dir = os.path.realpath(os.path.join(cwd, lines[0]))
+    common = os.path.realpath(os.path.join(cwd, lines[1]))
+    return git_dir == common
+
+
+def _head_sha(cwd: str) -> str | None:
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=cwd, capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip() or None
+
+
+def _session_owns(session_id: str, sha: str) -> bool:
+    if not session_id or not sha:
+        return False
+    path = _session_commits_dir() / session_id
+    try:
+        return sha in path.read_text(encoding="utf-8").split()
+    except OSError:
+        return False
+
+
+def _amend_on_foreign_tip(command: str, payload: dict[str, Any]) -> str | None:
+    """The offending HEAD sha when *command* amends a foreign tip in the
+    primary checkout, else None."""
+    segments = _amend_segments(command)
+    if not segments:
+        return None
+    payload_cwd = str(payload.get("cwd") or "") or os.getcwd()
+    session_id = str(payload.get("session_id") or "")
+    for _tokens, c_dir in segments:
+        cwd = _effective_cwd(payload_cwd, c_dir)
+        if not _is_primary_checkout(cwd):
+            continue
+        head = _head_sha(cwd)
+        if head is None:
+            continue                               # unborn branch: nothing to rewrite
+        if not _session_owns(session_id, head):
+            return head
+    return None
+
+
+def _amend_message(head: str) -> str:
+    return (
+        f"git commit --amend in the shared primary checkout is blocked: HEAD "
+        f"{head[:12]} is not recorded as this session's own commit "
+        f"(nexus-9wxu6, 2026-09-07: an amend here rewrote a peer's commit).\n"
+        f"Make a new commit instead, or amend from a worktree you own. If HEAD "
+        f"really is yours (committed before this guard was installed), append "
+        f"`# routing-allow: <reason>` (>=8 chars); the escape is logged."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rule 4: a bare `git push` to the integration branch in a repo that ships
+# the vouched push script (nexus-9wxu6).
+# ---------------------------------------------------------------------------
+
+_VOUCHED_PUSH_SCRIPT = os.path.join("scripts", "git-push-develop.sh")
+_INTEGRATION: frozenset[str] = frozenset({"develop"})
+
+
+def _toplevel(cwd: str) -> str | None:
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=cwd, capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return None
+    return r.stdout.strip() or None if r.returncode == 0 else None
+
+
+def _push_target(tokens: list[str], cwd: str) -> str | None:
+    """The branch a ``git push`` segment would update, or None for a tag
+    push / undeterminable. Same resolution as rule 2: explicit refspec,
+    else the upstream, else the current branch name."""
+    positional: list[str] = []
+    skip_next = False
+    for tok in _strip_shell_redirections(tokens[1:]):
+        if skip_next:
+            skip_next = False
+            continue
+        if tok in _VALUED_PUSH_FLAGS:
+            skip_next = True
+            continue
+        if tok.startswith("-"):
+            continue
+        positional.append(tok)
+    refspecs = positional[1:] if len(positional) > 1 else []
+    if "--follow-tags" not in tokens and "--tags" in tokens and not refspecs:
+        return None
+    if refspecs:
+        for spec in refspecs:
+            if spec.startswith("refs/tags/") or re.fullmatch(r"v\d+\.\d+\.\d+", spec):
+                continue
+            dst = spec.split(":")[-1].lstrip("+")
+            return dst.rsplit("/", 1)[-1]
+        return None
+    return _upstream_branch(cwd) or _current_branch(cwd)
+
+
+def _bare_push_to_integration(command: str, cwd: str) -> str | None:
+    """The integration branch a bare ``git push`` in *command* would update
+    when the repo at *cwd* ships the vouched push script, else None. The
+    script's own inner push is never seen here: the tool command is the
+    script, not ``git push``."""
+    segments = _push_tokens(command)
+    if not segments:
+        return None
+    top = _toplevel(cwd)
+    if top is None or not os.path.exists(os.path.join(top, _VOUCHED_PUSH_SCRIPT)):
+        return None
+    for tokens in segments:
+        target = _push_target(tokens, cwd)
+        if target in _INTEGRATION:
+            return target
+    return None
+
+
+def _bare_push_message(branch: str) -> str:
+    return (
+        f"A bare `git push` to `{branch}` is blocked in this repo (nexus-9wxu6): "
+        f"the checkout is shared and every session commits as the same user, so "
+        f"the outbound range must be vouched.\n"
+        f"Use  scripts/git-push-develop.sh <sha> [<sha> ...]  naming the commits "
+        f"you made; it fetches, reads origin/{branch}..{branch}, and pushes only "
+        f"when the range equals your list (NX_PUSH_SOURCE=HEAD from a detached "
+        f"worktree).\n"
+        f"To override, append `# routing-allow: <reason>` (>=8 chars); the escape "
+        f"is logged."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Entry point.
 # ---------------------------------------------------------------------------
 
@@ -516,7 +760,15 @@ def body(payload: dict[str, Any]) -> None:
         push_segments = _push_tokens(command)
         push_to_main = any(_targets_protected(t, cwd) for t in push_segments)
 
+    amend_head: str | None = None
+    bare_push: str | None = None
     if not wildcard_add and not push_to_main:
+        amend_head = _amend_on_foreign_tip(command, payload)
+        if amend_head is None:
+            cwd = str(payload.get("cwd") or "") or os.getcwd()
+            bare_push = _bare_push_to_integration(command, cwd)
+
+    if not wildcard_add and not push_to_main and amend_head is None and bare_push is None:
         _allow()
 
     if _should_skip_for_reason(command):
@@ -525,6 +777,16 @@ def body(payload: dict[str, Any]) -> None:
 
     _log_event("deny", command_fragment=command)
     # Each check keeps its OWN message.
+    if bare_push is not None:
+        _deny(
+            _bare_push_message(bare_push),
+            summary=f"bare git push to {bare_push} blocked: use scripts/git-push-develop.sh <sha>... (nexus-9wxu6).",
+        )
+    if amend_head is not None:
+        _deny(
+            _amend_message(amend_head),
+            summary="git commit --amend on a foreign tip in the primary checkout blocked (nexus-9wxu6).",
+        )
     if push_to_main:
         _deny(
             _push_to_main_message("main"),

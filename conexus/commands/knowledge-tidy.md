@@ -24,7 +24,7 @@ Invoke the **knowledge-tidying** skill (calls `mcp__plugin_conexus_nexus__nx_tid
 ```
 mcp__plugin_conexus_nexus__nx_tidy(
     topic="<topic from $ARGUMENTS>",
-    collection="knowledge"
+    collection="<subject>"
 )
 ```
 
@@ -32,7 +32,7 @@ Then store the organized knowledge:
 ```
 mcp__plugin_conexus_nexus__store_put(
     content="<knowledge to persist>",
-    collection="knowledge",
+    collection="<subject>",
     title="<research-*|decision-*|pattern-*|debug-*>",
     tags="<meaningful tags>"
 )

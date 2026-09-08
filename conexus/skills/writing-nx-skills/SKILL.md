@@ -80,7 +80,7 @@ Do NOT inline the relay template. One source of truth: `agents/_shared/RELAY_TEM
 Skills that produce outputs must document which tiers they use:
 - **T1 scratch**: scratch tool: action="put", content="...", tags="..." — session-scoped ephemeral notes
 - **T2 memory**: memory_put tool: content="...", project="{repo}", title="file.md" — cross-session state
-- **T3 knowledge**: store_put tool: content="...", collection="knowledge", title="..." — permanent validated findings
+- **T3 knowledge**: store_put tool: content="...", collection="<subject>", title="..." — permanent validated findings
 
 ### Registry Integration
 

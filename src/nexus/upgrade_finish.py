@@ -2559,6 +2559,13 @@ def check_version_transition(
         seen = ""
     if seen == version:
         return None
+    # nexus-i24r4: a dev-checkout run (uv run nx from a release branch
+    # checked out in the shared tree) used to reach the stamp write below
+    # and record ITS version, so the next managed-install invocation read
+    # 7.34.0 -> 7.33.0 as an upgrade that never happened. Only a managed
+    # install owns the stamp; the tool-install check ran after the write.
+    if not running_from_tool_install():
+        return None
     if preview is None:
         preview = invocation_is_preview()
     if not preview:
@@ -2601,11 +2608,6 @@ def check_version_transition(
     # transition, so the real finish pass would never run automatically.
     if not seen:
         return None  # first-ever run: nothing stale to finish
-    if not running_from_tool_install():
-        # A dev checkout's venv mtime says nothing about the production
-        # processes on this box — measuring (let alone killing) them from
-        # here is the cross-venv confusion class. Report-only via doctor.
-        return None
     try:
         report = detect_stale_processes()
         actions = restart_stale(report, dry_run=preview)

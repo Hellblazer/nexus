@@ -40,6 +40,7 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -380,10 +381,31 @@ def _build_lease_root() -> Path:
     return _REPO_ROOT / "service" / ".build-lease"
 
 
-_BUILD_LEASE_ROOT = _build_lease_root()
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # alive, owned by another user — still a live build
+    return True
 
 
-def build_in_progress_reason(lease_root: Path = _BUILD_LEASE_ROOT) -> str | None:
+def _group_alive(pgid: int) -> bool:
+    """Any member of process group *pgid* alive? Mirrors the shell lib's
+    ``kill -0 -- -PGID``: EPERM counts as alive (the failure direction is
+    always "still held")."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def build_in_progress_reason(lease_root: Path | None = None) -> str | None:
     """Return a reason if a service BUILD IS RUNNING, else ``None``.
 
     nexus-06fu4. Writers of the shaded jar take a lease
@@ -415,18 +437,26 @@ def build_in_progress_reason(lease_root: Path = _BUILD_LEASE_ROOT) -> str | None
     Never raises: a malformed or half-written lease returns ``None`` rather
     than blocking the suite on the lease reader's own bug.
     """
+    # Resolved per call, not at import: NX_BUILD_LEASE_ROOT set by a test
+    # (or a box) after this module loaded must still win (nexus-pv93h —
+    # the freshness tests read the box's live lease and failed whenever any
+    # Maven run held it).
     try:
-        lease = lease_root / "service"
+        lease = (lease_root or _build_lease_root()) / "service"
         if not lease.is_dir():
             return None
         raw_pid = (lease / "pid").read_text().strip()
         pid = int(raw_pid)
-        try:
-            os.kill(pid, 0)
-        except (ProcessLookupError, ValueError):
+        # The lease lib records the real build's process GROUP (`pgid`,
+        # build_lease_track_pid) once the ./mvnw child exists; it outlives
+        # a wrapper killed directly, so it wins over the wrapper's pid
+        # exactly as in _build_lease_group_alive (nexus-pv93h).
+        pgid_file = lease / "pgid"
+        if pgid_file.exists():
+            if not _group_alive(int(pgid_file.read_text().strip())):
+                return None
+        elif not _pid_alive(pid):
             return None  # holder is gone; the lease lib will reclaim it
-        except PermissionError:
-            pass  # alive, owned by another user — still a live build
         holder = (lease / "label").read_text().strip() or "unknown"
         command = (lease / "command").read_text().strip() or "unknown command"
         since = (lease / "ts").read_text().strip() or "unknown time"
@@ -438,6 +468,60 @@ def build_in_progress_reason(lease_root: Path = _BUILD_LEASE_ROOT) -> str | None
         "rewritten, so launching the engine now would read a partial or "
         "half-replaced artifact. Wait for that build to finish and rerun."
     )
+
+
+#: Seconds between lease polls while waiting (matches build_lease_acquire_wait).
+_BUILD_LEASE_POLL_S = 5
+
+
+def build_lease_wait_seconds() -> int:
+    """``NX_BUILD_LEASE_WAIT`` as an int, 0 when unset or unparsable.
+
+    The same variable bounds every shell producer's wait
+    (``build_lease_acquire_wait``); here it is OPT-IN, because a developer
+    who types ``pytest`` should be told the box is building, not left to
+    wonder why nothing has started for an hour. Unset means refuse at
+    once with the holder named.
+    """
+    raw = os.environ.get("NX_BUILD_LEASE_WAIT", "").strip()
+    return int(raw) if raw.isdigit() else 0
+
+
+def wait_for_build_lease(
+    max_seconds: int,
+    *,
+    reason_fn=None,
+    sleep=time.sleep,
+    announce=None,
+) -> str | None:
+    """Wait up to *max_seconds* for the service build lease to clear.
+
+    nexus-pv93h. Returns ``None`` once no live build holds the lease, or
+    the last in-progress reason if it is still held when the bound runs
+    out (``max_seconds`` 0 is a single look). Polls every
+    ``_BUILD_LEASE_POLL_S`` and keys on the HOLDER's liveness through
+    ``build_in_progress_reason`` — the lease directory in the git common
+    dir never disappears on its own, so a waiter that watched the path
+    would wait forever behind a dead holder. Announces once at the first
+    refusal and once a minute after, the same cadence as the shell lib.
+    """
+    reason_fn = reason_fn or build_in_progress_reason
+    announce = announce or (lambda msg: sys.stderr.write(msg + "\n"))
+    waited = 0
+    announced = False
+    while True:
+        reason = reason_fn()
+        if reason is None:
+            if announced:
+                announce(f"build lease: clear after {waited}s, starting.")
+            return None
+        if waited >= max_seconds:
+            return reason
+        if not announced or waited % 60 == 0:
+            announce(f"build lease: held — waiting ({waited}s of {max_seconds}s). {reason}")
+            announced = True
+        sleep(_BUILD_LEASE_POLL_S)
+        waited += _BUILD_LEASE_POLL_S
 
 
 def jar_freshness_skip_reason(jar: Path = _SERVICE_JAR) -> str | None:
