@@ -200,6 +200,27 @@ def test_an_unknown_collection_refuses_rather_than_reporting_coverage(wiring, mo
     assert result.exit_code != 0, result.output
     assert "No catalog rows in 'knowledge__dt-papers'" in result.output
     assert "No missing aspects" not in result.output
+    # The orphan signal survives the refusal: the wiring fixture holds four
+    # aspect rows under this name, and with no catalog entries every one of
+    # them is an orphan (the audit "is not complete without it", nexus-bocft).
+    assert "4 aspect row(s) exist under that exact name" in result.output
+
+
+def test_the_extraction_verb_refuses_the_same_unknown_collection(wiring, monkeypatch) -> None:
+    """nexus-3ygp3: `nx enrich aspects <bare name>` printed "No documents to
+    process" at exit 0 for the same input, which reads as a completed,
+    zero-cost extraction."""
+    from nexus.commands.enrich import enrich  # noqa: PLC0415 — file pattern: deferred imports
+
+    monkeypatch.setattr(
+        "nexus.catalog.factory.make_catalog_reader",
+        lambda: SimpleNamespace(list_by_collection=lambda _c: []),
+    )
+    monkeypatch.setattr(enrich_mod.click, "echo", _REAL_ECHO)
+    result = CliRunner().invoke(enrich, ["aspects", "knowledge__dt-papers", "--dry-run"])
+    assert result.exit_code != 0, result.output
+    assert "No catalog rows in 'knowledge__dt-papers'" in result.output
+    assert "No documents to process" not in result.output
 
 
 # --------------------------------------------------------------------------

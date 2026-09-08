@@ -246,12 +246,12 @@ its ``source_path`` line.
 
 _SCHOLARLY_PAPER_CONFIG = ExtractorConfig(
     extractor_name="scholarly-paper-v1",
-    # The model is pinned at config; the actual Claude CLI may
-    # use a different model based on user config. This is the
-    # *expected* model version for this extractor recipe and is
-    # what gets stored in document_aspects.model_version so the
-    # version-filter query (list_by_extractor_version) can
-    # identify rows captured under an outdated recipe.
+    # Passed to the CLI as ``--model`` (nexus-oc98c), so the model that
+    # produced a row is the one its model_version names. Before that the
+    # subprocess ran on the ambient CLI default (claude-fable-5 on the
+    # measuring box, about ten times the cost) while every row was still
+    # stamped haiku, and the version-filter query
+    # (list_by_extractor_version) could not tell them apart.
     model_version="claude-haiku-4-5-20251001",
     prompt_template=_SCHOLARLY_PAPER_PROMPT,
     required_fields=(
@@ -1359,7 +1359,7 @@ def _retry_subprocess_batch(
     """
     for attempt in range(_RETRY_ATTEMPTS):
         try:
-            return _invoke_once_batch(prompt, timeout=timeout)
+            return _invoke_once_batch(prompt, timeout=timeout, model=config.model_version)
         except _TransientFailure as exc:
             _log.debug(
                 "aspect_extractor_batch_transient_failure",
@@ -1387,14 +1387,14 @@ def _retry_subprocess_batch(
     return None
 
 
-def _invoke_once_batch(prompt: str, *, timeout: int) -> dict:
+def _invoke_once_batch(prompt: str, *, timeout: int, model: str | None = None) -> dict:
     """Single batch subprocess invocation. Same shape as
     ``_invoke_once`` but with a configurable timeout (single-paper
     is hardcoded at 180 s; batch scales up). Prompt is stdin-fed
     for the same reason as the single-paper path.
     """
     try:
-        result = _run_claude_isolated(prompt, timeout=timeout)
+        result = _run_claude_isolated(prompt, timeout=timeout, model=model)
     except subprocess.TimeoutExpired as exc:
         raise _TransientFailure(f"timeout after {timeout}s: {exc}") from exc
     except OSError as exc:
@@ -1424,6 +1424,7 @@ def _invoke_once_batch(prompt: str, *, timeout: int) -> dict:
             "claude --output-format json wrapper missing 'result' key"
         )
 
+    _log_usage(outer, model)
     inner_text = outer["result"]
     if not isinstance(inner_text, str):
         raise _HardFailure(
@@ -1515,7 +1516,7 @@ def _retry_subprocess(
     """
     for attempt in range(_RETRY_ATTEMPTS):
         try:
-            return _invoke_once(prompt)
+            return _invoke_once(prompt, model=config.model_version)
         except _TransientFailure as exc:
             _log.debug(
                 "aspect_extractor_transient_failure",
@@ -1547,6 +1548,7 @@ def _run_claude_isolated(
     prompt: str,
     timeout: float,
     *,
+    model: str | None = None,
     _argv: list[str] | None = None,
 ) -> subprocess.CompletedProcess:
     """Run ``claude -p`` isolated so it is never orphaned burning API quota
@@ -1612,6 +1614,10 @@ def _run_claude_isolated(
         # site did not, until now.
         "--strict-mcp-config",
     ]
+    if _argv is None and model:
+        # nexus-oc98c: the config's model_version is what the row will be
+        # stamped with, so it is what the child runs on.
+        argv = [*argv, "--model", model]
     prompt_path = _write_prompt_file(prompt)
     try:
         # The file object is only needed to hand Popen a real fd to
@@ -1656,7 +1662,24 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
             proc.kill()
 
 
-def _invoke_once(prompt: str) -> dict:
+def _log_usage(outer: dict, requested_model: str | None) -> None:
+    """Record what an extraction actually cost and ran on (nexus-oc98c).
+
+    The envelope's ``total_cost_usd`` and ``modelUsage`` were discarded
+    before this, so the only cost figure the system had was the
+    single-sample ``_PER_PAPER_COST_USD`` constant in the enrich verb.
+    """
+    usage = outer.get("modelUsage")
+    _log.info(
+        "aspect_extractor_usage",
+        requested_model=requested_model,
+        models=sorted(usage.keys()) if isinstance(usage, dict) else [],
+        cost_usd=outer.get("total_cost_usd"),
+        duration_ms=outer.get("duration_ms"),
+    )
+
+
+def _invoke_once(prompt: str, *, model: str | None = None) -> dict:
     """Single subprocess invocation. Raises ``_TransientFailure`` on
     retriable failure, ``_HardFailure`` on non-retriable. Returns the
     parsed JSON dict on success.
@@ -1667,7 +1690,7 @@ def _invoke_once(prompt: str) -> dict:
     14-page documents in production. Stdin has no such limit.
     """
     try:
-        result = _run_claude_isolated(prompt, timeout=180)
+        result = _run_claude_isolated(prompt, timeout=180, model=model)
     except subprocess.TimeoutExpired as exc:
         raise _TransientFailure(f"timeout after 180s: {exc}") from exc
     except OSError as exc:
@@ -1697,6 +1720,7 @@ def _invoke_once(prompt: str) -> dict:
             f"(got keys: {list(outer.keys()) if isinstance(outer, dict) else type(outer).__name__})",
         )
 
+    _log_usage(outer, model)
     inner_text = outer["result"]
     if not isinstance(inner_text, str):
         raise _HardFailure(

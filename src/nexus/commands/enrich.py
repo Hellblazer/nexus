@@ -960,13 +960,17 @@ def _enrich_apply(
 # ``TestLiveMeasurement`` -- one real dispatch of the SAME
 # ``_SCHOLARLY_PAPER_PROMPT`` template production uses, filled with a
 # ~1000-word synthetic paper, through ``claude_dispatch`` with NO
-# ``--model`` override (matching production: ``_run_claude_isolated``'s
-# default argv never passes ``--model`` either, so both this measurement
-# and production run whatever the ambient CLI default model is).
+# ``--model`` override, which matched production at the time.
 # Result: cost_usd=1.179986, canonical model=claude-fable-5,
-# output_tokens=1087, duration_ms=13444. Re-run that test (``-m
-# integration -k LiveMeasurement -s``) to refresh this figure if the
-# ambient default model or its pricing changes.
+# output_tokens=1087, duration_ms=13444.
+#
+# Since nexus-oc98c production passes the config's model_version as
+# ``--model`` (haiku for scholarly-paper-v1) and logs each extraction's
+# actual cost and model (``aspect_extractor_usage``). Measured 2026-09-07
+# on haiku with real 54k to 109k token papers: $0.13 to $0.31 per paper.
+# This constant is therefore an upper bound from the wrong model; the
+# log line is the figure to trust, and the constant should be refreshed
+# from it by re-running ``-m integration -k LiveMeasurement -s``.
 _PER_PAPER_COST_USD = 1.18
 
 # Default per the RDR's original Phase 2 spec. The P1.3 spike's
@@ -1187,6 +1191,28 @@ def enrich_aspects(
         )
 
 
+def _no_catalog_rows_message(collection: str, orphan_rows: int | None = None) -> str:
+    """The refusal both aspect verbs raise when the catalog holds no rows
+    for *collection* (nexus-ngpx0, nexus-3ygp3). Three causes share this
+    symptom: a bare subject name where the catalog keys on the physical
+    four-segment name, a collection never indexed, or one whose rows were
+    all tombstoned. The remedy line covers the first, which is the one
+    measured; the other two are visible from ``nx collection list`` and
+    ``nx catalog stats``.
+    """
+    msg = (
+        f"No catalog rows in '{collection}'. Pass the physical collection "
+        "name as `nx collection list` prints it; a collection that is "
+        "genuinely empty has nothing to audit or extract."
+    )
+    if orphan_rows:
+        msg += (
+            f" {orphan_rows} aspect row(s) exist under that exact name and "
+            "match no catalog entry."
+        )
+    return msg
+
+
 def _aspect_identity(entry) -> str:
     """The ONE key a catalog entry is matched to ``document_aspects.source_path`` by.
 
@@ -1229,6 +1255,12 @@ def _select_entries(
         click.echo("Catalog is empty — index or store documents first (nx index repo / nx store put).")
         return None
     entries = cat.list_by_collection(collection)
+    if not entries:
+        # nexus-3ygp3: the same vacuous shape as the --missing audit. A
+        # bare name that select_config prefix-matched but the catalog
+        # does not know produced "No documents to process" at exit 0,
+        # which reads as a completed, zero-cost extraction.
+        raise click.ClickException(_no_catalog_rows_message(collection))
 
     if re_extract or not extract_all:
         # ONE T2 open serves both filters. nexus-ym9ey originally added a
@@ -2342,24 +2374,20 @@ def aspects_list_cmd(
                 "Catalog is empty. Index or store documents first (nx index repo / nx store put)."
             )
         entries = cat.list_by_collection(collection)
-        if not entries:
-            # A collection the catalog does not know (a bare subject name
-            # such as ``knowledge__dt-papers`` where the physical name is
-            # the four-segment form) has zero rows and therefore zero
-            # gaps; reporting "no missing aspects" for it is the vacuous
-            # pass the gate doctrine bans. Measured 2026-09-07: the bare
-            # name reported full coverage while 54 of 58 rows had no
-            # aspect record.
-            raise click.ClickException(
-                f"No catalog rows in '{collection}'. Pass the physical "
-                "collection name as `nx collection list` prints it."
-            )
         with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
             existing = {
                 r.source_path for r in db.document_aspects.list_by_collection(
                     collection,
                 )
             }
+        if not entries:
+            # Zero catalog rows means zero gaps by construction, and
+            # "no missing aspects" for that is the vacuous pass the gate
+            # doctrine bans (measured 2026-09-07: a bare subject name
+            # reported full coverage while 54 of 58 rows had no aspect
+            # record). Refuse, and still say what the aspect side holds,
+            # since every one of those rows is an orphan of this name.
+            raise click.ClickException(_no_catalog_rows_message(collection, len(existing)))
         # THE SAME KEY THE GAP-FILL USES (nexus-bocft). This read
         # `e.file_path and e.file_path not in existing`, which is not a gap
         # test -- it is a gap test over the subset of entries that happen to
