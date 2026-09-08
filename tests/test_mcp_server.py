@@ -2409,3 +2409,19 @@ def test_store_put_refuses_a_placeholder_collection() -> None:
     result = store_put(content="a note", collection="knowledge", title="placeholder-probe")
     assert result.startswith("Error:"), result
     assert "placeholder" in result and "docs/collections.md" in result
+
+
+# ── nexus-onn7s: annotated context block on the text renders ────────────────
+
+
+def test_search_render_leads_with_the_reader_instruction_and_annotates_age(t3):
+    from nexus.context_annotations import READER_INSTRUCTION
+
+    coll = "knowledge__ctxblock__voyage-context-3__v1"
+    t3.put(collection=coll, content="a note about annotated retrieval context", title="ctxnote")
+    out = _search_render(query="annotated retrieval context", corpus=coll, limit=5, offset=0)
+    assert out.startswith(READER_INSTRUCTION), out[:120]
+    assert "indexed 20" in out and "d ago)" in out, out
+    # structured output is untouched by the annotation
+    structured = _search_render(query="annotated retrieval context", corpus=coll, limit=5, offset=0, structured=True)
+    assert set(structured) == {"ids", "tumblers", "distances", "collections", "chunk_collections", "chunk_text_hash"}

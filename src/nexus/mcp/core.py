@@ -2079,7 +2079,13 @@ def _search_render(
                 ],
             }
 
-        lines: list[str] = []
+        # nexus-onn7s: the reader instruction leads every text render, and
+        # each result carries what is already stored about its age and
+        # expiry (context_annotations); the contradiction flag stays on the
+        # title line where it has always been.
+        from nexus.context_annotations import READER_INSTRUCTION, annotation_line  # noqa: PLC0415 — deferred; keeps core's import surface flat
+
+        lines: list[str] = [READER_INSTRUCTION]
         current_cluster: str | None = None
         for r in page:
             # Emit cluster header when group changes
@@ -2100,7 +2106,9 @@ def _search_render(
             label = title or source or r.id
             snippet = r.content[:200].replace("\n", " ")
             flag = " [CONTRADICTS ANOTHER RESULT]" if r.metadata.get("_contradiction_flag") else ""
-            lines.append(f"[{dist}] {label}{flag}\n  {snippet}")
+            note = annotation_line(r.metadata)
+            note_line = f"\n  {note}" if note else ""
+            lines.append(f"[{dist}] {label}{flag}{note_line}\n  {snippet}")
 
         # Pagination footer
         shown_end = offset + len(page)
@@ -3484,6 +3492,7 @@ def query(
                     f"queries.]"
                 )
             lines_svc.append(f"{routing_note_svc}\n{header_svc}")
+            lines_svc.append(_READER_INSTRUCTION_LINE())
             lines_svc.append("")
             for i, row in enumerate(rows, 1):
                 tumbler_str = row.get("id", "")
@@ -3519,6 +3528,9 @@ def query(
                     bib_svc.append(f"{bib_citation_count_svc} citations")
                 if bib_svc:
                     lines_svc.append(f"   {' · '.join(bib_svc)}")
+                _note_svc = _annotation_line_for_entry(entry_svc)
+                if _note_svc:
+                    lines_svc.append(f"   {_note_svc}")
                 if chunk_count_svc:
                     lines_svc.append(f"   [{chunk_count_svc} chunks]")
                 lines_svc.append(f"   {collection_svc}")
@@ -3699,6 +3711,9 @@ def query(
                     "bib_authors": meta.get("bib_authors", ""),
                     "bib_citation_count": meta.get("bib_citation_count", ""),
                     "bib_venue": meta.get("bib_venue", ""),
+                    # nexus-onn7s: what the annotation line reads.
+                    "indexed_at": meta.get("indexed_at", ""),
+                    "ttl_days": meta.get("ttl_days"),
                     # nexus-voy5: derive chunk_count from the catalog
                     # manifest (RDR-108 D2 authoritative source).
                     # Fall back to legacy metadata for chunks the
@@ -3751,6 +3766,7 @@ def query(
                 f"Narrow `subtree` or split into multiple queries.]"
             )
         lines.append(f"{routing_note}\n{header}" if routing_note else header)
+        lines.append(_READER_INSTRUCTION_LINE())
         lines.append("")
         for i, d in enumerate(sorted_docs, 1):
             dist = f"{d['distance']:.4f}"
@@ -3775,6 +3791,9 @@ def query(
             lines.append(f"{i}. {' | '.join(header_parts)}")
             if bib_parts:
                 lines.append(f"   {' · '.join(bib_parts)}")
+            _note = _annotation_line_for_doc(d)
+            if _note:
+                lines.append(f"   {_note}")
             if tech_parts:
                 lines.append(f"   [{' · '.join(tech_parts)}]")
             lines.append(f"   {d['collection']}")
@@ -3789,6 +3808,36 @@ def query(
         )
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("query", e)
+
+
+def _READER_INSTRUCTION_LINE() -> str:  # noqa: N802 — reads as the constant it wraps
+    """nexus-onn7s: the response-level reader instruction for ``query``."""
+    from nexus.context_annotations import READER_INSTRUCTION  # noqa: PLC0415 — deferred; keeps core's import surface flat
+
+    return READER_INSTRUCTION
+
+
+def _annotation_line_for_doc(d: dict) -> str:
+    """nexus-onn7s: the per-document annotation for ``query``'s grouped
+    path, from the chunk metadata the doc dict carries. ``bib_year`` is
+    already printed on the bib line, so it is not repeated here."""
+    from nexus.context_annotations import annotation_line  # noqa: PLC0415 — deferred; keeps core's import surface flat
+
+    return annotation_line({"indexed_at": d.get("indexed_at", ""), "ttl_days": d.get("ttl_days")})
+
+
+def _annotation_line_for_entry(entry) -> str:
+    """nexus-onn7s: the per-document annotation for ``query``'s catalog-
+    routed path, from the catalog row (``indexed_at``, ``index_state``).
+    The year is printed on the bib line already."""
+    if entry is None:
+        return ""
+    from nexus.context_annotations import annotation_line  # noqa: PLC0415 — deferred; keeps core's import surface flat
+
+    return annotation_line(
+        {"indexed_at": getattr(entry, "indexed_at", "")},
+        index_state=getattr(entry, "index_state", None),
+    )
 
 
 @mcp.tool(
