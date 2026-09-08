@@ -7,11 +7,13 @@ import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.ResultSet;
 import java.sql.Statement;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -38,6 +40,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class GrantsSvcForeignOwnedRelationTest {
 
+    // nexus-cbo4a batch 13 group F: kept raw verbatim (byte-for-byte identical to the
+    // same-named method in every other grants/ladder test file, batch 7/12 precedent) --
+    // CREATE EXTENSION / ALTER EXTENSION SET SCHEMA and a SECURITY DEFINER plpgsql
+    // function body have no typed jOOQ DSL form, and this exact copy is reused
+    // tree-wide for diff parity.
     private static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
         exec(su, "CREATE EXTENSION IF NOT EXISTS vector");
         exec(su, "CREATE EXTENSION IF NOT EXISTS pg_trgm");
@@ -91,10 +98,15 @@ class GrantsSvcForeignOwnedRelationTest {
             // creates; extensions are superuser-installed up front (CREATE
             // EXTENSION requires superuser; neither vector nor pg_trgm is
             // trusted).
+            // CREATE ROLE has no typed jOOQ DSL (DSLContext exposes no createRole); raw.
             exec(su, "CREATE ROLE " + ADMIN_ROLE + " LOGIN PASSWORD '" + ADMIN_PASS
                 + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
             exec(su, "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                 + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
+            // GRANT ... ON DATABASE / ON SCHEMA has no typed jOOQ form: GrantOnStep#on
+            // resolves to a relation (regclass) internally even through its Name/String
+            // overloads -- only TABLE-level GRANT is typed (batch 13 group A finding,
+            // confirmed via javap against org.jooq.impl.GrantImpl); raw.
             exec(su, "GRANT CREATE ON DATABASE postgres TO " + ADMIN_ROLE);
             exec(su, "GRANT CREATE ON SCHEMA public TO " + ADMIN_ROLE);
             // nexus-hzhgl: mirrors pg_provision.py's bootstrap-only GRANT pg_monitor TO
@@ -103,6 +115,8 @@ class GrantsSvcForeignOwnedRelationTest {
             // and PostgreSQL refuses that GRANT unless the migration role already holds
             // pg_monitor WITH ADMIN OPTION (or is superuser). See GrantsPgMonitorTest for
             // the falsification proof of this exact prerequisite.
+            // GRANT <role> TO <role> is role-MEMBERSHIP grant, a different statement
+            // from GrantOnStep's object-privilege grant; no typed jOOQ form; raw.
             exec(su, "GRANT pg_monitor TO " + ADMIN_ROLE + " WITH ADMIN OPTION");
             // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2
             // nexus/critique-nexus-cbo4a-batch-9-search-path): see
@@ -137,18 +151,18 @@ class GrantsSvcForeignOwnedRelationTest {
             //    Drop it first (superuser can drop any relation regardless
             //    of owner) so this step can still reconstruct a genuinely
             //    FOREIGN-owned (superuser-owned) view for the replay below.
-            exec(su, "DROP VIEW nexus.diag_chash_conformance");
-            exec(su, "CREATE VIEW nexus.diag_chash_conformance AS SELECT 1 AS n");
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.dropView(DSL.name("nexus", "diag_chash_conformance")).execute();
+            ctx.createView(DSL.name("nexus", "diag_chash_conformance"), DSL.name("n"))
+                .as(DSL.select(DSL.val(1).as("n")))
+                .execute();
 
             // Sanity: the setup actually leaves a relation the admin role
             // cannot grant on.
-            assertThat(count(su,
-                "SELECT count(*) FROM pg_class c JOIN pg_namespace n "
-                + "ON n.oid = c.relnamespace WHERE n.nspname = 'nexus' "
-                + "AND c.relname = 'diag_chash_conformance' "
-                + "AND pg_get_userbyid(c.relowner) <> '" + ADMIN_ROLE + "'"))
+            assertThat(PgCatalogProbes.relationOwner(ctx, "nexus", "diag_chash_conformance"))
                 .as("diag view must be foreign-owned relative to the admin role")
-                .isEqualTo(1);
+                .isNotNull()
+                .isNotEqualTo(ADMIN_ROLE);
 
             // 3. THE REPLAY: nexus_admin's next startup. runAlways
             //    changesets fire again. Pre-fix (bulk GRANT ON ALL TABLES)
@@ -186,22 +200,9 @@ class GrantsSvcForeignOwnedRelationTest {
 
     private static boolean hasTablePriv(Connection c, String role, String rel, String priv)
             throws Exception {
-        try (var ps = c.prepareStatement("SELECT has_table_privilege(?, ?, ?)")) {
-            ps.setString(1, role);
-            ps.setString(2, rel);
-            ps.setString(3, priv);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getBoolean(1);
-            }
-        }
-    }
-
-    private static int count(Connection c, String sql) throws Exception {
-        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            rs.next();
-            return rs.getInt(1);
-        }
+        var hasPriv = DSL.function("has_table_privilege", SQLDataType.BOOLEAN,
+            DSL.val(role), DSL.val(rel), DSL.val(priv));
+        return DSL.using(c, SQLDialect.POSTGRES).select(hasPriv).fetchOne(hasPriv);
     }
 
     private static void exec(Connection c, String sql) throws Exception {
