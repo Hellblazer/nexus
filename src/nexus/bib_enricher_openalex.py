@@ -152,7 +152,14 @@ _TITLE_MAX_SHORT_SET_SIZE: int = 1
 # Genuine variants (subtitle added/dropped, punctuation drift, filename-
 # truncated source) keep containment near 1.0; same-subfield strangers sit
 # at 0.2-0.35. The single-token short-source relaxation below is unchanged.
-_TITLE_MIN_CONTAINMENT: float = 0.5
+# nexus-g276c (2026-09-08): at 0.5, "Self-Aware Vector Embeddings for
+# Retrieval-Augmented Generation" accepted "LightRAG: Simple and Fast
+# Retrieval-Augmented Generation" — {retrieval, augmented, generation} is
+# exactly half of LightRAG's six tokens, and every distinctive token on
+# either side was absent from the other. The genuine variants tested above
+# sit at 1.0 (the filename-truncated NL2Pipe case at 0.75); 0.7 keeps them
+# and rejects the three-generic-token stranger.
+_TITLE_MIN_CONTAINMENT: float = 0.7
 
 # A 2-token shorter side is trivially "contained" (2/2 = 1.0) in ANY longer
 # title that carries both words — "Query Optimization" vs "LIMAO: ... Learned
@@ -395,16 +402,24 @@ def enrich(title: str) -> dict[str, Any]:
             # first compatible one — the genuine paper is routinely ranked
             # behind a vocabulary-sharing stranger.
             first_rejected: dict[str, Any] | None = None
+            compatible: list[dict[str, Any]] = []
             for work in data[:_TITLE_SEARCH_CANDIDATES]:
                 result = _build_result(work)
                 lookup_title = result.pop("_lookup_title", "")
                 if _titles_compatible(title, lookup_title):
-                    return result
-                if first_rejected is None:
+                    compatible.append(result)
+                elif first_rejected is None:
                     first_rejected = {
                         "returned_title": lookup_title,
                         "rejected_openalex_id": result.get("openalex_id", ""),
                     }
+            if compatible:
+                # nexus-g276c: OpenAlex can hold one preprint as two works
+                # with the DOI-less duplicate ranked first (W7155573699
+                # ahead of W7155372395 for arXiv:2604.20598). Among the
+                # compatible candidates the DOI-bearing one wins; rank order
+                # is otherwise the tie-break, as before.
+                return next((r for r in compatible if r.get("doi")), compatible[0])
             _log.warning(
                 "openalex_title_search_rejected",
                 query_title=title,

@@ -2400,3 +2400,37 @@ class TestPageCoverage:
         result = runner.invoke(main, ["dt", "index", "--selection"])
         assert result.exit_code == 0, result.output
         assert "Indexed 1 record(s)" in result.output
+
+
+class TestEnrichUnchangedRecord:
+    """nexus-g276c: ``nx dt index --uuid X --enrich`` on an already-indexed
+    record printed "index fresh" and enriched nothing — touched_collections
+    was only fed on a write. Enrichment is idempotent per backend, so an
+    unchanged record's collection is part of the pass."""
+
+    def test_unchanged_record_still_enriches_its_collection(
+        self, runner, fake_selectors, monkeypatch,
+    ):
+        from nexus.cli import main
+        from nexus.commands import dt as dt_module
+
+        fake_selectors["selection"].return_value = [("U1", "/a.md")]
+        monkeypatch.setattr(
+            dt_module, "_stamp_dt_uri_on_entry", lambda *a, **kw: True,
+        )
+        # Staleness gate: unchanged -> 0 chunks.
+        monkeypatch.setattr("nexus.doc_indexer.index_markdown", lambda *a, **kw: 0)
+        calls: list[tuple[str, dict]] = []
+        monkeypatch.setattr(
+            "nexus.commands.enrich.run_bib_enrichment",
+            lambda coll, **kw: calls.append((coll, kw)),
+        )
+
+        result = runner.invoke(main, [
+            "dt", "index", "--selection",
+            "--collection", "knowledge__fixture-subject", "--enrich",
+        ])
+
+        assert result.exit_code == 0, result.output
+        assert "skipped: index fresh (use --force)" in result.output
+        assert calls == [("knowledge__fixture-subject__voyage-context-3__v1", {"source": "dt"})]

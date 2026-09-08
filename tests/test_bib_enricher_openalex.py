@@ -673,3 +673,63 @@ def test_titles_compatible_short_generic_source_vs_long_stranger_rejects():
     assert _titles_compatible("Attention Is All You Need", "Attention Is All You Need")
     # the rare single-token source still accepts against a long returned title
     assert _titles_compatible("Hex Bloom", "HEX-BLOOM: An Efficient Method for Authenticity and Integrity Verification in Privacy-preserving Computing")
+
+
+def test_titles_compatible_rejects_three_generic_token_stranger():
+    """nexus-g276c (2026-09-08): OpenAlex title search for the Self-Aware
+    Vector Embeddings preprint returned LightRAG, and the 0.5 containment
+    floor accepted it — {retrieval, augmented, generation} is exactly half
+    of LightRAG's six tokens while no distinctive token matched."""
+    from nexus.bib_enricher_openalex import _titles_compatible
+
+    full = (
+        "Self-Aware Vector Embeddings for Retrieval-Augmented Generation: "
+        "A Neuroscience-Inspired Framework for Temporal, Confidence-Weighted, "
+        "and Relational Knowledge"
+    )
+    lightrag = "LightRAG: Simple and Fast Retrieval-Augmented Generation"
+    # the chunk-level (first-line) title the enrich loop actually used
+    assert not _titles_compatible(
+        "Self-Aware Vector Embeddings for Retrieval-Augmented Generation:", lightrag,
+    )
+    assert not _titles_compatible(full, lightrag)
+    # the paper against its own OpenAlex record still accepts
+    assert _titles_compatible(full, full)
+    assert _titles_compatible(
+        "Self-Aware Vector Embeddings for Retrieval-Augmented Generation:", full,
+    )
+
+
+def test_title_search_prefers_doi_bearing_duplicate():
+    """nexus-g276c: OpenAlex held arXiv:2604.20598 as two works, the
+    DOI-less one (W7155573699) ranked ahead of the DOI-bearing one
+    (W7155372395). Among compatible candidates the DOI wins."""
+    from unittest.mock import MagicMock, patch
+
+    from nexus.bib_enricher_openalex import enrich
+
+    title = (
+        "Self-Aware Vector Embeddings for Retrieval-Augmented Generation: "
+        "A Neuroscience-Inspired Framework for Temporal, Confidence-Weighted, "
+        "and Relational Knowledge"
+    )
+    stranger = {
+        "id": "https://openalex.org/W4206484811",
+        "display_name": "A Metaverse: Taxonomy, Components, Applications, and Open Challenges",
+        "publication_year": 2022, "authorships": [], "cited_by_count": 1,
+    }
+    dup_no_doi = {
+        "id": "https://openalex.org/W7155573699", "display_name": title,
+        "publication_year": 2026, "authorships": [], "cited_by_count": 0,
+    }
+    dup_with_doi = {
+        "id": "https://openalex.org/W7155372395", "display_name": title,
+        "doi": "https://doi.org/10.48550/arxiv.2604.20598",
+        "publication_year": 2026, "authorships": [], "cited_by_count": 0,
+    }
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = {"results": [stranger, dup_no_doi, dup_with_doi]}
+    with patch("nexus.bib_enricher_openalex.httpx.get", return_value=resp):
+        out = enrich(title)
+    assert out.get("openalex_id") == "W7155372395", out
+    assert out.get("doi") == "10.48550/arxiv.2604.20598"
