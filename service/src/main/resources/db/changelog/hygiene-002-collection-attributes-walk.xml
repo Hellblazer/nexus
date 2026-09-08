@@ -306,25 +306,36 @@ ALTER TABLE nexus.catalog_collections DROP CONSTRAINT IF EXISTS catalog_collecti
 
     <changeSet id="hygiene-002-2" author="nexus-ft04v.4">
         <comment>
-            RDR-204 nexus-ft04v.4/.5 fallout: vectors-005-12/13's gc_quarantine_orphans
-            and gc_restore_rereferenced (the CURRENT, post-RDR-191 dim-agnostic bodies --
-            catalog-024's original per-dim bodies were already superseded by vectors-005
-            before this changeset ever runs) stub-insert catalog_collections
-            (tenant_id, name, content_type, owner_id, embedding_model, model_version)
-            with no lifecycle_state column at all, and an empty-string fallback for
-            content_type/owner_id/embedding_model on a non-4-segment name. Both are now
-            illegal: lifecycle_state is NOT NULL and the three metadata columns carry a
-            non-empty CHECK (hygiene-002-1, same changelog file). PostgreSQL enforces
-            both against the attempted VALUES tuple of an INSERT ... ON CONFLICT DO
-            NOTHING BEFORE it resolves the conflict, so even a pre-existing row
-            (registered elsewhere first) does not save an omitted/blank stub from a
-            23502 or CHECK violation on this exact statement. CREATE OR REPLACE
-            FUNCTION redefines both functions with the same signature, return shape,
-            and sweep-gate / cross-dim-collision-guard logic as vectors-005 -- only the
-            stub-insert VALUES lists change, to a lifecycle_state literal (quarantine
-            for the quarantine-sibling registration; live for the origin-collection
-            re-registration) and non-empty placeholders matching
-            PgContainerHelper.insertCollection's Java-side "unknown stub" defaults.
+            RDR-204 nexus-ft04v.4/.5 fallout: gc_restore_rereferenced's CURRENT body at
+            this point in the changelog is vectors-005-13's (dim-agnostic, catalog-024's
+            original per-dim body already superseded there); gc_quarantine_orphans's
+            CURRENT body is catalog-033-2's, NOT vectors-005-12's -- catalog-033-2 runs
+            after vectors-005 and already added a gc_audit producer INSERT (same
+            transaction as the chunk move) plus a server-side sample_limit clamp
+            (v_sample_limit := LEAST(GREATEST(COALESCE(p_sample_limit, 20), 0), 5000))
+            before this changeset ever runs. Both functions' stub-insert into
+            catalog_collections (tenant_id, name, content_type, owner_id,
+            embedding_model, model_version) carries no lifecycle_state column and an
+            empty-string fallback for content_type/owner_id/embedding_model on a
+            non-4-segment name. Both are now illegal: lifecycle_state is NOT NULL and
+            the three metadata columns carry a non-empty CHECK (hygiene-002-1, same
+            changelog file). PostgreSQL enforces both against the attempted VALUES
+            tuple of an INSERT ... ON CONFLICT DO NOTHING BEFORE it resolves the
+            conflict, so even a pre-existing row (registered elsewhere first) does not
+            save an omitted/blank stub from a 23502 or CHECK violation on this exact
+            statement. CREATE OR REPLACE FUNCTION redefines both functions with the
+            same signature, return shape, and sweep-gate / cross-dim-collision-guard
+            logic as their respective current bodies -- gc_restore_rereferenced only
+            gets the lifecycle_state-literal stub-insert change described above;
+            gc_quarantine_orphans gets the same stub-insert change ON TOP OF
+            catalog-033-2's clamp and gc_audit INSERT, both carried forward unchanged,
+            so this remains the SINGLE correct definition of the function (nexus-ft04v.4,
+            Sam's squash ruling 2026-09-08: a separate hygiene-004-1 changeset had been
+            added to restore catalog-033-2's clamp/audit after an earlier draft of this
+            changeset silently dropped them by being authored against vectors-005-12's
+            body instead of catalog-033-2's; that changeset is squashed into this one
+            rather than shipped as a two-changeset fix -- see this changeset's rollback
+            for the corresponding pre-hygiene-002 restoration).
         </comment>
         <sql splitStatements="false" stripComments="false">
 CREATE OR REPLACE FUNCTION nexus.gc_quarantine_orphans(
@@ -345,12 +356,26 @@ DECLARE
     v_seg              text[];
     v_collision_count  bigint;
     v_collision_sample text[];
+    v_sample_limit     int;
 BEGIN
     IF dim NOT IN (384, 768, 1024) THEN
         RAISE EXCEPTION
             'gc_quarantine_orphans: unsupported dim %. Supported values: 384, 768, 1024',
             dim;
     END IF;
+
+    -- nexus-0uuit/sybbh crit-fix critique 2026-08-19 (code-review-expert):
+    -- p_sample_limit is caller-supplied over HTTP (VectorHandler's
+    -- handleGcQuarantineOrphans, optInt default 20) and unlike purge_trash /
+    -- gc_expire_quarantine (both hard-capped in-function), this function
+    -- previously trusted it unbounded -- a caller passing a large
+    -- sample_limit could insert a gc_audit row with an unbounded chashes
+    -- array. VectorHandler now clamps server-side too, but this is defense
+    -- in depth: the SAME GC_AUDIT_MAX_CHASHES cap (5000, CatalogRepository.
+    -- java) enforced here independently of the HTTP layer. Carried forward
+    -- from catalog-033-2 into this changeset's lifecycle_state-aware body
+    -- (nexus-ft04v.4; see this changeset's own comment above).
+    v_sample_limit := LEAST(GREATEST(COALESCE(p_sample_limit, 20), 0), 5000);
 
     -- nexus-sa731: EXCLUSIVE half of the RDR-191 sweep gate (unchanged from
     -- catalog-028-1 — see that changeset's comment for the full derivation).
@@ -493,9 +518,38 @@ BEGIN
     counted AS (SELECT count(*) AS n FROM del),
     sampled AS (
         SELECT jsonb_agg(jsonb_build_object('chash', encode(chash, 'hex'), 'title', title)) AS s
-          FROM (SELECT chash, title FROM del LIMIT p_sample_limit) lim
+          FROM (SELECT chash, title FROM del LIMIT v_sample_limit) lim
     )
     SELECT counted.n, sampled.s INTO v_moved, v_sample FROM counted, sampled;
+
+    -- nexus-sybbh: audit the move IN THE SAME TRANSACTION as the DELETE
+    -- above. `chashes` here is deliberately the v_sample_limit-capped
+    -- sample the function already computes (extracting just the chash
+    -- field) -- chash_count still carries the exact full v_moved count
+    -- regardless of sample size. `chashes_truncated`/`chashes_stored` are
+    -- set (same convention as purge_trash / gc_expire_quarantine) only
+    -- when the CALLER's requested p_sample_limit itself exceeded
+    -- GC_AUDIT_MAX_CHASHES and had to be clamped -- distinct from
+    -- `chashes_is_sample`, which is always true here by design (the sample
+    -- is intentionally partial even when p_sample_limit is well within
+    -- bounds). Carried forward from catalog-033-2 into this changeset's
+    -- lifecycle_state-aware body (nexus-ft04v.4; catalog-033-2's original
+    -- comment, adapted).
+    INSERT INTO nexus.gc_audit
+        (tenant_id, operation, collection, actor, dry_run, chash_count, chashes, details)
+    VALUES (
+        p_tenant_id, 'gc_quarantine_orphans', p_collection, 'engine', false, v_moved,
+        COALESCE(
+            (SELECT jsonb_agg(elem->>'chash') FROM jsonb_array_elements(COALESCE(v_sample, '[]'::jsonb)) elem),
+            '[]'::jsonb),
+        jsonb_build_object(
+            'quarantine_collection', p_quarantine_collection,
+            'sample_limit', v_sample_limit,
+            'chashes_is_sample', true)
+            || CASE WHEN COALESCE(p_sample_limit, 20) > 5000
+                    THEN jsonb_build_object('chashes_truncated', true, 'chashes_stored', 5000)
+                    ELSE '{}'::jsonb END
+    );
 
     RETURN QUERY SELECT v_moved, v_sample;
 END;
@@ -622,6 +676,13 @@ END;
 $$
         </sql>
         <rollback>
+            <!-- Restores each function to its own pre-hygiene-002 body (nexus-ft04v.4):
+                 gc_quarantine_orphans restores catalog-033-2's body verbatim, clamp and
+                 gc_audit INSERT included, no lifecycle_state stub-insert column (the
+                 last definition of this function before this changeset, since
+                 catalog-033-2 runs after vectors-005; see this changeset's own comment
+                 above), and gc_restore_rereferenced restores vectors-005-13's body
+                 verbatim (unchanged since vectors-005, catalog-033 never redefines it). -->
             <sql splitStatements="false" stripComments="false">
 CREATE OR REPLACE FUNCTION nexus.gc_quarantine_orphans(
     dim                      int,
@@ -641,12 +702,24 @@ DECLARE
     v_seg              text[];
     v_collision_count  bigint;
     v_collision_sample text[];
+    v_sample_limit     int;
 BEGIN
     IF dim NOT IN (384, 768, 1024) THEN
         RAISE EXCEPTION
             'gc_quarantine_orphans: unsupported dim %. Supported values: 384, 768, 1024',
             dim;
     END IF;
+
+    -- nexus-0uuit/sybbh crit-fix critique 2026-08-19 (code-review-expert):
+    -- p_sample_limit is caller-supplied over HTTP (VectorHandler's
+    -- handleGcQuarantineOrphans, optInt default 20) and unlike purge_trash /
+    -- gc_expire_quarantine above (both hard-capped in-function), this
+    -- function previously trusted it unbounded -- a caller passing a large
+    -- sample_limit could insert a gc_audit row with an unbounded chashes
+    -- array. VectorHandler now clamps server-side too, but this is defense
+    -- in depth: the SAME GC_AUDIT_MAX_CHASHES cap (5000, CatalogRepository.
+    -- java) enforced here independently of the HTTP layer.
+    v_sample_limit := LEAST(GREATEST(COALESCE(p_sample_limit, 20), 0), 5000);
 
     -- nexus-sa731: EXCLUSIVE half of the RDR-191 sweep gate (unchanged from
     -- catalog-028-1 — see that changeset's comment for the full derivation).
@@ -779,9 +852,36 @@ BEGIN
     counted AS (SELECT count(*) AS n FROM del),
     sampled AS (
         SELECT jsonb_agg(jsonb_build_object('chash', encode(chash, 'hex'), 'title', title)) AS s
-          FROM (SELECT chash, title FROM del LIMIT p_sample_limit) lim
+          FROM (SELECT chash, title FROM del LIMIT v_sample_limit) lim
     )
     SELECT counted.n, sampled.s INTO v_moved, v_sample FROM counted, sampled;
+
+    -- nexus-sybbh: audit the move IN THE SAME TRANSACTION as the DELETE
+    -- above. `chashes` here is deliberately the v_sample_limit-capped
+    -- sample the function already computes (extracting just the chash
+    -- field) -- chash_count still carries the exact full v_moved count
+    -- regardless of sample size. `chashes_truncated`/`chashes_stored` are
+    -- set (same convention as purge_trash / gc_expire_quarantine above)
+    -- only when the CALLER's requested p_sample_limit itself exceeded
+    -- GC_AUDIT_MAX_CHASHES and had to be clamped -- distinct from
+    -- `chashes_is_sample`, which is always true here by design (the sample
+    -- is intentionally partial even when p_sample_limit is well within
+    -- bounds).
+    INSERT INTO nexus.gc_audit
+        (tenant_id, operation, collection, actor, dry_run, chash_count, chashes, details)
+    VALUES (
+        p_tenant_id, 'gc_quarantine_orphans', p_collection, 'engine', false, v_moved,
+        COALESCE(
+            (SELECT jsonb_agg(elem->>'chash') FROM jsonb_array_elements(COALESCE(v_sample, '[]'::jsonb)) elem),
+            '[]'::jsonb),
+        jsonb_build_object(
+            'quarantine_collection', p_quarantine_collection,
+            'sample_limit', v_sample_limit,
+            'chashes_is_sample', true)
+            || CASE WHEN COALESCE(p_sample_limit, 20) > 5000
+                    THEN jsonb_build_object('chashes_truncated', true, 'chashes_stored', 5000)
+                    ELSE '{}'::jsonb END
+    );
 
     RETURN QUERY SELECT v_moved, v_sample;
 END;
