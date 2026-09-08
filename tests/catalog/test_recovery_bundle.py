@@ -662,8 +662,8 @@ def test_target_collection_for_restores_a_placeholder_named_collection() -> None
     from nexus.catalog.recovery_bundle import target_collection_for
 
     # The model segment is re-derived for the TARGET install (bge locally,
-    # voyage in cloud mode); the placeholder subject survives either way.
-    out = target_collection_for("knowledge__knowledge__voyage-context-3__v1", t3=None)
+    # the target's active model); the placeholder subject survives either way.
+    out = target_collection_for("knowledge__knowledge__bge-base-en-v15-768__v1", t3=None)
     assert out.startswith("knowledge__knowledge__") and out.endswith("__v1"), out
-    out = target_collection_for("docs__default__voyage-context-3__v1", t3=None)
+    out = target_collection_for("docs__default__bge-base-en-v15-768__v1", t3=None)
     assert out.startswith("docs__default__") and out.endswith("__v1"), out
