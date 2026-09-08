@@ -970,10 +970,10 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "service/native-smoke.sh:144",
         "service/native-smoke.sh:205",
         "service/native-smoke.sh:257",
-        "service/native-smoke.sh:349",
-        "service/native-smoke.sh:387",
-        "service/native-smoke.sh:393",
-        "service/native-smoke.sh:396",
+        "service/native-smoke.sh:361",
+        "service/native-smoke.sh:399",
+        "service/native-smoke.sh:405",
+        "service/native-smoke.sh:408",
         # --- service/linux-native-verify.sh:43 (1 entry): a GENUINE
         # FALSE POSITIVE, not a "needs live infra" deferral -- the
         # matched pipe (`native-image --version | head -1`) sits inside a
