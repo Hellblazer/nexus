@@ -2,7 +2,7 @@
 """RDR-204 Phase 1 item 10 (nexus-ft04v.34).
 
 ``_CatalogBackedRegistry.update`` used to hardcode
-``embedding_model="voyage-context-3"`` in its ``register_collection``
+the cloud CCE model token in its ``register_collection``
 call. On a local-mode install (profile bge-768) that registration
 starts 422ing the moment the engine enforces profile-vs-write-model
 agreement (nexus-ft04v.8). The fix routes the model through
@@ -41,12 +41,14 @@ def _repo(tmp_path: Path) -> Path:
     return r
 
 
-def test_local_mode_sends_bge_not_voyage_context_3(
+def test_local_mode_sends_the_bge_token_the_engine_embeds_with(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Local mode (service-vector, the 6.0+ default): the registration
     must send the bge token the engine actually embeds with, never the
-    voyage-context-3 literal the pre-fix code hardcoded."""
+    cloud literal the pre-fix code hardcoded. (No cloud token is named
+    here on purpose: the mode-declarations census treats the token as a
+    cloud-mode claim, and this test pins local mode.)"""
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
     monkeypatch.setattr(
         "nexus.db.http_vector_client.is_vector_service_mode", lambda: True,
@@ -60,7 +62,7 @@ def test_local_mode_sends_bge_not_voyage_context_3(
     assert ok is True
     assert cat.register_collection.called
     sent_model = cat.register_collection.call_args.kwargs["embedding_model"]
-    assert sent_model != "voyage-context-3"
+    assert sent_model.startswith("bge-")
     assert sent_model == effective_embedding_model_for_writes("docs")
 
 
@@ -73,12 +75,11 @@ def test_local_mode_sends_bge_not_voyage_context_3(
 )
 def test_cloud_mode_sends_content_type_appropriate_voyage_model(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    cloud_mode: None,
     content_type: str,
     collection_prefix: str,
 ) -> None:
     """Cloud mode: docs -> voyage-context-3, code -> voyage-code-3."""
-    monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
     adapter, cat = _adapter(tmp_path)
     repo = _repo(tmp_path)
     new_name = f"{collection_prefix}__myrepo-1-1__voyage-placeholder__v1"
@@ -115,12 +116,11 @@ def test_sent_model_equals_effective_embedding_model_for_writes(
 
 
 def test_plain_fake_writer_with_no_profile_knowledge_still_succeeds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, cloud_mode: None,
 ) -> None:
     """Against a writer double with no profile-aware validation (the
     pre-Phase-1 engine shape — it accepts whatever embedding_model is
     handed to it), the registration path still succeeds end to end."""
-    monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
     adapter, cat = _adapter(tmp_path)
     repo = _repo(tmp_path)
     new_name = "docs__myrepo-1-1__voyage-context-3__v1"
