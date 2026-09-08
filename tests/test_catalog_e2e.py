@@ -383,7 +383,7 @@ def test_store_put_registers_in_catalog():
         mock_t3.return_value = mock_db
         result = store_put(
             content=content,
-            collection="knowledge", title="research-vector-indexing",
+            collection="fixture-subject", title="research-vector-indexing",
             tags="research,embeddings",
         )
     assert "Stored" in result

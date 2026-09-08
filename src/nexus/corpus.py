@@ -69,6 +69,16 @@ def validate_collection_name(name: str) -> None:
 
 
 CONTENT_TYPES: tuple[str, ...] = _CONTENT_TYPES
+
+#: Subject names that are containers, not subjects (docs/collections.md
+#: Rule 1). A write that names one of these as the subject is refused
+#: (nexus-0fw11): ``knowledge__knowledge`` and ``docs__default`` on the
+#: production tenant were both minted by taking a default where a subject
+#: was needed. Reads are unaffected, and a full four-segment conformant
+#: name passes through untouched, which is the deliberate escape for the
+#: collections that already exist. ``tests/test_corpus.py`` pins this set
+#: to the list docs/collections.md prints.
+PLACEHOLDER_SUBJECTS: frozenset[str] = frozenset({"default", "knowledge", "notes", "tmp", "test"})
 """Public alias for the canonical content_type values used in the
 RDR-103 ``<content_type>__<owner_id>__<embedding_model>__v<n>`` schema.
 ``CollectionName`` validates against this tuple."""
@@ -171,6 +181,11 @@ def canonical_embedding_model(content_type: str) -> str:
         f"canonical_embedding_model: unknown content_type {content_type!r}; "
         f"expected one of {CONTENT_TYPES}"
     )
+
+
+class PlaceholderCollectionError(ValueError):
+    """A write named a placeholder (``default``, ``knowledge``, ``notes``,
+    ``tmp``, ``test``) where a subject was required (nexus-0fw11)."""
 
 
 class LocalVoyageCredentialMissingError(RuntimeError):
@@ -656,6 +671,21 @@ def embedding_model_for_collection_calibrated(collection_name: str) -> str:
     return resolve_read_embedding_model(content_type)
 
 
+def _refuse_placeholder_subject(user_arg: str) -> None:
+    """Raise :class:`PlaceholderCollectionError` when the subject segment of
+    a bare or two-segment name is a placeholder (nexus-0fw11). Only write
+    resolution calls this; the four-segment conformant form never reaches it."""
+    _, _, rest = user_arg.partition("__") if "__" in user_arg else ("", "", user_arg)
+    if rest in PLACEHOLDER_SUBJECTS:
+        raise PlaceholderCollectionError(
+            f"collection {user_arg!r} names a placeholder, not a subject: a knowledge "
+            "collection is a subject area a reader would browse (distributed-systems, "
+            "vector-search), never default/knowledge/notes/tmp/test. Name the subject, "
+            "reusing an existing one from `nx collection list` where it fits; see "
+            "docs/collections.md Rule 1."
+        )
+
+
 def t3_collection_name(
     user_arg: str, *, t3: object | None = None, for_write: bool = False,
 ) -> str:
@@ -711,6 +741,9 @@ def t3_collection_name(
     """
     if is_conformant_collection_name(user_arg):
         return user_arg
+
+    if for_write:
+        _refuse_placeholder_subject(user_arg)
 
     # GH #545: when the user typed a BARE content-type prefix
     # (``"code"``, ``"docs"``, ``"rdr"``, ``"knowledge"``) AND no

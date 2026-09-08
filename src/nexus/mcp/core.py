@@ -3796,7 +3796,7 @@ def query(
 )
 def store_put(
     content: str,
-    collection: str = "knowledge",
+    collection: str,
     title: str = "",
     tags: str = "",
     category: str = "",
@@ -3815,13 +3815,15 @@ def store_put(
             that, split it into titled parts and call store_put once per
             part with the same tags (e.g. title "my-note (1/2)",
             "my-note (2/2)") rather than one oversized call.
-        collection: Collection name or prefix (default: knowledge). Give a
-            bare SUBJECT (``distributed-systems``), never a four-segment
-            name or a model token; the catalog renders the rest. A
-            knowledge collection is a durable subject area a reader would
-            browse, not a document, session, task, or source app, and
-            existing subjects are reused before a new one is created
-            (``nx collection list``). Rules: docs/collections.md.
+        collection: REQUIRED. The bare SUBJECT the note belongs to
+            (``distributed-systems``), never a four-segment name or a model
+            token; the catalog renders the rest. A knowledge collection is
+            a durable subject area a reader would browse, not a document,
+            session, task, or source app, and existing subjects are reused
+            before a new one is created (``nx collection list``). The
+            placeholders default/knowledge/notes/tmp/test are refused
+            (nexus-0fw11): there is no default, because the default is what
+            minted ``knowledge__knowledge``. Rules: docs/collections.md.
         title: Document title (recommended for deduplication). A non-empty
             title makes catalog identity stable: re-putting the same
             (collection, title) pair reconciles onto the existing document

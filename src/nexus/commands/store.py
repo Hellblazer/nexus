@@ -7,7 +7,7 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
-from nexus.corpus import t3_collection_name
+from nexus.corpus import PlaceholderCollectionError, t3_collection_name
 from nexus.db import make_t3
 from nexus.db.t3 import T3Database
 from nexus.errors import PutOversizedError
@@ -35,9 +35,10 @@ def store() -> None:
 
 @store.command("put")
 @click.argument("source")
-@click.option("--collection", "-c", default="knowledge", show_default=True,
-              help="Collection: a bare subject such as distributed-systems (default: "
-                   "knowledge). Never a model token or version; see "
+@click.option("--collection", "-c", required=True,
+              help="Collection: the bare subject this note belongs to, such as "
+                   "distributed-systems. Required: the placeholders default/knowledge/"
+                   "notes/tmp/test are refused. Never a model token or version; see "
                    "docs/collections.md.")
 @click.option("--title", "-t", default="", help="Document title (required when SOURCE is -)")
 @click.option("--tags", default="", help="Comma-separated tags")
@@ -100,7 +101,10 @@ def put_cmd(
     # for_write=True (nexus-35ok4): this command WRITES new content —
     # a genuinely new corpus mints strictly (raises loud if
     # local.embed_model is voyage-shaped with no key configured).
-    col_name = t3_collection_name(collection, t3=db, for_write=True)
+    try:
+        col_name = t3_collection_name(collection, t3=db, for_write=True)
+    except PlaceholderCollectionError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     # RDR-101 Phase 3 PR δ Stage B.4: pre-register the catalog entry
     # so the T3 chunk can carry the resulting tumbler as ``doc_id``

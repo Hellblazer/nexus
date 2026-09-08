@@ -323,7 +323,7 @@ def test_catalog_store_hook_failed_logs_warning(tmp_path, monkeypatch):
         with capture_logs() as cap:
             result = store_put(
                 content="hook failure test",
-                collection="knowledge",
+                collection="fixture-subject",
                 title="hook-fail-doc",
             )
 

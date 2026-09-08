@@ -12,7 +12,7 @@ from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
 
 
-def _seed_for_store_put(content: str, collection: str = "knowledge") -> None:
+def _seed_for_store_put(content: str, collection: str = "fixture-subject") -> None:
     """Pre-seed a REAL ``nexus.chunks`` row for what CLI ``nx store put``
     is about to write (nexus-dbzxb, RDR-191 Phase 5 Python collateral).
 
@@ -109,14 +109,14 @@ def test_store_put_tenant_optional(runner, monkeypatch, tmp_path):
         db.__exit__ = MagicMock(return_value=False)
         db.put.return_value = "doc-id-1"
         mt3.return_value = db
-        result = runner.invoke(main, ["store", "put", str(src), "--title", "test"])
+        result = runner.invoke(main, ["store", "put", "--collection", "fixture-subject", str(src), "--title", "test"])
     assert result.exit_code == 0, result.output
 
 
 # ── nx store put ─────────────────────────────────────────────────────────────
 
 def test_store_put_stdin_requires_title(runner, mock_store):
-    result = runner.invoke(main, ["store", "put", "-"], input="some content")
+    result = runner.invoke(main, ["store", "put", "--collection", "fixture-subject", "-"], input="some content")
     assert result.exit_code != 0
     assert "--title" in result.output
 
@@ -124,7 +124,7 @@ def test_store_put_stdin_requires_title(runner, mock_store):
 def test_store_put_stdin_with_title_succeeds(runner, mock_store):
     mock_store.put.return_value = "doc-id-abc"
     _seed_for_store_put("content here")
-    result = runner.invoke(main, ["store", "put", "-", "--title", "my-title.md"], input="content here")
+    result = runner.invoke(main, ["store", "put", "--collection", "fixture-subject", "-", "--title", "my-title.md"], input="content here")
     assert result.exit_code == 0
     assert "doc-id-abc" in result.output
     mock_store.put.assert_called_once()
@@ -138,14 +138,14 @@ def test_store_put_file_uses_filename_as_title(runner, mock_store, tmp_path):
     src.write_text("finding: important")
     mock_store.put.return_value = "doc-id-xyz"
     _seed_for_store_put("finding: important")
-    result = runner.invoke(main, ["store", "put", str(src)])
+    result = runner.invoke(main, ["store", "put", "--collection", "fixture-subject", str(src)])
     assert result.exit_code == 0
     assert "doc-id-xyz" in result.output
     assert mock_store.put.call_args.kwargs["title"] == "analysis.md"
 
 
 def test_store_put_file_not_found(runner, mock_store):
-    result = runner.invoke(main, ["store", "put", "/no/such/file.txt"])
+    result = runner.invoke(main, ["store", "put", "--collection", "fixture-subject", "/no/such/file.txt"])
     assert result.exit_code != 0
     assert "not found" in result.output.lower() or "File not found" in result.output
 
@@ -153,7 +153,7 @@ def test_store_put_file_not_found(runner, mock_store):
 def test_store_put_invalid_ttl_shows_error(runner, mock_store, tmp_path):
     src = tmp_path / "f.txt"
     src.write_text("content")
-    result = runner.invoke(main, ["store", "put", str(src), "--ttl", "5z"])
+    result = runner.invoke(main, ["store", "put", "--collection", "fixture-subject", str(src), "--ttl", "5z"])
     assert result.exit_code != 0
     assert "5z" in result.output
 
@@ -173,7 +173,7 @@ def test_store_put_oversized_content_shows_clean_error(runner, mock_store, tmp_p
 
     src = tmp_path / "big.md"
     src.write_text("x" * (QUOTAS.MAX_DOCUMENT_BYTES + 1))
-    result = runner.invoke(main, ["store", "put", str(src), "--title", "big.md"])
+    result = runner.invoke(main, ["store", "put", "--collection", "fixture-subject", str(src), "--title", "big.md"])
 
     assert result.exit_code != 0
     assert "Traceback" not in result.output, (
@@ -205,7 +205,7 @@ def test_store_put_oversized_content_never_mints_catalog_row(runner, mock_store,
 
     src = tmp_path / "big.md"
     src.write_text("x" * (QUOTAS.MAX_DOCUMENT_BYTES + 1))
-    result = runner.invoke(main, ["store", "put", str(src), "--title", "big.md"])
+    result = runner.invoke(main, ["store", "put", "--collection", "fixture-subject", str(src), "--title", "big.md"])
 
     assert result.exit_code != 0
     assert mint_calls == [], (
@@ -244,7 +244,7 @@ def test_store_put_heartbeat_ticks_during_a_slow_embed(runner, mock_store, tmp_p
         return "doc-id-slow"
 
     mock_store.put.side_effect = _slow_put
-    result = runner.invoke(main, ["store", "put", str(src)])
+    result = runner.invoke(main, ["store", "put", "--collection", "fixture-subject", str(src)])
 
     assert result.exit_code == 0, result.output
     assert "[embed]" in result.output
@@ -259,7 +259,7 @@ def test_store_put_heartbeat_silent_on_a_fast_put(runner, mock_store, tmp_path, 
     src.write_text("small content")
 
     mock_store.put.return_value = "doc-id-fast"
-    result = runner.invoke(main, ["store", "put", str(src)])
+    result = runner.invoke(main, ["store", "put", "--collection", "fixture-subject", str(src)])
 
     assert result.exit_code == 0, result.output
     assert "[embed]" not in result.output
@@ -282,7 +282,7 @@ def test_store_put_heartbeat_disarmed_on_exception(runner, mock_store, tmp_path,
     src.write_text("content that triggers a put failure")
 
     mock_store.put.side_effect = RuntimeError("boom")
-    result = runner.invoke(main, ["store", "put", str(src)])
+    result = runner.invoke(main, ["store", "put", "--collection", "fixture-subject", str(src)])
 
     assert result.exit_code != 0
     time.sleep(0.05)
@@ -731,3 +731,33 @@ def test_store_import_heartbeat_disarmed_on_exception(runner, tmp_path, monkeypa
     assert result.exit_code != 0
     time.sleep(0.05)
     assert not any(t.name == "nx-phase-heartbeat" for t in threading.enumerate())
+
+
+
+# nexus-0fw11: the subject is required and a placeholder is refused.
+
+
+def test_store_put_requires_a_collection(tmp_path) -> None:
+    from click.testing import CliRunner
+
+    from nexus.cli import main
+
+    src = tmp_path / "n.md"
+    src.write_text("body")
+    result = CliRunner().invoke(main, ["store", "put", str(src), "--title", "n"])
+    assert result.exit_code == 2, result.output
+    assert "--collection" in result.output
+
+
+def test_store_put_refuses_a_placeholder_collection(tmp_path, monkeypatch) -> None:
+    from click.testing import CliRunner
+
+    import nexus.commands.store as store_mod
+    from nexus.cli import main
+
+    src = tmp_path / "n.md"
+    src.write_text("body")
+    monkeypatch.setattr(store_mod, "_t3", lambda: None)
+    result = CliRunner().invoke(main, ["store", "put", str(src), "--title", "n", "--collection", "knowledge"])
+    assert result.exit_code != 0, result.output
+    assert "placeholder" in result.output and "docs/collections.md" in result.output

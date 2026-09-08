@@ -108,7 +108,7 @@ class TestVictimScenarioEndToEnd:
                    return_value=("cid", [{}])), \
              patch("nexus.hook_registry.HookRegistry"), \
              patch("nexus.hook_registry.install_default_hooks"):
-            result = runner.invoke(main, ["store", "put", str(src), "--title", "t"])
+            result = runner.invoke(main, ["store", "put", "--collection", "fixture-subject", str(src), "--title", "t"])
         assert result.exit_code == 0, result.output
 
     def test_store_list_works(self, runner, no_cred_env):

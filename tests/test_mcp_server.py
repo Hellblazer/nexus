@@ -113,7 +113,7 @@ def _clear_ephemeral_collections(client) -> None:
     test file's T3 fixture survived into a "fresh" client. The RDR-155
     P4b ``InMemoryVectorClient`` has real per-instance isolation, making
     this a no-op safeguard on a fresh client. ``store_put``
-    resolves ``collection="knowledge"`` via ``t3_collection_name``, which
+    resolves ``collection="fixture-subject"`` via ``t3_collection_name``, which
     probes ``list_collections()`` for a unique ``knowledge__*`` match and
     returns it verbatim — so a single leaked ``knowledge__<owner>__...``
     collection silently re-targets the write/read away from the expected
@@ -169,7 +169,7 @@ def _capture_search():
     return captured, fake
 
 
-def _seed_for_store_put(content: str, collection: str = "knowledge") -> None:
+def _seed_for_store_put(content: str, collection: str = "fixture-subject") -> None:
     """Pre-seed a REAL ``nexus.chunks`` row for what ``store_put(...)`` is
     about to write (nexus-dbzxb, RDR-191 Phase 5 Python collateral sweep).
 
@@ -198,7 +198,7 @@ def _seed_for_store_put(content: str, collection: str = "knowledge") -> None:
     seed_manifest_chunks(col_name, [chash])
 
 
-def _put_id(content: str, collection: str = "knowledge", title: str = "t") -> str:
+def _put_id(content: str, collection: str = "fixture-subject", title: str = "t") -> str:
     """store_put then extract the doc ID."""
     _seed_for_store_put(content, collection)
     return store_put(content=content, collection=collection, title=title) \
@@ -557,25 +557,25 @@ def test_clustered_mode_skips_the_diversity_cap():
 # ── Store ────────────────────────────────────────────────────────────────────
 
 def test_store_put(t3):
-    _seed_for_store_put("test content", "knowledge")
-    result = store_put(content="test content", collection="knowledge", title="test-doc")
+    _seed_for_store_put("test content", "fixture-subject")
+    result = store_put(content="test content", collection="fixture-subject", title="test-doc")
     assert "Stored:" in result
-    assert "knowledge__knowledge" in result
+    assert "knowledge__fixture-subject" in result
 
 
 def test_store_list(t3):
-    store_put(content="listed entry", collection="knowledge", title="list-test")
-    result = store_list(collection="knowledge")
+    store_put(content="listed entry", collection="fixture-subject", title="list-test")
+    result = store_list(collection="fixture-subject")
     assert not result.startswith("Error:")
     assert "entries" in result.lower() or "list-test" in result
 
 
 @pytest.mark.parametrize("content, collection, title, expect_in", [
-    pytest.param("full document text here", "knowledge", "get-test",
+    pytest.param("full document text here", "fixture-subject", "get-test",
                  ["full document text here"], id="full-content"),
-    pytest.param("metadata content", "knowledge", "metadata-test-doc",
-                 ["metadata-test-doc", "knowledge__knowledge"], id="metadata"),
-    pytest.param("qualified content", "knowledge__knowledge", "qualified-test",
+    pytest.param("metadata content", "fixture-subject", "metadata-test-doc",
+                 ["metadata-test-doc", "knowledge__fixture-subject"], id="metadata"),
+    pytest.param("qualified content", "knowledge__fixture-subject", "qualified-test",
                  ["qualified content"], id="fully-qualified"),
 ])
 def test_store_get_round_trip(t3, content, collection, title, expect_in):
@@ -587,19 +587,19 @@ def test_store_get_round_trip(t3, content, collection, title, expect_in):
 
 
 def test_store_get_not_found(t3):
-    result = store_get(doc_id="nonexistent-id-12345", collection="knowledge")
+    result = store_get(doc_id="nonexistent-id-12345", collection="fixture-subject")
     assert not result.startswith("Error:")
     assert "not found" in result.lower() or "nonexistent" in result.lower()
 
 
 def test_store_get_empty_doc_id(t3):
-    result = store_get(doc_id="", collection="knowledge")
+    result = store_get(doc_id="", collection="fixture-subject")
     assert result.startswith("Error:")
 
 
 def test_store_get_no_ansi(t3):
     doc_id = _put_id("ansi check content", title="ansi-get-test")
-    result = store_get(doc_id=doc_id, collection="knowledge")
+    result = store_get(doc_id=doc_id, collection="fixture-subject")
     assert not ANSI_RE.search(result), f"ANSI codes found in: {result[:100]}"
 
 
@@ -607,14 +607,14 @@ def test_store_get_by_title_fallback(t3):
     """store_get accepts an exact title when the input doesn't look like a
     16-char content hash — fixed in 4.9.6 follow-up (was silent Not found)."""
     _put_id("findable by title", title="title-lookup-test")
-    result = store_get(doc_id="title-lookup-test", collection="knowledge")
+    result = store_get(doc_id="title-lookup-test", collection="fixture-subject")
     assert not result.startswith("Error:")
     assert "findable by title" in result
 
 
 def test_store_get_unknown_title_actionable_error(t3):
     """The Not-found message hints at the hash-vs-title distinction."""
-    result = store_get(doc_id="totally-not-a-real-title", collection="knowledge")
+    result = store_get(doc_id="totally-not-a-real-title", collection="fixture-subject")
     assert "not found" in result.lower()
     assert "content-hash" in result.lower() or "title" in result.lower()
 
@@ -622,8 +622,8 @@ def test_store_get_unknown_title_actionable_error(t3):
 def test_store_list_docs_chunk_count_numeric(t3):
     """--docs=true derives chunk count from the dedup pass; previously
     showed `?` for every entry because metadata didn't carry chunk_count."""
-    store_put(content="single chunk doc", collection="knowledge", title="docs-count-test")
-    result = store_list(collection="knowledge", docs=True)
+    store_put(content="single chunk doc", collection="fixture-subject", title="docs-count-test")
+    result = store_list(collection="fixture-subject", docs=True)
     assert "?" not in result.split("\n")[1] if "\n" in result else True
     # A 1-chunk doc should report `1 chunks` (or `1 chunk`)
     assert "1 chunks" in result
@@ -710,7 +710,7 @@ def test_error_missing_params(t1):
 
 
 def test_store_put_empty_content(t3):
-    result = store_put(content="", collection="knowledge", title="empty")
+    result = store_put(content="", collection="fixture-subject", title="empty")
     assert result.startswith("Error:") and "content" in result.lower()
 
 
@@ -768,8 +768,8 @@ def test_no_ansi_in_output(t1, t3, t2_path):
         memory_put(content="ansi check", project="test", title="ansi.md"),
         memory_get(project="test", title="ansi.md"),
         memory_search(query="ansi"),
-        store_put(content="ansi store", title="ansi-doc"),
-        store_list(collection="knowledge"),
+        store_put(content="ansi store", collection="fixture-subject", title="ansi-doc"),
+        store_list(collection="fixture-subject"),
     ]
     for r in results:
         assert not ANSI_RE.search(r), f"ANSI codes found in: {r[:100]}"
@@ -1365,13 +1365,13 @@ def test_store_put_invalidates_page_cache(t3, monkeypatch):
     clears the page cache so the next search refetches."""
     from nexus.mcp import core as mcp_core
     _fresh_page_cache(monkeypatch)
-    store_put(content="seed doc", collection="knowledge", title="cache-seed")
+    store_put(content="seed doc", collection="fixture-subject", title="cache-seed")
     calls: list[int] = []
 
     def fake(query, collections, n_results, t3, where=None, **kw):
         calls.append(1)
         return [SearchResult(id=f"r{i}", content="c", distance=0.1 + i * 0.01,
-                             collection="knowledge__knowledge", metadata={})
+                             collection="knowledge__fixture-subject", metadata={})
                 for i in range(6)]
 
     # nexus-rbhci: the freshly-seeded collection holds exactly 1 chunk and
@@ -1385,7 +1385,7 @@ def test_store_put_invalidates_page_cache(t3, monkeypatch):
         _search_render(query="q", corpus="knowledge", limit=2, offset=0)
         _search_render(query="q", corpus="knowledge", limit=2, offset=2)
         assert len(calls) == 1, "page-turn burst must serve from cache pre-write"
-        store_put(content="written mid-burst", collection="knowledge",
+        store_put(content="written mid-burst", collection="fixture-subject",
                   title="cache-inval")
         _search_render(query="q", corpus="knowledge", limit=2, offset=2)
 
@@ -1398,9 +1398,9 @@ def test_store_put_invalidates_page_cache(t3, monkeypatch):
 def test_store_delete_invalidates_page_cache(t3, monkeypatch):
     from nexus.mcp import core as mcp_core
     _fresh_page_cache(monkeypatch)
-    _seed_for_store_put("delete me", "knowledge")
+    _seed_for_store_put("delete me", "fixture-subject")
     put_result = store_put(
-        content="delete me", collection="knowledge", title="cache-del"
+        content="delete me", collection="fixture-subject", title="cache-del"
     )
     real_doc_id = put_result.split("Stored: ")[1].split()[0]
     calls: list[int] = []
@@ -1408,7 +1408,7 @@ def test_store_delete_invalidates_page_cache(t3, monkeypatch):
     def fake(query, collections, n_results, t3, where=None, **kw):
         calls.append(1)
         return [SearchResult(id=f"r{i}", content="c", distance=0.1 + i * 0.01,
-                             collection="knowledge__knowledge", metadata={})
+                             collection="knowledge__fixture-subject", metadata={})
                 for i in range(6)]
 
     # nexus-rbhci: same lone-collection-under-a-prefix rule as the sibling
@@ -1416,7 +1416,7 @@ def test_store_delete_invalidates_page_cache(t3, monkeypatch):
     with patch("nexus.search_engine.search_cross_corpus", fake):
         _search_render(query="q", corpus="knowledge", limit=2, offset=0)
         assert len(calls) == 1
-        store_delete(doc_id=real_doc_id, collection="knowledge")
+        store_delete(doc_id=real_doc_id, collection="fixture-subject")
         _search_render(query="q", corpus="knowledge", limit=2, offset=0)
 
     assert len(calls) == 2, "a store_delete must invalidate the page cache"
@@ -1434,7 +1434,7 @@ def test_store_put_invalidates_collections_cache(t3, monkeypatch):
     from nexus.mcp import core as mcp_core
     spy = MagicMock()
     monkeypatch.setattr(mcp_core, "_invalidate_collections_cache", spy)
-    store_put(content="cache invalidation trigger", collection="knowledge",
+    store_put(content="cache invalidation trigger", collection="fixture-subject",
               title="civ-put")
     assert spy.called, (
         "store_put must call invalidate_collections_cache() on a "
@@ -1446,14 +1446,14 @@ def test_store_delete_invalidates_collections_cache(t3, monkeypatch):
     """Same cache-coherence review finding as the store_put test above,
     for the delete path."""
     from nexus.mcp import core as mcp_core
-    _seed_for_store_put("civ delete me", "knowledge")
+    _seed_for_store_put("civ delete me", "fixture-subject")
     put_result = store_put(
-        content="civ delete me", collection="knowledge", title="civ-del"
+        content="civ delete me", collection="fixture-subject", title="civ-del"
     )
     real_doc_id = put_result.split("Stored: ")[1].split()[0]
     spy = MagicMock()
     monkeypatch.setattr(mcp_core, "_invalidate_collections_cache", spy)
-    store_delete(doc_id=real_doc_id, collection="knowledge")
+    store_delete(doc_id=real_doc_id, collection="fixture-subject")
     assert spy.called, (
         "store_delete must call invalidate_collections_cache() on a "
         "committed delete"
@@ -2311,3 +2311,24 @@ def test_mcp_shim_imports():
     )
     for fn in (search, query, store_put, catalog_search, _inject_t1, _reset_singletons):
         assert callable(fn)
+
+
+
+# nexus-0fw11: the MCP write tool has no default subject and refuses placeholders.
+
+
+def test_store_put_has_no_default_collection() -> None:
+    import inspect
+
+    from nexus.mcp.core import store_put
+
+    param = inspect.signature(store_put).parameters["collection"]
+    assert param.default is inspect.Parameter.empty
+
+
+def test_store_put_refuses_a_placeholder_collection() -> None:
+    from nexus.mcp.core import store_put
+
+    result = store_put(content="a note", collection="knowledge", title="placeholder-probe")
+    assert result.startswith("Error:"), result
+    assert "placeholder" in result and "docs/collections.md" in result

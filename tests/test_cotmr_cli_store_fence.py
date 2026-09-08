@@ -79,7 +79,7 @@ def _invoke_store_put(tmp_path: Path, t3, title: str, content: str):
     with patch("nexus.commands.store._t3", lambda: t3):
         return CliRunner().invoke(main, [
             "store", "put", str(f),
-            "--collection", "knowledge",
+            "--collection", "fixture-subject",
             "--title", title,
         ])
 
@@ -96,7 +96,7 @@ def _invoke_promote(tmp_path: Path, t3, title: str, content: str):
          patch("nexus.db.make_t3", return_value=t3):
         return CliRunner().invoke(main, [
             "memory", "promote", str(row_id),
-            "--collection", "knowledge",
+            "--collection", "fixture-subject",
         ])
 
 
