@@ -1,6 +1,8 @@
 package dev.nexus.service;
 
 import org.jooq.impl.DSL;
+
+import dev.nexus.service.jooq.test.Routines;
 import org.jooq.SQLDialect;
 import org.jooq.DSLContext;
 import dev.nexus.service.db.ScratchRepository;
@@ -19,8 +21,6 @@ import java.util.Set;
 import static dev.nexus.service.jooq.t1.Tables.SCRATCH;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.jooq.impl.DSL.condition;
-import static org.jooq.impl.DSL.val;
 
 /**
  * RDR-152 bead nexus-gmiaf.13 — Liquibase t1 scratch schema integration test.
@@ -180,14 +180,12 @@ class ScratchSchemaLiquibaseTest {
                    "training neural networks gradient descent", "running,ml", false, 0, OffsetDateTime.now())
                .execute();
 
-            // @@ / plainto_tsquery have no typed jOOQ operator/function form (same
-            // house idiom as PlanRepository/MemoryRepository's own FTS predicates) --
-            // a bare, statically-imported condition() template, never DSL.condition(...)
-            // qualified (which the scanDslTemplates gate flags as assembled SQL text).
+            // jOOQ has no typed text-search operator: the match runs through the
+            // Liquibase-owned nexus_test.fts_matches function (generated Routines).
             var probe = ctx.select(
-                    DSL.field(condition("fts_vector @@ plainto_tsquery('english', {0})", val("network"))),
-                    DSL.field(condition("fts_vector @@ plainto_tsquery('simple', {0})", val("running"))),
-                    DSL.field(condition("fts_vector @@ plainto_tsquery('simple', {0})", val("run"))))
+                    Routines.ftsMatches(SCRATCH.FTS_VECTOR, DSL.val("english"), DSL.val("network")),
+                    Routines.ftsMatches(SCRATCH.FTS_VECTOR, DSL.val("simple"), DSL.val("running")),
+                    Routines.ftsMatches(SCRATCH.FTS_VECTOR, DSL.val("simple"), DSL.val("run")))
                 .from(SCRATCH)
                 .where(SCRATCH.ID.eq("probe-id-1"))
                 .fetchOne();

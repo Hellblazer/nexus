@@ -1,6 +1,8 @@
 package dev.nexus.service;
 
 import org.jooq.impl.DSL;
+
+import dev.nexus.service.jooq.test.Routines;
 import org.jooq.impl.SQLDataType;
 import org.jooq.SQLDialect;
 import org.jooq.DSLContext;
@@ -21,8 +23,6 @@ import java.util.Set;
 import static dev.nexus.service.jooq.nexus.Tables.PLANS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.jooq.impl.DSL.condition;
-import static org.jooq.impl.DSL.val;
 
 /**
  * RDR-152 bead nexus-gmiaf.11 — Liquibase plans baseline integration test.
@@ -207,21 +207,19 @@ class PlansSchemaLiquibaseTest {
                    OffsetDateTime.now())
                .execute();
 
-            // @@ / plainto_tsquery have no typed jOOQ operator/function form (same house
-            // idiom as PlanRepository/MemoryRepository's own FTS predicates) -- a bare,
-            // statically-imported condition() template, never DSL.condition(...) qualified
-            // (which the scanDslTemplates gate flags as assembled SQL text).
+            // jOOQ has no typed text-search operator: the match runs through the
+            // Liquibase-owned nexus_test.fts_matches function (generated Routines).
             var ftsCheck = ctx.select(
                     // (1) Positive english: 'searching' and 'searches' share stem 'search'.
                     //     match_text is indexed under english so query for stem must match.
-                    DSL.field(condition("fts_vector @@ plainto_tsquery('english', {0})", val("searching"))),
+                    Routines.ftsMatches(PLANS.FTS_VECTOR, DSL.val("english"), DSL.val("searching")),
                     // (2) Positive simple exact: tags='planning,...'; simple stores verbatim.
-                    DSL.field(condition("fts_vector @@ plainto_tsquery('simple', {0})", val("planning"))),
+                    Routines.ftsMatches(PLANS.FTS_VECTOR, DSL.val("simple"), DSL.val("planning")),
                     // (3) NEGATIVE discrimination: 'plan' is the english stem of 'planning'.
                     //     Under simple, 'planning' is stored as-is (not stemmed).
                     //     plainto_tsquery('simple','plan') → literal 'plan', must NOT match 'planning'.
                     //     If this fails (returns true), tags are accidentally english-indexed.
-                    DSL.field(condition("fts_vector @@ plainto_tsquery('simple', {0})", val("plan"))))
+                    Routines.ftsMatches(PLANS.FTS_VECTOR, DSL.val("simple"), DSL.val("plan")))
                 .from(PLANS)
                 .where(PLANS.TENANT_ID.eq("fts-probe-tenant").and(PLANS.PROJECT.eq("probe-proj")))
                 .fetchOne();
@@ -299,7 +297,7 @@ class PlansSchemaLiquibaseTest {
         // the entity resolution plan's match_text but not the search/walk plans.
         var ftsAlpha = tenantScope.withTenant("plan-alpha", ctx ->
             ctx.select(PLANS.QUERY).from(PLANS)
-               .where(condition("fts_vector @@ plainto_tsquery('english', {0})", val("resolving")))
+               .where(Routines.ftsMatches(PLANS.FTS_VECTOR, DSL.val("english"), DSL.val("resolving")).isTrue())
                .orderBy(PLANS.QUERY).fetch(PLANS.QUERY));
         assertThat(ftsAlpha)
             .as("FTS query for 'resolving' (english stem 'resolv') under plan-alpha " +
@@ -309,7 +307,7 @@ class PlansSchemaLiquibaseTest {
         // FTS query scoped to plan-beta: 'java' in simple (tag) config matches.
         var ftsBeta = tenantScope.withTenant("plan-beta", ctx ->
             ctx.select(PLANS.QUERY).from(PLANS)
-               .where(condition("fts_vector @@ plainto_tsquery('simple', {0})", val("java")))
+               .where(Routines.ftsMatches(PLANS.FTS_VECTOR, DSL.val("simple"), DSL.val("java")).isTrue())
                .orderBy(PLANS.QUERY).fetch(PLANS.QUERY));
         assertThat(ftsBeta)
             .as("FTS query for 'java' (simple/tags) under plan-beta must match Java plan")
@@ -318,7 +316,7 @@ class PlansSchemaLiquibaseTest {
         // Cross-tenant FTS isolation: 'researching' under plan-beta must return nothing.
         var crossTenantFts = tenantScope.withTenant("plan-beta", ctx ->
             ctx.select(PLANS.QUERY).from(PLANS)
-               .where(condition("fts_vector @@ plainto_tsquery('english', {0})", val("researching")))
+               .where(Routines.ftsMatches(PLANS.FTS_VECTOR, DSL.val("english"), DSL.val("researching")).isTrue())
                .fetch(PLANS.QUERY));
         assertThat(crossTenantFts)
             .as("FTS 'researching' under plan-beta must return empty (cross-tenant isolation)")

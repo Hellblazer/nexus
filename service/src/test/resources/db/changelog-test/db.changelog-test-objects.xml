@@ -178,4 +178,25 @@ $$;
         <rollback>DROP FUNCTION IF EXISTS nexus_test.insert_chunk_bare_vector(text, text, bytea, int)</rollback>
     </changeSet>
 
+    <changeSet id="test-objects-fts-matches" author="nexus-cbo4a">
+        <comment>nexus_test.fts_matches(tsvector, text, text): SQL-language wrapper for
+        p_vector @@ plainto_tsquery(p_config::regconfig, p_query) (nexus-cbo4a batch 13).
+        jOOQ has no typed text-search operator; the three schema tests that probe a
+        table's fts_vector (Plans, Memory, Scratch) call the generated
+        Routines.ftsMatches Field instead of a condition("...") template. p_config
+        is the regconfig name ('english' / 'simple'), cast inside the function so the
+        Java side passes plain text. STABLE: plainto_tsquery with an explicit
+        configuration does not read session state. SECURITY INVOKER.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.fts_matches(p_vector tsvector, p_config text, p_query text) RETURNS boolean
+    LANGUAGE sql
+    STABLE
+    SECURITY INVOKER
+AS $$
+    SELECT p_vector @@ plainto_tsquery(p_config::regconfig, p_query)
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.fts_matches(tsvector, text, text)</rollback>
+    </changeSet>
+
 </databaseChangeLog>

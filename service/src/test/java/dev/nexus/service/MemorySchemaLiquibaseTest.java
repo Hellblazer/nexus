@@ -5,6 +5,8 @@ import dev.nexus.service.db.TenantScope;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
+
+import dev.nexus.service.jooq.test.Routines;
 import org.jooq.impl.SQLDataType;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.AfterAll;
@@ -21,8 +23,6 @@ import java.util.Set;
 import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.jooq.impl.DSL.condition;
-import static org.jooq.impl.DSL.val;
 
 /**
  * RDR-152 bead nexus-gmiaf.5 — Liquibase memory baseline integration test.
@@ -216,21 +216,19 @@ class MemorySchemaLiquibaseTest {
                    OffsetDateTime.now(), 0)
                .execute();
 
-            // @@ / plainto_tsquery have no typed jOOQ operator/function form (same house
-            // idiom as PlanRepository/MemoryRepository's own FTS predicates) -- a bare,
-            // statically-imported condition() template, never DSL.condition(...) qualified
-            // (which the scanDslTemplates gate flags as assembled SQL text).
+            // jOOQ has no typed text-search operator: the match runs through the
+            // Liquibase-owned nexus_test.fts_matches function (generated Routines).
             var ftsCheck = ctx.select(
                     // (1) Positive english: 'mechanics' stems to 'mechan'; 'mechanic' also
                     //     stems to 'mechan' under english.  Title is indexed under english,
                     //     so the stem query must match.
-                    DSL.field(condition("fts_vector @@ plainto_tsquery('english', {0})", val("mechanic"))),
+                    Routines.ftsMatches(MEMORY.FTS_VECTOR, DSL.val("english"), DSL.val("mechanic")),
                     // (2) Positive simple exact: tags='running,...'; simple stores verbatim.
-                    DSL.field(condition("fts_vector @@ plainto_tsquery('simple', {0})", val("running"))),
+                    Routines.ftsMatches(MEMORY.FTS_VECTOR, DSL.val("simple"), DSL.val("running")),
                     // (3) NEGATIVE discrimination: 'run' is the english stem of 'running'.
                     //     Under simple, 'running' is stored as-is (no stemming), so querying
                     //     the stem 'run' must NOT match.  Proves tags≠english.
-                    DSL.field(condition("fts_vector @@ plainto_tsquery('simple', {0})", val("run"))))
+                    Routines.ftsMatches(MEMORY.FTS_VECTOR, DSL.val("simple"), DSL.val("run")))
                 .from(MEMORY)
                 .where(MEMORY.TENANT_ID.eq("probe-tenant")
                     .and(MEMORY.TITLE.eq("Quantum mechanics overview")))
@@ -307,7 +305,7 @@ class MemorySchemaLiquibaseTest {
         // FTS query scoped to tenant-alpha: search for 'neural' (english→'neural' retained)
         List<String> ftsAlpha = tenantScope.withTenant("alpha", ctx ->
             ctx.select(MEMORY.TITLE).from(MEMORY)
-               .where(condition("fts_vector @@ plainto_tsquery('english', {0})", val("neural")))
+               .where(Routines.ftsMatches(MEMORY.FTS_VECTOR, DSL.val("english"), DSL.val("neural")).isTrue())
                .orderBy(MEMORY.TITLE).fetch(MEMORY.TITLE));
         assertThat(ftsAlpha)
             .as("FTS query for 'neural' under tenant-alpha must match ML row only")
@@ -316,7 +314,7 @@ class MemorySchemaLiquibaseTest {
         // FTS query scoped to tenant-beta: 'rust' in simple (tag) config
         List<String> ftsBeta = tenantScope.withTenant("beta", ctx ->
             ctx.select(MEMORY.TITLE).from(MEMORY)
-               .where(condition("fts_vector @@ plainto_tsquery('simple', {0})", val("rust")))
+               .where(Routines.ftsMatches(MEMORY.FTS_VECTOR, DSL.val("simple"), DSL.val("rust")).isTrue())
                .orderBy(MEMORY.TITLE).fetch(MEMORY.TITLE));
         assertThat(ftsBeta)
             .as("FTS query for 'rust' (simple/tags) under tenant-beta must match Rust row")
@@ -325,7 +323,7 @@ class MemorySchemaLiquibaseTest {
         // Cross-tenant FTS isolation: 'neural' under beta must return nothing
         List<String> ftsAlphaUnderBeta = tenantScope.withTenant("beta", ctx ->
             ctx.select(MEMORY.TITLE).from(MEMORY)
-               .where(condition("fts_vector @@ plainto_tsquery('english', {0})", val("neural")))
+               .where(Routines.ftsMatches(MEMORY.FTS_VECTOR, DSL.val("english"), DSL.val("neural")).isTrue())
                .orderBy(MEMORY.TITLE).fetch(MEMORY.TITLE));
         assertThat(ftsAlphaUnderBeta)
             .as("FTS query for 'neural' under tenant-beta must return empty (cross-tenant isolation)")
