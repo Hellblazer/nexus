@@ -14,10 +14,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.time.Clock;
 import java.util.Optional;
 
+import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -73,10 +73,12 @@ class TokenScopeResolutionTest {
 
     private String scopeOfHash(String tokenHash) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT scope FROM nexus.service_tokens WHERE token_hash = '" + tokenHash + "'");
-            assertThat(rs.next()).as("row must exist for hash " + tokenHash).isTrue();
-            return rs.getString("scope");
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(SERVICE_TOKENS.SCOPE).from(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.TOKEN_HASH.eq(tokenHash))
+                .fetch(SERVICE_TOKENS.SCOPE);
+            assertThat(rows).as("row must exist for hash " + tokenHash).hasSize(1);
+            return rows.get(0);
         }
     }
 

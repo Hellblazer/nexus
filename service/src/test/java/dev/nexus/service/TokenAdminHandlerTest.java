@@ -20,8 +20,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
-import java.sql.ResultSet;
 
+import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -142,17 +142,18 @@ class TokenAdminHandlerTest {
         try (Connection su = pg.createConnection("")) {
             // All three rows are still live (revoked_at IS NULL) during the grace window.
             assertThat(countLive("tenant-rot", su)).isEqualTo(3L);
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
             // The two pre-existing rows now have a future expires_at; the new one has none.
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) c FROM nexus.service_tokens WHERE tenant_id='tenant-rot' "
-                + "AND revoked_at IS NULL AND expires_at IS NOT NULL");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getLong("c")).as("the two old tokens are now grace-expiring").isEqualTo(2L);
-            ResultSet rs2 = su.createStatement().executeQuery(
-                "SELECT COUNT(*) c FROM nexus.service_tokens WHERE tenant_id='tenant-rot' "
-                + "AND revoked_at IS NULL AND expires_at IS NULL");
-            assertThat(rs2.next()).isTrue();
-            assertThat(rs2.getLong("c")).as("exactly one fresh non-expiring token").isEqualTo(1L);
+            long grace = dsl.selectCount().from(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.TENANT_ID.eq("tenant-rot"),
+                    SERVICE_TOKENS.REVOKED_AT.isNull(), SERVICE_TOKENS.EXPIRES_AT.isNotNull())
+                .fetchOne(0, long.class);
+            assertThat(grace).as("the two old tokens are now grace-expiring").isEqualTo(2L);
+            long fresh = dsl.selectCount().from(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.TENANT_ID.eq("tenant-rot"),
+                    SERVICE_TOKENS.REVOKED_AT.isNull(), SERVICE_TOKENS.EXPIRES_AT.isNull())
+                .fetchOne(0, long.class);
+            assertThat(fresh).as("exactly one fresh non-expiring token").isEqualTo(1L);
         }
     }
 
@@ -167,12 +168,14 @@ class TokenAdminHandlerTest {
             "{\"tenant\":\"" + TenantConstants.DEFAULT_TENANT + "\",\"grace_seconds\":300}");
         String bootHash = TokenHashing.sha256Hex(BOOT);
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT expires_at, revoked_at FROM nexus.service_tokens WHERE token_hash = '"
-                + bootHash + "'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getObject("expires_at")).as("root token must not be grace-expired").isNull();
-            assertThat(rs.getObject("revoked_at")).as("root token must not be revoked").isNull();
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(SERVICE_TOKENS.EXPIRES_AT, SERVICE_TOKENS.REVOKED_AT)
+                .from(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.TOKEN_HASH.eq(bootHash))
+                .fetch();
+            assertThat(rows).hasSize(1);
+            assertThat(rows.get(0).value1()).as("root token must not be grace-expired").isNull();
+            assertThat(rows.get(0).value2()).as("root token must not be revoked").isNull();
         }
     }
 
@@ -267,11 +270,12 @@ class TokenAdminHandlerTest {
     void issue_withTtl_setsExpiry() throws Exception {
         JsonNode r = postJson("/v1/service-tokens/issue", "{\"tenant\":\"tenant-exp\",\"ttl_seconds\":3600}");
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT expires_at FROM nexus.service_tokens WHERE token_hash = '"
-                + r.get("token_hash").asText() + "'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getObject("expires_at")).as("ttl must set expires_at").isNotNull();
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(SERVICE_TOKENS.EXPIRES_AT).from(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.TOKEN_HASH.eq(r.get("token_hash").asText()))
+                .fetch(SERVICE_TOKENS.EXPIRES_AT);
+            assertThat(rows).hasSize(1);
+            assertThat(rows.get(0)).as("ttl must set expires_at").isNotNull();
         }
     }
 
@@ -553,10 +557,12 @@ class TokenAdminHandlerTest {
 
     private String scopeOf(String hash) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT scope FROM nexus.service_tokens WHERE token_hash = '" + hash + "'");
-            assertThat(rs.next()).isTrue();
-            return rs.getString("scope");
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(SERVICE_TOKENS.SCOPE).from(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.TOKEN_HASH.eq(hash))
+                .fetch(SERVICE_TOKENS.SCOPE);
+            assertThat(rows).hasSize(1);
+            return rows.get(0);
         }
     }
 
@@ -598,18 +604,19 @@ class TokenAdminHandlerTest {
 
     private String tenantOf(String hash) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT tenant_id FROM nexus.service_tokens WHERE token_hash = '" + hash + "'");
-            assertThat(rs.next()).isTrue();
-            return rs.getString("tenant_id");
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(SERVICE_TOKENS.TENANT_ID).from(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.TOKEN_HASH.eq(hash))
+                .fetch(SERVICE_TOKENS.TENANT_ID);
+            assertThat(rows).hasSize(1);
+            return rows.get(0);
         }
     }
 
     private long countLive(String tenant, Connection su) throws Exception {
-        ResultSet rs = su.createStatement().executeQuery(
-            "SELECT COUNT(*) c FROM nexus.service_tokens WHERE tenant_id='" + tenant
-            + "' AND revoked_at IS NULL");
-        assertThat(rs.next()).isTrue();
-        return rs.getLong("c");
+        return DSL.using(su, SQLDialect.POSTGRES)
+            .selectCount().from(SERVICE_TOKENS)
+            .where(SERVICE_TOKENS.TENANT_ID.eq(tenant), SERVICE_TOKENS.REVOKED_AT.isNull())
+            .fetchOne(0, long.class);
     }
 }

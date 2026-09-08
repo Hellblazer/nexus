@@ -17,8 +17,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.Statement;
 import java.time.Clock;
 import java.time.Duration;
@@ -26,6 +24,7 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 
+import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -96,14 +95,10 @@ class TokenStoreDataTokenSweepTest {
     }
 
     private boolean tokenExists(String tenant, String label) throws Exception {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "SELECT 1 FROM nexus.service_tokens WHERE tenant_id = ? AND label = ?")) {
-            ps.setString(1, tenant);
-            ps.setString(2, label);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next();
-            }
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .fetchExists(DSL.selectOne().from(SERVICE_TOKENS)
+                    .where(SERVICE_TOKENS.TENANT_ID.eq(tenant), SERVICE_TOKENS.LABEL.eq(label)));
         }
     }
 
@@ -270,6 +265,10 @@ class TokenStoreDataTokenSweepTest {
         // connection: without a statement_timeout the sweep would wait forever.
         try (Connection blocker = pg.createConnection("")) {
             blocker.setAutoCommit(false);
+            // KEPT RAW (nexus-cbo4a batch 13): jOOQ has no typed LOCK TABLE clause, and
+            // every other LOCK TABLE site in this tree (NexusServiceScheduledSweepTest,
+            // Rdr71gw2CollectionNotNullTest) is raw too -- there is no existing typed
+            // form to fold onto.
             try (Statement st = blocker.createStatement()) {
                 st.execute("LOCK TABLE nexus.service_tokens IN SHARE MODE");
             }

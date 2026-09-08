@@ -5,6 +5,8 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TokenHashing;
 import dev.nexus.service.db.TokenStore;
 import liquibase.Liquibase;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -12,13 +14,12 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 
+import static dev.nexus.service.jooq.nexus.Tables.SESSION_TOKENS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -65,28 +66,22 @@ class TokenStoreSessionSweepTest {
     }
 
     private void insertSessionToken(String tenant, String sessionId, Instant expiresAt) throws Exception {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "INSERT INTO nexus.session_tokens (session_token_hash, tenant_id, session_id, expires_at) "
-                 + "VALUES (?, ?, ?, ?)")) {
+        try (Connection su = pg.createConnection("")) {
             String hash = TokenHashing.sha256Hex(tenant + ":" + sessionId + ":" + expiresAt);
-            ps.setString(1, hash);
-            ps.setString(2, tenant);
-            ps.setString(3, sessionId);
-            ps.setObject(4, OffsetDateTime.ofInstant(expiresAt, ZoneOffset.UTC));
-            ps.executeUpdate();
+            DSL.using(su, SQLDialect.POSTGRES)
+                .insertInto(SESSION_TOKENS)
+                .columns(SESSION_TOKENS.SESSION_TOKEN_HASH, SESSION_TOKENS.TENANT_ID,
+                    SESSION_TOKENS.SESSION_ID, SESSION_TOKENS.EXPIRES_AT)
+                .values(hash, tenant, sessionId, OffsetDateTime.ofInstant(expiresAt, ZoneOffset.UTC))
+                .execute();
         }
     }
 
     private boolean sessionTokenExists(String tenant, String sessionId) throws Exception {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "SELECT 1 FROM nexus.session_tokens WHERE tenant_id = ? AND session_id = ?")) {
-            ps.setString(1, tenant);
-            ps.setString(2, sessionId);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next();
-            }
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .fetchExists(DSL.selectOne().from(SESSION_TOKENS)
+                    .where(SESSION_TOKENS.TENANT_ID.eq(tenant), SESSION_TOKENS.SESSION_ID.eq(sessionId)));
         }
     }
 

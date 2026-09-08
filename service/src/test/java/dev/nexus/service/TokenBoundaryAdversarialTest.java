@@ -29,7 +29,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -39,6 +38,10 @@ import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.UUID;
 
+import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
+import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
+import static dev.nexus.service.jooq.nexus.Tables.SESSION_TOKENS;
+import static dev.nexus.service.jooq.t1.Tables.SCRATCH;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -402,12 +405,13 @@ class TokenBoundaryAdversarialTest {
         String hash = TokenHashing.sha256Hex(TOK_REVOKE_ME);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                "UPDATE nexus.service_tokens SET revoked_at = now() WHERE token_hash = ?")) {
-                ps.setString(1, hash);
-                assertThat(ps.executeUpdate())
-                    .as("exactly one row revoked").isEqualTo(1);
-            }
+            int updated = DSL.using(su, SQLDialect.POSTGRES)
+                .update(SERVICE_TOKENS)
+                .set(SERVICE_TOKENS.REVOKED_AT, DSL.currentOffsetDateTime())
+                .where(SERVICE_TOKENS.TOKEN_HASH.eq(hash))
+                .execute();
+            assertThat(updated)
+                .as("exactly one row revoked").isEqualTo(1);
         }
         service.getTokenCache().invalidate(hash);
 
@@ -477,11 +481,12 @@ class TokenBoundaryAdversarialTest {
             // Revoke out-of-band WITHOUT invalidating the cache (e.g. a direct DB edit).
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                try (var ps = su.prepareStatement(
-                    "UPDATE nexus.service_tokens SET revoked_at = now() WHERE token_hash = ?")) {
-                    ps.setString(1, tok.tokenHash());
-                    assertThat(ps.executeUpdate()).isEqualTo(1);
-                }
+                int updated = DSL.using(su, SQLDialect.POSTGRES)
+                    .update(SERVICE_TOKENS)
+                    .set(SERVICE_TOKENS.REVOKED_AT, DSL.currentOffsetDateTime())
+                    .where(SERVICE_TOKENS.TOKEN_HASH.eq(tok.tokenHash()))
+                    .execute();
+                assertThat(updated).isEqualTo(1);
             }
 
             // One second before the TTL bound: still served stale (200).
@@ -537,53 +542,44 @@ class TokenBoundaryAdversarialTest {
     private void seedMemoryRow(String tenant, String project, String title, String content) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.memory (tenant_id, project, title, content, timestamp) "
-                + "VALUES (?, ?, ?, ?, now())")) {
-                ps.setString(1, tenant);
-                ps.setString(2, project);
-                ps.setString(3, title);
-                ps.setString(4, content);
-                ps.executeUpdate();
-            }
+            // OffsetDateTime.now() (a plain value), not DSL.currentOffsetDateTime(): the
+            // timestamp column is never asserted here, and mixing a Field into a
+            // multi-arg .values() call alongside plain Strings hits jOOQ's Field-vs-
+            // plain-value overload ambiguity (nexus-cbo4a batch 11/12 idiom).
+            DSL.using(su, SQLDialect.POSTGRES)
+                .insertInto(MEMORY)
+                .columns(MEMORY.TENANT_ID, MEMORY.PROJECT, MEMORY.TITLE, MEMORY.CONTENT, MEMORY.TIMESTAMP)
+                .values(tenant, project, title, content, OffsetDateTime.now())
+                .execute();
         }
     }
 
     private int superuserMemoryCount(String tenant, String project) throws Exception {
-        try (Connection su = pg.createConnection("");
-             var ps = su.prepareStatement(
-                 "SELECT COUNT(*) AS c FROM nexus.memory WHERE tenant_id = ? AND project = ?")) {
-            ps.setString(1, tenant);
-            ps.setString(2, project);
-            ResultSet rs = ps.executeQuery();
-            rs.next();
-            return rs.getInt("c");
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .selectCount().from(MEMORY)
+                .where(MEMORY.TENANT_ID.eq(tenant), MEMORY.PROJECT.eq(project))
+                .fetchOne(0, int.class);
         }
     }
 
     private void seedScratchRow(String id, String tenant, String session, String content) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                "INSERT INTO t1.scratch (id, tenant_id, session_id, content) VALUES (?, ?, ?, ?)")) {
-                ps.setString(1, id);
-                ps.setString(2, tenant);
-                ps.setString(3, session);
-                ps.setString(4, content);
-                ps.executeUpdate();
-            }
+            DSL.using(su, SQLDialect.POSTGRES)
+                .insertInto(SCRATCH)
+                .columns(SCRATCH.ID, SCRATCH.TENANT_ID, SCRATCH.SESSION_ID, SCRATCH.CONTENT)
+                .values(id, tenant, session, content)
+                .execute();
         }
     }
 
     private int superuserScratchCount(String tenant, String session) throws Exception {
-        try (Connection su = pg.createConnection("");
-             var ps = su.prepareStatement(
-                 "SELECT COUNT(*) AS c FROM t1.scratch WHERE tenant_id = ? AND session_id = ?")) {
-            ps.setString(1, tenant);
-            ps.setString(2, session);
-            ResultSet rs = ps.executeQuery();
-            rs.next();
-            return rs.getInt("c");
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .selectCount().from(SCRATCH)
+                .where(SCRATCH.TENANT_ID.eq(tenant), SCRATCH.SESSION_ID.eq(session))
+                .fetchOne(0, int.class);
         }
     }
 
@@ -595,15 +591,13 @@ class TokenBoundaryAdversarialTest {
 
     private static void insertSessionToken(Connection su, String raw, String tenant,
                                            String sessionId, OffsetDateTime expiresAt) throws Exception {
-        try (var ps = su.prepareStatement(
-            "INSERT INTO nexus.session_tokens (session_token_hash, tenant_id, session_id, expires_at) "
-            + "VALUES (?, ?, ?, ?) ON CONFLICT (session_token_hash) DO NOTHING")) {
-            ps.setString(1, TokenHashing.sha256Hex(raw));
-            ps.setString(2, tenant);
-            ps.setString(3, sessionId);
-            ps.setObject(4, expiresAt);
-            ps.executeUpdate();
-        }
+        DSL.using(su, SQLDialect.POSTGRES)
+            .insertInto(SESSION_TOKENS)
+            .columns(SESSION_TOKENS.SESSION_TOKEN_HASH, SESSION_TOKENS.TENANT_ID,
+                SESSION_TOKENS.SESSION_ID, SESSION_TOKENS.EXPIRES_AT)
+            .values(TokenHashing.sha256Hex(raw), tenant, sessionId, expiresAt)
+            .onConflictDoNothing()
+            .execute();
     }
 
     /** {@code now()} minus {@code seconds}, resolved by the DB clock (for fixtures). */
@@ -617,11 +611,9 @@ class TokenBoundaryAdversarialTest {
     }
 
     private static OffsetDateTime offsetNow(Connection su) throws Exception {
-        try (var st = su.createStatement();
-             ResultSet rs = st.executeQuery("SELECT now()")) {
-            rs.next();
-            return rs.getObject(1, OffsetDateTime.class);
-        }
+        return DSL.using(su, SQLDialect.POSTGRES)
+            .select(DSL.currentOffsetDateTime())
+            .fetchOne(DSL.currentOffsetDateTime());
     }
 
     /** Minimal flat JSON builder (string values only). */
