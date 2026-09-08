@@ -283,21 +283,30 @@ _ARXIV_BANNER_RE = re.compile(
 # html/2510.24476v1".
 _ARXIV_CITATION_CONTEXT_RE = re.compile(
     r"arxiv\s+preprint"
+    r"|cite\s+as:?"
     r"|arxiv:\s*\d{4}\.\d{4,5}(?:v\d+)?\s*[,.]\s*(?:19|20)\d{2}\b"
     r"|arxiv\.org/(?:abs|pdf|html)/",
     re.IGNORECASE,
 )
 
 
-def _first_arxiv_id(region: str) -> str | None:
-    """First ``_ARXIV_BODY_RE`` match in ``region`` whose line is neither a
-    bibliography entry nor citation-shaped (``_ARXIV_CITATION_CONTEXT_RE``)."""
-    for match in _ARXIV_BODY_RE.finditer(region):
+def _first_arxiv_id(region: str, pattern: re.Pattern[str]) -> str | None:
+    """First ``pattern`` match in ``region`` whose line is neither a
+    bibliography entry nor citation-shaped (``_ARXIV_CITATION_CONTEXT_RE``).
+    The banner and body patterns both go through this filter: a reference
+    entry pasted in arXiv's own "Cite as: arXiv:ID [cs.CL]" form carries
+    the bracketed category too (code review of 528681f01, Critical)."""
+    for match in pattern.finditer(region):
         line = _line_containing(region, match.start())
         if _CITATION_LINE_RE.search(line) or _ARXIV_CITATION_CONTEXT_RE.search(line):
             continue
-        return match.group(1) or match.group(2)
+        return match.group(1) or (match.group(2) if match.re.groups > 1 else None)
     return None
+
+
+def _arxiv_id_in(region: str) -> str | None:
+    """Banner shape first, then any ``arXiv:`` mention, both line-filtered."""
+    return _first_arxiv_id(region, _ARXIV_BANNER_RE) or _first_arxiv_id(region, _ARXIV_BODY_RE)
 
 
 def extract_arxiv_id(text: str) -> str | None:
@@ -315,28 +324,27 @@ def extract_arxiv_id(text: str) -> str | None:
     was returned, and on a preprint whose own margin banner the extractor
     had dropped (MinerU does not read rotated margin text) that was
     reference [3]: the by-id lookup was rejected on title mismatch and the
-    fallback title search stamped a stranger. The banner shape
-    (``arXiv:ID [cs.XX]``) is preferred wherever it sits, because only the
-    paper's own stamp has it. None is the correct answer for a text that
-    carries nothing but citations.
+    fallback title search stamped a stranger. Within each region the
+    banner shape (``arXiv:ID [cs.XX]``) is preferred over a bare mention,
+    but it passes through the same line filter: a bibliography entry in
+    arXiv's "Cite as: arXiv:ID [cs.CL]" form carries the bracket as well.
+    None is the correct answer for a text that carries nothing but
+    citations.
     """
     if not text:
         return None
     fn_match = _ARXIV_FILENAME_RE.search(text)
     if fn_match:
         return fn_match.group(1)
-    banner = _ARXIV_BANNER_RE.search(text)
-    if banner:
-        return banner.group(1)
     region = _text_above_references(text)
-    found = _first_arxiv_id(region)
+    found = _arxiv_id_in(region)
     if found:
         return found
     if region.strip():
         # Normal document order and no own id above the bibliography.
         return None
     # Region empty => the heading opened the text (chunk reordering).
-    return _first_arxiv_id(text)
+    return _arxiv_id_in(text)
 
 
 class _Identifiers(TypedDict):

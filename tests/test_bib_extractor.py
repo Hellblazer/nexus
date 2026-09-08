@@ -504,8 +504,16 @@ class TestArxivReferenceSectionBound:
 
         assert extract_arxiv_id("Guo et al. LightRAG. arXiv preprint arXiv:2410.05779") is None
 
-    def test_banner_wins_wherever_it_sits(self) -> None:
-        """Only the paper's own stamp carries the bracketed category."""
+    def test_banner_wins_over_a_bare_mention_in_the_same_region(self) -> None:
+        from nexus.bib_extractor import extract_arxiv_id
+
+        text = (
+            "See also arXiv:2205.13147 for background.\n"
+            "arXiv:2604.20598v1 [cs.IR] 22 Apr 2026\n"
+        )
+        assert extract_arxiv_id(text) == "2604.20598"
+
+    def test_reordered_banner_below_a_heading_still_found_when_region_empty(self) -> None:
         from nexus.bib_extractor import extract_arxiv_id
 
         text = (
@@ -514,6 +522,28 @@ class TestArxivReferenceSectionBound:
             "arXiv:2604.20598v1 [cs.IR] 22 Apr 2026\n"
         )
         assert extract_arxiv_id(text) == "2604.20598"
+
+    def test_bracketed_category_inside_a_citation_is_not_a_banner(self) -> None:
+        """Code review of 528681f01 (Critical): the banner search ran over
+        the whole text before any guard, so a reference entry pasted in
+        arXiv's own "Cite as: arXiv:ID [cs.CL]" form was returned as the
+        paper's id — the exact defect the commit exists to fix."""
+        from nexus.bib_extractor import extract_arxiv_id
+
+        marked = (
+            "Self-Aware Vector Embeddings\nAbstract.\n## References\n"
+            "[5] Guo et al. LightRAG. Cite as: arXiv:2410.05779 [cs.CL]\n"
+        )
+        assert extract_arxiv_id(marked) is None
+        # the wrapped continuation line: no [N] marker, "Cite as" is the cue
+        wrapped = (
+            "Some prose.\n"
+            "LightRAG: Simple and Fast Retrieval-Augmented Generation. "
+            "Cite as: arXiv:2410.05779 [cs.CL]\n"
+        )
+        assert extract_arxiv_id(wrapped) is None
+        # bracket plus year, no marker, no "cite as"
+        assert extract_arxiv_id("Guo et al. arXiv:2410.05779 [cs.CL], 2024.") is None
 
     def test_own_id_above_references_still_found(self) -> None:
         from nexus.bib_extractor import extract_arxiv_id
