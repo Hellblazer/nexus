@@ -31,4 +31,4 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.36.1)
 
-(none)
+- `conexus/skills/nexus/reference.md` — nexus-0fw11: the store_put parameter table says `collection` is required and names the refused placeholders; the old row documented a `"knowledge"` default the tool no longer has.
