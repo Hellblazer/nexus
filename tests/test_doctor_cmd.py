@@ -46,6 +46,27 @@ def _isolate_cloud_credentials_from_host_env(monkeypatch, tmp_path):
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
 
 
+@pytest.fixture(autouse=True)
+def _reset_vector_client_singleton():
+    """nexus-x75kg: ``nexus.db.http_vector_client`` caches its client and
+    its cloud version-probe verdict PER PROCESS. A doctor test patches
+    ``_get`` and ``get_credential`` but not ``make_t3``, so whether a
+    check reaches the patched ``_get`` depends on whether some earlier
+    test in the same xdist worker left that singleton constructed — with
+    it, ``make_t3()`` hands back a live client and the fan-out floor
+    census calls the patched transport; without it, construction fails
+    first with an unrelated ManagedServiceUnreachable. That is the whole
+    ordering dependence behind the 3-of-3 red under ``-n auto``. Reset on
+    both sides so these tests neither inherit the singleton nor export
+    one.
+    """
+    from nexus.db.http_vector_client import reset_http_vector_client_for_tests
+
+    reset_http_vector_client_for_tests()
+    yield
+    reset_http_vector_client_for_tests()
+
+
 @pytest.fixture()
 def runner():
     return CliRunner()
@@ -600,6 +621,22 @@ def test_doctor_single_db_no_secret_leak(runner, mock_reg):
     })
     assert "SUPERSECRET" not in result.output
     assert "not reachable" in result.output
+
+
+def test_fanout_floor_census_redacts_credentials(runner, mock_reg):
+    """nexus-x75kg: the census renders whatever the T3 handle raised. The
+    engine echoes the rejected credential in its 401 body, so the
+    UNAVAILABLE line must carry the redacted form. Patches ``make_t3``
+    directly rather than relying on a prior test having left the
+    process-local client constructed — that accident is what made the
+    leak order-dependent instead of visible."""
+    result = _invoke(runner, mock_reg, extra_patches=[
+        patch("nexus.db.make_t3",
+              side_effect=RuntimeError("HTTP 401: invalid api_key SUPERSECRET")),
+    ])
+    assert "fan-out floor census: UNAVAILABLE" in result.output
+    assert "SUPERSECRET" not in result.output
+    assert "api_key [redacted]" in result.output
 
 
 # ── _check helper ───────────────────────────────────────────────────────────
