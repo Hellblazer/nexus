@@ -348,17 +348,21 @@ if ( cd "$MVV_CORPUS_DIR" && git init -q && git add -A \
 else
   bad "MVV fixture repo git init/commit failed"; cat /tmp/candmig-mvv-git.log | sed 's/^/       /'
 fi
+# Wall-clock fence for the row lookup below: the collection name carries the
+# owner TUMBLER (docs__1-3__<model>__v1), never the repo basename, so the
+# fixture's rows are the ones registered after this instant.
+MVV_T0="$(diag_sql "SELECT now()")"
 if nx index repo "$MVV_CORPUS_DIR" 2>&1 | tail -8 | sed 's/^/       /'; then
   ok "indexed the MVV fixture (registers a code__ and a docs__ collection under the install's profile)"
 else
   bad "indexing the MVV fixture repo failed"
 fi
-# Identify the exact rows by name (LIKE on the path-derived basename segment,
-# not created_at ordering — Stage 3b already registered an unrelated docs__
-# collection for the candmig corpus, so ordering alone is not a safe
-# discriminator here).
-MVV_CODE_NAME="$(diag_sql "SELECT name FROM nexus.catalog_collections WHERE content_type='code' AND name LIKE 'code__candmig-mvv-repo-$$%' ORDER BY created_at DESC LIMIT 1")"
-MVV_DOCS_NAME="$(diag_sql "SELECT name FROM nexus.catalog_collections WHERE content_type='docs' AND name LIKE 'docs__candmig-mvv-repo-$$%' ORDER BY created_at DESC LIMIT 1")"
+# Identify the fixture's rows as the newest code__ / docs__ registrations after
+# MVV_T0 (Stage 3b already registered an unrelated docs__ collection for the
+# candmig corpus, so created_at ordering alone is not a safe discriminator;
+# the fence makes it one).
+MVV_CODE_NAME="$(diag_sql "SELECT name FROM nexus.catalog_collections WHERE content_type='code' AND created_at >= '${MVV_T0}' ORDER BY created_at DESC LIMIT 1")"
+MVV_DOCS_NAME="$(diag_sql "SELECT name FROM nexus.catalog_collections WHERE content_type='docs' AND created_at >= '${MVV_T0}' ORDER BY created_at DESC LIMIT 1")"
 if [ -n "$MVV_CODE_NAME" ]; then ok "resolved the MVV code__ collection: $MVV_CODE_NAME"; else bad "could not resolve the MVV code__ collection name"; fi
 if [ -n "$MVV_DOCS_NAME" ]; then ok "resolved the MVV docs__ collection: $MVV_DOCS_NAME"; else bad "could not resolve the MVV docs__ collection name"; fi
 MVV_CODE_OWNER="$(diag_sql "SELECT owner_id FROM nexus.catalog_collections WHERE name='${MVV_CODE_NAME}'")"
