@@ -6462,15 +6462,49 @@ public final class CatalogRepository {
         });
     }
 
-    /** List all collections. */
+    /** List all collections. Delegates to {@link #listCollections(String, String, String)}
+     *  with no filters — byte-for-byte the pre-P2.4 unfiltered result. */
     public List<Map<String, Object>> listCollections(String tenant) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
-                       CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, CATALOG_COLLECTIONS.SUPERSEDED_BY, F_COL_SUPAT, F_COL_CRTAT)
-               .from(CATALOG_COLLECTIONS).orderBy(CATALOG_COLLECTIONS.NAME).fetch()
-               .map(r -> collRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
-                                  r.value6(), r.value7(), r.value8(), r.value9(), r.value10()))
-        );
+        return listCollections(tenant, null, null);
+    }
+
+    /**
+     * List collections, optionally filtered by {@code content_type} and/or
+     * {@code lifecycle_state} (RDR-204 Phase 2, bead nexus-ft04v.24). A {@code null}
+     * or blank filter argument is a no-op; calling with both {@code null} reproduces
+     * {@link #listCollections(String)}'s unfiltered result exactly — same rows, same
+     * order, same shape (ADDITIVE overload: {@link #listCollections(String)} keeps its
+     * signature unchanged for {@code VectorHandler}'s and every other existing caller).
+     *
+     * <p>Each row also now carries {@code dimension} and {@code lifecycle_state} —
+     * columns that did not exist when {@link #collRow} was first written — via
+     * {@link #collRowWithLifecycle}. {@link #getCollection} and {@link
+     * #collectionForTuple} are NOT touched by this bead and keep {@link #collRow}'s
+     * original 10-key shape.
+     *
+     * @param contentType    exact-match filter on {@code catalog_collections.content_type},
+     *                       or {@code null}/blank for no filter
+     * @param lifecycleState exact-match filter on {@code catalog_collections.lifecycle_state}
+     *                       (one of {@code live}/{@code quarantine}/{@code dormant}/
+     *                       {@code disputed}), or {@code null}/blank for no filter
+     */
+    public List<Map<String, Object>> listCollections(String tenant, String contentType, String lifecycleState) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            Condition cond = DSL.noCondition();
+            if (contentType != null && !contentType.isBlank()) {
+                cond = cond.and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(contentType));
+            }
+            if (lifecycleState != null && !lifecycleState.isBlank()) {
+                cond = cond.and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq(lifecycleState));
+            }
+            return ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
+                           CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, CATALOG_COLLECTIONS.SUPERSEDED_BY, F_COL_SUPAT, F_COL_CRTAT,
+                           CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+                       .from(CATALOG_COLLECTIONS).where(cond).orderBy(CATALOG_COLLECTIONS.NAME).fetch()
+                       .map(r -> collRowWithLifecycle(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
+                                                       r.value6(), r.value7(), r.value8(), r.value9(), r.value10(),
+                                                       r.value11(), r.value12()));
+        });
     }
 
     /**
@@ -8913,6 +8947,32 @@ public final class CatalogRepository {
         m.put("superseded_by",        nne(supBy));
         m.put("superseded_at",        nne(supAt));
         m.put("created_at",           nne(crAt));
+        return m;
+    }
+
+    /**
+     * {@link #collRow} plus {@code dimension} and {@code lifecycle_state} (RDR-204
+     * Phase 2, bead nexus-ft04v.24) — used ONLY by {@link #listCollections(String,
+     * String, String)}. {@link #getCollection} and {@link #collectionForTuple} are
+     * out of this bead's scope and keep {@link #collRow}'s original 10-key shape;
+     * every key {@link #collRow} already sets is untouched here, this only appends
+     * two new keys at the end.
+     *
+     * @param dimension      {@code catalog_collections.dimension} — nullable (a
+     *                       collection can be registered before its stats dimension
+     *                       is known; see hygiene-002's own walk comments), passed
+     *                       through as-is (JSON {@code null}, not coerced to 0)
+     * @param lifecycleState {@code catalog_collections.lifecycle_state} — NOT NULL
+     *                       on any real row since hygiene-002, but {@code nne()}'d
+     *                       for defensive consistency with every other string field here
+     */
+    private static Map<String, Object> collRowWithLifecycle(String name, String ctype, String owner,
+                                                 String embd, String mver, String dname,
+                                                 Boolean legcy, String supBy, String supAt, String crAt,
+                                                 Integer dimension, String lifecycleState) {
+        Map<String, Object> m = collRow(name, ctype, owner, embd, mver, dname, legcy, supBy, supAt, crAt);
+        m.put("dimension",       dimension);
+        m.put("lifecycle_state", nne(lifecycleState));
         return m;
     }
 

@@ -18,6 +18,7 @@ import org.jooq.Result;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_1024;
@@ -2250,9 +2251,27 @@ public final class PgVectorRepository {
      * are invisible — same guarantee as {@link #listCollections}.
      *
      * @return one entry per (collection, dim):
-     *         {@code [{"name": ..., "dim": 384, "count": N, "last_write": "..."}]},
-     *         name ascending. {@code last_write} is ISO-8601 with offset, or absent
-     *         if null. Collections with zero live chunks do not appear.
+     *         {@code [{"name": ..., "dim": 384, "count": N, "last_write": "...",
+     *         "content_type": ..., "owner_id": ..., "embedding_model": ...,
+     *         "lifecycle_state": ...}]}, name ascending. {@code last_write} is
+     *         ISO-8601 with offset, or absent if null. Collections with zero live
+     *         chunks do not appear. The four catalog-joined keys are ABSENT
+     *         (omitted, not {@code null}-valued — same "absent means absent"
+     *         convention {@code last_write} already uses above) for a collection
+     *         with live vector stats but no {@code catalog_collections} row.
+     *
+     * <p><strong>RDR-204 Phase 2 (bead nexus-ft04v.24): catalog attributes joined
+     * in, ADDITIVE.</strong> {@code content_type}/{@code owner_id}/{@code
+     * embedding_model}/{@code lifecycle_state} come from a LEFT JOIN against
+     * {@code nexus.catalog_collections} on {@code (tenant_id, name=collection)} —
+     * LEFT, not INNER, so a collection this route already surfaced keeps
+     * surfacing even without a catalog row: the client's collection cache
+     * (mcp_infra.py {@code get_collection_names}) reads this exact route and its
+     * population must not shrink. Both tables carry {@code FORCE ROW LEVEL
+     * SECURITY} and are already tenant-scoped by the {@code nexus.tenant} GUC this
+     * method sets via {@link TenantScope#withTenant}; the explicit
+     * {@code tenant_id} equality in the join condition below is belt-and-braces
+     * documentation of that scoping, not a substitute for it.
      *
      * <p><strong>RDR-191 Phase 4 (nexus-o8dil.16/.18): coordinated, NO code change needed.</strong>
      * {@code nexus.collection_vector_stats}'s body is UNCHANGED by the vectors-005 repoint
@@ -2270,8 +2289,13 @@ public final class PgVectorRepository {
     public List<Map<String, Object>> collectionStats(String tenant) {
         var result = tenantScope.withTenant(tenant, ctx ->
             ctx.select(COLLECTION_VECTOR_STATS.COLLECTION, COLLECTION_VECTOR_STATS.DIM,
-                       COLLECTION_VECTOR_STATS.CHUNK_COUNT, COLLECTION_VECTOR_STATS.LAST_WRITE)
+                       COLLECTION_VECTOR_STATS.CHUNK_COUNT, COLLECTION_VECTOR_STATS.LAST_WRITE,
+                       CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                       CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
                .from(COLLECTION_VECTOR_STATS)
+               .leftJoin(CATALOG_COLLECTIONS)
+               .on(CATALOG_COLLECTIONS.TENANT_ID.eq(COLLECTION_VECTOR_STATS.TENANT_ID)
+                   .and(CATALOG_COLLECTIONS.NAME.eq(COLLECTION_VECTOR_STATS.COLLECTION)))
                .orderBy(COLLECTION_VECTOR_STATS.COLLECTION.asc(), COLLECTION_VECTOR_STATS.DIM.asc())
                .fetch());
         List<Map<String, Object>> out = new ArrayList<>(result.size());
@@ -2283,6 +2307,25 @@ public final class PgVectorRepository {
             var lastWrite = rec.value4();
             if (lastWrite != null) {
                 row.put("last_write", lastWrite.toString());
+            }
+            // RDR-204 P2.4: absent (omitted), not null-valued, when the LEFT JOIN
+            // found no catalog_collections row — same convention last_write uses
+            // above for its own "value not present" case.
+            String contentType    = rec.value5();
+            String ownerId        = rec.value6();
+            String embeddingModel = rec.value7();
+            String lifecycleState = rec.value8();
+            if (contentType != null) {
+                row.put("content_type", contentType);
+            }
+            if (ownerId != null) {
+                row.put("owner_id", ownerId);
+            }
+            if (embeddingModel != null) {
+                row.put("embedding_model", embeddingModel);
+            }
+            if (lifecycleState != null) {
+                row.put("lifecycle_state", lifecycleState);
             }
             out.add(row);
         }

@@ -1642,9 +1642,20 @@ public final class CatalogHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, "{\"ok\":true}");
     }
 
+    /**
+     * GET /v1/catalog/collections/list — optional {@code content_type} and
+     * {@code lifecycle_state} query filters (RDR-204 Phase 2, bead nexus-ft04v.24).
+     * Absent/blank filters reproduce the pre-P2.4 unfiltered result exactly (a
+     * pre-Phase-2 client sending neither param is unaffected). Follows {@link
+     * #handleList}'s own blank-is-absent convention for optional query params.
+     */
     private void handleCollectionList(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        var colls = repo.listCollections(tenant);
+        String contentType    = queryParam(exchange, "content_type");
+        String lifecycleState = queryParam(exchange, "lifecycle_state");
+        var colls = repo.listCollections(tenant,
+            (contentType != null && !contentType.isBlank()) ? contentType : null,
+            (lifecycleState != null && !lifecycleState.isBlank()) ? lifecycleState : null);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("collections", colls)));
     }
 
