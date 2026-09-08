@@ -958,18 +958,48 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         # RDR-204 Phase 1 (nexus-f5wwx): pre-register every DISTINCT
         # source_collection the batch references — see assign_topic's
         # identical rationale. Cheap after the first call per name
-        # (ensure_collection_registered's cache); a batch failure still
-        # falls through to the per-row assign_topic loop below (its own
-        # write_with_registration_retry), so this is a fast-path
-        # optimisation, not the only place registration happens.
-        from nexus.corpus import ensure_collection_registered  # noqa: PLC0415 — circular-dep avoidance (corpus)
-        for source_collection in {a.get("source_collection") for a in assignments if a.get("source_collection")}:
+        # (ensure_collection_registered's cache).
+        from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (corpus)
+            ensure_collection_registered,
+            write_with_registration_retry,
+        )
+        source_collections = {
+            a.get("source_collection") for a in assignments if a.get("source_collection")
+        }
+        for source_collection in source_collections:
             ensure_collection_registered(source_collection)
         _PAGE = 1000  # engine cap (MAX_BATCH parity)
-        try:
+
+        def _post_pages() -> None:
             for start in range(0, len(assignments), _PAGE):
                 batch = assignments[start : start + _PAGE]
                 self._post("/assignments/assign_many", {"assignments": batch})
+
+        try:
+            # RDR-204 Phase 1 follow-up (nexus-f5wwx, code review [24995]
+            # Significant finding 1): the batch write must self-heal on
+            # the SAME not-registered 422 that assign_topic /
+            # persist_discovered_topics / persist_rebuild_topics already
+            # retry through write_with_registration_retry — this is the
+            # engine's per-tenant boot sweep (bead .3) reaping a
+            # registered-but-chunkless collection between this process's
+            # registration and this write, not the older-engine 404
+            # below. The prior comment here claimed the 404 fallback
+            # covered this case; it did not — a 422 propagated straight
+            # through, unretried. Wrapping needs exactly ONE collection
+            # name to retry against, which every real caller supplies
+            # (taxonomy_cmd._persist_assignments / index.py always pass
+            # one source_collection per call, so this set is 0 or 1 in
+            # practice); a batch with zero or more-than-one distinct
+            # collections posts unwrapped, unchanged from before this
+            # fix — there is no single name to re-register in that
+            # shape. Re-posting an already-succeeded earlier page on
+            # retry is safe: the engine's per-row semantics (GREATEST/
+            # CASE upsert, centroid DO NOTHING) are idempotent.
+            if len(source_collections) == 1:
+                write_with_registration_retry(next(iter(source_collections)), _post_pages)
+            else:
+                _post_pages()
             return len(assignments)
         except Exception as exc:  # noqa: BLE001 — 404-classify only; anything else re-raises below
             status = getattr(
