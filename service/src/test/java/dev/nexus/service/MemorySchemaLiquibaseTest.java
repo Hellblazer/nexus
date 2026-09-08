@@ -5,6 +5,7 @@ import dev.nexus.service.db.TenantScope;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -13,11 +14,15 @@ import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Set;
 
+import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.jooq.impl.DSL.condition;
+import static org.jooq.impl.DSL.val;
 
 /**
  * RDR-152 bead nexus-gmiaf.5 — Liquibase memory baseline integration test.
@@ -200,40 +205,45 @@ class MemorySchemaLiquibaseTest {
         //       'running' would be stored as 'run' and the query WOULD match.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
-            try (var ps = su.prepareStatement("SELECT set_config(?, ?, true)")) {
-                ps.setString(1, TenantConstants.GUC_NAME);
-                ps.setString(2, "probe-tenant");
-                ps.execute();
-            }
-            su.createStatement().execute(
-                "INSERT INTO nexus.memory " +
-                "(tenant_id, project, title, content, tags, timestamp, access_count) " +
-                "VALUES " +
-                "('probe-tenant', 'probe-proj', 'Quantum mechanics overview', " +
-                " 'wave functions superposition entanglement', 'running,distributed', now(), 0)");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.select(DSL.function("set_config", SQLDataType.VARCHAR,
+                DSL.val(TenantConstants.GUC_NAME), DSL.val("probe-tenant"), DSL.inline(true))).fetch();
 
-            ResultSet ftsCheck = su.createStatement().executeQuery(
-                // (1) Positive english: 'mechanics' stems to 'mechan'; 'mechanic' also
-                //     stems to 'mechan' under english.  Title is indexed under english,
-                //     so the stem query must match.
-                "SELECT fts_vector @@ plainto_tsquery('english', 'mechanic')  AS english_stem_match, " +
-                // (2) Positive simple exact: tags='running,...'; simple stores verbatim.
-                "       fts_vector @@ plainto_tsquery('simple',  'running')   AS simple_exact_match, " +
-                // (3) NEGATIVE discrimination: 'run' is the english stem of 'running'.
-                //     Under simple, 'running' is stored as-is (no stemming), so querying
-                //     the stem 'run' must NOT match.  Proves tags≠english.
-                "       fts_vector @@ plainto_tsquery('simple',  'run')       AS simple_stem_no_match " +
-                "FROM nexus.memory " +
-                "WHERE tenant_id = 'probe-tenant' AND title = 'Quantum mechanics overview'");
+            ctx.insertInto(MEMORY, MEMORY.TENANT_ID, MEMORY.PROJECT, MEMORY.TITLE, MEMORY.CONTENT,
+                    MEMORY.TAGS, MEMORY.TIMESTAMP, MEMORY.ACCESS_COUNT)
+               .values("probe-tenant", "probe-proj", "Quantum mechanics overview",
+                   "wave functions superposition entanglement", "running,distributed",
+                   OffsetDateTime.now(), 0)
+               .execute();
 
-            assertThat(ftsCheck.next()).as("probe row must be retrievable").isTrue();
+            // @@ / plainto_tsquery have no typed jOOQ operator/function form (same house
+            // idiom as PlanRepository/MemoryRepository's own FTS predicates) -- a bare,
+            // statically-imported condition() template, never DSL.condition(...) qualified
+            // (which the scanDslTemplates gate flags as assembled SQL text).
+            var ftsCheck = ctx.select(
+                    // (1) Positive english: 'mechanics' stems to 'mechan'; 'mechanic' also
+                    //     stems to 'mechan' under english.  Title is indexed under english,
+                    //     so the stem query must match.
+                    DSL.field(condition("fts_vector @@ plainto_tsquery('english', {0})", val("mechanic"))),
+                    // (2) Positive simple exact: tags='running,...'; simple stores verbatim.
+                    DSL.field(condition("fts_vector @@ plainto_tsquery('simple', {0})", val("running"))),
+                    // (3) NEGATIVE discrimination: 'run' is the english stem of 'running'.
+                    //     Under simple, 'running' is stored as-is (no stemming), so querying
+                    //     the stem 'run' must NOT match.  Proves tags≠english.
+                    DSL.field(condition("fts_vector @@ plainto_tsquery('simple', {0})", val("run"))))
+                .from(MEMORY)
+                .where(MEMORY.TENANT_ID.eq("probe-tenant")
+                    .and(MEMORY.TITLE.eq("Quantum mechanics overview")))
+                .fetchOne();
 
-            assertThat(ftsCheck.getBoolean("english_stem_match"))
+            assertThat(ftsCheck).as("probe row must be retrievable").isNotNull();
+
+            assertThat(ftsCheck.value1())
                 .as("english config must stem: 'mechanic' and 'mechanics' share stem 'mechan'; " +
                     "title is indexed under english so query matches")
                 .isTrue();
 
-            assertThat(ftsCheck.getBoolean("simple_exact_match"))
+            assertThat(ftsCheck.value2())
                 .as("simple config must match exact token: 'running' stored verbatim in tags")
                 .isTrue();
 
@@ -241,7 +251,7 @@ class MemorySchemaLiquibaseTest {
             // instead of simple, 'running' would be stored as 'run' (stem) and
             // plainto_tsquery('simple','run') → literal 'run' would match.
             // Under correct simple indexing, 'running' ≠ 'run', so it must NOT match.
-            assertThat(ftsCheck.getBoolean("simple_stem_no_match"))
+            assertThat(ftsCheck.value3())
                 .as("simple config must NOT stem: plainto_tsquery('simple','run') " +
                     "must NOT match tags='running,...' — proves tags use simple (verbatim), " +
                     "not english (stemming).  If this fails, tags are accidentally english-indexed.")
@@ -271,8 +281,8 @@ class MemorySchemaLiquibaseTest {
 
         // tenant-alpha sees exactly its 3 rows via TenantScope.withTenant
         List<String> alphaTitles = tenantScope.withTenant("alpha", ctx ->
-            ctx.fetch("SELECT title FROM nexus.memory WHERE project = 'alpha-proj' ORDER BY title")
-               .getValues("title", String.class));
+            ctx.select(MEMORY.TITLE).from(MEMORY).where(MEMORY.PROJECT.eq("alpha-proj"))
+               .orderBy(MEMORY.TITLE).fetch(MEMORY.TITLE));
         assertThat(alphaTitles)
             .as("tenant-alpha must see exactly its 3 rows")
             .containsExactlyInAnyOrder(
@@ -285,8 +295,8 @@ class MemorySchemaLiquibaseTest {
 
         // tenant-beta sees only its 1 row
         List<String> betaTitles = tenantScope.withTenant("beta", ctx ->
-            ctx.fetch("SELECT title FROM nexus.memory WHERE project = 'beta-proj' ORDER BY title")
-               .getValues("title", String.class));
+            ctx.select(MEMORY.TITLE).from(MEMORY).where(MEMORY.PROJECT.eq("beta-proj"))
+               .orderBy(MEMORY.TITLE).fetch(MEMORY.TITLE));
         assertThat(betaTitles)
             .as("tenant-beta must see exactly its 1 row")
             .containsExactly("Rust ownership model");
@@ -296,33 +306,27 @@ class MemorySchemaLiquibaseTest {
 
         // FTS query scoped to tenant-alpha: search for 'neural' (english→'neural' retained)
         List<String> ftsAlpha = tenantScope.withTenant("alpha", ctx ->
-            ctx.fetch(
-                "SELECT title FROM nexus.memory " +
-                "WHERE fts_vector @@ plainto_tsquery('english', 'neural') " +
-                "ORDER BY title")
-               .getValues("title", String.class));
+            ctx.select(MEMORY.TITLE).from(MEMORY)
+               .where(condition("fts_vector @@ plainto_tsquery('english', {0})", val("neural")))
+               .orderBy(MEMORY.TITLE).fetch(MEMORY.TITLE));
         assertThat(ftsAlpha)
             .as("FTS query for 'neural' under tenant-alpha must match ML row only")
             .containsExactly("Machine learning basics");
 
         // FTS query scoped to tenant-beta: 'rust' in simple (tag) config
         List<String> ftsBeta = tenantScope.withTenant("beta", ctx ->
-            ctx.fetch(
-                "SELECT title FROM nexus.memory " +
-                "WHERE fts_vector @@ plainto_tsquery('simple', 'rust') " +
-                "ORDER BY title")
-               .getValues("title", String.class));
+            ctx.select(MEMORY.TITLE).from(MEMORY)
+               .where(condition("fts_vector @@ plainto_tsquery('simple', {0})", val("rust")))
+               .orderBy(MEMORY.TITLE).fetch(MEMORY.TITLE));
         assertThat(ftsBeta)
             .as("FTS query for 'rust' (simple/tags) under tenant-beta must match Rust row")
             .containsExactly("Rust ownership model");
 
         // Cross-tenant FTS isolation: 'neural' under beta must return nothing
         List<String> ftsAlphaUnderBeta = tenantScope.withTenant("beta", ctx ->
-            ctx.fetch(
-                "SELECT title FROM nexus.memory " +
-                "WHERE fts_vector @@ plainto_tsquery('english', 'neural') " +
-                "ORDER BY title")
-               .getValues("title", String.class));
+            ctx.select(MEMORY.TITLE).from(MEMORY)
+               .where(condition("fts_vector @@ plainto_tsquery('english', {0})", val("neural")))
+               .orderBy(MEMORY.TITLE).fetch(MEMORY.TITLE));
         assertThat(ftsAlphaUnderBeta)
             .as("FTS query for 'neural' under tenant-beta must return empty (cross-tenant isolation)")
             .isEmpty();
@@ -370,10 +374,8 @@ class MemorySchemaLiquibaseTest {
         try (Connection svc = svcDs.getConnection()) {
             svc.setAutoCommit(true);
             // Do NOT stamp the GUC — this is the unstamped-connection scenario.
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT COUNT(*) AS cnt FROM nexus.memory");
-            assertThat(rs.next()).isTrue();
-            long count = rs.getLong("cnt");
+            Long count = DSL.using(svc, SQLDialect.POSTGRES)
+                .selectCount().from(MEMORY).fetchOne(0, Long.class);
             assertThat(count)
                 .as("unstamped service connection must see zero rows (RLS fail-closed: " +
                     "unset GUC → NULL → no tenant_id matches NULL)")
@@ -392,14 +394,14 @@ class MemorySchemaLiquibaseTest {
         assertThatThrownBy(() ->
             tenantScope.withTenant("gamma", ctx ->
                 // tenant is stamped as 'gamma' but we try to INSERT with tenant_id='delta'
-                ctx.execute(
-                    "INSERT INTO nexus.memory " +
-                    "(tenant_id, project, title, content, timestamp, access_count) " +
-                    "VALUES (?, ?, ?, ?, now(), 0)",
-                    "delta",        // tenant_id mismatch — WITH CHECK must reject
-                    "gamma-proj",
-                    "Cross-tenant insert attempt",
-                    "this should be rejected by RLS WITH CHECK"))
+                ctx.insertInto(MEMORY, MEMORY.TENANT_ID, MEMORY.PROJECT, MEMORY.TITLE, MEMORY.CONTENT,
+                        MEMORY.TIMESTAMP, MEMORY.ACCESS_COUNT)
+                   .values("delta",        // tenant_id mismatch — WITH CHECK must reject
+                       "gamma-proj",
+                       "Cross-tenant insert attempt",
+                       "this should be rejected by RLS WITH CHECK",
+                       OffsetDateTime.now(), 0)
+                   .execute())
         )
         .as("INSERT with tenant_id != GUC value must be rejected by RLS WITH CHECK")
         .isInstanceOf(Exception.class)
@@ -427,10 +429,10 @@ class MemorySchemaLiquibaseTest {
         // Attempt to UPDATE tenant_id to 'beta-rw' — WITH CHECK must block it.
         assertThatThrownBy(() ->
             tenantScope.withTenant("alpha-rw", ctx ->
-                ctx.execute(
-                    "UPDATE nexus.memory SET tenant_id = ? " +
-                    "WHERE project = 'rw-proj' AND title = 'Row to rewrite'",
-                    "beta-rw")   // rewrite target — WITH CHECK must reject
+                ctx.update(MEMORY)
+                   .set(MEMORY.TENANT_ID, "beta-rw")   // rewrite target — WITH CHECK must reject
+                   .where(MEMORY.PROJECT.eq("rw-proj").and(MEMORY.TITLE.eq("Row to rewrite")))
+                   .execute()
             )
         )
         .as("UPDATE SET tenant_id to a different value must be rejected by RLS WITH CHECK")
@@ -458,22 +460,14 @@ class MemorySchemaLiquibaseTest {
      */
     private void insertRow(Connection su, String tenant, String project,
                            String title, String content, String tags) throws Exception {
-        try (var ps = su.prepareStatement("SELECT set_config(?, ?, true)")) {
-            ps.setString(1, TenantConstants.GUC_NAME);
-            ps.setString(2, tenant);
-            ps.execute();
-        }
-        try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.memory " +
-                "(tenant_id, project, title, content, tags, timestamp, access_count) " +
-                "VALUES (?, ?, ?, ?, ?, now(), 0) " +
-                "ON CONFLICT (tenant_id, project, title) DO NOTHING")) {
-            ps.setString(1, tenant);
-            ps.setString(2, project);
-            ps.setString(3, title);
-            ps.setString(4, content);
-            ps.setString(5, tags);
-            ps.executeUpdate();
-        }
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        ctx.select(DSL.function("set_config", SQLDataType.VARCHAR,
+            DSL.val(TenantConstants.GUC_NAME), DSL.val(tenant), DSL.inline(true))).fetch();
+        ctx.insertInto(MEMORY, MEMORY.TENANT_ID, MEMORY.PROJECT, MEMORY.TITLE, MEMORY.CONTENT,
+                MEMORY.TAGS, MEMORY.TIMESTAMP, MEMORY.ACCESS_COUNT)
+           .values(tenant, project, title, content, tags, OffsetDateTime.now(), 0)
+           .onConflict(MEMORY.TENANT_ID, MEMORY.PROJECT, MEMORY.TITLE)
+           .doNothing()
+           .execute();
     }
 }
