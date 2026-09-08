@@ -13,9 +13,11 @@ and NEVER wedges synchronous SessionStart (CA-4), NEVER writes the marker
 (the action owns that, on confirmed upgrade only), and NEVER raises
 (fail-safe exit 0).
 
-Stdlib-only: this runs under whichever bare interpreter
-``_run_python_hook.sh`` resolves, which on a ``uv tool install conexus``
-deployment cannot import the ``conexus`` package (same constraint as
+Stdlib-only: this runs under whichever interpreter ``_run_python_hook.sh``
+resolves. Since nexus-4ti7e that is the installed generation's python when
+one exists, but a ``uv tool install conexus`` deployment or a box with no
+generation still gets a bare python that cannot import the ``conexus``
+package, so the hook stays stdlib-only (same constraint as
 ``t2_prefix_scan.py`` / ``preflight.py``).
 """
 from __future__ import annotations
