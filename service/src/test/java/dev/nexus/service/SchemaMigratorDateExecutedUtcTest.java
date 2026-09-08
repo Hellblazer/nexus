@@ -5,6 +5,8 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.SchemaMigrator;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 
@@ -45,6 +47,10 @@ class SchemaMigratorDateExecutedUtcTest {
         try (var pg = PgContainerHelper.start()) {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
+                // KEPT RAW: conditional CREATE ROLE via a DO $$ block -- no typed jOOQ
+                // DDL form for "create this role only if it does not already exist",
+                // and no nexus_test bootstrap function covers it this round (candidate
+                // for one, per the task brief's ladder-file exclusion list).
                 su.createStatement().execute(
                     "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN "
                     + "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; END IF; END $$");
@@ -66,10 +72,11 @@ class SchemaMigratorDateExecutedUtcTest {
                 .isEqualTo("UTC");
 
             try (Connection su = pg.createConnection("")) {
-                var rs = su.createStatement().executeQuery(
-                    "SELECT max(dateexecuted) FROM databasechangelog");
-                assertThat(rs.next()).isTrue();
-                LocalDateTime stamped = rs.getObject(1, LocalDateTime.class);
+                var dateExecuted = DSL.field(DSL.name("dateexecuted"), LocalDateTime.class);
+                LocalDateTime stamped = DSL.using(su, SQLDialect.POSTGRES)
+                    .select(DSL.max(dateExecuted))
+                    .from(DSL.table(DSL.name("databasechangelog")))
+                    .fetchOne(0, LocalDateTime.class);
                 assertThat(stamped).as("a walk that ran must have stamped rows").isNotNull();
                 Instant asUtc = stamped.toInstant(ZoneOffset.UTC);
                 // Read as UTC, the newest row lands inside the walk's own window.
