@@ -1674,6 +1674,34 @@ class TaxonomyRepositoryTest {
         assertThat(repo.getAssignmentDetails(tenant, List.of(hexChash("no-such-doc")))).isEmpty();
     }
 
+    @Test @Order(69)
+    void insertTopic_unregisteredCollection_throwsAndWritesNoRow() {
+        // RDR-204 Phase 1 (nexus-ft04v.7 gap 3, closed by nexus-ft04v.8's test
+        // addendum): topics_collection_fk is real and always-enforced, but
+        // insertTopic must fail loud via CollectionRegistry.requireRegistered
+        // BEFORE the INSERT ever reaches the FK — an unregistered collection
+        // never leaves a topics row, and (separately) never creates a
+        // catalog_collections stub row either.
+        String collection = "unreg-topic-coll";
+
+        assertThatThrownBy(() ->
+                repo.insertTopic(TENANT_A, "unreg-topic", null, collection, 0, null, null))
+            .isInstanceOf(dev.nexus.service.db.UnregisteredCollectionException.class)
+            .hasMessageContaining(collection)
+            .hasMessageContaining("POST /v1/catalog/collections/upsert");
+
+        assertThat(repo.getAllTopics(TENANT_A, collection))
+            .as("a write against an unregistered collection must create no topics row")
+            .isEmpty();
+        boolean stubRowExists = tenantScope.withTenant(TENANT_A, ctx -> ctx.fetchExists(
+                ctx.selectOne().from(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+                   .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A))
+                   .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(collection))));
+        assertThat(stubRowExists)
+            .as("the rejected write must not have created a catalog_collections stub row either")
+            .isFalse();
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     /** Build a {@code Map<String,Object>} from alternating key/value varargs (mixed value types). */

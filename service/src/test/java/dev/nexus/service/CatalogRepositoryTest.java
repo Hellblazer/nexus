@@ -1568,6 +1568,38 @@ class CatalogRepositoryTest {
         assertThat(coll.get("legacy_grandfathered")).isEqualTo(Boolean.TRUE);
     }
 
+    @Test @Order(60)
+    void collection_upsert_noProfileAndNoModelNamed_refused422NamingEmbeddingModel() {
+        // RDR-204 Phase 1 review Significant 3 (nexus-ft04v.8): when the new-row
+        // branch's profile lookup misses (no nexus.embedding_profile row for this
+        // tenant/content_type) AND the caller supplies no embedding_model either,
+        // upsertCollection must refuse loud -- EmbeddingProfileConflictException
+        // naming "embedding_model" -- rather than binding "" into the INSERT's
+        // VALUES tuple and letting hygiene-002-1's
+        // catalog_collections_embedding_model_chk surface as an opaque
+        // CheckViolation (23514) instead of this method's uniform 422 contract
+        // (mirrors the pre-existing content_type guard a few lines earlier in the
+        // same method). Not reachable through the production HTTP path
+        // (CatalogHandler always pre-seeds a profile for the request's
+        // content_type first) -- this drives CatalogRepository's own guard
+        // directly, the only way to reach the no-profile branch with no model.
+        String name = "code__cat-noprofile-owner__unset__v1";
+        String contentType = "cat-noprofile-content-type";
+
+        assertThatThrownBy(() -> repo.upsertCollection(TENANT_A, Map.of(
+                "name", name,
+                "content_type", contentType,
+                "owner_id", "cat-noprofile-owner")))
+            .isInstanceOf(CatalogRepository.EmbeddingProfileConflictException.class)
+            .hasMessageContaining(name)
+            .hasMessageContaining("embedding_model")
+            .hasMessageContaining(contentType);
+
+        assertThat(repo.getCollection(TENANT_A, name))
+            .as("a refused registration must not leave a row behind")
+            .isNull();
+    }
+
     @Test @Order(61)
     void collection_list() {
         var colls = repo.listCollections(TENANT_A);

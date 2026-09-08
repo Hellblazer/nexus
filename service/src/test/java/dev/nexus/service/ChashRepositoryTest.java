@@ -250,6 +250,31 @@ class ChashRepositoryTest {
             .isInstanceOf(IllegalArgumentException.class);
     }
 
+    @Test
+    void renameCollection_unregisteredNewSide_throwsAndWritesNoRow() {
+        // RDR-204 Phase 1 (nexus-ft04v.7 gap 3, closed by nexus-ft04v.8's test
+        // addendum): renameCollection's NEW-side ensureCollectionRegistered
+        // guard runs before any row is re-homed -- a never-registered
+        // destination must fail loud (UnregisteredCollectionException) and
+        // create no catalog_collections row for it, whether or not the
+        // source collection carries any chunks.
+        String oldCollection = "chr-unreg-src";
+        String newCollection = "chr-unreg-dst";
+
+        assertThatThrownBy(() -> repo.renameCollection(TENANT_A, oldCollection, newCollection))
+            .isInstanceOf(dev.nexus.service.db.UnregisteredCollectionException.class)
+            .hasMessageContaining(newCollection)
+            .hasMessageContaining("POST /v1/catalog/collections/upsert");
+
+        boolean stubRowExists = tenantScope.withTenant(TENANT_A, ctx -> ctx.fetchExists(
+                ctx.selectOne().from(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+                   .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A))
+                   .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(newCollection))));
+        assertThat(stubRowExists)
+            .as("the rejected rename must not have created a catalog_collections stub row for the new side")
+            .isFalse();
+    }
+
     // ── is_empty / count_for_collection ──────────────────────────────────────
 
     @Test

@@ -2,6 +2,7 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.AspectRepository;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.db.UnregisteredCollectionException;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.*;
 import org.jooq.DSLContext;
@@ -1823,6 +1824,33 @@ class AspectRepositoryTest {
         int n = repo.importQueueBatch(t, List.of(good, noColl, noPath));
         assertThat(n).isEqualTo(1);
         assertThat(repo.listPending(t, 100)).hasSize(1);
+    }
+
+    @Test @Order(70)
+    void upsertAspect_unregisteredCollection_throwsAndWritesNoRow() {
+        // RDR-204 Phase 1 (nexus-ft04v.7 gap 3, closed by nexus-ft04v.8's test
+        // addendum): AspectRepository's stub-insert retirement means a write
+        // against a collection with no catalog_collections row must fail loud
+        // via CollectionRegistry.requireRegistered, and create NO row anywhere --
+        // neither the document_aspects row nor a catalog_collections stub.
+        String collection = "unreg-aspect-coll";
+        var body = makeAspect(collection, "unreg.pdf");
+
+        assertThatThrownBy(() -> repo.upsertAspect(TENANT_A, body))
+            .isInstanceOf(UnregisteredCollectionException.class)
+            .hasMessageContaining(collection)
+            .hasMessageContaining("POST /v1/catalog/collections/upsert");
+
+        assertThat(repo.getAspect(TENANT_A, collection, "unreg.pdf"))
+            .as("a write against an unregistered collection must create no document_aspects row")
+            .isEmpty();
+        boolean stubRowExists = tenantScope.withTenant(TENANT_A, ctx -> ctx.fetchExists(
+                ctx.selectOne().from(CATALOG_COLLECTIONS)
+                   .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A))
+                   .and(CATALOG_COLLECTIONS.NAME.eq(collection))));
+        assertThat(stubRowExists)
+            .as("the rejected write must not have created a catalog_collections stub row either")
+            .isFalse();
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

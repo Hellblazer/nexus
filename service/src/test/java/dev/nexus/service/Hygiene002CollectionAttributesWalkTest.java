@@ -167,6 +167,7 @@ class Hygiene002CollectionAttributesWalkTest {
                     DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
                     for (String tenant : List.of(TENANT_1, TENANT_2)) {
                         assertBranchOutcomes(ctx, tenant);
+                        assertWalkCompletedOnDisputedFixture(ctx, tenant);
                     }
                     assertNoBlankColumnsAndEveryModelKnown(ctx);
                     assertConstraintsReject(ctx);
@@ -266,6 +267,74 @@ class Hygiene002CollectionAttributesWalkTest {
                 .as("dimension for %s / %s", tenant, name).isEqualTo(want.dimension());
             assertThat(row.get(CATALOG_COLLECTIONS.LIFECYCLE_STATE))
                 .as("lifecycle_state for %s / %s", tenant, name).isEqualTo(want.lifecycleState());
+        }
+    }
+
+    /**
+     * RDR-204 Phase 1 (nexus-ft04v.4 gap 6, closed by nexus-ft04v.8's test
+     * addendum): an EXPLICIT, dedicated assertion that the walk genuinely
+     * COMPLETED for the disputed branch, rather than that fact being merely
+     * IMPLIED by the test method reaching later assertions without an
+     * exception. Proves three things together, on the same disputed fixture
+     * ({@code docs__disagree-owner__voyage-context-3__v1}, Branch A
+     * disagreement):
+     * <ol>
+     *   <li>the {@code hygiene-002-1} changeset itself is recorded as
+     *       applied in {@code databasechangelog} -- the walk ran to
+     *       completion rather than being skipped or short-circuited;</li>
+     *   <li>the fixture's row landed exactly {@code 'disputed'}, the
+     *       branch's own documented outcome (also covered, less explicitly,
+     *       by {@link #assertBranchOutcomes} above);</li>
+     *   <li>every CHECK/FK constraint the SAME changeset adds actually
+     *       exists in {@code pg_constraint} afterward -- the backfill half
+     *       and the constraints half of hygiene-002-1 both landed, not just
+     *       one of the two.</li>
+     * </ol>
+     */
+    private static void assertWalkCompletedOnDisputedFixture(DSLContext ctx, String tenant) {
+        String disputedFixture = "docs__disagree-owner__voyage-context-3__v1";
+
+        // (1) the changeset applied -- house pattern (DSL.table/DSL.name) for a
+        // table with no generated jOOQ binding, e.g. StagingPromoteOps's own
+        // "staging".chunks accessors; never a raw SQL string.
+        var changelogId = DSL.field(DSL.name("id"), String.class);
+        boolean changesetApplied = ctx.fetchExists(
+            DSL.selectOne()
+               .from(DSL.table(DSL.name("databasechangelog")))
+               .where(changelogId.eq(TARGET_CHANGESET_ID)));
+        assertThat(changesetApplied)
+            .as("hygiene-002-1 must be recorded APPLIED in databasechangelog -- "
+                + "the walk genuinely completed rather than being skipped")
+            .isTrue();
+
+        // (2) the disputed fixture's row landed exactly 'disputed'.
+        String lifecycleState = ctx.select(CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+            .from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+            .and(CATALOG_COLLECTIONS.NAME.eq(disputedFixture))
+            .fetchOne(CATALOG_COLLECTIONS.LIFECYCLE_STATE);
+        assertThat(lifecycleState)
+            .as("the walk must have completed classification of the disputed fixture "
+                + "for tenant %s, landing it 'disputed'", tenant)
+            .isEqualTo("disputed");
+
+        // (3) the changeset's own constraints exist -- exact names from
+        // hygiene-002-collection-attributes-walk.xml's hygiene-002-1 changeset.
+        var conname = DSL.field(DSL.name("conname"), String.class);
+        for (String constraintName : List.of(
+                "catalog_collections_content_type_chk",
+                "catalog_collections_owner_id_chk",
+                "catalog_collections_embedding_model_chk",
+                "catalog_collections_embedding_model_fk",
+                "catalog_collections_lifecycle_state_chk")) {
+            boolean exists = ctx.fetchExists(
+                DSL.selectOne()
+                   .from(DSL.table(DSL.name("pg_catalog", "pg_constraint")))
+                   .where(conname.eq(constraintName)));
+            assertThat(exists)
+                .as("constraint %s (added by hygiene-002-1) must exist -- the walk's "
+                    + "constraints half must land alongside its backfill half", constraintName)
+                .isTrue();
         }
     }
 

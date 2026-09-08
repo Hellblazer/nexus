@@ -765,6 +765,41 @@ class CombinedWriteRepositoryTest {
             .contains("\"section_type\": \"imports\"");
     }
 
+    @Test @Order(15)
+    void combinedWrite_unregisteredCollection_docsOnlyPath_throwsAndWritesNoRow() throws Exception {
+        // RDR-204 Phase 1 (nexus-ft04v.7 gap 3, closed by nexus-ft04v.8's test
+        // addendum): writeManyCombined's ensureCollectionRegistered guard runs
+        // BEFORE any per-doc processing -- including a docs-only call (empty
+        // `chunks`, exactly the §5.1 backward-compatible shape Order(4)/(5)
+        // above exercise against a REGISTERED collection). Against an
+        // unregistered one it must fail loud instead, with no manifest row,
+        // no chunk row, and no catalog_collections stub for the name.
+        String col = "code__cw-unreg__minilm-l6-v2-384__v1";
+        String chash = ch("cw-unreg-chash");
+
+        assertThatThrownBy(() -> svc.writeManyCombined(TENANT_A, col,
+                List.of(), // docs-only: no new chunk content sent
+                List.of(doc("cw.unreg", List.of(row(0, chash)))),
+                null, false, false))
+            .isInstanceOf(dev.nexus.service.db.UnregisteredCollectionException.class)
+            .hasMessageContaining(col)
+            .hasMessageContaining("POST /v1/catalog/collections/upsert");
+
+        assertThat(repo.getManifest(TENANT_A, "cw.unreg"))
+            .as("a write against an unregistered collection must create no manifest row")
+            .isEmpty();
+        assertThat(chunk384Exists(TENANT_A, col, chash))
+            .as("no chunk row either")
+            .isFalse();
+        boolean stubRowExists = tenantScope.withTenant(TENANT_A, ctx -> ctx.fetchExists(
+                ctx.selectOne().from(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+                   .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A))
+                   .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(col))));
+        assertThat(stubRowExists)
+            .as("the rejected write must not have created a catalog_collections stub row either")
+            .isFalse();
+    }
+
     /** Deterministic, dim-384 embedder that counts every text it is asked to embed. */
     static final class CountingFakeEmbedder implements Embedder {
         final AtomicInteger calls = new AtomicInteger();

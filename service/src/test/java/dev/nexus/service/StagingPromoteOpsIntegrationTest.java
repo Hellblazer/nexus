@@ -1893,4 +1893,34 @@ class StagingPromoteOpsIntegrationTest {
             conn.rollback();
         }
     }
+
+    @Test
+    @Order(40)
+    void promoteCollection_unregisteredCollection_throwsAndWritesNoRow() {
+        // RDR-204 Phase 1 (nexus-ft04v.7 gap 3, closed by nexus-ft04v.8's test
+        // addendum): promoteCollection's own requireRegistered guard (step 4,
+        // after the dim/null-embedding preconditions) must fail loud for a
+        // collection with no catalog_collections row -- and create neither a
+        // chunks row (nothing is staged for this collection) nor a
+        // catalog_collections stub.
+        String collection = "knowledge__unreg-promote__bge-base-en-v15-768__v1";
+
+        assertThatThrownBy(() -> ops.promoteCollection(T1, collection, 768))
+            .isInstanceOf(dev.nexus.service.db.UnregisteredCollectionException.class)
+            .hasMessageContaining(collection)
+            .hasMessageContaining("POST /v1/catalog/collections/upsert");
+
+        assertThat(count(ctx -> ctx.selectCount().from(CHUNKS)
+            .where(CHUNKS.COLLECTION.eq(collection))
+            .fetchOne(0, Integer.class)))
+            .as("a promote against an unregistered collection must create no chunks row")
+            .isEqualTo(0);
+        boolean stubRowExists = scope.withTenant(T1, ctx -> ctx.fetchExists(
+                ctx.selectOne().from(CATALOG_COLLECTIONS)
+                   .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T1))
+                   .and(CATALOG_COLLECTIONS.NAME.eq(collection))));
+        assertThat(stubRowExists)
+            .as("the rejected promote must not have created a catalog_collections stub row either")
+            .isFalse();
+    }
 }

@@ -6351,16 +6351,18 @@ public final class CatalogRepository {
             } else {
                 String  profileModel     = null;
                 Integer profileDimension = null;
-                if (contentType != null && !contentType.isBlank()) {
-                    var profileRow = ctx.select(EMBEDDING_PROFILE.EMBEDDING_MODEL, EMBEDDING_PROFILE.DIMENSION)
-                            .from(EMBEDDING_PROFILE)
-                            .where(EMBEDDING_PROFILE.TENANT_ID.eq(tenant))
-                            .and(EMBEDDING_PROFILE.CONTENT_TYPE.eq(contentType))
-                            .fetchOne();
-                    if (profileRow != null) {
-                        profileModel     = profileRow.value1();
-                        profileDimension = profileRow.value2();
-                    }
+                // contentType is already proven non-null/non-blank by the guard above
+                // (line ~6317) that throws before this branch can ever run -- no need
+                // to re-check it here (nexus-ft04v.8 review Minor 1: this guard was
+                // dead, always true).
+                var profileRow = ctx.select(EMBEDDING_PROFILE.EMBEDDING_MODEL, EMBEDDING_PROFILE.DIMENSION)
+                        .from(EMBEDDING_PROFILE)
+                        .where(EMBEDDING_PROFILE.TENANT_ID.eq(tenant))
+                        .and(EMBEDDING_PROFILE.CONTENT_TYPE.eq(contentType))
+                        .fetchOne();
+                if (profileRow != null) {
+                    profileModel     = profileRow.value1();
+                    profileDimension = profileRow.value2();
                 }
                 if (profileModel != null) {
                     if (requestedModel != null && !requestedModel.isBlank()
@@ -6374,12 +6376,23 @@ public final class CatalogRepository {
                     effectiveDimension = profileDimension;
                 } else {
                     effectiveModel = nne(requestedModel);
-                    if (!effectiveModel.isBlank()) {
-                        effectiveDimension = ctx.select(EMBEDDING_MODELS.DIMENSION)
-                                .from(EMBEDDING_MODELS)
-                                .where(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(effectiveModel))
-                                .fetchOne(EMBEDDING_MODELS.DIMENSION);
+                    // nexus-ft04v.8 review Significant 3: no embedding profile exists
+                    // for this content_type and the caller supplied no model either --
+                    // refuse loud here, naming the missing field, rather than binding
+                    // "" into the INSERT's VALUES tuple and letting hygiene-002-1's
+                    // catalog_collections_embedding_model_chk surface as an opaque
+                    // 23514 (500-shaped) instead of this method's uniform 422 contract
+                    // (mirrors the content_type guard above).
+                    if (effectiveModel.isBlank()) {
+                        throw new EmbeddingProfileConflictException(
+                            "registering collection '" + name + "' requires embedding_model; "
+                            + "no embedding profile exists for content_type '" + contentType
+                            + "' and none was supplied");
                     }
+                    effectiveDimension = ctx.select(EMBEDDING_MODELS.DIMENSION)
+                            .from(EMBEDDING_MODELS)
+                            .where(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(effectiveModel))
+                            .fetchOne(EMBEDDING_MODELS.DIMENSION);
                 }
                 boolean quarantine = (contentType != null && contentType.startsWith("quarantine-"))
                                   || (name != null && name.startsWith("quarantine-"));
