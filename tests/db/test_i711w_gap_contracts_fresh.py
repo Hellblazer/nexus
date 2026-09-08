@@ -277,8 +277,12 @@ class TestItem12CatalogReadsAfterRename:
     candidate on nexus-i711w.1.
     """
 
-    _OLD = "knowledge__i711w1-gapfresh__voyage-context-3__v1"
-    _NEW = "knowledge__i711w1-gapfresh-renamed__voyage-context-3__v1"
+    # RDR-204 (nexus-f5wwx): this fixture's java_service is a pure ONNX
+    # local engine (no voyage key) -- bge-base-en-v15-768, not the
+    # historical voyage-context-3, is the model its content_type='knowledge'
+    # profile actually serves.
+    _OLD = "knowledge__i711w1-gapfresh__bge-base-en-v15-768__v1"
+    _NEW = "knowledge__i711w1-gapfresh-renamed__bge-base-en-v15-768__v1"
     _PATH = "papers/i711w1_rename_probe.md"
     _CHASH = _ch("i711w1-rename-probe-chunk-0")
 
@@ -289,7 +293,7 @@ class TestItem12CatalogReadsAfterRename:
             self._OLD,
             content_type="knowledge",
             owner_id="i711w1-gapfresh",
-            embedding_model="voyage-context-3",
+            embedding_model="bge-base-en-v15-768",
             model_version="v1",
         )
         t = cat.register(

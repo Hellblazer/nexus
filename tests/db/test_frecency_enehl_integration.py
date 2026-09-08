@@ -272,7 +272,10 @@ def test_frecency_service_mode_update_lands_in_service_chroma(
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
     monkeypatch.setenv("NX_SERVICE_URL", base_url)
     monkeypatch.setenv("NX_SERVICE_TOKEN", token)
-    monkeypatch.delenv("NX_LOCAL", raising=False)
+    # RDR-204 (nexus-f5wwx): NX_SERVICE_URL alone reads as managed mode and
+    # derives voyage-code-3 for a code registration, which this ONNX
+    # engine's bge-768 profile refuses with 422.
+    monkeypatch.setenv("NX_LOCAL", "1")
     monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
 
@@ -297,6 +300,14 @@ def test_frecency_service_mode_update_lands_in_service_chroma(
     # supplied explicitly via a ``_build_frecency_doc_id_map`` patch
     # below rather than through the (still-unavailable) catalog, so the
     # where-filter this seeds against is the alive doc_id-keyed path.
+    #
+    # RDR-204 (nexus-f5wwx): the engine no longer auto-registers a
+    # collection on first write, and this seed posts to
+    # /v1/vectors/upsert-chunks directly via raw urllib -- bypassing
+    # HttpVectorClient's own write_with_registration_retry self-heal
+    # entirely. Register explicitly first.
+    from nexus.corpus import ensure_collection_registered
+    ensure_collection_registered(collection)
     upsert_result = _svc_post(base_url, token, "/v1/vectors/upsert-chunks", {
         "collection": collection,
         "ids": [chunk_id],

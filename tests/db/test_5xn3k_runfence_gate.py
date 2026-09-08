@@ -344,7 +344,12 @@ def service_env(
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
     monkeypatch.setenv("NX_SERVICE_URL", base_url)
     monkeypatch.setenv("NX_SERVICE_TOKEN", token)
-    monkeypatch.delenv("NX_LOCAL", raising=False)
+    # RDR-204 (nexus-f5wwx): NX_SERVICE_URL alone reads as managed mode and
+    # derives voyage-context-3 for a docs/knowledge/code registration, which
+    # this ONNX engine's bge-768 profile refuses with 422. Deleting NX_LOCAL
+    # used to be harmless (no client-side registration existed to derive a
+    # model from); RDR-204 made the model derivation load-bearing.
+    monkeypatch.setenv("NX_LOCAL", "1")
     monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.setenv("NX_MINERU_AUTOSTART", "0")
