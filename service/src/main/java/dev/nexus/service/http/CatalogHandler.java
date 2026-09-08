@@ -1175,18 +1175,26 @@ public final class CatalogHandler implements HttpHandler {
     }
 
     /**
-     * GET /v1/catalog/manifest/chashes?collection=X
+     * GET /v1/catalog/manifest/chashes?collection=X[&with_tombstone_protected=1]
      *
-     * <p>nexus-zewg3 (ADDITIVE wire change): the envelope also carries
-     * {@code tombstone_protected_count} — of the chashes above, how many are
-     * held alive ONLY by a pending tombstone (never by a live document,
-     * tenant-wide) rather than a live document, per {@link
+     * <p>nexus-zewg3 (ADDITIVE wire change, OPT-IN): passing
+     * {@code with_tombstone_protected=1} (or {@code =true}) makes the envelope
+     * also carry {@code tombstone_protected_count} — of the chashes above, how
+     * many are held alive ONLY by a pending tombstone (never by a live
+     * document, tenant-wide) rather than a live document, per {@link
      * CatalogRepository#tombstoneProtectedChunkCount}. {@code nx t3 gc}'s own
      * alive-set diff cannot make this distinction (both classes stay in
      * {@code chashes} equally per nexus-dkymw), so the client reads this
      * field to report it instead of re-deriving it client-side. Old clients
      * that don't know the key simply ignore it (same pattern as
      * nexus-kzso5's per-row {@code collection} addition above).
+     *
+     * <p>The count is computed ONLY when requested: this route is not
+     * {@code nx t3 gc}-exclusive — {@code nexus.indexer._prune_deleted_files}
+     * calls the plain (no-param) form on EVERY {@code nx index repo} run, and
+     * that caller never reads the field, so it must not pay for the three
+     * extra {@code strandedChunkCount} queries the count costs (critique T2
+     * nexus/critique-nexus-zewg3-engine-side Significant 1).
      */
     private void handleManifestChashes(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
@@ -1203,10 +1211,14 @@ public final class CatalogHandler implements HttpHandler {
         // all. The client reconciles len(chashes) == count before any orphan
         // classification and aborts on mismatch.
         var list = new ArrayList<>(chashes);
-        long tombstoneProtected = repo.tombstoneProtectedChunkCount(tenant, collection);
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
-            Map.of("chashes", list, "count", list.size(),
-                   "tombstone_protected_count", tombstoneProtected)));
+        String withTombstoneProtectedParam = queryParam(exchange, "with_tombstone_protected");
+        boolean withTombstoneProtected = "1".equals(withTombstoneProtectedParam)
+            || "true".equalsIgnoreCase(withTombstoneProtectedParam);
+        Map<String, Object> envelope = withTombstoneProtected
+            ? Map.of("chashes", list, "count", list.size(),
+                     "tombstone_protected_count", repo.tombstoneProtectedChunkCount(tenant, collection))
+            : Map.of("chashes", list, "count", list.size());
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(envelope));
     }
 
     /** POST /v1/catalog/manifest/docs_for_chashes */

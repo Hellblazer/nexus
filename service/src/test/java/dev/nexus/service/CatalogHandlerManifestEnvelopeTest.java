@@ -270,6 +270,56 @@ class CatalogHandlerManifestEnvelopeTest {
         assertThat(((Number) body.get("count")).intValue()).isEqualTo(0);
     }
 
+    // ── nexus-zewg3: manifest/chashes's tombstone_protected_count is OPT-IN ────
+
+    @Test
+    void manifestChashes_withoutParam_omitsTombstoneProtectedCount() throws Exception {
+        var t1 = registerDoc("zewg3.owner1", "zewg3 doc 1", "file:///zewg3/doc1.md");
+        var collection = "knowledge__zewg3-owner1__v1";
+        writeManifestRow(t1, collection, ch("zewg3-chunk-1"));
+
+        var resp = get("/v1/catalog/manifest/chashes?collection=" + collection);
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        assertThat(body).containsKeys("chashes", "count");
+        assertThat(body)
+            .as("tombstone_protected_count is opt-in (nexus-zewg3) -- absent unless "
+                + "with_tombstone_protected is set, so the indexer's hot per-collection "
+                + "call (nexus.indexer._prune_deleted_files) never pays for it")
+            .doesNotContainKey("tombstone_protected_count");
+    }
+
+    @Test
+    void manifestChashes_withParamOne_emitsTombstoneProtectedCount() throws Exception {
+        var t1 = registerDoc("zewg3.owner2", "zewg3 doc 2", "file:///zewg3/doc2.md");
+        var collection = "knowledge__zewg3-owner2__v1";
+        writeManifestRow(t1, collection, ch("zewg3-chunk-2"));
+
+        var resp = get("/v1/catalog/manifest/chashes?collection=" + collection
+            + "&with_tombstone_protected=1");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        assertThat(body).containsKeys("chashes", "count", "tombstone_protected_count");
+        assertThat(((Number) body.get("tombstone_protected_count")).longValue())
+            .as("nothing tombstoned in this fixture")
+            .isEqualTo(0L);
+    }
+
+    @Test
+    void manifestChashes_withParamTrue_alsoEmitsTombstoneProtectedCount() throws Exception {
+        var t1 = registerDoc("zewg3.owner3", "zewg3 doc 3", "file:///zewg3/doc3.md");
+        var collection = "knowledge__zewg3-owner3__v1";
+        writeManifestRow(t1, collection, ch("zewg3-chunk-3"));
+
+        var resp = get("/v1/catalog/manifest/chashes?collection=" + collection
+            + "&with_tombstone_protected=true");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        assertThat(body)
+            .as("both '1' and 'true' spellings opt in")
+            .containsKey("tombstone_protected_count");
+    }
+
     private HttpResponse<String> post(String path, String body) throws Exception {
         var req = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + service.getPort() + path))
