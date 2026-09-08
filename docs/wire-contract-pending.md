@@ -59,7 +59,7 @@ carries no method signature for a contract change to reconcile against) is a
 
 ## Unshipped
 
-(none)
+- `a70971b00` -- bead nexus-ft04v.24 -- engine tag `TBD (the RDR-204 Phase 2 engine-service cut, not yet tagged; Phases 1 and 2 ride one cut, Sam's call)` -- [additive] two read routes grow, nothing changes shape. `GET /v1/vectors/stats` rows gain `content_type`, `owner_id`, `embedding_model`, `lifecycle_state` (LEFT JOIN on `nexus.catalog_collections`; the four keys are OMITTED, not null, for a collection with vector stats and no catalog row, the same convention `last_write` uses; the population is unchanged). `GET /v1/catalog/collections/list` gains optional `content_type` and `lifecycle_state` query parameters (blank or absent = unfiltered, byte-identical to today) and each row gains `dimension` and `lifecycle_state`. Client half: none in this commit; bead nexus-ft04v.26 (Phase 3) reads the new keys and sends the filters. Direction safety, both directions: NEW client + OLD engine -- no released client sends the parameters or reads the keys yet, and the Phase 3 client is required to fail loud on the missing filter (RDR-204 §Cross-Cutting), never to fan out over unfiltered rows; OLD client + NEW engine -- an unfiltered list call returns the same rows with two extra keys, the stats rows carry four extra keys, and every existing key is unchanged. Ack condition: the client release whose `REQUIRED_ENGINE_VERSION` bumps to the engine tag carrying this commit.
 
 ## Shipped
 
