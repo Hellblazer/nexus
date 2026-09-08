@@ -308,7 +308,63 @@ else
   say "ABORT"; exit 1
 fi
 
-say "Stage 3e — capture pre-swap invariants"
+say "Stage 3e — seed a code+docs repo corpus (RDR-204 P1.9 MVV, bead nexus-ft04v.10)"
+# A `code` and a `docs` catalog_collections row, registered under this
+# install's embedding profile — the two collections the Minimum Viable
+# Validation (RDR-204 §Implementation Plan) asserts post-walk, further down
+# this script (the "Assert — RDR-204 P1.9 Minimum Viable Validation"
+# section). `nx index repo` on a tiny two-file fixture registers both in one
+# call, same pattern as rehearse_shakeout_e2e.sh Step 2: the .py file becomes
+# a code__ collection, the .md file a docs__ collection, both under the SAME
+# owner (the fixture repo's path-derived identity) — this is deliberate: the
+# MVV's register-refusal clause targets "the same content_type and owner" as
+# an already-registered row.
+#
+# Seeded HERE, through the FLOOR engine, alongside Stage 3a-3d's population —
+# not after the swap — so the MVV's clauses below read the SAME populated
+# store the rest of this leg's invariants are captured against, and the
+# Stage 3f EXACT row-invariant comparison (captured immediately after this
+# stage) already includes these rows on both sides of the swap.
+MVV_CORPUS_DIR="/tmp/candmig-mvv-repo-$$"
+MVV_MARKER="candmigmvvmarker$$"
+mkdir -p "$MVV_CORPUS_DIR"
+cat > "$MVV_CORPUS_DIR/mvv_sentinel.py" <<PYEOF
+"""RDR-204 P1.9 MVV code-collection fixture."""
+
+
+def mvv_sentinel_function() -> str:
+    """Retrieval sentinel for the candidate-migration MVV: ${MVV_MARKER}."""
+    return "${MVV_MARKER}"
+PYEOF
+cat > "$MVV_CORPUS_DIR/mvv_notes.md" <<MDEOF
+# RDR-204 P1.9 MVV docs-collection fixture
+
+Prose fixture anchoring the docs collection for the candidate-migration MVV: ${MVV_MARKER}.
+MDEOF
+if ( cd "$MVV_CORPUS_DIR" && git init -q && git add -A \
+      && git -c user.email=candmig-mvv@nexus.local -c user.name=candmig-mvv commit -qm seed ) \
+    >/tmp/candmig-mvv-git.log 2>&1; then
+  ok "MVV fixture repo committed"
+else
+  bad "MVV fixture repo git init/commit failed"; cat /tmp/candmig-mvv-git.log | sed 's/^/       /'
+fi
+if nx index repo "$MVV_CORPUS_DIR" 2>&1 | tail -8 | sed 's/^/       /'; then
+  ok "indexed the MVV fixture (registers a code__ and a docs__ collection under the install's profile)"
+else
+  bad "indexing the MVV fixture repo failed"
+fi
+# Identify the exact rows by name (LIKE on the path-derived basename segment,
+# not created_at ordering — Stage 3b already registered an unrelated docs__
+# collection for the candmig corpus, so ordering alone is not a safe
+# discriminator here).
+MVV_CODE_NAME="$(diag_sql "SELECT name FROM nexus.catalog_collections WHERE content_type='code' AND name LIKE 'code__candmig-mvv-repo-$$%' ORDER BY created_at DESC LIMIT 1")"
+MVV_DOCS_NAME="$(diag_sql "SELECT name FROM nexus.catalog_collections WHERE content_type='docs' AND name LIKE 'docs__candmig-mvv-repo-$$%' ORDER BY created_at DESC LIMIT 1")"
+if [ -n "$MVV_CODE_NAME" ]; then ok "resolved the MVV code__ collection: $MVV_CODE_NAME"; else bad "could not resolve the MVV code__ collection name"; fi
+if [ -n "$MVV_DOCS_NAME" ]; then ok "resolved the MVV docs__ collection: $MVV_DOCS_NAME"; else bad "could not resolve the MVV docs__ collection name"; fi
+MVV_CODE_OWNER="$(diag_sql "SELECT owner_id FROM nexus.catalog_collections WHERE name='${MVV_CODE_NAME}'")"
+note "MVV code collection: name=$MVV_CODE_NAME owner=$MVV_CODE_OWNER; docs collection: name=$MVV_DOCS_NAME"
+
+say "Stage 3f — capture pre-swap invariants"
 CHUNKS_PRE="$(diag_sql "SELECT count(*) FROM nexus.chunks WHERE embedding_768 IS NOT NULL AND chunk_text <> ''")"
 MANIFEST_PRE="$(diag_sql "SELECT count(*) FROM nexus.catalog_document_chunks")"
 DOCS_PRE="$(diag_sql "SELECT count(*) FROM nexus.catalog_documents WHERE deleted_at IS NULL")"
@@ -348,7 +404,7 @@ else
   bad "expected >= 1 topic_assignments row after discovery, counted '$TOPIC_ASSIGN_PRE'"
 fi
 
-say "Stage 3f — pre-swap read sanity"
+say "Stage 3g — pre-swap read sanity"
 PRE_SEARCH="$(nx search "$MARKER1" --corpus knowledge -m 3 2>&1)"
 if printf '%s' "$PRE_SEARCH" | grep -q "candmigmarker1populate"; then
   ok "floor-engine search serves the seeded marker"
@@ -513,6 +569,81 @@ if printf '%s' "$DOC_OUT" | grep -qi "engine convergence pending"; then
   bad "nx doctor reports engine convergence pending — the swap did not settle cleanly"
 else
   ok "no engine convergence pending — the hand-swap settled cleanly"
+fi
+
+say "Assert — RDR-204 P1.9 Minimum Viable Validation (bead nexus-ft04v.10)"
+# DECISIONS 2026-09-07 (Sam, T2 nexus_rdr/204-research-17 [24889]) OVERRIDE
+# the bead description: this bead asserts exactly what Phase 1 delivers —
+# both rows carry the profile's model+dimension; a register call naming a
+# different model is refused with 422; nx search --corpus code resolves.
+# The engine-parse-census-at-zero clause is Phase 2's validation (bead
+# nexus-ft04v.19); the client-parse-census-at-zero clause is Phase 3's
+# (bead nexus-ft04v.30). No skipped-with-a-reason clauses here — the
+# non-vacuity assert below covers exactly the three clauses that run
+# (nexus-moht0 doctrine: a run in which fewer clauses executed is a
+# FAILURE, not a pass).
+MVV_CLAUSES_RUN=0
+
+# Clause 1/3 — both the code and docs catalog_collections rows carry the
+# profile's embedding_model + dimension (bge-base-en-v15-768 / 768), read
+# post-walk so a changeset that touched either column would surface here.
+MVV_CLAUSES_RUN=$((MVV_CLAUSES_RUN + 1))
+MVV_CODE_ROW="$(diag_sql "SELECT embedding_model || '|' || COALESCE(dimension::text,'NULL') FROM nexus.catalog_collections WHERE name='${MVV_CODE_NAME}'")"
+MVV_DOCS_ROW="$(diag_sql "SELECT embedding_model || '|' || COALESCE(dimension::text,'NULL') FROM nexus.catalog_collections WHERE name='${MVV_DOCS_NAME}'")"
+note "MVV clause 1/3 — code row ($MVV_CODE_NAME): $MVV_CODE_ROW; docs row ($MVV_DOCS_NAME): $MVV_DOCS_ROW"
+if [ "$MVV_CODE_ROW" = "bge-base-en-v15-768|768" ] && [ "$MVV_DOCS_ROW" = "bge-base-en-v15-768|768" ]; then
+  ok "MVV clause 1/3 — both the code and docs catalog_collections rows carry the profile's embedding_model=bge-base-en-v15-768 dimension=768 after the candidate's walk"
+else
+  bad "MVV clause 1/3 — expected both rows at embedding_model=bge-base-en-v15-768 dimension=768; got code='$MVV_CODE_ROW' (name=$MVV_CODE_NAME) docs='$MVV_DOCS_ROW' (name=$MVV_DOCS_NAME)"
+fi
+
+# Clause 2/3 — a register call naming voyage-code-3 for the SAME content_type
+# and owner as the already-registered code collection is refused with HTTP
+# 422 (CatalogRepository.upsertCollection's EmbeddingProfileConflictException
+# -> CatalogHandler's 422 contract, bead nexus-ft04v.8).
+MVV_CLAUSES_RUN=$((MVV_CLAUSES_RUN + 1))
+MVV_REGISTER_OUT="$("$TOOLPY" - "$MVV_CODE_NAME" "$MVV_CODE_OWNER" <<'PYEOF' 2>&1
+import sys
+name, owner = sys.argv[1], sys.argv[2]
+import httpx
+from nexus.catalog.factory import make_catalog_writer
+writer = make_catalog_writer()
+try:
+    writer.register_collection(
+        name, content_type="code", owner_id=owner, embedding_model="voyage-code-3",
+    )
+    print("RESULT:NOREFUSAL")
+except httpx.HTTPStatusError as exc:
+    status = exc.response.status_code if exc.response is not None else 0
+    print(f"RESULT:STATUS={status}")
+except Exception as exc:  # noqa: BLE001 — harness probe, report whatever surfaced
+    print(f"RESULT:EXCEPTION={type(exc).__name__}:{exc}")
+PYEOF
+)"
+note "MVV clause 2/3 — register(embedding_model=voyage-code-3, content_type=code, owner=$MVV_CODE_OWNER, name=$MVV_CODE_NAME) -> $MVV_REGISTER_OUT"
+if printf '%s' "$MVV_REGISTER_OUT" | grep -q "RESULT:STATUS=422"; then
+  ok "MVV clause 2/3 — a register call naming voyage-code-3 for the same content_type+owner is refused with HTTP 422"
+else
+  bad "MVV clause 2/3 — expected an HTTP 422 refusal for a voyage-code-3 register call against the profile-governed code collection; got: $MVV_REGISTER_OUT"
+fi
+
+# Clause 3/3 — nx search --corpus code resolves through the candidate and
+# returns the sentinel seeded in Stage 3e.
+MVV_CLAUSES_RUN=$((MVV_CLAUSES_RUN + 1))
+MVV_SEARCH_OUT="$(nx search "$MVV_MARKER" --corpus code -m 3 2>&1)"
+if printf '%s' "$MVV_SEARCH_OUT" | grep -q "$MVV_MARKER"; then
+  ok "MVV clause 3/3 — nx search --corpus code resolves through the candidate and returns the seeded sentinel"
+else
+  printf '%s\n' "$MVV_SEARCH_OUT" | head -8 | sed 's/^/       /'
+  bad "MVV clause 3/3 — nx search --corpus code did not return the seeded sentinel through the candidate"
+fi
+
+# Non-vacuity (nexus-moht0): a run in which fewer than 3 clauses executed is
+# a FAILURE, not a pass.
+if [ "$MVV_CLAUSES_RUN" -eq 3 ]; then
+  ok "MVV non-vacuity — exactly 3 clause(s) executed"
+else
+  bad "MVV non-vacuity — expected exactly 3 clauses executed, counted $MVV_CLAUSES_RUN — a run in which fewer clauses executed is a FAILURE, not a pass"
 fi
 
 say "RESULT"

@@ -178,9 +178,11 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
            "PG/engine fresh per run; 2 extra matches are echo/label lines.",
     ),
     "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh": (
-        8, "CONTAINER: runs INSIDE the container (own header comment); Stage 2b "
+        9, "CONTAINER: runs INSIDE the container (own header comment); Stage 2b "
            "is `nx init --service` provisioning its own bundled PG fresh per "
-           "run; 7 more matches, all container-scoped.",
+           "run; 8 more matches, all container-scoped, including Stage 3e's "
+           "`nx index repo` seeding the RDR-204 P1.9 MVV's code/docs "
+           "collections (bead nexus-ft04v.10).",
     ),
     "tests/e2e/migration-rehearsal/rehearse_era_hop.sh": (
         1, "CONTAINER: runs INSIDE the container (own header comment: "
