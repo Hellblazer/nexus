@@ -35,6 +35,7 @@ from pathlib import Path
 from nexus.daemon.aspect_worker_daemon import (
     _DEFAULT_RECLAIM_INTERVAL,
     AspectWorkerDaemon,
+    next_reclaim_wait,
 )
 
 
@@ -172,3 +173,55 @@ def test_reclaim_failure_evicts_and_rebuilds_queue(tmp_path: Path) -> None:
         assert created[1].reclaim_calls, "the rebuilt handle never got a chance to reclaim"
     finally:
         d.stop()
+
+
+# nexus-e0ypa (Sam, 2026-09-08): an idle queue was swept every 30s for a
+# 300s stale window, 2,880 empty requests a day, the dominant empty poll on
+# the edge. The cadence backs off on consecutive empty sweeps up to the stale
+# window and snaps back to the base on any reclaim, so a live queue keeps the
+# RDR-173 M1 promptness and an idle one costs about a tenth of the traffic.
+
+
+def test_next_reclaim_wait_doubles_on_empty_sweeps_up_to_the_stale_window() -> None:
+    base, window = 30.0, 300
+    waits = []
+    current = base
+    for _ in range(6):
+        current = next_reclaim_wait(current, reclaimed=0, base=base, stale_timeout=window)
+        waits.append(current)
+    assert waits == [60.0, 120.0, 240.0, 300.0, 300.0, 300.0]
+
+
+def test_next_reclaim_wait_resets_to_base_on_any_reclaim() -> None:
+    assert next_reclaim_wait(300.0, reclaimed=1, base=30.0, stale_timeout=300) == 30.0
+    assert next_reclaim_wait(60.0, reclaimed=7, base=30.0, stale_timeout=300) == 30.0
+
+
+def test_next_reclaim_wait_holds_on_a_failed_sweep() -> None:
+    """A failed sweep (reclaimed is None) is not evidence the queue is idle;
+    the cadence neither backs off nor resets."""
+    assert next_reclaim_wait(120.0, reclaimed=None, base=30.0, stale_timeout=300) == 120.0
+
+
+def test_next_reclaim_wait_never_below_base_even_when_window_is_smaller() -> None:
+    """A test-sized stale window below the base interval never shrinks the
+    sweep below the base (the window caps growth, it does not set a floor)."""
+    assert next_reclaim_wait(0.05, reclaimed=0, base=0.05, stale_timeout=0) == 0.05
+
+
+def test_daemon_backs_off_on_empty_sweeps_and_resets_on_a_hit(tmp_path: Path) -> None:
+    """The loop's own bookkeeping, driven through the main-thread seam so no
+    timing is asserted: three empty sweeps grow the wait, one reclaim resets it."""
+    q = _FakeQueue()
+    d = AspectWorkerDaemon(
+        config_dir=tmp_path, tenant="default",
+        worker_factory=_FakeWorker, queue_factory=lambda: q,
+        reclaim_interval=30.0, stale_timeout_seconds=300,
+    )
+    assert d._current_reclaim_wait == 30.0
+    for expected in (60.0, 120.0, 240.0):
+        d._reclaim_once()
+        assert d._current_reclaim_wait == expected
+    q._reclaimed = 2
+    d._reclaim_once()
+    assert d._current_reclaim_wait == 30.0
