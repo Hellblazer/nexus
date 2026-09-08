@@ -7,7 +7,7 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
-from nexus.corpus import PlaceholderCollectionError, t3_collection_name
+from nexus.corpus import t3_collection_name
 from nexus.db import make_t3
 from nexus.db.t3 import T3Database
 from nexus.errors import PutOversizedError
@@ -101,10 +101,10 @@ def put_cmd(
     # for_write=True (nexus-35ok4): this command WRITES new content —
     # a genuinely new corpus mints strictly (raises loud if
     # local.embed_model is voyage-shaped with no key configured).
-    try:
-        col_name = t3_collection_name(collection, t3=db, for_write=True)
-    except PlaceholderCollectionError as exc:
-        raise click.ClickException(str(exc)) from exc
+    # nexus-0fw11: a placeholder subject raises PlaceholderCollectionError,
+    # itself a ClickException, so the refusal prints cleanly here and on
+    # every other CLI writer without a per-command catch.
+    col_name = t3_collection_name(collection, t3=db, for_write=True)
 
     # RDR-101 Phase 3 PR δ Stage B.4: pre-register the catalog entry
     # so the T3 chunk can carry the resulting tumbler as ``doc_id``

@@ -366,10 +366,10 @@ class TestPassthroughFlags:
         fake_selectors["selection"].return_value = [("U", "/a.pdf")]
         result = runner.invoke(main, [
             "dt", "index", "--selection",
-            "--collection", "knowledge__test",
+            "--collection", "knowledge__fixture-subject",
         ])
         assert result.exit_code == 0, result.output
-        assert fake_dispatcher[0]["collection"] == "knowledge__test__voyage-context-3__v1"  # nexus-t952k: --collection is normalised
+        assert fake_dispatcher[0]["collection"] == "knowledge__fixture-subject__voyage-context-3__v1"  # nexus-t952k: --collection is normalised
 
     def test_corpus_passthrough(
         self, runner, fake_selectors, fake_dispatcher,
@@ -2142,10 +2142,10 @@ class TestEnrichWiring:
         ]
         result = runner.invoke(main, [
             "dt", "index", "--selection",
-            "--collection", "knowledge__test", "--enrich",
+            "--collection", "knowledge__fixture-subject", "--enrich",
         ])
         assert result.exit_code == 0, result.output
-        assert calls == [("knowledge__test__voyage-context-3__v1", {"source": "dt"})]  # nexus-t952k
+        assert calls == [("knowledge__fixture-subject__voyage-context-3__v1", {"source": "dt"})]  # nexus-t952k
         assert "Enriching bibliographic metadata" in result.output
 
     def test_no_enrich_flag_skips_enrichment(

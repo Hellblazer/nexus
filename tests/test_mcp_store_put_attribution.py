@@ -49,7 +49,7 @@ def _no_op(*args, **kwargs):
     pass
 
 
-def _seed_for_store_put(content: str, collection: str = "knowledge") -> None:
+def _seed_for_store_put(content: str, collection: str = "fixture-subject") -> None:
     """See ``tests/test_mcp_store_put_doc_id.py``'s helper of the same
     name — pre-seeds the real ``nexus.chunks`` FK row the manifest write
     requires."""
@@ -85,7 +85,7 @@ def _store(
     title: str,
     agent: str = "",
     session: str = "",
-    collection: str = "knowledge",
+    collection: str = "fixture-subject",
 ) -> str:
     from nexus.mcp.core import store_put
 

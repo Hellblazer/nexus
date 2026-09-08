@@ -283,7 +283,7 @@ def test_store_put_is_searchable_and_catalogued(t2_service_env) -> None:
     runner = CliRunner()
     title = "scenario-journey-1-note"
     put = runner.invoke(main, [
-        "store", "put", "-", "--title", title, "-c", "knowledge",
+        "store", "put", "-", "--title", title, "-c", "fixture-subject",
     ], input="HNSW indexes approximate nearest neighbor search using a "
              "layered proximity graph.\n")
     assert put.exit_code == 0, put.output
@@ -402,7 +402,7 @@ def test_index_repo_routes_code_to_code_corpus(t2_service_env, tmp_path: Path) -
     # would pass for the wrong reason (nothing to search) instead of
     # proving routing.
     seed = runner.invoke(main, [
-        "store", "put", "-", "--title", "scenario3-unrelated-seed", "-c", "knowledge",
+        "store", "put", "-", "--title", "scenario3-unrelated-seed", "-c", "fixture-subject",
     ], input="Sourdough starters need daily feeding to stay active.\n")
     assert seed.exit_code == 0, seed.output
 
@@ -457,7 +457,7 @@ def test_cross_corpus_search_routes_correctly(t2_service_env, tmp_path: Path) ->
     runner = CliRunner()
 
     put = runner.invoke(main, [
-        "store", "put", "-", "--title", "scenario4-wombat-note", "-c", "knowledge",
+        "store", "put", "-", "--title", "scenario4-wombat-note", "-c", "fixture-subject",
     ], input="Wombats dig extensive burrow systems across the southern "
              "hemisphere grasslands.\n")
     assert put.exit_code == 0, put.output

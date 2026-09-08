@@ -581,3 +581,20 @@ def test_placeholder_set_matches_docs_collections_rule_1() -> None:
     assert m, "docs/collections.md no longer lists the placeholders in a parenthetical"
     documented = frozenset(re.findall(r"`([^`]+)`", m.group(1)))
     assert documented == PLACEHOLDER_SUBJECTS
+
+
+def test_placeholder_refusal_is_a_click_exception_for_every_cli_writer() -> None:
+    """Critique of 86cd65ef0: only nx store put caught the error; promote,
+    index and dt index printed a traceback. The exception is a
+    ClickException, so every command prints it and exits 1."""
+    import click
+
+    with pytest.raises(click.ClickException) as excinfo:
+        t3_collection_name("knowledge", for_write=True)
+    assert isinstance(excinfo.value, PlaceholderCollectionError)
+
+
+def test_allow_placeholder_lifts_the_refusal_for_a_restore() -> None:
+    assert t3_collection_name("knowledge__knowledge", for_write=True, allow_placeholder=True) == (
+        "knowledge__knowledge__voyage-context-3__v1"
+    )

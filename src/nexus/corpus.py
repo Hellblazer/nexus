@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 
+import click
 import structlog
 
 _log = structlog.get_logger(__name__)
@@ -183,9 +184,15 @@ def canonical_embedding_model(content_type: str) -> str:
     )
 
 
-class PlaceholderCollectionError(ValueError):
+class PlaceholderCollectionError(click.ClickException, ValueError):
     """A write named a placeholder (``default``, ``knowledge``, ``notes``,
-    ``tmp``, ``test``) where a subject was required (nexus-0fw11)."""
+    ``tmp``, ``test``) where a subject was required (nexus-0fw11).
+
+    A ``click.ClickException`` so every CLI writer that shares the resolver
+    (``nx store put``, ``nx memory promote``, ``nx index pdf/md``, ``nx dt
+    index``) prints the message and exits 1 instead of a traceback, without
+    each command catching it; the MCP tools ``str()`` it into their
+    ``Error:`` reply. Also a ``ValueError`` for library callers."""
 
 
 class LocalVoyageCredentialMissingError(RuntimeError):
@@ -688,6 +695,7 @@ def _refuse_placeholder_subject(user_arg: str) -> None:
 
 def t3_collection_name(
     user_arg: str, *, t3: object | None = None, for_write: bool = False,
+    allow_placeholder: bool = False,
 ) -> str:
     """Resolve a --collection argument to a T3 collection name.
 
@@ -742,7 +750,11 @@ def t3_collection_name(
     if is_conformant_collection_name(user_arg):
         return user_arg
 
-    if for_write:
+    # nexus-0fw11: a write that names a placeholder subject is refused here,
+    # the one resolver every writer uses. ``allow_placeholder`` is for a
+    # writer restoring a collection that already exists under that name
+    # (the recovery-bundle import), never for a new mint.
+    if for_write and not allow_placeholder:
         _refuse_placeholder_subject(user_arg)
 
     # GH #545: when the user typed a BARE content-type prefix
