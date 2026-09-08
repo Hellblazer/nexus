@@ -18,6 +18,8 @@ import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_VECTOR_STATS;
 import static dev.nexus.service.jooq.nexus.Tables.COVERAGE_BY_CONTENT_TYPE;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
+import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
+import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_PROFILE;
 import static dev.nexus.service.jooq.nexus.Tables.GC_AUDIT;
 import static dev.nexus.service.jooq.nexus.Tables.HOOK_FAILURES;
 import static dev.nexus.service.jooq.nexus.Tables.LINKS_BY_TYPE_COUNTS;
@@ -6240,9 +6242,128 @@ public final class CatalogRepository {
     // COLLECTIONS
     // ══════════════════════════════════════════════════════════════════════════
 
-    /** Upsert a collection. */
+    /**
+     * A register call's {@code embedding_model} disagrees with the value the
+     * profile (or, for an existing row, the row itself) says is authoritative
+     * (RDR-204 Technical Design step 2, bead nexus-ft04v.8).
+     *
+     * <p>Mapped to HTTP 422 by {@code CatalogHandler}: the request is
+     * well-formed, but this install's collection authority says otherwise.
+     * The message names the authoritative value — asserted verbatim by
+     * tests, not just the status code (bead ACCEPTANCE).
+     */
+    public static final class EmbeddingProfileConflictException extends RuntimeException {
+        public EmbeddingProfileConflictException(String message) { super(message); }
+    }
+
+    /**
+     * Upsert a collection.
+     *
+     * <p>RDR-204 Phase 1 (bead nexus-ft04v.8) — a NEW registration (no
+     * existing row for {@code (tenant, name)}) takes its {@code
+     * embedding_model} from the tenant's current {@code
+     * nexus.embedding_profile} row for the request's {@code content_type}
+     * (Technical Design step 2): a request naming no model gets the
+     * profile's model; a request naming the SAME model is accepted; a
+     * request naming a DIFFERENT model is refused with {@link
+     * EmbeddingProfileConflictException} carrying the profile's value. When
+     * no profile row exists for the request's content type (blank/absent
+     * {@code content_type}, or a handler wired with no {@link
+     * dev.nexus.service.vectors.EmbedderRouter} — see {@code
+     * CatalogHandler}'s 1-arg constructor — so nothing ever seeded one),
+     * the request's own {@code embedding_model} is used exactly as sent,
+     * matching this method's pre-RDR-204 behaviour; its {@code dimension}
+     * is looked up from {@code nexus.embedding_models} when that model is
+     * known there, else left {@code NULL}.
+     *
+     * <p>An EXISTING row is never re-pointed by the profile (Technical
+     * Design 1a): {@code embedding_model}, {@code dimension} and {@code
+     * lifecycle_state} are omitted from the {@code ON CONFLICT DO UPDATE}
+     * SET list entirely, so a re-registration of an existing name leaves
+     * all three exactly as they were written the first time — the row
+     * records the model its vectors were actually embedded with. A
+     * register call naming a DIFFERENT model than the existing row's own is
+     * refused the same way, naming the ROW's value as authoritative instead
+     * of the profile's.
+     *
+     * <p>A NEW row's {@code lifecycle_state} is {@code quarantine} when
+     * either the request's {@code content_type} or {@code name} starts with
+     * {@code quarantine-}, else {@code live} (bead nexus-ft04v.8 NOTES: the
+     * simplest answer consistent with bead nexus-ft04v.4's backfill walk,
+     * which derives {@code quarantine} from that same name-prefix
+     * convention — new registrations carry {@code content_type} explicitly,
+     * so both are checked). {@code model_version} keeps round-tripping
+     * exactly as sent; this bead does not touch any client-side parse site
+     * (Phase 3's census).
+     */
     public void upsertCollection(String tenant, Map<String, Object> coll) {
         tenantScope.withTenant(tenant, ctx -> {
+            String name           = s(coll, "name");
+            // Raw, nullable/blank — used to key the profile lookup and the
+            // quarantine-prefix check; nne() below still fills the written
+            // CONTENT_TYPE column with "" as before when absent.
+            String contentType    = s(coll, "content_type");
+            String requestedModel = s(coll, "embedding_model");
+
+            var existingRow = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL)
+                    .from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+                    .and(CATALOG_COLLECTIONS.NAME.eq(name))
+                    .fetchOne();
+
+            String  effectiveModel;
+            Integer effectiveDimension = null;
+            String  lifecycleState     = null;
+
+            if (existingRow != null) {
+                String existingModel = existingRow.value1();
+                if (requestedModel != null && !requestedModel.isBlank()
+                        && !requestedModel.equals(existingModel)) {
+                    throw new EmbeddingProfileConflictException(
+                        "collection '" + name + "' is already registered with embedding_model '"
+                        + existingModel + "'; refusing to change it to '" + requestedModel + "'");
+                }
+                // Discarded on conflict (EMBEDDING_MODEL is not in the SET list below) —
+                // bound only because the INSERT's VALUES list requires a value.
+                effectiveModel = nne(existingModel);
+            } else {
+                String  profileModel     = null;
+                Integer profileDimension = null;
+                if (contentType != null && !contentType.isBlank()) {
+                    var profileRow = ctx.select(EMBEDDING_PROFILE.EMBEDDING_MODEL, EMBEDDING_PROFILE.DIMENSION)
+                            .from(EMBEDDING_PROFILE)
+                            .where(EMBEDDING_PROFILE.TENANT_ID.eq(tenant))
+                            .and(EMBEDDING_PROFILE.CONTENT_TYPE.eq(contentType))
+                            .fetchOne();
+                    if (profileRow != null) {
+                        profileModel     = profileRow.value1();
+                        profileDimension = profileRow.value2();
+                    }
+                }
+                if (profileModel != null) {
+                    if (requestedModel != null && !requestedModel.isBlank()
+                            && !requestedModel.equals(profileModel)) {
+                        throw new EmbeddingProfileConflictException(
+                            "the embedding profile for content_type '" + contentType + "' is '"
+                            + profileModel + "'; refusing to register '" + name
+                            + "' with embedding_model '" + requestedModel + "'");
+                    }
+                    effectiveModel     = profileModel;
+                    effectiveDimension = profileDimension;
+                } else {
+                    effectiveModel = nne(requestedModel);
+                    if (!effectiveModel.isBlank()) {
+                        effectiveDimension = ctx.select(EMBEDDING_MODELS.DIMENSION)
+                                .from(EMBEDDING_MODELS)
+                                .where(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(effectiveModel))
+                                .fetchOne(EMBEDDING_MODELS.DIMENSION);
+                    }
+                }
+                boolean quarantine = (contentType != null && contentType.startsWith("quarantine-"))
+                                  || (name != null && name.startsWith("quarantine-"));
+                lifecycleState = quarantine ? "quarantine" : "live";
+            }
+
             // nexus-xtmtf: superseded_at / created_at are timestamptz NULL columns after
             // catalog-002-1-temporal-typing (RDR-156 P0.2). Parse the ISO-8601-or-empty
             // strings to OffsetDateTime in Java (blank -> NULL) and bind the generated
@@ -6253,10 +6374,11 @@ public final class CatalogRepository {
                     CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
                     CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
                     CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_AT,
-                    CATALOG_COLLECTIONS.CREATED_AT)
+                    CATALOG_COLLECTIONS.CREATED_AT,
+                    CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
                .values(tenant,
-                       s(coll, "name"), nne(s(coll, "content_type")),
-                       nne(s(coll, "owner_id")), nne(s(coll, "embedding_model")),
+                       name, nne(contentType),
+                       nne(s(coll, "owner_id")), effectiveModel,
                        nne(s(coll, "model_version")), nne(s(coll, "display_name")),
                        nb(bFlag(coll, "legacy_grandfathered"), false),
                        nne(s(coll, "superseded_by")), tsOrNull(s(coll, "superseded_at")),
@@ -6264,12 +6386,17 @@ public final class CatalogRepository {
                        // now — the client never sends it (nexus-1wjmq class), so stamp
                        // "now" on insert rather than binding NULL (mirrors createdAtOrNow's
                        // existing catalog_links fix, nexus-4j80w).
-                       createdAtOrNow(s(coll, "created_at")))
+                       createdAtOrNow(s(coll, "created_at")),
+                       effectiveDimension, lifecycleState)
                .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
                .doUpdate()
                .set(CATALOG_COLLECTIONS.CONTENT_TYPE,         DSL.excluded(CATALOG_COLLECTIONS.CONTENT_TYPE))
                .set(CATALOG_COLLECTIONS.OWNER_ID,             DSL.excluded(CATALOG_COLLECTIONS.OWNER_ID))
-               .set(CATALOG_COLLECTIONS.EMBEDDING_MODEL,      DSL.excluded(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
+               // RDR-204 1a: embedding_model/dimension/lifecycle_state are deliberately
+               // ABSENT from this SET list — an existing row is never re-pointed by the
+               // profile (or by a same-name re-registration naming its own model). The
+               // VALUES bound above for those three columns are used only on a genuine
+               // INSERT; a conflict discards them entirely.
                .set(CATALOG_COLLECTIONS.MODEL_VERSION,        DSL.excluded(CATALOG_COLLECTIONS.MODEL_VERSION))
                .set(CATALOG_COLLECTIONS.DISPLAY_NAME,         DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME))
                .set(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, DSL.excluded(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED))

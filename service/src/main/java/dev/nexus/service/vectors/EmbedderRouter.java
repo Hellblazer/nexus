@@ -305,23 +305,38 @@ public final class EmbedderRouter implements Embedder {
      * inventing a second marker — neither seed method needs one of its own,
      * because the UPSERT is the idempotency check, not a marker read.
      *
+     * <p>Content types are free-form on the client (bead nexus-ft04v.8 fix,
+     * coordinator-reported regression against the primary's Python suite,
+     * 2026-09-07): a caller may register any string, including one this
+     * router's mode has no dedicated mapping for (a test fixture's
+     * {@code "prose"}, a {@code quarantine-<ct>} content type, or any other
+     * caller-invented value). Such a content type gets the SAME CCE bucket
+     * token {@code "unknown"} gets (bge-768 in ONNX mode, {@code
+     * voyage-context-3} in Voyage mode) — never a hard refusal. Registration
+     * is a request the engine must be able to honour; the 422 this profile
+     * enables (bead nexus-ft04v.8) is reserved for a request that NAMES a
+     * model disagreeing with the profile, never for an unrecognised content
+     * type.
+     *
      * @param tenantScope the RLS-stamping gateway
      * @param tenant      the tenant being registered for
      * @param contentType the content type of the collection being registered
-     *                    (one of this router's mapped types, or {@code
-     *                    "unknown"} — see {@link #contentTypeModelTokens})
-     * @throws IllegalArgumentException if {@code contentType} has no mapping
-     *                                  in this router's mode
+     *                    — any string; one of this router's mapped types
+     *                    (or {@code "unknown"}, see {@link
+     *                    #contentTypeModelTokens}) gets its own token, any
+     *                    other value falls back to the {@code "unknown"}
+     *                    token
      */
     public void seedEmbeddingProfileForContentType(
             TenantScope tenantScope, String tenant, String contentType) {
-        String modelToken = contentTypeModelTokens().get(contentType);
+        Map<String, String> tokens = contentTypeModelTokens();
+        String modelToken = tokens.get(contentType);
         if (modelToken == null) {
-            throw new IllegalArgumentException(
-                "content type '" + contentType + "' has no model mapping in mode " + modeName());
+            modelToken = tokens.get("unknown");
         }
+        String finalModelToken = modelToken;
         tenantScope.withTenant(tenant, ctx -> {
-            upsertProfileRow(ctx, tenant, contentType, modelToken);
+            upsertProfileRow(ctx, tenant, contentType, finalModelToken);
             return null;
         });
         CollectionRegistry.evictTenant(tenant);

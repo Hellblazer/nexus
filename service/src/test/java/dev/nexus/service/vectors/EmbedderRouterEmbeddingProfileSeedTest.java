@@ -23,7 +23,6 @@ import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_PROFILE;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * RDR-204 Phase 1 (bead nexus-ft04v.6) — {@link EmbedderRouter}'s
@@ -253,11 +252,32 @@ class EmbedderRouterEmbeddingProfileSeedTest {
                 .isEqualTo("voyage-context-3");
     }
 
+    /**
+     * bead nexus-ft04v.8 fix (coordinator-reported regression, 2026-09-07):
+     * content types are free-form on the client — an unmapped one must fall
+     * back to the SAME CCE bucket token {@code "unknown"} gets, in BOTH
+     * modes, never throw. This test used to assert the opposite
+     * ({@code IllegalArgumentException}); that behaviour, once the caller
+     * (bead .8's {@code CatalogHandler}) moved the seed ahead of the
+     * registration decision, turned a registration that used to succeed
+     * into an HTTP 400 for any content type outside the fixed set (a test
+     * fixture's {@code "prose"}, a {@code quarantine-<ct>} content type,
+     * etc.) — never a hard refusal.
+     */
     @Test
-    void unmappedContentType_isRejected() {
-        EmbedderRouter router = new EmbedderRouter(new FakeBge(), "document");
-        assertThatThrownBy(() -> router.seedEmbeddingProfileForContentType(
-                tenantScope, LOCAL_TENANT + "-bogus", "not-a-real-content-type"))
-                .isInstanceOf(IllegalArgumentException.class);
+    void unmappedContentType_fallsBackToTheCCEBucketToken_inBothModes() {
+        EmbedderRouter onnx = new EmbedderRouter(new FakeBge(), "document");
+        String onnxTenant = LOCAL_TENANT + "-unmapped";
+        onnx.seedEmbeddingProfileForContentType(tenantScope, onnxTenant, "not-a-real-content-type");
+        assertThat(profileRows(onnxTenant).get("not-a-real-content-type").get("model"))
+                .as("ONNX mode: unmapped content type falls back to bge-768, same as \"unknown\"")
+                .isEqualTo("bge-base-en-v15-768");
+
+        EmbedderRouter voyage = new EmbedderRouter("dummy-key", "document");
+        String voyageTenant = VOYAGE_TENANT + "-unmapped";
+        voyage.seedEmbeddingProfileForContentType(tenantScope, voyageTenant, "not-a-real-content-type");
+        assertThat(profileRows(voyageTenant).get("not-a-real-content-type").get("model"))
+                .as("Voyage mode: unmapped content type falls back to voyage-context-3, same as \"unknown\"")
+                .isEqualTo("voyage-context-3");
     }
 }
