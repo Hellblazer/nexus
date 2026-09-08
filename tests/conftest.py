@@ -588,6 +588,15 @@ _real_config_dir_baseline: dict[str, tuple[int, int]] = {}
 #: run. A path is exempt if it starts with any entry here. Every entry is
 #: commented with the specific writing process and how it was established.
 _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
+    # The user-level PostToolUse hook ``record_session_commits.py``
+    # (nexus-9wxu6, installed 2026-09-08 on this box beside the git-policy
+    # hook) appends one sha to ``session_commits/<session_id>`` after every
+    # ``git commit`` a Claude Code session makes. Several sessions share the
+    # box and commit at any time, so a 90-second unit run routinely sees a
+    # peer's file grow: MEASURED on the plugin-v7.36.1-1 cut battery
+    # (two peers' files modified during tests/hooks/). Append-only, one
+    # line per commit, never read by any test.
+    "session_commits/",
     # Live aspect-worker daemon's own address/heartbeat registration file
     # (``ttl=3.0``-second heartbeat_epoch bump, same size every write).
     # MEASURED directly (nexus-pfuns round 1): ran `uv run pytest tests/
