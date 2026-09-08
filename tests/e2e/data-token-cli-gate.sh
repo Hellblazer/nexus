@@ -243,7 +243,7 @@ echo "── 5/10 store put + search round trip — self-minted data token ONLY 
 # actually minting and presenting a data token for BOTH the T3 vector
 # write/read AND the T2 catalog registration store put also performs.
 SENTINEL="dtok-gate-sentinel: self-minted data token round trip ($$)"
-echo "$SENTINEL" | _nx_poisoned store put - --title "dtok-gate-sentinel" \
+echo "$SENTINEL" | _nx_poisoned store put - --collection dtok-gate --title "dtok-gate-sentinel" \
     >"$LOGS/store-put.log" 2>"$LOGS/store-put.stderr.log" \
     || _fail "store put via self-minted data token failed (see $LOGS/store-put.log / .stderr.log) — the mint path did not authenticate"
 grep -Eq "Stored: [0-9a-f]{64}" "$LOGS/store-put.log" \
