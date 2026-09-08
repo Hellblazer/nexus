@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Callable
 import structlog
 
 from nexus.config import default_db_path
+from nexus.redact import redact_credentials  # noqa: F401 — re-exported; callers import it from here
 
 if TYPE_CHECKING:
     from nexus.catalog.catalog_protocol import CatalogReader
@@ -26,16 +27,6 @@ _log = structlog.get_logger(__name__)
 #: Credential-bearing phrases a service error body may echo back. The value
 #: after the key word is replaced, whatever its shape, so a rotated token or
 #: a raw api_key never reaches a log line (nexus-8ooxn / nexus-hcy4w).
-_CREDENTIAL_RE = re.compile(
-    r"(?i)\b(api[_-]?key|token|bearer|password|secret|authorization)\b(\s*[:=]?\s*)(\S+)"
-)
-
-
-def redact_credentials(text: str) -> str:
-    """*text* with the value after any credential key word replaced by
-    ``[redacted]``. Applied to error bodies before they are logged."""
-    return _CREDENTIAL_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}[redacted]", text)
-
 _CHECK = "✓"
 _WARN = "✗"
 # RDR-129 B4 (nexus-uq8a4): a third, soft state — the check could not complete

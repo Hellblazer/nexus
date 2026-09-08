@@ -390,9 +390,16 @@ except ValueError:
         except ValueError:
             tokenized.append((None, raw_seg))
 
+# Malformed quoting means the flag value could not be isolated by shlex;
+# blank it textually (a value opened by an unbalanced quote runs to the
+# end of the segment) so the raw scan never reads --reason prose as targets.
+FLAG_VALUE_RE = re.compile(
+    r'(--reason|--description|--notes|-m)(=|\s+)(\x22[^\x22]*\x22?|\x27[^\x27]*\x27?|\S+)'
+)
+
 for tokens, raw in tokenized:
     if tokens is None:
-        _scan_text(raw)
+        _scan_text(FLAG_VALUE_RE.sub(r'\1\2 ', raw))
         continue
     i = 0
     while i < len(tokens):

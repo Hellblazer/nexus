@@ -504,6 +504,8 @@ class TestCheckVersionTransitionBackfillsInstallMode:
             "nexus.upgrade_finish.install_mtime_and_version",
             return_value=(0.0, "6.7.1"),
         ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
             "nexus.config.backfill_install_mode_record",
         ) as backfill:
             check_version_transition(tmp_path, preview=True)

@@ -38,6 +38,7 @@ from typing import Any, NoReturn
 
 import structlog
 
+from nexus.redact import redact_credentials
 from nexus.logging_setup import emit_import_time_warning
 
 _log = structlog.get_logger(__name__)
@@ -1337,7 +1338,9 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
             err = json.loads(body_bytes)
         except Exception:  # noqa: BLE001 — error-body decode is best-effort; fall back to raw bytes
             err = {"error": body_bytes.decode(errors="replace")}
-        msg = f"POST {path} → HTTP {e.code}: {err.get('error', err)}"
+        # nexus-8ooxn: a 401/403 body can echo the rejected credential;
+        # redact where it enters the message so every renderer sees it gone.
+        msg = f"POST {path} → HTTP {e.code}: {redact_credentials(str(err.get('error', err)))}"
         # RDR-195 (nexus-kmtlp.11): a STRUCTURED error body — the engine's
         # 422 for Voyage TOO_MANY_TOKENS_IN_BATCH carries detail/sub_requests/
         # batch_size/model — must reach the caller intact. Keeping only the
@@ -1346,7 +1349,7 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
         # purpose: any error body with a ``detail`` field gets the same
         # treatment; plain ``{"error": ...}`` bodies render exactly as before.
         if isinstance(err, dict) and err.get("detail"):
-            msg += f" — {err['detail']}"
+            msg += f" — {redact_credentials(str(err['detail']))}"
             extras = [
                 f"{k}={err[k]}"
                 for k in ("sub_requests", "batch_size", "model")
@@ -1395,7 +1398,7 @@ def _get(path: str, *, tenant: str = "default") -> Any:
             err = json.loads(body_bytes)
         except Exception:  # noqa: BLE001 — error-body decode is best-effort; fall back to raw bytes
             err = {"error": body_bytes.decode(errors="replace")}
-        msg = f"GET {path} → HTTP {e.code}: {err.get('error', err)}"
+        msg = f"GET {path} → HTTP {e.code}: {redact_credentials(str(err.get('error', err)))}"
         edge_server = _edge_server(e.headers)  # nexus-1jtob — see _post
         if edge_server:
             remedy: str | None = _edge_refusal_remedy(edge_server, e.code)

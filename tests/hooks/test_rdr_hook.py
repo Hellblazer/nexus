@@ -157,9 +157,14 @@ def test_summary_prints_for_this_repos_real_tree(rdr_hook_module, monkeypatch, c
         mod.main()
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
-    m = re.search(r"^RDR: (\d+) documents \(2 closed, 1 accepted\) in docs/rdr but NOT indexed\.$", out, re.M)
+    m = re.search(r"^RDR: (\d+) documents \((\d+) RDRs: 2 closed, 1 accepted\) in docs/rdr but NOT indexed\.$", out, re.M)
     assert m, out
-    assert int(m.group(1)) > 200, out
+    documents, rdrs = int(m.group(1)), int(m.group(2))
+    assert rdrs > 200, out
+    # nexus-owna8: the document count is the indexer's own walk (recursive,
+    # joint/ and post-mortem/ included), so it reconciles with the collection.
+    assert documents == sum(1 for p in (REPO_ROOT / "docs" / "rdr").rglob("*.md") if p.is_file()), out
+    assert documents > rdrs, out
     assert "Run: nx index repo" in out
     # nexus-3o4lt: the old remedy minted curator-owner rows with absolute
     # paths for every RDR; the hook must never recommend it again.
@@ -270,3 +275,46 @@ def test_resolution_failure_is_logged_not_swallowed(rdr_hook_module, monkeypatch
     name = mod._resolve_rdr_collection(tmp_path)
     assert name == "rdr__isolated-abcdef12__voyage-context-3__v1"
     assert any(e["event"] == "rdr_hook_collection_resolution_failed" and e["source"] == "catalog" for e in logged), logged
+
+
+def test_indexed_document_count_matches_the_indexer_walk(rdr_hook_module, tmp_path) -> None:
+    rdr_dir = tmp_path / "docs" / "rdr"
+    (rdr_dir / "post-mortem").mkdir(parents=True)
+    (rdr_dir / "joint").mkdir()
+    for name in ("rdr-201-thing.md", "README.md", "AGENTS.md"):
+        (rdr_dir / name).write_text("x")
+    (rdr_dir / "post-mortem" / "rdr-191-postmortem.md").write_text("x")
+    (rdr_dir / "joint" / "JDR-001.md").write_text("x")
+    (rdr_dir / "notes.txt").write_text("x")
+    assert rdr_hook_module._indexed_document_count(rdr_dir) == 5
+    assert len(rdr_hook_module._rdr_files(rdr_dir)) == 1
+
+
+def test_slow_t3_answer_falls_back_to_the_listing_within_the_hook_budget(
+    rdr_hook_module, monkeypatch,
+) -> None:
+    """Review of a71c93e92: the T3 client's request timeout (30s) exceeds
+    the hook's 10s cap, so a slow store had the harness kill the hook before
+    the fallback ran. The T3 call now has its own deadline."""
+    import subprocess as sp
+    import time
+
+    mod = rdr_hook_module
+    monkeypatch.setattr(mod, "_T3_DEADLINE_S", 0.2)
+
+    class _SlowT3:
+        def collection_exists(self, name):
+            time.sleep(2)
+            return True
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _SlowT3())
+
+    class _Done:
+        returncode = 0
+        stdout = "rdr__1-1__voyage-context-3__v1\n"
+    monkeypatch.setattr(sp, "run", lambda *a, **k: _Done())
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _Done())
+
+    started = time.monotonic()
+    assert mod._collection_exists("rdr__1-1__voyage-context-3__v1")
+    assert not mod._collection_exists("rdr__other__voyage-context-3__v1")
+    assert time.monotonic() - started < 1.5

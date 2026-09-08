@@ -31,8 +31,8 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.36.0)
 
-- `conexus/hooks/scripts/pre_close_verification_hook.sh` — nexus-fv65m: the command is tokenized quote-aware before it is split on operators, so a ';' or 'do' inside a quoted --reason no longer harvests prose ids as close targets.
-- `conexus/hooks/scripts/rdr_hook.py` — nexus-owna8: collection existence is asked of the T3 client, not a substring of `nx collection list`; a resolution failure is logged instead of swallowed.
+- `conexus/hooks/scripts/pre_close_verification_hook.sh` — nexus-fv65m: the command is tokenized quote-aware before it is split on operators, so a ';' or 'do' inside a quoted --reason no longer harvests prose ids as close targets; with an unbalanced quote the flag value is blanked before the raw-scan fallback.
+- `conexus/hooks/scripts/rdr_hook.py` — nexus-owna8: collection existence is asked of the T3 client, not a substring of `nx collection list`; a resolution failure is logged instead of swallowed; the T3 call has a 4s deadline inside the hook's 10s cap; the summary counts every document the indexer walks (recursive) beside the RDR count.
 - `conexus/agents/_shared/CONTEXT_PROTOCOL.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
 - `conexus/agents/architect-planner.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
 - `conexus/agents/code-review-expert.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).

@@ -34,6 +34,8 @@ if sys.version_info < (3, 12):
 
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from collections import Counter
 from pathlib import Path
 
@@ -114,21 +116,37 @@ def _log_resolution_error(source: str, exc: BaseException) -> None:
         pass
 
 
+# hooks.json caps this hook at 10s and the T3 client's own request timeout
+# is 30s, so a slow-but-reachable store would have the harness kill the hook
+# before the listing fallback ever ran (review of a71c93e92). Both halves
+# get a budget that fits inside the cap.
+_T3_DEADLINE_S = 4.0
+_LISTING_TIMEOUT_S = 4
+
+
 def _collection_exists(target: str) -> bool:
     """Whether *target* exists in T3, asked of the store itself
     (nexus-owna8: the previous substring match over ``nx collection list``
     output missed a listed collection when the resolved name and the
-    listed name were rendered differently)."""
+    listed name were rendered differently). The T3 call runs under
+    ``_T3_DEADLINE_S``; past it, or on any error, the listing is the fallback."""
     try:
         from nexus.db import make_t3  # noqa: PLC0415
 
-        return bool(make_t3().collection_exists(target))
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = pool.submit(lambda: bool(make_t3().collection_exists(target)))
+            return future.result(timeout=_T3_DEADLINE_S)
+        finally:
+            pool.shutdown(wait=False)
+    except FutureTimeout:
+        _log_resolution_error("t3-exists", TimeoutError(f"no answer within {_T3_DEADLINE_S}s"))
     except Exception as exc:  # noqa: BLE001 — the hook must never fail; fall back to the listing
         _log_resolution_error("t3-exists", exc)
     try:
         result = subprocess.run(
             ["nx", "collection", "list"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=_LISTING_TIMEOUT_S,
         )
         if result.returncode == 0:
             return target in result.stdout
@@ -274,12 +292,21 @@ def _rdr_dir(root: Path) -> Path:
 
 def _rdr_files(rdr_dir: Path) -> list[Path]:
     """The RDR documents directly under *rdr_dir* -- non-recursive, so
-    ``docs/rdr/post-mortem/`` (a separate document set) is never counted,
-    with the index/template/agents files excluded by name."""
+    ``docs/rdr/post-mortem/`` (a separate document set) never carries an
+    RDR status, with the index/template/agents files excluded by name."""
     return [
         p for p in rdr_dir.glob("*.md")
         if p.name.lower() not in _EXCLUDE_FILES and _extract_rdr_id(p) is not None
     ]
+
+
+def _indexed_document_count(rdr_dir: Path) -> int:
+    """Every markdown file the repo indexer registers under *rdr_dir*: the
+    same recursive walk as ``nx index repo`` (joint/ and post-mortem/
+    included, README and AGENTS included). nexus-owna8: the hook reported
+    the RDR count against a collection holding this count, and the two
+    numbers (215 vs 298) read as a partial index."""
+    return sum(1 for p in rdr_dir.rglob("*.md") if p.is_file() and not p.is_symlink())
 
 
 def main() -> None:
@@ -301,11 +328,12 @@ def main() -> None:
 
     statuses = _load_all_t2_statuses(repo_name)
     counts = _rdr_status_counts(repo_name, statuses)
+    documents = _indexed_document_count(rdr_dir)
     if counts:
         breakdown = ", ".join(f"{n} {s}" for s, n in counts.most_common())
-        status_info = f"{len(rdr_files)} documents ({breakdown})"
+        status_info = f"{documents} documents ({len(rdr_files)} RDRs: {breakdown})"
     else:
-        status_info = f"{len(rdr_files)} document(s)"
+        status_info = f"{documents} documents ({len(rdr_files)} RDRs)"
 
     if indexed:
         print(f"RDR: {status_info}, indexed in {rdr_collection}")
