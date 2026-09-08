@@ -25,14 +25,14 @@ def test_session_end_sweeps_stale_mint_locks(tmp_path: Path, monkeypatch) -> Non
     os.utime(stale, (old, old))
     fresh = cfg / "t1_mint_cafebabe.lock"
     fresh.touch()
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: cfg)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
     launcher._sweep_local_garbage()
     assert not stale.exists(), "a day-old lock with no lease is reaped"
     assert fresh.exists(), "a fresh lock is left alone"
 
 
 def test_sweep_failure_never_raises(monkeypatch) -> None:
-    def boom():
-        raise RuntimeError("no config dir")
-    monkeypatch.setattr("nexus.config.nexus_config_dir", boom)
+    def boom(*a, **k):
+        raise RuntimeError("store unavailable")
+    monkeypatch.setattr("nexus.garbage.sweep_local_garbage", boom)
     launcher._sweep_local_garbage()  # must not raise
