@@ -9,6 +9,8 @@ import com.sun.net.httpserver.HttpPrincipal;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -306,14 +308,9 @@ class CatalogHandlerManifestFkTest {
             // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now carries
             // chunks_collection_fk (tenant_id, collection) -> catalog_collections
             // (tenant_id, name) — stub-register the collection first, mirroring
-            // PgVectorRepository#upsertChunks' own ensure-registered step.
-            try (var regPs = su.prepareStatement(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
-                    + "ON CONFLICT (tenant_id, name) DO NOTHING")) {
-                regPs.setString(1, TENANT);
-                regPs.setString(2, collection);
-                regPs.execute();
-            }
+            // PgVectorRepository#upsertChunks' own ensure-registered step. RDR-204
+            // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection);
             try (var ps = su.prepareStatement(
                     "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
                     + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::nexus.vector) "

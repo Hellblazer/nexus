@@ -57,9 +57,22 @@ from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbed
 from click.testing import CliRunner
 
 from nexus.cli import main
+from nexus.corpus import effective_embedding_model_for_writes
 from nexus.db.t3 import T3Database
 from tests._catalog_fixture_ops import ActiveCatalog
 from tests.conftest import make_vector_test_client
+
+# RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine pins an install-scoped
+# embedding profile per (tenant, content_type) on FIRST write and refuses a
+# later registration naming a DIFFERENT model for that content_type (422
+# EmbeddingProfileConflictException). This file's rename destinations used
+# to hardcode "voyage-context-3" as "a plausible conformant model token" —
+# against this suite's real local (bge) substrate, whose 'knowledge'
+# profile is already pinned to bge the moment any earlier test in the file
+# registers a knowledge__* collection for real, that hardcoded token
+# conflicts. Resolve the box's REAL write-time model instead (never a
+# mocked mode against a real substrate that cannot honor a foreign token).
+_KNOWLEDGE_MODEL = effective_embedding_model_for_writes("knowledge")
 
 
 @pytest.fixture()
@@ -142,7 +155,7 @@ def test_rename_rejects_old_not_in_projection(t3_db, active_catalog, runner):
             main,
             ["catalog", "rename-collection",
              "knowledge__delos",
-             "knowledge__1-1__voyage-context-3__v1"],
+             f"knowledge__1-1__{_KNOWLEDGE_MODEL}__v1"],
         )
     assert result.exit_code != 0
     assert "not registered" in result.output.lower()
@@ -165,17 +178,17 @@ def test_rename_rejects_already_superseded(t3_db, active_catalog, runner):
     """
     active_catalog.register_collection("knowledge__delos")
     active_catalog.register_collection(
-        "knowledge__1-1__voyage-context-3__v1",
+        f"knowledge__1-1__{_KNOWLEDGE_MODEL}__v1",
         content_type="knowledge", owner_id="1-1",
-        embedding_model="voyage-context-3", model_version="v1",
+        embedding_model=_KNOWLEDGE_MODEL, model_version="v1",
     )
     active_catalog.supersede_collection(
-        "knowledge__delos", "knowledge__1-1__voyage-context-3__v1",
+        "knowledge__delos", f"knowledge__1-1__{_KNOWLEDGE_MODEL}__v1",
     )
     # NON-VACUITY guard: the already-superseded premise is real.
     seeded = active_catalog.get_collection("knowledge__delos")
     assert seeded is not None
-    assert seeded.get("superseded_by") == "knowledge__1-1__voyage-context-3__v1", (
+    assert seeded.get("superseded_by") == f"knowledge__1-1__{_KNOWLEDGE_MODEL}__v1", (
         "guard: the seed supersede must have landed before probing the gate"
     )
     _seed_t3_collection(t3_db, "knowledge__delos")
@@ -185,7 +198,7 @@ def test_rename_rejects_already_superseded(t3_db, active_catalog, runner):
             main,
             ["catalog", "rename-collection",
              "knowledge__delos",
-             "knowledge__1-1__voyage-context-3__v2"],
+             f"knowledge__1-1__{_KNOWLEDGE_MODEL}__v2"],
         )
     assert result.exit_code != 0
     assert "superseded" in result.output.lower()
@@ -194,14 +207,14 @@ def test_rename_rejects_already_superseded(t3_db, active_catalog, runner):
 def test_rename_rejects_new_already_exists_in_t3(t3_db, active_catalog, runner):
     active_catalog.register_collection("knowledge__delos")
     _seed_t3_collection(t3_db, "knowledge__delos")
-    _seed_t3_collection(t3_db, "knowledge__1-1__voyage-context-3__v1")
+    _seed_t3_collection(t3_db, f"knowledge__1-1__{_KNOWLEDGE_MODEL}__v1")
 
     with patch("nexus.db.make_t3", return_value=t3_db):
         result = runner.invoke(
             main,
             ["catalog", "rename-collection",
              "knowledge__delos",
-             "knowledge__1-1__voyage-context-3__v1"],
+             f"knowledge__1-1__{_KNOWLEDGE_MODEL}__v1"],
         )
     assert result.exit_code != 0
     assert "already exists" in result.output.lower()
@@ -244,7 +257,7 @@ def test_rename_conformant_new_succeeds(t3_db, active_catalog, runner):
             main,
             ["catalog", "rename-collection",
              "knowledge__delos",
-             "knowledge__1-1__voyage-context-3__v1",
+             f"knowledge__1-1__{_KNOWLEDGE_MODEL}__v1",
              "--yes"],
         )
     assert result.exit_code == 0, result.output
@@ -252,17 +265,17 @@ def test_rename_conformant_new_succeeds(t3_db, active_catalog, runner):
     # Collections projection: new is registered with parsed segments and
     # not legacy (explicit-segment register_collection path — correct on
     # both arms; the BARE path's derivation gap is nexus-cecqy item 16).
-    new_row = active_catalog.get_collection("knowledge__1-1__voyage-context-3__v1")
+    new_row = active_catalog.get_collection(f"knowledge__1-1__{_KNOWLEDGE_MODEL}__v1")
     assert new_row is not None
     assert new_row["legacy_grandfathered"] is False
     assert new_row["content_type"] == "knowledge"
-    assert new_row["embedding_model"] == "voyage-context-3"
+    assert new_row["embedding_model"] == _KNOWLEDGE_MODEL
 
     # Catalog documents re-pointed by the cascade (service arm: inside the
     # engine's one-transaction rename; read back through the live reader).
     entry = active_catalog.by_doc_id(str(doc_tumbler))
     assert entry is not None
-    assert entry.physical_collection == "knowledge__1-1__voyage-context-3__v1"
+    assert entry.physical_collection == f"knowledge__1-1__{_KNOWLEDGE_MODEL}__v1"
 
 
 # test_rename_conformant_new_succeeds_local_fanout RETIRED (nexus-i711w
@@ -285,17 +298,17 @@ def test_rename_dry_run_no_writes(t3_db, active_catalog, runner):
             main,
             ["catalog", "rename-collection",
              "knowledge__delos",
-             "knowledge__1-1__voyage-context-3__v1",
+             f"knowledge__1-1__{_KNOWLEDGE_MODEL}__v1",
              "--dry-run"],
         )
     assert result.exit_code == 0, result.output
     assert "would rename" in result.output.lower()
     assert t3_db.collection_exists("knowledge__delos")
-    assert not t3_db.collection_exists("knowledge__1-1__voyage-context-3__v1")
+    assert not t3_db.collection_exists(f"knowledge__1-1__{_KNOWLEDGE_MODEL}__v1")
     # Projection untouched: nothing registered for the new name, old row
     # not superseded. (``not ...get("superseded_by")`` rather than == "":
     # by meaning — the service arm may render the empty pointer as None.)
-    assert active_catalog.get_collection("knowledge__1-1__voyage-context-3__v1") is None
+    assert active_catalog.get_collection(f"knowledge__1-1__{_KNOWLEDGE_MODEL}__v1") is None
     old_row = active_catalog.get_collection("knowledge__delos")
     assert old_row is not None
     assert not old_row.get("superseded_by")
@@ -311,13 +324,13 @@ def test_rename_no_yes_falls_back_to_report_only(t3_db, active_catalog, runner):
             main,
             ["catalog", "rename-collection",
              "knowledge__delos",
-             "knowledge__1-1__voyage-context-3__v1"],
+             f"knowledge__1-1__{_KNOWLEDGE_MODEL}__v1"],
         )
     assert result.exit_code == 0
     assert "add --yes" in result.output.lower()
     assert t3_db.collection_exists("knowledge__delos")
     # Report-only: nothing registered for the new name.
-    assert active_catalog.get_collection("knowledge__1-1__voyage-context-3__v1") is None
+    assert active_catalog.get_collection(f"knowledge__1-1__{_KNOWLEDGE_MODEL}__v1") is None
 
 
 def test_rename_to_self_rejected(t3_db, active_catalog, runner):
@@ -326,18 +339,18 @@ def test_rename_to_self_rejected(t3_db, active_catalog, runner):
     ``new already exists`` gate (misleading).
     """
     active_catalog.register_collection(
-        "knowledge__1-1__voyage-context-3__v1",
+        f"knowledge__1-1__{_KNOWLEDGE_MODEL}__v1",
         content_type="knowledge", owner_id="1-1",
-        embedding_model="voyage-context-3", model_version="v1",
+        embedding_model=_KNOWLEDGE_MODEL, model_version="v1",
     )
-    _seed_t3_collection(t3_db, "knowledge__1-1__voyage-context-3__v1")
+    _seed_t3_collection(t3_db, f"knowledge__1-1__{_KNOWLEDGE_MODEL}__v1")
 
     with patch("nexus.db.make_t3", return_value=t3_db):
         result = runner.invoke(
             main,
             ["catalog", "rename-collection",
-             "knowledge__1-1__voyage-context-3__v1",
-             "knowledge__1-1__voyage-context-3__v1",
+             f"knowledge__1-1__{_KNOWLEDGE_MODEL}__v1",
+             f"knowledge__1-1__{_KNOWLEDGE_MODEL}__v1",
              "--yes"],
         )
     assert result.exit_code != 0

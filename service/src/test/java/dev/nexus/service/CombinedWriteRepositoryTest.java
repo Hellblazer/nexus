@@ -88,6 +88,31 @@ class CombinedWriteRepositoryTest {
         repo = new CatalogRepository(tenantScope);
         embedder = new CountingFakeEmbedder();
         svc = new CombinedWriteService(tenantScope, repo, new EmbedderRouter(embedder, "document"));
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK to catalog_collections — CombinedWriteService's
+        // stub-insert is retired, so a real row must exist before any chunk write
+        // (writeManifestRows -> upsertManifestChunkVectors), or the FK itself rejects
+        // the insert. This suite's tests predate that requirement and use a small,
+        // distinct, per-test collection name purely for row isolation
+        // (CollectionRegistryTest owns the fail-loud contract itself).
+        for (String col : List.of(
+                "code__cw1__minilm-l6-v2-384__v1", "code__cw2__minilm-l6-v2-384__v1",
+                "code__cw3__minilm-l6-v2-384__v1", "code__cw4__minilm-l6-v2-384__v1",
+                "code__cw5__minilm-l6-v2-384__v1", "code__cw6__minilm-l6-v2-384__v1",
+                "code__cw7__minilm-l6-v2-384__v1", "code__cw8__minilm-l6-v2-384__v1",
+                "code__cw9b__minilm-l6-v2-384__v1", "code__cw10__minilm-l6-v2-384__v1",
+                "code__cw11__minilm-l6-v2-384__v1", "code__cw12__minilm-l6-v2-384__v1",
+                "code__cw13__minilm-l6-v2-384__v1", "code__cw14__minilm-l6-v2-384__v1")) {
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection,
+            // which derives the constraint-satisfying attributes hygiene-002-1 now
+            // requires (the bare two-column insert this used to run 23502s on
+            // lifecycle_state NOT NULL).
+            tenantScope.withTenant(TENANT_A, ctx -> {
+                PgContainerHelper.insertCollection(ctx, TENANT_A, col);
+                return null;
+            });
+        }
     }
 
     @AfterAll
@@ -738,6 +763,41 @@ class CombinedWriteRepositoryTest {
         assertThat(chunk384MetadataJson(TENANT_A, col, chash))
             .as("the refresh completed once the gate was released")
             .contains("\"section_type\": \"imports\"");
+    }
+
+    @Test @Order(15)
+    void combinedWrite_unregisteredCollection_docsOnlyPath_throwsAndWritesNoRow() throws Exception {
+        // RDR-204 Phase 1 (nexus-ft04v.7 gap 3, closed by nexus-ft04v.8's test
+        // addendum): writeManyCombined's ensureCollectionRegistered guard runs
+        // BEFORE any per-doc processing -- including a docs-only call (empty
+        // `chunks`, exactly the §5.1 backward-compatible shape Order(4)/(5)
+        // above exercise against a REGISTERED collection). Against an
+        // unregistered one it must fail loud instead, with no manifest row,
+        // no chunk row, and no catalog_collections stub for the name.
+        String col = "code__cw-unreg__minilm-l6-v2-384__v1";
+        String chash = ch("cw-unreg-chash");
+
+        assertThatThrownBy(() -> svc.writeManyCombined(TENANT_A, col,
+                List.of(), // docs-only: no new chunk content sent
+                List.of(doc("cw.unreg", List.of(row(0, chash)))),
+                null, false, false))
+            .isInstanceOf(dev.nexus.service.db.UnregisteredCollectionException.class)
+            .hasMessageContaining(col)
+            .hasMessageContaining("POST /v1/catalog/collections/upsert");
+
+        assertThat(repo.getManifest(TENANT_A, "cw.unreg"))
+            .as("a write against an unregistered collection must create no manifest row")
+            .isEmpty();
+        assertThat(chunk384Exists(TENANT_A, col, chash))
+            .as("no chunk row either")
+            .isFalse();
+        boolean stubRowExists = tenantScope.withTenant(TENANT_A, ctx -> ctx.fetchExists(
+                ctx.selectOne().from(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+                   .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A))
+                   .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(col))));
+        assertThat(stubRowExists)
+            .as("the rejected write must not have created a catalog_collections stub row either")
+            .isFalse();
     }
 
     /** Deterministic, dim-384 embedder that counts every text it is asked to embed. */

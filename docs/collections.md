@@ -43,6 +43,13 @@ Not a subject: a document (`the-hnsw-paper`), a session or task
 production tenant today, `docs__default` and `knowledge__knowledge`, both
 minted by taking a default where a subject was needed. They are the
 failure this rule prevents.
+A write that names one of those placeholders as its subject is refused
+(nexus-0fw11) on every writer that resolves a collection name: `nx store
+put`, the MCP `store_put` tool, `nx memory promote`, `nx index pdf` and
+`nx index md`, and `nx dt index`. `nx store put` and `store_put` have no
+default collection for the same reason. An existing placeholder collection
+stays readable, its full four-segment name is still accepted for writes,
+and a recovery-bundle import restores it under its recorded name.
 
 Fine distinctions go on the document, not in a new collection. Use `--tags`
 and `--category` for "postmortem", "draft", "from DEVONthink", "week 36".

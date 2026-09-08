@@ -111,17 +111,17 @@ public final class TaxonomyRepository {
     }
 
     /**
-     * RDR-156 P0.2: ensure catalog_collections has a stub row for the given collection
-     * before any topic_assignment write that carries source_collection.
-     * Idempotent — ON CONFLICT DO NOTHING.
+     * RDR-204 Phase 1 (bead nexus-ft04v.7): require catalog_collections to already
+     * carry a row for the given collection before any topics / taxonomy_meta /
+     * topic_assignments write that carries it; fails loud
+     * ({@link UnregisteredCollectionException}, mapped to 422) instead of the
+     * RDR-156-era stub INSERT ... ON CONFLICT DO NOTHING that used to paper over a
+     * missing row with blank content_type/owner_id/embedding_model. A no-op for a
+     * null/blank collection (unchanged from the stub-insert era).
      */
     private static void ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
         if (collection == null || collection.isBlank()) return;
-        ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-           .values(tenant, collection)
-           .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-           .doNothing()
-           .execute();
+        CollectionRegistry.requireRegistered(ctx, tenant, collection);
     }
 
     /**

@@ -378,7 +378,11 @@ def target_collection_for(recorded: str, t3: Any) -> str:
     if is_conformant_collection_name(recorded):
         parts = recorded.split("__")
         base = f"{parts[0]}__{parts[1]}"
-    return t3_collection_name(base, t3=t3, for_write=True)
+    # nexus-0fw11: the recorded collection already exists on the source
+    # install, placeholder-named or not (docs__default and
+    # knowledge__knowledge are live on the production tenant); restoring it
+    # is not a new placeholder mint, so the refusal is lifted here alone.
+    return t3_collection_name(base, t3=t3, for_write=True, allow_placeholder=True)
 
 
 def _default_import_doc(t3: Any, rec: dict) -> None:

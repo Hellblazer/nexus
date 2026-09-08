@@ -8,6 +8,8 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -346,13 +348,8 @@ class Taxonomy010BackfillDirectIntegrationTest {
     }
 
     private static void registerCollection(Connection c, String tenant, String name) throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.catalog_collections (tenant_id, name) "
-            + "VALUES (?, ?) ON CONFLICT DO NOTHING")) {
-            ps.setString(1, tenant);
-            ps.setString(2, name);
-            ps.executeUpdate();
-        }
+        // RDR-204 nexus-ft04v.4/.5: delegates to PgContainerHelper.insertCollection.
+        PgContainerHelper.insertCollection(DSL.using(c, SQLDialect.POSTGRES), tenant, name);
     }
 
     private static long seedTopic(Connection c, String tenant, String collection, String label)

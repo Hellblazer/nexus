@@ -12,6 +12,23 @@ import pytest
 from nexus.db.t2.http_aspect_queue import HttpAspectQueue
 
 
+@pytest.fixture(autouse=True)
+def _no_real_catalog_registration(monkeypatch: pytest.MonkeyPatch):
+    """RDR-204 Phase 1 (nexus-f5wwx): ``HttpAspectQueue.enqueue`` now
+    routes through ``nexus.corpus.write_with_registration_retry``,
+    which registers the collection before the write. This file's
+    tests are pure HTTP-shape/behavior tests that mock ``_post``
+    directly and never configure a real catalog endpoint — stub the
+    registration step to a bare passthrough (call ``write_fn()``
+    directly), matching the identical fixture in
+    tests/db/test_http_vector_client.py.
+    """
+    monkeypatch.setattr(
+        "nexus.corpus.write_with_registration_retry",
+        lambda name, write_fn, **kwargs: write_fn(),
+    )
+
+
 @pytest.fixture
 def queue(monkeypatch) -> HttpAspectQueue:
     monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")

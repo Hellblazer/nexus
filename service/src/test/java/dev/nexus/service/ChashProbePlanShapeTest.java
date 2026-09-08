@@ -3,6 +3,8 @@ package dev.nexus.service;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -109,9 +111,8 @@ class ChashProbePlanShapeTest {
             st.execute("DROP INDEX IF EXISTS nexus.idx_chunks_trgm");
 
             for (int dim : new int[] {384, 768, 1024}) {
-                st.execute(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                    "VALUES ('" + TENANT + "', 'plan-" + dim + "') ON CONFLICT DO NOTHING");
+                // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "plan-" + dim);
                 st.execute(
                     "INSERT INTO nexus.chunks" +
                     " (tenant_id, collection, chash, chunk_text, embedding_" + dim + ") " +

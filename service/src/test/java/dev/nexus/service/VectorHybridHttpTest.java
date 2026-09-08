@@ -107,6 +107,11 @@ class VectorHybridHttpTest {
         embedder.register("tenant isolation policy enforcement in postgres", 0.8f, 0.6f);
         embedder.register("quantum entanglement spectroscopy experiment", 0.995f, 0.0998749f);
         pgRepo = new PgVectorRepository(tenantScope, embedder, embedder);
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK now -- PgVectorRepository's stub-insert is retired.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT_A, COL);
+        }
         pgRepo.upsertChunks(TENANT_A, COL,
             List.of(HH_C1, HH_C2, HH_C3),
             List.of("the tenant isolation policy guards every row",

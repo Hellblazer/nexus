@@ -83,8 +83,21 @@ def _assert_shape(http_row: dict, oracle: frozenset[str], allow: frozenset[str],
 
 @pytest.fixture()
 def _token_env(service, monkeypatch):
-    _base_url, token, _ = service
+    base_url, token, _ = service
+    # RDR-204 (nexus-f5wwx): setting NX_SERVICE_TOKEN alone left
+    # NX_SERVICE_URL unset/stale (the suite-wide _pin_t2_substrate's
+    # shared-substrate URL, from an earlier test), so a caller like
+    # HttpTaxonomyStore(base_url=base_url, tenant="default") that omits
+    # _token resolves ITS token from this fixture's pin but any auto-heal
+    # write path that constructs its OWN default-registrar client
+    # (ensure_collection_registered -> make_catalog_writer) resolved the
+    # URL from env -- landing on the WRONG (shared substrate) service
+    # while presenting THIS module's bearer: 401 unauthorized. Pin both
+    # halves together, plus NX_LOCAL=1 so the derived embedding_model
+    # matches this ONNX engine's bge-768 profile.
+    monkeypatch.setenv("NX_SERVICE_URL", base_url)
     monkeypatch.setenv("NX_SERVICE_TOKEN", token)
+    monkeypatch.setenv("NX_LOCAL", "1")
 
 
 def _keys(row: dict) -> set[str]:

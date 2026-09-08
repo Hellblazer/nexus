@@ -117,11 +117,9 @@ class CatalogManifestSweepRepositoryTest {
             // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now carries
             // chunks_collection_fk (tenant_id, collection) -> catalog_collections
             // (tenant_id, name) — stub-register the collection first, mirroring
-            // PgVectorRepository#upsertChunks' own ensure-registered step.
-            ctx.execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
-                + "ON CONFLICT (tenant_id, name) DO NOTHING",
-                tenant, collection);
+            // PgVectorRepository#upsertChunks' own ensure-registered step. RDR-204
+            // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+            PgContainerHelper.insertCollection(ctx, tenant, collection);
             return ctx.execute(
                 "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
                 + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::nexus.vector) "

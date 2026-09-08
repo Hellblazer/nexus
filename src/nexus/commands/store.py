@@ -35,9 +35,10 @@ def store() -> None:
 
 @store.command("put")
 @click.argument("source")
-@click.option("--collection", "-c", default="knowledge", show_default=True,
-              help="Collection: a bare subject such as distributed-systems (default: "
-                   "knowledge). Never a model token or version; see "
+@click.option("--collection", "-c", required=True,
+              help="Collection: the bare subject this note belongs to, such as "
+                   "distributed-systems. Required: the placeholders default/knowledge/"
+                   "notes/tmp/test are refused. Never a model token or version; see "
                    "docs/collections.md.")
 @click.option("--title", "-t", default="", help="Document title (required when SOURCE is -)")
 @click.option("--tags", default="", help="Comma-separated tags")
@@ -100,6 +101,9 @@ def put_cmd(
     # for_write=True (nexus-35ok4): this command WRITES new content —
     # a genuinely new corpus mints strictly (raises loud if
     # local.embed_model is voyage-shaped with no key configured).
+    # nexus-0fw11: a placeholder subject raises PlaceholderCollectionError,
+    # itself a ClickException, so the refusal prints cleanly here and on
+    # every other CLI writer without a per-command catch.
     col_name = t3_collection_name(collection, t3=db, for_write=True)
 
     # RDR-101 Phase 3 PR δ Stage B.4: pre-register the catalog entry

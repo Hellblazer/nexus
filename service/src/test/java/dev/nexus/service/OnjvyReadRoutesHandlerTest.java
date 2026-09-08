@@ -79,6 +79,33 @@ class OnjvyReadRoutesHandlerTest {
         service = new NexusService(0, TOKEN, svcDs);
         service.start();
         http = HttpClient.newHttpClient();
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.3): AuthFilter runs the per-tenant,
+        // once-per-process ghost sweep on whichever request is a tenant's first
+        // against this service instance, and DELETES any collection it finds
+        // registered-but-chunkless at that moment. Several @Test methods below
+        // register a collection via raw SQL (through seedChunk) and then POST
+        // to it; whichever runs first would have its POST be that first
+        // request, letting the sweep delete the freshly registered,
+        // still-chunkless collection out from under the write (see
+        // BridgeAddressFieldsTest's identical fix). Burn the sweep here
+        // first, once, for every @Test method uniformly.
+        var warmup = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+            .header("Authorization", "Bearer " + TOKEN)
+            .GET().build();
+        http.send(warmup, HttpResponse.BodyHandlers.ofString());
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): TaxonomyRepository.ensureCollectionRegistered
+        // now fails loud (CollectionRegistry.requireRegistered -> 422) instead of the retired
+        // stub-insert. "code__routes" is passed as a plain string to /v1/taxonomy/topics/insert
+        // below (assignmentDetails_isRoutedAndCarriesTheQualityColumns and
+        // hubs_isRoutedAndCarriesTheStalenessFields) with no raw-SQL INSERT anywhere in this
+        // file to grep for, so it was missed in the earlier registration sweep -- register it
+        // once here, after the ghost-sweep warmup above, for every @Test method uniformly.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "code__routes");
+        }
     }
 
     @AfterAll
@@ -317,9 +344,8 @@ class OnjvyReadRoutesHandlerTest {
     private void seedChunk(String tenant, String collection, String chashHex, int dim) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenant + "', '"
-                + collection + "') ON CONFLICT (tenant_id, name) DO NOTHING");
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, collection);
             String embeddingCol = "embedding_" + dim;
             su.createStatement().execute(
                 "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, " + embeddingCol + ") VALUES " +

@@ -14,9 +14,12 @@ import static dev.nexus.service.jooq.nexus.Tables.CHASH_CONFORMANCE_REPORT;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_DOC_COUNTS;
 import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_HEALTH_META;
+import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_VECTOR_STATS;
 import static dev.nexus.service.jooq.nexus.Tables.COVERAGE_BY_CONTENT_TYPE;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
+import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
+import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_PROFILE;
 import static dev.nexus.service.jooq.nexus.Tables.GC_AUDIT;
 import static dev.nexus.service.jooq.nexus.Tables.HOOK_FAILURES;
 import static dev.nexus.service.jooq.nexus.Tables.LINKS_BY_TYPE_COUNTS;
@@ -6239,9 +6242,163 @@ public final class CatalogRepository {
     // COLLECTIONS
     // ══════════════════════════════════════════════════════════════════════════
 
-    /** Upsert a collection. */
+    /**
+     * A register call's {@code embedding_model} disagrees with the value the
+     * profile (or, for an existing row, the row itself) says is authoritative
+     * (RDR-204 Technical Design step 2, bead nexus-ft04v.8).
+     *
+     * <p>Mapped to HTTP 422 by {@code CatalogHandler}: the request is
+     * well-formed, but this install's collection authority says otherwise.
+     * The message names the authoritative value — asserted verbatim by
+     * tests, not just the status code (bead ACCEPTANCE).
+     */
+    public static final class EmbeddingProfileConflictException extends RuntimeException {
+        public EmbeddingProfileConflictException(String message) { super(message); }
+    }
+
+    /**
+     * Upsert a collection.
+     *
+     * <p>RDR-204 Phase 1 (bead nexus-ft04v.8) — a NEW registration (no
+     * existing row for {@code (tenant, name)}) takes its {@code
+     * embedding_model} from the tenant's current {@code
+     * nexus.embedding_profile} row for the request's {@code content_type}
+     * (Technical Design step 2): a request naming no model gets the
+     * profile's model; a request naming the SAME model is accepted; a
+     * request naming a DIFFERENT model is refused with {@link
+     * EmbeddingProfileConflictException} carrying the profile's value. When
+     * no profile row exists for the request's content type (blank/absent
+     * {@code content_type}, or a handler wired with no {@link
+     * dev.nexus.service.vectors.EmbedderRouter} — see {@code
+     * CatalogHandler}'s 1-arg constructor — so nothing ever seeded one),
+     * the request's own {@code embedding_model} is used exactly as sent,
+     * matching this method's pre-RDR-204 behaviour; its {@code dimension}
+     * is looked up from {@code nexus.embedding_models} when that model is
+     * known there, else left {@code NULL}.
+     *
+     * <p>An EXISTING row is never re-pointed by the profile (Technical
+     * Design 1a): {@code embedding_model}, {@code dimension} and {@code
+     * lifecycle_state} are omitted from the {@code ON CONFLICT DO UPDATE}
+     * SET list entirely, so a re-registration of an existing name leaves
+     * all three exactly as they were written the first time — the row
+     * records the model its vectors were actually embedded with. A
+     * register call naming a DIFFERENT model than the existing row's own is
+     * refused the same way, naming the ROW's value as authoritative instead
+     * of the profile's.
+     *
+     * <p>A NEW row's {@code lifecycle_state} is {@code quarantine} when
+     * either the request's {@code content_type} or {@code name} starts with
+     * {@code quarantine-}, else {@code live} (bead nexus-ft04v.8 NOTES: the
+     * simplest answer consistent with bead nexus-ft04v.4's backfill walk,
+     * which derives {@code quarantine} from that same name-prefix
+     * convention — new registrations carry {@code content_type} explicitly,
+     * so both are checked). {@code model_version} keeps round-tripping
+     * exactly as sent; this bead does not touch any client-side parse site
+     * (Phase 3's census).
+     */
     public void upsertCollection(String tenant, Map<String, Object> coll) {
         tenantScope.withTenant(tenant, ctx -> {
+            String name           = s(coll, "name");
+            // Raw, nullable/blank — used to key the profile lookup and the
+            // quarantine-prefix check; nne() below still fills the written
+            // CONTENT_TYPE column with "" as before when absent.
+            String contentType    = s(coll, "content_type");
+            String requestedModel = s(coll, "embedding_model");
+
+            // RDR-204 Phase 1 (Sam's decision): the legacy no-content_type
+            // registration contract is retired. hygiene-002-1's non-empty CHECK on
+            // content_type means every registration must carry one explicitly now
+            // (this method never silently defaults it) -- and the DO UPDATE arm
+            // below writes CONTENT_TYPE from this exact value even on a conflict,
+            // so an omitted one would 23514 there too, on an EXISTING row. Refuse
+            // loud, naming the missing field, before either branch runs -- the
+            // same 422 contract as the embedding_model conflict below, not a
+            // 23514 surfacing as an opaque 409/500.
+            if (contentType == null || contentType.isBlank()) {
+                throw new EmbeddingProfileConflictException(
+                    "registering collection '" + name + "' requires content_type; none was supplied");
+            }
+
+            var existingRow = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL)
+                    .from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+                    .and(CATALOG_COLLECTIONS.NAME.eq(name))
+                    .fetchOne();
+
+            String  effectiveModel;
+            Integer effectiveDimension = null;
+            String  lifecycleState     = null;
+
+            if (existingRow != null) {
+                String existingModel = existingRow.value1();
+                if (requestedModel != null && !requestedModel.isBlank()
+                        && !requestedModel.equals(existingModel)) {
+                    throw new EmbeddingProfileConflictException(
+                        "collection '" + name + "' is already registered with embedding_model '"
+                        + existingModel + "'; refusing to change it to '" + requestedModel + "'");
+                }
+                // Discarded on conflict (EMBEDDING_MODEL is not in the SET list below) —
+                // bound only because the INSERT's VALUES list requires a value.
+                effectiveModel = nne(existingModel);
+                // RDR-204 nexus-ft04v.4/.5: lifecycle_state carries a NOT NULL constraint
+                // (hygiene-002) that PostgreSQL enforces on the VALUES tuple of an
+                // INSERT ... ON CONFLICT DO UPDATE BEFORE it resolves the conflict — a
+                // NULL here 23502s even though this branch always takes the conflict
+                // path and LIFECYCLE_STATE is (deliberately) absent from the SET list
+                // below. Any valid enum value is correct: it is discarded on conflict
+                // exactly like effectiveModel above.
+                lifecycleState = "live";
+            } else {
+                String  profileModel     = null;
+                Integer profileDimension = null;
+                // contentType is already proven non-null/non-blank by the guard above
+                // (line ~6317) that throws before this branch can ever run -- no need
+                // to re-check it here (nexus-ft04v.8 review Minor 1: this guard was
+                // dead, always true).
+                var profileRow = ctx.select(EMBEDDING_PROFILE.EMBEDDING_MODEL, EMBEDDING_PROFILE.DIMENSION)
+                        .from(EMBEDDING_PROFILE)
+                        .where(EMBEDDING_PROFILE.TENANT_ID.eq(tenant))
+                        .and(EMBEDDING_PROFILE.CONTENT_TYPE.eq(contentType))
+                        .fetchOne();
+                if (profileRow != null) {
+                    profileModel     = profileRow.value1();
+                    profileDimension = profileRow.value2();
+                }
+                if (profileModel != null) {
+                    if (requestedModel != null && !requestedModel.isBlank()
+                            && !requestedModel.equals(profileModel)) {
+                        throw new EmbeddingProfileConflictException(
+                            "the embedding profile for content_type '" + contentType + "' is '"
+                            + profileModel + "'; refusing to register '" + name
+                            + "' with embedding_model '" + requestedModel + "'");
+                    }
+                    effectiveModel     = profileModel;
+                    effectiveDimension = profileDimension;
+                } else {
+                    effectiveModel = nne(requestedModel);
+                    // nexus-ft04v.8 review Significant 3: no embedding profile exists
+                    // for this content_type and the caller supplied no model either --
+                    // refuse loud here, naming the missing field, rather than binding
+                    // "" into the INSERT's VALUES tuple and letting hygiene-002-1's
+                    // catalog_collections_embedding_model_chk surface as an opaque
+                    // 23514 (500-shaped) instead of this method's uniform 422 contract
+                    // (mirrors the content_type guard above).
+                    if (effectiveModel.isBlank()) {
+                        throw new EmbeddingProfileConflictException(
+                            "registering collection '" + name + "' requires embedding_model; "
+                            + "no embedding profile exists for content_type '" + contentType
+                            + "' and none was supplied");
+                    }
+                    effectiveDimension = ctx.select(EMBEDDING_MODELS.DIMENSION)
+                            .from(EMBEDDING_MODELS)
+                            .where(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(effectiveModel))
+                            .fetchOne(EMBEDDING_MODELS.DIMENSION);
+                }
+                boolean quarantine = (contentType != null && contentType.startsWith("quarantine-"))
+                                  || (name != null && name.startsWith("quarantine-"));
+                lifecycleState = quarantine ? "quarantine" : "live";
+            }
+
             // nexus-xtmtf: superseded_at / created_at are timestamptz NULL columns after
             // catalog-002-1-temporal-typing (RDR-156 P0.2). Parse the ISO-8601-or-empty
             // strings to OffsetDateTime in Java (blank -> NULL) and bind the generated
@@ -6252,10 +6409,11 @@ public final class CatalogRepository {
                     CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
                     CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
                     CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_AT,
-                    CATALOG_COLLECTIONS.CREATED_AT)
+                    CATALOG_COLLECTIONS.CREATED_AT,
+                    CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
                .values(tenant,
-                       s(coll, "name"), nne(s(coll, "content_type")),
-                       nne(s(coll, "owner_id")), nne(s(coll, "embedding_model")),
+                       name, nne(contentType),
+                       nne(s(coll, "owner_id")), effectiveModel,
                        nne(s(coll, "model_version")), nne(s(coll, "display_name")),
                        nb(bFlag(coll, "legacy_grandfathered"), false),
                        nne(s(coll, "superseded_by")), tsOrNull(s(coll, "superseded_at")),
@@ -6263,12 +6421,17 @@ public final class CatalogRepository {
                        // now — the client never sends it (nexus-1wjmq class), so stamp
                        // "now" on insert rather than binding NULL (mirrors createdAtOrNow's
                        // existing catalog_links fix, nexus-4j80w).
-                       createdAtOrNow(s(coll, "created_at")))
+                       createdAtOrNow(s(coll, "created_at")),
+                       effectiveDimension, lifecycleState)
                .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
                .doUpdate()
                .set(CATALOG_COLLECTIONS.CONTENT_TYPE,         DSL.excluded(CATALOG_COLLECTIONS.CONTENT_TYPE))
                .set(CATALOG_COLLECTIONS.OWNER_ID,             DSL.excluded(CATALOG_COLLECTIONS.OWNER_ID))
-               .set(CATALOG_COLLECTIONS.EMBEDDING_MODEL,      DSL.excluded(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
+               // RDR-204 1a: embedding_model/dimension/lifecycle_state are deliberately
+               // ABSENT from this SET list — an existing row is never re-pointed by the
+               // profile (or by a same-name re-registration naming its own model). The
+               // VALUES bound above for those three columns are used only on a genuine
+               // INSERT; a conflict discards them entirely.
                .set(CATALOG_COLLECTIONS.MODEL_VERSION,        DSL.excluded(CATALOG_COLLECTIONS.MODEL_VERSION))
                .set(CATALOG_COLLECTIONS.DISPLAY_NAME,         DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME))
                .set(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, DSL.excluded(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED))
@@ -6723,7 +6886,13 @@ public final class CatalogRepository {
      * per table post-drop, so a 1:1 registration is what "correct" now means for
      * these two, not a stale 3-way split.
      */
-    private static final List<CollectionScopedTable> COLLECTION_SCOPED_TABLES = List.of(
+    // Package-private (widened from private, RDR-204 bead nexus-ft04v.3): the
+    // ghost-sweep parametrised test (GhostSweepDormantMarkingTest, same package)
+    // needs to iterate this list DIRECTLY rather than duplicate it — a copy is
+    // exactly the drift this list exists to prevent (nexus-v6za0). Deliberate,
+    // not a reflection workaround; the list itself and its element type
+    // (CollectionScopedTable, below) are both widened together.
+    static final List<CollectionScopedTable> COLLECTION_SCOPED_TABLES = List.of(
         new CollectionScopedTable("chunks",                  CHUNKS,                  CHUNKS.COLLECTION),
         new CollectionScopedTable("catalog_document_chunks", CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.COLLECTION),
         new CollectionScopedTable("topic_assignments",       TOPIC_ASSIGNMENTS,       TOPIC_ASSIGNMENTS.SOURCE_COLLECTION),
@@ -6745,8 +6914,14 @@ public final class CatalogRepository {
         // after a rename, or incident triage silently loses the collection's GC history.
         new CollectionScopedTable("gc_audit",                GC_AUDIT,                GC_AUDIT.COLLECTION));
 
-    /** One denorm-collection table: its rename-count key, the table, and its collection column. */
-    private record CollectionScopedTable(String countKey, Table<?> table, Field<String> collection) {}
+    /**
+     * One denorm-collection table: its rename-count key, the table, and its collection
+     * column. Package-private (widened from private alongside {@link
+     * #COLLECTION_SCOPED_TABLES}, RDR-204 bead nexus-ft04v.3) so the ghost-sweep
+     * parametrised test can read {@code countKey()}/{@code table()}/{@code collection()}
+     * for each entry without a reflective or copied inventory.
+     */
+    record CollectionScopedTable(String countKey, Table<?> table, Field<String> collection) {}
 
     /**
      * The rename transaction refused to merge a populated retired target.
@@ -7042,6 +7217,7 @@ public final class CatalogRepository {
                         CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                         CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
                         CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
+                        CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
                         CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_AT,
                         CATALOG_COLLECTIONS.CREATED_AT)
                     .select(ctx.select(
@@ -7049,6 +7225,13 @@ public final class CatalogRepository {
                             CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                             CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
                             CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
+                            // RDR-204 nexus-ft04v.4/.5: catalog_collections.dimension and
+                            // lifecycle_state carry a NOT NULL / CHECK constraint (hygiene-002)
+                            // on lifecycle_state, so the fresh-insert arm below must carry X's
+                            // values forward the same way every other attribute does — an
+                            // omitted column here is not "leave it unset", it is a 23502 on
+                            // every rename that takes this branch.
+                            CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
                             // nexus-c29vr: the new row is LIVE by construction — never copy the
                             // source's tombstone markers. This select-list used to carry
                             // SUPERSEDED_BY/SUPERSEDED_AT straight through, and only the
@@ -7069,6 +7252,8 @@ public final class CatalogRepository {
                     .set(CATALOG_COLLECTIONS.MODEL_VERSION,        DSL.excluded(CATALOG_COLLECTIONS.MODEL_VERSION))
                     .set(CATALOG_COLLECTIONS.DISPLAY_NAME,         DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME))
                     .set(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, DSL.excluded(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED))
+                    .set(CATALOG_COLLECTIONS.DIMENSION,            DSL.excluded(CATALOG_COLLECTIONS.DIMENSION))
+                    .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE,      DSL.excluded(CATALOG_COLLECTIONS.LIFECYCLE_STATE))
                     // Revive: clear the tombstone markers rather than copying X's (which
                     // are '' / NULL anyway — the CLI refuses to rename an already-
                     // superseded row, so X is live). Explicit beats incidental here.
@@ -7174,6 +7359,166 @@ public final class CatalogRepository {
             var r = ctx.select(CATALOG_META.VALUE).from(CATALOG_META).where(CATALOG_META.KEY.eq(key)).fetchOne();
             return r != null ? r.value1() : null;
         });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // RDR-204 PHASE 1 — GHOST SWEEP + DORMANT MARKING (bead nexus-ft04v.3)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Marker key in {@link #setMeta}/{@link #getMeta}'s {@code nexus.catalog_meta}
+     * (per-tenant key/value table, catalog-001 baseline) guarding {@link
+     * #ensureGhostSweepRanOnce}. Versioned deliberately (bead nexus-ft04v.3's own
+     * DECISIONS): bumping the suffix is how a FUTURE job forces a deliberate re-run
+     * across every tenant, without touching this one's logic.
+     */
+    private static final String GHOST_SWEEP_META_KEY = "rdr204_ghost_sweep_v1";
+
+    /**
+     * In-process fast path in front of {@link #GHOST_SWEEP_META_KEY}: once a tenant
+     * has been checked THIS process (swept, or found already marked from a prior
+     * boot), every later call for the same tenant costs nothing — no {@link
+     * #getMeta} round trip at all. Instance-scoped, not static: this class has
+     * exactly one live instance per process (see {@code NexusService.catalogRepo}),
+     * so instance scope already gives "once per tenant per process" without the
+     * cross-test-class JVM leakage a {@code static} set would risk (integration
+     * tests construct a fresh {@code CatalogRepository} per test class, and a
+     * static set would let one class's tenant id silently short-circuit another's).
+     */
+    private final Set<String> ghostSweepCheckedTenants = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * The per-tenant, at-most-once-per-process trigger for {@link
+     * #sweepGhostsAndMarkDormant} (RDR-204 Technical Design step 3, bead
+     * nexus-ft04v.3). The intended caller is {@code AuthFilter.doFilter} — the
+     * single per-request choke point where EVERY {@code /v1/*} route resolves its
+     * tenant, which makes this run at that tenant's first authenticated request
+     * after the process boots, whichever route that happens to be. This is
+     * deliberately NOT "first catalog/vector request": the bead's own DECISIONS
+     * (T2 {@code nexus_rdr/204-research-17}) retired tenant enumeration entirely —
+     * {@code catalog_collections}/{@code catalog_meta} are FORCE RLS and {@code
+     * nexus_svc} is NOBYPASSRLS, so there is no primitive that lists tenants; a
+     * tenant that never sends a request is never swept because it never needs to
+     * be.
+     *
+     * <p>Two gates, cheapest first: {@link #ghostSweepCheckedTenants} (in-process;
+     * every request after the first for a tenant costs nothing), then the durable
+     * {@link #GHOST_SWEEP_META_KEY} marker in {@code nexus.catalog_meta} (one
+     * {@link #getMeta} read; makes a SECOND process boot a no-op for a tenant
+     * already swept in a prior boot).
+     *
+     * <p>NEVER fails the calling request: every {@link RuntimeException} here is
+     * caught and logged, and the in-process gate is released so the NEXT request
+     * for the same tenant retries. A failure never reaches {@link #setMeta}, so a
+     * retry always re-attempts the full sweep — nothing is marked done on a
+     * partial or failed pass.
+     */
+    public void ensureGhostSweepRanOnce(String tenant) {
+        if (!ghostSweepCheckedTenants.add(tenant)) {
+            return; // already checked (in flight, or done) this process
+        }
+        try {
+            if (getMeta(tenant, GHOST_SWEEP_META_KEY) != null) {
+                return; // a prior boot already swept this tenant
+            }
+            GhostSweepResult result = sweepGhostsAndMarkDormant(tenant);
+            setMeta(tenant, GHOST_SWEEP_META_KEY, "done");
+            log.info("event=rdr204_ghost_sweep tenant={} scanned={} deleted={} dormant={}",
+                      tenant, result.scanned(), result.ghostsDeleted(), result.markedDormant());
+        } catch (RuntimeException e) {
+            ghostSweepCheckedTenants.remove(tenant);
+            log.warn("event=rdr204_ghost_sweep_failed tenant={} error={}", tenant, e.toString(), e);
+        }
+    }
+
+    /** Per-tenant ghost-sweep + dormant-marking counts (RDR-204 bead nexus-ft04v.3). */
+    public record GhostSweepResult(int scanned, int ghostsDeleted, int markedDormant) {}
+
+    /** Per-row disposition {@link #sweepGhostsAndMarkDormant} assigns during its walk. */
+    private enum SweepDisposition { DELETED, MARKED_DORMANT, UNCHANGED }
+
+    private record SweptRow(String name, SweepDisposition disposition) {}
+
+    /**
+     * THE SWEEP ITSELF (RDR-204 Technical Design step 3, bead nexus-ft04v.3's
+     * DECISIONS: "this job does two things only"). Walks every {@code
+     * catalog_collections} row for {@code tenant} and, for each:
+     * <ul>
+     *   <li>DELETEs it when {@link #collectionIsEmpty} is true — a ghost: no row
+     *       in ANY {@link #COLLECTION_SCOPED_TABLES} entry names it;</li>
+     *   <li>else, when it has no row in {@code nexus.collection_vector_stats}
+     *       (referenced elsewhere but no live chunks to embed or read), sets
+     *       {@code lifecycle_state = 'dormant'};</li>
+     *   <li>else leaves it exactly as it was.</li>
+     * </ul>
+     * The attribute walk (content_type/owner_id/embedding_model/dimension) is
+     * deliberately NOT this method's job — that is bead nexus-ft04v.4's Liquibase
+     * changeset, which also adds the constraints this method's writes must never
+     * violate. Both run strictly AFTER that changeset (never-wedge-an-upgrade
+     * ordering, RDR-204 Technical Design step 3): a DELETE cannot violate a
+     * constraint, and a bare {@code lifecycle_state} UPDATE writes only the one
+     * column the walk already filled and constrained.
+     *
+     * <p>One transaction per tenant ({@link TenantScope#withTenant}).  {@link
+     * #collectionIsEmpty}'s own javadoc already documents the narrow,
+     * intra-transaction TOCTOU window a concurrent write can open between that
+     * read and an UPDATE/DELETE that follows it, and every existing caller
+     * accepts it rather than serialising against it — {@link
+     * #renameCollectionTxn} takes only the SHARED half of the sweep-gate advisory
+     * lock around the identical check, never the EXCLUSIVE half {@code
+     * runSweepTransaction} reserves for itself. This method follows that same
+     * precedent instead of inventing a new one. Seven of the fourteen {@link
+     * #COLLECTION_SCOPED_TABLES} entries carry a real {@code ON DELETE RESTRICT}
+     * FK to {@code catalog_collections}, which backstops the worst case: a
+     * concurrent write to one of those tables either commits first (this
+     * method's read then correctly reports non-empty) or loses the race and has
+     * its OWN insert rejected by the FK trigger against a registry row this
+     * method already deleted — a real, catchable Postgres error surfaced to
+     * {@link #ensureGhostSweepRanOnce}'s catch, never silent corruption. The
+     * manifest and the four audit-only tables carry no such FK, the same
+     * residual {@link #renameCollectionTxn} already accepts.
+     *
+     * <p>Post-commit (mirrors {@link #deleteCollection}'s discipline): every
+     * ghost this method deletes is evicted from {@link CollectionRegistry} so a
+     * later write against the same, now-reusable name always re-verifies against
+     * the database instead of trusting a stale cache entry.
+     */
+    public GhostSweepResult sweepGhostsAndMarkDormant(String tenant) {
+        List<SweptRow> rows = tenantScope.withTenant(tenant, ctx -> {
+            List<String> names = ctx.select(CATALOG_COLLECTIONS.NAME)
+                .from(CATALOG_COLLECTIONS)
+                .fetch(CATALOG_COLLECTIONS.NAME);
+            List<SweptRow> out = new ArrayList<>(names.size());
+            for (String name : names) {
+                if (collectionIsEmpty(ctx, name)) {
+                    ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute();
+                    out.add(new SweptRow(name, SweepDisposition.DELETED));
+                } else if (!ctx.fetchExists(ctx.selectOne().from(COLLECTION_VECTOR_STATS)
+                        .where(COLLECTION_VECTOR_STATS.COLLECTION.eq(name)))) {
+                    ctx.update(CATALOG_COLLECTIONS)
+                       .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "dormant")
+                       .where(CATALOG_COLLECTIONS.NAME.eq(name))
+                       .execute();
+                    out.add(new SweptRow(name, SweepDisposition.MARKED_DORMANT));
+                } else {
+                    out.add(new SweptRow(name, SweepDisposition.UNCHANGED));
+                }
+            }
+            return out;
+        });
+        int deleted = 0;
+        int dormant = 0;
+        for (SweptRow r : rows) {
+            switch (r.disposition()) {
+                case DELETED -> {
+                    deleted++;
+                    CollectionRegistry.evict(tenant, r.name());
+                }
+                case MARKED_DORMANT -> dormant++;
+                case UNCHANGED -> { }
+            }
+        }
+        return new GhostSweepResult(rows.size(), deleted, dormant);
     }
 
     /** Return ACTIVE owners filtered by owner_type. Used by repos.py:list_repos_dual (nexus-qnp5s). */
@@ -8249,11 +8594,21 @@ public final class CatalogRepository {
     /**
      * Fidelity-preserving collection import.
      *
-     * <p>ON CONFLICT (tenant_id, name): performs DO UPDATE only when the existing row is a
-     * backfill/auto-registered STUB (embedding_model = '' AND content_type = '' AND owner_id = '').
-     * Stub rows are created by fk-002-0-backfill-stubs or by PgVectorRepository.upsertChunks
-     * auto-registration.  They must be upgradable by the RDR-153 catalog ETL, but a re-run
-     * must never clobber genuinely-newer live rows.
+     * <p>ON CONFLICT (tenant_id, name) DO NOTHING: an import NEVER overwrites an existing
+     * row (recovery-bundle import must not clobber a registered collection) -- surviving
+     * contract per {@code importCollection_doesNotOverwriteLiveRow}.
+     *
+     * <p>RDR-204 Phase 1 (Sam's decision): this used to be a conditional
+     * {@code DO UPDATE ... WHERE (embedding_model = '' AND content_type = '' AND owner_id
+     * = '')} -- upgrading a backfill/auto-registered STUB row (all three discriminators
+     * blank) in place, created by fk-002-0-backfill-stubs or by PgVectorRepository
+     * .upsertChunks' since-retired auto-registration. hygiene-002-1's three non-empty
+     * CHECK constraints on those same three columns make that WHERE clause permanently
+     * unsatisfiable now -- no row can exist with any of them blank -- so the stub-upgrade
+     * arm was unreachable dead code. Replaced with a plain DO NOTHING: the surviving
+     * behavior (never overwrite an existing row) is identical to what the WHERE clause
+     * already produced for every row the table's own constraints allow, with no branch
+     * that can never fire.
      *
      * <p>nz() for timestamptz columns: '' is invalid in timestamptz; NULL means "not set".
      * catalog-002-1-temporal-typing (RDR-156 P0.2) converted these columns to timestamptz NULL.
@@ -8267,12 +8622,17 @@ public final class CatalogRepository {
 
     /**
      * nexus-1usso: GUC-once bulk collection import — ONE multi-row
-     * {@code INSERT ... ON CONFLICT DO UPDATE ... WHERE} statement per
-     * chunk. nexus-xtmtf: jOOQ's chained {@code .values()} supports a
-     * dynamic row count, and the nullable timestamptz columns bind as
-     * OffsetDateTime (blank -> NULL) — zero raw SQL, one statement per
-     * chunk preserved. Rows are deduped on {@code name} (the conflict
-     * key) within a chunk, last occurrence wins.
+     * {@code INSERT ... ON CONFLICT DO NOTHING} statement per chunk (see
+     * {@link #doImportCollection}'s javadoc for why this is DO NOTHING, not a
+     * conditional DO UPDATE, after RDR-204 Phase 1's stub-upgrade retirement).
+     * nexus-xtmtf: jOOQ's chained {@code .values()} supports a dynamic row
+     * count, and the nullable timestamptz columns bind as OffsetDateTime
+     * (blank -> NULL) — zero raw SQL, one statement per chunk preserved. Rows
+     * are deduped on {@code name} (the conflict key) within a chunk, last
+     * occurrence wins (a name repeated within one batch still contributes
+     * only one row to the INSERT's VALUES list; the dedupe is orthogonal to
+     * the ON CONFLICT behavior, which never fires for an already-existing row
+     * regardless of dedupe).
      */
     public int importCollectionsBatch(String tenant, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return 0;
@@ -8281,7 +8641,7 @@ public final class CatalogRepository {
             for (var coll : rows) unique.put(s(coll, "name"), coll);
             List<Map<String, Object>> deduped = List.copyOf(unique.values());
 
-            final int cols = 11;
+            final int cols = 12;
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
             for (int start = 0; start < deduped.size(); start += chunkSize) {
                 var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
@@ -8291,7 +8651,7 @@ public final class CatalogRepository {
                         CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
                         CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
                         CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_AT,
-                        CATALOG_COLLECTIONS.CREATED_AT);
+                        CATALOG_COLLECTIONS.CREATED_AT, CATALOG_COLLECTIONS.LIFECYCLE_STATE);
                 for (Map<String, Object> coll : batch) {
                     insert = insert.values(tenant,
                             s(coll, "name"), nne(s(coll, "content_type")),
@@ -8301,39 +8661,49 @@ public final class CatalogRepository {
                             nne(s(coll, "superseded_by")), tsOrNull(s(coll, "superseded_at")),
                             // hygiene-001: created_at is NOT NULL now; stamp "now" when
                             // the import row doesn't carry one (see upsertCollection).
-                            createdAtOrNow(s(coll, "created_at")));
+                            createdAtOrNow(s(coll, "created_at")),
+                            // RDR-204 nexus-ft04v.4/.5: lifecycle_state carries a NOT
+                            // NULL + enum CHECK (hygiene-002) that a fresh INSERT here
+                            // 23502'd on before this fix.
+                            lifecycleStateForImport(nne(s(coll, "content_type")), s(coll, "name")));
                 }
                 insert.onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-                      .doUpdate()
-                      .set(CATALOG_COLLECTIONS.CONTENT_TYPE,         DSL.excluded(CATALOG_COLLECTIONS.CONTENT_TYPE))
-                      .set(CATALOG_COLLECTIONS.OWNER_ID,             DSL.excluded(CATALOG_COLLECTIONS.OWNER_ID))
-                      .set(CATALOG_COLLECTIONS.EMBEDDING_MODEL,      DSL.excluded(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
-                      .set(CATALOG_COLLECTIONS.MODEL_VERSION,        DSL.excluded(CATALOG_COLLECTIONS.MODEL_VERSION))
-                      .set(CATALOG_COLLECTIONS.DISPLAY_NAME,         DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME))
-                      .set(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, DSL.excluded(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED))
-                      .set(CATALOG_COLLECTIONS.SUPERSEDED_BY,        DSL.excluded(CATALOG_COLLECTIONS.SUPERSEDED_BY))
-                      .set(CATALOG_COLLECTIONS.SUPERSEDED_AT,        DSL.excluded(CATALOG_COLLECTIONS.SUPERSEDED_AT))
-                      .set(CATALOG_COLLECTIONS.CREATED_AT,           DSL.excluded(CATALOG_COLLECTIONS.CREATED_AT))
-                      .where(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq("")
-                          .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(""))
-                          .and(CATALOG_COLLECTIONS.OWNER_ID.eq("")))
+                      .doNothing()
                       .execute();
             }
             return rows.size();
         });
     }
 
+    /**
+     * RDR-204 nexus-ft04v.4/.5: the ONE lifecycle_state rule the ETL import paths
+     * (importCollection/importCollectionsBatch) need on a fresh INSERT — the same
+     * quarantine-prefix convention {@code upsertCollection}'s own new-row branch
+     * and hygiene-002-1's backfill walk both use, minus the embedding_profile
+     * lookup (an ETL import row already carries its own metadata explicitly; there
+     * is no profile to consult). Only ever bound on the VALUES tuple of a fresh
+     * INSERT -- both import methods are ON CONFLICT DO NOTHING now (Sam's
+     * decision, RDR-204 Phase 1: an import never overwrites an existing row), so
+     * an existing row's lifecycle_state is never touched by this method at all.
+     */
+    private static String lifecycleStateForImport(String contentType, String name) {
+        boolean quarantine = (contentType != null && contentType.startsWith("quarantine-"))
+                          || (name != null && name.startsWith("quarantine-"));
+        return quarantine ? "quarantine" : "live";
+    }
+
     private void doImportCollection(DSLContext ctx, String tenant, Map<String, Object> coll) {
-        // DO UPDATE WHERE stub-guard: only upgrades rows where all three discriminator
-        // columns are empty (auto-registered stubs from RDR-156 P0.2 ensure-registration).
-        // nexus-xtmtf: single-row delegate of the importCollectionsBatch DSL shape.
+        // ON CONFLICT DO NOTHING: an import never overwrites an existing row (see this
+        // method's caller's javadoc for why the old conditional stub-upgrade DO UPDATE
+        // was retired). nexus-xtmtf: single-row delegate of the importCollectionsBatch
+        // DSL shape.
         var insert = ctx.insertInto(CATALOG_COLLECTIONS,
                 CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
                 CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                 CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
                 CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
                 CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_AT,
-                CATALOG_COLLECTIONS.CREATED_AT)
+                CATALOG_COLLECTIONS.CREATED_AT, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
            .values(tenant,
                    s(coll, "name"), nne(s(coll, "content_type")),
                    nne(s(coll, "owner_id")), nne(s(coll, "embedding_model")),
@@ -8342,21 +8712,14 @@ public final class CatalogRepository {
                    nne(s(coll, "superseded_by")), tsOrNull(s(coll, "superseded_at")),
                    // hygiene-001: created_at is NOT NULL now; stamp "now" when the
                    // import row doesn't carry one (see upsertCollection).
-                   createdAtOrNow(s(coll, "created_at")));
+                   createdAtOrNow(s(coll, "created_at")),
+                   // RDR-204 nexus-ft04v.4/.5: lifecycle_state carries a NOT NULL +
+                   // enum CHECK (hygiene-002) that a fresh INSERT here 23502'd on
+                   // before this fix -- same quarantine-prefix rule as
+                   // upsertCollection's own new-row branch.
+                   lifecycleStateForImport(nne(s(coll, "content_type")), s(coll, "name")));
         insert.onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-              .doUpdate()
-              .set(CATALOG_COLLECTIONS.CONTENT_TYPE,         DSL.excluded(CATALOG_COLLECTIONS.CONTENT_TYPE))
-              .set(CATALOG_COLLECTIONS.OWNER_ID,             DSL.excluded(CATALOG_COLLECTIONS.OWNER_ID))
-              .set(CATALOG_COLLECTIONS.EMBEDDING_MODEL,      DSL.excluded(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
-              .set(CATALOG_COLLECTIONS.MODEL_VERSION,        DSL.excluded(CATALOG_COLLECTIONS.MODEL_VERSION))
-              .set(CATALOG_COLLECTIONS.DISPLAY_NAME,         DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME))
-              .set(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, DSL.excluded(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED))
-              .set(CATALOG_COLLECTIONS.SUPERSEDED_BY,        DSL.excluded(CATALOG_COLLECTIONS.SUPERSEDED_BY))
-              .set(CATALOG_COLLECTIONS.SUPERSEDED_AT,        DSL.excluded(CATALOG_COLLECTIONS.SUPERSEDED_AT))
-              .set(CATALOG_COLLECTIONS.CREATED_AT,           DSL.excluded(CATALOG_COLLECTIONS.CREATED_AT))
-              .where(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq("")
-                  .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(""))
-                  .and(CATALOG_COLLECTIONS.OWNER_ID.eq("")))
+              .doNothing()
               .execute();
     }
 

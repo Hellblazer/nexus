@@ -112,7 +112,13 @@ class PgVectorRepositoryGetAllMetadataCapBoundaryTest {
         return out;
     }
 
-    private void seed(String collection, int n) {
+    private void seed(String collection, int n) throws Exception {
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK now -- PgVectorRepository's stub-insert is retired.
+        try (var su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(
+                org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), TENANT, collection);
+        }
         List<String> ids = chashesFor(collection, n);
         List<String> texts = new ArrayList<>(n);
         List<Map<String, Object>> metas = new ArrayList<>(n);
@@ -133,7 +139,7 @@ class PgVectorRepositoryGetAllMetadataCapBoundaryTest {
      * exists specifically to prevent.
      */
     @Test
-    void overCap_raisesInsteadOfTruncating() {
+    void overCap_raisesInsteadOfTruncating() throws Exception {
         String col = "knowledge__gamcapover__minilm-l6-v2-384__v1";
         seed(col, TEST_CAP + 1);
 
@@ -146,7 +152,7 @@ class PgVectorRepositoryGetAllMetadataCapBoundaryTest {
 
     /** Exactly at the cap: every row is returned, no exception. */
     @Test
-    void atCap_returnsEveryRow_doesNotRaise() {
+    void atCap_returnsEveryRow_doesNotRaise() throws Exception {
         String col = "knowledge__gamcapat__minilm-l6-v2-384__v1";
         seed(col, TEST_CAP);
 
@@ -159,7 +165,7 @@ class PgVectorRepositoryGetAllMetadataCapBoundaryTest {
 
     /** One below the cap: also a full, unexceptional read — brackets the boundary from below. */
     @Test
-    void belowCap_returnsEveryRow_doesNotRaise() {
+    void belowCap_returnsEveryRow_doesNotRaise() throws Exception {
         String col = "knowledge__gamcapbelow__minilm-l6-v2-384__v1";
         seed(col, TEST_CAP - 1);
 
@@ -191,10 +197,14 @@ class PgVectorRepositoryGetAllMetadataCapBoundaryTest {
      * never fail.
      */
     @Test
-    void productionConstructor_hasNoCapOverride_crossesTestCapBoundaryWithoutRaising() {
+    void productionConstructor_hasNoCapOverride_crossesTestCapBoundaryWithoutRaising() throws Exception {
         var prodEmbedder = new ZeroEmbedder(384);
         var prodRepo = new PgVectorRepository(tenantScope, prodEmbedder, prodEmbedder);
         String col = "knowledge__gamcapprod__minilm-l6-v2-384__v1";
+        try (var su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(
+                org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), TENANT, col);
+        }
         List<String> ids = chashesFor(col, TEST_CAP + 1);
         List<String> texts = new ArrayList<>(ids.size());
         List<Map<String, Object>> metas = new ArrayList<>(ids.size());

@@ -38,6 +38,16 @@ from tests._catalog_fixture_ops import ActiveCatalog
 import structlog
 from structlog.testing import capture_logs
 
+from nexus.corpus import effective_embedding_model_for_writes
+
+# RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine's ``/collections/upsert``
+# handler unconditionally seeds the tenant's embedding_profile for the
+# request's content_type from the ENGINE's own configured embedder (bead
+# nexus-ft04v.6/.8) on the FIRST touch of that content_type — hardcoded
+# voyage-* literals here 422 against the box's real (bge) profile.
+_CODE_MODEL = effective_embedding_model_for_writes("code")
+_DOCS_MODEL = effective_embedding_model_for_writes("docs")
+
 from nexus.commands.index import _CatalogBackedRegistry
 
 
@@ -145,14 +155,14 @@ class TestSig14ContextDoesNotSynthesizeMissingRdr:
         owner = cat.ensure_owner_for_repo(repo)
         owner_id = str(owner).replace(".", "-")
         cat.register_collection(
-            "code__myrepo-1-1__voyage-code-3__v1",
+            f"code__myrepo-1-1__{_CODE_MODEL}__v1",
             content_type="code", owner_id=owner_id,
-            embedding_model="voyage-code-3", model_version="v1",
+            embedding_model=_CODE_MODEL, model_version="v1",
         )
         cat.register_collection(
-            "docs__myrepo-1-1__voyage-context-3__v1",
+            f"docs__myrepo-1-1__{_DOCS_MODEL}__v1",
             content_type="docs", owner_id=owner_id,
-            embedding_model="voyage-context-3", model_version="v1",
+            embedding_model=_DOCS_MODEL, model_version="v1",
         )
 
         from nexus.context import _repo_collections

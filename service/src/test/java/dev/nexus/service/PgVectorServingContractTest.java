@@ -145,6 +145,34 @@ class PgVectorServingContractTest {
         service = new NexusService(0, TOKEN_A, svcDs, null, null, pgRepo);
         service.start();
         http = HttpClient.newHttpClient();
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.3): AuthFilter runs the per-tenant,
+        // once-per-process ghost sweep on whichever request is a tenant's first
+        // against this service instance, and DELETES any collection it finds
+        // registered-but-chunkless at that moment. The warmup below must
+        // therefore run BEFORE COL is registered at all (measured, nexus-ft04v
+        // Phase 1 round 4: registering COL first and warming up second let the
+        // warmup ITSELF be the sweep-triggering request, deleting the row it
+        // had just registered, out from under every test in this class -- the
+        // symptom was Order(1)'s own upsert-chunks 422ing as "not registered"
+        // and every later read test seeing an empty collection). Burn the
+        // sweep for both tenants here, on a harmless GET, THEN register COL
+        // for both, before any @Test runs.
+        for (String token : List.of(TOKEN_A, TOKEN_B)) {
+            var warmup = HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+                .header("Authorization", "Bearer " + token)
+                .GET().build();
+            http.send(warmup, HttpResponse.BodyHandlers.ofString());
+        }
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            // COL is written under both tenants across this suite (Order(1)
+            // under TENANT_A, Order(12)'s cross-tenant case under TENANT_B).
+            PgContainerHelper.insertCollection(dsl, TENANT_A, COL);
+            PgContainerHelper.insertCollection(dsl, TENANT_B, COL);
+        }
     }
 
     @AfterAll

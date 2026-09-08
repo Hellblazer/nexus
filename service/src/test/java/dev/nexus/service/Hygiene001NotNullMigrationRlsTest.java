@@ -58,7 +58,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class Hygiene001NotNullMigrationRlsTest {
 
-    private static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
+    /** Package-visible (nexus-ft04v.4/.5): {@link Hygiene002CollectionAttributesWalkTest}
+     *  reuses this exact bootstrap for its own real NOBYPASSRLS migrating-role walk
+     *  rather than duplicating it — RawSqlGateTest's TEST_TREE_RAW_SQL_CEILING ratchet
+     *  is reduce-only, so a second copy of this raw-SQL bootstrap is not an option. */
+    static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
         su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
         su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
         su.createStatement().execute(
@@ -442,8 +446,9 @@ class Hygiene001NotNullMigrationRlsTest {
         }
     }
 
-    /** Minimal DBA-equivalent bootstrap, mirroring AspectDocIdBackfillTest's identical helper. */
-    private static void bootstrapAdminRole(PostgreSQLContainer<?> pg, String role, String pass)
+    /** Minimal DBA-equivalent bootstrap, mirroring AspectDocIdBackfillTest's identical helper.
+     *  Package-visible (nexus-ft04v.4/.5): see {@link #bootstrapVectorExtensionsForFreshWalk}. */
+    static void bootstrapAdminRole(PostgreSQLContainer<?> pg, String role, String pass)
             throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);

@@ -19,7 +19,6 @@ import java.util.Map;
 import dev.nexus.service.vectors.DimTables;
 
 import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
-import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
@@ -308,20 +307,13 @@ public final class StagingPromoteOps {
             // content INSERT's chunk_text_hash stamp and M1 tiebreak) is
             // the only survivor of this block.
 
-            // (4) collection registration stub — the chunks tables carry a
-            // (tenant, collection) FK to catalog_collections (RDR-156
-            // schema-enforced integrity: the FK that mechanically catches a
-            // missed landing leg). Same ON-CONFLICT-DO-NOTHING shape as the
-            // serving path's auto-stub; the catalog ETL's fuller row wins
-            // when it already exists.
-            String contentType = collection.contains("__")
-                ? collection.substring(0, collection.indexOf("__")) : "knowledge";
-            ctx.insertInto(CATALOG_COLLECTIONS,
-                    CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE)
-                .values(currentTenantSetting(), DSL.val(collection), DSL.val(contentType))
-                .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-                .doNothing()
-                .execute();
+            // (4) RDR-204 Phase 1 (bead nexus-ft04v.7): require catalog_collections
+            // to already carry a row for `collection` — the chunks tables carry a
+            // (tenant, collection) FK to catalog_collections (RDR-156 schema-enforced
+            // integrity), and a promote against an unregistered collection now fails
+            // loud (UnregisteredCollectionException, mapped to 422) instead of the
+            // name-parsed stub INSERT ... ON CONFLICT DO NOTHING this replaces.
+            CollectionRegistry.requireRegistered(ctx, tenant, collection);
 
             // nexus-11gh6 round 3 CRITICAL (T2 nexus/critique-11gh6-gate-
             // impl-2026-08-08 [21798] REWORK DELTA): this content INSERT

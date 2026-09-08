@@ -29,7 +29,7 @@ from tests._t2_fixture_ops import canonical_chunk_id as _cid
 from tests.conftest import make_vector_test_client
 
 
-def _seed_for_store_put(content: str, collection: str = "knowledge") -> None:
+def _seed_for_store_put(content: str, collection: str = "fixture-subject") -> None:
     """Pre-seed a REAL ``nexus.chunks`` row for what MCP ``store_put`` is
     about to write (nexus-dbzxb, RDR-191 Phase 5 Python collateral).
 
@@ -230,7 +230,7 @@ def test_store_put_logs_relevance_for_recent_searches(t1, tmp_path, monkeypatch)
 
     # Call store_put — should log relevance for both chunks
     _seed_for_store_put("some notes about vector search")
-    result = store_put(content="some notes about vector search", collection="knowledge")
+    result = store_put(content="some notes about vector search", collection="fixture-subject")
     assert "Stored" in result
 
     # Verify relevance_log has entries
@@ -258,7 +258,7 @@ def test_store_put_without_search_trace_no_log(t1, tmp_path, monkeypatch):
     # No search trace — direct store_put
     clear_search_traces()
     _seed_for_store_put("random notes")
-    result = store_put(content="random notes", collection="knowledge")
+    result = store_put(content="random notes", collection="fixture-subject")
     assert "Stored" in result
 
     with T2Database(t2_path) as db:
@@ -281,7 +281,7 @@ def test_store_put_only_logs_latest_trace(t1, tmp_path, monkeypatch):
     record_search_trace("test-session-e2", "old query", [(_cid("c-old"), "knowledge__a")])
     record_search_trace("test-session-e2", "newer query", [(_cid("c-new-1"), "knowledge__a"), (_cid("c-new-2"), "knowledge__a")])
 
-    store_put(content="notes", collection="knowledge")
+    store_put(content="notes", collection="fixture-subject")
 
     with T2Database(t2_path) as db:
         rows = db.get_relevance_log()

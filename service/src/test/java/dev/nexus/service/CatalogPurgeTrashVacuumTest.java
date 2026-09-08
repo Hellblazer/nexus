@@ -177,9 +177,11 @@ class CatalogPurgeTrashVacuumTest {
                                      String tenant, String collection, int count) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenant + "', '"
-                + collection + "') ON CONFLICT DO NOTHING");
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection,
+            // which derives the constraint-satisfying attributes hygiene-002-1 now
+            // requires (the bare two-column raw INSERT this used to run 23502s on
+            // lifecycle_state NOT NULL).
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, collection);
         }
 
         List<String> docIds = new ArrayList<>();

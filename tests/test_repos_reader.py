@@ -25,6 +25,7 @@ import pytest
 import structlog
 from structlog.testing import capture_logs
 
+import nexus.corpus as nexus_corpus
 from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.registry import RepoRegistry
 from nexus.repos import (
@@ -34,6 +35,15 @@ from nexus.repos import (
     list_repos_dual,
     read_dual,
 )
+
+# RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine pins an install-scoped
+# embedding profile per (tenant, content_type) on first write — hardcoded
+# "voyage-code-3"/"voyage-context-3" literals here conflict with the box's
+# real (bge, in local mode) profile. Resolve the box's real write-time
+# model per content_type instead (both collapse to the SAME local token in
+# local mode, which these tests do not depend on being distinct).
+_CODE_MODEL = nexus_corpus.effective_embedding_model_for_writes("code")
+_DOCS_MODEL = nexus_corpus.effective_embedding_model_for_writes("docs")
 
 
 @pytest.fixture(autouse=True)
@@ -110,7 +120,7 @@ def _seed_owner_with_collections(
             code_coll,
             content_type="code",
             owner_id=owner_id,
-            embedding_model="voyage-code-3",
+            embedding_model=_CODE_MODEL,
             model_version="1",
         )
     if docs_coll:
@@ -120,7 +130,7 @@ def _seed_owner_with_collections(
             docs_coll,
             content_type=ct,
             owner_id=owner_id,
-            embedding_model="voyage-context-3",
+            embedding_model=nexus_corpus.effective_embedding_model_for_writes(ct),
             model_version="1",
         )
     return str(owner)
@@ -132,14 +142,14 @@ class TestFromCatalog:
     ) -> None:
         owner = _seed_owner_with_collections(
             cat, repo,
-            code_coll="code__myrepo-1-2__voyage-code-3__v1",
-            docs_coll="docs__myrepo-1-2__voyage-context-3__v1",
+            code_coll=f"code__myrepo-1-2__{_CODE_MODEL}__v1",
+            docs_coll=f"docs__myrepo-1-2__{_DOCS_MODEL}__v1",
         )
         rec = from_catalog(repo, cat=cat)
         assert isinstance(rec, RepoRecord)
         assert rec.name == "myrepo"
-        assert rec.code_collection == "code__myrepo-1-2__voyage-code-3__v1"
-        assert rec.docs_collection == "docs__myrepo-1-2__voyage-context-3__v1"
+        assert rec.code_collection == f"code__myrepo-1-2__{_CODE_MODEL}__v1"
+        assert rec.docs_collection == f"docs__myrepo-1-2__{_DOCS_MODEL}__v1"
         # Back-compat alias.
         assert rec.collection == rec.code_collection
 
@@ -158,8 +168,8 @@ class TestFromCatalog:
         """
         _seed_owner_with_collections(
             cat, repo,
-            code_coll="code__myrepo-1-2__voyage-code-3__v1",
-            docs_coll="knowledge__myrepo-1-2__voyage-context-3__v1",
+            code_coll=f"code__myrepo-1-2__{_CODE_MODEL}__v1",
+            docs_coll=f"knowledge__myrepo-1-2__{_DOCS_MODEL}__v1",
         )
         rec = from_catalog(repo, cat=cat)
         assert rec is not None
@@ -174,18 +184,18 @@ class TestFromCatalog:
         slot (the user's most recent intent)."""
         owner_str = _seed_owner_with_collections(
             cat, repo,
-            code_coll="code__myrepo-1-2__voyage-code-3__v1",
+            code_coll=f"code__myrepo-1-2__{_CODE_MODEL}__v1",
         )
         owner_id = owner_str.replace(".", "-")
         cat.register_collection(
-            "docs__myrepo-1-2__voyage-context-3__v1",
+            f"docs__myrepo-1-2__{_DOCS_MODEL}__v1",
             content_type="docs", owner_id=owner_id,
-            embedding_model="voyage-context-3", model_version="1",
+            embedding_model=_DOCS_MODEL, model_version="1",
         )
         cat.register_collection(
-            "knowledge__myrepo-1-2__voyage-context-3__v1",
+            f"knowledge__myrepo-1-2__{_DOCS_MODEL}__v1",
             content_type="knowledge", owner_id=owner_id,
-            embedding_model="voyage-context-3", model_version="1",
+            embedding_model=_DOCS_MODEL, model_version="1",
         )
         rec = from_catalog(repo, cat=cat)
         assert rec is not None
@@ -216,8 +226,8 @@ class TestReadDualShim:
         returned, no fallback fire."""
         _seed_owner_with_collections(
             cat, repo,
-            code_coll="code__myrepo-1-2__voyage-code-3__v1",
-            docs_coll="docs__myrepo-1-2__voyage-context-3__v1",
+            code_coll=f"code__myrepo-1-2__{_CODE_MODEL}__v1",
+            docs_coll=f"docs__myrepo-1-2__{_DOCS_MODEL}__v1",
         )
         rec = read_dual(
             repo, cat=cat, registry_path=tmp_path / "missing.json",
@@ -251,8 +261,8 @@ class TestReadDualShim:
         code_collection — emit the disagreement log line at DEBUG."""
         _seed_owner_with_collections(
             cat, repo,
-            code_coll="code__myrepo-1-2__voyage-code-3__v1",
-            docs_coll="docs__myrepo-1-2__voyage-context-3__v1",
+            code_coll=f"code__myrepo-1-2__{_CODE_MODEL}__v1",
+            docs_coll=f"docs__myrepo-1-2__{_DOCS_MODEL}__v1",
         )
         # Registry says a DIFFERENT code_collection (legacy hash-based
         # name) — the kind of drift RDR-137 was filed to eliminate.
@@ -275,7 +285,7 @@ class TestReadDualShim:
             )
         # Catalog wins.
         assert rec is not None
-        assert rec.code_collection == "code__myrepo-1-2__voyage-code-3__v1"
+        assert rec.code_collection == f"code__myrepo-1-2__{_CODE_MODEL}__v1"
         # Disagreement event fired and names the divergent fields.
         disagree_events = [
             e for e in cap
@@ -285,7 +295,7 @@ class TestReadDualShim:
         diffs = disagree_events[0]["disagreements"]
         assert "code_collection" in diffs
         assert diffs["code_collection"]["catalog"] == (
-            "code__myrepo-1-2__voyage-code-3__v1"
+            f"code__myrepo-1-2__{_CODE_MODEL}__v1"
         )
         assert diffs["code_collection"]["registry"] == "code__myrepo-FAKE"
 

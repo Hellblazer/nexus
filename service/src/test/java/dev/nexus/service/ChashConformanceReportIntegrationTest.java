@@ -4,6 +4,8 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
@@ -180,8 +182,11 @@ class ChashConformanceReportIntegrationTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            exec(su, "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
-                + TENANT_A + "', '" + COLLECTION + "') ON CONFLICT DO NOTHING");
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection,
+            // which derives the constraint-satisfying attributes hygiene-002-1 now
+            // requires (the bare two-column raw INSERT this used to run 23502s on
+            // lifecycle_state NOT NULL).
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT_A, COLLECTION);
             exec(su, "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) VALUES ('"
                 + TENANT_A + "', '1.1', 'doc') ON CONFLICT DO NOTHING");
             withChecksDropped(su, () -> {

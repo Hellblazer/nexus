@@ -1,7 +1,12 @@
 """AC2/AC6: Embedding model selection and --corpus prefix resolution."""
+import re
+from pathlib import Path
+
 import pytest
 
 from nexus.corpus import (
+    PLACEHOLDER_SUBJECTS,
+    PlaceholderCollectionError,
     embedding_model_for_collection,
     index_model_for_collection,
     resolve_corpus,
@@ -532,3 +537,64 @@ def test_t3_collection_name_bare_knowledge_falls_through_to_legacy_default() -> 
     out = t3_collection_name("knowledge", t3=t3)
     # MUST be the auto-promoted shape (no knowledge__knowledge on disk).
     assert out == "knowledge__knowledge__voyage-context-3__v1"
+
+
+
+# nexus-0fw11 (Sam, 2026-09-08): a write that names a placeholder where a
+# subject was required is refused at the one resolver every writer uses.
+
+
+@pytest.mark.parametrize("name", ["knowledge", "default", "test", "notes", "tmp",
+                                  "knowledge__knowledge", "docs__default", "knowledge__test"])
+def test_write_resolution_refuses_placeholder_subjects(name: str) -> None:
+    with pytest.raises(PlaceholderCollectionError) as excinfo:
+        t3_collection_name(name, for_write=True)
+    assert "docs/collections.md" in str(excinfo.value)
+    assert name in str(excinfo.value)
+
+
+@pytest.mark.parametrize("name", ["knowledge", "default", "knowledge__knowledge", "docs__default"])
+def test_read_resolution_still_accepts_placeholder_subjects(name: str) -> None:
+    """Reads keep resolving so existing placeholder collections stay reachable."""
+    assert t3_collection_name(name)
+
+
+def test_conformant_placeholder_name_passes_through_on_write() -> None:
+    """The deliberate escape: the full four-segment name of an existing
+    placeholder collection is accepted verbatim, so nothing already minted
+    becomes unwritable by name."""
+    full = "knowledge__knowledge__voyage-context-3__v1"
+    assert t3_collection_name(full, for_write=True) == full
+
+
+def test_real_subject_is_accepted_on_write() -> None:
+    assert t3_collection_name("distributed-systems", for_write=True) == (
+        "knowledge__distributed-systems__voyage-context-3__v1"
+    )
+
+
+def test_placeholder_set_matches_docs_collections_rule_1() -> None:
+    """docs/collections.md Rule 1 lists the placeholders in one parenthetical;
+    the code's set is that list, checked mechanically so the two cannot drift."""
+    text = (Path(__file__).resolve().parents[1] / "docs" / "collections.md").read_text()
+    m = re.search(r"a placeholder\s*\(([^)]*)\)", text)
+    assert m, "docs/collections.md no longer lists the placeholders in a parenthetical"
+    documented = frozenset(re.findall(r"`([^`]+)`", m.group(1)))
+    assert documented == PLACEHOLDER_SUBJECTS
+
+
+def test_placeholder_refusal_is_a_click_exception_for_every_cli_writer() -> None:
+    """Critique of 86cd65ef0: only nx store put caught the error; promote,
+    index and dt index printed a traceback. The exception is a
+    ClickException, so every command prints it and exits 1."""
+    import click
+
+    with pytest.raises(click.ClickException) as excinfo:
+        t3_collection_name("knowledge", for_write=True)
+    assert isinstance(excinfo.value, PlaceholderCollectionError)
+
+
+def test_allow_placeholder_lifts_the_refusal_for_a_restore() -> None:
+    assert t3_collection_name("knowledge__knowledge", for_write=True, allow_placeholder=True) == (
+        "knowledge__knowledge__voyage-context-3__v1"
+    )

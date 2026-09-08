@@ -194,8 +194,17 @@ class HttpChashIndex(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     # ── rename_collection ──────────────────────────────────────────────────────
 
     def rename_collection(self, *, old: str, new: str) -> int:
-        """Re-point every row from ``old`` -> ``new``. Returns updated row count."""
-        data = self._post("/v1/chash/rename_collection", {"old": old, "new": new})
+        """Re-point every row from ``old`` -> ``new``. Returns updated row count.
+
+        RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine no longer
+        auto-registers the rename DESTINATION — ``new`` must be a
+        registered ``catalog_collections`` row before the fan-out.
+        """
+        from nexus.corpus import write_with_registration_retry  # noqa: PLC0415 — circular-dep avoidance (corpus)
+        data = write_with_registration_retry(
+            new,
+            lambda: self._post("/v1/chash/rename_collection", {"old": old, "new": new}),
+        )
         return int((data or {}).get("updated", 0))
 
     # ── delete_stale ───────────────────────────────────────────────────────────

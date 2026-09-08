@@ -181,8 +181,20 @@ def _seed_chunk(pg: dict, tenant: str, collection: str, chash_hex: str, *, dim: 
     row exists — mirror test_http_catalog_integration._seed_chunks (zero
     vector; superuser psql bypasses FORCE RLS)."""
     vec = "[" + ",".join(["0"] * dim) + "]"
+    # RDR-204 Phase 1 (nexus-f5wwx): this test substrate's engine always
+    # boots local mode with the bge-768 profile, regardless of which
+    # pgvector dim column this stub chunk uses -- the model here must
+    # match the REAL registered profile (what nexus.corpus.
+    # effective_embedding_model_for_writes computes) or a real
+    # register_collection call on this name later 422s "already
+    # registered with a different model". The stub chunk's own dim is
+    # an unrelated FK-satisfaction detail (which embedding_<dim> column
+    # holds the zero-vector), not a model choice.
+    model_for_dim = "bge-base-en-v15-768"
     _psql(pg, (
-        f"INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('{tenant}', '{collection}') "
+        "INSERT INTO nexus.catalog_collections "
+        "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
+        f"VALUES ('{tenant}', '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live') "
         "ON CONFLICT DO NOTHING; "
         f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_{dim}) "
         f"VALUES ('{tenant}', '{collection}', decode('{chash_hex}', 'hex'), 'seed', '{vec}'::nexus.vector) "

@@ -524,8 +524,10 @@ def test_inverted_control_handseeded_dangling_row_detected(t2_service_env):
     vec_1024 = "[" + ",".join(["0.1"] * 1024) + "]"
 
     _psql(state, (
-        "INSERT INTO nexus.catalog_collections (tenant_id, name) "
-        f"VALUES ('{tenant}', '{coll}') ON CONFLICT DO NOTHING"
+        "INSERT INTO nexus.catalog_collections "
+        "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
+        f"VALUES ('{tenant}', '{coll}', 'code', 'o8dil7-control', 'voyage-code-3', 'live') "
+        "ON CONFLICT DO NOTHING"
     ))
     # Correlation pin: one unrelated LIVE chunk in the same collection, so
     # the anti-join cannot pass by "the chunk table happens to be empty".

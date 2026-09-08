@@ -88,6 +88,22 @@ class RemapHandlerTest {
         service = new NexusService(0, TOKEN, svcDs);
         service.start();
         http = HttpClient.newHttpClient();
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.3): AuthFilter runs the per-tenant,
+        // once-per-process ghost sweep on whichever request is TENANT's first
+        // against this service instance, and DELETES any collection it finds
+        // registered-but-chunkless at that moment. Several @Test methods below
+        // register a collection via raw SQL (through seedTargetChunks) and
+        // then POST to it; whichever runs first would have its POST be that
+        // first request, letting the sweep delete the freshly registered,
+        // still-chunkless collection out from under the write (see
+        // BridgeAddressFieldsTest's identical fix). Burn the sweep here
+        // first, once, for every @Test method uniformly.
+        var warmup = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+            .header("Authorization", "Bearer " + TOKEN)
+            .GET().build();
+        http.send(warmup, HttpResponse.BodyHandlers.ofString());
     }
 
     @AfterAll
@@ -569,9 +585,8 @@ class RemapHandlerTest {
     private void seedTargetChunks(String collection, String seedPrefix, int count) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                "VALUES ('" + TENANT + "', '" + collection + "') ON CONFLICT DO NOTHING");
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection);
             for (int i = 1; i <= count; i++) {
                 su.createStatement().execute(
                     "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +

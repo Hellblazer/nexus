@@ -104,7 +104,7 @@ def _no_op(*args, **kwargs):
     pass
 
 
-def _seed_for_store_put(t3, content: str, collection: str = "knowledge") -> None:
+def _seed_for_store_put(t3, content: str, collection: str = "fixture-subject") -> None:
     """Pre-seed a REAL ``nexus.chunks`` row for what a store_put-shaped
     write (MCP ``store_put``, CLI ``nx store put``, ``nx memory promote``)
     is about to write (nexus-dbzxb, RDR-191 Phase 5 Python collateral).
@@ -140,7 +140,7 @@ def _mcp_store_put_with(t3, content: str, title: str) -> str:
          patch("nexus.mcp.core._hooks.fire_batch", side_effect=_no_op), \
          patch("nexus.mcp.core._hooks.fire_document", side_effect=_no_op), \
          patch("nexus.mcp.core._catalog_auto_link", return_value=0):
-        return store_put(content=content, collection="knowledge", title=title)
+        return store_put(content=content, collection="fixture-subject", title=title)
 
 
 # ── C2: ghost-register compensation (MCP) ────────────────────────────────────
@@ -170,7 +170,7 @@ class TestMcpGhostRegisterCompensation:
         owner = cat.register_owner("knowledge", "curator")
         cat.register(
             owner, "b6enc-dedup-mcp", content_type="knowledge",
-            physical_collection="knowledge__knowledge__bge-base-en-v15-768__v1",
+            physical_collection="knowledge__fixture-subject__bge-base-en-v15-768__v1",
             meta={"doc_id": chash},
         )
 
@@ -201,7 +201,7 @@ class TestMcpGhostRegisterCompensation:
         owner = cat.register_owner("knowledge", "curator")
         cat.register(
             owner, "b6enc-dedup-fence-mcp", content_type="knowledge",
-            physical_collection="knowledge__knowledge__bge-base-en-v15-768__v1",
+            physical_collection="knowledge__fixture-subject__bge-base-en-v15-768__v1",
             meta={"doc_id": chash},
         )
 
@@ -445,7 +445,7 @@ class TestCliStorePut:
         with patch("nexus.commands.store._t3", lambda: t3):
             return CliRunner().invoke(main, [
                 "store", "put", str(f),
-                "--collection", "knowledge",
+                "--collection", "fixture-subject",
                 "--title", title,
             ])
 
@@ -520,7 +520,7 @@ class TestPromoteGhostRegisterCompensation:
              patch("nexus.db.make_t3", return_value=t3):
             return CliRunner().invoke(main, [
                 "memory", "promote", str(row_id),
-                "--collection", "knowledge",
+                "--collection", "fixture-subject",
             ])
 
     def test_t3_failure_rolls_back_minted_row(
@@ -545,7 +545,7 @@ class TestPromoteGhostRegisterCompensation:
         owner = cat.register_owner("knowledge", "curator")
         cat.register(
             owner, "b6enc-dedup-promote", content_type="knowledge",
-            physical_collection="knowledge__knowledge__bge-base-en-v15-768__v1",
+            physical_collection="knowledge__fixture-subject__bge-base-en-v15-768__v1",
             meta={"doc_id": chash},
         )
 
@@ -678,7 +678,7 @@ class TestDirectPlusHookCoexistence:
              patch("nexus.mcp.core._hooks.fire_document", side_effect=_no_op), \
              patch("nexus.mcp.core._catalog_auto_link", return_value=0):
             result = store_put(
-                content=content, collection="knowledge",
+                content=content, collection="fixture-subject",
                 title="b6enc-coexist",
             )
         assert result.startswith("Stored:"), result
@@ -716,7 +716,7 @@ class TestStoreDeleteAsymmetry:
         from nexus.mcp.core import store_delete
         chash = hashlib.sha256(content.encode()).hexdigest()
         with patch("nexus.mcp.core._get_t3", return_value=local_t3):
-            del_result = store_delete(chash, collection="knowledge")
+            del_result = store_delete(chash, collection="fixture-subject")
         assert del_result.startswith("Deleted:"), del_result
         assert "WARNING" not in del_result
 
@@ -741,16 +741,16 @@ class TestStoreDeleteAsymmetry:
         cat.register(
             owner, "b6enc-filebacked", content_type="prose",
             file_path="notes/file.md",
-            physical_collection="knowledge__knowledge__bge-base-en-v15-768__v1",
+            physical_collection="knowledge__fixture-subject__bge-base-en-v15-768__v1",
             meta={"doc_id": chash},
         )
 
-        col = "knowledge__knowledge__bge-base-en-v15-768__v1"
+        col = "knowledge__fixture-subject__bge-base-en-v15-768__v1"
         local_t3.put(collection=col, content=content, title="b6enc-filebacked")
 
         from nexus.mcp.core import store_delete
         with patch("nexus.mcp.core._get_t3", return_value=local_t3):
-            del_result = store_delete(chash, collection="knowledge")
+            del_result = store_delete(chash, collection="fixture-subject")
         assert del_result.startswith("Deleted:"), del_result
         assert len(_catalog_rows(catalog_env, "b6enc-filebacked")) == 1, (
             "file-backed (indexer-origin) rows are out of scope for the "

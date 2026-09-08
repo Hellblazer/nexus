@@ -35,11 +35,79 @@ pytestmark = pytest.mark.usefixtures("cloud_mode")
 
 
 @pytest.fixture()
-def catalog(tmp_path):
+def catalog(tmp_path, monkeypatch):
     # nexus-i711w terminal deletion: the raw local Catalog this fixture built
     # is gone. ActiveCatalog routes the same public surface
     # (register_collection / collection_for / collection_for_repo) to the
     # live service catalog; no init step needed.
+    #
+    # RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine now pins an
+    # install-scoped embedding profile per (tenant, content_type) — the
+    # FIRST accepted model for a content_type in this suite's shared test
+    # tenant wins, and every later ``register_collection`` naming a
+    # DIFFERENT model for that content_type 422s
+    # (``EmbeddingProfileConflictException``, "the embedding profile for
+    # content_type '...' is '...'"). This file's whole point (RDR-103
+    # Phase 2 pinned decisions #1/#2) is exercising MULTIPLE explicit
+    # voyage-* models against the SAME content_type across many tests —
+    # something the real engine's single pinned local (bge) profile
+    # cannot satisfy no matter what model value a test sends, since the
+    # profile is a per-tenant fact of a PRIOR write, not a per-call
+    # choice. Per the RDR-204 fix-check ruling (never a mocked mode
+    # against a real substrate that cannot honor it): fake the WIRE
+    # transport only, for exactly the two collection-tuple endpoints this
+    # file's tests exercise, so every other bit of behavior
+    # (``owner_segment_for_tumbler``, ``CollectionName`` construction, the
+    # version-bump math in ``collection_for``/``collection_for_repo``) is
+    # the REAL client code, talking to an in-memory dict instead of the
+    # engine. ``register_owner``/``owner_for_repo`` (different endpoints,
+    # no embedding-profile involvement) are left untouched and still hit
+    # the real substrate.
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+    fake_rows: dict[str, dict] = {}
+    real_post = HttpCatalogClient._post
+    real_get = HttpCatalogClient._get
+
+    def fake_post(self, path, body=None, **kw):
+        if path == "/collections/upsert":
+            fake_rows[body["name"]] = dict(body)
+            return {}
+        return real_post(self, path, body, **kw)
+
+    def fake_get(self, path, **params):
+        if path == "/collections/for_tuple":
+            # Multiple registered rows can share one (content_type, owner_id,
+            # embedding_model) tuple at different model_version values (e.g.
+            # v1/v2/v9/v10 all registered for the same tuple) — the real
+            # engine's lookup returns the MAX version for the tuple, so this
+            # fake must too rather than the first match by insertion order.
+            matches = [
+                row for row in fake_rows.values()
+                if (
+                    row.get("content_type") == params.get("content_type")
+                    and row.get("owner_id") == params.get("owner_id")
+                    and row.get("embedding_model") == params.get("embedding_model")
+                )
+            ]
+            if matches:
+                def _version(row: dict) -> int:
+                    v = (row.get("model_version") or "").lstrip("v")
+                    return int(v) if v.isdigit() else 0
+                return max(matches, key=_version)
+            import httpx
+            raise httpx.HTTPStatusError(
+                "not found",
+                request=httpx.Request("GET", "http://fake/v1/catalog/collections/for_tuple"),
+                response=httpx.Response(404, request=httpx.Request("GET", "http://fake")),
+            )
+        if path == "/collections/get":
+            return fake_rows.get(params.get("name"), {})
+        return real_get(self, path, **params)
+
+    monkeypatch.setattr(HttpCatalogClient, "_post", fake_post)
+    monkeypatch.setattr(HttpCatalogClient, "_get", fake_get)
+
     from tests._catalog_fixture_ops import ActiveCatalog
     return ActiveCatalog()
 

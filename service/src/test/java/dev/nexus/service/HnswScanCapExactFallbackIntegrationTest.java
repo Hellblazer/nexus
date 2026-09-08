@@ -78,14 +78,13 @@ class HnswScanCapExactFallbackIntegrationTest {
         embedder = new PgVectorRepositoryContractTest.FakeEmbedder(384);
         repo = new PgVectorRepository(scope, embedder, embedder);
 
+        // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection,
+        // which derives the SAME content_type/owner_id/embedding_model this hand-rolled
+        // insert hardcoded (COLLECTION is RDR-103-conformant) plus the lifecycle_state
+        // hygiene-002-1 now requires NOT NULL (the six-column insert omitted it and
+        // 23502'd).
         scope.withTenant(TENANT, ctx -> {
-            ctx.insertInto(CATALOG_COLLECTIONS,
-                           CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
-                           CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
-                           CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
-               .values(TENANT, COLLECTION, "knowledge", "scan-cap", "minilm-l6-v2-384", "v1")
-               .onConflictDoNothing()
-               .execute();
+            PgContainerHelper.insertCollection(ctx, TENANT, COLLECTION);
             return null;
         });
 

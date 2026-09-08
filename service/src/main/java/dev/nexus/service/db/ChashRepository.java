@@ -3,7 +3,6 @@ package dev.nexus.service.db;
 import dev.nexus.service.vectors.DimTables;
 import org.jooq.DSLContext;
 
-import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 
 import java.time.OffsetDateTime;
@@ -95,10 +94,13 @@ public final class ChashRepository {
     }
 
     /**
-     * RDR-156 P0.2: ensure catalog_collections has a stub row for the given
-     * collection before a rename re-homes rows onto it (fk-002 RESTRICT).
-     * Idempotent — ON CONFLICT DO NOTHING. In-transaction deliberately:
-     * rename's registration must be atomic with the re-point.
+     * RDR-204 Phase 1 (bead nexus-ft04v.7): require catalog_collections to already
+     * carry a row for {@code collection} before a rename re-homes rows onto it
+     * (chunks_collection_fk RESTRICT); fails loud
+     * ({@link UnregisteredCollectionException}, mapped to 422) instead of the
+     * RDR-156-era stub INSERT ... ON CONFLICT DO NOTHING that used to paper over a
+     * missing row with blank content_type/owner_id/embedding_model. In-transaction
+     * deliberately: the registration check must be atomic with the re-point.
      *
      * @throws IllegalArgumentException if collection is null or blank
      */
@@ -106,15 +108,7 @@ public final class ChashRepository {
         if (collection == null || collection.isBlank()) {
             throw new IllegalArgumentException("collection must not be blank");
         }
-        if (CollectionRegistry.isKnown(tenant, collection)) {
-            return;
-        }
-        ctx.insertInto(CATALOG_COLLECTIONS,
-                        CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-           .values(tenant, collection)
-           .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-           .doNothing()
-           .execute();
+        CollectionRegistry.requireRegistered(ctx, tenant, collection);
     }
 
     // ── legacy-reference resolution: RETIRED at nexus-lgdel.l1 ────────────────

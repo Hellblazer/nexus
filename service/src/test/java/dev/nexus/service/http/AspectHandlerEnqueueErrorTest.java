@@ -7,6 +7,8 @@ import com.sun.net.httpserver.HttpPrincipal;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.AspectRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -81,6 +83,16 @@ class AspectHandlerEnqueueErrorTest {
         tenantScope = new TenantScope(svcDs);
         repo = new AspectRepository(tenantScope);
         handler = new AspectHandler(repo);
+
+        // RDR-164 P1a / RDR-204 Phase 1: document_aspects_collection_fk is a REAL,
+        // always-enforced FK now -- register every collection this suite's
+        // non-blank-doc_id enqueue tests target (the blank-doc_id tests short-circuit
+        // before ever reaching the collection FK, so they need no registration).
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(dsl, TENANT, "coll-enq-fk");
+            PgContainerHelper.insertCollection(dsl, TENANT, "coll-enqmany-ok");
+        }
     }
 
     @AfterAll

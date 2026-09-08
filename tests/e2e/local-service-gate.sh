@@ -524,7 +524,7 @@ echo "[gate] throwaway service on 127.0.0.1:$SERVICE_PORT"
 # LIVED_IN_EXPECTED / CLOUD_MODE_EXPECTED below: every assertion increments
 # SMOKE_PASSED, and a mismatch against SMOKE_EXPECTED FAILS the gate — an
 # unreachable service or a malformed response fails loud, never skips.
-SMOKE_EXPECTED=11  # 12->11 at 3b2901141: the manifest/verify leg was retired
+SMOKE_EXPECTED=12  # 11->12 (nexus-ft04v.7): the vector leg registers its collection first; 12->11 at 3b2901141: the manifest/verify leg was retired
                    # with the catalog-030 subtraction but the count was not
                    # lowered, making the gate structurally unpassable (caught
                    # by its own vacuity guard in the 7.8.0 battery).
@@ -681,6 +681,14 @@ if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
   SMOKE_CHASH="$(python3 -c "import hashlib;print(hashlib.sha256(b'gate-smoke-chunk-$SMOKE_UID').hexdigest())")"
   SMOKE_VEC_COLLECTION="knowledge__gate-smoke__bge-base-en-v15-768__v1"
   SMOKE_CHUNK_TEXT="gate smoke vector round-trip probe $SMOKE_UID"
+  # RDR-204 Phase 1 (nexus-ft04v.7): a chunk write against an unregistered
+  # collection is a 422; the engine no longer auto-registers. Register the
+  # way the client does, with the tenant profile's bge model.
+  smoke_request POST /v1/catalog/collections/upsert \
+    "$(python3 -c "import json;print(json.dumps({'name':'$SMOKE_VEC_COLLECTION','content_type':'knowledge','owner_id':'gate-smoke','embedding_model':'bge-base-en-v15-768'}))")"
+  [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/collections/upsert"
+  smoke_check "POST /v1/catalog/collections/upsert -> ok" "d.get('ok') is True"
+
   smoke_request POST /v1/vectors/upsert-chunks \
     "$(python3 -c "import json;print(json.dumps({'collection':'$SMOKE_VEC_COLLECTION','ids':['$SMOKE_CHASH'],'documents':['$SMOKE_CHUNK_TEXT'],'metadatas':[{'source':'gate-smoke'}]}))")"
   [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/vectors/upsert-chunks"

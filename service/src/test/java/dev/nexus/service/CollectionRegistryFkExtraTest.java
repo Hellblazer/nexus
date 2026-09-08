@@ -624,19 +624,41 @@ class CollectionRegistryFkExtraTest {
 
     /**
      * Runs the fk-003-0-backfill-stubs shape for one source table via typed jOOQ:
-     * {@code INSERT INTO nexus.catalog_collections (tenant_id, name) SELECT DISTINCT
-     * tenant_id, <collectionField> FROM <source table> [WHERE <filter>] ON CONFLICT
-     * (tenant_id, name) DO NOTHING} — renders the exact statement shape the changeset's
-     * raw SQL specifies (DISTINCT projection, optional WHERE, ON CONFLICT DO NOTHING),
-     * just built through jOOQ's typed DSL instead of string concatenation.
+     * {@code INSERT INTO nexus.catalog_collections (tenant_id, name, content_type,
+     * owner_id, embedding_model, lifecycle_state) SELECT DISTINCT tenant_id,
+     * <collectionField>, 'unknown', tenant_id, 'bge-base-en-v15-768', 'live' FROM
+     * <source table> [WHERE <filter>] ON CONFLICT (tenant_id, name) DO NOTHING} —
+     * renders the exact statement shape the changeset's raw SQL specifies (DISTINCT
+     * projection, optional WHERE, ON CONFLICT DO NOTHING), just built through jOOQ's
+     * typed DSL instead of string concatenation.
+     *
+     * <p>nexus-ft04v.4/.5 fix (critic T2 critique-nexus-ft04v-4-walk-changeset-b42549f03
+     * [24941]): hygiene-002-collection-attributes-walk.xml's non-empty CHECKs /
+     * embedding_model FK / lifecycle_state NOT NULL reject the bare (tenant_id, name)
+     * insert this used to do. The four backfilled columns here mirror this bead's own
+     * walk's catch-all branch D (no separator/unparseable-shape) EXACTLY, since a
+     * name derived from an arbitrary source table's own {@code collection} column has
+     * no guaranteed RDR-103 shape either: content_type 'unknown', owner_id the row's
+     * own tenant_id (the same value the walk uses), the seeded local fallback model,
+     * lifecycle_state 'live' (this stub always represents a collection reference that
+     * genuinely exists, never a disputed one). Literal projected columns via
+     * {@code DSL.val(...)}, not string concatenation.
      */
     private static void runBackfillStub(
             DSLContext ctx, org.jooq.TableField<?, String> tenantField,
             org.jooq.TableField<?, String> collectionField, org.jooq.Condition filter) {
+        var contentTypeField = DSL.val("unknown").as(CATALOG_COLLECTIONS.CONTENT_TYPE);
+        var ownerIdField = tenantField.as(CATALOG_COLLECTIONS.OWNER_ID.getName());
+        var embeddingModelField = DSL.val("bge-base-en-v15-768").as(CATALOG_COLLECTIONS.EMBEDDING_MODEL);
+        var lifecycleStateField = DSL.val("live").as(CATALOG_COLLECTIONS.LIFECYCLE_STATE);
         var select = filter == null
-            ? ctx.selectDistinct(tenantField, collectionField).from(tenantField.getTable())
-            : ctx.selectDistinct(tenantField, collectionField).from(tenantField.getTable()).where(filter);
-        ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+            ? ctx.selectDistinct(tenantField, collectionField, contentTypeField, ownerIdField,
+                    embeddingModelField, lifecycleStateField).from(tenantField.getTable())
+            : ctx.selectDistinct(tenantField, collectionField, contentTypeField, ownerIdField,
+                    embeddingModelField, lifecycleStateField).from(tenantField.getTable()).where(filter);
+        ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
             .select(select)
             .onConflictDoNothing()
             .execute();

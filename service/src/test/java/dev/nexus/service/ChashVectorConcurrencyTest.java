@@ -193,6 +193,29 @@ class ChashVectorConcurrencyTest {
         var embedder = new PgVectorRepositoryContractTest.FakeEmbedder(1024);
         var pgRepo = new PgVectorRepository(tenantScope, embedder, embedder);
 
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): the "first-registration burst" this
+        // suite's class doc describes is RETIRED along with the stub-insert it raced —
+        // ChashRepository.ensureCollectionRegistered and PgVectorRepository
+        // .upsertChunksInternal's auto-stub INSERT ... ON CONFLICT DO NOTHING are gone;
+        // a write against an unregistered collection now fails loud (422) instead of
+        // auto-registering. Pre-register COLLECTION here (same in-process
+        // CollectionRegistry static this HTTP server's handlers read) so every worker's
+        // FIRST request is a real, successful write — the concurrent POOL-CAPACITY
+        // proof this suite exists for is unrelated to registration and still holds;
+        // without this, every request would 422 and the "zero 5xx" assertion would
+        // pass VACUOUSLY (a 422 is not a 5xx) while proving nothing. A real row (not
+        // just a CollectionRegistry cache entry) is required — chunks_collection_fk
+        // and chash_index-adjacent FKs enforce it at the DB level regardless of the
+        // in-process cache.
+        // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection,
+        // which derives the constraint-satisfying attributes hygiene-002-1 now
+        // requires (the bare two-column insert this used to run 23502s on
+        // lifecycle_state NOT NULL).
+        tenantScope.withTenant(TENANT, ctx -> {
+            PgContainerHelper.insertCollection(ctx, TENANT, COLLECTION);
+            return null;
+        });
+
         // NexusService wires ChashHandler and VectorHandler off the SAME DataSource
         // (hence the SAME HikariCP pool) — exactly the production topology this bug
         // depends on.

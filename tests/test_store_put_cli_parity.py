@@ -51,7 +51,7 @@ def _make_stub_t3():
     return lambda: _StubT3()
 
 
-def _seed_for_store_put(content: str, collection: str = "knowledge") -> None:
+def _seed_for_store_put(content: str, collection: str = "fixture-subject") -> None:
     """Pre-seed a REAL ``nexus.chunks`` row for what a store_put-shaped
     write (CLI ``nx store put``, MCP ``store_put``, ``nx memory promote``)
     is about to write (nexus-dbzxb, RDR-191 Phase 5 Python collateral).
@@ -141,7 +141,7 @@ class TestStorePutCli:
             runner = CliRunner()
             result = runner.invoke(main, [
                 "store", "put", str(f),
-                "--collection", "knowledge",
+                "--collection", "fixture-subject",
                 "--title", "parity-store-put",
             ])
 
@@ -300,7 +300,7 @@ class TestCrossCallerIdentityParity:
         with patch("nexus.commands.store._t3", _make_stub_t3()):
             cli_result = CliRunner().invoke(main, [
                 "store", "put", str(f),
-                "--collection", "knowledge", "--title", title,
+                "--collection", "fixture-subject", "--title", title,
             ])
         assert cli_result.exit_code == 0, cli_result.output
 
@@ -315,7 +315,7 @@ class TestCrossCallerIdentityParity:
         ):
             mcp_result = mcp_store_put(
                 content="mcp body (different content)",
-                collection="knowledge", title=title,
+                collection="fixture-subject", title=title,
             )
         assert mcp_result.startswith("Stored:"), mcp_result
 
@@ -331,7 +331,7 @@ class TestCrossCallerIdentityParity:
             patch("nexus.commands.memory.t2_handle", return_value=db),
         ):
             promote_result = CliRunner().invoke(main, [
-                "memory", "promote", str(entry_id), "--collection", "knowledge",
+                "memory", "promote", str(entry_id), "--collection", "fixture-subject",
             ])
         assert promote_result.exit_code == 0, promote_result.output
 
@@ -370,7 +370,7 @@ class TestStorePutManifestReplace:
         with patch("nexus.commands.store._t3", _make_stub_t3()):
             first_result = CliRunner().invoke(main, [
                 "store", "put", str(f),
-                "--collection", "knowledge", "--title", title,
+                "--collection", "fixture-subject", "--title", title,
             ])
         assert first_result.exit_code == 0, first_result.output
         old_chash = hashlib.sha256(b"original body").hexdigest()
@@ -386,7 +386,7 @@ class TestStorePutManifestReplace:
         with patch("nexus.commands.store._t3", _make_stub_t3()):
             second_result = CliRunner().invoke(main, [
                 "store", "put", str(f),
-                "--collection", "knowledge", "--title", title,
+                "--collection", "fixture-subject", "--title", title,
             ])
         assert second_result.exit_code == 0, second_result.output
         new_chash = hashlib.sha256(b"replaced body with entirely different content").hexdigest()

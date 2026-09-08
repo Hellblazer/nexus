@@ -4,9 +4,12 @@ via /assignments/assign_many, with 404 fallback to the per-row loop for
 engines predating v0.1.24."""
 
 from __future__ import annotations
+from unittest.mock import MagicMock
 
+import httpx
 import pytest
 
+import nexus.corpus as corpus
 from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 
 
@@ -15,6 +18,19 @@ def _rows(n: int, by: str = "centroid") -> list[dict]:
         {"doc_id": f"d{i}", "topic_id": 7, "assigned_by": by}
         for i in range(n)
     ]
+
+
+def _rows_with_collection(n: int, collection: str, by: str = "centroid") -> list[dict]:
+    return [
+        {"doc_id": f"d{i}", "topic_id": 7, "assigned_by": by, "source_collection": collection}
+        for i in range(n)
+    ]
+
+
+def _http_422(body_text: str) -> httpx.HTTPStatusError:
+    response = MagicMock(status_code=422)
+    response.text = body_text
+    return httpx.HTTPStatusError(body_text, request=MagicMock(), response=response)
 
 
 class TestPersistAssignmentsBatch:
@@ -69,6 +85,91 @@ class TestPersistAssignmentsBatch:
         store = HttpTaxonomyStore.__new__(HttpTaxonomyStore)
         monkeypatch.setattr(store, "_post", lambda *a: pytest.fail("no post"), raising=False)
         assert store.persist_assignments([]) == 0
+
+
+class TestPersistAssignmentsBatchSelfHeals:
+    """RDR-204 Phase 1 follow-up (nexus-f5wwx, code review [24995]
+    Significant finding 1): the batch write self-heals on the engine's
+    not-registered 422 (the per-tenant boot-sweep race, bead .3) via
+    ``write_with_registration_retry``, exactly like every sibling write
+    path — not only on the older-engine 404 handled above."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_registration_cache(self):
+        corpus._REGISTERED_COLLECTIONS.clear()
+        yield
+        corpus._REGISTERED_COLLECTIONS.clear()
+
+    @pytest.fixture(autouse=True)
+    def _pin_write_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client.is_vector_service_mode", lambda: True,
+        )
+
+    def _fake_writer(self, monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+        writer = MagicMock()
+        writer.register_collection.return_value = None
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_writer", MagicMock(return_value=writer),
+        )
+        return writer
+
+    def test_batch_selfheals_on_stale_registration_422(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        store = HttpTaxonomyStore.__new__(HttpTaxonomyStore)
+        writer = self._fake_writer(monkeypatch)
+        posts: list[dict] = []
+        err = _http_422(
+            "collection 'code__stale-registration-test' is not registered "
+            "for tenant 'nexus'",
+        )
+        calls = {"n": 0}
+
+        def post(path, body):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise err
+            posts.append(body)
+            return {"persisted": len(body["assignments"])}
+
+        monkeypatch.setattr(store, "_post", post, raising=False)
+
+        n = store.persist_assignments(
+            _rows_with_collection(2, "code__stale-registration-test"),
+        )
+
+        assert n == 2
+        assert calls["n"] == 2  # first attempt 422s, retry succeeds
+        assert len(posts) == 1
+        assert len(posts[0]["assignments"]) == 2
+        # Registered once up front, once more after the stale-cache eviction.
+        assert writer.register_collection.call_count == 2
+
+    def test_batch_different_422_is_not_retried(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        store = HttpTaxonomyStore.__new__(HttpTaxonomyStore)
+        self._fake_writer(monkeypatch)
+        err = _http_422(
+            "embedding_model 'some-other-model' does not match the install "
+            "profile's 'bge-base-en-v15-768'",
+        )
+        calls = {"n": 0}
+
+        def post(path, body):
+            calls["n"] += 1
+            raise err
+
+        monkeypatch.setattr(store, "_post", post, raising=False)
+
+        with pytest.raises(httpx.HTTPStatusError):
+            store.persist_assignments(
+                _rows_with_collection(1, "code__profile-mismatch-test"),
+            )
+
+        assert calls["n"] == 1  # not retried — a different 422 propagates unretried
 
 
 class TestAssignFromChashesPaging:

@@ -385,6 +385,12 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         String content = "upsert content";
         String chash = Chash.ofText(content).toHex();
 
+        // RDR-204 nexus-ft04v.7 retired upsertChunks's own auto-stub-on-write;
+        // the collection must be registered explicitly before the write.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, coll);
+        }
         vectorRepo.upsertChunks(TENANT, coll, List.of(chash), List.of(content),
             List.of(Map.of("title", "gate2 upsert")));
         catalogRepo.upsertDocument(TENANT, Map.of(
@@ -417,6 +423,12 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         String text = "gate2 promote content " + System.nanoTime();
         String canonical = digestHex(text);
 
+        // RDR-204 nexus-ft04v.7 retired StagingPromoteOps's own auto-stub-on-write;
+        // the collection must be registered explicitly before promoteCollection runs.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, coll);
+        }
         scope.withTenant(TENANT, ctx -> {
             ctx.insertInto(STAGING_CHUNKS, SC_TENANT_ID, SC_COLLECTION, SC_DIM, SC_LEGACY_REF, SC_CHUNK_TEXT,
                            SC_EMBEDDING, SC_MODEL)
@@ -465,10 +477,8 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             var suCtx = DSL.using(su, SQLDialect.POSTGRES);
-            suCtx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-                 .values(TENANT, collHome).execute();
-            suCtx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-                 .values(TENANT, collDel).execute();
+            PgContainerHelper.insertCollection(suCtx, TENANT, collHome);
+            PgContainerHelper.insertCollection(suCtx, TENANT, collDel);
             // Document homed in collHome; its manifest row's OWN denormalized
             // `collection` names collDel (F8c reclassification-without-reindex
             // drift shape) — reachable by NEITHER scope symmetrically before
@@ -513,6 +523,12 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         String sharedText = "shared content";
         String shared = Chash.ofText(sharedText).toHex();
 
+        // RDR-204 nexus-ft04v.7 retired upsertChunks's own auto-stub-on-write;
+        // the collection must be registered explicitly before the write.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, coll);
+        }
         vectorRepo.upsertChunks(TENANT, coll, List.of(shared), List.of(sharedText),
             List.of(Map.of("title", "shared")));
         catalogRepo.upsertDocument(TENANT, Map.of(
@@ -582,6 +598,12 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         String sharedText = "shared content tombstoned";
         String shared = Chash.ofText(sharedText).toHex();
 
+        // RDR-204 nexus-ft04v.7 retired upsertChunks's own auto-stub-on-write;
+        // the collection must be registered explicitly before the write.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, coll);
+        }
         vectorRepo.upsertChunks(TENANT, coll, List.of(shared), List.of(sharedText),
             List.of(Map.of("title", "shared-tombstone")));
         catalogRepo.upsertDocument(TENANT, Map.of(
@@ -677,6 +699,14 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         String orphanContent = "gate2-gc-orphan-content";
         String orphanChash = Chash.ofText(orphanContent).toHex();
 
+        // RDR-204 nexus-ft04v.7 retired upsertChunks's own auto-stub-on-write;
+        // both the source and quarantine collections must be registered explicitly.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            var suCtx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(suCtx, TENANT, coll);
+            PgContainerHelper.insertCollection(suCtx, TENANT, quarantineColl);
+        }
         vectorRepo.upsertChunks(TENANT, coll, List.of(protectedChash, orphanChash),
             List.of(protectedContent, orphanContent),
             List.of(Map.of("title", "gc protected fixture"), Map.of("title", "gc orphan fixture")));
@@ -765,10 +795,8 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             var suCtx = DSL.using(su, SQLDialect.POSTGRES);
-            suCtx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-                 .values(TENANT, coll).execute();
-            suCtx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-                 .values(TENANT, quarantineColl).execute();
+            PgContainerHelper.insertCollection(suCtx, TENANT, coll);
+            PgContainerHelper.insertCollection(suCtx, TENANT, quarantineColl);
             for (var pair : List.of(Map.entry(refChash, refContent), Map.entry(unrefChash, unrefContent))) {
                 suCtx.insertInto(CHUNKS)
                      .set(CHUNKS.TENANT_ID, TENANT)
@@ -907,8 +935,7 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             var suCtx = DSL.using(su, SQLDialect.POSTGRES);
-            suCtx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-                 .values(TENANT, coll).execute();
+            PgContainerHelper.insertCollection(suCtx, TENANT, coll);
             suCtx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                              CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
                  .values(TENANT, "gate2-control-tombstone-doc", "control tombstone doc", coll).execute();
@@ -999,8 +1026,7 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             var suCtx = DSL.using(su, SQLDialect.POSTGRES);
-            suCtx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-                 .values(TENANT, coll).execute();
+            PgContainerHelper.insertCollection(suCtx, TENANT, coll);
             // Correlation pin: one unrelated LIVE chunk per dim (three distinct rows,
             // one per embedding_<dim> column, RDR-191 unified table), in the SAME
             // collection, so the anti-join cannot pass by "nexus.chunks happens to

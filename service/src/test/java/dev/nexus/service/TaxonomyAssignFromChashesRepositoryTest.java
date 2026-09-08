@@ -4,6 +4,8 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -420,20 +422,38 @@ class TaxonomyAssignFromChashesRepositoryTest {
         // Symmetric to foreignTenant_seesNothing_chashReportedUnmatched (code-review-expert
         // LOW): own-pass RLS isolation was pinned but the cross ("projection") pass — the
         // branch that ALSO reads across every other collection FOR THE TENANT — had no
-        // isolation coverage of its own. cross_collection=true here must behave identically:
-        // tenant B's call sees none of tenant A's chunk row, in EITHER pass.
+        // isolation coverage of its own.
+        //
+        // RDR-204 Phase 1 (Sam's decision, hygiene-003): the cross pass used to stub-
+        // register `col` for whichever tenant called it, so tenant B's call here silently
+        // registered col under TENANT_B and returned an empty pass (assigned=0,
+        // cross_assigned=0, unmatched=[c1]) -- the assertions this test originally made.
+        // That stub-insert is retired: under RLS, TENANT_B genuinely has no
+        // catalog_collections row for `col` (only TENANT_A does, via seedChunk's own
+        // registerCollection), so nexus.assign_from_chashes_1024's fail-loud guard now
+        // raises instead of silently minting one. That IS the correct outcome, not a
+        // regression -- the surviving contract this test asserts: a foreign tenant's
+        // cross-pass call against a collection it never registered fails loud, naming
+        // the remedy, and leaks NOTHING about the owning tenant (not TENANT_A's name,
+        // not the chash value, not the row's existence beyond "not registered").
         String col = "code__afc_rls_cross__voyage-code-3__v1";  // dedicated, see above note
         String c1 = hexChash("afc-chash-rls-cross");
         seedChunk(TENANT_A, col, c1, unit(1.0f, 0.0f));
         long t = seedTopic(TENANT_A, col, "rls-cross-topic");
         seedCentroid(TENANT_A, col, t, unit(1.0f, 0.0f));
 
-        Map<String, Object> out = repo.assignFromChashes(TENANT_B, col, List.of(c1), true);
-        assertThat(out.get("assigned")).as("tenant B cannot see tenant A's chunk row (own pass)").isEqualTo(0);
-        assertThat(out.get("cross_assigned")).as("tenant B cannot see tenant A's chunk row (cross pass)").isEqualTo(0);
-        assertThat((List<String>) (List<?>) out.get("unmatched_chashes"))
-            .as("RLS-invisible chash reports as unmatched from tenant B's perspective, cross pass included")
-            .containsExactly(c1);
+        assertThatThrownBy(() -> repo.assignFromChashes(TENANT_B, col, List.of(c1), true))
+            .as("tenant B has no catalog_collections row for col (RLS) -- the fail-loud "
+                + "not-registered guard fires instead of a silent stub-registration")
+            .isInstanceOf(org.jooq.exception.IntegrityConstraintViolationException.class)
+            .hasMessageContaining(col)
+            .hasMessageContaining(TENANT_B)
+            .hasMessageContaining("register it first via POST /v1/catalog/collections/upsert")
+            .as("must not leak that TENANT_A owns a row for col, or the chash value")
+            .satisfies(e -> {
+                assertThat(e.getMessage()).doesNotContain(TENANT_A);
+                assertThat(e.getMessage()).doesNotContain(c1);
+            });
     }
 
     // ── dim parity (384/768/1024) ───────────────────────────────────────────────
@@ -594,20 +614,25 @@ class TaxonomyAssignFromChashesRepositoryTest {
     private void registerCollection(String tenant, String collection) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?)"
-                    + " ON CONFLICT (tenant_id, name) DO NOTHING")) {
-                ps.setString(1, tenant);
-                ps.setString(2, collection);
-                ps.executeUpdate();
-            }
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection,
+            // which derives the constraint-satisfying attributes hygiene-002-1 now
+            // requires (the bare two-column raw INSERT this used to run 23502s on
+            // lifecycle_state NOT NULL).
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, collection);
         }
     }
 
     /** topic_assignments.topic_id has a real FK to topics(id) — a centroid's topic_id must
      * name an actual row in nexus.topics (production creates both together at discover
      * time). Returns the generated id. */
-    private long seedTopic(String tenant, String collection, String label) {
+    private long seedTopic(String tenant, String collection, String label) throws Exception {
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): topics_collection_fk is a REAL,
+        // always-enforced FK -- unlike seedChunk's target (nexus.chunks, still
+        // FK-free per the class doc above seedCollection), nexus.topics DOES
+        // enforce this FK, and callers here often name a FOREIGN collection
+        // (topic lives in a different collection than the chunk being assigned)
+        // that seedChunk's own registerCollection call never touches.
+        registerCollection(tenant, collection);
         return repo.insertTopic(tenant, label, null, collection, 0, "2026-01-01T00:00:00Z", null);
     }
 

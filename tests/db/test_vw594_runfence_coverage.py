@@ -137,7 +137,7 @@ class TestStorePutStampsFence:
 
         result = store_put(
             content="nexus-vw594 store_put fence coverage test content.",
-            collection="knowledge",
+            collection="fixture-subject",
             title="vw594-store-put-fence-test",
         )
         assert "Error" not in result, result

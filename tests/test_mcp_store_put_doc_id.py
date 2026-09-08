@@ -55,7 +55,7 @@ def _no_op(*args, **kwargs):
     pass
 
 
-def _seed_for_store_put(content: str, collection: str = "knowledge") -> None:
+def _seed_for_store_put(content: str, collection: str = "fixture-subject") -> None:
     """Pre-seed a REAL ``nexus.chunks`` row for what MCP ``store_put`` is
     about to write (nexus-dbzxb, RDR-191 Phase 5 Python collateral).
 
@@ -121,7 +121,7 @@ def test_mcp_store_put_writes_catalog_doc_id_into_t3_chunk_metadata(
          patch("nexus.mcp.core._catalog_auto_link", return_value=0) as auto_link_mock:
         result = store_put(
             content="# MCP finding: nexus-mcp-doc-id\n\nSubagents need catalog backref.",
-            collection="knowledge",
+            collection="fixture-subject",
             title="mcp-finding-doc-id",
             tags="rdr-101,mcp,test",
         )
@@ -209,7 +209,7 @@ def test_mcp_store_put_forwards_catalog_tumbler_as_fire_document_doc_id(
          patch("nexus.mcp.core._catalog_auto_link", return_value=0):
         result = store_put(
             content=content,
-            collection="knowledge",
+            collection="fixture-subject",
             title="pyn35-tumbler-forward",
             tags="rdr-172,test",
         )
@@ -298,7 +298,7 @@ def test_mcp_store_put_skips_aspect_enqueue_when_catalog_hook_raises(
          structlog.testing.capture_logs() as cap:
         result = store_put(
             content=content,
-            collection="knowledge",
+            collection="fixture-subject",
             title="pyn35-hook-raises",
             tags="test",
         )
@@ -347,7 +347,7 @@ def test_mcp_store_put_ghost_reconciliation_and_manifest_linkage(
          patch("nexus.mcp.core._catalog_auto_link", return_value=0):
         result = store_put(
             content="# Real content for the ghost\n\nFinally has a body.",
-            collection="knowledge",
+            collection="fixture-subject",
             title="ghost-reconcile-e2e",
         )
     assert "Stored" in result, f"store_put failed: {result}"
@@ -394,7 +394,7 @@ def test_mcp_store_put_doc_id_absent_when_catalog_uninitialized(
          patch("nexus.mcp.core._catalog_auto_link", return_value=0):
         result = store_put(
             content="# MCP finding without catalog\n\nNo-catalog path test.",
-            collection="knowledge",
+            collection="fixture-subject",
             title="mcp-finding-no-catalog",
             tags="test",
         )

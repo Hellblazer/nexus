@@ -83,11 +83,9 @@ class ChashHandlerRerouteTest {
             PgContainerHelper.seedServiceToken(
                 DSL.using(su, SQLDialect.POSTGRES), TOKEN, TENANT, "chash-reroute-test");
 
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             for (String coll : new String[] {COLL_384, COLL_768}) {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                    "VALUES ('" + TENANT + "', '" + coll + "') " +
-                    "ON CONFLICT (tenant_id, name) DO NOTHING");
+                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, coll);
             }
             chunk(su, 384, COLL_384, MULTI,    "2026-07-02 08:00:01+00");
             chunk(su, 768, COLL_768, MULTI,    "2026-07-02 08:00:02+00");
@@ -254,10 +252,13 @@ class ChashHandlerRerouteTest {
         Chash renamed = Chash.ofText("wire-rename");
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                "VALUES ('" + TENANT + "', 'wire-ren-src') ON CONFLICT DO NOTHING");
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "wire-ren-src");
             chunk(su, 384, "wire-ren-src", renamed, "2026-07-02 08:00:04+00");
+            // RDR-204 Phase 1 (bead nexus-ft04v.7): /rename_collection no longer
+            // auto-registers a not-yet-seen destination name (the stub-insert
+            // that used to do it is retired) -- register the rename TARGET too,
+            // matching the coherent rename path's own precondition.
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "wire-ren-dst");
         }
         var resp = post("/v1/chash/rename_collection",
             "{\"old\":\"wire-ren-src\",\"new\":\"wire-ren-dst\"}");

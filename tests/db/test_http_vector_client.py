@@ -15,6 +15,28 @@ from nexus.db.http_vector_client import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_real_catalog_registration(monkeypatch: pytest.MonkeyPatch):
+    """RDR-204 Phase 1 (nexus-f5wwx): every ``HttpVectorClient`` write
+    (``put``/``upsert_chunks``) now routes through ``nexus.corpus.
+    write_with_registration_retry``, which registers the collection
+    before the write. This file's tests are pure HTTP-shape tests —
+    they construct ``HttpVectorClient()`` bare, mock only ``_post``,
+    and use arbitrary test collection names (``"my-col"``, ``"col"``,
+    ...) that carry no real ``<content_type>__<owner_id>`` shape and
+    were never meant to be validated as one. Stub the module-level
+    ``write_with_registration_retry`` to a bare passthrough (call
+    ``write_fn()`` directly, no registration attempted at all) so this
+    RDR-204 addition is fully transparent to a suite that predates it
+    and is not testing it.
+    """
+    monkeypatch.setattr(
+        "nexus.corpus.write_with_registration_retry",
+        lambda name, write_fn, **kwargs: write_fn(),
+    )
+    yield
+
+
 class TestDataPathConfigYmlFallback:
     """RDR-166 nexus-v3p0x — the T3 data path (_resolve_endpoint) must consume
     config.yml service creds so greenfield store/search works after `nx config

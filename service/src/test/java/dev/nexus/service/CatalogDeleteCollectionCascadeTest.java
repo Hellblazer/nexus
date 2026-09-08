@@ -187,12 +187,8 @@ class CatalogDeleteCollectionCascadeTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(TENANT_F8D, COLL_HOME)
-               .execute();
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(TENANT_F8D, COLL_DEL)
-               .execute();
+            PgContainerHelper.insertCollection(ctx, TENANT_F8D, COLL_HOME);
+            PgContainerHelper.insertCollection(ctx, TENANT_F8D, COLL_DEL);
             // The document is homed in COLL_HOME.
             ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                            CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
@@ -250,12 +246,8 @@ class CatalogDeleteCollectionCascadeTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(TENANT_LINK, COLL_LINK_HOME)
-               .execute();
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(TENANT_LINK, COLL_LINK_OTHER)
-               .execute();
+            PgContainerHelper.insertCollection(ctx, TENANT_LINK, COLL_LINK_HOME);
+            PgContainerHelper.insertCollection(ctx, TENANT_LINK, COLL_LINK_OTHER);
         }
 
         // dl-src is homed in the collection about to be deleted; dl-dst and
@@ -310,9 +302,7 @@ class CatalogDeleteCollectionCascadeTest {
     /** Seed one full collection (all lifecycle tables) for {@code tenant}. Superuser; bypasses RLS. */
     private static void seedFullCollection(Connection su, String tenant) throws Exception {
         DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-        ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-           .values(tenant, COLL)
-           .execute();
+        PgContainerHelper.insertCollection(ctx, tenant, COLL);
         // catalog_documents + manifest
         ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                        CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)

@@ -16,7 +16,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 
 /**
  * nexus-kl2z6 increment 1 — the orchestration seam T2 {@code
@@ -91,6 +90,28 @@ public final class CombinedWriteService {
         this.docRouter   = docRouter;
     }
 
+    /**
+     * RDR-204 Phase 1 (bead nexus-ft04v.6) — the LAZY per-tenant,
+     * per-content-type {@code nexus.embedding_profile} seed, called from
+     * {@code CatalogHandler.handleCollectionUpsert} right after a collection
+     * registration succeeds. This IS "first registration for a content type"
+     * for a cloud tenant: the engine has no tenant-mint route (tenants exist
+     * through data-token mint at the edge), so a real client registration
+     * request is the only seam available. Delegates to {@link
+     * EmbedderRouter#seedEmbeddingProfileForContentType} — idempotent (a real
+     * upsert, safe to call on every registration for that content type, not
+     * only the first) and never touches the {@code catalog_collections} row
+     * {@link CatalogRepository#upsertCollection} just wrote.
+     *
+     * @param tenant      tenant principal for RLS scoping
+     * @param contentType the collection's content type (blank/null is a
+     *                    no-op — nothing to seed a profile row against)
+     */
+    public void seedEmbeddingProfileForContentType(String tenant, String contentType) {
+        if (contentType == null || contentType.isBlank()) return;
+        docRouter.seedEmbeddingProfileForContentType(tenantScope, tenant, contentType);
+    }
+
     /** Embed-phase token usage plus the underlying {@code writeManifestMany} response. */
     public record CombinedWriteResult(Map<String, Object> response, long tokens) {}
 
@@ -121,14 +142,12 @@ public final class CombinedWriteService {
         int dim = PgVectorRepository.dimForCollection(collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
 
-        // Standing rule (RDR-156 P0.2, bead nexus-70r3c.2), same discipline
-        // PgVectorRepository.upsertChunksInternal applies: collection
-        // registration precedes chunk writes, enforced here (auto-stub, in
-        // its OWN short committed transaction — never inside a per-doc
-        // manifest transaction) and by the chunks_<dim> -> catalog_collections
-        // FK. Without this, the FIRST combined write to a brand-new
-        // collection fails every doc with a chunks_<dim>_collection_fk
-        // violation.
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): require catalog_collections to
+        // already carry a row for `collection` before any chunk write — checked here
+        // (in its OWN short transaction — never inside a per-doc manifest transaction)
+        // instead of the RDR-156-era auto-stub. A combined write against an
+        // unregistered collection now fails loud (UnregisteredCollectionException,
+        // mapped to 422) rather than silently registering a blank-attribute row.
         ensureCollectionRegistered(tenant, collection);
 
         List<Map<String, Object>> src = chunks != null ? chunks : List.of();
@@ -313,31 +332,22 @@ public final class CombinedWriteService {
     }
 
     /**
-     * Mirrors {@code PgVectorRepository.upsertChunksInternal}'s ensure-registered
-     * stub-insert exactly: a short, independently-committed transaction (never
-     * inside a per-doc manifest transaction), skipped when {@link
-     * CollectionRegistry} already knows this {@code (tenant, collection)} pair.
+     * RDR-204 Phase 1 (bead nexus-ft04v.7): require catalog_collections to already
+     * carry a row for {@code (tenant, collection)}, in its own short transaction
+     * (never inside a per-doc manifest transaction), skipped when {@link
+     * CollectionRegistry} already knows the pair. Replaces the RDR-70r3c-era
+     * auto-stub {@code INSERT ... ON CONFLICT DO NOTHING} (which used to derive
+     * content_type/owner_id/embedding_model/model_version by splitting the name on
+     * {@code "__"}) with a fail-loud check — a combined write against an
+     * unregistered collection throws {@link UnregisteredCollectionException} instead
+     * of ever writing a row.
      */
     private void ensureCollectionRegistered(String tenant, String collection) {
         if (CollectionRegistry.isKnown(tenant, collection)) return;
-        String[] collSegs = collection.split("__");
-        boolean conformant = collSegs.length == 4;
-        String regContentType  = conformant ? collSegs[0] : "";
-        String regOwner        = conformant ? collSegs[1] : "";
-        String regModel        = conformant ? collSegs[2] : "";
-        String regModelVersion = conformant ? collSegs[3] : "";
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.insertInto(CATALOG_COLLECTIONS,
-                            CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
-                            CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
-                            CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
-               .values(tenant, collection, regContentType, regOwner, regModel, regModelVersion)
-               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .doNothing()
-               .execute();
+            CollectionRegistry.requireRegistered(ctx, tenant, collection);
             return null;
         });
-        CollectionRegistry.markKnown(tenant, collection);
     }
 
     private static Map<String, String> selectExistingText(DSLContext ctx, DimTables.ChunkTable ch,

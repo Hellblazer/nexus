@@ -142,6 +142,11 @@ class HybridSelectiveGateTest {
             metas.add(Map.of());
         }
 
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK now -- PgVectorRepository's stub-insert is retired.
+        try (Connection su0 = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su0, SQLDialect.POSTGRES), TENANT, COLL);
+        }
         repo.upsertChunks(TENANT, COLL, ids, texts, metas);
 
         try (Connection su = pg.createConnection("")) {

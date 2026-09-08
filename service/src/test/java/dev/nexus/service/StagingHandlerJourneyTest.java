@@ -105,6 +105,28 @@ class StagingHandlerJourneyTest {
         service = new NexusService(0, TOKEN, svcDs, router, pgRepo);
         service.start();
         http = HttpClient.newHttpClient();
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.3): AuthFilter runs the per-tenant,
+        // once-per-process ghost sweep on whichever request is TENANT's first
+        // against this service instance, and DELETES any collection it finds
+        // registered-but-chunkless at that moment. The warmup MUST run before
+        // COLL is registered at all (measured, nexus-ft04v Phase 1 round 4:
+        // registering first and warming up second let the warmup ITSELF
+        // trigger the sweep and delete the row it had just registered, out
+        // from under every @Test method's write). Burn the sweep here first,
+        // THEN register.
+        var warmup = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+            .header("Authorization", "Bearer " + TOKEN)
+            .header("X-Nexus-Tenant", TENANT)
+            .GET().build();
+        http.send(warmup, HttpResponse.BodyHandlers.ofString());
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK now -- register the journey collection.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL);
+        }
     }
 
     @AfterAll

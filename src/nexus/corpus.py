@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import re
+import threading
 from collections.abc import Callable
+from typing import TypeVar
 
+import click
 import structlog
 
 _log = structlog.get_logger(__name__)
@@ -69,6 +72,16 @@ def validate_collection_name(name: str) -> None:
 
 
 CONTENT_TYPES: tuple[str, ...] = _CONTENT_TYPES
+
+#: Subject names that are containers, not subjects (docs/collections.md
+#: Rule 1). A write that names one of these as the subject is refused
+#: (nexus-0fw11): ``knowledge__knowledge`` and ``docs__default`` on the
+#: production tenant were both minted by taking a default where a subject
+#: was needed. Reads are unaffected, and a full four-segment conformant
+#: name passes through untouched, which is the deliberate escape for the
+#: collections that already exist. ``tests/test_corpus.py`` pins this set
+#: to the list docs/collections.md prints.
+PLACEHOLDER_SUBJECTS: frozenset[str] = frozenset({"default", "knowledge", "notes", "tmp", "test"})
 """Public alias for the canonical content_type values used in the
 RDR-103 ``<content_type>__<owner_id>__<embedding_model>__v<n>`` schema.
 ``CollectionName`` validates against this tuple."""
@@ -171,6 +184,17 @@ def canonical_embedding_model(content_type: str) -> str:
         f"canonical_embedding_model: unknown content_type {content_type!r}; "
         f"expected one of {CONTENT_TYPES}"
     )
+
+
+class PlaceholderCollectionError(click.ClickException, ValueError):
+    """A write named a placeholder (``default``, ``knowledge``, ``notes``,
+    ``tmp``, ``test``) where a subject was required (nexus-0fw11).
+
+    A ``click.ClickException`` so every CLI writer that shares the resolver
+    (``nx store put``, ``nx memory promote``, ``nx index pdf/md``, ``nx dt
+    index``) prints the message and exits 1 instead of a traceback, without
+    each command catching it; the MCP tools ``str()`` it into their
+    ``Error:`` reply. Also a ``ValueError`` for library callers."""
 
 
 class LocalVoyageCredentialMissingError(RuntimeError):
@@ -656,8 +680,24 @@ def embedding_model_for_collection_calibrated(collection_name: str) -> str:
     return resolve_read_embedding_model(content_type)
 
 
+def _refuse_placeholder_subject(user_arg: str) -> None:
+    """Raise :class:`PlaceholderCollectionError` when the subject segment of
+    a bare or two-segment name is a placeholder (nexus-0fw11). Only write
+    resolution calls this; the four-segment conformant form never reaches it."""
+    _, _, rest = user_arg.partition("__") if "__" in user_arg else ("", "", user_arg)
+    if rest in PLACEHOLDER_SUBJECTS:
+        raise PlaceholderCollectionError(
+            f"collection {user_arg!r} names a placeholder, not a subject: a knowledge "
+            "collection is a subject area a reader would browse (distributed-systems, "
+            "vector-search), never default/knowledge/notes/tmp/test. Name the subject, "
+            "reusing an existing one from `nx collection list` where it fits; see "
+            "docs/collections.md Rule 1."
+        )
+
+
 def t3_collection_name(
     user_arg: str, *, t3: object | None = None, for_write: bool = False,
+    allow_placeholder: bool = False,
 ) -> str:
     """Resolve a --collection argument to a T3 collection name.
 
@@ -711,6 +751,13 @@ def t3_collection_name(
     """
     if is_conformant_collection_name(user_arg):
         return user_arg
+
+    # nexus-0fw11: a write that names a placeholder subject is refused here,
+    # the one resolver every writer uses. ``allow_placeholder`` is for a
+    # writer restoring a collection that already exists under that name
+    # (the recovery-bundle import), never for a new mint.
+    if for_write and not allow_placeholder:
+        _refuse_placeholder_subject(user_arg)
 
     # GH #545: when the user typed a BARE content-type prefix
     # (``"code"``, ``"docs"``, ``"rdr"``, ``"knowledge"``) AND no
@@ -936,6 +983,258 @@ def t3_collection_name(
         # back to bge.
         return f"{ct}__{owner_segment}__{effective_embedding_model_for_writes(ct)}__v1"
     return promoted
+
+
+def collection_registration_kwargs(name: str) -> dict[str, str]:
+    """Derive ``register_collection`` kwargs for *name*.
+
+    RDR-204 Phase 1 (nexus-f5wwx): the engine no longer auto-registers a
+    collection on first write (bead .7 deleted the seven stub-insert
+    paths) — a client write path that used to rely on that must
+    register first. This is the ONE derivation every such call site
+    reuses (T3 chunk writes, the aspects store, taxonomy persistence),
+    so content_type/owner_id/embedding_model never diverge between them.
+
+    A conformant 4-segment name (``<content_type>__<owner_id>__
+    <embedding_model>__v<n>``) is decomposed via
+    :func:`parse_conformant_collection_name` for ``content_type``,
+    ``owner_id`` and ``model_version``. A legacy 2-segment name (e.g. a
+    grandfathered ``knowledge__distributed-systems``, RDR-101) is split
+    on the first ``__``: ``content_type`` is the first segment,
+    ``owner_id`` is everything after it, and ``model_version`` is
+    ``"v1"`` (the ``register_collection`` default — legacy names carry
+    no version segment to preserve). A name with NO ``__`` at all
+    (``"my-notes"``) mirrors :func:`t3_collection_name`'s own existing
+    bare-name convention (a bare content-type-less string promotes to
+    ``knowledge__<name>__...``): ``content_type`` is ``"knowledge"``,
+    ``owner_id`` is the whole string.
+
+    ``embedding_model`` is ALWAYS :func:`effective_embedding_model_for_writes`
+    for the derived ``content_type`` — never a token read back out of
+    the name — mirroring nexus-ft04v.34's ``commands/index.py`` fix
+    exactly: an engine older than Phase 1 (which ignores the field)
+    still stores the right model, and a Phase-1+ engine's
+    profile-mismatch 422 fires on a real drift instead of being masked
+    by parroting whatever the name happened to say.
+
+    Raises :class:`ValueError` only when *name* carries no
+    recognisable ``<content_type>__<owner_id>`` shape at all (an
+    empty segment on either side of a ``__``) — a MINT-time decision,
+    a name a client is about to write into for the first time, never
+    a backfill-time salvage; there is no "unknown"/"disputed"
+    fallback here the way the engine's one-time backfill has one for
+    pre-existing garbage rows. The derived ``content_type`` itself is
+    NOT restricted to the four canonical types here: the engine's own
+    constraint is NOT NULL + non-empty, not an enum
+    (hygiene-002-collection-attributes-walk.xml carries no CHECK on
+    the column), and a large pre-existing test surface uses
+    non-canonical placeholder segments (``test__coll``) as opaque
+    collection identifiers that were never meant to name a real T3
+    content type. :func:`effective_embedding_model_for_writes` still
+    validates on its cloud/voyage branch via
+    :func:`canonical_embedding_model` — unchanged, and the only
+    validation that ever fired here in production (plain local mode
+    never validates content_type either, an existing property of that
+    function this one does not alter).
+    """
+    if is_conformant_collection_name(name):
+        segments = parse_conformant_collection_name(name)
+        content_type = segments["content_type"]
+        owner_id = segments["owner_id"]
+        model_version = segments["model_version"]
+    elif "__" not in name:
+        content_type = "knowledge"
+        owner_id = name
+        model_version = "v1"
+    else:
+        parts = name.split("__")
+        if len(parts) < 2 or not parts[0] or not parts[1]:
+            raise ValueError(
+                f"collection_registration_kwargs: {name!r} has no "
+                "<content_type>__<owner_id> shape to register with"
+            )
+        content_type = parts[0]
+        owner_id = "__".join(parts[1:])
+        model_version = "v1"
+    return {
+        "content_type": content_type,
+        "owner_id": owner_id,
+        "embedding_model": effective_embedding_model_for_writes(content_type),
+        "model_version": model_version,
+    }
+
+
+#: Per-process cache of collection names already registered by
+#: :func:`ensure_collection_registered` — see that function's docstring.
+_REGISTERED_COLLECTIONS: set[str] = set()
+_REGISTERED_COLLECTIONS_LOCK = threading.Lock()
+
+
+def ensure_collection_registered(
+    name: str, *, registrar: "Callable[[], object] | None" = None,
+) -> None:
+    """Idempotently register *name* before its first write in this process.
+
+    RDR-204 Phase 1 client half (nexus-f5wwx). Call this from every
+    write path that used to rely on the engine's now-retired
+    auto-registration on first write: the T3 chunk write path
+    (``HttpVectorClient.put`` / ``.upsert_chunks``, which covers
+    ``nx store put``, MCP ``store_put``, the indexer, ``nx index md``/
+    ``pdf``/``rdr``, ``nx dt import`` and ``nx memory promote`` in one
+    place), the aspects store (``HttpDocumentAspectsStore.upsert``),
+    and taxonomy persistence (``HttpTaxonomyStore.persist_discovered_topics``
+    / ``.persist_rebuild_topics`` / ``.import_topic``).
+
+    Cheap after the first call: a per-process cache means a hot
+    per-chunk write path pays one HTTP round trip per NEW collection,
+    never one per write. The cache is name-keyed only (no tenant
+    dimension) — matching every other ambient-tenant catalog write in
+    this codebase (``make_catalog_writer()`` itself resolves tenant
+    from config, not from a caller-supplied value).
+
+    *registrar* is a zero-arg factory returning a catalog writer (an
+    object with ``register_collection`` and ``close``) — injectable so
+    a low-level caller (:class:`~nexus.db.http_vector_client.
+    HttpVectorClient`) is never hard-coupled to
+    ``nexus.catalog.factory``, and so a unit test can pass a fake
+    writer with no service running. Defaults to
+    :func:`nexus.catalog.factory.make_catalog_writer`, imported here
+    (not at module level) to keep this module free of a catalog
+    import cycle.
+
+    A 409 from the register call is treated as already-registered
+    (idempotent-upsert semantics, RDR-204 Technical Design step 2) —
+    another process may have won the race to register the same name.
+    Any other failure propagates uncaught: a registration failure here
+    means the write that follows would 422/4xx anyway, and failing at
+    this boundary names the real cause instead of the write's more
+    confusing downstream error.
+    """
+    if name in _REGISTERED_COLLECTIONS:
+        return
+    with _REGISTERED_COLLECTIONS_LOCK:
+        if name in _REGISTERED_COLLECTIONS:
+            return
+        kwargs = collection_registration_kwargs(name)
+        if registrar is None:
+            from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — circular-dep avoidance (catalog)
+            registrar = make_catalog_writer
+        writer = registrar()
+        try:
+            import httpx  # noqa: PLC0415 — deferred: keeps this module httpx-free at import time
+            try:
+                writer.register_collection(name, **kwargs)
+            except httpx.HTTPStatusError as exc:
+                if exc.response is None or exc.response.status_code != 409:
+                    raise
+                _log.debug(
+                    "collection_already_registered_race",
+                    name=name,
+                )
+        finally:
+            writer.close()
+        _REGISTERED_COLLECTIONS.add(name)
+
+
+def _looks_like_stale_registration_error(exc: BaseException) -> bool:
+    """True when *exc* is the ONE 422 :func:`write_with_registration_retry`
+    retries: the engine's per-tenant, once-per-boot ghost sweep (RDR-204
+    Technical Design step 3, bead nexus-ft04v.3) deleted a
+    registered-but-chunkless collection between this process's own
+    :func:`ensure_collection_registered` call and the write that
+    followed it — a real race only across an intervening engine
+    restart (the sweep runs once per tenant at that tenant's FIRST
+    request after boot), never within one call. Any OTHER 422 (most
+    notably the profile-mismatch "names a different model" refusal,
+    RDR-204 Technical Design step 2) must propagate unretried — this
+    check is deliberately narrowed to the "not registered" wording so
+    it can never mask that different failure as a transient one.
+
+    Two HTTP-error families reach here, mirroring
+    :func:`nexus.retry._extract_status_and_retry_after`'s own
+    precedent for this exact split: ``httpx.HTTPStatusError`` (the
+    aspects and taxonomy stores) carries the status and body on
+    ``.response``; ``nexus.db.http_vector_client.VectorServiceError``
+    (the T3 vector client, urllib-based) is matched by DUCK TYPE — a
+    plain ``.code`` int — rather than an import, so this module never
+    takes a dependency on ``http_vector_client`` (which already
+    deferred-imports THIS module, to avoid exactly that cycle);
+    ``VectorServiceError.__init__`` folds the engine's error body into
+    its message, so ``str(exc)`` is where the text lives for that
+    family.
+    """
+    import httpx  # noqa: PLC0415 — deferred: keeps this module httpx-free at import time
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        resp = exc.response
+        if resp is None or resp.status_code != 422:
+            return False
+        try:
+            body_text = resp.text
+        except Exception:  # noqa: BLE001 — a response with no readable body is never this specific error
+            return False
+        return "not registered" in body_text.lower()
+    code = getattr(exc, "code", None)
+    if code == 422:
+        return "not registered" in str(exc).lower()
+    return False
+
+
+_T = TypeVar("_T")
+
+
+def write_with_registration_retry(
+    name: str,
+    write_fn: "Callable[[], _T]",
+    *,
+    registrar: "Callable[[], object] | None" = None,
+) -> "_T":
+    """Ensure *name* is registered, run *write_fn*, and retry exactly
+    once on the one known post-registration race.
+
+    RDR-204 Phase 1 client half (nexus-f5wwx), refinement after bead
+    .3 landed: the engine's boot-sweep can delete a registered but
+    still-chunkless collection at the next engine restart, so a
+    collection this PROCESS registered earlier (and cached as known)
+    can be gone by the time a write for it finally happens, and that
+    write 422s "collection ... is not registered". Catch exactly that
+    shape (:func:`_looks_like_stale_registration_error`), evict the
+    cache entry, register once more, and retry *write_fn* ONE time.
+    Any second failure, or any OTHER exception on the first attempt
+    (including a different-shaped 422, e.g. a profile mismatch),
+    propagates immediately — this is a narrow one-shot repair, not a
+    general retry loop.
+
+    *write_fn* is a zero-arg callable performing the actual HTTP
+    write (and returning whatever the caller needs back) — callers
+    wrap their POST in a closure so this helper stays write-shape
+    agnostic across the T3 chunk write path, the aspects store, and
+    taxonomy persistence.
+
+    The normal path (registration and the write both succeed on the
+    first attempt) pays nothing extra beyond
+    :func:`ensure_collection_registered`'s own per-process cache: the
+    registration call is itself authenticated the same way as every
+    other catalog write, so it always completes strictly BEFORE the
+    write that follows in the SAME call — the sweep can only ever
+    catch a collection that sat registered-but-unwritten across an
+    intervening restart, never the write this function itself just
+    triggered registration for.
+    """
+    ensure_collection_registered(name, registrar=registrar)
+    try:
+        return write_fn()
+    except Exception as exc:  # noqa: BLE001 — narrowed immediately below; anything else re-raised unchanged
+        if not _looks_like_stale_registration_error(exc):
+            raise
+        _log.info(
+            "collection_registration_stale_after_boot_sweep_retry",
+            name=name,
+        )
+        with _REGISTERED_COLLECTIONS_LOCK:
+            _REGISTERED_COLLECTIONS.discard(name)
+        ensure_collection_registered(name, registrar=registrar)
+        return write_fn()
 
 
 def resolve_corpus(corpus: str, all_collections: list[str]) -> list[str]:

@@ -147,6 +147,26 @@ class RerankStageIntegrationTest {
         svcCross.start();
         http = HttpClient.newHttpClient();
 
+        // RDR-204 Phase 1 (bead nexus-ft04v.3): AuthFilter runs the per-tenant,
+        // once-per-process ghost sweep on whichever request is TENANT's first
+        // against a given NexusService instance -- registering COL and then
+        // making the upsert-chunks POST below THAT first request would let the
+        // sweep find COL freshly registered with zero chunks and delete it
+        // out from under the write (see BridgeAddressFieldsTest's identical
+        // fix). Burn the sweep on svcVoyage with a harmless GET first, THEN
+        // register COL, THEN upsert.
+        var warmup = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + svcVoyage.getPort() + "/v1/catalog/collections/list"))
+            .header("Authorization", "Bearer " + TOKEN)
+            .GET().build();
+        http.send(warmup, HttpResponse.BodyHandlers.ofString());
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK now -- PgVectorRepository's stub-insert is retired.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COL);
+        }
+
         // Fixture rows: distances 0.0 / 0.2 / 0.4 → distance order C1, C2, C3.
         Map<String, Object> up = postOk(svcVoyage, "/v1/vectors/upsert-chunks", Map.of(
             "collection", COL,

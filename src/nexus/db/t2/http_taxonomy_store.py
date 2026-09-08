@@ -439,14 +439,33 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         Projection rows use GREATEST(similarity) conflict resolution.
         Non-projection rows use INSERT OR IGNORE semantics.
         """
-        self._post("/assignments/assign", {
-            "doc_id": doc_id,
-            "topic_id": topic_id,
-            "assigned_by": assigned_by,
-            "similarity": similarity,
-            "source_collection": source_collection,
-            "assigned_at": assigned_at,
-        })
+        # RDR-204 Phase 1 (nexus-f5wwx): source_collection is NOT NULL
+        # server-side (RDR-194 P3b, taxonomy-010-1) — when the client
+        # DOES supply one, ensure it is registered (retrying once on
+        # the engine's per-tenant boot sweep, bead .3). When the client
+        # omits it, the server derives it from the assigned topic's own
+        # collection, which was already registered when that topic was
+        # persisted (persist_discovered_topics/persist_rebuild_topics)
+        # — nothing new to register here.
+        if source_collection:
+            from nexus.corpus import write_with_registration_retry  # noqa: PLC0415 — circular-dep avoidance (corpus)
+            write_with_registration_retry(source_collection, lambda: self._post("/assignments/assign", {
+                "doc_id": doc_id,
+                "topic_id": topic_id,
+                "assigned_by": assigned_by,
+                "similarity": similarity,
+                "source_collection": source_collection,
+                "assigned_at": assigned_at,
+            }))
+        else:
+            self._post("/assignments/assign", {
+                "doc_id": doc_id,
+                "topic_id": topic_id,
+                "assigned_by": assigned_by,
+                "similarity": similarity,
+                "source_collection": source_collection,
+                "assigned_at": assigned_at,
+            })
 
     def get_topic_doc_ids(self, topic_id: int, *, limit: int = 3) -> list[str]:
         """Return up to ``limit`` doc_ids assigned to a topic."""
@@ -854,31 +873,45 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         REPLACE-semantics, where a conflict would mean a genuinely lost
         write — those must keep propagating.
         """
-        try:
-            r = self._post(
-                "/topics/persist_discovered",
-                {"collection": collection_name, "specs": specs},
-            )
-        except httpx.HTTPStatusError as exc:
-            if exc.response is not None and exc.response.status_code == 409:
-                try:
-                    sqlstate = exc.response.json().get("sqlstate")
-                except Exception:  # noqa: BLE001 — body may be empty/non-JSON on older engines; absent sqlstate handled below
-                    sqlstate = None
-                if sqlstate in (None, "23505"):
-                    _log.info(
-                        "persist_discovered_conflict_benign_skip",
-                        collection=collection_name,
-                        sqlstate=sqlstate,
-                        hint=(
-                            "a concurrent discovery already persisted this "
-                            "collection's topics (pre-n2ls1 engine race shape); "
-                            "nothing to retry"
-                        ),
-                    )
-                    return []
-            raise
-        return r.get("topic_ids", [])
+        # RDR-204 Phase 1 (nexus-f5wwx): the engine no longer
+        # auto-registers a collection on first write (nexus-ft04v.7
+        # deleted TaxonomyRepository's stub insert) — ensure it here,
+        # once per process per collection (cached), and retry once if
+        # the engine's per-tenant boot sweep (bead .3) reaped a
+        # registered-but-chunkless row between registration and this
+        # write. The inner try/except's bare ``raise`` on a non-409
+        # status (422 included) is what lets that retry see the
+        # "not registered" error at all — untouched by this change.
+        from nexus.corpus import write_with_registration_retry  # noqa: PLC0415 — circular-dep avoidance (corpus)
+
+        def _do_persist() -> list[int]:
+            try:
+                r = self._post(
+                    "/topics/persist_discovered",
+                    {"collection": collection_name, "specs": specs},
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response is not None and exc.response.status_code == 409:
+                    try:
+                        sqlstate = exc.response.json().get("sqlstate")
+                    except Exception:  # noqa: BLE001 — body may be empty/non-JSON on older engines; absent sqlstate handled below
+                        sqlstate = None
+                    if sqlstate in (None, "23505"):
+                        _log.info(
+                            "persist_discovered_conflict_benign_skip",
+                            collection=collection_name,
+                            sqlstate=sqlstate,
+                            hint=(
+                                "a concurrent discovery already persisted this "
+                                "collection's topics (pre-n2ls1 engine race shape); "
+                                "nothing to retry"
+                            ),
+                        )
+                        return []
+                raise
+            return r.get("topic_ids", [])
+
+        return write_with_registration_retry(collection_name, _do_persist)
 
     def persist_rebuild_topics(
         self,
@@ -891,15 +924,23 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         old + INSERT new specs + manual_transfers in one txn — clears old rows
         even when specs is empty). Returns topic_ids aligned to ``plan["specs"]``.
         """
-        r = self._post(
-            "/topics/persist_rebuild",
-            {
-                "collection": collection_name,
-                "specs": plan["specs"],
-                "manual_transfers": plan.get("manual_transfers", {}),
-            },
-        )
-        return r.get("topic_ids", [])
+        # RDR-204 Phase 1 (nexus-f5wwx): see persist_discovered_topics
+        # above — same retired auto-registration and boot-sweep retry,
+        # guarded the same way.
+        from nexus.corpus import write_with_registration_retry  # noqa: PLC0415 — circular-dep avoidance (corpus)
+
+        def _do_rebuild() -> list[int]:
+            r = self._post(
+                "/topics/persist_rebuild",
+                {
+                    "collection": collection_name,
+                    "specs": plan["specs"],
+                    "manual_transfers": plan.get("manual_transfers", {}),
+                },
+            )
+            return r.get("topic_ids", [])
+
+        return write_with_registration_retry(collection_name, _do_rebuild)
 
     def persist_assignments(self, assignments: list[dict[str, Any]]) -> int:
         """Persist pre-computed assignments (mirrors CatalogTaxonomy.persist_assignments).
@@ -914,11 +955,51 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         if not assignments:
             return 0
+        # RDR-204 Phase 1 (nexus-f5wwx): pre-register every DISTINCT
+        # source_collection the batch references — see assign_topic's
+        # identical rationale. Cheap after the first call per name
+        # (ensure_collection_registered's cache).
+        from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (corpus)
+            ensure_collection_registered,
+            write_with_registration_retry,
+        )
+        source_collections = {
+            a.get("source_collection") for a in assignments if a.get("source_collection")
+        }
+        for source_collection in source_collections:
+            ensure_collection_registered(source_collection)
         _PAGE = 1000  # engine cap (MAX_BATCH parity)
-        try:
+
+        def _post_pages() -> None:
             for start in range(0, len(assignments), _PAGE):
                 batch = assignments[start : start + _PAGE]
                 self._post("/assignments/assign_many", {"assignments": batch})
+
+        try:
+            # RDR-204 Phase 1 follow-up (nexus-f5wwx, code review [24995]
+            # Significant finding 1): the batch write must self-heal on
+            # the SAME not-registered 422 that assign_topic /
+            # persist_discovered_topics / persist_rebuild_topics already
+            # retry through write_with_registration_retry — this is the
+            # engine's per-tenant boot sweep (bead .3) reaping a
+            # registered-but-chunkless collection between this process's
+            # registration and this write, not the older-engine 404
+            # below. The prior comment here claimed the 404 fallback
+            # covered this case; it did not — a 422 propagated straight
+            # through, unretried. Wrapping needs exactly ONE collection
+            # name to retry against, which every real caller supplies
+            # (taxonomy_cmd._persist_assignments / index.py always pass
+            # one source_collection per call, so this set is 0 or 1 in
+            # practice); a batch with zero or more-than-one distinct
+            # collections posts unwrapped, unchanged from before this
+            # fix — there is no single name to re-register in that
+            # shape. Re-posting an already-succeeded earlier page on
+            # retry is safe: the engine's per-row semantics (GREATEST/
+            # CASE upsert, centroid DO NOTHING) are idempotent.
+            if len(source_collections) == 1:
+                write_with_registration_retry(next(iter(source_collections)), _post_pages)
+            else:
+                _post_pages()
             return len(assignments)
         except Exception as exc:  # noqa: BLE001 — 404-classify only; anything else re-raises below
             status = getattr(
@@ -1809,11 +1890,15 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
     def record_discover_count(self, collection: str, doc_count: int) -> None:
         """Record discover doc_count for rebalance check."""
-        self._post("/meta/record", {
+        # RDR-204 Phase 1 (nexus-f5wwx): see persist_discovered_topics
+        # above — same retired auto-registration and boot-sweep retry,
+        # guarded the same way.
+        from nexus.corpus import write_with_registration_retry  # noqa: PLC0415 — circular-dep avoidance (corpus)
+        write_with_registration_retry(collection, lambda: self._post("/meta/record", {
             "collection": collection,
             "doc_count": doc_count,
             "discovered_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        })
+        }))
 
     def needs_rebalance(self, collection: str, current_count: int) -> bool:
         """Check if collection needs rebalancing (5% growth threshold)."""
@@ -1844,18 +1929,25 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         terms: str | None,
     ) -> int:
         """Fidelity-preserving import for a topics row. Returns preserved id."""
-        r = self._post("/import/topic", {
-            "id": src_id,
-            "label": label,
-            "parent_id": parent_id,
-            "collection": collection,
-            "centroid_hash": centroid_hash,
-            "doc_count": doc_count,
-            "created_at": created_at,
-            "review_status": review_status,
-            "terms": terms,
-        })
-        return r["id"]
+        # RDR-204 Phase 1 (nexus-f5wwx): see persist_discovered_topics
+        # above — same retired auto-registration and boot-sweep retry,
+        # guarded the same way.
+        from nexus.corpus import write_with_registration_retry  # noqa: PLC0415 — circular-dep avoidance (corpus)
+
+        def _do_import() -> dict[str, Any]:
+            return self._post("/import/topic", {
+                "id": src_id,
+                "label": label,
+                "parent_id": parent_id,
+                "collection": collection,
+                "centroid_hash": centroid_hash,
+                "doc_count": doc_count,
+                "created_at": created_at,
+                "review_status": review_status,
+                "terms": terms,
+            })
+
+        return write_with_registration_retry(collection, _do_import)["id"]
 
     def import_assignment(
         self,
@@ -2050,8 +2142,16 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
         Delegates to the service (/rename_collection).
         Returns count dict {topics, assignments, meta}.
+
+        RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine no longer
+        auto-registers the rename DESTINATION — ``new`` must be a
+        registered ``catalog_collections`` row before the fan-out.
         """
-        r = self._post("/rename_collection", {"old": old, "new": new})
+        from nexus.corpus import write_with_registration_retry  # noqa: PLC0415 — circular-dep avoidance (corpus)
+        r = write_with_registration_retry(
+            new,
+            lambda: self._post("/rename_collection", {"old": old, "new": new}),
+        )
         return {
             "topics": int(r.get("topics", 0)),
             "assignments": int(r.get("assignments", 0)),

@@ -1113,13 +1113,27 @@ class SchemaRollbackRoundTripIntegrationTest {
         // to catalog_collections(tenant_id, name) — registers the collection those
         // two families' fixtures below use; neither created_at/superseded_at value
         // is asserted for it, but hygiene-001-6 requires a real created_at.
+        // hygiene-002-1 (RDR-204 Phase 1, nexus-ft04v.4/.5) SUPERSEDES this INSERT's
+        // original bare column list: content_type/owner_id/embedding_model are
+        // non-empty CHECKed and embedding_model FK's to embedding_models now, and
+        // lifecycle_state is NOT NULL — SchemaMigrator.migrate above has already run
+        // the walk changeset by the time this fixture inserts, so a NEW row (never
+        // touched by that one-time walk) needs real values of its own. None of the
+        // four is asserted by this test (it probes created_at/superseded_at/
+        // legacy_grandfathered only); 'code'/'bge-base-en-v15-768'/'live' are fixed,
+        // arbitrary, constraint-satisfying literals, not fixture facts under test.
         ctx.insertInto(CATALOG_COLLECTIONS,
                 CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
                 CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, CATALOG_COLLECTIONS.CREATED_AT,
-                CATALOG_COLLECTIONS.SUPERSEDED_AT)
-            .values(FIXTURE_TENANT, "cck6z-legacy-true", true, TS_COLLECTIONS_CREATED_AT, null)
-            .values(FIXTURE_TENANT, "cck6z-legacy-false", false, TS_ZERO_MICROS, TS_COLLECTIONS_SUPERSEDED_AT)
-            .values(FIXTURE_TENANT, "cck6z-coll", false, TS_ZERO_MICROS, null)
+                CATALOG_COLLECTIONS.SUPERSEDED_AT, CATALOG_COLLECTIONS.CONTENT_TYPE,
+                CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
+                CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+            .values(FIXTURE_TENANT, "cck6z-legacy-true", true, TS_COLLECTIONS_CREATED_AT, null,
+                "code", "cck6z", "bge-base-en-v15-768", "live")
+            .values(FIXTURE_TENANT, "cck6z-legacy-false", false, TS_ZERO_MICROS, TS_COLLECTIONS_SUPERSEDED_AT,
+                "code", "cck6z", "bge-base-en-v15-768", "live")
+            .values(FIXTURE_TENANT, "cck6z-coll", false, TS_ZERO_MICROS, null,
+                "code", "cck6z", "bge-base-en-v15-768", "live")
             .execute();
 
         ctx.insertInto(HOOK_FAILURES,

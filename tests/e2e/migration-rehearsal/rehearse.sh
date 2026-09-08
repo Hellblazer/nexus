@@ -182,7 +182,7 @@ if [ "${COMPREHENSIVE:-0}" = 1 ]; then
 
   # T3 knowledge (bge-768): store put -> semantic search round-trip
   if printf 'Comprehensive shakeout knowledge doc %s. The quick brown fox indexes widgets and sprockets deterministically for bge-768 retrieval.\n' "$MARK" \
-       | nx store put - -t "shakeout-$MARK" --tags rehearsal >"$DD" 2>&1; then
+       | nx store put - -c rehearsal -t "shakeout-$MARK" --tags rehearsal >"$DD" 2>&1; then
     if nx search "widgets and sprockets for retrieval" --corpus knowledge -m 5 2>/dev/null | grep -q "$MARK"; then
       ok "T3 store put + bge-768 semantic search round-trip"
     else bad "T3 semantic search did not surface the stored doc"; fi
@@ -263,13 +263,13 @@ STUB_EOF
   NW=24; OPS=10
   worker() { w=$1; i=1; while [ "$i" -le "$OPS" ]; do
       nx memory put "stress w$w op$i widget sprocket" -p "stress$w" -t "m$w-$i" >>"$errlog" 2>&1 || echo "MEMFAIL $w/$i" >>"$errlog"
-      printf 'stress doc w%s op%s widgets sprockets gadget retrieval\n' "$w" "$i" | nx store put - -t "s$w-$i" >>"$errlog" 2>&1 || echo "STOREFAIL $w/$i" >>"$errlog"
+      printf 'stress doc w%s op%s widgets sprockets gadget retrieval\n' "$w" "$i" | nx store put - -c rehearsal -t "s$w-$i" >>"$errlog" 2>&1 || echo "STOREFAIL $w/$i" >>"$errlog"
       nx search "widgets sprockets gadget" --corpus knowledge -m 3 >/dev/null 2>>"$errlog" || echo "SEARCHFAIL $w/$i" >>"$errlog"
       i=$((i+1)); done; }
   note "launching $NW concurrent workers x $OPS mixed ops + burst spike…"
   pids=""
   w=1; while [ "$w" -le "$NW" ]; do worker "$w" & pids="$pids $!"; w=$((w+1)); done
-  ( b=1; while [ "$b" -le 60 ]; do printf 'burst %s widgets sprockets\n' "$b" | nx store put - -t "burst$b" >>"$errlog" 2>&1 || echo "BURSTFAIL $b" >>"$errlog"; b=$((b+1)); done ) &
+  ( b=1; while [ "$b" -le 60 ]; do printf 'burst %s widgets sprockets\n' "$b" | nx store put - -c rehearsal -t "burst$b" >>"$errlog" 2>&1 || echo "BURSTFAIL $b" >>"$errlog"; b=$((b+1)); done ) &
   pids="$pids $!"
   for p in $pids; do wait "$p"; done
   ok "tandem storm completed ($NW workers x $OPS + 60-burst)"
@@ -291,7 +291,7 @@ STUB_EOF
   seedcoll="$(q "select name from nexus.catalog_collections where tenant_id='default' order by name limit 1")"
   if [ -n "$seedcoll" ]; then
     # 300-row insert (FK→catalog_collections) WHILE a concurrent write race runs.
-    ( b=1; while [ "$b" -le 40 ]; do printf 'race %s\n' "$b" | nx store put - -t "qr$b" >>"$errlog" 2>&1 || true; b=$((b+1)); done ) & racepid=$!
+    ( b=1; while [ "$b" -le 40 ]; do printf 'race %s\n' "$b" | nx store put - -c rehearsal -t "qr$b" >>"$errlog" 2>&1 || true; b=$((b+1)); done ) & racepid=$!
     seedout="$("$PSQL" -tAc "set nexus.tenant='default'; insert into nexus.aspect_extraction_queue (tenant_id,collection,source_path,content,status,enqueued_at) select 'default','${seedcoll}','stress/'||g,'stress content '||g,'pending',now() from generate_series(1,300) g; select count(*) from nexus.aspect_extraction_queue where status='pending'" 2>&1)"
     wait "$racepid" 2>/dev/null || true
     seeded="$(printf '%s' "$seedout" | grep -oE '^[0-9]+$' | tail -1)"

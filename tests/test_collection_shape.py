@@ -445,6 +445,21 @@ class TestAgainstTheEngine:
                                 embedding_model="bge-base-en-v15-768", model_version="v1")
         cat.register_collection(live, content_type="knowledge", owner_id=f"topic-{tag}",
                                 embedding_model="bge-base-en-v15-768", model_version="v1")
+        # RDR-204 Phase 1 (nexus-f5wwx): this test already registered
+        # `live` above, deliberately with the model the local test
+        # engine actually embeds with. The T3 write below now also
+        # ensures registration (nexus.corpus.write_with_registration_
+        # retry) using the CLIENT's own ambient
+        # effective_embedding_model_for_writes — which reads real
+        # local config (local.embed_model) this test does not pin, so
+        # on a box configured for Voyage locally it would try to
+        # re-register `live` with a different model than the one just
+        # set above and 422. Seed the per-process cache directly so
+        # that redundant re-registration is skipped, matching what a
+        # real caller gets for free once THIS process already
+        # registered the name once.
+        import nexus.corpus as _corpus
+        _corpus._REGISTERED_COLLECTIONS.add(live)
         client = HttpVectorClient()  # the real service client; the in-memory unit substrate has no stats route
         texts = [f"alpha text {tag}", f"beta text {tag}"]
         ids = [hashlib.sha256(x.encode()).hexdigest() for x in texts]  # chunk ids are the chash

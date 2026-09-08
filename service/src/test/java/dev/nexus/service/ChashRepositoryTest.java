@@ -3,6 +3,8 @@ package dev.nexus.service;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -109,11 +111,18 @@ class ChashRepositoryTest {
                     {TENANT_A, "coll-a-1024"}, {TENANT_A, "stub-no-chunks"},
                     {TENANT_A, "ren-src"}, {TENANT_A, "ren-collide-src"},
                     {TENANT_A, "ren-collide-dst"},
-                    {TENANT_B, "coll-b-384"}}) {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                    "VALUES ('" + tc[0] + "', '" + tc[1] + "') " +
-                    "ON CONFLICT (tenant_id, name) DO NOTHING");
+                    {TENANT_B, "coll-b-384"},
+                    // RDR-204 Phase 1 (bead nexus-ft04v.7): renameCollection's
+                    // NEW-side name now requires a real catalog_collections row
+                    // (ChashRepository's stub-insert is retired) — pre-register
+                    // every rename DESTINATION these tests target, plus the
+                    // real-ingest-path fixture below.
+                    {TENANT_A, "ren-dst"},
+                    {TENANT_A, "gate-rename-old-1-dst"},
+                    {TENANT_A, "gate-rename-new-1-dst"},
+                    {TENANT_A, "gate-deadlock-a"}, {TENANT_A, "gate-deadlock-b"},
+                    {TENANT_A, "code__cr__minilm-l6-v2-384__v1"}}) {
+                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tc[0], tc[1]);
             }
 
             // Multi-collection chash: 384 + 1024.
@@ -239,6 +248,31 @@ class ChashRepositoryTest {
             .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> repo.renameCollection(TENANT_A, "x", " "))
             .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void renameCollection_unregisteredNewSide_throwsAndWritesNoRow() {
+        // RDR-204 Phase 1 (nexus-ft04v.7 gap 3, closed by nexus-ft04v.8's test
+        // addendum): renameCollection's NEW-side ensureCollectionRegistered
+        // guard runs before any row is re-homed -- a never-registered
+        // destination must fail loud (UnregisteredCollectionException) and
+        // create no catalog_collections row for it, whether or not the
+        // source collection carries any chunks.
+        String oldCollection = "chr-unreg-src";
+        String newCollection = "chr-unreg-dst";
+
+        assertThatThrownBy(() -> repo.renameCollection(TENANT_A, oldCollection, newCollection))
+            .isInstanceOf(dev.nexus.service.db.UnregisteredCollectionException.class)
+            .hasMessageContaining(newCollection)
+            .hasMessageContaining("POST /v1/catalog/collections/upsert");
+
+        boolean stubRowExists = tenantScope.withTenant(TENANT_A, ctx -> ctx.fetchExists(
+                ctx.selectOne().from(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+                   .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A))
+                   .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(newCollection))));
+        assertThat(stubRowExists)
+            .as("the rejected rename must not have created a catalog_collections stub row for the new side")
+            .isFalse();
     }
 
     // ── is_empty / count_for_collection ──────────────────────────────────────

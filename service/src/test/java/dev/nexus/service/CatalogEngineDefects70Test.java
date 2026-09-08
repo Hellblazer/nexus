@@ -87,11 +87,9 @@ class CatalogEngineDefects70Test {
             // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now carries
             // chunks_collection_fk (tenant_id, collection) -> catalog_collections
             // (tenant_id, name) — stub-register the collection first, mirroring
-            // PgVectorRepository#upsertChunks' own ensure-registered step.
-            ctx.execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
-                + "ON CONFLICT (tenant_id, name) DO NOTHING",
-                tenant, collection);
+            // PgVectorRepository#upsertChunks' own ensure-registered step. RDR-204
+            // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+            PgContainerHelper.insertCollection(ctx, tenant, collection);
             return ctx.execute(
                 "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
                 + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::nexus.vector) "
@@ -1281,7 +1279,7 @@ class CatalogEngineDefects70Test {
     private void seedChunkRow(String collection, String chash, String text) throws Exception {
         // nexus.chunks carries an FK to catalog_collections on (tenant_id, collection).
         repo.upsertCollection(TENANT, Map.of(
-            "name", collection, "content_type", "code",
+            "name", collection, "content_type", "code", "owner_id", "defects70",
             "embedding_model", "voyage-code-3", "model_version", "v1"));
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);

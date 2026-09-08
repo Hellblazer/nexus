@@ -281,6 +281,15 @@ public final class CatalogHandler implements HttpHandler {
             // /update. Same 409 shape as CollectionMergeRefused above: a
             // refusal, not a server error.
             HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
+        } catch (CatalogRepository.EmbeddingProfileConflictException e) {
+            // RDR-204 Phase 1 (bead nexus-ft04v.8): the request is
+            // well-formed, but this install's collection authority (the
+            // profile, or an existing row's own model) says otherwise. 422,
+            // not 400/409 — mirrors vectors.EmbeddingModelUnavailableException's
+            // "well-formed but unprocessable in this configuration" contract.
+            // The message names the authoritative value; tests assert its
+            // content, not just the status.
+            HttpUtil.send(exchange, 422, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
         } catch (CatalogRepository.DocumentNotFoundException e) {
             // nexus-s13u0/RDR-191 GATE-2 review High: a manifest write
             // (write/append/import_chunks_batch) against a doc_id with no
@@ -1603,6 +1612,32 @@ public final class CatalogHandler implements HttpHandler {
     private void handleCollectionUpsert(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
+        // RDR-204 Phase 1 (bead nexus-ft04v.6/.8): this IS the single choke
+        // point for "register a collection" (the client's
+        // register_collection() -> POST /v1/catalog/collections/upsert ->
+        // here) — the lazy, per-content-type embedding_profile seed for a
+        // cloud tenant fires BEFORE the registration decision below, not
+        // after (bead nexus-ft04v.8 ADDED SCOPE / ordering fix): repo
+        // .upsertCollection now READS this tenant's profile row for the
+        // request's content type to decide the collection's embedding_model,
+        // so a tenant with no profile row yet must be seeded first, in its
+        // own committed transaction, or that read sees nothing.
+        // combinedWriteService is null only when this handler was built with
+        // no EmbedderRouter available (the 1-arg constructor, e.g. some
+        // tests); no router means no mode decision to seed from, so the seed
+        // is skipped, not defaulted — repo.upsertCollection falls back to the
+        // request's own embedding_model in that case (see its javadoc).
+        if (combinedWriteService != null) {
+            Object contentType = body.get("content_type");
+            if (contentType instanceof String s) {
+                // bead nexus-ft04v.8 fix (coordinator-reported regression, 2026-09-07):
+                // content types are free-form on the client — this never throws for an
+                // unmapped value any more (EmbedderRouter#seedEmbeddingProfileForContentType
+                // falls back to the "unknown" CCE bucket token instead of refusing), so
+                // registration can never 400 on an unrecognised content_type.
+                combinedWriteService.seedEmbeddingProfileForContentType(tenant, s);
+            }
+        }
         repo.upsertCollection(tenant, body);
         HttpUtil.send(exchange, 200, "{\"ok\":true}");
     }

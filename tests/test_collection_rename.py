@@ -124,8 +124,16 @@ class TestCatalogRename:
         # The engine's rename endpoint 404s on an unregistered source
         # collection (unlike the deleted local arm, which renamed bare
         # document strings) — register the rows the way production does.
-        cat.register_collection("knowledge__old", embedding_model="test-model")
-        cat.register_collection("knowledge__stays", embedding_model="test-model")
+        # RDR-204 Phase 1 follow-up (nexus-f5wwx): omit embedding_model —
+        # the engine pins an install-scoped profile per (tenant,
+        # content_type) on first write, so an explicit foreign literal
+        # like "test-model" 422s against whatever this suite's real
+        # substrate already pinned 'knowledge' to. HttpCatalogClient.
+        # register_collection derives the box's real write-time model
+        # when the kwarg is omitted (collection_registration_kwargs),
+        # which no test here cares about beyond "a valid registered row".
+        cat.register_collection("knowledge__old")
+        cat.register_collection("knowledge__stays")
         owner = cat.register_owner("knowledge-corpus", "corpus")
         tumbler_a = cat.register(
             owner, title="doc-a", content_type="paper", file_path="a.pdf",

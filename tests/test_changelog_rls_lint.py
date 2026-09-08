@@ -403,6 +403,20 @@ ALLOWLIST: tuple[tuple[str, str, str], ...] = (
         "nexus-p9aw6: mirrors fk-002-6-reconcile exactly (gap-window "
         "reconcile re-run, backstop in later same-file changesets "
         "fk-003-7..11). Same NEW-finding / disposition rationale.",
+    ),    (
+        "hygiene-002-1",
+        "nexus.catalog_collections",
+        "nexus-ft04v.4 (RDR-204 Phase 1): the collection-attribute walk's "
+        "UPDATEs on nexus.catalog_collections (toggled) LEFT JOIN nexus.embedding_profile (FORCE RLS, created by "
+        "catalog-036-3 in the same tag's walk) without toggling it. The "
+        "changeset's own comment carries the reason: the engine writes "
+        "that table only after Liquibase finishes, at boot, so it holds "
+        "zero rows for every tenant at walk time by construction and the "
+        "LEFT JOIN yields the same zero rows toggled or not (the branch C/D "
+        "fallback is the rule there). Published in engine-service-v0.1.109 "
+        "(checksum-immutable); the PITR-fork walk rehearsal of 2026-09-08 "
+        "(T2 nexus/rehearsal-v01109-rdr204-phase1-walk-and-ghost-sweep-"
+        "2026-09-08) executed it with the predicted branch counts.",
     ),
 )
 

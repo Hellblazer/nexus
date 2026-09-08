@@ -10,6 +10,8 @@ from typing import Any
 import click
 import structlog
 
+from nexus.redact import redact_credentials
+
 
 _log = structlog.get_logger(__name__)
 
@@ -39,6 +41,27 @@ def _fix(lines: list[str], *fix_lines: str) -> None:
 # Keep old name so existing tests importing `_check` still work.
 def _check(label: str, ok: bool, detail: str = "") -> str:
     return _check_line(label, ok, detail)
+
+
+def _exc_detail(exc: BaseException, *, with_type: bool = False) -> str:
+    """Rendered exception text with credentials redacted.
+
+    Every doctor path that puts an exception into output goes through
+    this. A service's 401/403 body echoes the credential it rejected
+    (nexus-8ooxn / nexus-hcy4w), and doctor renders exception text on a
+    dozen best-effort paths that each catch broadly. ``health.py``'s
+    reachability probe already redacted; these did not — nexus-x75kg:
+    the fan-out floor census printed
+    ``UNAVAILABLE (RuntimeError: HTTP 401: invalid api_key <secret>)``
+    whenever ``make_t3()`` reached the service instead of failing during
+    construction, and click's ``Result.output`` mixes stderr, so the
+    structlog copy leaks the same text.
+
+    *with_type* prefixes the exception class, for the sites that already
+    named it.
+    """
+    text = redact_credentials(str(exc))
+    return f"{type(exc).__name__}: {text}" if with_type else text
 
 
 def _reinstall_command() -> str:
@@ -666,7 +689,7 @@ def _plan_library_parity(rows: list[dict[str, Any]], *, truncated: bool) -> _Par
             desired = desired_row_for_template(template)
         except Exception as exc:  # noqa: BLE001 — an unreadable template makes parity unknowable, not failed
             return _ParityReport(
-                [], [], [], unavailable=f"{path.name}: {type(exc).__name__}: {exc}",
+                [], [], [], unavailable=f"{path.name}: {_exc_detail(exc, with_type=True)}",
             )
         seen.add(canonical)
         row = live.get(canonical)
@@ -745,7 +768,7 @@ def _run_check_plan_library() -> None:
         # NOT an httpx.HTTPError (same trap documented on
         # _report_aspect_queue_service).
         click.echo(
-            f"Plan library check: service backend unreachable ({exc}). "
+            f"Plan library check: service backend unreachable ({_exc_detail(exc)}). "
             "Counts UNKNOWN — not reporting pass or fail.",
             err=True,
         )
@@ -977,7 +1000,7 @@ def _run_trim_telemetry(days: int, dry_run: bool = False) -> None:
         # scripted caller cannot mistake a failed trim for a completed one.
         verb = "preview" if dry_run else "trim"
         click.echo(
-            f"Error: telemetry {verb} unavailable ({exc}). Nothing was "
+            f"Error: telemetry {verb} unavailable ({_exc_detail(exc)}). Nothing was "
             "trimmed and the live retention state is UNKNOWN.",
             err=True,
         )
@@ -1032,7 +1055,7 @@ def _report_aspect_queue_service() -> None:
         # (console/routes/health.py::_collect_aspect_queue_data_service) had
         # this right; this call site did not.
         click.echo(
-            f"aspect_extraction_queue: service backend unreachable ({exc}). "
+            f"aspect_extraction_queue: service backend unreachable ({_exc_detail(exc)}). "
             "Queue depth UNKNOWN — not reporting a count.",
             err=True,
         )
@@ -1217,7 +1240,7 @@ def _report_index_failures_service() -> None:
         # httpx error) when it cannot — same class as
         # _report_aspect_queue_service's identical try/except.
         click.echo(
-            f"index_failures: service backend unreachable ({exc}). "
+            f"index_failures: service backend unreachable ({_exc_detail(exc)}). "
             "Backlog UNKNOWN — not reporting a count.",
             err=True,
         )
@@ -1400,7 +1423,10 @@ def _report_fanout_floor_census() -> None:
 
         rows = make_t3().list_collections()
     except Exception as exc:  # noqa: BLE001 — informational check; a T3 failure here is reported, not raised
-        click.echo(f"  fan-out floor census: UNAVAILABLE ({type(exc).__name__}: {exc})")
+        click.echo(
+            f"  fan-out floor census: UNAVAILABLE "
+            f"({_exc_detail(exc, with_type=True)})"
+        )
         return
 
     names = [row["name"] for row in rows]
@@ -1673,7 +1699,7 @@ def _run_check_storage_boundary(
         except Exception as exc:  # noqa: BLE001 — telemetry metric write must not crash the lint check; logged
             log.warning(
                 "storage_boundary_lint_metric_write_failed",
-                error=str(exc),
+                error=_exc_detail(exc),
                 phase=phase,
             )
 
@@ -1727,7 +1753,7 @@ def _run_check_mineru() -> None:
     try:
         from mineru.cli.common import do_parse  # noqa: PLC0415 — optional/heavy dependency deferred (mineru)
     except Exception as exc:  # noqa: BLE001 — boundary catch of optional MinerU import failure; surfaced via click.echo
-        click.echo(_check("MinerU import", False, f"{type(exc).__name__}: {exc}"))
+        click.echo(_check("MinerU import", False, _exc_detail(exc, with_type=True)))
         click.echo(
             "  ↳ MinerU is required since nexus-2fyb. Reinstall with "
             f"`{_reinstall_command()}`."
@@ -1976,9 +2002,13 @@ def _run_supplementary_checks() -> None:
             # nothing further to say here (see non-gating note above).
             pass
         except Exception as exc:  # noqa: BLE001 — isolate one check's crash from the rest of the sweep
-            click.echo(f"  [!] {name} check raised unexpectedly: {exc}", err=True)
+            click.echo(
+                f"  [!] {name} check raised unexpectedly: {_exc_detail(exc)}",
+                err=True,
+            )
             _log.warning(
-                "doctor_supplementary_check_failed", check=name, error=str(exc)
+                "doctor_supplementary_check_failed", check=name,
+                error=_exc_detail(exc),
             )
     click.echo(
         "\nRemaining opt-in-only checks (not run above; invoke explicitly): "
@@ -2440,7 +2470,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             db = make_t3()
         except Exception as exc:
             raise click.ClickException(
-                f"T3 handle unavailable for HNSW tuning: {exc}"
+                f"T3 handle unavailable for HNSW tuning: {_exc_detail(exc)}"
             ) from exc
         count = apply_hnsw_ef(db)
         click.echo(f"Updated HNSW search_ef on {count} collection(s).")
@@ -2462,7 +2492,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                 deleted = db.scan_orphaned_pipelines(delete=True)
         except Exception as exc:  # noqa: BLE001 — engine unreachable must not stack-trace a doctor verb
             raise click.ClickException(
-                f"pipeline scan unavailable (engine unreachable?): {exc}"
+                f"pipeline scan unavailable (engine unreachable?): {_exc_detail(exc)}"
             ) from exc
         if deleted:
             click.echo(f"Deleted {len(deleted)} orphaned pipeline entry/entries.")
@@ -2847,7 +2877,7 @@ def _run_check_collection_shape() -> None:
     try:
         report = audit(catalog=_shape_catalog(), t3=_t3(), write_model_for=_shape_write_model())
     except Exception as exc:  # noqa: BLE001 — boundary: an unreadable tenant is the one hard failure here
-        click.echo(f"[✗] Collections shape: UNREADABLE ({exc})")
+        click.echo(f"[✗] Collections shape: UNREADABLE ({_exc_detail(exc)})")
         raise SystemExit(1) from exc
     warn = sum(1 for f in report.findings if f.severity == "warn")
     info = len(report.findings) - warn
@@ -2953,7 +2983,7 @@ def _collect_quota_report() -> dict:
             t3_reachable = True
             t3_detail = "T3 backend reachable (pgvector service / managed endpoint)"
     except Exception as exc:  # noqa: BLE001 — best-effort T3 probe; failure surfaced in detail string
-        t3_detail = f"unreachable: {type(exc).__name__}: {str(exc)[:80]}"
+        t3_detail = f"unreachable: {type(exc).__name__}: {_exc_detail(exc)[:80]}"
 
     # Embedder limits. In cloud mode the three Voyage models we use
     # have a fixed 1024-dim space and 32k-token cap; in local mode the
@@ -3153,21 +3183,27 @@ def _run_check_taxonomy() -> None:
                 err=True,
             )
             raise click.exceptions.Exit(2)
-        click.echo(f"✗ FAIL: taxonomy engine check failed: {exc}", err=True)
+        click.echo(
+            f"✗ FAIL: taxonomy engine check failed: {_exc_detail(exc)}",
+            err=True,
+        )
         raise click.exceptions.Exit(1)
     except (httpx.HTTPError, RuntimeError) as exc:
         # Transport failure (connect/timeout) or an unresolvable endpoint
         # (ServiceEndpointUnresolvableError, a RuntimeError subclass): no
         # engine to ask, and there is no other store to read.
         click.echo(
-            f"✗ taxonomy check cannot run: no engine answered ({exc}). Start "
+            f"✗ taxonomy check cannot run: no engine answered ({_exc_detail(exc)}). Start "
             "the service (`nx daemon service start`) and re-run. Unverifiable "
             "is not a pass.",
             err=True,
         )
         raise click.exceptions.Exit(2)
     except Exception as exc:  # noqa: BLE001 — any other failure is the verdict, never a traceback (critic on 7742b9c05)
-        click.echo(f"✗ FAIL: taxonomy engine check failed: {exc}", err=True)
+        click.echo(
+            f"✗ FAIL: taxonomy engine check failed: {_exc_detail(exc)}",
+            err=True,
+        )
         raise click.exceptions.Exit(1)
 
     assert report is not None

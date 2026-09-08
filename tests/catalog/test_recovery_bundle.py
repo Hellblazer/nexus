@@ -443,7 +443,7 @@ def test_default_import_doc_drives_the_real_store_put_chain(monkeypatch, tmp_pat
 
     monkeypatch.setattr(
         "nexus.corpus.t3_collection_name",
-        lambda name, t3=None, for_write=False: KNOW,
+        lambda name, t3=None, for_write=False, allow_placeholder=False: KNOW,
     )
     monkeypatch.setattr(
         "nexus.catalog.store_hook.single_chunk_manifest_metadata",
@@ -501,7 +501,7 @@ def test_default_import_doc_put_failure_fences_and_rolls_back(monkeypatch):
 
     events: list[str] = []
     monkeypatch.setattr(
-        "nexus.corpus.t3_collection_name", lambda name, t3=None, for_write=False: name
+        "nexus.corpus.t3_collection_name", lambda name, t3=None, for_write=False, allow_placeholder=False: name
     )
     monkeypatch.setattr(
         "nexus.catalog.store_hook.single_chunk_manifest_metadata",
@@ -547,7 +547,7 @@ def test_import_rederives_collection_under_changed_embedding_mode(monkeypatch):
     resolved: list[str] = []
     target = "knowledge__knowledge__voyage-context-3__v1"
 
-    def _resolver(name, t3=None, for_write=False):
+    def _resolver(name, t3=None, for_write=False, allow_placeholder=False):
         resolved.append(name)
         return target
 
@@ -589,7 +589,7 @@ def test_target_collection_for_passes_nonconformant_names_through(monkeypatch):
     seen: list[str] = []
     monkeypatch.setattr(
         "nexus.corpus.t3_collection_name",
-        lambda name, t3=None, for_write=False: seen.append(name) or name,
+        lambda name, t3=None, for_write=False, allow_placeholder=False: seen.append(name) or name,
     )
     rb.target_collection_for("scratchpad", t3=None)
     assert seen == ["scratchpad"]  # non-conformant: untouched base
@@ -651,3 +651,19 @@ def test_vanished_span_is_stripped_and_counted(fake_catalog, tmp_path):
     sent = state.created_links[-1]
     assert sent["from_span"] == ""                   # stripped
     assert sent["to_span"] == f"chash:{CH_A}"        # resolvable: verbatim
+
+
+
+def test_target_collection_for_restores_a_placeholder_named_collection() -> None:
+    """Critique of 86cd65ef0 (nexus-0fw11): the import reduces a recorded
+    conformant name to its two-segment base before resolving for write, and
+    docs__default / knowledge__knowledge are live production collections;
+    the placeholder refusal must not block their restore."""
+    from nexus.catalog.recovery_bundle import target_collection_for
+
+    # The model segment is re-derived for the TARGET install (bge locally,
+    # the target's active model); the placeholder subject survives either way.
+    out = target_collection_for("knowledge__knowledge__bge-base-en-v15-768__v1", t3=None)
+    assert out.startswith("knowledge__knowledge__") and out.endswith("__v1"), out
+    out = target_collection_for("docs__default__bge-base-en-v15-768__v1", t3=None)
+    assert out.startswith("docs__default__") and out.endswith("__v1"), out

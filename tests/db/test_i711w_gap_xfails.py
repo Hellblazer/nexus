@@ -369,17 +369,24 @@ class TestSupersedeCollectionSemantics:
     marked superseded — the documented "keeps the event log and projection
     in sync" contract, and a Stage-2 exit criterion (no service-side
     semantic test existed at all; the only one asserted wire shape).
+
+    RDR-204 (nexus-f5wwx): every register_collection call in this class
+    uses bge-base-en-v15-768, not the historical voyage-code-3 -- this
+    fixture's java_service is a pure ONNX local engine (no voyage key),
+    and EmbedderRouter.contentTypeModelTokens' local branch maps every
+    content type (code included) to the single injected local embedder's
+    token. A voyage-* literal here 422s regardless of client posture.
     """
 
     # nexus-i711w.1 item 14 -> nexus-cecqy
     def test_supersede_after_rename_marks_old_row(self, cat) -> None:
-        old = "code__i711w-sup__voyage-code-3__v1"
-        new = "code__i711w-sup__voyage-code-3__v2"
+        old = "code__i711w-sup__bge-base-en-v15-768__v1"
+        new = "code__i711w-sup__bge-base-en-v15-768__v2"
         cat.register_collection(
             old,
             content_type="code",
             owner_id="i711w-sup",
-            embedding_model="voyage-code-3",
+            embedding_model="bge-base-en-v15-768",
         )
         # NON-VACUITY guard: the old row exists before the rename.
         assert cat.get_collection(old) is not None
@@ -409,19 +416,19 @@ class TestSupersedeCollectionSemantics:
     def test_supersede_records_timestamp_without_caller_supplied_at(
         self, cat
     ) -> None:
-        old = "code__i711w-supat__voyage-code-3__v1"
-        new = "code__i711w-supat__voyage-code-3__v2"
+        old = "code__i711w-supat__bge-base-en-v15-768__v1"
+        new = "code__i711w-supat__bge-base-en-v15-768__v2"
         cat.register_collection(
             old,
             content_type="code",
             owner_id="i711w-supat",
-            embedding_model="voyage-code-3",
+            embedding_model="bge-base-en-v15-768",
         )
         cat.register_collection(
             new,
             content_type="code",
             owner_id="i711w-supat",
-            embedding_model="voyage-code-3",
+            embedding_model="bge-base-en-v15-768",
         )
 
         cat.supersede_collection(old, new)
@@ -436,14 +443,14 @@ class TestSupersedeCollectionSemantics:
 
     # nexus-i711w.1 item 14 -> nexus-g8z8n (guard 1)
     def test_supersede_unknown_old_name_raises(self, cat) -> None:
-        new = "code__i711w-supguard__voyage-code-3__v2"
+        new = "code__i711w-supguard__bge-base-en-v15-768__v2"
         cat.register_collection(
             new,
             content_type="code",
             owner_id="i711w-supguard",
-            embedding_model="voyage-code-3",
+            embedding_model="bge-base-en-v15-768",
         )
-        missing = "code__i711w-nosuch__voyage-code-3__v1"
+        missing = "code__i711w-nosuch__bge-base-en-v15-768__v1"
         assert cat.get_collection(missing) is None  # guard: truly unregistered
 
         # try/except-then-assert (not pytest.raises): an unexpected exception
@@ -460,15 +467,15 @@ class TestSupersedeCollectionSemantics:
 
     # nexus-i711w.1 item 14 -> nexus-g8z8n (guard 2)
     def test_supersede_already_superseded_old_row_conflicts(self, cat) -> None:
-        old = "code__i711w-resup__voyage-code-3__v1"
-        new1 = "code__i711w-resup__voyage-code-3__v2"
-        new2 = "code__i711w-resup__voyage-code-3__v3"
+        old = "code__i711w-resup__bge-base-en-v15-768__v1"
+        new1 = "code__i711w-resup__bge-base-en-v15-768__v2"
+        new2 = "code__i711w-resup__bge-base-en-v15-768__v3"
         for name, ver in ((old, "v1"), (new1, "v2"), (new2, "v3")):
             cat.register_collection(
                 name,
                 content_type="code",
                 owner_id="i711w-resup",
-                embedding_model="voyage-code-3",
+                embedding_model="bge-base-en-v15-768",
                 model_version=ver,
             )
 
@@ -505,14 +512,14 @@ class TestSupersedeCollectionSemantics:
         Idempotent means genuinely idempotent: the recorded instant must NOT
         move, or every retry would relabel when the supersession happened.
         """
-        old = "code__i711w-idem__voyage-code-3__v1"
-        new = "code__i711w-idem__voyage-code-3__v2"
+        old = "code__i711w-idem__bge-base-en-v15-768__v1"
+        new = "code__i711w-idem__bge-base-en-v15-768__v2"
         for name, ver in ((old, "v1"), (new, "v2")):
             cat.register_collection(
                 name,
                 content_type="code",
                 owner_id="i711w-idem",
-                embedding_model="voyage-code-3",
+                embedding_model="bge-base-en-v15-768",
                 model_version=ver,
             )
 
@@ -534,14 +541,14 @@ class TestSupersedeCollectionSemantics:
 
     # nexus-i711w.1 item 14 -> nexus-g8z8n (guard 3)
     def test_supersede_unregistered_new_name_raises(self, cat) -> None:
-        old = "code__i711w-dangl__voyage-code-3__v1"
+        old = "code__i711w-dangl__bge-base-en-v15-768__v1"
         cat.register_collection(
             old,
             content_type="code",
             owner_id="i711w-dangl",
-            embedding_model="voyage-code-3",
+            embedding_model="bge-base-en-v15-768",
         )
-        missing_new = "code__i711w-dangl-nosuch__voyage-code-3__v2"
+        missing_new = "code__i711w-dangl-nosuch__bge-base-en-v15-768__v2"
 
         # NON-VACUITY guards: the target really is unregistered, and the old
         # row starts un-superseded (so a dangling write would be observable).
@@ -677,14 +684,14 @@ class TestLegacyGrandfatheredDerivation:
         that blanket-flags every service registration True also fails."""
         from nexus.corpus import is_conformant_collection_name
 
-        name = "docs__i711w-conf__voyage-context-3__v1"
+        name = "docs__i711w-conf__bge-base-en-v15-768__v1"
         assert is_conformant_collection_name(name)
 
         cat.register_collection(
             name,
             content_type="docs",
             owner_id="i711w-conf",
-            embedding_model="voyage-context-3",
+            embedding_model="bge-base-en-v15-768",
         )
 
         row = cat.get_collection(name)

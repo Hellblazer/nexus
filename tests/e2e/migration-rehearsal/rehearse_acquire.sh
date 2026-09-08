@@ -111,7 +111,7 @@ say "Drive — store + search round-trip (forces a real ONNX embed on the publis
 # was fine. Caught by validating this gate against the known-good published
 # v0.1.54 before ever pointing it at a new tag.
 PROBE_TEXT="acquire-gate probe $(date +%s) pgvector bge768 roundtrip"
-if printf '%s\n' "$PROBE_TEXT" | nx store put - --title "acquire-gate-probe" 2>&1 | sed 's/^/       /'; then
+if printf '%s\n' "$PROBE_TEXT" | nx store put - --collection acquire-gate --title "acquire-gate-probe" 2>&1 | sed 's/^/       /'; then
   ok "nx store put succeeded (embed + vector write on the published binary)"
 else
   bad "nx store put failed — the published binary cannot embed/write"

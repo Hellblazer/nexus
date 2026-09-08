@@ -115,8 +115,9 @@
 #   NX_PUBLISHED_CLIENT_VERSION=7.6.1 tests/e2e/published-client-write-gate.sh
 #       Pin the published client under test instead of resolving latest.
 #
-#   NX_EXPECTED_CLIENT_LAG=nexus-sh9v2 tests/e2e/published-client-write-gate.sh
-#       Acknowledge the known incompatible window (see above).
+#   NX_EXPECTED_CLIENT_LAG=nexus-f5wwx tests/e2e/published-client-write-gate.sh
+#       Acknowledge the known incompatible window (see above; the bead and
+#       its fix version are EXPECTED_LAG_BEAD / FIXED_IN_VERSION below).
 #
 # Exit codes (the verdict line is always the last line of output):
 #   0  PUBLISHED-CLIENT WRITE GATE PASSED
@@ -135,10 +136,15 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-# The bead this ack names, and the version its fix shipped in. Hand-updated —
-# see the KNOWN-INCOMPATIBLE WINDOW header note above.
-EXPECTED_LAG_BEAD="nexus-sh9v2"
-FIXED_IN_VERSION="7.7.0"
+# The bead this ack names, and the version its fix ships in. Hand-updated —
+# see the KNOWN-INCOMPATIBLE WINDOW header note above. History: nexus-sh9v2
+# (fixed in 7.7.0) held this slot until 2026-09-08; RDR-204 Phase 1
+# (nexus-ft04v.7, engine-service-v0.1.109) retired the engine's chunk-write
+# auto-registration, so every published client before nexus-f5wwx's
+# register-before-write (conexus 7.37.0, the paired client release) gets a
+# 422 on its first write to a new collection: the same shape, a new bead.
+EXPECTED_LAG_BEAD="nexus-f5wwx"
+FIXED_IN_VERSION="7.37.0"
 
 NEXUS_SERVICE_TAG="${NEXUS_SERVICE_TAG:-}"
 NX_PUBLISHED_CLIENT_VERSION="${NX_PUBLISHED_CLIENT_VERSION:-}"
@@ -344,7 +350,7 @@ FAIL_REASONS=()
 STORE_TITLE="pcwg-store-$RUN_ID"
 echo "[gate] store put: title=$STORE_TITLE"
 STORE_PUT_OUT="$(printf 'published-client-write-gate probe %s\n' "$RUN_ID" \
-  | _client_nx store put - --title "$STORE_TITLE" --collection knowledge 2>&1)" || true
+  | _client_nx store put - --title "$STORE_TITLE" --collection pcwg 2>&1)" || true
 printf '%s\n' "$STORE_PUT_OUT" | sed 's/^/       /' | tee "$LOGS/store-put.log" >/dev/null
 STORE_SHOW_JSON="$(_provisioner_nx catalog show "$STORE_TITLE" --json 2>/dev/null)" || STORE_SHOW_JSON=""
 if [ -n "$STORE_SHOW_JSON" ]; then

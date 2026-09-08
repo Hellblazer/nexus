@@ -150,6 +150,11 @@ class ManifestChunkFkTest {
         catalogRepo.upsertDocument(TENANT, Map.of(
             "tumbler", doc, "title", "FK accept doc", "content_type", "paper",
             "corpus", "knowledge", "physical_collection", COLLECTION));
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK now -- PgVectorRepository's stub-insert is retired.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION);
+        }
         vecRepo.upsertChunks(TENANT, COLLECTION, List.of(chash), List.of("accept text"), List.of(Map.of()));
         assertThatCode(() -> catalogRepo.writeManifest(TENANT, doc, COLLECTION,
                 List.of(Map.of("position", 0, "chash", chash))))
@@ -173,6 +178,11 @@ class ManifestChunkFkTest {
         catalogRepo.upsertDocument(TENANT, Map.of(
             "tumbler", doc, "title", "FK cascade doc", "content_type", "paper",
             "corpus", "knowledge", "physical_collection", oldCollection));
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK now -- PgVectorRepository's stub-insert is retired.
+        try (Connection su0 = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su0, SQLDialect.POSTGRES), TENANT, oldCollection);
+        }
         vecRepo.upsertChunks(TENANT, oldCollection, List.of(chash), List.of("cascade text"), List.of(Map.of()));
         catalogRepo.writeManifest(TENANT, doc, oldCollection,
             List.of(Map.of("position", 0, "chash", chash)));
@@ -189,10 +199,9 @@ class ManifestChunkFkTest {
             // header). This test's raw UPDATE below bypasses that coherent path to
             // isolate catalog-029's manifest-FK CASCADE in isolation, so it must
             // register the target collection itself first, exactly as the coherent
-            // rename path always does before touching any chunk row.
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES "
-                + "('" + TENANT + "', '" + newCollection + "') ON CONFLICT (tenant_id, name) DO NOTHING");
+            // rename path always does before touching any chunk row. RDR-204
+            // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, newCollection);
             int updated = su.createStatement().executeUpdate(
                 "UPDATE nexus.chunks SET collection = '" + newCollection + "' "
                 + "WHERE tenant_id = '" + TENANT + "' AND collection = '" + oldCollection + "' "
@@ -268,6 +277,11 @@ class ManifestChunkFkTest {
         catalogRepo.upsertDocument(TENANT, Map.of(
             "tumbler", doc, "title", "FK purge doc", "content_type", "paper",
             "corpus", "knowledge", "physical_collection", collection));
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK now -- PgVectorRepository's stub-insert is retired.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection);
+        }
         vecRepo.upsertChunks(TENANT, collection, List.of(chash), List.of("purge text"), List.of(Map.of()));
         catalogRepo.writeManifest(TENANT, doc, collection,
             List.of(Map.of("position", 0, "chash", chash)));
@@ -323,6 +337,11 @@ class ManifestChunkFkTest {
         catalogRepo.upsertDocument(TENANT, Map.of(
             "tumbler", doc, "title", "FK delete-collection doc", "content_type", "paper",
             "corpus", "knowledge", "physical_collection", collection));
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK now -- PgVectorRepository's stub-insert is retired.
+        try (Connection su0 = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su0, SQLDialect.POSTGRES), TENANT, collection);
+        }
         vecRepo.upsertChunks(TENANT, collection, List.of(chash), List.of("delcoll text"), List.of(Map.of()));
         catalogRepo.writeManifest(TENANT, doc, collection,
             List.of(Map.of("position", 0, "chash", chash)));

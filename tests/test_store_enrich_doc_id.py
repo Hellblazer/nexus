@@ -48,7 +48,7 @@ def catalog_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return catalog_dir
 
 
-def _seed_for_store_put(content: str, collection: str = "knowledge") -> None:
+def _seed_for_store_put(content: str, collection: str = "fixture-subject") -> None:
     """Pre-seed a REAL ``nexus.chunks`` row for what CLI ``nx store put``
     is about to write (nexus-dbzxb, RDR-191 Phase 5 Python collateral).
 
@@ -119,7 +119,7 @@ def test_store_put_cli_writes_catalog_doc_id_into_t3_chunk_metadata(
         result = runner.invoke(store, [
             "put",
             str(catalog_env.parent / "finding.md"),
-            "--collection", "knowledge",
+            "--collection", "fixture-subject",
             "--title", "finding-doc-id-pin",
             "--tags", "rdr-101,test",
         ], catch_exceptions=False)
@@ -194,7 +194,7 @@ def test_store_put_doc_id_absent_when_catalog_uninitialized(
         result = runner.invoke(store, [
             "put",
             str(tmp_path / "finding-nocat.md"),
-            "--collection", "knowledge",
+            "--collection", "fixture-subject",
             "--title", "finding-no-catalog",
             "--tags", "test",
         ], catch_exceptions=False)

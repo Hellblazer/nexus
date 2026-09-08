@@ -222,6 +222,28 @@ public final class HttpUtil {
                 + "}");
             return true;
         }
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): the seven stub-insert paths that used
+        // to auto-create a blank-attribute catalog_collections row on first write are
+        // retired. CollectionRegistry.requireRegistered throws this INSTEAD of writing
+        // one, from inside the repository's TenantScope.withTenant lambda before any
+        // mutating statement runs — same business-logic-refusal shape as identityConflict
+        // and pipelineConflict above, no SQLSTATE, mapped ahead of the generic class-23
+        // branch. 422 (not 409): this is a well-formed request that cannot be processed
+        // because a precondition — registration — is unmet, the same story as the
+        // profile-mismatch 422 (Technical Design step 2), not a genuine conflict.
+        var unregisteredCollection = unregisteredCollection(e);
+        if (unregisteredCollection != null) {
+            log.warn("event={}_unregistered_collection {} tenant={} collection={}",
+                event, context, unregisteredCollection.tenant(), unregisteredCollection.collection());
+            send(exchange, 422,
+                "{\"error\":" + jsonString(unregisteredCollection.getMessage())
+                + ",\"tenant\":" + jsonString(unregisteredCollection.tenant())
+                + ",\"collection\":" + jsonString(unregisteredCollection.collection())
+                + ",\"remedy\":\"register the collection first via "
+                + "POST /v1/catalog/collections/upsert\""
+                + "}");
+            return true;
+        }
         String sqlState = sqlState23(e);
         if (sqlState != null) {
             // nexus-7e057: class-23 integrity violations are caller errors (bad FK id
@@ -337,6 +359,22 @@ public final class HttpUtil {
         for (Throwable c = t; c != null; c = c.getCause()) {
             if (c instanceof dev.nexus.service.db.PipelineConflictException pe) {
                 return pe;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The {@link dev.nexus.service.db.UnregisteredCollectionException} in {@code t}'s
+     * cause chain, or null (RDR-204 Phase 1, bead nexus-ft04v.7). {@code
+     * CollectionRegistry.requireRegistered} throws it inside {@code TenantScope
+     * .withTenant}'s work lambda, which wraps on the way out — same walk shape as
+     * {@link #identityConflict} and {@link #pipelineConflict}.
+     */
+    static dev.nexus.service.db.UnregisteredCollectionException unregisteredCollection(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.UnregisteredCollectionException uce) {
+                return uce;
             }
         }
         return null;

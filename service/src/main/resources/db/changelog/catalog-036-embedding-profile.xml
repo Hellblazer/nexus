@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-204 Phase 1 item 1 (bead nexus-ft04v.2) — install-scoped embedding
+    profile (Technical Design step 1) plus the nullable catalog_collections
+    attribute columns the backfill walk (bead nexus-ft04v.4) will populate
+    (Technical Design step 2/3).
+
+    ADDITIVE ONLY: no NOT NULL, no CHECK, no FK from catalog_collections to
+    embedding_models here — those constraints land in the walk changeset
+    (hygiene-001-6 shape, bead nexus-ft04v.4) AFTER the walk has filled every
+    row, per the never-wedge-an-upgrade directive (2026-08-16): a
+    constraining changeset that runs ahead of the walk on a populated
+    install fails the changeset, and Main.java wraps any LiquibaseException
+    in MigrationException and refuses to boot — a bricked upgrade on a
+    laptop, the single live environment on the cloud.
+
+    Changeset ids reserved on nexus-ft04v.1 (closed, base develop
+    48a681084): catalog-036 is the next unused number in the catalog family
+    (family maximum at that base was catalog-035-fts-match-function.xml).
+
+    Token spellings are byte-for-byte the same four tokens both authorities
+    already carry:
+      engine:  PgVectorRepository.MODEL_DIMS (voyage-code-3, voyage-context-3,
+               voyage-3, bge-base-en-v15-768, minilm-l6-v2-384 — dims 1024,
+               1024, 1024, 768, 384).
+      client:  corpus.py CANONICAL_EMBEDDING_MODELS (voyage-context-3,
+               voyage-code-3) plus LOCAL_EMBEDDING_MODELS (minilm-l6-v2-384,
+               bge-base-en-v15-768).
+    voyage-3 is on the engine's list but has no client token and no live row
+    (RDR-204 Key Discoveries) — deliberately NOT seeded below.
+
+    provider values (voyage / onnx-local) reuse EmbedderRouter.modeName()'s
+    own two mode tokens verbatim — no new vocabulary invented for this
+    column.
+
+    Grants: nexus_svc and nexus_diag pick both new tables up automatically.
+    grants-nexus-svc.xml's grants-nexus-svc-1 changeset iterates every
+    relation nexus_admin owns in schema nexus/t1 at EXECUTION time (a
+    runAlways per-relation DO $$ loop, not a fixed table list), and
+    grants-nexus-diag.xml's grants-nexus-diag-1 issues a bulk
+    "GRANT SELECT ON ALL TABLES IN SCHEMA nexus" (also runAlways). Both
+    changesets run AFTER this file in db.changelog-master.xml (they sit
+    past search-path-001/002, this file's include sits before them), so
+    embedding_models/embedding_profile already exist by the time either
+    grant statement executes on a fresh walk — no edit needed to either
+    grants file.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: embedding_models reference table ──────────────────── -->
+    <changeSet id="catalog-036-1" author="nexus-ft04v.2">
+        <comment>embedding_models: install-scoped reference table of models this engine can serve (RDR-204 Technical Design 1). No tenant_id, no RLS — same posture as service_tokens/install_pings (telemetry-014's file header): this table holds install-wide configuration, not tenant-owned data, and every tenant reads the identical rows.</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.embedding_models (
+    embedding_model TEXT    NOT NULL,
+    dimension       INTEGER NOT NULL,
+    provider        TEXT    NOT NULL,
+    CONSTRAINT embedding_models_pk PRIMARY KEY (embedding_model)
+);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.embedding_models CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: embedding_models seed (exactly four rows) ──────────── -->
+    <changeSet id="catalog-036-2" author="nexus-ft04v.2">
+        <comment>embedding_models seed: the four models this engine can serve today (RDR-204 Key Discoveries) — voyage-3 deliberately excluded (no client token, no live row).</comment>
+        <sql splitStatements="true" stripComments="false">
+INSERT INTO nexus.embedding_models (embedding_model, dimension, provider) VALUES
+    ('voyage-code-3',       1024, 'voyage'),
+    ('voyage-context-3',    1024, 'voyage'),
+    ('bge-base-en-v15-768',  768, 'onnx-local'),
+    ('minilm-l6-v2-384',     384, 'onnx-local');
+        </sql>
+        <rollback>DELETE FROM nexus.embedding_models WHERE embedding_model IN ('voyage-code-3', 'voyage-context-3', 'bge-base-en-v15-768', 'minilm-l6-v2-384')</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: embedding_profile (tenant-scoped, RLS) ─────────────── -->
+    <changeSet id="catalog-036-3" author="nexus-ft04v.2">
+        <comment>embedding_profile: the install-scoped write-model choice per (tenant, content_type) (RDR-204 Technical Design 1). Tenant-scoped: RLS ENABLE+FORCE with the same tenant_isolation policy shape as catalog_collections/catalog_meta (catalog-001-baseline.xml changeset catalog-001-7).</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.embedding_profile (
+    tenant_id       TEXT    NOT NULL,
+    content_type    TEXT    NOT NULL,
+    embedding_model TEXT    NOT NULL,
+    dimension       INTEGER NOT NULL,
+    CONSTRAINT embedding_profile_pk PRIMARY KEY (tenant_id, content_type),
+    CONSTRAINT embedding_profile_model_fk FOREIGN KEY (embedding_model)
+        REFERENCES nexus.embedding_models (embedding_model)
+);
+
+ALTER TABLE nexus.embedding_profile ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.embedding_profile FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.embedding_profile
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.embedding_profile;
+            ALTER TABLE nexus.embedding_profile NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.embedding_profile DISABLE ROW LEVEL SECURITY;
+            DROP TABLE IF EXISTS nexus.embedding_profile CASCADE;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 4: catalog_collections nullable attribute columns ─────── -->
+    <changeSet id="catalog-036-4" author="nexus-ft04v.2">
+        <comment>catalog_collections: nullable dimension + lifecycle_state columns (RDR-204 Technical Design 2/3). Both NULLABLE at this step, no CHECK, no DEFAULT, no FK — the backfill walk (bead nexus-ft04v.4, hygiene-001-6 shape) populates every row and adds the constraints in the SAME changeset as the walk, so a constraining changeset never meets a blank row.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_collections
+    ADD COLUMN dimension INTEGER,
+    ADD COLUMN lifecycle_state TEXT;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.catalog_collections DROP COLUMN IF EXISTS lifecycle_state;
+            ALTER TABLE nexus.catalog_collections DROP COLUMN IF EXISTS dimension;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -8,6 +8,8 @@ import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
@@ -88,6 +90,12 @@ class CatalogRestoreTrashTest {
         catalogRepo = new CatalogRepository(tenantScope);
         var embedder = new PgVectorRepositoryContractTest.FakeEmbedder(384);
         vecRepo = new PgVectorRepository(tenantScope, embedder, embedder);
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK now -- PgVectorRepository's stub-insert is retired.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT_A, COLLECTION);
+        }
     }
 
     @AfterAll

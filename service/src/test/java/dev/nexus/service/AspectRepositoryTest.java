@@ -2,6 +2,7 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.AspectRepository;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.db.UnregisteredCollectionException;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.*;
 import org.jooq.DSLContext;
@@ -111,6 +112,39 @@ class AspectRepositoryTest {
                     "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) " +
                     "VALUES ('" + TENANT_A + "', '" + tumbler + "', 'Test fixture: " + tumbler + "') " +
                     "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+            }
+
+            // RDR-204 Phase 1 (bead nexus-ft04v.7): document_aspects_collection_fk /
+            // document_highlights_collection_fk / aspect_extraction_queue_collection_fk
+            // are REAL, always-enforced FKs to catalog_collections — AspectRepository's
+            // stub-insert is retired, so a real row (not just a CollectionRegistry cache
+            // entry) must exist before any write, or the FK itself rejects the insert
+            // regardless of what the in-process cache believes. This suite's tests
+            // predate that requirement and use a small, distinct, per-test collection
+            // name purely for row isolation, not to exercise registration behavior
+            // itself (CollectionRegistryTest owns the fail-loud contract). Seeded here,
+            // once, for BOTH tenants (RLS isolation is a DATA guarantee enforced on the
+            // rows themselves, never on collection registration) — including "", the
+            // document_highlights nne()-default some tests never override.
+            for (String collection : List.of(
+                    "", "coll-a", "coll-coalesce", "coll-coalesce-explicit", "coll-nodocid",
+                    "coll-nodocid2", "coll-lowconf", "coll-nullconf", "coll-nullconf-batch",
+                    "coll-overwrite", "coll-tumbler", "list-coll", "bykey-coll", "del-coll",
+                    "rename-src", "rename-dst", "import-coll", "importlc-coll", "rls-coll",
+                    "failclosed-coll", "extras-wire-coll", "extras-null-coll",
+                    "extras-blank-coll", "ev-coll", "batch-asp-coll", "salient-coll",
+                    "dt-papers", "hl-src", "hl-dst", "hl-ghost-src", "hl-ghost-dst",
+                    "hl-rls-src", "hl-rls-dst", "queue-coll", "reenqueue-coll",
+                    "coalesce-coll", "enqmany-coll", "enqmany-skip-coll",
+                    "enqmany-reenq-coll", "done-coll", "failretry-coll", "stale-coll",
+                    "fifo-coll", "qrename-src", "qrename-dst", "etl-queue-coll",
+                    "greatest-coll", "least-coll", "rls-queue-coll", "batch-coll",
+                    "nra-coll", "mr-coll", "rb-coll", "lf-a", "concurrent-coll",
+                    "qbatch-coll-a", "qbatch-coll-b", "qbatch-dup", "qbatch-fid",
+                    "qbatch-skip")) {
+                for (String tenant : List.of(TENANT_A, TENANT_B)) {
+                    PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, collection);
+                }
             }
         }
 
@@ -422,14 +456,8 @@ class AspectRepositoryTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext suCtx = DSL.using(su, SQLDialect.POSTGRES);
-            suCtx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-                .values(TENANT_A, "good-coll")
-                .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME).doNothing()
-                .execute();
-            suCtx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-                .values(TENANT_B, "bad-coll")
-                .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME).doNothing()
-                .execute();
+            PgContainerHelper.insertCollection(suCtx, TENANT_A, "good-coll");
+            PgContainerHelper.insertCollection(suCtx, TENANT_B, "bad-coll");
         }
 
         // isLocal=true (SET LOCAL) needs an explicit transaction to survive to the
@@ -983,6 +1011,7 @@ class AspectRepositoryTest {
         // omits doc_id, no FK issue" comment this line used to carry no
         // longer holds even for an existing row's conflict-triggered UPDATE.
         registerFixtureDoc(testTenant, "etl-q-fidelity-doc");
+        registerFixtureCollection(testTenant, "etl-queue-coll");
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection",  "etl-queue-coll");
         body.put("source_path", uniquePath);
@@ -1061,6 +1090,7 @@ class AspectRepositoryTest {
         String early  = "2025-01-01T00:00:00.000000Z";
         String later  = "2026-06-01T00:00:00.000000Z";
         registerFixtureDoc(tenant, "least-doc");
+        registerFixtureCollection(tenant, "least-coll");
 
         var seed = new java.util.LinkedHashMap<String, Object>();
         seed.put("collection",  "least-coll");
@@ -1127,6 +1157,7 @@ class AspectRepositoryTest {
         // Isolated tenant so claimNext sees ONLY this row.
         String tenant = "nra-future-tenant-" + System.nanoTime();
         registerFixtureDoc(tenant, "nra-doc");
+        registerFixtureCollection(tenant, "nra-coll");
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection",  "nra-coll");
         body.put("source_path", "future.pdf");
@@ -1147,6 +1178,7 @@ class AspectRepositoryTest {
     void claimNext_claimsRowWhenNextRetryAtNullOrElapsed() throws Exception {
         String tenant = "nra-ready-tenant-" + System.nanoTime();
         registerFixtureDoc(tenant, "nra-doc");
+        registerFixtureCollection(tenant, "nra-coll");
 
         // Row 1: next_retry_at elapsed (5 min in the past) -> claimable.
         var past = new java.util.LinkedHashMap<String, Object>();
@@ -1176,6 +1208,7 @@ class AspectRepositoryTest {
     void reclaimStale_leavesNextRetryAtUnchanged_andRowImmediatelyClaimable() throws Exception {
         String tenant = "nra-reclaim-tenant-" + System.nanoTime();
         registerFixtureDoc(tenant, "nra-doc");
+        registerFixtureCollection(tenant, "nra-coll");
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection",  "nra-coll");
         body.put("source_path", "reclaim.pdf");
@@ -1218,6 +1251,7 @@ class AspectRepositoryTest {
         // reclaimStale must not invent a value (which would back off a crash-victim).
         String tenant = "nra-reclaim-null-tenant-" + System.nanoTime();
         registerFixtureDoc(tenant, "nra-doc");
+        registerFixtureCollection(tenant, "nra-coll");
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection",  "nra-coll");
         body.put("source_path", "reclaim-null.pdf");
@@ -1241,6 +1275,7 @@ class AspectRepositoryTest {
     void markRetry_stampsNextRetryAtServerSide_andBacksOffClaim() throws Exception {
         String tenant = "markretry-tenant-" + System.nanoTime();
         registerFixtureDoc(tenant, "mr-doc");
+        registerFixtureCollection(tenant, "mr-coll");
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection",  "mr-coll");
         body.put("source_path", "mr.pdf");
@@ -1283,6 +1318,7 @@ class AspectRepositoryTest {
         // mark_retry stays silently held until the old backoff elapses.
         String tenant = "reenqueue-backoff-tenant-" + System.nanoTime();
         registerFixtureDoc(tenant, "rb-doc");
+        registerFixtureCollection(tenant, "rb-coll");
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection",  "rb-coll");
         body.put("source_path", "rb.pdf");
@@ -1311,6 +1347,8 @@ class AspectRepositoryTest {
         // list_failed tests and the already-tested listPending map).
         String tenant = "list-failed-tenant-" + System.nanoTime();
         registerFixtureDoc(tenant, "lf-doc");
+        registerFixtureCollection(tenant, "lf-a");
+        registerFixtureCollection(tenant, "lf-b");
         for (String[] cs : new String[][]{
                 {"lf-a", "a1.pdf"}, {"lf-a", "a2.pdf"}, {"lf-b", "b1.pdf"}}) {
             var body = new java.util.LinkedHashMap<String, Object>();
@@ -1352,6 +1390,22 @@ class AspectRepositoryTest {
      * whatever tenant (often a dynamically-generated isolated one) the test
      * actually uses.
      */
+    /**
+     * RDR-204 Phase 1 (bead nexus-ft04v.7): aspect_extraction_queue_collection_fk is
+     * a REAL, always-enforced FK to catalog_collections — AspectRepository's
+     * stub-insert is retired, so a real row must exist before enqueue()/import writes.
+     * A handful of queue tests use a freshly generated, per-test dynamic tenant (for
+     * claim/retry isolation) rather than TENANT_A/TENANT_B, so their fixture
+     * collection falls outside startAll()'s bulk registration — register it here,
+     * alongside the matching {@link #registerFixtureDoc}.
+     */
+    private void registerFixtureCollection(String tenant, String collection) {
+        tenantScope.withTenant(tenant, ctx -> {
+            PgContainerHelper.insertCollection(ctx, tenant, collection);
+            return null;
+        });
+    }
+
     private void registerFixtureDoc(String tenant, String tumbler) throws SQLException {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
@@ -1677,6 +1731,8 @@ class AspectRepositoryTest {
     void importQueueBatch_insertsAll_acrossCollections_oneStatement() throws Exception {
         String t = "qbatch-tenant-" + System.nanoTime();
         registerFixtureDoc(t, "qbatch-doc");
+        registerFixtureCollection(t, "qbatch-coll-a");
+        registerFixtureCollection(t, "qbatch-coll-b");
         var r1 = new java.util.LinkedHashMap<String, Object>();
         r1.put("collection", "qbatch-coll-a"); r1.put("source_path", "a1.pdf");
         r1.put("doc_id", "qbatch-doc");
@@ -1707,6 +1763,7 @@ class AspectRepositoryTest {
         // (tenant, collection, source_path) twice — repo must dedupe, last wins.
         String t = "qbatch-tenant2-" + System.nanoTime();
         registerFixtureDoc(t, "qbatch-dup-doc");
+        registerFixtureCollection(t, "qbatch-dup");
         var first = new java.util.LinkedHashMap<String, Object>();
         first.put("collection", "qbatch-dup"); first.put("source_path", "dup.pdf");
         first.put("doc_id", "qbatch-dup-doc");
@@ -1731,6 +1788,7 @@ class AspectRepositoryTest {
         // verbatim: a stale 'pending' import must not downgrade in_progress.
         String t = "qbatch-tenant3-" + System.nanoTime();
         registerFixtureDoc(t, "qbatch-fid-doc");
+        registerFixtureCollection(t, "qbatch-fid");
         var seed = new java.util.LinkedHashMap<String, Object>();
         seed.put("collection", "qbatch-fid"); seed.put("source_path", "fid.pdf");
         seed.put("doc_id", "qbatch-fid-doc");
@@ -1753,6 +1811,7 @@ class AspectRepositoryTest {
     void importQueueBatch_skipsRowsMissingKeys_countsOnlyKept() throws Exception {
         String t = "qbatch-tenant4-" + System.nanoTime();
         registerFixtureDoc(t, "qbatch-skip-doc");
+        registerFixtureCollection(t, "qbatch-skip");
         var good = new java.util.LinkedHashMap<String, Object>();
         good.put("collection", "qbatch-skip"); good.put("source_path", "ok.pdf");
         good.put("doc_id", "qbatch-skip-doc");
@@ -1765,6 +1824,33 @@ class AspectRepositoryTest {
         int n = repo.importQueueBatch(t, List.of(good, noColl, noPath));
         assertThat(n).isEqualTo(1);
         assertThat(repo.listPending(t, 100)).hasSize(1);
+    }
+
+    @Test @Order(70)
+    void upsertAspect_unregisteredCollection_throwsAndWritesNoRow() {
+        // RDR-204 Phase 1 (nexus-ft04v.7 gap 3, closed by nexus-ft04v.8's test
+        // addendum): AspectRepository's stub-insert retirement means a write
+        // against a collection with no catalog_collections row must fail loud
+        // via CollectionRegistry.requireRegistered, and create NO row anywhere --
+        // neither the document_aspects row nor a catalog_collections stub.
+        String collection = "unreg-aspect-coll";
+        var body = makeAspect(collection, "unreg.pdf");
+
+        assertThatThrownBy(() -> repo.upsertAspect(TENANT_A, body))
+            .isInstanceOf(UnregisteredCollectionException.class)
+            .hasMessageContaining(collection)
+            .hasMessageContaining("POST /v1/catalog/collections/upsert");
+
+        assertThat(repo.getAspect(TENANT_A, collection, "unreg.pdf"))
+            .as("a write against an unregistered collection must create no document_aspects row")
+            .isEmpty();
+        boolean stubRowExists = tenantScope.withTenant(TENANT_A, ctx -> ctx.fetchExists(
+                ctx.selectOne().from(CATALOG_COLLECTIONS)
+                   .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A))
+                   .and(CATALOG_COLLECTIONS.NAME.eq(collection))));
+        assertThat(stubRowExists)
+            .as("the rejected write must not have created a catalog_collections stub row either")
+            .isFalse();
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

@@ -88,6 +88,21 @@ class TaxonomyPersistHandlerTest {
         service = new NexusService(0, TOKEN, svcDs);
         service.start();
         http = HttpClient.newHttpClient();
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.3): AuthFilter runs the per-tenant,
+        // once-per-process ghost sweep on whichever request is TENANT's first
+        // against this service instance -- several @Test methods below register
+        // a collection via raw SQL and then POST to it; whichever runs first
+        // (JUnit's default order is not declaration order) would have its POST
+        // be that first request, letting the sweep delete the freshly
+        // registered, still-chunkless collection out from under the write (see
+        // BridgeAddressFieldsTest's identical fix). Burn the sweep here first,
+        // once, for every @Test method uniformly.
+        var warmup = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+            .header("Authorization", "Bearer " + TOKEN)
+            .GET().build();
+        http.send(warmup, HttpResponse.BodyHandlers.ofString());
     }
 
     @AfterAll
@@ -130,6 +145,11 @@ class TaxonomyPersistHandlerTest {
     @Test
     void persistDiscovered_existingGuard_returnsNoOp() throws Exception {
         String col = "knowledge__hpg";
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): topics_collection_fk is a REAL,
+        // always-enforced FK now -- register the collection first.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, col);
+        }
         var spec = Map.of("label", "first", "doc_count", 0, "terms", "[]",
                           "assigned_by", "hdbscan", "doc_ids", List.of());
         post("/v1/taxonomy/topics/persist_discovered",
@@ -271,9 +291,8 @@ class TaxonomyPersistHandlerTest {
     private void seedChunk(String collection, String chashHex, int dim) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT + "', '"
-                + collection + "') ON CONFLICT (tenant_id, name) DO NOTHING");
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection);
             String embeddingCol = "embedding_" + dim;
             su.createStatement().execute(
                 "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, " + embeddingCol + ") VALUES " +

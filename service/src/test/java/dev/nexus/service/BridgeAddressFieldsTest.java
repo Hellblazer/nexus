@@ -116,6 +116,30 @@ class BridgeAddressFieldsTest {
         service.start();
         http = HttpClient.newHttpClient();
 
+        // RDR-204 Phase 1 (bead nexus-ft04v.3): AuthFilter runs the per-tenant,
+        // once-per-process ghost sweep (deletes any registered-but-chunkless
+        // collection) on whichever request is TENANT's first since this
+        // service booted. Registering COL below and only then issuing the
+        // upsert-chunks POST made THAT POST tenant's first request -- the
+        // sweep fired ahead of the write, found COL freshly registered with
+        // zero chunks, and deleted it out from under the insert, which then
+        // 422'd (silently, since the response here is discarded) and left
+        // the manifest INSERT further down with no chunk row to reference
+        // (measured: WARN vector_handler_unregistered_collection, then the
+        // fk_catalog_chunks_chunk violation this bead's own fix surfaced).
+        // Burn the sweep on a harmless, unauthenticated-content GET first,
+        // so it is already spent by the time COL is registered.
+        var warmup = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+            .header("Authorization", "Bearer " + TOKEN)
+            .GET().build();
+        http.send(warmup, HttpResponse.BodyHandlers.ofString());
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK now -- the write path no longer auto-registers COL.
+        try (Connection su0 = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su0, SQLDialect.POSTGRES), TENANT, COL);
+        }
         // Upsert chunks (metadata carries chunk_text_hash = full sha256 hex)
         post("/v1/vectors/upsert-chunks", Map.of(
             "collection", COL,
@@ -168,6 +192,24 @@ class BridgeAddressFieldsTest {
         // TENANT2's own chunk row (a separate PK entry, tenant_id is part of the
         // key) to exist BEFORE the manifest insert below -- moved ahead of it
         // (previously ran after, order-independent pre-FK).
+        // RDR-204 Phase 1 (bead nexus-ft04v.3): the upsert-chunks POST below is
+        // TENANT2's first-ever request against `service` -- AuthFilter's
+        // per-tenant, once-per-process ghost sweep fires on it, and would
+        // delete COL out from under the write if COL were registered for
+        // TENANT2 before this warmup ran (see the identical TENANT-side fix
+        // above, and PgVectorServingContractTest/VectorHandlerEmbeddingModeTest/
+        // StagingHandlerJourneyTest's round-4 fix for the same bug, ordered the
+        // other way around by mistake once already). Burn the sweep for
+        // TENANT2 first, THEN register COL for TENANT2 (a separate row from
+        // TENANT's, since catalog_collections is tenant-scoped).
+        var warmup2 = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+            .header("Authorization", "Bearer " + TOKEN2)
+            .GET().build();
+        http.send(warmup2, HttpResponse.BodyHandlers.ofString());
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT2, COL);
+        }
         // Upsert CHASH_WITH_URI also for TENANT2 (needs the chunk to search against)
         postAs(TOKEN2, "/v1/vectors/upsert-chunks", Map.of(
             "collection", COL,
@@ -390,6 +432,12 @@ class BridgeAddressFieldsTest {
     @Test
     void storeGet_countField_reflectsMatchedLiveRows_andSignalsTruncation() throws Exception {
         String col = "knowledge__g5count__voyage-context-3__v1";
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): this test's own fixture collection --
+        // chunks_collection_fk is a REAL, always-enforced FK now, and TENANT's ghost
+        // sweep already ran (in startAll's warmup), so a plain registration here is safe.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, col);
+        }
         String c1 = dev.nexus.service.db.Chash.ofText("g5count-1").toHex();
         String c2 = dev.nexus.service.db.Chash.ofText("g5count-2").toHex();
         String c3 = dev.nexus.service.db.Chash.ofText("g5count-3").toHex();
@@ -441,6 +489,12 @@ class BridgeAddressFieldsTest {
     @Test
     void storeGet_moreThan20IdsNoExplicitLimit_returnsAll157() throws Exception {
         String col = "knowledge__g5e1__voyage-context-3__v1";
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): this test's own fixture collection --
+        // chunks_collection_fk is a REAL, always-enforced FK now, and TENANT's ghost
+        // sweep already ran (in startAll's warmup), so a plain registration here is safe.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, col);
+        }
         int n = 157;
         List<String> ids = new ArrayList<>(n);
         List<String> docs = new ArrayList<>(n);
@@ -505,6 +559,12 @@ class BridgeAddressFieldsTest {
     @Test
     void storeGet_offsetBeyondMatchedSet_returnsZeroRowsButTrueCount() throws Exception {
         String col = "knowledge__g5e3__voyage-context-3__v1";
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): this test's own fixture collection --
+        // chunks_collection_fk is a REAL, always-enforced FK now, and TENANT's ghost
+        // sweep already ran (in startAll's warmup), so a plain registration here is safe.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, col);
+        }
         int n = 5;
         List<String> ids = new ArrayList<>(n);
         List<String> docs = new ArrayList<>(n);
@@ -537,6 +597,12 @@ class BridgeAddressFieldsTest {
     @Test
     void storeGet_limitZero_returnsZeroRowsButTrueCount() throws Exception {
         String col = "knowledge__g5e4__voyage-context-3__v1";
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): this test's own fixture collection --
+        // chunks_collection_fk is a REAL, always-enforced FK now, and TENANT's ghost
+        // sweep already ran (in startAll's warmup), so a plain registration here is safe.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, col);
+        }
         int n = 5;
         List<String> ids = new ArrayList<>(n);
         List<String> docs = new ArrayList<>(n);

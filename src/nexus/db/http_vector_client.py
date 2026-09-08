@@ -1836,8 +1836,24 @@ class HttpVectorClient:
     # Tests may patch this.
     _tenant: str
 
-    def __init__(self, *, tenant: str = "default") -> None:
+    def __init__(
+        self,
+        *,
+        tenant: str = "default",
+        _collection_registrar: "Callable[[], object] | None" = None,
+    ) -> None:
         self._tenant = tenant
+        # RDR-204 Phase 1 (nexus-f5wwx): the engine no longer
+        # auto-registers a collection on first write. ``put``/
+        # ``upsert_chunks`` ensure registration before writing; the
+        # registrar is injectable (zero-arg catalog-writer factory, see
+        # ``nexus.corpus.ensure_collection_registered``) so this
+        # low-level HTTP client never hard-couples to
+        # ``nexus.catalog.factory`` and a unit test can pass a fake
+        # writer with no service running. ``None`` (the default) means
+        # ``ensure_collection_registered`` falls back to
+        # ``make_catalog_writer`` itself.
+        self._collection_registrar = _collection_registrar
 
     # ── Context manager (no-op: stateless HTTP, parity with T3Database) ──────
 
@@ -1938,6 +1954,19 @@ class HttpVectorClient:
         """
         if not ids:
             return
+        # RDR-204 Phase 1 (nexus-f5wwx): the engine no longer
+        # auto-registers a collection on first write (nexus-ft04v.7
+        # deleted the stub-insert paths). Each page's write below goes
+        # through write_with_registration_retry, which ensures
+        # registration (cached after the first page — cheap for every
+        # later page) and retries once if the engine's per-tenant boot
+        # sweep (bead .3) reaped a registered-but-chunkless row between
+        # registration and the write. Most callers (the indexer's own
+        # chunk writes) already registered explicitly with repo-derived
+        # metadata; this is a cheap idempotent no-op for them and the
+        # actual fix for callers that relied on the retired
+        # auto-registration.
+        from nexus.corpus import write_with_registration_retry  # noqa: PLC0415 — circular-dep avoidance (corpus)
         if skip_existing is None:
             skip_existing = os.environ.get("NX_UPSERT_SKIP_EXISTING", "") == "1"
         if force_re_embed is None:
@@ -2049,30 +2078,35 @@ class HttpVectorClient:
             if retry:
                 from nexus.retry import _vector_with_retry  # noqa: PLC0415 — deferred import: avoids a module-load-time httpx dependency for this otherwise-urllib-only module (matches the deferred-import convention every other _vector_with_retry caller uses)
 
-                result = _vector_with_retry(
-                    _post, "/v1/vectors/upsert-chunks", body, tenant=self._tenant,
-                    timeout=_UPSERT_CHUNKS_TIMEOUT_S,
-                    # nexus-8hdg9 phase 1: a bare TimeoutError on an upsert is
-                    # refused rather than retried. _request_once uses ONE
-                    # socket timeout for connect AND read, so this fires for
-                    # either phase -- most often read (the request was
-                    # already sent and the engine may still be embedding
-                    # this exact batch server-side, where re-POSTing it
-                    # would stack a second embed pass), but a genuine
-                    # connect-phase stall is refused the same way; the
-                    # transport cannot tell them apart (see
-                    # VectorUpsertTimeoutError's docstring). Contained per
-                    # file by the indexer (_contain_transient_upsert), not a
-                    # whole-run abort. A connection-level error (dead/
-                    # refused peer -- ConnectionError/URLError) is a
-                    # different exception family and still retries normally.
-                    retry_on_timeout=False,
-                )
+                def _do_upsert_page() -> Any:
+                    return _vector_with_retry(
+                        _post, "/v1/vectors/upsert-chunks", body, tenant=self._tenant,
+                        timeout=_UPSERT_CHUNKS_TIMEOUT_S,
+                        # nexus-8hdg9 phase 1: a bare TimeoutError on an upsert is
+                        # refused rather than retried. _request_once uses ONE
+                        # socket timeout for connect AND read, so this fires for
+                        # either phase -- most often read (the request was
+                        # already sent and the engine may still be embedding
+                        # this exact batch server-side, where re-POSTing it
+                        # would stack a second embed pass), but a genuine
+                        # connect-phase stall is refused the same way; the
+                        # transport cannot tell them apart (see
+                        # VectorUpsertTimeoutError's docstring). Contained per
+                        # file by the indexer (_contain_transient_upsert), not a
+                        # whole-run abort. A connection-level error (dead/
+                        # refused peer -- ConnectionError/URLError) is a
+                        # different exception family and still retries normally.
+                        retry_on_timeout=False,
+                    )
             else:
-                result = _post(
-                    "/v1/vectors/upsert-chunks", body, tenant=self._tenant,
-                    timeout=_UPSERT_CHUNKS_TIMEOUT_S,
-                )
+                def _do_upsert_page() -> Any:
+                    return _post(
+                        "/v1/vectors/upsert-chunks", body, tenant=self._tenant,
+                        timeout=_UPSERT_CHUNKS_TIMEOUT_S,
+                    )
+            result = write_with_registration_retry(
+                collection, _do_upsert_page, registrar=self._collection_registrar,
+            )
             # nexus-znwc2 / nexus-ir6eh: the engine echoes ids.length as
             # `upserted` unconditionally (VectorHandler), so any deviation —
             # missing field or wrong count — means something interposed on
@@ -2208,6 +2242,7 @@ class HttpVectorClient:
         from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (corpus)
             embedding_model_for_collection_name,
             index_model_for_collection,
+            write_with_registration_retry,
         )
         from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
 
@@ -2299,7 +2334,19 @@ class HttpVectorClient:
             "content": content,
             "metadata": metadata,
         }
-        result = _post("/v1/vectors/store-put", body, tenant=self._tenant)
+        # RDR-204 Phase 1 (nexus-f5wwx): this is the ``nx store put`` /
+        # MCP ``store_put`` write path — the primary caller that had no
+        # register_collection call anywhere in its chain and relied
+        # entirely on the engine's now-retired auto-registration.
+        # Cached after the first call per (process, collection); retries
+        # once if the engine's per-tenant boot sweep (bead .3) reaped a
+        # registered-but-chunkless row between registration and this
+        # write.
+        result = write_with_registration_retry(
+            collection,
+            lambda: _post("/v1/vectors/store-put", body, tenant=self._tenant),
+            registrar=self._collection_registrar,
+        )
         return result.get("id", doc_id)
 
     # ── Read path ────────────────────────────────────────────────────────────

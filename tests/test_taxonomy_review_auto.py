@@ -75,13 +75,25 @@ def _seed_chunks_for_tenant(
         return
     state = ensure_engine()
     embed_col = {384: "embedding_384", 768: "embedding_768", 1024: "embedding_1024"}[dim]
+    # RDR-204 Phase 1 (nexus-f5wwx): this test substrate's engine always
+    # boots local mode with the bge-768 profile, regardless of which
+    # pgvector dim column this stub chunk uses -- the model here must
+    # match the REAL registered profile (what nexus.corpus.
+    # effective_embedding_model_for_writes computes) or a real
+    # register_collection call on this name later 422s "already
+    # registered with a different model". The stub chunk's own dim is
+    # an unrelated FK-satisfaction detail (which embedding_<dim> column
+    # holds the zero-vector), not a model choice.
+    model_for_dim = "bge-base-en-v15-768"
     vec = "[" + ",".join(["0"] * dim) + "]"
     values = ", ".join(
         f"('{tenant}', '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::nexus.vector)"
         for c in chash_hexes
     )
     sql = (
-        f"INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('{tenant}', '{collection}') "
+        "INSERT INTO nexus.catalog_collections "
+        "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
+        f"VALUES ('{tenant}', '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live') "
         "ON CONFLICT DO NOTHING; "
         f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}) "
         f"VALUES {values} ON CONFLICT DO NOTHING;"

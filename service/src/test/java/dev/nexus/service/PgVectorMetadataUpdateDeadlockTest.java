@@ -28,6 +28,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -97,6 +98,13 @@ class PgVectorMetadataUpdateDeadlockTest {
         var embedder = new PgVectorRepositoryContractTest.FakeEmbedder(DIM);
         pgRepo = new PgVectorRepository(tenantScope, embedder, embedder);
 
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK now -- PgVectorRepository's stub-insert is retired, so
+        // a real row must exist before any chunk write, or upsertChunks below fails
+        // loud instead of exercising the metadata-update deadlock race.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION);
+        }
         // Seed every shared row once; the raced window is the metadata UPDATE only.
         pgRepo.upsertChunks(TENANT, COLLECTION, sharedIds(), sharedDocs(), metasFor(sharedIds(), 0));
     }

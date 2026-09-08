@@ -302,10 +302,7 @@ class CatalogRenameCollectionTest {
         final String b = "knowledge__ren-belt-ok__minilm-l6-v2-384__v2";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            DSL.using(su, SQLDialect.POSTGRES)
-               .insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(TENANT_A, a)
-               .execute();
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT_A, a);
         }
         repo.renameCollection(TENANT_A, a, b); // A -> B; A is now a tombstone, superseded_by=B.
         // Rename back B -> A, threading the belt with the OBSERVED value at A: "b" — the
@@ -339,12 +336,8 @@ class CatalogRenameCollectionTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(TENANT_A, a)
-               .execute();
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(TENANT_A, c2)
-               .execute();
+            PgContainerHelper.insertCollection(ctx, TENANT_A, a);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, c2);
         }
         repo.renameCollection(TENANT_A, a, b); // A -> B; A is now an EMPTY tombstone, superseded_by=B.
 
@@ -383,17 +376,13 @@ class CatalogRenameCollectionTest {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // source registry + a document pointing at it
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(TENANT_A, src)
-               .execute();
+            PgContainerHelper.insertCollection(ctx, TENANT_A, src);
             ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                            CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
                .values(TENANT_A, "xm-doc-1", "XM Doc", src)
                .execute();
             // target registry already exists (cross-model copy registered it)
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(TENANT_A, tgt)
-               .execute();
+            PgContainerHelper.insertCollection(ctx, TENANT_A, tgt);
             // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires
             // a matching nexus.chunks row for the manifest insert below, at BOTH
             // ends: the pre-rename manifest row needs a chunk under src, and
@@ -470,9 +459,7 @@ class CatalogRenameCollectionTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(TENANT_C, old)
-               .execute();
+            PgContainerHelper.insertCollection(ctx, TENANT_C, old);
             insertChunk384(ctx, TENANT_C, old, chashBytes("rbchunk"), vector(384));
             // OLD telemetry row that will try to move to (ts,'collide',NEW)...
             ctx.insertInto(SEARCH_TELEMETRY, SEARCH_TELEMETRY.TENANT_ID, SEARCH_TELEMETRY.TS,
@@ -530,12 +517,8 @@ class CatalogRenameCollectionTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(TENANT_A, src)
-               .execute();
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(TENANT_A, tgt)
-               .execute();
+            PgContainerHelper.insertCollection(ctx, TENANT_A, src);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, tgt);
             ctx.insertInto(GC_AUDIT, GC_AUDIT.TENANT_ID, GC_AUDIT.OPERATION, GC_AUDIT.COLLECTION)
                .values(TENANT_A, "purge", tgt)
                .execute();
@@ -560,12 +543,8 @@ class CatalogRenameCollectionTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(TENANT_A, src)
-               .execute();
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(TENANT_A, tgt)
-               .execute();
+            PgContainerHelper.insertCollection(ctx, TENANT_A, src);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, tgt);
             ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                            CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
                .values(TENANT_A, "nrg-data-doc", "Doc", tgt)
@@ -589,12 +568,8 @@ class CatalogRenameCollectionTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(TENANT_A, src)
-               .execute();
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(TENANT_A, tgt)
-               .execute();
+            PgContainerHelper.insertCollection(ctx, TENANT_A, src);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, tgt);
         }
         assertThat(repo.supersedeCollection(TENANT_A, tgt, src, ""))
             .as("precondition: target retired").isEqualTo(1);
@@ -608,9 +583,7 @@ class CatalogRenameCollectionTest {
     /** Seed one full collection (all re-homed lifecycle tables) for {@code tenant}. Superuser; bypasses RLS. */
     private static void seedFullCollection(Connection su, String tenant, String coll) throws Exception {
         DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-        ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-           .values(tenant, coll)
-           .execute();
+        PgContainerHelper.insertCollection(ctx, tenant, coll);
         ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                        CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
            .values(tenant, "rn-doc-1", "Doc 1", coll)

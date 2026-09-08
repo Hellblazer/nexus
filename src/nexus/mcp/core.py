@@ -25,9 +25,11 @@ except ImportError:  # pragma: no cover — future SDK restructure
     _FastMCPSettings = None
 
 from nexus.corpus import (
+    _refuse_placeholder_subject,
     embedding_model_for_collection,
     embedding_model_for_collection_name,
     index_model_for_collection,
+    is_conformant_collection_name,
     resolve_corpus,
     t3_collection_name,
 )
@@ -3796,7 +3798,7 @@ def query(
 )
 def store_put(
     content: str,
-    collection: str = "knowledge",
+    collection: str,
     title: str = "",
     tags: str = "",
     category: str = "",
@@ -3815,13 +3817,15 @@ def store_put(
             that, split it into titled parts and call store_put once per
             part with the same tags (e.g. title "my-note (1/2)",
             "my-note (2/2)") rather than one oversized call.
-        collection: Collection name or prefix (default: knowledge). Give a
-            bare SUBJECT (``distributed-systems``), never a four-segment
-            name or a model token; the catalog renders the rest. A
-            knowledge collection is a durable subject area a reader would
-            browse, not a document, session, task, or source app, and
-            existing subjects are reused before a new one is created
-            (``nx collection list``). Rules: docs/collections.md.
+        collection: REQUIRED. The bare SUBJECT the note belongs to
+            (``distributed-systems``), never a four-segment name or a model
+            token; the catalog renders the rest. A knowledge collection is
+            a durable subject area a reader would browse, not a document,
+            session, task, or source app, and existing subjects are reused
+            before a new one is created (``nx collection list``). The
+            placeholders default/knowledge/notes/tmp/test are refused
+            (nexus-0fw11): there is no default, because the default is what
+            minted ``knowledge__knowledge``. Rules: docs/collections.md.
         title: Document title (recommended for deduplication). A non-empty
             title makes catalog identity stable: re-putting the same
             (collection, title) pair reconciles onto the existing document
@@ -3877,6 +3881,13 @@ def store_put(
         # empty string for every MCP write with no explicit agent.
         agent_arg = agent.strip() or _os.environ.get("NX_AGENT", "").strip() or "mcp"
         session_arg = session.strip() or _os.environ.get("NX_SESSION_ID", "").strip()
+        # nexus-0fw11: refuse a placeholder subject BEFORE any engine contact.
+        # ``_get_t3()`` runs the managed-engine floor probe in cloud mode, and
+        # an unreachable or below-floor engine would otherwise answer first
+        # and mask the refusal (the same check t3_collection_name repeats
+        # below, where it is too late to be the first thing a caller sees).
+        if not is_conformant_collection_name(collection):
+            _refuse_placeholder_subject(collection)
         t3 = _get_t3()
         # nexus-hmxi: pass t3 so the resolver grandfathers an existing
         # legacy 2-segment collection ahead of the auto-promoted

@@ -1109,6 +1109,26 @@
          telemetry-013-capability-census-scope-split.xml (current telemetry
          tail) and before the search-path / grants tail. -->
     <include file="db/changelog/telemetry-014-install-pings.xml"/>
+    <!-- RDR-204 Phase 1 item 1 (bead nexus-ft04v.2): embedding_models (seeded,
+         no RLS) + embedding_profile (tenant-scoped, RLS) + nullable
+         catalog_collections.dimension/lifecycle_state. Additive only — see
+         the included file's own header for why the constraints wait for the
+         walk (bead nexus-ft04v.4). Placed after telemetry-014-install-pings.xml
+         (current tail) and before search-path-001 (reserved changeset-id
+         ordering per nexus-ft04v.1/.2's NOTES). -->
+    <include file="db/changelog/catalog-036-embedding-profile.xml"/>
+
+    <!-- RDR-204 Phase 1 items 1/5 (beads nexus-ft04v.4 / .5, reserved changeset
+         family hygiene-002 per nexus-ft04v.1): the one-time catalog_collections
+         attribute backfill walk plus its constraints, ONE changeset on the
+         hygiene-001-6 shape — see the included file's own header for the full
+         mechanism and branch derivation. Placed immediately after
+         catalog-036-embedding-profile.xml (whose nullable dimension/
+         lifecycle_state columns this walk populates) and before
+         search-path-001 — it references no vector-typed object (an int
+         dimension column, text model names, the collection_vector_stats
+         view), so it is safe ahead of the extension relocation. -->
+    <include file="db/changelog/hygiene-002-collection-attributes-walk.xml"/>
 
     <!--
         nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): relocates the
@@ -1169,6 +1189,17 @@
         since grants target the function name, unaffected by this repoint.
     -->
     <include file="db/changelog/search-path-002-qualify-vector-operator-functions.xml"/>
+
+    <!--
+        RDR-204 Phase 1 fallout (bead nexus-ft04v.4/.5): retires the cross_collection
+        stub-register INSERT in nexus.assign_from_chashes_384/768/1024 (dead by
+        construction post-nexus-ft04v.7; see hygiene-003-assign-from-chashes-stub-
+        register.xml's own header for Sam's ninth-stub-path decision), replacing it
+        with a fail-loud guard. Placed after search-path-002 (the changelog that
+        currently owns these three functions' live bodies) so this CREATE OR REPLACE
+        always applies last.
+    -->
+    <include file="db/changelog/hygiene-003-assign-from-chashes-stub-register.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

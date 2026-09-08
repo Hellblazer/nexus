@@ -77,7 +77,32 @@ _DEFAULT_STALE_TIMEOUT_S: int = 300
 #: from the staleness threshold above. 30s matches the T2 predecessor
 #: (``_ASPECT_RECLAIM_INTERVAL``), so a row that crosses the staleness threshold
 #: is reclaimed within ~30s rather than waiting a full threshold-length interval.
+#: This is the BASE cadence: the loop backs off on consecutive empty sweeps
+#: (nexus-e0ypa, see :func:`next_reclaim_wait`) and returns here on any reclaim.
 _DEFAULT_RECLAIM_INTERVAL: float = 30.0
+
+
+def next_reclaim_wait(
+    current: float, *, reclaimed: int | None, base: float, stale_timeout: float,
+) -> float:
+    """The wait before the next reclaim sweep (nexus-e0ypa, Sam 2026-09-08).
+
+    A sweep that reclaimed rows resets the wait to *base*; an empty sweep
+    doubles it, capped at the stale window (a row cannot become reclaimable
+    faster than that, so sweeping an idle queue more often than the window
+    only samples what it cannot detect); a failed sweep (``reclaimed is
+    None``) leaves it unchanged, since a service error says nothing about
+    whether the queue is idle. The base is a floor: a window smaller than
+    the base (test sizes) caps growth without shrinking the sweep. On an
+    idle queue this cuts the 30s cadence's 2,880 empty requests a day to
+    about a tenth; on a live queue it keeps the RDR-173 review-M1 promptness
+    the 30s base was chosen for.
+    """
+    if reclaimed is None:
+        return current
+    if reclaimed > 0:
+        return base
+    return max(base, min(current * 2, float(stale_timeout)))
 
 #: Grace window (s) to catch a daemon child that crashes immediately after spawn
 #: (RDR-173 P5). On the store path only at actual spawn time (deduped), so the
@@ -157,13 +182,21 @@ class AspectWorkerDaemon:
         # (review M1): _stale_timeout is the STALENESS THRESHOLD (a row must be
         # in_progress longer than this to be reclaimed — kept > the 180s
         # extraction budget to avoid false-reclaiming an in-flight row), while
-        # _reclaim_interval is the SWEEP CADENCE (how often we ask the service to
-        # reclaim — a frequent fixed 30s, matching the T2 predecessor, so a
-        # genuinely-stranded row recovers promptly once it crosses the threshold).
+        # _reclaim_interval is the SWEEP CADENCE's BASE (how often we ask the
+        # service to reclaim while the queue is live: 30s, matching the T2
+        # predecessor, so a genuinely-stranded row recovers promptly once it
+        # crosses the threshold). On an idle queue the loop backs off from it
+        # up to the threshold (nexus-e0ypa, next_reclaim_wait), so the
+        # worst case for a row stranded on a long-idle queue is threshold +
+        # threshold, the same as a flat threshold-length cadence; the base
+        # buys promptness only while sweeps are finding rows.
         self._stale_timeout = stale_timeout_seconds
         self._reclaim_interval = (
             float(reclaim_interval) if reclaim_interval is not None else _DEFAULT_RECLAIM_INTERVAL
         )
+        # nexus-e0ypa: the wait actually used by the loop; backs off from the
+        # base on empty sweeps and returns to it on a reclaim.
+        self._current_reclaim_wait: float = self._reclaim_interval
         self._queue_factory = (
             queue_factory if queue_factory is not None
             else (lambda: _default_aspect_queue(self._tenant))
@@ -253,14 +286,15 @@ class AspectWorkerDaemon:
         interval — in service mode this daemon is the SOLE reclaim owner."""
         while True:
             self._reclaim_once()
-            if self._stop.wait(self._reclaim_interval):
+            if self._stop.wait(self._current_reclaim_wait):
                 break
 
-    def _reclaim_once(self) -> None:
+    def _reclaim_once(self) -> int | None:
         """One reclaim sweep (the loop body; also the main-thread test seam).
         Emits a structured signal when rows are reset (RDR-173 P5 observability,
         nexus-xv5fl) so self-healing is observable, and logs a failure without
-        killing the loop.
+        killing the loop. Returns the reclaimed count, or None when the sweep
+        failed, and updates ``_current_reclaim_wait`` from it (nexus-e0ypa).
 
         nexus-64np7: rebuilds ``self._reclaim_queue`` on demand (here, not
         just once at a failure site) so a rotated/expired credential baked
@@ -284,15 +318,30 @@ class AspectWorkerDaemon:
                     "aspect_worker_daemon.reclaim_queue_rebuild_failed",
                     tenant=self._tenant, error=str(rebuild_exc),
                 )
-                return
+                return None
         queue = self._reclaim_queue
         try:
-            n = queue.reclaim_stale(self._stale_timeout)
+            n = int(queue.reclaim_stale(self._stale_timeout) or 0)
             if n:
                 _log.info(
                     "aspect_worker_daemon.reclaimed_stale",
                     tenant=self._tenant, count=n, stale_timeout_seconds=self._stale_timeout,
                 )
+            previous = self._current_reclaim_wait
+            self._current_reclaim_wait = next_reclaim_wait(
+                previous, reclaimed=n,
+                base=self._reclaim_interval, stale_timeout=self._stale_timeout,
+            )
+            if self._current_reclaim_wait != previous:
+                # Review of 53923fe3e: the backoff is otherwise invisible in
+                # this daemon's own logs and only inferable from edge traffic.
+                _log.info(
+                    "aspect_worker_daemon.reclaim_wait_changed",
+                    tenant=self._tenant, reclaimed=n,
+                    previous_wait_seconds=previous,
+                    next_wait_seconds=self._current_reclaim_wait,
+                )
+            return n
         except Exception as exc:  # noqa: BLE001 - reclaim is best-effort; keep the loop alive for the next interval
             _log.warning(
                 "aspect_worker_daemon.reclaim_failed",
@@ -306,6 +355,7 @@ class AspectWorkerDaemon:
                     "aspect_worker_daemon.reclaim_queue_close_failed",
                     tenant=self._tenant, error=str(close_exc),
                 )
+            return None
 
     def heartbeat_once(self) -> None:
         """Run a single heartbeat tick (test seam + the loop body)."""

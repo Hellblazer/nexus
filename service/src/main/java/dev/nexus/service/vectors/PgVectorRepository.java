@@ -18,7 +18,6 @@ import org.jooq.Result;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 
-import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_1024;
@@ -702,53 +701,22 @@ public final class PgVectorRepository {
 
         String table = chunksTable(dim);
 
-        // Standing rule (RDR-156 P0.2, bead nexus-70r3c.2):
-        // Collection registration precedes chunk writes — enforced server-side here
-        // (auto-stub in the write transaction) and by the chunks_<dim>/chash_index/
-        // topic_assignments -> catalog_collections FKs (NOT VALID until RDR-153 data
-        // lands; VALIDATE is nexus-70r3c.3).  Stub rows (all metadata='') are upgraded
-        // by the catalog ETL's importCollection DO UPDATE...WHERE-stub logic.
-        // Never add a chunk write path that bypasses this ensure-registered step.
-        String[] collSegs = collection.split("__");
-        // Non-conformant path (collSegs.length != 4) is unreachable in practice:
-        // dimForCollection() above fails loud for any non-four-segment name, so by
-        // the time we reach this point, segments.length == 4 is guaranteed.
-        // The branch is retained as defense-in-depth to produce a name-only stub
-        // rather than crash if the invariant is ever violated by a future caller.
-        boolean conformant = collSegs.length == 4;
-        String regContentType  = conformant ? collSegs[0] : "";
-        String regOwner        = conformant ? collSegs[1] : "";
-        String regModel        = conformant ? collSegs[2] : "";
-        String regModelVersion = conformant ? collSegs[3] : "";
-
-        // Ensure-registered in its OWN short committed transaction (v0.1.21,
-        // ChashVectorConcurrencyTest full-suite failure). The nexus-h8rf6.2
-        // CollectionRegistry cache bounds convoy COUNT (registration attempts after
-        // the first are skipped process-wide), but registration-inside-the-batch-txn
-        // left convoy DURATION unbounded: the FIRST writer to a brand-new collection
-        // held the catalog_collections ON CONFLICT value lock for its ENTIRE batch
-        // (60x1024-dim inserts + HNSW maintenance — seconds on a loaded host), so
-        // every concurrent racer blew the pool's connectionTimeout and got the typed
-        // 503 the cache was built to prevent. Committing the single-statement
-        // registration BEFORE the batch caps the lock hold at micro-transaction
-        // length. Rollback trade-off: a zero-chunk stub row may persist if the batch
-        // then fails — benign (existence is live-chunk-count-based everywhere;
-        // deleteCollection removes stubs; any retry would recreate it anyway).
-        // Mirrors ChashRepository.registerCollectionShortTxn.
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): require catalog_collections to
+        // already carry a row for `collection` before any chunk write — checked in
+        // its OWN short transaction (same shape the RDR-70r3c-era auto-stub used, so
+        // the v0.1.21 lock-contention fix below still holds: a plain existence SELECT
+        // takes no value lock at all, so there is no convoy to bound in the first
+        // place). Never add a chunk write path that bypasses this check.
+        //
+        // Checked in its OWN short transaction (v0.1.21, ChashVectorConcurrencyTest
+        // full-suite failure) rather than inline in the batch transaction below —
+        // kept for symmetry with that history even though a read-only check has no
+        // lock-hold duration to bound.
         if (!CollectionRegistry.isKnown(tenant, collection)) {
             tenantScope.withTenant(tenant, ctx -> {
-                ctx.insertInto(CATALOG_COLLECTIONS,
-                                CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
-                                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
-                                CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
-                   .values(tenant, collection, regContentType, regOwner, regModel, regModelVersion)
-                   .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-                   .doNothing()
-                   .execute();
+                CollectionRegistry.requireRegistered(ctx, tenant, collection);
                 return null;
             });
-            // Post-commit discipline per CollectionRegistry class doc.
-            CollectionRegistry.markKnown(tenant, collection);
         }
 
         // nexus-ps9wb belt-and-suspenders: the chash sort above removes the
@@ -942,9 +910,6 @@ public final class PgVectorRepository {
                 + " (dim mismatch — no silent truncation)");
         }
 
-        String[] collSegs  = collection.split("__");
-        boolean conformant = collSegs.length == 4;
-
         tenantScope.withTenant(tenant, ctx -> {
             // (3) full → reference-only guard: SELECT before INSERT.
             // Reads only chunk_text — safe against Phase-A schema (no retention column needed).
@@ -965,7 +930,7 @@ public final class PgVectorRepository {
 
             // (4) Phase-A write gate — short-circuits BEFORE the retention-binding INSERT.
             // REFERENCE_ONLY_WRITES_ENABLED is false until Phase B (nexus-dtnpu) adds the
-            // retention column.  The ensure-registered and chunk INSERT below are correct
+            // retention column.  The registration check and chunk INSERT below are correct
             // code that will execute once the gate is flipped; they do not run in Phase A.
             if (!REFERENCE_ONLY_WRITES_ENABLED) {
                 throw new IllegalStateException(
@@ -974,21 +939,14 @@ public final class PgVectorRepository {
                     + "REFERENCE_ONLY_WRITES_ENABLED");
             }
 
-            // (5) Ensure-registered: INSERT stub collection row before any chunk write.
-            // Standing rule (RDR-156 P0.2, bead nexus-70r3c.2) — mirrors upsertChunksInternal.
-            // ON CONFLICT DO NOTHING: preserves fully-populated rows from the catalog ETL.
-            ctx.insertInto(CATALOG_COLLECTIONS,
-                            CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
-                            CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
-                            CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
-               .values(tenant, collection,
-                       conformant ? collSegs[0] : "",
-                       conformant ? collSegs[1] : "",
-                       conformant ? collSegs[2] : "",
-                       conformant ? collSegs[3] : "")
-               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .doNothing()
-               .execute();
+            // (5) RDR-204 Phase 1 (bead nexus-ft04v.7): require catalog_collections to
+            // already carry a row for `collection` before any chunk write. Replaces the
+            // RDR-70r3c-era stub INSERT ... ON CONFLICT DO NOTHING (mirrored
+            // upsertChunksInternal's, deriving content_type/owner_id/embedding_model from
+            // the name) with a fail-loud check — this path is unreachable in Phase A
+            // (see the gate immediately above), so this is a behavior-neutral swap today
+            // and takes effect only once Phase B flips REFERENCE_ONLY_WRITES_ENABLED.
+            CollectionRegistry.requireRegistered(ctx, tenant, collection);
 
             // (6) Reference-only chunk INSERT (Phase B — requires retention column;
             // see referenceOnlyInsertQuery for the Phase-A/B contract).

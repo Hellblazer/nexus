@@ -98,6 +98,11 @@ class VectorHandlerTokenUsageTest {
 
         var pgRepo = new PgVectorRepository(new TenantScope(svcDs), embedder, embedder);
 
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK now -- PgVectorRepository's stub-insert is retired.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COL);
+        }
         // Seed one chunk so /search returns a non-empty result (header is set regardless
         // of result count, but seeding gives a deterministic happy-path).
         pgRepo.upsertChunks(TENANT, COL,

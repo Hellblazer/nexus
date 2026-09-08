@@ -76,6 +76,32 @@ class PgVectorEmbedSkipIntegrationTest {
 
         embedder = new CountingEmbedder(1024);
         repo = new PgVectorRepository(tenantScope, embedder, embedder);
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK to catalog_collections — PgVectorRepository's stub-insert
+        // is retired, so a real row (not just a CollectionRegistry cache entry) must
+        // exist before any chunk write, or the FK itself rejects it regardless of
+        // what the in-process cache believes. This suite's tests predate that
+        // requirement and use a small, distinct, per-test collection name purely for
+        // row isolation, so every name is registered here (CollectionRegistryTest
+        // owns the fail-loud contract itself).
+        for (String col : List.of(
+                "code__embedskip-updatemeta__voyage-code-3__v1",
+                "code__embedskip-parity__voyage-code-3__v1",
+                "code__embedskip-mixed__voyage-code-3__v1",
+                "code__embedskip-selfheal__voyage-code-3__v1",
+                "code__embedskip-order__voyage-code-3__v1",
+                "code__embedskip-force-noselect__voyage-code-3__v1",
+                "code__embedskip-force-reembed__voyage-code-3__v1",
+                "code__embedskip-force-passthrough__voyage-code-3__v1",
+                "code__embedskip-failsafe__voyage-code-3__v1",
+                "knowledge__embedskip-cce__voyage-context-3__v1")) {
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+            tenantScope.withTenant(TENANT_A, ctx -> {
+                PgContainerHelper.insertCollection(ctx, TENANT_A, col);
+                return null;
+            });
+        }
     }
 
     @AfterAll

@@ -2681,13 +2681,36 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         Deriving here rather than at the call sites puts the inference on the
         same side of the boundary as the implementation it replaced, and covers
         callers that do not yet exist. Pass the kwarg explicitly to force it.
+
+        RDR-204 Phase 1 follow-up (nexus-f5wwx): ``content_type``/``owner_id``/
+        ``embedding_model`` get the SAME same-side-of-the-boundary derivation,
+        for the same reason. The engine now refuses a registration with an
+        empty ``content_type`` outright (bead nexus-ft04v.7's stub-insert
+        retirement widened the constraint from NOT-NULL-with-empty-string-
+        allowed to actually-non-empty), so every *bare* ``register_collection
+        (name)`` call site — production (the same three listed above) and
+        test-fixture (``tests._catalog_fixture_ops.ActiveCatalog``'s pass-
+        through) alike — started 422ing on a two-plus-segment name it used to
+        register fine with a blank content_type. Deriving the three fields
+        here via :func:`nexus.corpus.collection_registration_kwargs` — the
+        SAME derivation :func:`nexus.corpus.ensure_collection_registered`
+        already uses for the RDR-204 write-time registration paths — covers
+        every existing bare caller plus any that do not yet exist, instead of
+        hand-fixing each call site. An explicitly-passed non-empty value is
+        never overridden.
         """
         from nexus.corpus import (  # noqa: PLC0415  — deferred: nexus.corpus imports back into catalog
+            collection_registration_kwargs,
             is_conformant_collection_name,
         )
 
         if legacy_grandfathered is None:
             legacy_grandfathered = not is_conformant_collection_name(name)
+        if not content_type or not owner_id or not embedding_model:
+            derived = collection_registration_kwargs(name)
+            content_type = content_type or derived["content_type"]
+            owner_id = owner_id or derived["owner_id"]
+            embedding_model = embedding_model or derived["embedding_model"]
         self._post("/collections/upsert", {
             "name": name,
             "content_type": content_type,
@@ -3446,6 +3469,19 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 "infers it; previously this was only enforced when 'chunks' "
                 "was provided, which was itself the bug)"
             )
+        # RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine no longer
+        # auto-registers a collection on first write (nexus-ft04v.7) —
+        # this is the combined-write / flush-grain manifest path (the
+        # ChunkBatcher flush from the indexer's hot loop), a write path
+        # the original bead missed (it named T3 chunks / aspects /
+        # taxonomy, not the catalog manifest write). Register ONCE
+        # before the page loop rather than wrapping each page's POST in
+        # write_with_registration_retry: that helper's retry re-invokes
+        # the whole write_fn, and here that would re-send an
+        # already-uploaded page's chunks on a stale-registration retry —
+        # a correctness risk, not just a wasted call.
+        from nexus.corpus import ensure_collection_registered  # noqa: PLC0415 — deferred: nexus.corpus imports back into catalog
+        ensure_collection_registered(collection)
         failed: list[str] = []
         refused: list[dict] = []
         refused_count = 0

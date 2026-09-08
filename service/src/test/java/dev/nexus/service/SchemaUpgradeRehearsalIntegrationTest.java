@@ -28,6 +28,7 @@ import java.sql.Statement;
 import java.util.List;
 import java.util.Set;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
@@ -446,6 +447,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   hygiene-001-9b nexus-tk070.p6a
                 //   hygiene-001-10 nexus-tk070.p6a
                 //   hygiene-001-11 nexus-tk070.p6a
+                //   hygiene-002-1 nexus-ft04v.4
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -827,6 +829,49 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         + "now(), NULL, NULL)")) {
                         ps.executeUpdate();
                     }
+
+                    // hygiene-002-1 (nexus-ft04v.4, RDR-204 Phase 1 item 1, seed-coverage
+                    // lint follow-up): the one-time catalog_collections attribute
+                    // backfill walk's four name-shape branches (see
+                    // hygiene-002-collection-attributes-walk.xml's own header). Four
+                    // DEDICATED rows, one per branch, registered via registerCollection()
+                    // -- at this point in the hop lifecycle_state does not exist yet
+                    // (added by catalog-036-4, well inside this SAME hop but AFTER this
+                    // seed phase runs), so PgContainerHelper.insertCollection falls back
+                    // to its bare (tenant_id, name) insert, leaving content_type/
+                    // owner_id/embedding_model at their catalog-001-5 DEFAULT '' -- the
+                    // exact blank input shape hygiene-002-1's walk exists to fix.
+                    //
+                    // The "one stored dimension agrees with the name's token" sub-arm of
+                    // branches A/C is NOT exercisable in this fixture: hygiene-001-5
+                    // (this same changelog file, runs strictly before hygiene-002-1)
+                    // unconditionally deletes every nexus.chunks row with
+                    // octet_length(chash) <> 32, and every chash this pre-hop seed phase
+                    // can write is legacy-width (16-byte, decoded from a 32-hex literal
+                    // against the OLD_TAG chunks_384/768/1024 schema) -- the identical
+                    // "every chash seedable pre-hop is legacy-width" constraint
+                    // taxonomy-010-1's own coverage note above already documents. By the
+                    // time hygiene-002-1's DO block runs, nexus.chunks is structurally
+                    // empty for every collection this fixture seeds, so every row below
+                    // resolves through the zero-chunks arm of its branch (dimension
+                    // NULL). The with-dimension arm (agreement and disagreement) is
+                    // proven separately, free of that constraint, by
+                    // Hygiene002CollectionAttributesWalkTest's HEAD-schema fixture.
+                    //
+                    // Branch A (4-segment conformant, KNOWN token): zero chunks -> live,
+                    // dimension NULL, embedding_model keeps the name's own (known) token.
+                    registerCollection(su, "t1", "code__h002a__bge-base-en-v15-768__v1");
+                    // Branch B (quarantine-<ct>__...): lifecycle_state = 'quarantine'
+                    // UNCONDITIONALLY, independent of chunk count or dimension agreement.
+                    registerCollection(su, "t1", "quarantine-code__h002b__bge-base-en-v15-768__v1");
+                    // Branch C (grandfathered 2-segment, no model token): zero chunks ->
+                    // live, embedding_model the fallback (the profile is always empty at
+                    // walk time).
+                    registerCollection(su, "t1", "code__h002c");
+                    // Branch D (no "__" separator at all): content_type 'unknown',
+                    // owner_id the row's own tenant_id, lifecycle_state 'disputed'
+                    // UNCONDITIONALLY, embedding_model the fallback.
+                    registerCollection(su, "t1", "h002d-no-separator");
 
                     assertThat(count(su, "SELECT count(*) FROM nexus.chash_index"))
                         .as("superuser ground truth after seeding").isEqualTo(5);
@@ -1795,6 +1840,107 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .as("the conforming 3-segment control row must survive "
                             + "catalog-034-0 untouched -- the KEEP arm")
                         .isEqualTo(1);
+
+                    // hygiene-002-1 leg (nexus-ft04v.4, RDR-204 Phase 1 item 1,
+                    // seed-coverage lint follow-up): each of the four seeded
+                    // catalog_collections rows above must have every blank
+                    // content_type/owner_id/embedding_model column filled from its
+                    // own name (per its branch), dimension left NULL (this
+                    // fixture's own chunk-content constraint, see the seed-side
+                    // comment above), and lifecycle_state set per branch -- under
+                    // FORCE ROW LEVEL SECURITY, the same silent-no-op hazard as
+                    // catalog-014-0/catalog-016-0/catalog-025-0/catalog-034-0/
+                    // aspects-004-1 (catalog_collections is FORCE ROW LEVEL
+                    // SECURITY and the Liquibase role is not BYPASSRLS -- an
+                    // untoggled UPDATE would leave every row exactly as blank as
+                    // it was seeded).
+                    // Typed jOOQ DSL, not the raw-count() helper used above (nexus-cbo4a/
+                    // nexus-zrcj7 RawSqlGateTest reduce-only ratchet -- CATALOG_COLLECTIONS
+                    // is already imported for registerCollection()'s own seeding above).
+                    org.jooq.DSLContext h002Dsl = DSL.using(su, SQLDialect.POSTGRES);
+                    assertThat(h002Dsl.fetchCount(CATALOG_COLLECTIONS,
+                        CATALOG_COLLECTIONS.TENANT_ID.eq("t1")
+                            .and(CATALOG_COLLECTIONS.NAME.eq("code__h002a__bge-base-en-v15-768__v1"))
+                            .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq("code"))
+                            .and(CATALOG_COLLECTIONS.OWNER_ID.eq("h002a"))
+                            .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq("bge-base-en-v15-768"))
+                            .and(CATALOG_COLLECTIONS.DIMENSION.isNull())
+                            .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("live"))))
+                        .as("hygiene-002-1 branch A (4-segment conformant, known token) must "
+                            + "backfill content_type/owner_id/embedding_model from the name and "
+                            + "set lifecycle_state = 'live' (zero chunks)")
+                        .isEqualTo(1);
+                    assertThat(h002Dsl.fetchCount(CATALOG_COLLECTIONS,
+                        CATALOG_COLLECTIONS.TENANT_ID.eq("t1")
+                            .and(CATALOG_COLLECTIONS.NAME.eq("quarantine-code__h002b__bge-base-en-v15-768__v1"))
+                            .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq("code"))
+                            .and(CATALOG_COLLECTIONS.OWNER_ID.eq("h002b"))
+                            .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq("bge-base-en-v15-768"))
+                            .and(CATALOG_COLLECTIONS.DIMENSION.isNull())
+                            .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("quarantine"))))
+                        .as("hygiene-002-1 branch B (quarantine-<ct>__...) must strip the "
+                            + "quarantine- prefix from content_type and set "
+                            + "lifecycle_state = 'quarantine' unconditionally")
+                        .isEqualTo(1);
+                    assertThat(h002Dsl.fetchCount(CATALOG_COLLECTIONS,
+                        CATALOG_COLLECTIONS.TENANT_ID.eq("t1")
+                            .and(CATALOG_COLLECTIONS.NAME.eq("code__h002c"))
+                            .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq("code"))
+                            .and(CATALOG_COLLECTIONS.OWNER_ID.eq("h002c"))
+                            .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq("bge-base-en-v15-768"))
+                            .and(CATALOG_COLLECTIONS.DIMENSION.isNull())
+                            .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("live"))))
+                        .as("hygiene-002-1 branch C (grandfathered 2-segment) must "
+                            + "backfill content_type/owner_id from the name, embedding_model "
+                            + "to the fallback (the profile is always empty at walk time), "
+                            + "and lifecycle_state = 'live' (zero chunks)")
+                        .isEqualTo(1);
+                    assertThat(h002Dsl.fetchCount(CATALOG_COLLECTIONS,
+                        CATALOG_COLLECTIONS.TENANT_ID.eq("t1")
+                            .and(CATALOG_COLLECTIONS.NAME.eq("h002d-no-separator"))
+                            .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq("unknown"))
+                            .and(CATALOG_COLLECTIONS.OWNER_ID.eq("t1"))
+                            .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq("bge-base-en-v15-768"))
+                            .and(CATALOG_COLLECTIONS.DIMENSION.isNull())
+                            .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("disputed"))))
+                        .as("hygiene-002-1 branch D (no separator) must set "
+                            + "content_type = 'unknown', owner_id = the row's own tenant_id, "
+                            + "embedding_model = the fallback, and "
+                            + "lifecycle_state = 'disputed' unconditionally")
+                        .isEqualTo(1);
+                    assertThat(h002Dsl.fetchCount(CATALOG_COLLECTIONS,
+                        CATALOG_COLLECTIONS.CONTENT_TYPE.eq("")
+                            .or(CATALOG_COLLECTIONS.OWNER_ID.eq(""))
+                            .or(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq(""))))
+                        .as("no catalog_collections row may survive hygiene-002-1 with a "
+                            + "blank content_type/owner_id/embedding_model -- the invariant "
+                            + "the CHECK constraints immediately below depend on")
+                        .isEqualTo(0);
+                    assertThat((PgCatalogProbes.constraintExists(DSL.using(su, SQLDialect.POSTGRES), "catalog_collections_content_type_chk") ? 1 : 0))
+                        .as("catalog_collections_content_type_chk must exist at HEAD")
+                        .isEqualTo(1);
+                    assertThat((PgCatalogProbes.constraintExists(DSL.using(su, SQLDialect.POSTGRES), "catalog_collections_owner_id_chk") ? 1 : 0))
+                        .as("catalog_collections_owner_id_chk must exist at HEAD")
+                        .isEqualTo(1);
+                    assertThat((PgCatalogProbes.constraintExists(DSL.using(su, SQLDialect.POSTGRES), "catalog_collections_embedding_model_chk") ? 1 : 0))
+                        .as("catalog_collections_embedding_model_chk must exist at HEAD")
+                        .isEqualTo(1);
+                    assertThat((Boolean.TRUE.equals(PgCatalogProbes.constraintValidated(DSL.using(su, SQLDialect.POSTGRES), "catalog_collections_embedding_model_fk")) ? 1 : 0))
+                        .as("catalog_collections_embedding_model_fk must exist and be "
+                            + "VALIDATED at HEAD -- only reachable if every row's "
+                            + "embedding_model was already a real nexus.embedding_models "
+                            + "row when the FK was added, immediately after the walk")
+                        .isEqualTo(1);
+                    assertThat((PgCatalogProbes.constraintExists(DSL.using(su, SQLDialect.POSTGRES), "catalog_collections_lifecycle_state_chk") ? 1 : 0))
+                        .as("catalog_collections_lifecycle_state_chk must exist at HEAD")
+                        .isEqualTo(1);
+                    assertThat(columnMatches(DSL.using(su, SQLDialect.POSTGRES), "nexus", "catalog_collections", "lifecycle_state", col -> col != null && "NO".equals(col.isNullable())))
+                        .as("nexus.catalog_collections.lifecycle_state must be NOT NULL at HEAD")
+                        .isEqualTo(1);
+                    assertThat(PgCatalogProbes.forcedRowSecurityCount(DSL.using(su, SQLDialect.POSTGRES), "nexus.catalog_collections", "nexus.chunks", "nexus.catalog_document_chunks", "nexus.catalog_documents"))
+                        .as("FORCE ROW LEVEL SECURITY restored on all four tables "
+                            + "hygiene-002-1's own toggle-wrap covers")
+                        .isEqualTo(4);
                 }
             }
         } finally {
@@ -2010,14 +2156,12 @@ class SchemaUpgradeRehearsalIntegrationTest {
     // ── Helpers: seeding (data leg) ──────────────────────────────────────────
 
     private static void registerCollection(Connection c, String tenant, String name) throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.catalog_collections (tenant_id, name) "
-            + "VALUES (?, ?) ON CONFLICT DO NOTHING")) {
-            ps.setString(1, tenant);
-            ps.setString(2, name);
-            ps.executeUpdate();
-        }
+        // RDR-204 nexus-ft04v.4/.5: delegates to PgContainerHelper.insertCollection,
+        // safely falling back to this exact bare insert at any migration depth
+        // where lifecycle_state does not exist yet.
+        PgContainerHelper.insertCollection(DSL.using(c, SQLDialect.POSTGRES), tenant, name);
     }
+
 
     private static void seedChashRow(Connection c, String tenant, String chash,
                                      String collection) throws Exception {

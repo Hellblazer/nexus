@@ -215,6 +215,31 @@ class StagingPromoteOpsIntegrationTest {
         svcDs = new com.zaxxer.hikari.HikariDataSource(config);
         scope = new TenantScope(svcDs);
         ops = new StagingPromoteOps(scope);
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK to catalog_collections — StagingPromoteOps.
+        // promoteCollection's stub-insert is retired, so a real row must exist
+        // before the content INSERT into chunks_<dim>, or the FK itself rejects it.
+        // This suite's promoteCollection tests predate that requirement and use a
+        // small, distinct, per-test collection name purely for row isolation, not to
+        // exercise registration behavior itself (CollectionRegistryTest owns the
+        // fail-loud contract). Registered here, once, under BOTH tenants this file
+        // promotes against (RLS isolation is a DATA guarantee, never a registration
+        // one). Tests that ALREADY register their own collection explicitly via a
+        // real catalog_collections INSERT (finalizeTenant paths not reached through
+        // promoteCollection) are unaffected either way.
+        for (String col : List.of(COLL_A, COLL_B, COLL_LATE, COLL_GATE, COLL_GATE2,
+                COLL_F12B, COLL_G6,
+                "knowledge__kmulti-a__bge-base-en-v15-768__v1",
+                "knowledge__kmulti-b__bge-base-en-v15-768__v1",
+                "knowledge__kg8z__bge-base-en-v15-768__v1")) {
+            for (String tenant : List.of(T1, T_REJECT)) {
+                scope.withTenant(tenant, ctx -> {
+                    PgContainerHelper.insertCollection(ctx, tenant, col);
+                    return null;
+                });
+            }
+        }
     }
 
     @AfterAll
@@ -861,12 +886,7 @@ class StagingPromoteOpsIntegrationTest {
             // -- held UNCOMMITTED.
             PgContainerHelper.setTenant(connA, TenantScope.DEFAULT_TENANT_GUC, T1, false);
             acquireGateShared(connA, T1, col);
-            DSL.using(connA, SQLDialect.POSTGRES)
-               .insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(T1, col)
-               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .doNothing()
-               .execute();
+            PgContainerHelper.insertCollection(DSL.using(connA, SQLDialect.POSTGRES), T1, col);
             DSL.using(connA, SQLDialect.POSTGRES)
                .insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
                            CHUNKS.EMBEDDING_768)
@@ -1336,12 +1356,7 @@ class StagingPromoteOpsIntegrationTest {
             // below needs the stub row promoteCollection's own step (4)
             // would normally create; this collection is never promoted
             // through that path so it must be stubbed directly here.
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
-                           CATALOG_COLLECTIONS.CONTENT_TYPE)
-               .values(T_DIM, coll, "knowledge")
-               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .doNothing()
-               .execute();
+            PgContainerHelper.insertCollection(ctx, T_DIM, coll);
             return null;
         });
         // The orphan itself: an empty-text staged chunk row at this dim —
@@ -1463,11 +1478,7 @@ class StagingPromoteOpsIntegrationTest {
         // (nullable, no default) unset.
         String doc = "aspects-promote-json-doc";
         scope.withTenant(T1, ctx -> {
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(T1, ASPECTS_PROMOTE_COLL)
-               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .doNothing()
-               .execute();
+            PgContainerHelper.insertCollection(ctx, T1, ASPECTS_PROMOTE_COLL);
             ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                            CATALOG_DOCUMENTS.TITLE)
                .values(T1, doc, "aspects-promote-json fixture")
@@ -1519,11 +1530,7 @@ class StagingPromoteOpsIntegrationTest {
         // tell them apart (critique finding, cefa1.4).
         String doc = "aspects-promote-malformed-doc";
         scope.withTenant(T1, ctx -> {
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(T1, coll)
-               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .doNothing()
-               .execute();
+            PgContainerHelper.insertCollection(ctx, T1, coll);
             ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                            CATALOG_DOCUMENTS.TITLE)
                .values(T1, doc, "aspects-promote-malformed fixture")
@@ -1578,11 +1585,7 @@ class StagingPromoteOpsIntegrationTest {
         // not a write-safety one.
         String badDocId = "some-memory-note-title-not-a-chash";
         scope.withTenant(T_REJECT, ctx -> {
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(T_REJECT, COLL_A)
-               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .doNothing()
-               .execute();
+            PgContainerHelper.insertCollection(ctx, T_REJECT, COLL_A);
             ctx.insertInto(STAGING_TOPIC_ASSIGNMENTS, STA_TENANT_ID, STA_DOC_ID, STA_TOPIC_ID, STA_TOPIC_LABEL,
                            STA_TOPIC_COLLECTION)
                .values(T_REJECT, badDocId, 999999L, "reject-topic", COLL_A)
@@ -1635,11 +1638,7 @@ class StagingPromoteOpsIntegrationTest {
         String goodText = "resolvable topic assignment content " + System.nanoTime();
         String goodChash = digestHex(goodText);
         scope.withTenant(T_REJECT, ctx -> {
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(T_REJECT, COLL_A)
-               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .doNothing()
-               .execute();
+            PgContainerHelper.insertCollection(ctx, T_REJECT, COLL_A);
             // No onConflict target here (the original bare "ON CONFLICT DO NOTHING" named
             // none either): topics.id is an unsupplied identity column, so a fresh insert
             // always gets a fresh id and can never collide with the table's own UNIQUE
@@ -1708,11 +1707,7 @@ class StagingPromoteOpsIntegrationTest {
         // graceful count.
         String pendingChash = digestHex("chunk that has not promoted yet " + System.nanoTime());
         scope.withTenant(T_REJECT, ctx -> {
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(T_REJECT, COLL_A)
-               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .doNothing()
-               .execute();
+            PgContainerHelper.insertCollection(ctx, T_REJECT, COLL_A);
             // No onConflict target (see the identical topics insert above): id is an
             // unsupplied identity column, so a fresh row can never collide.
             ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.CREATED_AT)
@@ -1766,11 +1761,7 @@ class StagingPromoteOpsIntegrationTest {
             conn.setAutoCommit(true);
             PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, T_REJECT, false);
             var c = DSL.using(conn, SQLDialect.POSTGRES);
-            c.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-             .values(T_REJECT, COLL_A)
-             .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-             .doNothing()
-             .execute();
+            PgContainerHelper.insertCollection(c, T_REJECT, COLL_A);
             topicId = c.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.CREATED_AT)
                        .values(T_REJECT, "reject-topic-fk-raw", COLL_A, OffsetDateTime.now())
                        .returningResult(TOPICS.ID)
@@ -1832,12 +1823,8 @@ class StagingPromoteOpsIntegrationTest {
             // javadoc) -- SET CONSTRAINTS has no jOOQ typed-DSL form at all.
             CatalogRepository.deferManifestChunkFk(ctx);
 
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(tenant, collReal)
-               .execute();
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(tenant, collDangling)
-               .execute();
+            PgContainerHelper.insertCollection(ctx, tenant, collReal);
+            PgContainerHelper.insertCollection(ctx, tenant, collDangling);
             ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                            CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
                .values(tenant, "eanej-doc-1", "eanej doc", collDangling)
@@ -1887,9 +1874,7 @@ class StagingPromoteOpsIntegrationTest {
             // javadoc) -- SET CONSTRAINTS has no jOOQ typed-DSL form at all.
             CatalogRepository.deferManifestChunkFk(ctx);
 
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(tenant, coll)
-               .execute();
+            PgContainerHelper.insertCollection(ctx, tenant, coll);
             ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                            CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
                .values(tenant, "eanej-doc-2", "eanej doc 2", coll)
@@ -1907,5 +1892,35 @@ class StagingPromoteOpsIntegrationTest {
 
             conn.rollback();
         }
+    }
+
+    @Test
+    @Order(40)
+    void promoteCollection_unregisteredCollection_throwsAndWritesNoRow() {
+        // RDR-204 Phase 1 (nexus-ft04v.7 gap 3, closed by nexus-ft04v.8's test
+        // addendum): promoteCollection's own requireRegistered guard (step 4,
+        // after the dim/null-embedding preconditions) must fail loud for a
+        // collection with no catalog_collections row -- and create neither a
+        // chunks row (nothing is staged for this collection) nor a
+        // catalog_collections stub.
+        String collection = "knowledge__unreg-promote__bge-base-en-v15-768__v1";
+
+        assertThatThrownBy(() -> ops.promoteCollection(T1, collection, 768))
+            .isInstanceOf(dev.nexus.service.db.UnregisteredCollectionException.class)
+            .hasMessageContaining(collection)
+            .hasMessageContaining("POST /v1/catalog/collections/upsert");
+
+        assertThat(count(ctx -> ctx.selectCount().from(CHUNKS)
+            .where(CHUNKS.COLLECTION.eq(collection))
+            .fetchOne(0, Integer.class)))
+            .as("a promote against an unregistered collection must create no chunks row")
+            .isEqualTo(0);
+        boolean stubRowExists = scope.withTenant(T1, ctx -> ctx.fetchExists(
+                ctx.selectOne().from(CATALOG_COLLECTIONS)
+                   .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T1))
+                   .and(CATALOG_COLLECTIONS.NAME.eq(collection))));
+        assertThat(stubRowExists)
+            .as("the rejected promote must not have created a catalog_collections stub row either")
+            .isFalse();
     }
 }

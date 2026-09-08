@@ -981,7 +981,7 @@ def test_md_monitor_return_metadata(runner, fake_md):
     # 1-segment / 2-segment user input to a conformant 4-segment name
     # so the strict-naming guard at ``T3Database.get_or_create_collection``
     # passes for fresh writes.
-    ("knowledge", "knowledge__knowledge__voyage-context-3__v1"),
+    ("papers", "knowledge__papers__voyage-context-3__v1"),
     ("knowledge__delos", "knowledge__delos__voyage-context-3__v1"),
 ])
 def test_pdf_collection_flag_normalization(runner, fake_pdf, flag_val, expected):

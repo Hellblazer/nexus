@@ -297,6 +297,27 @@ def test_indexer_seam_b_index_search_round_trip(
 
     collection = "knowledge__seam-b-test__bge-base-en-v15-768__v1"
 
+    # RDR-204 (nexus-f5wwx): the engine no longer auto-registers a
+    # collection on first write. This test deliberately does NOT set
+    # NX_LOCAL=1 (see the non-vacuity proof below -- doing so would let
+    # the pre-fix guard-ordering bug hide again), so the auto-heal path's
+    # DEFAULT registration (ensure_collection_registered's derivation via
+    # effective_embedding_model_for_writes) would read managed posture and
+    # request voyage-context-3, which this ONNX engine's bge-768 profile
+    # refuses. Register explicitly with the model this engine actually
+    # serves, bypassing that derivation entirely, and warm the per-process
+    # cache so _index_document's own write never touches the derivation
+    # either (the same test-sanctioned pattern as
+    # tests/test_store_cmd.py:64 / tests/test_collection_shape.py:462).
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+    from nexus.corpus import _REGISTERED_COLLECTIONS
+    with HttpCatalogClient(base_url=base_url, tenant="default", _token=token) as _cat:
+        _cat.register_collection(
+            collection, content_type="knowledge", owner_id="seam-b-test",
+            embedding_model="bge-base-en-v15-768",
+        )
+    _REGISTERED_COLLECTIONS.add(collection)
+
     # NON-VACUITY PROOF: patch _make_local_embed_fn to raise AssertionError.
     # If it fires, the service-mode guard is broken and local ONNX embedding
     # is running instead of the service. nexus-sghyo (2026-08-06): the
@@ -399,7 +420,12 @@ def test_store_put_get_roundtrip_ij9hg(
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
     monkeypatch.setenv("NX_SERVICE_URL", base_url)
     monkeypatch.setenv("NX_SERVICE_TOKEN", token)
-    monkeypatch.delenv("NX_LOCAL", raising=False)
+    # RDR-204 (nexus-f5wwx): NX_SERVICE_URL alone reads as managed mode and
+    # derives voyage-context-3 for the store_put registration, which this
+    # ONNX engine's bge-768 profile refuses with 422 -- unlike the sibling
+    # seam-B test above, this test has no non-vacuity dependency on local
+    # posture being absent, so pinning it is safe.
+    monkeypatch.setenv("NX_LOCAL", "1")
     monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
 

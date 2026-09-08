@@ -283,15 +283,31 @@ def bypass_fk_seed_chunk(
     INSERT must register the parent stub itself first, mirroring
     ``fk-004-1-reconcile``'s own additive ``INSERT ... ON CONFLICT DO
     NOTHING`` shape (the Java sweep's precedent for this exact FK
-    direction). All other ``catalog_collections`` columns default (see
-    ``catalog-001-baseline.xml`` changeset 7), so ``(tenant_id, name)`` is
-    sufficient.
+    direction). RDR-204 Phase 1 (nexus-f5wwx) added NOT NULL + FK
+    constraints on ``content_type``/``owner_id``/``embedding_model``/
+    ``lifecycle_state`` (hygiene-002-collection-attributes-walk.xml) —
+    ``(tenant_id, name)`` alone no longer satisfies the row; this stub
+    now supplies all four with test-fixture-only placeholder values
+    (``embedding_model`` keyed off *dim* so it matches an existing
+    ``nexus.embedding_models`` row and never trips the FK).
     """
     vec_col = {384: "embedding_384", 768: "embedding_768", 1024: "embedding_1024"}[dim]
     vec_literal = "[" + ",".join(["0"] * dim) + "]"
+    # RDR-204 Phase 1 (nexus-f5wwx): this test substrate's engine always
+    # boots local mode with the bge-768 profile, regardless of which
+    # pgvector dim column this stub chunk uses -- the model here must
+    # match the REAL registered profile (what nexus.corpus.
+    # effective_embedding_model_for_writes computes) or a real
+    # register_collection call on this name later 422s "already
+    # registered with a different model". The stub chunk's own dim is
+    # an unrelated FK-satisfaction detail (which embedding_<dim> column
+    # holds the zero-vector), not a model choice.
+    model_for_dim = "bge-base-en-v15-768"
     sql = (
-        "INSERT INTO nexus.catalog_collections (tenant_id, name) "
-        f"VALUES ({tenant!r}, {collection!r}) "
+        "INSERT INTO nexus.catalog_collections "
+        "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
+        f"VALUES ({tenant!r}, {collection!r}, 'knowledge', 'test-seed', "
+        f"{model_for_dim!r}, 'live') "
         "ON CONFLICT (tenant_id, name) DO NOTHING;\n"
         "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, "
         f"{vec_col}) VALUES ({tenant!r}, {collection!r}, "
