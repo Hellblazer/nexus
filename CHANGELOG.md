@@ -6,6 +6,48 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.36.1] - 2026-09-08
+
+Client-only patch. Engine unchanged at engine-service-v0.1.108
+(`REQUIRED_ENGINE_VERSION` 0.1.108); the wire ledger's Unshipped section is
+empty. Plugin pin advances to v7.36.1, which makes every entry that waited
+in `conexus/PENDING_RELEASE.md` since 7.36.0 live (see `conexus/CHANGELOG.md`).
+
+### Fixed
+
+- Service error bodies are redacted where they enter `VectorServiceError`
+  (new `nexus.redact` module), so `nx search`, `nx doc` and the doctor log
+  line no longer echo a rejected credential (nexus-8ooxn, nexus-hcy4w).
+- The upgrade-finish stamp (`last_seen_version`) is written only by a
+  managed install; a dev checkout on a release branch no longer makes the
+  next installed-tool invocation report an upgrade that never happened
+  (nexus-i24r4).
+- Session end reaps stale `t1_mint_<session>.lock` litter under
+  `~/.config/nexus` (older than a day, no live lease) as its own
+  failure-isolated step, instead of only under `nx doctor --fix`
+  (nexus-fjwk7).
+- Aspects: the cost banner names the measured model, usage is logged before
+  the envelope check, and an extraction refusal is reported as such
+  (follow-up to 7.36.0's aspects work).
+- `nx dt index` page-coverage follow-ups after review (nexus-i0cwh).
+
+### Developer workflow
+
+- `scripts/git-push-develop.sh <sha>...` is the way develop is pushed from a
+  shared checkout: it fetches, resolves the tip once, and pushes only when
+  `origin/develop..tip` equals the commits vouched on the command line; a
+  vouched merge commit covers what it merges in, so the release and
+  plugin-cut back-merges use it too (nexus-9wxu6).
+- The unit suite decides once at session start while a Maven run holds the
+  shared build lease: it refuses with exit 75 naming the holder, or waits
+  when `NX_BUILD_LEASE_WAIT=<seconds>` is set; `NX_TEST_T2_SUBSTRATE=none`
+  runs are never gated. The migration-rehearsal `--shakeout` native build
+  and the gc-ab harness wait on the lease like every other producer
+  (nexus-pv93h).
+- Release pins that moved by hand every cut are derived: the engine-floor
+  test reads the pairing from the newest released CHANGELOG section, and
+  the stale-dim-table count pins tally code lines only (nexus-9gggv).
+
 ## [7.36.0] - 2026-09-07
 
 Pairs with engine-service-v0.1.108 (additive).

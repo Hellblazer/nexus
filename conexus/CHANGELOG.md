@@ -4,6 +4,28 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.36.1] - 2026-09-08
+
+Plugin version aligned with conexus 7.36.1. Everything below waited in
+`PENDING_RELEASE.md` since 7.36.0 and is live at this pin.
+
+- `pre_close_verification_hook.sh`: the close command is tokenized
+  quote-aware before it is split on operators, so a `;` or `do` inside a
+  quoted `--reason` no longer harvests prose ids (a session name, a peer's
+  bead) as close targets; with an unbalanced quote the flag value is
+  blanked before the raw-scan fallback (nexus-fv65m).
+- `rdr_hook.py` (SessionStart): collection existence is asked of the T3
+  client, not substring-matched against `nx collection list`; a resolution
+  failure is logged instead of swallowed; the T3 call has a 4 s deadline
+  inside the hook's 10 s cap; the summary counts every document the
+  indexer walks beside the RDR count (nexus-owna8). The text names
+  `nx index repo <root>` alone; `nx catalog setup` is retired.
+- Every example that said `collection="knowledge"` now names a subject
+  (`collection="<subject>"`) across 27 skills, agents, commands and the
+  reference, with the subject rule and a Common Mistakes row in
+  `using-nx-skills` (nexus-fjc8v): the placeholder had minted
+  `knowledge__knowledge__<model>__v1` with 1464 live chunks.
+
 ## [7.36.0] - 2026-09-07
 
 - `rdr-gate` skill and command: the outcome is computed by

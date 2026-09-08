@@ -29,34 +29,6 @@ mechanize, it matters enough to ship.
 ---
 
 
-## Awaiting the next release or plugin cut (pinned: v7.36.0)
+## Awaiting the next release or plugin cut (pinned: v7.36.1)
 
-- `conexus/hooks/scripts/pre_close_verification_hook.sh` — nexus-fv65m: the command is tokenized quote-aware before it is split on operators, so a ';' or 'do' inside a quoted --reason no longer harvests prose ids as close targets; with an unbalanced quote the flag value is blanked before the raw-scan fallback.
-- `conexus/hooks/scripts/rdr_hook.py` — nexus-owna8: collection existence is asked of the T3 client, not a substring of `nx collection list`; a resolution failure is logged instead of swallowed; the T3 call has a 4s deadline inside the hook's 10s cap; the summary counts every document the indexer walks (recursive) beside the RDR count.
-- `conexus/agents/_shared/CONTEXT_PROTOCOL.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/agents/architect-planner.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/agents/code-review-expert.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/agents/codebase-deep-analyzer.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/agents/debugger.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/agents/deep-analyst.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/agents/deep-research-synthesizer.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/agents/developer.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/agents/strategic-planner.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/agents/substantive-critic.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/agents/test-validator.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/commands/knowledge-tidy.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/skills/architecture/SKILL.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/skills/catalog/SKILL.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/skills/code-review/SKILL.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/skills/codebase-analysis/SKILL.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/skills/debugging/SKILL.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/skills/deep-analysis/SKILL.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/skills/nexus/SKILL.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/skills/nexus/reference.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/skills/rdr-gate/SKILL.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/skills/rdr-research/SKILL.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/skills/research-synthesis/SKILL.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/skills/strategic-planning/SKILL.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/skills/substantive-critique/SKILL.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/skills/writing-nx-skills/SKILL.md` — nexus-fjc8v: examples name `collection="<subject>"` instead of the placeholder `knowledge` (a subject area per docs/collections.md; the bare name minted knowledge__knowledge, 1464 chunks live).
-- `conexus/skills/using-nx-skills/SKILL.md` — nexus-fjc8v: Common Mistakes row on placeholder collections.
+(none)
