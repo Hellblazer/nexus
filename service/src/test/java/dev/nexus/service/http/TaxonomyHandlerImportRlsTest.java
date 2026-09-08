@@ -9,6 +9,8 @@ import com.sun.net.httpserver.HttpPrincipal;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -98,6 +100,15 @@ class TaxonomyHandlerImportRlsTest {
         tenantScope = new TenantScope(svcDs);
         repo = new TaxonomyRepository(tenantScope);
         handler = new TaxonomyHandler(repo, null);
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): topics_collection_fk is a REAL,
+        // always-enforced FK now -- every importTopic/importTopicBatch fixture call
+        // below targets "knowledge__rls" under both tenants; register it first.
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(dsl, TENANT_A, "knowledge__rls");
+            PgContainerHelper.insertCollection(dsl, TENANT_B, "knowledge__rls");
+        }
     }
 
     @AfterAll

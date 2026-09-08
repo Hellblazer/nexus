@@ -7,6 +7,8 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -180,7 +182,16 @@ class PgVectorHybridSearchContractTest {
     }
 
     /** Seed every collection once via the GREEN P2 upsert path; tests are read-only. */
-    private void seedFixtures() {
+    private void seedFixtures() throws Exception {
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK now -- PgVectorRepository's stub-insert is retired, so
+        // every collection this fixture writes into must be registered first.
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            for (String col : List.of(COL_HY, COL_MA, COL_MB, COL_WH, COL_384H)) {
+                PgContainerHelper.insertCollection(dsl, TENANT_A, col);
+            }
+        }
         // Queries embed to (1, 0). Q_TYPO and Q_JUNK fall through to FakeEmbedder's
         // default (1, 0) — registered explicitly anyway for readability.
         embedder1024.register(Q,      1.0f, 0.0f);
@@ -379,8 +390,11 @@ class PgVectorHybridSearchContractTest {
     // where test before this fix (plain $ne), none exercising type mismatch.
 
     @Test
-    void hybridSearch_whereEqNumeric_matchesBothJsonNumberAndJsonStringStoredValues() {
+    void hybridSearch_whereEqNumeric_matchesBothJsonNumberAndJsonStringStoredValues() throws Exception {
         String col = "code__hybridsearcheqtyping__voyage-code-3__v1";
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT_A, col);
+        }
         repo1024.upsertChunks(TENANT_A, col,
             List.of("53fee991ee97e4a03d984ac944fc0c3676d3b715ff6e1b9e57eb348569db7d71",
                     "7d3dfe0222b8df3275aa84403d462a577c2a8b11f5f76160923e29bb9f4a8bd4"),
@@ -402,8 +416,11 @@ class PgVectorHybridSearchContractTest {
     }
 
     @Test
-    void hybridSearch_whereNeNumeric_excludesBothJsonNumberAndJsonStringStoredValues() {
+    void hybridSearch_whereNeNumeric_excludesBothJsonNumberAndJsonStringStoredValues() throws Exception {
         String col = "code__hybridsearchnetyping__voyage-code-3__v1";
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT_A, col);
+        }
         repo1024.upsertChunks(TENANT_A, col,
             List.of("6b721b55e4c4c5508880c4989846c0f6d7349305dae8bf5b4754ba3b9d338baa",
                     "091bfc5c542c33e9a855e7a66d436ddd4142e50291203acd5ced23c701ce89dc"),

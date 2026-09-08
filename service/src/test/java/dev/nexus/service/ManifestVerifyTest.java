@@ -576,9 +576,8 @@ class ManifestVerifyTest {
     }
 
     private static void insertCollection(Connection su, String tenantId, String name) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-            "VALUES ('" + tenantId + "', '" + name + "') ON CONFLICT (tenant_id, name) DO NOTHING");
+        // RDR-204 nexus-ft04v.4/.5: delegates to PgContainerHelper.insertCollection.
+        PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenantId, name);
     }
 
     private static void insertDoc(Connection su, String tenantId, String tumbler) throws Exception {

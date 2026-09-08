@@ -80,6 +80,23 @@ class CatalogHandlerManifestEnvelopeTest {
         service = new NexusService(0, TOKEN, svcDs);
         service.start();
         http = HttpClient.newHttpClient();
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.3): AuthFilter runs the per-tenant,
+        // once-per-process ghost sweep on whichever request is TENANT's first
+        // against this service instance, and DELETES any collection it finds
+        // registered-but-chunkless at that moment. Several @Test methods below
+        // register a collection via raw SQL (through writeManifestRow) and then
+        // POST to it; whichever runs first (JUnit's default order is not
+        // declaration order) would have its POST be that first request,
+        // letting the sweep delete the freshly registered, still-chunkless
+        // collection out from under the write (see BridgeAddressFieldsTest's
+        // identical fix). Burn the sweep here first, once, for every @Test
+        // method uniformly.
+        var warmup = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+            .header("Authorization", "Bearer " + TOKEN)
+            .GET().build();
+        http.send(warmup, HttpResponse.BodyHandlers.ofString());
     }
 
     @AfterAll
@@ -114,14 +131,9 @@ class CatalogHandlerManifestEnvelopeTest {
             // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now carries
             // chunks_collection_fk (tenant_id, collection) -> catalog_collections
             // (tenant_id, name) — stub-register the collection first, mirroring
-            // PgVectorRepository#upsertChunks' own ensure-registered step.
-            try (var regPs = su.prepareStatement(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
-                    + "ON CONFLICT (tenant_id, name) DO NOTHING")) {
-                regPs.setString(1, TENANT);
-                regPs.setString(2, collection);
-                regPs.execute();
-            }
+            // PgVectorRepository#upsertChunks' own ensure-registered step. RDR-204
+            // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection);
             try (var ps = su.prepareStatement(
                     "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
                     + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::nexus.vector) "

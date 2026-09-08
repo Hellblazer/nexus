@@ -2010,14 +2010,12 @@ class SchemaUpgradeRehearsalIntegrationTest {
     // ── Helpers: seeding (data leg) ──────────────────────────────────────────
 
     private static void registerCollection(Connection c, String tenant, String name) throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.catalog_collections (tenant_id, name) "
-            + "VALUES (?, ?) ON CONFLICT DO NOTHING")) {
-            ps.setString(1, tenant);
-            ps.setString(2, name);
-            ps.executeUpdate();
-        }
+        // RDR-204 nexus-ft04v.4/.5: delegates to PgContainerHelper.insertCollection,
+        // safely falling back to this exact bare insert at any migration depth
+        // where lifecycle_state does not exist yet.
+        PgContainerHelper.insertCollection(DSL.using(c, SQLDialect.POSTGRES), tenant, name);
     }
+
 
     private static void seedChashRow(Connection c, String tenant, String chash,
                                      String collection) throws Exception {

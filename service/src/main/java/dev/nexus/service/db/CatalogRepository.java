@@ -6305,6 +6305,20 @@ public final class CatalogRepository {
             String contentType    = s(coll, "content_type");
             String requestedModel = s(coll, "embedding_model");
 
+            // RDR-204 Phase 1 (Sam's decision): the legacy no-content_type
+            // registration contract is retired. hygiene-002-1's non-empty CHECK on
+            // content_type means every registration must carry one explicitly now
+            // (this method never silently defaults it) -- and the DO UPDATE arm
+            // below writes CONTENT_TYPE from this exact value even on a conflict,
+            // so an omitted one would 23514 there too, on an EXISTING row. Refuse
+            // loud, naming the missing field, before either branch runs -- the
+            // same 422 contract as the embedding_model conflict below, not a
+            // 23514 surfacing as an opaque 409/500.
+            if (contentType == null || contentType.isBlank()) {
+                throw new EmbeddingProfileConflictException(
+                    "registering collection '" + name + "' requires content_type; none was supplied");
+            }
+
             var existingRow = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL)
                     .from(CATALOG_COLLECTIONS)
                     .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
@@ -8567,11 +8581,21 @@ public final class CatalogRepository {
     /**
      * Fidelity-preserving collection import.
      *
-     * <p>ON CONFLICT (tenant_id, name): performs DO UPDATE only when the existing row is a
-     * backfill/auto-registered STUB (embedding_model = '' AND content_type = '' AND owner_id = '').
-     * Stub rows are created by fk-002-0-backfill-stubs or by PgVectorRepository.upsertChunks
-     * auto-registration.  They must be upgradable by the RDR-153 catalog ETL, but a re-run
-     * must never clobber genuinely-newer live rows.
+     * <p>ON CONFLICT (tenant_id, name) DO NOTHING: an import NEVER overwrites an existing
+     * row (recovery-bundle import must not clobber a registered collection) -- surviving
+     * contract per {@code importCollection_doesNotOverwriteLiveRow}.
+     *
+     * <p>RDR-204 Phase 1 (Sam's decision): this used to be a conditional
+     * {@code DO UPDATE ... WHERE (embedding_model = '' AND content_type = '' AND owner_id
+     * = '')} -- upgrading a backfill/auto-registered STUB row (all three discriminators
+     * blank) in place, created by fk-002-0-backfill-stubs or by PgVectorRepository
+     * .upsertChunks' since-retired auto-registration. hygiene-002-1's three non-empty
+     * CHECK constraints on those same three columns make that WHERE clause permanently
+     * unsatisfiable now -- no row can exist with any of them blank -- so the stub-upgrade
+     * arm was unreachable dead code. Replaced with a plain DO NOTHING: the surviving
+     * behavior (never overwrite an existing row) is identical to what the WHERE clause
+     * already produced for every row the table's own constraints allow, with no branch
+     * that can never fire.
      *
      * <p>nz() for timestamptz columns: '' is invalid in timestamptz; NULL means "not set".
      * catalog-002-1-temporal-typing (RDR-156 P0.2) converted these columns to timestamptz NULL.
@@ -8585,12 +8609,17 @@ public final class CatalogRepository {
 
     /**
      * nexus-1usso: GUC-once bulk collection import — ONE multi-row
-     * {@code INSERT ... ON CONFLICT DO UPDATE ... WHERE} statement per
-     * chunk. nexus-xtmtf: jOOQ's chained {@code .values()} supports a
-     * dynamic row count, and the nullable timestamptz columns bind as
-     * OffsetDateTime (blank -> NULL) — zero raw SQL, one statement per
-     * chunk preserved. Rows are deduped on {@code name} (the conflict
-     * key) within a chunk, last occurrence wins.
+     * {@code INSERT ... ON CONFLICT DO NOTHING} statement per chunk (see
+     * {@link #doImportCollection}'s javadoc for why this is DO NOTHING, not a
+     * conditional DO UPDATE, after RDR-204 Phase 1's stub-upgrade retirement).
+     * nexus-xtmtf: jOOQ's chained {@code .values()} supports a dynamic row
+     * count, and the nullable timestamptz columns bind as OffsetDateTime
+     * (blank -> NULL) — zero raw SQL, one statement per chunk preserved. Rows
+     * are deduped on {@code name} (the conflict key) within a chunk, last
+     * occurrence wins (a name repeated within one batch still contributes
+     * only one row to the INSERT's VALUES list; the dedupe is orthogonal to
+     * the ON CONFLICT behavior, which never fires for an already-existing row
+     * regardless of dedupe).
      */
     public int importCollectionsBatch(String tenant, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return 0;
@@ -8599,7 +8628,7 @@ public final class CatalogRepository {
             for (var coll : rows) unique.put(s(coll, "name"), coll);
             List<Map<String, Object>> deduped = List.copyOf(unique.values());
 
-            final int cols = 11;
+            final int cols = 12;
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
             for (int start = 0; start < deduped.size(); start += chunkSize) {
                 var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
@@ -8609,7 +8638,7 @@ public final class CatalogRepository {
                         CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
                         CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
                         CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_AT,
-                        CATALOG_COLLECTIONS.CREATED_AT);
+                        CATALOG_COLLECTIONS.CREATED_AT, CATALOG_COLLECTIONS.LIFECYCLE_STATE);
                 for (Map<String, Object> coll : batch) {
                     insert = insert.values(tenant,
                             s(coll, "name"), nne(s(coll, "content_type")),
@@ -8619,39 +8648,49 @@ public final class CatalogRepository {
                             nne(s(coll, "superseded_by")), tsOrNull(s(coll, "superseded_at")),
                             // hygiene-001: created_at is NOT NULL now; stamp "now" when
                             // the import row doesn't carry one (see upsertCollection).
-                            createdAtOrNow(s(coll, "created_at")));
+                            createdAtOrNow(s(coll, "created_at")),
+                            // RDR-204 nexus-ft04v.4/.5: lifecycle_state carries a NOT
+                            // NULL + enum CHECK (hygiene-002) that a fresh INSERT here
+                            // 23502'd on before this fix.
+                            lifecycleStateForImport(nne(s(coll, "content_type")), s(coll, "name")));
                 }
                 insert.onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-                      .doUpdate()
-                      .set(CATALOG_COLLECTIONS.CONTENT_TYPE,         DSL.excluded(CATALOG_COLLECTIONS.CONTENT_TYPE))
-                      .set(CATALOG_COLLECTIONS.OWNER_ID,             DSL.excluded(CATALOG_COLLECTIONS.OWNER_ID))
-                      .set(CATALOG_COLLECTIONS.EMBEDDING_MODEL,      DSL.excluded(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
-                      .set(CATALOG_COLLECTIONS.MODEL_VERSION,        DSL.excluded(CATALOG_COLLECTIONS.MODEL_VERSION))
-                      .set(CATALOG_COLLECTIONS.DISPLAY_NAME,         DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME))
-                      .set(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, DSL.excluded(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED))
-                      .set(CATALOG_COLLECTIONS.SUPERSEDED_BY,        DSL.excluded(CATALOG_COLLECTIONS.SUPERSEDED_BY))
-                      .set(CATALOG_COLLECTIONS.SUPERSEDED_AT,        DSL.excluded(CATALOG_COLLECTIONS.SUPERSEDED_AT))
-                      .set(CATALOG_COLLECTIONS.CREATED_AT,           DSL.excluded(CATALOG_COLLECTIONS.CREATED_AT))
-                      .where(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq("")
-                          .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(""))
-                          .and(CATALOG_COLLECTIONS.OWNER_ID.eq("")))
+                      .doNothing()
                       .execute();
             }
             return rows.size();
         });
     }
 
+    /**
+     * RDR-204 nexus-ft04v.4/.5: the ONE lifecycle_state rule the ETL import paths
+     * (importCollection/importCollectionsBatch) need on a fresh INSERT — the same
+     * quarantine-prefix convention {@code upsertCollection}'s own new-row branch
+     * and hygiene-002-1's backfill walk both use, minus the embedding_profile
+     * lookup (an ETL import row already carries its own metadata explicitly; there
+     * is no profile to consult). Only ever bound on the VALUES tuple of a fresh
+     * INSERT -- both import methods are ON CONFLICT DO NOTHING now (Sam's
+     * decision, RDR-204 Phase 1: an import never overwrites an existing row), so
+     * an existing row's lifecycle_state is never touched by this method at all.
+     */
+    private static String lifecycleStateForImport(String contentType, String name) {
+        boolean quarantine = (contentType != null && contentType.startsWith("quarantine-"))
+                          || (name != null && name.startsWith("quarantine-"));
+        return quarantine ? "quarantine" : "live";
+    }
+
     private void doImportCollection(DSLContext ctx, String tenant, Map<String, Object> coll) {
-        // DO UPDATE WHERE stub-guard: only upgrades rows where all three discriminator
-        // columns are empty (auto-registered stubs from RDR-156 P0.2 ensure-registration).
-        // nexus-xtmtf: single-row delegate of the importCollectionsBatch DSL shape.
+        // ON CONFLICT DO NOTHING: an import never overwrites an existing row (see this
+        // method's caller's javadoc for why the old conditional stub-upgrade DO UPDATE
+        // was retired). nexus-xtmtf: single-row delegate of the importCollectionsBatch
+        // DSL shape.
         var insert = ctx.insertInto(CATALOG_COLLECTIONS,
                 CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
                 CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                 CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
                 CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
                 CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_AT,
-                CATALOG_COLLECTIONS.CREATED_AT)
+                CATALOG_COLLECTIONS.CREATED_AT, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
            .values(tenant,
                    s(coll, "name"), nne(s(coll, "content_type")),
                    nne(s(coll, "owner_id")), nne(s(coll, "embedding_model")),
@@ -8660,21 +8699,14 @@ public final class CatalogRepository {
                    nne(s(coll, "superseded_by")), tsOrNull(s(coll, "superseded_at")),
                    // hygiene-001: created_at is NOT NULL now; stamp "now" when the
                    // import row doesn't carry one (see upsertCollection).
-                   createdAtOrNow(s(coll, "created_at")));
+                   createdAtOrNow(s(coll, "created_at")),
+                   // RDR-204 nexus-ft04v.4/.5: lifecycle_state carries a NOT NULL +
+                   // enum CHECK (hygiene-002) that a fresh INSERT here 23502'd on
+                   // before this fix -- same quarantine-prefix rule as
+                   // upsertCollection's own new-row branch.
+                   lifecycleStateForImport(nne(s(coll, "content_type")), s(coll, "name")));
         insert.onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-              .doUpdate()
-              .set(CATALOG_COLLECTIONS.CONTENT_TYPE,         DSL.excluded(CATALOG_COLLECTIONS.CONTENT_TYPE))
-              .set(CATALOG_COLLECTIONS.OWNER_ID,             DSL.excluded(CATALOG_COLLECTIONS.OWNER_ID))
-              .set(CATALOG_COLLECTIONS.EMBEDDING_MODEL,      DSL.excluded(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
-              .set(CATALOG_COLLECTIONS.MODEL_VERSION,        DSL.excluded(CATALOG_COLLECTIONS.MODEL_VERSION))
-              .set(CATALOG_COLLECTIONS.DISPLAY_NAME,         DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME))
-              .set(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, DSL.excluded(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED))
-              .set(CATALOG_COLLECTIONS.SUPERSEDED_BY,        DSL.excluded(CATALOG_COLLECTIONS.SUPERSEDED_BY))
-              .set(CATALOG_COLLECTIONS.SUPERSEDED_AT,        DSL.excluded(CATALOG_COLLECTIONS.SUPERSEDED_AT))
-              .set(CATALOG_COLLECTIONS.CREATED_AT,           DSL.excluded(CATALOG_COLLECTIONS.CREATED_AT))
-              .where(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq("")
-                  .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(""))
-                  .and(CATALOG_COLLECTIONS.OWNER_ID.eq("")))
+              .doNothing()
               .execute();
     }
 

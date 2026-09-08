@@ -207,14 +207,12 @@ class ChashVectorConcurrencyTest {
         // just a CollectionRegistry cache entry) is required — chunks_collection_fk
         // and chash_index-adjacent FKs enforce it at the DB level regardless of the
         // in-process cache.
+        // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection,
+        // which derives the constraint-satisfying attributes hygiene-002-1 now
+        // requires (the bare two-column insert this used to run 23502s on
+        // lifecycle_state NOT NULL).
         tenantScope.withTenant(TENANT, ctx -> {
-            ctx.insertInto(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS,
-                            dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID,
-                            dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME)
-               .values(TENANT, COLLECTION)
-               .onConflict(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID,
-                           dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME).doNothing()
-               .execute();
+            PgContainerHelper.insertCollection(ctx, TENANT, COLLECTION);
             return null;
         });
 

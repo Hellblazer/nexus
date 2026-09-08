@@ -214,6 +214,14 @@ class PgBouncerTenantIsolationTest {
         String coll = "pgb-aspect-coll";
         registerFixtureDoc(tenantA, "pgb-aspect-doc-a");
         registerFixtureDoc(tenantB, "pgb-aspect-doc-b");
+        // RDR-164 P1a / RDR-204 Phase 1: document_aspects_collection_fk is a REAL,
+        // always-enforced FK -- register the collection before enqueue.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(
+                org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), tenantA, coll);
+            PgContainerHelper.insertCollection(
+                org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), tenantB, coll);
+        }
 
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection", coll);

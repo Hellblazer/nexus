@@ -7,6 +7,8 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -285,9 +287,11 @@ class PgVectorCombinedQueryContractTest {
     }
 
     private static void insertCollection(Connection su, String tenant, String name) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenant + "', '" + name + "') "
-            + "ON CONFLICT (tenant_id, name) DO NOTHING");
+        // RDR-204 nexus-ft04v.4/.5: delegates to PgContainerHelper.insertCollection,
+        // which derives the constraint-satisfying attributes hygiene-002-1 now
+        // requires (the bare two-column raw INSERT this used to run 23502s on
+        // lifecycle_state NOT NULL).
+        PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, name);
     }
 
     private static void insertManifest(Connection su, String tenant, String docId, String chash,

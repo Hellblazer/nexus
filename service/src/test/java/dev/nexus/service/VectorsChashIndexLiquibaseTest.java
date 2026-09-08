@@ -118,11 +118,9 @@ class VectorsChashIndexLiquibaseTest {
     private void seedChunkRows() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             for (String coll : new String[] {COLL_A, COLL_B}) {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                    "VALUES ('" + TENANT + "', '" + coll + "') " +
-                    "ON CONFLICT (tenant_id, name) DO NOTHING");
+                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, coll);
             }
             for (int dim : DIMS) {
                 int filler = 0;

@@ -2,6 +2,8 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.*;
 import org.postgresql.util.PSQLException;
@@ -84,11 +86,12 @@ class CatalogRepositoryTest {
             // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now carries
             // chunks_collection_fk (tenant_id, collection) -> catalog_collections
             // (tenant_id, name) — stub-register the collection first, mirroring
-            // PgVectorRepository#upsertChunks' own ensure-registered step.
-            ctx.execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
-                + "ON CONFLICT (tenant_id, name) DO NOTHING",
-                tenant, collection);
+            // PgVectorRepository#upsertChunks' own ensure-registered step. RDR-204
+            // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection,
+            // which derives the constraint-satisfying attributes hygiene-002-1 now
+            // requires (the bare two-column raw INSERT this used to run 23502s on
+            // lifecycle_state NOT NULL).
+            PgContainerHelper.insertCollection(ctx, tenant, collection);
             ctx.execute(
                 "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
                 + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::nexus.vector) "
@@ -1731,40 +1734,17 @@ class CatalogRepositoryTest {
         assertThat(forTuple.get("name")).isEqualTo(name);
     }
 
-    @Test @Order(63)
-    void importCollection_overwritesStubRow() {
-        // A stub row (all three discriminator columns empty) must be fully upgraded
-        // by importCollection. Stubs are created by PgVectorRepository.upsertChunks
-        // auto-registration and by fk-002-0-backfill-stubs (RDR-156 P0.2).
-        String name = "code__nexus__voyage-code-3__v2";
-        // Seed a stub via upsertCollection with no metadata — this simulates the
-        // auto-registration path (content_type/owner_id/embedding_model all default to '').
-        // Use a direct SQL stub to guarantee the three discriminators are all empty:
-        repo.importCollection(TENANT_A, Map.of(
-            "name", name,
-            "content_type", "",
-            "owner_id", "",
-            "embedding_model", "",
-            "model_version", ""
-        ));
-        var before = repo.getCollection(TENANT_A, name);
-        assertThat(before).isNotNull();
-        assertThat(before.get("content_type")).as("stub has empty content_type").isEqualTo("");
-
-        // Now call importCollection with full metadata — the DO UPDATE WHERE-stub must fire.
-        repo.importCollection(TENANT_A, Map.of(
-            "name", name,
-            "content_type", "code",
-            "owner_id", "nexus-1-1",
-            "embedding_model", "voyage-code-3",
-            "model_version", "v2"
-        ));
-        var after = repo.getCollection(TENANT_A, name);
-        assertThat(after.get("content_type")).as("importCollection must upgrade stub content_type").isEqualTo("code");
-        assertThat(after.get("owner_id")).as("importCollection must upgrade stub owner_id").isEqualTo("nexus-1-1");
-        assertThat(after.get("embedding_model")).as("importCollection must upgrade stub embedding_model").isEqualTo("voyage-code-3");
-        assertThat(after.get("model_version")).as("importCollection must upgrade stub model_version").isEqualTo("v2");
-    }
+    // Order(63) was importCollection_overwritesStubRow: it seeded a "stub" row (all
+    // three discriminator columns blank) via a bare importCollection call, then
+    // asserted a second importCollection call upgraded it in place. RDR-204 Phase 1
+    // (Sam's decision): that premise is gone -- hygiene-002-1's three non-empty CHECK
+    // constraints on content_type/owner_id/embedding_model make a blank-discriminator
+    // row impossible to create through ANY path now (the seeding call itself 23514s),
+    // and importCollection/importCollectionsBatch's ON CONFLICT is now DO NOTHING, not
+    // a conditional upgrade -- see CatalogRepository#importCollection's javadoc. The
+    // surviving contract this bead's own importCollection_doesNotOverwriteLiveRow
+    // (Order 64, below-adjacent in source but unordered relative to this gap) already
+    // covers: an import never overwrites an existing row.
 
     @Test @Order(64)
     void importCollection_doesNotOverwriteLiveRow() {
@@ -1801,7 +1781,8 @@ class CatalogRepositoryTest {
         repo.upsertCollection(TENANT_A, Map.of(
             "name", "knowledge__old__v1",
             "content_type", "knowledge",
-            "owner_id", "nexus-1-1"
+            "owner_id", "nexus-1-1",
+            "embedding_model", "voyage-context-3"
         ));
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "rn.1", "title", "Rename Test",
             "content_type", "paper", "corpus", "knowledge",
@@ -3548,37 +3529,60 @@ class CatalogRepositoryTest {
     }
 
     @Test @Order(225)
-    void importCollectionsBatch_multiRow_stubUpgrade_intraBatchDedupe() {
-        String tenant = "etl-batch-coll-tenant";
-        String name   = "code__batch__voyage-code-3__v1";
+    void importCollectionsBatch_multiRow_existingRowUntouched_intraBatchDedupe() throws Exception {
+        // RDR-204 Phase 1 (Sam's decision): this used to seed a blank-discriminator
+        // "stub" row via a bare importCollectionsBatch call and assert a later batch
+        // upgraded it in place. That premise is gone -- hygiene-002-1's non-empty CHECK
+        // constraints make a blank-discriminator row impossible to create through ANY
+        // path now (the seeding call itself would 23514), and importCollectionsBatch's
+        // ON CONFLICT is DO NOTHING now, not a conditional upgrade -- see
+        // CatalogRepository#importCollection's javadoc. The surviving contract: an
+        // import batch never overwrites an EXISTING row (seeded here the same way a
+        // real prior registration would be, via PgContainerHelper.insertCollection,
+        // not through importCollectionsBatch itself), a NEW name in the same batch is
+        // inserted with a valid lifecycle_state, and intra-batch dedupe still holds for
+        // that new row.
+        String tenant       = "etl-batch-coll-tenant";
+        String existingName = "code__batch__voyage-code-3__v1";
+        String newName      = "code__batch-new__voyage-code-3__v1";
 
-        // Seed a stub (all three discriminators empty).
-        repo.importCollectionsBatch(tenant, List.of(
-            Map.of("name", name, "content_type", "", "owner_id", "", "embedding_model", "",
-                   "model_version", "")));
-        var before = repo.getCollection(tenant, name);
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, existingName);
+        }
+        var before = repo.getCollection(tenant, existingName);
         assertThat(before).isNotNull();
-        assertThat(before.get("content_type")).isEqualTo("");
+        assertThat(before.get("content_type")).as("PgContainerHelper.insertCollection derives a real, non-empty content_type from the conformant name").isEqualTo("code");
 
-        // Batch of 2 rows for the SAME name — intra-batch dedupe, last wins — plus
-        // the DO UPDATE WHERE-stub predicate must fire (upgrading the stub).
+        // Batch: the EXISTING name (must not be touched), plus the NEW name twice
+        // (intra-batch dedupe, last occurrence wins) with DIFFERENT metadata than the
+        // existing row's, so an accidental overwrite would be observable.
         int n = repo.importCollectionsBatch(tenant, List.of(
-            Map.of("name", name, "content_type", "code", "owner_id", "nexus-1-1",
+            Map.of("name", existingName, "content_type", "docs", "owner_id", "nexus-x",
+                   "embedding_model", "voyage-context-3", "model_version", "v9"),
+            Map.of("name", newName, "content_type", "code", "owner_id", "nexus-1-1",
                    "embedding_model", "voyage-code-3", "model_version", "v0"),
-            Map.of("name", name, "content_type", "code", "owner_id", "nexus-1-1",
+            Map.of("name", newName, "content_type", "code", "owner_id", "nexus-1-1",
                    "embedding_model", "voyage-code-3", "model_version", "v1")));
-        assertThat(n).isEqualTo(2);
+        assertThat(n).isEqualTo(3);
 
-        var after = repo.getCollection(tenant, name);
-        assertThat(after.get("content_type")).isEqualTo("code");
-        assertThat(after.get("model_version")).as("intra-batch dedupe: last wins").isEqualTo("v1");
+        var stillExisting = repo.getCollection(tenant, existingName);
+        assertThat(stillExisting.get("content_type")).as("an import batch must not overwrite an existing row").isEqualTo("code");
+        assertThat(stillExisting.get("owner_id")).as("an import batch must not overwrite an existing row").isEqualTo("batch");
 
-        // A second batch call must NOT overwrite the now-live row (WHERE-stub predicate).
-        repo.importCollectionsBatch(tenant, List.of(
-            Map.of("name", name, "content_type", "docs", "owner_id", "nexus-x",
-                   "embedding_model", "voyage-context-3", "model_version", "v9")));
-        var stillLive = repo.getCollection(tenant, name);
-        assertThat(stillLive.get("content_type")).as("live row must not be overwritten").isEqualTo("code");
+        var inserted = repo.getCollection(tenant, newName);
+        assertThat(inserted).as("a genuinely new name in the batch must be inserted").isNotNull();
+        assertThat(inserted.get("model_version")).as("intra-batch dedupe: last occurrence wins").isEqualTo("v1");
+
+        // getCollection() does not project lifecycle_state; read it directly.
+        try (Connection su = pg.createConnection("")) {
+            var lifecycleState = DSL.using(su, SQLDialect.POSTGRES)
+                .select(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+                .from(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+                .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                    .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(newName)))
+                .fetchOne(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.LIFECYCLE_STATE);
+            assertThat(lifecycleState).as("a fresh INSERT must carry a valid lifecycle_state").isEqualTo("live");
+        }
     }
 
     @Test @Order(226)

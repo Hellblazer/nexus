@@ -8,6 +8,8 @@ import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -156,6 +158,12 @@ class PgVectorEmbedSkipGcRaceTest {
         //    delete below target a chunk two live documents already reference — exactly
         //    the F10c bug the anti-join now correctly refuses, which would make this
         //    fixture untestable as originally written.
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK now -- PgVectorRepository's stub-insert is retired, so
+        // a real row must exist before any chunk write.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION);
+        }
         repo.upsertChunks(TENANT, COLLECTION, List.of(CHASH_H), List.of(SHARED_TEXT),
                 List.of(Map.of("v", "1")));
         assertThat(superuserCount()).as("H exists after the initial seed insert").isEqualTo(1L);

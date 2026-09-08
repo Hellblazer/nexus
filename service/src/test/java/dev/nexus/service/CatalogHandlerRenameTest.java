@@ -60,11 +60,6 @@ class CatalogHandlerRenameTest {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
             PgContainerHelper.seedServiceToken(
                 DSL.using(su, SQLDialect.POSTGRES), TOKEN, TENANT, "test-bound");
-            // Seed two registry rows to rename (one per route-shape test).
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT + "', 'hren__old')");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT + "', 'hren__old-alias')");
         }
         var cfg = new com.zaxxer.hikari.HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
@@ -76,6 +71,28 @@ class CatalogHandlerRenameTest {
         service = new NexusService(0, TOKEN, svcDs);
         service.start();
         http = HttpClient.newHttpClient();
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.3): AuthFilter runs the per-tenant,
+        // once-per-process ghost sweep on whichever request is TENANT's first
+        // against this service instance, and DELETES any collection it finds
+        // registered-but-chunkless at that moment. The warmup MUST run before
+        // the two rows below are registered at all (measured, nexus-ft04v
+        // Phase 1: registering first and warming up second let the warmup
+        // ITSELF trigger the sweep and delete the rows it had just
+        // registered, out from under this suite's own rename assertions).
+        // Burn the sweep here first, THEN register.
+        var warmup = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+            .header("Authorization", "Bearer " + TOKEN)
+            .GET().build();
+        http.send(warmup, HttpResponse.BodyHandlers.ofString());
+
+        // Seed two registry rows to rename (one per route-shape test). RDR-204
+        // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "hren__old");
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "hren__old-alias");
+        }
     }
 
     @AfterAll
@@ -141,10 +158,8 @@ class CatalogHandlerRenameTest {
         // it must 409, not silently take the RDR-162 cross-model COPY branch (repoint-only).
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES ('" + TENANT + "', 'hren__c409-src') ON CONFLICT DO NOTHING");
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES ('" + TENANT + "', 'hren__c409-tgt') ON CONFLICT DO NOTHING");
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "hren__c409-src");
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "hren__c409-tgt");
         }
         var resp = post("/v1/catalog/collections/rename",
             "{\"old_name\":\"hren__c409-src\",\"new_name\":\"hren__c409-tgt\"}");
@@ -158,10 +173,8 @@ class CatalogHandlerRenameTest {
         // exists (ETL populated it), only catalog_documents.physical_collection moves.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES ('" + TENANT + "', 'hren__xm-src') ON CONFLICT DO NOTHING");
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES ('" + TENANT + "', 'hren__xm-tgt') ON CONFLICT DO NOTHING");
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "hren__xm-src");
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "hren__xm-tgt");
             su.createStatement().execute("INSERT INTO nexus.catalog_documents "
                 + "(tenant_id, tumbler, title, physical_collection) "
                 + "VALUES ('" + TENANT + "', 'xm-doc-1', 'XM', 'hren__xm-src') ON CONFLICT DO NOTHING");
@@ -187,8 +200,7 @@ class CatalogHandlerRenameTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             for (String n : names) {
-                su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                    + "VALUES ('" + TENANT + "', '" + n + "') ON CONFLICT DO NOTHING");
+                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, n);
             }
         }
     }

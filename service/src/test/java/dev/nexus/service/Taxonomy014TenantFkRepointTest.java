@@ -11,6 +11,8 @@ import liquibase.database.jvm.JdbcConnection;
 import liquibase.exception.LiquibaseException;
 import liquibase.resource.ClassLoaderResourceAccessor;
 import liquibase.resource.DirectoryResourceAccessor;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.PostgreSQLContainer;
 
@@ -400,12 +402,11 @@ class Taxonomy014TenantFkRepointTest {
      * but must be satisfied for the INSERT to reach the parent_id FK at all).
      */
     private static long seedTopic(Connection c, String tenant, Long parentId) throws Exception {
-        try (PreparedStatement reg = c.prepareStatement(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, 'coll') "
-                + "ON CONFLICT (tenant_id, name) DO NOTHING")) {
-            reg.setString(1, tenant);
-            reg.executeUpdate();
-        }
+        // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection,
+        // which derives the constraint-satisfying attributes hygiene-002-1 now
+        // requires (the bare two-column raw INSERT this used to run 23502s on
+        // lifecycle_state NOT NULL).
+        PgContainerHelper.insertCollection(DSL.using(c, SQLDialect.POSTGRES), tenant, "coll");
         try (PreparedStatement ps = c.prepareStatement(
                 "INSERT INTO nexus.topics (tenant_id, label, parent_id, collection, created_at) "
                 + "VALUES (?, ?, ?, 'coll', now()) RETURNING id")) {
@@ -453,13 +454,8 @@ class Taxonomy014TenantFkRepointTest {
      */
     private static long seedTopicWithDocCount(
             Connection c, String tenant, String collection, int docCount) throws Exception {
-        try (PreparedStatement reg = c.prepareStatement(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
-                + "ON CONFLICT (tenant_id, name) DO NOTHING")) {
-            reg.setString(1, tenant);
-            reg.setString(2, collection);
-            reg.executeUpdate();
-        }
+        // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+        PgContainerHelper.insertCollection(DSL.using(c, SQLDialect.POSTGRES), tenant, collection);
         try (PreparedStatement ps = c.prepareStatement(
                 "INSERT INTO nexus.topics (tenant_id, label, collection, doc_count, created_at) "
                 + "VALUES (?, ?, ?, ?, now()) RETURNING id")) {
@@ -484,10 +480,9 @@ class Taxonomy014TenantFkRepointTest {
     private static void seedChunkForAssignment(
             Connection c, String tenant, String collection, String chashHex) throws Exception {
         int dim = 384;
+        // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+        PgContainerHelper.insertCollection(DSL.using(c, SQLDialect.POSTGRES), tenant, collection);
         try (Statement st = c.createStatement()) {
-            st.execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
-                + tenant + "', '" + collection + "') ON CONFLICT (tenant_id, name) DO NOTHING");
             st.execute(
                 "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_" + dim + ") "
                 + "VALUES ('" + tenant + "', '" + collection + "', decode('" + chashHex + "', 'hex'), "

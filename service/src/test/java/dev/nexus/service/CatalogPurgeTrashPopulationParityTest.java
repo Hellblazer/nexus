@@ -6,6 +6,8 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -142,9 +144,8 @@ class CatalogPurgeTrashPopulationParityTest {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "DELETE FROM nexus.catalog_documents WHERE tenant_id = '" + TENANT + "'");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT + "', '"
-                + COLLECTION + "') ON CONFLICT DO NOTHING");
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION);
 
             // A live document — must never be touched by any of this.
             su.createStatement().execute(

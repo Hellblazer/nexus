@@ -566,7 +566,13 @@ class TopicsDocCountDeadlockConcurrencyTest {
 
     // ── fixtures ────────────────────────────────────────────────────────────────
 
-    private long seedTopic(String collection, String label) {
+    private long seedTopic(String collection, String label) throws Exception {
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): topics_collection_fk is a REAL,
+        // always-enforced FK now -- register the collection before insertTopic.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(
+                org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), TENANT, collection);
+        }
         return repo.insertTopic(TENANT, label, null, collection, 0, "2026-01-01T00:00:00Z", null);
     }
 

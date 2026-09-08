@@ -229,9 +229,11 @@ class Rdr71gw2CollectionNotNullTest {
      *  shape (not yet landed as of this bead) -- registering first keeps every
      *  fixture forward-compatible regardless of when that FK ships. */
     private static void insertCollection(Connection su, String tenantId, String name) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_collections (tenant_id, name) "
-            + "VALUES ('" + tenantId + "', '" + name + "') ON CONFLICT (tenant_id, name) DO NOTHING");
+        // RDR-204 nexus-ft04v.4/.5: delegates to PgContainerHelper.insertCollection,
+        // which derives the constraint-satisfying attributes hygiene-002-1 now
+        // requires, and safely falls back to this exact bare insert at any
+        // migration depth where lifecycle_state does not exist yet.
+        PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenantId, name);
     }
 
     private static void insertDoc(Connection su, String tenantId, String tumbler) throws Exception {

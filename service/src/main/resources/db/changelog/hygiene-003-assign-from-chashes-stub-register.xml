@@ -1,0 +1,601 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-204 Phase 1 fallout (bead nexus-ft04v.4/.5): nexus.assign_from_chashes_<dim>'s
+    cross_collection branch stub-registers the FOREIGN collection it just read
+    centroids from, via:
+
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+    a bare two-column insert search-path-002-10/11/12 (the currently-live bodies,
+    placed last among function-defining changelogs) still carry unchanged. hygiene-002-1
+    (this same changelog family, landed earlier in the walk) added a NOT NULL +
+    non-empty CHECK on lifecycle_state/content_type/owner_id/embedding_model, so this
+    exact statement now 23502s/23514s on every cross-collection assign against a
+    foreign collection that was never separately registered.
+
+    Sam's decision (RDR-204 Phase 1, one fail-loud rule for every stub-insert path;
+    nothing mints a catalog_collections row from a name any more): this is the NINTH
+    stub-insert path found in this RDR, and unlike the eighth (hygiene-002-2's
+    nexus.gc_quarantine_orphans / nexus.gc_restore_rereferenced, which legitimately
+    CREATES the quarantine collection it moves orphans into, with known attributes,
+    so a real registration there stands), this one is dead by construction: post-
+    nexus-ft04v.7, chunks_collection_fk already requires p_collection to be registered
+    before any chunk can exist under it, so by the time this branch's SELECT FROM
+    nexus.chunks finds a row at all, the collection is already guaranteed present.
+    The fix here is therefore NOT a widened insert (there is nothing legitimate to
+    insert) but a guard: RAISE EXCEPTION naming POST /v1/catalog/collections/upsert
+    if the row is genuinely absent (a caller naming a collection with zero chunks),
+    replacing the retired stub insert. Everything else in each function body is
+    byte-for-byte identical to search-path-002-10/11/12's own forward bodies.
+
+    A separate new changeset per dim (not one file-wide CREATE OR REPLACE) mirrors
+    hygiene-002-2's own two-changeset shape (one per function); each is independently
+    revertable.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="hygiene-003-1" author="nexus-ft04v.4">
+        <comment>nexus.assign_from_chashes_384: retire the cross_collection stub-register INSERT (dead by construction post-nexus-ft04v.7) and replace it with a fail-loud RAISE EXCEPTION naming POST /v1/catalog/collections/upsert. Body otherwise identical to search-path-002-10's forward body.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_384(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        -- Sam's standing rule for this RDR: one fail-loud path for every
+        -- stub-insert, nothing mints a catalog_collections row from a name
+        -- any more. Post-nexus-ft04v.7, chunks_collection_fk already requires
+        -- p_collection to be registered before any chunk can exist under it,
+        -- so if the SELECT below finds rows at all, the row is guaranteed
+        -- present -- this guard only ever fires on a genuinely absent
+        -- registration (a caller naming a collection with zero chunks), and
+        -- names the remedy instead of silently minting the row this branch
+        -- used to stub-insert here.
+        IF NOT EXISTS (
+            SELECT 1 FROM nexus.catalog_collections
+             WHERE tenant_id = current_setting('nexus.tenant', true)
+               AND name = p_collection
+        ) THEN
+            RAISE EXCEPTION
+                'assign_from_chashes_384: collection % is not registered for tenant % -- register it first via POST /v1/catalog/collections/upsert',
+                p_collection, current_setting('nexus.tenant', true)
+                USING ERRCODE = 'foreign_key_violation';
+        END IF;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   c.chash                                                         AS m_chash_bytes,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) ct.embedding_384))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection &lt;&gt; p_collection
+               AND ct.embedding_384 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_384 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) ct.embedding_384) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   c.chash                                                         AS m_chash_bytes,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) ct.embedding_384))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection = p_collection
+               AND ct.embedding_384 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_384 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) ct.embedding_384) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id, 'centroid', p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_384(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   c.chash                                                         AS m_chash_bytes,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) ct.embedding_384))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection &lt;&gt; p_collection
+               AND ct.embedding_384 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_384 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) ct.embedding_384) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   c.chash                                                         AS m_chash_bytes,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) ct.embedding_384))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection = p_collection
+               AND ct.embedding_384 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_384 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_384 OPERATOR(nexus.&lt;=&gt;) ct.embedding_384) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id, 'centroid', p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="hygiene-003-2" author="nexus-ft04v.4">
+        <comment>nexus.assign_from_chashes_768: same retire-and-fail-loud fix as hygiene-003-1, dim 768.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_768(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        -- Sam's standing rule for this RDR: one fail-loud path for every
+        -- stub-insert, nothing mints a catalog_collections row from a name
+        -- any more. Post-nexus-ft04v.7, chunks_collection_fk already requires
+        -- p_collection to be registered before any chunk can exist under it,
+        -- so if the SELECT below finds rows at all, the row is guaranteed
+        -- present -- this guard only ever fires on a genuinely absent
+        -- registration (a caller naming a collection with zero chunks), and
+        -- names the remedy instead of silently minting the row this branch
+        -- used to stub-insert here.
+        IF NOT EXISTS (
+            SELECT 1 FROM nexus.catalog_collections
+             WHERE tenant_id = current_setting('nexus.tenant', true)
+               AND name = p_collection
+        ) THEN
+            RAISE EXCEPTION
+                'assign_from_chashes_768: collection % is not registered for tenant % -- register it first via POST /v1/catalog/collections/upsert',
+                p_collection, current_setting('nexus.tenant', true)
+                USING ERRCODE = 'foreign_key_violation';
+        END IF;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   c.chash                                                         AS m_chash_bytes,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) ct.embedding_768))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection &lt;&gt; p_collection
+               AND ct.embedding_768 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_768 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) ct.embedding_768) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   c.chash                                                         AS m_chash_bytes,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) ct.embedding_768))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection = p_collection
+               AND ct.embedding_768 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_768 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) ct.embedding_768) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id, 'centroid', p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_768(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   c.chash                                                         AS m_chash_bytes,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) ct.embedding_768))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection &lt;&gt; p_collection
+               AND ct.embedding_768 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_768 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) ct.embedding_768) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   c.chash                                                         AS m_chash_bytes,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) ct.embedding_768))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection = p_collection
+               AND ct.embedding_768 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_768 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_768 OPERATOR(nexus.&lt;=&gt;) ct.embedding_768) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id, 'centroid', p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="hygiene-003-3" author="nexus-ft04v.4">
+        <comment>nexus.assign_from_chashes_1024: same retire-and-fail-loud fix as hygiene-003-1, dim 1024.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_1024(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        -- Sam's standing rule for this RDR: one fail-loud path for every
+        -- stub-insert, nothing mints a catalog_collections row from a name
+        -- any more. Post-nexus-ft04v.7, chunks_collection_fk already requires
+        -- p_collection to be registered before any chunk can exist under it,
+        -- so if the SELECT below finds rows at all, the row is guaranteed
+        -- present -- this guard only ever fires on a genuinely absent
+        -- registration (a caller naming a collection with zero chunks), and
+        -- names the remedy instead of silently minting the row this branch
+        -- used to stub-insert here.
+        IF NOT EXISTS (
+            SELECT 1 FROM nexus.catalog_collections
+             WHERE tenant_id = current_setting('nexus.tenant', true)
+               AND name = p_collection
+        ) THEN
+            RAISE EXCEPTION
+                'assign_from_chashes_1024: collection % is not registered for tenant % -- register it first via POST /v1/catalog/collections/upsert',
+                p_collection, current_setting('nexus.tenant', true)
+                USING ERRCODE = 'foreign_key_violation';
+        END IF;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                            AS m_chash,
+                   c.chash                                                           AS m_chash_bytes,
+                   ct.topic_id                                                       AS m_topic_id,
+                   (1 - (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) ct.embedding_1024))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection &lt;&gt; p_collection
+               AND ct.embedding_1024 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_1024 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) ct.embedding_1024) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                            AS m_chash,
+                   c.chash                                                           AS m_chash_bytes,
+                   ct.topic_id                                                       AS m_topic_id,
+                   (1 - (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) ct.embedding_1024))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection = p_collection
+               AND ct.embedding_1024 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_1024 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) ct.embedding_1024) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id, 'centroid', p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_1024(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                            AS m_chash,
+                   c.chash                                                           AS m_chash_bytes,
+                   ct.topic_id                                                       AS m_topic_id,
+                   (1 - (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) ct.embedding_1024))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection &lt;&gt; p_collection
+               AND ct.embedding_1024 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_1024 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) ct.embedding_1024) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                            AS m_chash,
+                   c.chash                                                           AS m_chash_bytes,
+                   ct.topic_id                                                       AS m_topic_id,
+                   (1 - (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) ct.embedding_1024))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection = p_collection
+               AND ct.embedding_1024 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_1024 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_1024 OPERATOR(nexus.&lt;=&gt;) ct.embedding_1024) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id, 'centroid', p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

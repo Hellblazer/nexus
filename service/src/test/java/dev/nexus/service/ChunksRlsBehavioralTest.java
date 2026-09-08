@@ -439,11 +439,13 @@ class ChunksRlsBehavioralTest {
         // RDR-156 P0.2: chash_len_check requires exactly 32 chars — pad test chashes.
         String paddedChash = padChash(chash);
         tenantScope.withTenant(tenant, ctx -> {
-            // RDR-156 P0.2: ensure catalog_collections has a stub row before the chunk insert.
-            ctx.execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) " +
-                "ON CONFLICT (tenant_id, name) DO NOTHING",
-                tenant, collection);
+            // RDR-156 P0.2: ensure catalog_collections has a stub row before the chunk
+            // insert. RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper
+            // .insertCollection, which derives the constraint-satisfying content_type/
+            // owner_id/embedding_model/lifecycle_state attributes hygiene-002-1 now
+            // requires (the bare two-column raw INSERT this used to run 23502s on
+            // lifecycle_state NOT NULL).
+            PgContainerHelper.insertCollection(ctx, tenant, collection);
             ctx.execute(
                 "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
                 " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ")" +

@@ -10,7 +10,9 @@ import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.DSLContext;
 import org.jooq.Query;
+import org.jooq.SQLDialect;
 import org.jooq.Table;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -122,6 +124,17 @@ class PlainSearchTextGatedSearchExplainTest {
     }
 
     private void seedFixtures() throws Exception {
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK now -- PgVectorRepository's stub-insert is retired, so
+        // every collection this fixture (and the two it calls) writes into must be
+        // registered first.
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            for (String col : List.of(COLL, DENSE_COLL, ORDER_COLL)) {
+                PgContainerHelper.insertCollection(dsl, TENANT, col);
+            }
+        }
+
         embedder.register(TOKEN, 1.0f, 0.0f);  // query vector points at the filler cluster
 
         List<String> ids = new ArrayList<>();

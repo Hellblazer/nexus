@@ -9,6 +9,8 @@ import com.sun.net.httpserver.HttpPrincipal;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -227,9 +229,8 @@ class TaxonomyHandlerAssignFkTest {
     private void seedChunk(String tenant, String collection, String chashHex, int dim) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenant + "', '"
-                + collection + "') ON CONFLICT (tenant_id, name) DO NOTHING");
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, collection);
             String embeddingCol = "embedding_" + dim;
             su.createStatement().execute(
                 "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, " + embeddingCol + ") VALUES " +

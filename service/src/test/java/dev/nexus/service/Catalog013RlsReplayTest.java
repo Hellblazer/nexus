@@ -5,6 +5,8 @@ import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
@@ -114,15 +116,10 @@ class Catalog013RlsReplayTest {
             // 2. Seed the REAL mid-migration legacy state: 16-byte decoded
             //    pre-RDR-180 values (what the type conversion leaves before
             //    the per-tenant rekey runs). FK parents first.
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             for (String[] tc : new String[][] {
                 {"t1", "code__x"}, {"t2", "code__z"}}) {
-                try (var ps = su.prepareStatement(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                    + "VALUES (?, ?) ON CONFLICT DO NOTHING")) {
-                    ps.setString(1, tc[0]);
-                    ps.setString(2, tc[1]);
-                    ps.executeUpdate();
-                }
+                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tc[0], tc[1]);
             }
             // The octet CHECK is NOT VALID — which ENFORCES NEW WRITES by
             // design (only pre-existing rows escape validation). The real

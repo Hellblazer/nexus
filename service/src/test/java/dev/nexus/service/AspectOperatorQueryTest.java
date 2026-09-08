@@ -86,6 +86,14 @@ class AspectOperatorQueryTest {
     private void seed(String tenant, String collection, String sourcePath, String sourceUri,
                       String proposedMethod, String expDatasets, String extras, double confidence,
                       String docId) {
+        // RDR-164 P1a / RDR-204 Phase 1: document_aspects_collection_fk is a REAL,
+        // always-enforced FK -- register the collection before upsertAspect.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(
+                org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), tenant, collection);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
         java.util.LinkedHashMap<String, Object> body = new java.util.LinkedHashMap<>();
         body.put("collection",             collection);
         body.put("source_path",            sourcePath);

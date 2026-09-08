@@ -3,6 +3,8 @@ package dev.nexus.service;
 import dev.nexus.service.db.CatalogIdentityConflictException;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.*;
 import org.postgresql.util.PSQLException;
@@ -99,9 +101,8 @@ class TaxonomyRepositoryTest {
         zeroVec.append(']');
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
-                + tenant + "', '" + collection + "') ON CONFLICT DO NOTHING");
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, collection);
             su.createStatement().execute(
                 "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
                 + "VALUES ('" + tenant + "', '" + collection + "', decode('" + chashHex + "', 'hex'), "
@@ -173,10 +174,8 @@ class TaxonomyRepositoryTest {
                 // rls_tenantA_cannotReadTenantB, rootTopicUniqueness_...otherTenantAllowed)
                 // write the SAME collection name under TENANT_B too.
                 for (String tenant : List.of(TENANT_A, TENANT_B)) {
-                    su.createStatement().execute(
-                        "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                        "VALUES ('" + tenant + "', '" + col + "') " +
-                        "ON CONFLICT (tenant_id, name) DO NOTHING");
+                    // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+                    PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, col);
                 }
             }
         }
@@ -1522,14 +1521,12 @@ class TaxonomyRepositoryTest {
      * outside startAll()'s bulk TENANT_A/TENANT_B registration.
      */
     private void registerReal(String tenant, String collection) {
+        // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection,
+        // which derives the constraint-satisfying attributes hygiene-002-1 now
+        // requires (the bare two-column insert this used to run 23502s on
+        // lifecycle_state NOT NULL).
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.insertInto(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS,
-                            dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID,
-                            dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME)
-               .values(tenant, collection)
-               .onConflict(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID,
-                           dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME).doNothing()
-               .execute();
+            PgContainerHelper.insertCollection(ctx, tenant, collection);
             return null;
         });
     }

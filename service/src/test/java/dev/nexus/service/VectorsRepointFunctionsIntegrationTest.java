@@ -239,13 +239,11 @@ class VectorsRepointFunctionsIntegrationTest {
             // that neither nexus.chunks nor nexus.taxonomy_centroids requires
             // (vectors-004/taxonomy-007 headers: no collection FK on either unified
             // table). Register the collection first so the topics insert below succeeds.
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
-                        + "ON CONFLICT (tenant_id, name) DO NOTHING")) {
-                ps.setString(1, TENANT);
-                ps.setString(2, collection);
-                ps.executeUpdate();
-            }
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection,
+            // which derives the constraint-satisfying attributes hygiene-002-1 now
+            // requires (the bare two-column raw INSERT this used to run 23502s on
+            // lifecycle_state NOT NULL).
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection);
 
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.catalog_documents "
@@ -884,10 +882,9 @@ class VectorsRepointFunctionsIntegrationTest {
                 su.setAutoCommit(true);
                 // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now carries
                 // chunks_collection_fk (tenant_id, collection) -> catalog_collections
-                // (tenant_id, name) — register the quarantine target first.
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
-                    + TENANT + "', '" + quarantineShared + "') ON CONFLICT (tenant_id, name) DO NOTHING");
+                // (tenant_id, name) — register the quarantine target first. RDR-204
+                // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, quarantineShared);
                 // Pre-existing quarantined row under dim 768, at the SHARED
                 // quarantine target, same chash.
                 try (PreparedStatement ps = su.prepareStatement(
@@ -970,10 +967,9 @@ class VectorsRepointFunctionsIntegrationTest {
                 su.setAutoCommit(true);
                 // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now carries
                 // chunks_collection_fk (tenant_id, collection) -> catalog_collections
-                // (tenant_id, name) — register the quarantine target first.
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
-                    + TENANT + "', '" + quarantineCollection + "') ON CONFLICT (tenant_id, name) DO NOTHING");
+                // (tenant_id, name) — register the quarantine target first. RDR-204
+                // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, quarantineCollection);
                 // Pre-existing row ALREADY at the origin collection, under a
                 // DIFFERENT dim (1024) than the row being restored (384).
                 try (PreparedStatement ps = su.prepareStatement(
@@ -1072,10 +1068,9 @@ class VectorsRepointFunctionsIntegrationTest {
                 su.setAutoCommit(true);
                 // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now carries
                 // chunks_collection_fk (tenant_id, collection) -> catalog_collections
-                // (tenant_id, name) — register the collection first.
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
-                    + TENANT + "', '" + collection + "') ON CONFLICT (tenant_id, name) DO NOTHING");
+                // (tenant_id, name) — register the collection first. RDR-204
+                // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection);
                 for (var doc : new Object[][] {{"relay-a", chashA}, {"relay-b", chashB}, {"relay-c", chashC}}) {
                     String tumbler = (String) doc[0];
                     byte[] chash = (byte[]) doc[1];

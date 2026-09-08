@@ -71,7 +71,6 @@ class VectorHandlerEmbeddingModeTest {
             PgContainerHelper.seedServiceToken(
                 DSL.using(su, SQLDialect.POSTGRES), TOKEN, TENANT, "pebfx2-mode-test");
         }
-
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
         cfg.setUsername("nexus_svc");
@@ -93,6 +92,28 @@ class VectorHandlerEmbeddingModeTest {
         service = new NexusService(0, TOKEN, svcDs, null, docRouter, pgRepo);
         service.start();
         http = HttpClient.newHttpClient();
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.3): AuthFilter runs the per-tenant,
+        // once-per-process ghost sweep on whichever request is TENANT's first
+        // against this service instance, and DELETES any collection it finds
+        // registered-but-chunkless at that moment. The warmup MUST run before
+        // the collection is registered at all (measured, nexus-ft04v Phase 1
+        // round 4: registering first and warming up second let the warmup
+        // ITSELF trigger the sweep and delete the row it had just registered,
+        // out from under every @Test method's write). Burn the sweep here
+        // first, THEN register.
+        var warmup = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+            .header("Authorization", "Bearer " + TOKEN)
+            .GET().build();
+        http.send(warmup, HttpResponse.BodyHandlers.ofString());
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK now -- register the fixture collection.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES),
+                TENANT, "knowledge__pebfx2__minilm-l6-v2-384__v1");
+        }
     }
 
     @AfterAll
@@ -288,6 +309,14 @@ class VectorHandlerEmbeddingModeTest {
         String embA = dev.nexus.service.db.Chash.ofText("emb-a").toHex();
         String embB = dev.nexus.service.db.Chash.ofText("emb-b").toHex();
         String embMissing = dev.nexus.service.db.Chash.ofText("emb-missing").toHex();
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): this test's own fixture collection,
+        // distinct from startAll's -- chunks_collection_fk is a REAL, always-
+        // enforced FK now, and TENANT's ghost sweep already ran (in startAll's
+        // warmup), so a plain registration here is safe.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES),
+                TENANT, "knowledge__pebfx7__minilm-l6-v2-384__v1");
+        }
         var up = post("/v1/vectors/upsert-chunks", Map.of(
             "collection", "knowledge__pebfx7__minilm-l6-v2-384__v1",
             "ids",        List.of(embB, embA),

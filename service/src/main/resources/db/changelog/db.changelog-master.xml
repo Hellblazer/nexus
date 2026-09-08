@@ -1191,6 +1191,29 @@
     <include file="db/changelog/search-path-002-qualify-vector-operator-functions.xml"/>
 
     <!--
+        RDR-204 Phase 1 fallout (bead nexus-ft04v.4/.5): retires the cross_collection
+        stub-register INSERT in nexus.assign_from_chashes_384/768/1024 (dead by
+        construction post-nexus-ft04v.7; see hygiene-003-assign-from-chashes-stub-
+        register.xml's own header for Sam's ninth-stub-path decision), replacing it
+        with a fail-loud guard. Placed after search-path-002 (the changelog that
+        currently owns these three functions' live bodies) so this CREATE OR REPLACE
+        always applies last.
+    -->
+    <include file="db/changelog/hygiene-003-assign-from-chashes-stub-register.xml"/>
+
+    <!--
+        RDR-204 Phase 1 fallout (nexus-ft04v.4): hygiene-002-2 redefined
+        nexus.gc_quarantine_orphans from vectors-005's shape (to add
+        lifecycle_state to its stub-insert) and, in doing so, silently
+        dropped catalog-033-2's gc_audit producer row and sample_limit
+        clamp. Restore both on top of hygiene-002-2's lifecycle_state-aware
+        body; see hygiene-004-gc-quarantine-orphans-audit-restore.xml's own
+        header for the full derivation. Placed after hygiene-003 so this
+        CREATE OR REPLACE always applies last.
+    -->
+    <include file="db/changelog/hygiene-004-gc-quarantine-orphans-audit-restore.xml"/>
+
+    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when

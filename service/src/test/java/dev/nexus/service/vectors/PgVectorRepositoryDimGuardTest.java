@@ -109,9 +109,15 @@ class PgVectorRepositoryDimGuardTest {
         var embedder = new ZeroEmbedder(1024);
         repo = new PgVectorRepository(tenantScope, embedder, embedder);
 
-        // Own-dim row via the real application write path — also registers
-        // nexus.catalog_collections for COLLECTION, satisfying the FK the
-        // foreign-dim raw insert below relies on.
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK now -- PgVectorRepository's stub-insert is retired, so
+        // the comment below is no longer true: the write path itself no longer
+        // registers the collection, this must happen explicitly first.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(
+                org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), TENANT, COLLECTION);
+        }
+        // Own-dim row via the real application write path.
         repo.upsertChunks(TENANT, COLLECTION,
             List.of(CHASH_OWN_DIM), List.of("own-dim chunk text"), List.of(Map.of()));
 
@@ -142,6 +148,12 @@ class PgVectorRepositoryDimGuardTest {
         // above); foreign-dim row via a direct superuser insert, same technique.
         var unitEmbedder = new UnitAxisEmbedder(1024);
         repoNullGuard = new PgVectorRepository(tenantScope, unitEmbedder, unitEmbedder);
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK now -- PgVectorRepository's stub-insert is retired.
+        try (Connection su2 = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(
+                org.jooq.impl.DSL.using(su2, org.jooq.SQLDialect.POSTGRES), TENANT, COLLECTION_NULLGUARD);
+        }
         repoNullGuard.upsertChunks(TENANT, COLLECTION_NULLGUARD,
             List.of(CHASH_NULLGUARD_OWN), List.of("own dim ng chunk text"), List.of(Map.of()));
         try (Connection su = pg.createConnection("");

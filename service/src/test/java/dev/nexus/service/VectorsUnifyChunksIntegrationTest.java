@@ -268,13 +268,11 @@ class VectorsUnifyChunksIntegrationTest {
     private static void seedChunk(PostgreSQLContainer<?> pg, int dim, String tenant, String collection,
                                    byte[] chash, String text) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            try (PreparedStatement stub = su.prepareStatement(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
-                        + "ON CONFLICT (tenant_id, name) DO NOTHING")) {
-                stub.setString(1, tenant);
-                stub.setString(2, collection);
-                stub.executeUpdate();
-            }
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection,
+            // which falls back to this exact bare two-column insert when lifecycle_state
+            // does not exist yet at this migration depth (column-existence guard) --
+            // safe at every migrateUpTo boundary this file exercises.
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, collection);
             // Bare (unqualified) ::vector, deliberately NOT ::nexus.vector: every caller
             // of seedChunk runs this at the migrateUpTo(rig.adminDs(), "vectors-004-1")
             // boundary, well before search-path-001 (placed near the changelog's end)
@@ -535,9 +533,10 @@ class VectorsUnifyChunksIntegrationTest {
                 // chunks_collection_fk (tenant_id, collection) -> catalog_collections
                 // (tenant_id, name) -- register 't1'/'c' first so the CHECK-constraint
                 // rejections below actually reach exactly_one_embedding, not the FK.
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('t1', 'c') "
-                    + "ON CONFLICT (tenant_id, name) DO NOTHING");
+                // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper
+                // .insertCollection (the bare two-column raw INSERT this used to run
+                // 23502s on lifecycle_state NOT NULL after the full migrate() above).
+                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), "t1", "c");
 
                 // Zero embeddings -> rejected.
                 assertThatThrownBy(() -> {
@@ -740,9 +739,10 @@ class VectorsUnifyChunksIntegrationTest {
 
             try (Connection su = rig.pg().createConnection("")) {
                 su.setAutoCommit(true);
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('t1', 'c') "
-                    + "ON CONFLICT (tenant_id, name) DO NOTHING");
+                // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper
+                // .insertCollection (the bare two-column raw INSERT this used to run
+                // 23502s on lifecycle_state NOT NULL after the full migrate() above).
+                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), "t1", "c");
 
                 // 31-byte chash -> rejected.
                 assertThatThrownBy(() -> {

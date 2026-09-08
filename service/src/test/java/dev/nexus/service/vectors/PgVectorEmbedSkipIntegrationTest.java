@@ -96,14 +96,9 @@ class PgVectorEmbedSkipIntegrationTest {
                 "code__embedskip-force-passthrough__voyage-code-3__v1",
                 "code__embedskip-failsafe__voyage-code-3__v1",
                 "knowledge__embedskip-cce__voyage-context-3__v1")) {
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             tenantScope.withTenant(TENANT_A, ctx -> {
-                ctx.insertInto(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS,
-                                dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID,
-                                dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME)
-                   .values(TENANT_A, col)
-                   .onConflict(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID,
-                               dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME).doNothing()
-                   .execute();
+                PgContainerHelper.insertCollection(ctx, TENANT_A, col);
                 return null;
             });
         }

@@ -104,14 +104,12 @@ class CombinedWriteRepositoryTest {
                 "code__cw9b__minilm-l6-v2-384__v1", "code__cw10__minilm-l6-v2-384__v1",
                 "code__cw11__minilm-l6-v2-384__v1", "code__cw12__minilm-l6-v2-384__v1",
                 "code__cw13__minilm-l6-v2-384__v1", "code__cw14__minilm-l6-v2-384__v1")) {
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection,
+            // which derives the constraint-satisfying attributes hygiene-002-1 now
+            // requires (the bare two-column insert this used to run 23502s on
+            // lifecycle_state NOT NULL).
             tenantScope.withTenant(TENANT_A, ctx -> {
-                ctx.insertInto(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS,
-                                dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID,
-                                dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME)
-                   .values(TENANT_A, col)
-                   .onConflict(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID,
-                               dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME).doNothing()
-                   .execute();
+                PgContainerHelper.insertCollection(ctx, TENANT_A, col);
                 return null;
             });
         }

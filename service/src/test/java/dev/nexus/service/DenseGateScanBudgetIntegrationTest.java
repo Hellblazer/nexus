@@ -8,6 +8,8 @@ import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -108,10 +110,10 @@ class DenseGateScanBudgetIntegrationTest {
     private void seedLiveShapedStore() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection,
+            // which derives content_type from each RDR-103-conformant name.
             for (String col : new String[] {COL_TARGET, COL_NOISE}) {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name, content_type) "
-                    + "VALUES ('" + TENANT + "', '" + col + "', 'rdr') ON CONFLICT DO NOTHING");
+                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, col);
             }
             // RDR-191 Phase 4: idx_chunks_384_embedding -> idx_chunks_embedding_384 on
             // the unified nexus.chunks table.

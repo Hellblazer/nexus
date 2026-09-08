@@ -94,10 +94,9 @@ class UpdatedAtTriggerTest {
             su.setAutoCommit(true);
             // Insert with a deliberately OLD updated_at (INSERT does not fire the
             // BEFORE UPDATE trigger), then UPDATE a single column.
-            // RDR-164 P1a: register collection 'c' (topics_collection_fk).
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT + "', 'c') "
-                + "ON CONFLICT (tenant_id, name) DO NOTHING");
+            // RDR-164 P1a: register collection 'c' (topics_collection_fk). RDR-204
+            // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "c");
             su.createStatement().execute(
                 "INSERT INTO nexus.topics (tenant_id, label, collection, doc_count, created_at, review_status, updated_at) "
                 + "VALUES ('" + TENANT + "', 'uat-topic', 'c', 0, now(), 'pending', '" + OLD_TS + "')");
@@ -120,9 +119,8 @@ class UpdatedAtTriggerTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // RDR-164 P1a: register collection 'c' (document_aspects_collection_fk).
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT + "', 'c') "
-                + "ON CONFLICT (tenant_id, name) DO NOTHING");
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "c");
             // hygiene-001 step 1 (nexus-tk070.p6a follow-on): doc_id/source_uri are NOT
             // NULL now -- seed a real catalog-document parent and supply both.
             su.createStatement().execute(

@@ -3,6 +3,8 @@ package dev.nexus.service;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -120,10 +122,7 @@ class ChashRepositoryTest {
                     {TENANT_A, "gate-rename-new-1-dst"},
                     {TENANT_A, "gate-deadlock-a"}, {TENANT_A, "gate-deadlock-b"},
                     {TENANT_A, "code__cr__minilm-l6-v2-384__v1"}}) {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                    "VALUES ('" + tc[0] + "', '" + tc[1] + "') " +
-                    "ON CONFLICT (tenant_id, name) DO NOTHING");
+                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tc[0], tc[1]);
             }
 
             // Multi-collection chash: 384 + 1024.

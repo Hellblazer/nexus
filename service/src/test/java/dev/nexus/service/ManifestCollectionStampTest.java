@@ -3,6 +3,8 @@ package dev.nexus.service;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -81,8 +83,8 @@ class ManifestCollectionStampTest {
             "title", "stamp doc", "content_type", "knowledge",
             "physical_collection", COLL));
         try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
-            st.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES ('" + TENANT + "', '" + COLL + "') ON CONFLICT DO NOTHING");
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL);
             st.execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
                 + "VALUES ('" + TENANT + "', '" + COLL + "', decode('" + CH_A + "', 'hex'), 'alpha text', "
                 + "('[' || repeat('0.1,', 1023) || '0.1]')::nexus.vector)");
@@ -103,8 +105,8 @@ class ManifestCollectionStampTest {
      */
     private void seedChunkContent(String coll, String chash, String text) throws Exception {
         try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
-            st.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES ('" + TENANT + "', '" + coll + "') ON CONFLICT DO NOTHING");
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, coll);
             st.execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
                 + "VALUES ('" + TENANT + "', '" + coll + "', decode('" + chash + "', 'hex'), '"
                 + text + "', ('[' || repeat('0.1,', 1023) || '0.1]')::nexus.vector) "
@@ -128,6 +130,18 @@ class ManifestCollectionStampTest {
             return;
         }
         if (!chashHex.matches("(?i)^[0-9a-f]+$")) {
+            return;
+        }
+        // writeManifest_blankOrNullCollection_rejectedLoudly_notSilentlySkipped's null
+        // case: a null collection has nothing sensible to seed a chunk row under
+        // (chunks_collection_fk requires a matching catalog_collections row, and
+        // there is no name to register one under). Skip seeding entirely so the
+        // ONLY exception the null-collection call can throw is repo.writeMani-
+        // fest's own requireNonBlank IllegalArgumentException -- the contract this
+        // test pins -- rather than an unrelated FK/NOT-NULL failure from this
+        // seeding helper. The blank ("") case seeds normally: "" is a valid, if
+        // unusual, NAME value and was never the problem.
+        if (collection == null) {
             return;
         }
         seedChunkContent(collection, chashHex, "stub " + chashHex);

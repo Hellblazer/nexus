@@ -162,14 +162,27 @@ class CatalogHandlerCollectionUpsertProfileSeedTest {
     }
 
     @Test
-    void registeringWithNoContentType_seedsNoProfileRow() throws Exception {
+    void registeringWithNoContentType_refuses422_namingTheField() throws Exception {
+        // RDR-204 Phase 1 (Sam's decision): the legacy no-content_type registration
+        // contract is retired -- hygiene-002-1's non-empty CHECK on content_type
+        // means every registration must carry one explicitly now. This used to
+        // assert 200 + no profile row seeded; it now asserts the fail-loud refusal
+        // CatalogRepository#upsertCollection raises instead, mirroring the
+        // embedding_model profile-conflict 422 shape.
         String tenant = "cloud-shaped-tenant-http-3";
+        String name = "legacy-name-" + tenant;
 
         CapturingExchange ex = post("/v1/catalog/collections/upsert",
-            "{\"name\":\"legacy-name-" + tenant + "\"}");
+            "{\"name\":\"" + name + "\"}");
         handleWithTenant(ex, tenant);
-        assertThat(ex.status).isEqualTo(200);
+        assertThat(ex.status).isEqualTo(422);
+        assertThat(ex.bodyString())
+            .as("the 422 body must name the missing field")
+            .contains("content_type");
 
+        assertThat(repo.getCollection(tenant, name))
+            .as("a refused registration must not land a catalog_collections row")
+            .isNull();
         assertThat(profileRows(tenant))
             .as("no content_type in the request -- nothing to seed a profile row against")
             .isEmpty();

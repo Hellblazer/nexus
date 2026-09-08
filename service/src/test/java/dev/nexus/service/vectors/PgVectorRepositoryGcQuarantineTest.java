@@ -189,7 +189,13 @@ class PgVectorRepositoryGcQuarantineTest {
         }
     }
 
-    private void seedChunk(String tenant, String collection, String chash, String text, String title) {
+    private void seedChunk(String tenant, String collection, String chash, String text, String title)
+            throws Exception {
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK now -- PgVectorRepository's stub-insert is retired.
+        try (var su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, collection);
+        }
         vectorRepo.upsertChunks(tenant, collection,
             List.of(chash), List.of(text), List.of(Map.of("title", title)));
     }

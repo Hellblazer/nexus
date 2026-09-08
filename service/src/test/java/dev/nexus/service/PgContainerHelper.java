@@ -481,6 +481,18 @@ public final class PgContainerHelper {
      * @param name     the collection name ({@code catalog_collections.name})
      */
     public static void insertCollection(DSLContext dsl, String tenantId, String name) {
+        // nexus-cbo4a fix (ManifestCollectionStampTest's "null collection is rejected
+        // the same way" case): catalog_collections.name is NOT NULL, so there is no
+        // sensible row to seed for a null name -- a no-op here. Before this guard, a
+        // null name reached the startsWith("quarantine-") check below and NPE'd,
+        // masking the writer-under-test's own IllegalArgumentException contract
+        // (requireNonBlank) behind an unrelated seeding-helper crash. Blank ("") is
+        // deliberately NOT included here: an empty NAME is a valid, if unusual,
+        // value that existing callers (e.g. this file's own blank-collection sibling
+        // test) rely on actually registering a row under, same as any other name.
+        if (name == null) {
+            return;
+        }
         if (!PgCatalogProbes.columnExists(dsl, "nexus", "catalog_collections", "lifecycle_state")) {
             dsl.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
                 .values(tenantId, name)

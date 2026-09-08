@@ -102,14 +102,12 @@ class ReferenceOnlyChunkUpsertTest {
         // RDR-204 Phase 1 (bead nexus-ft04v.7): PgVectorRepository's stub-insert is
         // retired — the upsertChunks seed call below now requires COL to already be
         // registered (CollectionRegistry.requireRegistered), or it fails loud.
+        // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection,
+        // which derives the constraint-satisfying attributes hygiene-002-1 now
+        // requires (the bare two-column insert this used to run 23502s on
+        // lifecycle_state NOT NULL).
         try (Connection conn = ds.getConnection()) {
-            DSL.using(conn, SQLDialect.POSTGRES)
-                .insertInto(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS,
-                            dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID,
-                            dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME)
-                .values(TENANT, COL)
-                .onConflictDoNothing()
-                .execute();
+            PgContainerHelper.insertCollection(DSL.using(conn, SQLDialect.POSTGRES), TENANT, COL);
         }
 
         // Seed a full-content chunk for the full→reference-only guard test.

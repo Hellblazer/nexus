@@ -9,7 +9,9 @@ import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.SQLDialect;
 import org.jooq.Table;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -265,9 +267,8 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
 
             for (int dim : new int[] {1024, 768, 384}) {
                 String coll = dim == 1024 ? COL_1024 : dim == 768 ? COL_768 : COL_384;
-                st.execute(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
-                    + TENANT + "', '" + coll + "') ON CONFLICT DO NOTHING");
+                // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, coll);
                 String embCol = DimTables.embeddingColumn(dim);
                 // Filler: CHUNKS_PER_DIM independently-random vectors (never collides with
                 // the single "nearest" row seeded below — see the method javadoc for why

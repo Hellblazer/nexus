@@ -5,7 +5,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
+import org.jooq.SQLDialect;
 import org.jooq.Table;
+import org.jooq.impl.DSL;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.util.ArrayList;
@@ -707,9 +709,11 @@ class GraphHopParityTest {
 
     private static void insertCollection(Connection su, String tenantId, String name)
             throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" +
-            tenantId + "', '" + name + "') ON CONFLICT (tenant_id, name) DO NOTHING");
+        // RDR-204 nexus-ft04v.4/.5: delegates to PgContainerHelper.insertCollection,
+        // which derives the constraint-satisfying attributes hygiene-002-1 now
+        // requires (the bare two-column raw INSERT this used to run 23502s on
+        // lifecycle_state NOT NULL).
+        PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenantId, name);
     }
 
     private static void setDeleted(Connection su, String tenantId, String tumbler, boolean deleted)

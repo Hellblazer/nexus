@@ -123,8 +123,20 @@ class CatalogTombstoneProtectedChunkCountTest {
         var embedder = new PgVectorRepositoryContractTest.FakeEmbedder(384);
         vecRepo = new PgVectorRepository(tenantScope, embedder, embedder);
 
-        catalogRepo.upsertCollection(TENANT, Map.of("name", COLLECTION_A));
-        catalogRepo.upsertCollection(TENANT, Map.of("name", COLLECTION_B));
+        // RDR-204 nexus-ft04v.4/.5: hygiene-002-1's non-empty CHECK on content_type/
+        // embedding_model means a registration naming only "name" now 23514s (the
+        // repository's contentType/requestedModel default to blank when the map omits
+        // them, per CatalogRepository#upsertCollection's own docstring: "new
+        // registrations carry content_type explicitly"). Both names are RDR-103
+        // conformant (knowledge__<owner>__minilm-l6-v2-384__v1) so content_type/
+        // owner_id/embedding_model below are exactly what a real client derives from
+        // the name before calling this route.
+        catalogRepo.upsertCollection(TENANT, Map.of("name", COLLECTION_A,
+            "content_type", "knowledge", "owner_id", "tombstone-protected-count-a",
+            "embedding_model", "minilm-l6-v2-384"));
+        catalogRepo.upsertCollection(TENANT, Map.of("name", COLLECTION_B,
+            "content_type", "knowledge", "owner_id", "tombstone-protected-count-b",
+            "embedding_model", "minilm-l6-v2-384"));
 
         registerDoc(DOC_LIVE_ONLY,   "Live Only",   COLLECTION_A);
         registerDoc(DOC_TOMB_ONLY,   "Tomb Only",   COLLECTION_A);

@@ -116,7 +116,13 @@ class IndexRunFenceTest {
                                           (dev.nexus.service.vectors.Embedder) null);
         vectorHandler = new VectorHandler(null, vecRepo);
 
-        repo.upsertCollection(TENANT, Map.of("name", COLLECTION, "content_type", "knowledge"));
+        // RDR-204 nexus-ft04v.4/.5: hygiene-002-1's non-empty CHECK on embedding_model
+        // means the requestedModel-blank fallback 23514s now with no embedding_profile
+        // row seeded for this tenant/content_type -- name the model explicitly (the
+        // COLLECTION name's own token, a real client's derivation before calling this
+        // route).
+        repo.upsertCollection(TENANT, Map.of("name", COLLECTION, "content_type", "knowledge",
+            "owner_id", "irf-owner", "embedding_model", "voyage-context-3"));
     }
 
     @AfterAll

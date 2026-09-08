@@ -9,6 +9,8 @@ import com.sun.net.httpserver.HttpPrincipal;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -212,13 +214,8 @@ class TaxonomyHandlerAssignFromChashesTest {
     private void registerCollection(String collection) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?)"
-                    + " ON CONFLICT (tenant_id, name) DO NOTHING")) {
-                ps.setString(1, TENANT);
-                ps.setString(2, collection);
-                ps.executeUpdate();
-            }
+            // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection);
         }
     }
 
