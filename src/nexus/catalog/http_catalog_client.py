@@ -3291,14 +3291,23 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         ``GET /manifest/chashes`` envelope carries ``tombstone_protected_count``
         (of *chashes*, how many are referenced by a tombstoned document only,
         tenant-wide — see ``CatalogRepository.tombstoneProtectedChunkCount``)
-        as an ADDITIVE field; an engine older than the one that shipped it
-        simply omits the key. The second element is ``None`` in that case —
-        NEVER coerced to ``0`` — so a caller (``nx t3 gc``) can tell "verified
-        zero" from "this engine cannot answer that question" and report the
-        difference honestly instead of printing a confident zero that is
-        actually unknown.
+        as an ADDITIVE, OPT-IN field: it is computed only when this method
+        passes ``with_tombstone_protected=1`` (the sibling
+        :meth:`chashes_for_collection` never passes it, so the indexer's hot
+        per-collection call pays nothing extra — code review T2
+        nexus/critique-nexus-zewg3-engine-side Significant 1). An engine
+        older than the one that shipped the field, or a response that
+        omitted the param, simply omits the key. The second element is
+        ``None`` in that case — NEVER coerced to ``0`` — so a caller (``nx
+        t3 gc``) can tell "verified zero" from "this engine cannot answer
+        that question" and report the difference honestly instead of
+        printing a confident zero that is actually unknown.
         """
-        result = self._get("/manifest/chashes", collection=physical_collection)
+        result = self._get(
+            "/manifest/chashes",
+            collection=physical_collection,
+            with_tombstone_protected="1",
+        )
         result = result if isinstance(result, dict) else {}
         chashes = self._manifest_chashes_reconciled(physical_collection, result)
         tombstone_protected = (
