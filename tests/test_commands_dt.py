@@ -2248,6 +2248,32 @@ class TestPageCoverage:
         assert _missing_pages([], 0) == []
         assert _missing_pages([2, 2, 1], 2) == []
 
+    def test_stamp_writes_devonthink_title_url_year(self, monkeypatch, tmp_path):
+        """critique [24937] Critical 2: DEVONthink's name becomes the catalog title."""
+        import nexus.commands.dt as dt_mod
+        from types import SimpleNamespace
+
+        updates: list[tuple] = []
+
+        class _Reader:
+            def find_by_file_path(self, p):
+                return SimpleNamespace(tumbler="1.12.9", title="pdf guess", year=0)
+            def close(self): pass
+
+        class _Writer:
+            def update(self, tumbler, **fields):
+                updates.append((tumbler, fields))
+            def close(self): pass
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _Reader())
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", lambda priority="": _Writer())
+        facts = {"name": "DT Name", "url": "https://x/y.pdf", "year": 2013, "page_count": 20}
+        assert dt_mod._stamp_dt_uri_on_entry(tmp_path / "a.pdf", "U1", facts=facts)
+        tumbler, fields = updates[0]
+        assert fields["title"] == "DT Name" and fields["year"] == 2013
+        assert fields["source_uri"] == "x-devonthink-item://U1"
+        assert fields["meta"]["devonthink_url"] == "https://x/y.pdf" and fields["meta"]["devonthink_page_count"] == 20
+
     def test_record_facts_from_dt_properties(self, monkeypatch):
         import nexus.commands.dt as dt_mod
 
@@ -2322,6 +2348,19 @@ class TestPageCoverage:
         assert result.exit_code == 0, result.output
         assert "1 page coverage unverified" in result.output
         assert "no per-page text" in result.output
+
+    def test_zero_page_count_is_unverified_not_silent(self, runner, fake_selectors, monkeypatch):
+        """code review [24938] finding 2: DT reachable but pageCount 0."""
+        from nexus.cli import main
+        import nexus.commands.dt as dt_mod
+
+        fake_selectors["selection"].return_value = [("U", "/a.pdf")]
+        self._dispatch(monkeypatch, [1, 2])
+        monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "year": 0, "page_count": 0})
+        result = runner.invoke(main, ["dt", "index", "--selection"])
+        assert result.exit_code == 0, result.output
+        assert "1 page coverage unverified" in result.output
+        assert "reports no pageCount" in result.output
 
     def test_unreachable_dt_is_unverified_not_covered(self, runner, fake_selectors, monkeypatch):
         from nexus.cli import main

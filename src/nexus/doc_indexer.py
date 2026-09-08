@@ -2161,7 +2161,8 @@ def _pdf_chunks(
     )
     if extraction_stats is not None:
         extraction_stats["page_count"] = int(result.metadata.get("page_count", 0) or 0)
-        extraction_stats["pages_with_text"] = list(result.metadata.get("pages_with_text") or [])
+        _pwt = result.metadata.get("pages_with_text")
+        extraction_stats["pages_with_text"] = list(_pwt) if _pwt is not None else None
     chunker = PDFChunker(chunk_chars=chunk_chars) if chunk_chars is not None else PDFChunker()
     chunks = chunker.chunk(result.text, result.metadata)
     if not chunks:
@@ -2845,7 +2846,7 @@ def index_pdf(
                     "title": all_meta[0].get("title", "") if all_meta else "",
                     "author": all_meta[0].get("source_author", "") if all_meta else "",
                                     "page_count": _extraction_stats.get("page_count", 0),
-                    "pages_with_text": list(_extraction_stats.get("pages_with_text", [])),
+                    "pages_with_text": _extraction_stats.get("pages_with_text"),
                 }
             return count
 
@@ -2929,7 +2930,7 @@ def index_pdf(
                 "title": metadatas[0].get("title", "") if metadatas else "",
                 "author": metadatas[0].get("source_author", "") if metadatas else "",
                             "page_count": _extraction_stats.get("page_count", 0),
-                "pages_with_text": list(_extraction_stats.get("pages_with_text", [])),
+                "pages_with_text": _extraction_stats.get("pages_with_text"),
             }
         return count
 
@@ -3107,7 +3108,7 @@ def index_pdf(
             "title": metadatas_list[0].get("source_title", "") if metadatas_list else "",
             "author": metadatas_list[0].get("source_author", "") if metadatas_list else "",
                     "page_count": _extraction_stats.get("page_count", 0),
-            "pages_with_text": list(_extraction_stats.get("pages_with_text", [])),
+            "pages_with_text": _extraction_stats.get("pages_with_text"),
         }
     return len(prepared)
 

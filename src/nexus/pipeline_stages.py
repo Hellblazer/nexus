@@ -1113,7 +1113,10 @@ def pipeline_index_pdf(
     if extraction_stats is not None:
         _em = getattr(extraction_result, "metadata", None) or {}
         extraction_stats["page_count"] = int(_em.get("page_count", 0) or 0)
-        extraction_stats["pages_with_text"] = list(_em.get("pages_with_text") or [])
+        # None when the extraction predates the field (a resumed pipeline
+        # buffer written by an older version): "unverified", never "no pages".
+        _pwt = _em.get("pages_with_text")
+        extraction_stats["pages_with_text"] = list(_pwt) if _pwt is not None else None
 
     # Resolve collection once for all post-passes (avoids repeated API calls).
     col = t3.get_or_create_collection(collection)

@@ -963,7 +963,8 @@ class PDFExtractor:
                 f"PDF not found or not a regular file: {pdf_path}"
             )
 
-        # nexus-i0cwh: every backend fires on_page per page with
+        # nexus-i0cwh: every backend fires on_page per page (or per MinerU
+        # batch, which then names its pages in ``page_numbers``) with
         # ``text_length``; the pages that produced text are the coverage
         # oracle's input (chunk page numbers only mark where chunks START,
         # so a 20-page deck in 7 chunks would read as 13 missing pages).
@@ -974,8 +975,9 @@ class PDFExtractor:
             length = page_metadata.get("text_length")
             if length is None:
                 length = len(page_text or "")
-            if isinstance(number, int) and length and int(length) > 0:
-                pages_with_text.add(number)
+            if length and int(length) > 0:
+                numbers = page_metadata.get("page_numbers") or ([number] if isinstance(number, int) else [])
+                pages_with_text.update(int(n) for n in numbers)
             if on_page is not None:
                 on_page(page_index, page_text, page_metadata)
 
@@ -1443,7 +1445,13 @@ class PDFExtractor:
             # without per-page md from MinerU). on_page/md_parts/content fire
             # once for the batch; per_page_lengths is the distributed form.
             if on_page is not None:
-                on_page(s, md, {"page_number": s + 1, "text_length": len(md)})
+                # page_numbers names every page the batch md covers, so the
+                # pages_with_text collector counts the whole batch, not its
+                # first page (critique [24937] S3).
+                on_page(s, md, {
+                    "page_number": s + 1, "text_length": len(md),
+                    "page_numbers": list(range(s + 1, s + 1 + max(1, batch_pages))),
+                })
             md_parts.append(md)
             _rebase_page_idx(content_list, s)
             all_content_list.extend(content_list)

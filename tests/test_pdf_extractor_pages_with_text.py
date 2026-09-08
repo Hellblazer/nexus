@@ -42,3 +42,18 @@ def test_caller_on_page_still_fires(monkeypatch, tmp_path: Path) -> None:
     seen: list[int] = []
     PDFExtractor().extract(pdf, extractor="docling", on_page=lambda i, t, m: seen.append(m["page_number"]))
     assert seen == [1, 2]
+
+
+def test_mineru_batch_metadata_counts_every_page_of_the_batch(monkeypatch, tmp_path: Path) -> None:
+    """A batch callback carrying page_numbers marks all of them (critique [24937] S3)."""
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+
+    def dispatch(self, pdf_path, *, extractor, on_formula_oom, on_page):
+        on_page(0, "batch text " * 10, {"page_number": 1, "text_length": 100, "page_numbers": [1, 2, 3]})
+        on_page(3, "", {"page_number": 4, "text_length": 0, "page_numbers": [4, 5]})
+        return ExtractionResult(text="batch text", metadata={"page_count": 5})
+    monkeypatch.setattr(PDFExtractor, "_extract_dispatch", dispatch)
+    monkeypatch.setattr("nexus.pdf_extractor._enforce_extraction_quality", lambda *a, **k: None)
+    result = PDFExtractor().extract(pdf, extractor="mineru")
+    assert result.metadata["pages_with_text"] == [1, 2, 3]

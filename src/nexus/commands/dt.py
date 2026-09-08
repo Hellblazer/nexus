@@ -336,6 +336,11 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str, facts: dict | None = None
         meta: dict = {"devonthink_uri": dt_uri}
         fields: dict = {}
         if facts:
+            # The catalog title is DEVONthink's record name (the bead's
+            # acceptance names DEVONthink's title/url/year), not the
+            # indexer's PDF-derived guess.
+            if facts.get("name") and facts["name"] != getattr(entry, "title", ""):
+                fields["title"] = facts["name"]
             if facts.get("url"):
                 meta["devonthink_url"] = facts["url"]
             if facts.get("page_count"):
@@ -936,6 +941,7 @@ def index_cmd(
     coverage_failed = 0
     coverage_unverified = 0
     unverified_no_pages = 0
+    unverified_no_page_count = 0
     page_gap_allowed = 0
     _reset_facts_cache()
     # nexus-l6tr7: refusals that PROPAGATED (streaming/incremental path) and
@@ -1245,11 +1251,16 @@ def index_cmd(
         # was checked when it was indexed).
         if ext == ".pdf" and chunks:
             facts = _dt_record_facts(uuid) if pages_seen is not None else None
-            if pages_seen is None or facts is None:
+            if pages_seen is None or facts is None or facts["page_count"] <= 0:
+                # Unverified, never covered (code review [24938] finding 2:
+                # a DT record with no usable pageCount must not vanish from
+                # the tally).
                 coverage_unverified += 1
                 if pages_seen is None:
                     unverified_no_pages += 1
-            elif facts["page_count"] > 0:
+                elif facts is not None:
+                    unverified_no_page_count += 1
+            else:
                 missing = _missing_pages(pages_seen, facts["page_count"])
                 _stamp_page_gap(uuid, missing)  # records a gap, or clears a stale one
                 if missing:
@@ -1257,7 +1268,8 @@ def index_cmd(
                     detail = (
                         f"page coverage: {seen_n} of {facts['page_count']} pages produced text; "
                         f"missing pages {', '.join(str(n) for n in missing)} (DEVONthink pageCount vs "
-                        "chunk page_number). Re-run with --extractor mineru, or --allow-page-gap to accept."
+                        "the pages the extractor produced text for). Re-run with --extractor mineru, "
+                        "or --allow-page-gap to accept."
                     )
                     if allow_page_gap:
                         page_gap_allowed += 1
@@ -1314,10 +1326,15 @@ def index_cmd(
     click.echo(summary)
     if coverage_unverified:
         reasons = []
-        if coverage_unverified - unverified_no_pages:
+        unreachable = coverage_unverified - unverified_no_pages - unverified_no_page_count
+        if unreachable:
             reasons.append(
-                f"{coverage_unverified - unverified_no_pages} with the DEVONthink MCP unreachable "
+                f"{unreachable} with the DEVONthink MCP unreachable "
                 "(pageCount could not be read; re-run with DEVONthink running)"
+            )
+        if unverified_no_page_count:
+            reasons.append(
+                f"{unverified_no_page_count} where DEVONthink reports no pageCount for the record"
             )
         if unverified_no_pages:
             reasons.append(
