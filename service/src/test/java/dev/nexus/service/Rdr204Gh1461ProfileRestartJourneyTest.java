@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_PROFILE;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -195,14 +196,17 @@ class Rdr204Gh1461ProfileRestartJourneyTest {
     private boolean chunkExists(String tenant, String collection, String hexChash, int dim) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            var ps = su.prepareStatement(
-                "SELECT 1 FROM " + DimTables.CHUNKS_TABLE_NAME
-                + " WHERE tenant_id = ? AND collection = ? AND chash = ? AND "
-                + DimTables.embeddingColumn(dim) + " IS NOT NULL");
-            ps.setString(1, tenant);
-            ps.setString(2, collection);
-            ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
-            return ps.executeQuery().next();
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            // The dim-specific embedding column has no fixed generated field (one per width),
+            // so it is resolved by name against the generated CHUNKS table.
+            var embedding = DSL.field(DSL.name(DimTables.embeddingColumn(dim)), Object.class);
+            return ctx.fetchExists(
+                ctx.selectOne()
+                    .from(CHUNKS)
+                    .where(CHUNKS.TENANT_ID.eq(tenant))
+                    .and(CHUNKS.COLLECTION.eq(collection))
+                    .and(CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(hexChash)))
+                    .and(embedding.isNotNull()));
         }
     }
 
