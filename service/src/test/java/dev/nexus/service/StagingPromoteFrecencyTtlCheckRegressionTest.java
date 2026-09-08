@@ -9,7 +9,9 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.Field;
 import org.jooq.SQLDialect;
+import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -24,6 +26,7 @@ import java.net.http.HttpResponse;
 import java.sql.Connection;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.FRECENCY;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -133,18 +136,23 @@ class StagingPromoteFrecencyTtlCheckRegressionTest {
         // Existing nexus.frecency row: ttl_days = NULL (post-migration
         // permanent sentinel — as if telemetry-006-1 already ran).
         scope.withTenant(TENANT, ctx -> {
-            ctx.execute(
-                "INSERT INTO nexus.frecency (tenant_id, chunk_id, ttl_days) VALUES (?, ?, NULL)",
-                TENANT, CHUNK_ID);
+            ctx.insertInto(FRECENCY, FRECENCY.TENANT_ID, FRECENCY.CHUNK_ID, FRECENCY.TTL_DAYS)
+                .values(TENANT, CHUNK_ID, (Integer) null)
+                .execute();
             return null;
         });
         // Staged row, SAME chunk_id: ttl_days = 0 (staging carries no CHECK
         // — still representable there, the exact legacy shape this
-        // scenario models).
+        // scenario models). staging.frecency carries no jOOQ codegen (only
+        // nexus/t1 are generated) — schema-agnostic DSL.table/DSL.field.
+        Table<?> stagingFrecency = DSL.table(DSL.name("staging", "frecency"));
+        Field<String> stagingTenantId = DSL.field(DSL.name("tenant_id"), String.class);
+        Field<String> stagingChunkId = DSL.field(DSL.name("chunk_id"), String.class);
+        Field<Integer> stagingTtlDays = DSL.field(DSL.name("ttl_days"), Integer.class);
         scope.withTenant(TENANT, ctx -> {
-            ctx.execute(
-                "INSERT INTO staging.frecency (tenant_id, chunk_id, ttl_days) VALUES (?, ?, 0)",
-                TENANT, CHUNK_ID);
+            ctx.insertInto(stagingFrecency, stagingTenantId, stagingChunkId, stagingTtlDays)
+                .values(TENANT, CHUNK_ID, 0)
+                .execute();
             return null;
         });
 
@@ -169,10 +177,10 @@ class StagingPromoteFrecencyTtlCheckRegressionTest {
 
         // Ground truth: the pre-existing NULL row must survive UNCHANGED —
         // a failed transaction must not leave a partial write behind.
-        int stillNull = scope.withTenant(TENANT, ctx -> ctx.fetchOne(
-            "SELECT count(*) FROM nexus.frecency WHERE tenant_id = '" + TENANT
-            + "' AND chunk_id = '" + CHUNK_ID + "' AND ttl_days IS NULL")
-            .get(0, Integer.class));
+        int stillNull = scope.withTenant(TENANT, ctx -> ctx.fetchCount(FRECENCY,
+            FRECENCY.TENANT_ID.eq(TENANT)
+                .and(FRECENCY.CHUNK_ID.eq(CHUNK_ID))
+                .and(FRECENCY.TTL_DAYS.isNull())));
         assertThat(stillNull)
             .as("the failed merge must not have partially applied — the existing "
                 + "row's NULL ttl_days must be untouched")

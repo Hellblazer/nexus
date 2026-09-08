@@ -203,13 +203,16 @@ class PlanRepositoryTest {
             throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            String used = usedDaysAgo == null
-                ? "NULL"
-                : "now() - interval '" + usedDaysAgo + " days'";
-            su.createStatement().execute(
-                "UPDATE nexus.plans SET created_at = now() - interval '"
-                + createdDaysAgo + " days', last_used = " + used
-                + " WHERE id = " + id);
+            OffsetDateTime createdAt = OffsetDateTime.now(ZoneOffset.UTC).minusDays(createdDaysAgo);
+            OffsetDateTime lastUsed = usedDaysAgo == null
+                ? null
+                : OffsetDateTime.now(ZoneOffset.UTC).minusDays(usedDaysAgo);
+            DSL.using(su, SQLDialect.POSTGRES)
+                .update(PLANS)
+                .set(PLANS.CREATED_AT, createdAt)
+                .set(PLANS.LAST_USED, lastUsed)
+                .where(PLANS.ID.eq(id))
+                .execute();
         }
     }
 
@@ -284,12 +287,9 @@ class PlanRepositoryTest {
     //    used by listActivePlans/searchPlans/listPlans AND this sweep) ─────────
 
     private boolean planRowExists(long id) throws Exception {
-        try (Connection su = pg.createConnection("");
-             var ps = su.prepareStatement("SELECT 1 FROM nexus.plans WHERE id = ?")) {
-            ps.setLong(1, id);
-            try (var rs = ps.executeQuery()) {
-                return rs.next();
-            }
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .fetchExists(DSL.selectOne().from(PLANS).where(PLANS.ID.eq(id)));
         }
     }
 
