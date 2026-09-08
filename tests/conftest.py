@@ -193,7 +193,10 @@ def _gate_on_build_lease() -> None:
     try:
         from tests.db._service_fixture import build_lease_wait_seconds, wait_for_build_lease
         reason = wait_for_build_lease(build_lease_wait_seconds())
-    except Exception:  # noqa: BLE001 — the gate must never break collection on its own bug
+    except Exception as exc:  # noqa: BLE001 — the gate must never break collection on its own bug
+        import sys as _sys
+
+        _sys.stderr.write(f"build-lease gate skipped on its own error (nexus-pv93h): {exc!r}\n")
         return
     if reason is None:
         return

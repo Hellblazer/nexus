@@ -14,7 +14,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LIB = REPO_ROOT / "scripts" / "lib" / "build-lease.sh"
 EXEMPT = {LIB, REPO_ROOT / "scripts" / "lib" / "build-lease_test.sh"}
-_BARE = re.compile(r"^\s*build_lease_acquire\s")
+#: A call anywhere on a non-comment line: start of line, or after `&&`, `||`, `;`, `(`, `{`, `then`, `do`.
+_BARE = re.compile(r"(?:^|&&|\|\||;|\(|\{|\bthen\b|\bdo\b)\s*build_lease_acquire\s")
 
 
 def _shell_files():
@@ -32,7 +33,9 @@ def test_no_bare_acquire_outside_the_lease_library() -> None:
             continue
         checked += 1
         for n, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
-            if _BARE.match(line):
+            if line.lstrip().startswith("#"):
+                continue
+            if _BARE.search(line):
                 offenders.append(f"{path.relative_to(REPO_ROOT)}:{n}: {line.strip()}")
     assert checked > 10, "the sweep examined almost nothing; check the roots"
     assert not offenders, "use build_lease_acquire_wait service \"${NX_BUILD_LEASE_WAIT:-3600}\" ...:\n" + "\n".join(offenders)
