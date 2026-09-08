@@ -303,6 +303,9 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         neither("/collections/upsert", "handleCollectionUpsert"),
         collectionExempt("/collections/list", "handleCollectionList", ADMIN_SCALE),
         neither("/collections/get", "handleCollectionGet"),
+        // RDR-204 Phase 2 (nexus-ft04v.33): one row per profiled content type,
+        // bounded by the content-type vocabulary; emits count.
+        collectionOk("/embedding_profile", "handleEmbeddingProfile"),
         neither("/collections/supersede", "handleCollectionSupersede"),
         neither("/collections/rename", "handleCollectionRename"),
         neither("/collections/delete", "handleCollectionDelete"),

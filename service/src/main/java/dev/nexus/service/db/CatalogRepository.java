@@ -6464,6 +6464,42 @@ public final class CatalogRepository {
         });
     }
 
+    /**
+     * RDR-204 Phase 2 (bead nexus-ft04v.33, engine half): the calling tenant's
+     * {@code nexus.embedding_profile} rows — one per content type the engine
+     * has profiled for it — as the read surface the Phase 3 client accessor
+     * and the {@code nx doctor} profile row consume. READ-ONLY: the engine is
+     * the only writer of the profile (Technical Design 1a); this method never
+     * seeds, so an unprofiled tenant gets an EMPTY list, never a default —
+     * a reader that invents a model reintroduces the GH #667 class.
+     *
+     * <p>RLS scopes the read to {@code tenant} through the {@code
+     * nexus.tenant} GUC that {@link TenantScope#withTenant} stamps; the
+     * explicit {@code TENANT_ID} predicate is belt-and-braces, not the
+     * isolation mechanism. Ordered by content type so the wire shape is
+     * deterministic.
+     *
+     * @return rows of {@code content_type}, {@code embedding_model},
+     *         {@code dimension}; empty when the tenant has no profile yet
+     */
+    public List<Map<String, Object>> embeddingProfile(String tenant) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(EMBEDDING_PROFILE.CONTENT_TYPE, EMBEDDING_PROFILE.EMBEDDING_MODEL,
+                       EMBEDDING_PROFILE.DIMENSION)
+               .from(EMBEDDING_PROFILE)
+               .where(EMBEDDING_PROFILE.TENANT_ID.eq(tenant))
+               .orderBy(EMBEDDING_PROFILE.CONTENT_TYPE)
+               .fetch()
+               .map(r -> {
+                   Map<String, Object> row = new LinkedHashMap<>();
+                   row.put("content_type", r.value1());
+                   row.put("embedding_model", r.value2());
+                   row.put("dimension", r.value3());
+                   return row;
+               })
+        );
+    }
+
     /** List all collections. Delegates to {@link #listCollections(String, String, String)}
      *  with no filters — byte-for-byte the pre-P2.4 unfiltered result. */
     public List<Map<String, Object>> listCollections(String tenant) {
