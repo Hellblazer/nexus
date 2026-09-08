@@ -6,10 +6,15 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
+import dev.nexus.service.jooq.nexus.tables.records.TaxonomyCentroidsRecord;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.TaxonomyCentroidRepository;
 import dev.nexus.service.vectors.TaxonomyCentroidRepository.AnnHit;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
 import org.jooq.Table;
+import org.jooq.TableField;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -17,8 +22,8 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.util.List;
+import java.util.Random;
 
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_384;
@@ -115,6 +120,10 @@ class TaxonomyCentroidAnnPlanShapeTest {
         // above for the actual HNSW-bind proof.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            // KEPT RAW (all five statements): no typed jOOQ DDL form for a conditional
+            // CREATE ROLE via DO $$, GRANT USAGE ON SCHEMA, a multi-privilege GRANT ON
+            // TABLE, or ALTER ROLE ... SET -- none covered by a nexus_test bootstrap
+            // function this round (candidates for one, per the task brief).
             su.createStatement().execute(
                 "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '"
                 + SVC_ROLE_REALCALL + "') THEN CREATE ROLE " + SVC_ROLE_REALCALL
@@ -181,43 +190,53 @@ class TaxonomyCentroidAnnPlanShapeTest {
     private void seedFixtures() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            var st = su.createStatement();
-            // Deterministic filler positions (CLAUDE.md: seeded randomness) — the exact
-            // values don't matter, only that they are NOT all identical.
-            st.execute("SELECT setseed(0.42)");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            // Deterministic filler positions (CLAUDE.md: seeded randomness) -- a
+            // client-side seeded Random replaces the retired setseed(0.42)/random()
+            // SQL-side generation (nexus-cbo4a: the raw generate_series/LATERAL/
+            // array_agg bulk insert this used to build has no typed jOOQ DSL form,
+            // so the filler vectors are now generated in Java and bound directly).
+            // The exact values don't matter, only that they are NOT all identical.
+            Random rnd = new Random(42);
 
             for (int dim : new int[] {1024, 768, 384}) {
                 String coll = dim == 1024 ? COL_1024 : dim == 768 ? COL_768 : COL_384;
-                String embCol = DimTables.embeddingColumn(dim);
+                TableField<TaxonomyCentroidsRecord, Vector> embCol = embeddingField(dim);
                 // Filler: CENTROIDS_PER_DIM independently-random vectors (never collides
                 // with the single "nearest" row seeded below — see the method javadoc).
-                st.execute(
-                    "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, "
-                    + embCol + ", label, doc_count) "
-                    + "SELECT '" + TENANT + "', '" + coll + "', i, v.vec, 'filler', 1 "
-                    + "FROM generate_series(1, " + CENTROIDS_PER_DIM + ") i "
-                    + "CROSS JOIN LATERAL (SELECT (array_agg(random() * 2 - 1))::nexus.vector AS vec"
-                    + "                    FROM generate_series(1, " + dim + ")) v");
+                var insert = ctx.insertInto(TAXONOMY_CENTROIDS,
+                    TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                    TAXONOMY_CENTROIDS.TOPIC_ID, embCol,
+                    TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT);
+                for (int i = 1; i <= CENTROIDS_PER_DIM; i++) {
+                    insert = insert.values(TENANT, coll, (long) i, fillerVector(rnd, dim), "filler", 1);
+                }
+                insert.execute();
                 // The single nearest row: unit vector along the first axis.
-                st.execute(
-                    "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, "
-                    + embCol + ", label, doc_count) VALUES ('"
-                    + TENANT + "', '" + coll + "', " + (CENTROIDS_PER_DIM + dim) + ", "
-                    + "('[1' || repeat(',0', " + (dim - 1) + ") || ']')::nexus.vector, 'nearest', 1)");
+                ctx.insertInto(TAXONOMY_CENTROIDS,
+                        TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                        TAXONOMY_CENTROIDS.TOPIC_ID, embCol,
+                        TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT)
+                    .values(TENANT, coll, (long) (CENTROIDS_PER_DIM + dim), queryVec(dim), "nearest", 1)
+                    .execute();
                 PgContainerHelper.analyzeTable(su, TAXONOMY_CENTROIDS);
             }
 
             // Mixed-dim collection: topic 1 at 384-dim (near), topic 2 at 768-dim (near
             // in ITS own space) — disjoint topic_ids, same (tenant, collection), two
             // different populated embedding columns on two different physical rows.
-            st.execute(
-                "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, embedding_384, label, doc_count) "
-                + "VALUES ('" + TENANT + "', '" + COL_MIXED + "', 1, "
-                + "('[1' || repeat(',0', 383) || ']')::nexus.vector, 'mixed-384', 1)");
-            st.execute(
-                "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, embedding_768, label, doc_count) "
-                + "VALUES ('" + TENANT + "', '" + COL_MIXED + "', 2, "
-                + "('[1' || repeat(',0', 767) || ']')::nexus.vector, 'mixed-768', 1)");
+            ctx.insertInto(TAXONOMY_CENTROIDS,
+                    TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                    TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_384,
+                    TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT)
+                .values(TENANT, COL_MIXED, 1L, queryVec(384), "mixed-384", 1)
+                .execute();
+            ctx.insertInto(TAXONOMY_CENTROIDS,
+                    TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                    TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_768,
+                    TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT)
+                .values(TENANT, COL_MIXED, 2L, queryVec(768), "mixed-768", 1)
+                .execute();
             PgContainerHelper.analyzeTable(su, TAXONOMY_CENTROIDS);
         }
     }
@@ -239,6 +258,28 @@ class TaxonomyCentroidAnnPlanShapeTest {
     private static Vector queryVec(int dim) {
         float[] v = new float[dim];
         v[0] = 1.0f;
+        return Vector.of(v);
+    }
+
+    /** The generated {@code embedding_<dim>} column for {@code dim}, replacing
+     *  {@link DimTables#embeddingColumn(int)}'s string column name with a typed field. */
+    private static TableField<TaxonomyCentroidsRecord, Vector> embeddingField(int dim) {
+        return switch (dim) {
+            case 384 -> TAXONOMY_CENTROIDS.EMBEDDING_384;
+            case 768 -> TAXONOMY_CENTROIDS.EMBEDDING_768;
+            case 1024 -> TAXONOMY_CENTROIDS.EMBEDDING_1024;
+            default -> throw new IllegalArgumentException("unsupported dim: " + dim);
+        };
+    }
+
+    /** A length-{@code dim} vector of independently-random components in [-1, 1),
+     *  replacing the retired {@code generate_series/LATERAL/array_agg(random())}
+     *  SQL-side generation -- see {@link #seedFixtures}'s own javadoc. */
+    private static Vector fillerVector(Random rnd, int dim) {
+        float[] v = new float[dim];
+        for (int i = 0; i < dim; i++) {
+            v[i] = rnd.nextFloat() * 2 - 1;
+        }
         return Vector.of(v);
     }
 
@@ -338,11 +379,10 @@ class TaxonomyCentroidAnnPlanShapeTest {
 
     @Test
     void seededCardinalityIsReal() throws Exception {
-        try (Connection su = pg.createConnection("");
-             ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM nexus.taxonomy_centroids WHERE tenant_id = '" + TENANT + "'")) {
-            rs.next();
-            assertThat(rs.getLong(1))
+        try (Connection su = pg.createConnection("")) {
+            int count = DSL.using(su, SQLDialect.POSTGRES)
+                .fetchCount(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID.eq(TENANT));
+            assertThat((long) count)
                 .as("the plan-shape claim is only meaningful at cardinality")
                 .isEqualTo(3L * (CENTROIDS_PER_DIM + 1) + 2);
         }
