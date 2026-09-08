@@ -1,8 +1,10 @@
 package dev.nexus.service;
 
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.jooq.SQLDialect;
 import org.jooq.DSLContext;
+import org.jooq.JSONB;
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -13,10 +15,14 @@ import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.time.OffsetDateTime;
 import java.util.Set;
 
+import static dev.nexus.service.jooq.nexus.Tables.PLANS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.jooq.impl.DSL.condition;
+import static org.jooq.impl.DSL.val;
 
 /**
  * RDR-152 bead nexus-gmiaf.11 — Liquibase plans baseline integration test.
@@ -188,42 +194,46 @@ class PlansSchemaLiquibaseTest {
         //   not english; if tags were english-indexed, 'planning'→'plan' and query would match).
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
-            try (var ps = su.prepareStatement("SELECT set_config(?, ?, true)")) {
-                ps.setString(1, TenantConstants.GUC_NAME);
-                ps.setString(2, "fts-probe-tenant");
-                ps.execute();
-            }
-            su.createStatement().execute(
-                "INSERT INTO nexus.plans " +
-                // verb: plans.verb is NOT NULL (hygiene-001-11).
-                "(tenant_id, project, query, plan_json, outcome, tags, match_text, verb, created_at) " +
-                "VALUES " +
-                "('fts-probe-tenant', 'probe-proj', 'FTS discrimination probe query'," +
-                " '{\"steps\":[]}', 'success', 'planning,rdr', " +
-                " 'How to perform searches across knowledge repositories', 'research', now())");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.select(DSL.function("set_config", SQLDataType.VARCHAR,
+                DSL.val(TenantConstants.GUC_NAME), DSL.val("fts-probe-tenant"), DSL.inline(true))).fetch();
 
-            ResultSet ftsCheck = su.createStatement().executeQuery(
-                // (1) Positive english: 'searching' and 'searches' share stem 'search'.
-                //     match_text is indexed under english so query for stem must match.
-                "SELECT fts_vector @@ plainto_tsquery('english', 'searching') AS english_stem_match, " +
-                // (2) Positive simple exact: tags='planning,...'; simple stores verbatim.
-                "       fts_vector @@ plainto_tsquery('simple', 'planning')   AS simple_exact_match, " +
-                // (3) NEGATIVE discrimination: 'plan' is the english stem of 'planning'.
-                //     Under simple, 'planning' is stored as-is (not stemmed).
-                //     plainto_tsquery('simple','plan') → literal 'plan', must NOT match 'planning'.
-                //     If this fails (returns true), tags are accidentally english-indexed.
-                "       fts_vector @@ plainto_tsquery('simple', 'plan')       AS simple_stem_no_match " +
-                "FROM nexus.plans " +
-                "WHERE tenant_id = 'fts-probe-tenant' AND project = 'probe-proj'");
+            // verb: plans.verb is NOT NULL (hygiene-001-11).
+            ctx.insertInto(PLANS, PLANS.TENANT_ID, PLANS.PROJECT, PLANS.QUERY, PLANS.PLAN_JSON,
+                    PLANS.OUTCOME, PLANS.TAGS, PLANS.MATCH_TEXT, PLANS.VERB, PLANS.CREATED_AT)
+               .values("fts-probe-tenant", "probe-proj", "FTS discrimination probe query",
+                   JSONB.valueOf("{\"steps\":[]}"), "success", "planning,rdr",
+                   "How to perform searches across knowledge repositories", "research",
+                   OffsetDateTime.now())
+               .execute();
 
-            assertThat(ftsCheck.next()).as("probe row must be retrievable from nexus.plans").isTrue();
+            // @@ / plainto_tsquery have no typed jOOQ operator/function form (same house
+            // idiom as PlanRepository/MemoryRepository's own FTS predicates) -- a bare,
+            // statically-imported condition() template, never DSL.condition(...) qualified
+            // (which the scanDslTemplates gate flags as assembled SQL text).
+            var ftsCheck = ctx.select(
+                    // (1) Positive english: 'searching' and 'searches' share stem 'search'.
+                    //     match_text is indexed under english so query for stem must match.
+                    DSL.field(condition("fts_vector @@ plainto_tsquery('english', {0})", val("searching"))),
+                    // (2) Positive simple exact: tags='planning,...'; simple stores verbatim.
+                    DSL.field(condition("fts_vector @@ plainto_tsquery('simple', {0})", val("planning"))),
+                    // (3) NEGATIVE discrimination: 'plan' is the english stem of 'planning'.
+                    //     Under simple, 'planning' is stored as-is (not stemmed).
+                    //     plainto_tsquery('simple','plan') → literal 'plan', must NOT match 'planning'.
+                    //     If this fails (returns true), tags are accidentally english-indexed.
+                    DSL.field(condition("fts_vector @@ plainto_tsquery('simple', {0})", val("plan"))))
+                .from(PLANS)
+                .where(PLANS.TENANT_ID.eq("fts-probe-tenant").and(PLANS.PROJECT.eq("probe-proj")))
+                .fetchOne();
 
-            assertThat(ftsCheck.getBoolean("english_stem_match"))
+            assertThat(ftsCheck).as("probe row must be retrievable from nexus.plans").isNotNull();
+
+            assertThat(ftsCheck.value1())
                 .as("english config must stem: 'searching' and 'searches' share stem 'search'; " +
                     "match_text indexed under english so query matches")
                 .isTrue();
 
-            assertThat(ftsCheck.getBoolean("simple_exact_match"))
+            assertThat(ftsCheck.value2())
                 .as("simple config must match exact token: 'planning' stored verbatim in tags")
                 .isTrue();
 
@@ -231,7 +241,7 @@ class PlansSchemaLiquibaseTest {
             // plainto_tsquery('simple','plan') → literal 'plan' would match the stored stem.
             // Under correct simple indexing, 'planning' is stored as 'planning', not 'plan',
             // so the query must NOT match.
-            assertThat(ftsCheck.getBoolean("simple_stem_no_match"))
+            assertThat(ftsCheck.value3())
                 .as("simple config must NOT stem: plainto_tsquery('simple','plan') " +
                     "must NOT match tags='planning,...' — proves tags use simple (verbatim), " +
                     "not english (stemming).  Failure here means tags are accidentally english-indexed.")
@@ -261,8 +271,8 @@ class PlansSchemaLiquibaseTest {
 
         // tenant plan-alpha sees exactly its 3 rows.
         var alphaTitles = tenantScope.withTenant("plan-alpha", ctx ->
-            ctx.fetch("SELECT query FROM nexus.plans WHERE project = 'plan-proj' ORDER BY query")
-               .getValues("query", String.class));
+            ctx.select(PLANS.QUERY).from(PLANS).where(PLANS.PROJECT.eq("plan-proj"))
+               .orderBy(PLANS.QUERY).fetch(PLANS.QUERY));
         assertThat(alphaTitles)
             .as("tenant plan-alpha must see exactly its 3 plans")
             .containsExactlyInAnyOrder(
@@ -275,8 +285,8 @@ class PlansSchemaLiquibaseTest {
 
         // tenant plan-beta sees only its 1 row.
         var betaTitles = tenantScope.withTenant("plan-beta", ctx ->
-            ctx.fetch("SELECT query FROM nexus.plans WHERE project = 'plan-proj2' ORDER BY query")
-               .getValues("query", String.class));
+            ctx.select(PLANS.QUERY).from(PLANS).where(PLANS.PROJECT.eq("plan-proj2"))
+               .orderBy(PLANS.QUERY).fetch(PLANS.QUERY));
         assertThat(betaTitles)
             .as("tenant plan-beta must see exactly its 1 plan")
             .containsExactly("Compile and deploy Java services");
@@ -288,11 +298,9 @@ class PlansSchemaLiquibaseTest {
         // FTS query scoped to plan-alpha: 'resolving' (english→stem 'resolv') must match
         // the entity resolution plan's match_text but not the search/walk plans.
         var ftsAlpha = tenantScope.withTenant("plan-alpha", ctx ->
-            ctx.fetch(
-                "SELECT query FROM nexus.plans " +
-                "WHERE fts_vector @@ plainto_tsquery('english', 'resolving') " +
-                "ORDER BY query")
-               .getValues("query", String.class));
+            ctx.select(PLANS.QUERY).from(PLANS)
+               .where(condition("fts_vector @@ plainto_tsquery('english', {0})", val("resolving")))
+               .orderBy(PLANS.QUERY).fetch(PLANS.QUERY));
         assertThat(ftsAlpha)
             .as("FTS query for 'resolving' (english stem 'resolv') under plan-alpha " +
                 "must match entity resolution plan only")
@@ -300,21 +308,18 @@ class PlansSchemaLiquibaseTest {
 
         // FTS query scoped to plan-beta: 'java' in simple (tag) config matches.
         var ftsBeta = tenantScope.withTenant("plan-beta", ctx ->
-            ctx.fetch(
-                "SELECT query FROM nexus.plans " +
-                "WHERE fts_vector @@ plainto_tsquery('simple', 'java') " +
-                "ORDER BY query")
-               .getValues("query", String.class));
+            ctx.select(PLANS.QUERY).from(PLANS)
+               .where(condition("fts_vector @@ plainto_tsquery('simple', {0})", val("java")))
+               .orderBy(PLANS.QUERY).fetch(PLANS.QUERY));
         assertThat(ftsBeta)
             .as("FTS query for 'java' (simple/tags) under plan-beta must match Java plan")
             .containsExactly("Compile and deploy Java services");
 
         // Cross-tenant FTS isolation: 'researching' under plan-beta must return nothing.
         var crossTenantFts = tenantScope.withTenant("plan-beta", ctx ->
-            ctx.fetch(
-                "SELECT query FROM nexus.plans " +
-                "WHERE fts_vector @@ plainto_tsquery('english', 'researching')")
-               .getValues("query", String.class));
+            ctx.select(PLANS.QUERY).from(PLANS)
+               .where(condition("fts_vector @@ plainto_tsquery('english', {0})", val("researching")))
+               .fetch(PLANS.QUERY));
         assertThat(crossTenantFts)
             .as("FTS 'researching' under plan-beta must return empty (cross-tenant isolation)")
             .isEmpty();
@@ -350,10 +355,8 @@ class PlansSchemaLiquibaseTest {
         // Raw service-role connection WITHOUT GUC stamp.
         try (Connection svc = svcDs.getConnection()) {
             svc.setAutoCommit(true);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT COUNT(*) AS cnt FROM nexus.plans");
-            assertThat(rs.next()).isTrue();
-            long count = rs.getLong("cnt");
+            Long count = DSL.using(svc, SQLDialect.POSTGRES)
+                .selectCount().from(PLANS).fetchOne(0, Long.class);
             assertThat(count)
                 .as("unstamped service connection must see zero plans rows " +
                     "(RLS fail-closed: unset GUC → NULL → no tenant_id matches NULL)")
@@ -367,21 +370,20 @@ class PlansSchemaLiquibaseTest {
     void rls_withCheck_blocksCrossTenantInsert() {
         assertThatThrownBy(() ->
             tenantScope.withTenant("gamma-plans", ctx ->
-                ctx.execute(
-                    "INSERT INTO nexus.plans " +
-                    // verb supplied (plans.verb NOT NULL, hygiene-001-11) so the
-                    // RLS WITH CHECK violation this test is proving is what
-                    // actually fires, not an unrelated NOT NULL violation.
-                    "(tenant_id, project, query, plan_json, outcome, match_text, verb, created_at) " +
-                    // nexus-cefa1.5: plan_json is jsonb now — see insertPlan's identical comment.
-                    "VALUES (?, ?, ?, ?::jsonb, ?, ?, ?, now())",
-                    "delta-plans",         // tenant_id mismatch — WITH CHECK must reject
-                    "gamma-proj",
-                    "Cross-tenant insert attempt",
-                    "{}",
-                    "success",
-                    "this should be rejected by RLS WITH CHECK",
-                    "research"))
+                // verb supplied (plans.verb NOT NULL, hygiene-001-11) so the
+                // RLS WITH CHECK violation this test is proving is what
+                // actually fires, not an unrelated NOT NULL violation.
+                ctx.insertInto(PLANS, PLANS.TENANT_ID, PLANS.PROJECT, PLANS.QUERY, PLANS.PLAN_JSON,
+                        PLANS.OUTCOME, PLANS.MATCH_TEXT, PLANS.VERB, PLANS.CREATED_AT)
+                   .values("delta-plans",         // tenant_id mismatch — WITH CHECK must reject
+                       "gamma-proj",
+                       "Cross-tenant insert attempt",
+                       JSONB.valueOf("{}"),
+                       "success",
+                       "this should be rejected by RLS WITH CHECK",
+                       "research",
+                       OffsetDateTime.now())
+                   .execute())
         )
         .as("INSERT with tenant_id != GUC value must be rejected by RLS WITH CHECK")
         .isInstanceOf(Exception.class)
@@ -400,10 +402,10 @@ class PlansSchemaLiquibaseTest {
 
         assertThatThrownBy(() ->
             tenantScope.withTenant("alpha-plans-rw", ctx ->
-                ctx.execute(
-                    "UPDATE nexus.plans SET tenant_id = ? " +
-                    "WHERE project = 'rw-proj' AND query = 'Plan to rewrite'",
-                    "beta-plans-rw")   // rewrite target — WITH CHECK must reject
+                ctx.update(PLANS)
+                   .set(PLANS.TENANT_ID, "beta-plans-rw")   // rewrite target — WITH CHECK must reject
+                   .where(PLANS.PROJECT.eq("rw-proj").and(PLANS.QUERY.eq("Plan to rewrite")))
+                   .execute()
             )
         )
         .as("UPDATE SET tenant_id to a different value must be rejected by RLS WITH CHECK")
@@ -429,32 +431,19 @@ class PlansSchemaLiquibaseTest {
      */
     private void insertPlan(Connection su, String tenant, String project,
                             String query, String tags, String matchText) throws Exception {
-        try (var ps = su.prepareStatement("SELECT set_config(?, ?, true)")) {
-            ps.setString(1, TenantConstants.GUC_NAME);
-            ps.setString(2, tenant);
-            ps.execute();
-        }
-        try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.plans " +
-                // verb: plans.verb is NOT NULL (hygiene-001-11, nexus-tk070.p6a
-                // follow-on) — every insertPlan call now supplies one.
-                "(tenant_id, project, query, plan_json, outcome, tags, match_text, verb, created_at) " +
-                // nexus-cefa1.5: plan_json is jsonb now (plans-002-jsonb.xml) — a raw
-                // JDBC varchar-bound parameter has no implicit assignment cast to
-                // jsonb, so the placeholder needs an explicit ::jsonb cast (same
-                // idiom as CatalogRepositoryTest / VectorsRepointFunctionsIntegrationTest's
-                // ?::jsonb raw-SQL inserts elsewhere in this test tree).
-                "VALUES (?, ?, ?, ?::jsonb, ?, ?, ?, ?, now()) " +
-                "ON CONFLICT (tenant_id, project, query) DO NOTHING")) {
-            ps.setString(1, tenant);
-            ps.setString(2, project);
-            ps.setString(3, query);
-            ps.setString(4, "{\"steps\":[]}");
-            ps.setString(5, "success");
-            ps.setString(6, tags);
-            ps.setString(7, matchText);
-            ps.setString(8, "research");
-            ps.executeUpdate();
-        }
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        ctx.select(DSL.function("set_config", SQLDataType.VARCHAR,
+            DSL.val(TenantConstants.GUC_NAME), DSL.val(tenant), DSL.inline(true))).fetch();
+        // verb: plans.verb is NOT NULL (hygiene-001-11, nexus-tk070.p6a follow-on) --
+        // every insertPlan call now supplies one. plan_json is a typed JSONB column
+        // (plans-002-jsonb.xml) -- JSONB.valueOf renders the correct cast, no raw
+        // ?::jsonb placeholder needed (nexus-cbo4a).
+        ctx.insertInto(PLANS, PLANS.TENANT_ID, PLANS.PROJECT, PLANS.QUERY, PLANS.PLAN_JSON,
+                PLANS.OUTCOME, PLANS.TAGS, PLANS.MATCH_TEXT, PLANS.VERB, PLANS.CREATED_AT)
+           .values(tenant, project, query, JSONB.valueOf("{\"steps\":[]}"), "success", tags,
+               matchText, "research", OffsetDateTime.now())
+           .onConflict(PLANS.TENANT_ID, PLANS.PROJECT, PLANS.QUERY)
+           .doNothing()
+           .execute();
     }
 }
