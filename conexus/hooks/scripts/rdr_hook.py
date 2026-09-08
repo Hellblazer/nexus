@@ -87,17 +87,44 @@ def _resolve_rdr_collection(repo_root: Path) -> str | None:
             return cat.collection_for_repo(repo_root, "rdr").render()
         except LookupError:
             pass  # owner not registered yet, fall through
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 — the SessionStart hook must never fail; the reason is logged, not swallowed (nexus-owna8)
+        _log_resolution_error("catalog", exc)
     try:
         from nexus.indexer import _repo_collection_or_legacy  # noqa: PLC0415
 
         return _repo_collection_or_legacy(repo_root, "rdr")
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — same contract as above
+        _log_resolution_error("path-derived", exc)
         return None
 
 
+def _log_resolution_error(source: str, exc: BaseException) -> None:
+    """nexus-owna8: a blind except here forced every session onto the
+    path-derived fallback, whose owner id can differ from the catalog's, and
+    the hook then reported a fully indexed tree as NOT indexed. The failure
+    is logged so the next false verdict names its cause."""
+    try:
+        import structlog  # noqa: PLC0415
+
+        structlog.get_logger(__name__).warning(
+            "rdr_hook_collection_resolution_failed",
+            source=source, error_type=type(exc).__name__, error=str(exc),
+        )
+    except Exception:  # noqa: BLE001 — even the log is best-effort in a hook
+        pass
+
+
 def _collection_exists(target: str) -> bool:
+    """Whether *target* exists in T3, asked of the store itself
+    (nexus-owna8: the previous substring match over ``nx collection list``
+    output missed a listed collection when the resolved name and the
+    listed name were rendered differently)."""
+    try:
+        from nexus.db import make_t3  # noqa: PLC0415
+
+        return bool(make_t3().collection_exists(target))
+    except Exception as exc:  # noqa: BLE001 — the hook must never fail; fall back to the listing
+        _log_resolution_error("t3-exists", exc)
     try:
         result = subprocess.run(
             ["nx", "collection", "list"],
@@ -105,7 +132,7 @@ def _collection_exists(target: str) -> bool:
         )
         if result.returncode == 0:
             return target in result.stdout
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort fallback
         pass
     return False
 

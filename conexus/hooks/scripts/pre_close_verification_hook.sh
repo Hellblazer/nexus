@@ -355,7 +355,7 @@ import json, re, shlex, sys
 cmd = sys.stdin.read()
 VALUE_FLAGS = {'--reason', '--description', '--notes', '-m'}
 BEAD_RE = re.compile(r'\bnexus-[a-z0-9]+\b', re.IGNORECASE)
-segments = re.split(r'(?:&&|\|\||;|\s\|\s|\bthen\b|\bdo\b)', cmd)
+OPERATORS = {';', '&&', '||', '|', 'then', 'do'}
 seen, ids = set(), []
 
 def _scan_text(text):
@@ -365,13 +365,34 @@ def _scan_text(text):
             seen.add(tok)
             ids.append(tok)
 
-for seg in segments:
-    try:
-        tokens = shlex.split(seg, posix=True)
-    except ValueError:
-        # Malformed quoting for this segment -- fall back to a raw scan
-        # rather than losing the segment's ids entirely.
-        _scan_text(seg)
+# nexus-fv65m: tokenize the WHOLE command quote-aware first, then split on
+# operator TOKENS. The old order split the raw string on ';' / '|' / 'do'
+# / 'then' BEFORE tokenizing, so a semicolon or the word 'do' inside a
+# quoted --reason broke the quotes, shlex failed on both halves, and the
+# raw-scan fallback harvested every id-shaped word of the prose (a session
+# name, a peer's bead) as a close target.
+try:
+    all_tokens = shlex.split(cmd, posix=True)
+    segments = [[]]
+    for tok in all_tokens:
+        if tok in OPERATORS:
+            segments.append([])
+        else:
+            segments[-1].append(tok)
+    tokenized = [(seg, None) for seg in segments if seg]
+except ValueError:
+    # Malformed quoting for the whole command: segment the raw string and
+    # let each segment fall back to a raw scan where shlex still fails.
+    tokenized = []
+    for raw_seg in re.split(r'(?:&&|\|\||;|\s\|\s|\bthen\b|\bdo\b)', cmd):
+        try:
+            tokenized.append((shlex.split(raw_seg, posix=True), None))
+        except ValueError:
+            tokenized.append((None, raw_seg))
+
+for tokens, raw in tokenized:
+    if tokens is None:
+        _scan_text(raw)
         continue
     i = 0
     while i < len(tokens):

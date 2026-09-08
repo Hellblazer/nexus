@@ -88,6 +88,29 @@ def _run_session_end_synchronously() -> None:
         # Fully detached; nothing upstream can observe us. Swallow.
         pass
     _write_capability_census()
+    _sweep_local_garbage()
+
+
+def _sweep_local_garbage() -> None:
+    """Reap the config directory's litter at session close (nexus-fjwk7):
+    ``t1_mint_<session>.lock`` files older than a day with no live lease,
+    rotated logs, operator dumps. The same sweep ``nx doctor --fix`` runs,
+    so a box no one doctors stops accumulating hundreds of zero-byte
+    locks. Failure-isolated like the census above."""
+    try:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+        from nexus.garbage import sweep_local_garbage  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+        sweep_local_garbage(nexus_config_dir())
+    except Exception as exc:  # noqa: BLE001 — boundary catch; session close must never break on a sweep
+        try:
+            import structlog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+            structlog.get_logger(__name__).debug(
+                "session_end_garbage_sweep_failed", error=str(exc),
+            )
+        except Exception:  # noqa: BLE001 — even the debug log is best-effort
+            pass
 
 
 def _write_capability_census() -> None:

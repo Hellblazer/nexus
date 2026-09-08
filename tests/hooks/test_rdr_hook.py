@@ -238,3 +238,35 @@ def test_uncommitted_rdr_file_is_not_reported(rdr_hook_module, tmp_path) -> None
     f.write_text("---\nstatus: draft\n---\n")
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     assert mod._unchecked_fix_edits(tmp_path, [f], {"204": "draft"}, {"204": "abc1234"}) == []
+
+
+def test_collection_exists_asks_the_store_not_the_listing(rdr_hook_module, monkeypatch) -> None:
+    """nexus-owna8: existence comes from the T3 client's own answer."""
+    mod = rdr_hook_module
+
+    class _T3:
+        def collection_exists(self, name):
+            return name == "rdr__1-1__voyage-context-3__v1"
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _T3())
+    assert mod._collection_exists("rdr__1-1__voyage-context-3__v1")
+    assert not mod._collection_exists("rdr__other__voyage-context-3__v1")
+
+
+def test_resolution_failure_is_logged_not_swallowed(rdr_hook_module, monkeypatch, tmp_path) -> None:
+    mod = rdr_hook_module
+    logged: list[dict] = []
+
+    class _Logger:
+        def warning(self, event, **kw):
+            logged.append({"event": event, **kw})
+
+    import structlog
+    monkeypatch.setattr(structlog, "get_logger", lambda *a, **k: _Logger())
+
+    def boom():
+        raise ConnectionError("engine down")
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", boom)
+    monkeypatch.setattr("nexus.repo_identity._repo_identity", lambda r: ("isolated", "abcdef12"))
+    name = mod._resolve_rdr_collection(tmp_path)
+    assert name == "rdr__isolated-abcdef12__voyage-context-3__v1"
+    assert any(e["event"] == "rdr_hook_collection_resolution_failed" and e["source"] == "catalog" for e in logged), logged

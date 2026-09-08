@@ -31,4 +31,5 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.36.0)
 
-(none)
+- `conexus/hooks/scripts/pre_close_verification_hook.sh` — nexus-fv65m: the command is tokenized quote-aware before it is split on operators, so a ';' or 'do' inside a quoted --reason no longer harvests prose ids as close targets.
+- `conexus/hooks/scripts/rdr_hook.py` — nexus-owna8: collection existence is asked of the T3 client, not a substring of `nx collection list`; a resolution failure is logged instead of swallowed.
