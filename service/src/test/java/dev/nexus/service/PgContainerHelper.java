@@ -28,10 +28,13 @@ import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
 import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 
 
@@ -419,6 +422,13 @@ public final class PgContainerHelper {
         step.onConflictDoNothing().execute();
     }
 
+    /** The RDR-103 4-segment conformant name shape, {@code <ct>__<owner>__<model>__v<n>},
+     *  same regex as hygiene-002-collection-attributes-walk.xml's own branch A --
+     *  used only to derive constraint-satisfying attributes for {@link #insertCollection},
+     *  never a general-purpose parser. */
+    private static final Pattern CONFORMANT_COLLECTION_NAME = Pattern.compile(
+        "^(code|docs|rdr|knowledge)__([a-zA-Z0-9-]+)__([a-z][a-z0-9-]*)__v[0-9]+$");
+
     /**
      * Seed a minimal {@code nexus.catalog_collections} row via generated jOOQ DSL
      * (nexus-cbo4a batch 10) — replaces the identical hand-rolled {@code INSERT INTO
@@ -427,11 +437,43 @@ public final class PgContainerHelper {
      * {@code CollectionRegistryFkExtraTest} each built by string concatenation
      * (identical shape, duplicated across files — the same class of duplication
      * {@link #seedServiceToken(DSLContext, String, String, String)} closed for
-     * {@code service_tokens}). {@code catalog_collections} PK is {@code (tenant_id,
-     * name)}; the four remaining NOT NULL TEXT columns
-     * ({@code content_type}/{@code owner_id}/{@code embedding_model}/{@code
-     * model_version}/{@code display_name}) all default to {@code ''} and are left
-     * unset, matching every hand-rolled call site's own scope.
+     * {@code service_tokens}).
+     *
+     * <p><b>nexus-ft04v.4/.5 fix (critic T2 critique-nexus-ft04v-4-walk-changeset-b42549f03
+     * [24941] Critical):</b> hygiene-002-collection-attributes-walk.xml adds a non-empty
+     * CHECK on {@code content_type}/{@code owner_id}/{@code embedding_model}, an
+     * {@code embedding_model} FK to {@code nexus.embedding_models}, and a NOT NULL +
+     * enum CHECK on {@code lifecycle_state} -- the bare two-column insert this method
+     * used to do (still {@code ''}/{@code ''}/{@code ''}/{@code NULL}) violates all four
+     * on the shared, fully-migrated test cluster, and this is the ONE place ~39 call
+     * sites across the tree share, so it is fixed here rather than at each site. When
+     * {@code name} matches the RDR-103 conformant shape
+     * ({@code <ct>__<owner>__<model>__v<n>}, {@code ct} one of code/docs/rdr/knowledge),
+     * {@code content_type}/{@code owner_id} come from the name and {@code embedding_model}
+     * is the name's token when it is a real row in {@code embedding_models}, else the
+     * seeded local fallback {@code bge-base-en-v15-768} (same rule
+     * hygiene-002-1's own walk uses) -- {@code lifecycle_state} is {@code 'live'}.
+     * Otherwise: {@code content_type} {@code 'unknown'}, {@code owner_id} the tenant,
+     * {@code embedding_model} the fallback, and {@code lifecycle_state} {@code
+     * 'quarantine'} when {@code name} carries the {@code quarantine-} prefix, else
+     * {@code 'live'}. {@code model_version}/{@code display_name} stay at their {@code ''}
+     * default -- neither is constrained and no caller of this method has ever needed
+     * them set.
+     *
+     * <p><b>Column-existence guard (found while landing the fix above):</b> this
+     * method is also called against databases migrated only PART WAY through the
+     * changelog, well before catalog-036-4 even adds {@code dimension}/{@code
+     * lifecycle_state} (e.g. {@code SchemaMigratorIntegrationTest}'s aged-fleet
+     * scenarios, which stop at an early changeset like {@code catalog-013-0} on
+     * purpose to reproduce a pre-constraint production timeline). Referencing
+     * {@code CATALOG_COLLECTIONS.LIFECYCLE_STATE} unconditionally breaks those --
+     * jOOQ's generated field exists at COMPILE time regardless of what the TARGET
+     * database has actually walked to, so the INSERT fails with "column
+     * lifecycle_state does not exist" there. {@link PgCatalogProbes#columnExists}
+     * checks live, on the SAME connection, whether {@code lifecycle_state} exists
+     * yet; when it does not, this method falls back to the original bare
+     * {@code (tenant_id, name)} insert, preserving every early-migration caller's
+     * prior behavior exactly.
      *
      * @param dsl      a {@link DSLContext} over the same connection/role the schema
      *                 was migrated under (e.g. {@code DSL.using(su, SQLDialect.POSTGRES)})
@@ -439,8 +481,35 @@ public final class PgContainerHelper {
      * @param name     the collection name ({@code catalog_collections.name})
      */
     public static void insertCollection(DSLContext dsl, String tenantId, String name) {
-        dsl.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-            .values(tenantId, name)
+        if (!PgCatalogProbes.columnExists(dsl, "nexus", "catalog_collections", "lifecycle_state")) {
+            dsl.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+                .values(tenantId, name)
+                .onConflictDoNothing()
+                .execute();
+            return;
+        }
+
+        String contentType = "unknown";
+        String ownerId = tenantId;
+        String embeddingModel = "bge-base-en-v15-768";
+        String lifecycleState = name.startsWith("quarantine-") ? "quarantine" : "live";
+
+        Matcher m = CONFORMANT_COLLECTION_NAME.matcher(name);
+        if (m.matches()) {
+            contentType = m.group(1);
+            ownerId = m.group(2);
+            String token = m.group(3);
+            boolean modelKnown = dsl.fetchExists(dsl.selectOne().from(EMBEDDING_MODELS)
+                .where(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(token)));
+            embeddingModel = modelKnown ? token : "bge-base-en-v15-768";
+            lifecycleState = "live";
+        }
+
+        dsl.insertInto(CATALOG_COLLECTIONS,
+                CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+            .values(tenantId, name, contentType, ownerId, embeddingModel, lifecycleState)
             .onConflictDoNothing()
             .execute();
     }

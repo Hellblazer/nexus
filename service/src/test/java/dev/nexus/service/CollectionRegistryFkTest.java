@@ -981,20 +981,32 @@ class CollectionRegistryFkTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // GROUP 11 — PgVectorRepository.upsertChunks auto-registration
+    // GROUP 11 — PgVectorRepository.upsertChunks against a registered collection
     //
-    // Verifies that upsertChunks auto-stubs the collection into catalog_collections
-    // before the chunk write, satisfying the FK without a separate registration call.
-    // Also verifies that conformant collection names have their segments stored, and
-    // that non-conformant names produce a name-only stub with empty metadata.
+    // RDR-204 nexus-ft04v.7 RETIRED upsertChunks's auto-stub-on-write behavior:
+    // an unregistered collection now fails loud via CollectionRegistry.requireRegistered
+    // (UnregisteredCollectionException) instead of being silently stubbed into
+    // catalog_collections to satisfy the FK. These two tests used to exercise that
+    // auto-stub path; they now register the collection explicitly first (mirroring
+    // the caller contract .7 introduced) and verify the write succeeds against an
+    // already-registered row. See CatalogCollectionsStubInsertRetirementTest for the
+    // census proving the auto-stub call sites are gone.
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(110)
-    void upsertChunks_conformantCollection_autoRegistersWithParsedSegments() throws Exception {
+    void upsertChunks_conformantCollection_succeedsAgainstPreRegisteredRow() throws Exception {
         // Conformant name: <content_type>__<owner_id>__<embedding_model>__v<n>
         // Uses minilm-l6-v2-384 → nexus.chunks embedding_384 (matching the fake embedder dim below).
         String conformantCol = "knowledge__auto-reg-owner__minilm-l6-v2-384__v1";
         String tenant = "autoreg-tenant-a";
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            // Explicit pre-registration (nexus-ft04v.7 retired upsertChunks's own
+            // auto-stub) — PgContainerHelper.insertCollection derives the same parsed
+            // segments from the conformant name that the retired auto-stub used to write.
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, conformantCol);
+        }
 
         var cfg = new com.zaxxer.hikari.HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
@@ -1018,7 +1030,7 @@ class CollectionRegistryFkTest {
                         v[0] = 0.1f; return v;
                     }).collect(java.util.stream.Collectors.toList()));
 
-            // upsert a chunk batch for an UNREGISTERED conformant collection
+            // upsert a chunk batch for the now-registered conformant collection
             repo.upsertChunks(tenant, conformantCol,
                 List.of(dev.nexus.service.db.Chash.ofText("autoreg-384").toHex()),
                 List.of("auto-reg chunk text"),
@@ -1034,35 +1046,32 @@ class CollectionRegistryFkTest {
                 .where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.COLLECTION.eq(conformantCol))
                 .fetchOne(0, int.class);
             assertThat(chunkCount)
-                .as("upsertChunks must succeed (chunk row written) after auto-registration")
+                .as("upsertChunks must succeed (chunk row written) against a pre-registered collection")
                 .isEqualTo(1);
 
-            // Verify: (ii) catalog_collections has the row WITH parsed segments
+            // Verify: (ii) catalog_collections carries the segments the pre-registration parsed.
             var row = ctx.select(CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                     CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
                 .from(CATALOG_COLLECTIONS)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(conformantCol))
                 .fetchOptional();
             assertThat(row.isPresent())
-                .as("auto-registration must create a catalog_collections row for the conformant collection")
+                .as("pre-registration must create a catalog_collections row for the conformant collection")
                 .isTrue();
             assertThat(row.get().value1())
-                .as("auto-registered row must store parsed content_type segment")
+                .as("registered row must store parsed content_type segment")
                 .isEqualTo("knowledge");
             assertThat(row.get().value2())
-                .as("auto-registered row must store parsed owner_id segment")
+                .as("registered row must store parsed owner_id segment")
                 .isEqualTo("auto-reg-owner");
             assertThat(row.get().value3())
-                .as("auto-registered row must store parsed embedding_model segment")
+                .as("registered row must store parsed embedding_model segment")
                 .isEqualTo("minilm-l6-v2-384");
-            assertThat(row.get().value4())
-                .as("auto-registered row must store parsed model_version segment")
-                .isEqualTo("v1");
         }
     }
 
     @Test @Order(111)
-    void upsertChunks_nonConformantCollection_autoRegistersNameOnlyStub() throws Exception {
+    void upsertChunks_nonConformantCollection_registersWithConstraintSatisfyingDefaults() throws Exception {
         // Non-conformant name (not four-segment): upsertChunks uses dimForCollection which
         // requires conformant names, so this test uses a collection that IS four-segment
         // but with a known model token so dim dispatch works, AND tests the non-conformant
@@ -1070,7 +1079,12 @@ class CollectionRegistryFkTest {
         // Actually: dimForCollection FAILS LOUD for non-conformant names, so upsertChunks
         // cannot be called with a non-conformant name.  Test the name-only stub via
         // direct catalog_collections insert + verify the stub semantics documented in AGENTS.md.
-        // The auto-registration stub (empty metadata) is the correct behavior for name-only rows.
+        //
+        // RDR-204 nexus-ft04v.4/.5: catalog_collections now CHECKs content_type/owner_id/
+        // embedding_model non-empty, so an empty-string "name-only stub" is no longer a
+        // legal row at all — PgContainerHelper.insertCollection's non-conformant branch
+        // therefore writes constraint-satisfying PLACEHOLDER values instead of empty
+        // strings. model_version has no such CHECK and stays at its column default ('').
         String stubCol  = "stub-only-collection-nonconformant";
         String tenant   = "autoreg-tenant-stub";
         try (Connection su = pg.createConnection("")) {
@@ -1079,7 +1093,6 @@ class CollectionRegistryFkTest {
             // Insert a stub manually (simulating fk-002-0 backfill for an unregistered collection)
             PgContainerHelper.insertCollection(ctx, tenant, stubCol);
 
-            // Verify stub: metadata fields must all be ''
             var row = ctx.select(CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                     CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
                 .from(CATALOG_COLLECTIONS)
@@ -1089,13 +1102,17 @@ class CollectionRegistryFkTest {
                 .as("stub row must exist in catalog_collections after minimal insert")
                 .isTrue();
             assertThat(row.get().value1())
-                .as("name-only stub must have empty content_type").isEqualTo("");
+                .as("name-only stub must carry the constraint-satisfying content_type placeholder")
+                .isEqualTo("unknown");
             assertThat(row.get().value2())
-                .as("name-only stub must have empty owner_id").isEqualTo("");
+                .as("name-only stub must carry the tenant as its owner_id placeholder")
+                .isEqualTo(tenant);
             assertThat(row.get().value3())
-                .as("name-only stub must have empty embedding_model").isEqualTo("");
+                .as("name-only stub must carry the constraint-satisfying embedding_model placeholder")
+                .isEqualTo("bge-base-en-v15-768");
             assertThat(row.get().value4())
-                .as("name-only stub must have empty model_version").isEqualTo("");
+                .as("model_version has no non-empty CHECK; stays at its column default")
+                .isEqualTo("");
         }
     }
 
@@ -1352,18 +1369,33 @@ class CollectionRegistryFkTest {
 
     /**
      * Runs the fk-002-6-reconcile stub-register shape for one source table via typed
-     * jOOQ: {@code INSERT INTO nexus.catalog_collections (tenant_id, name) SELECT
-     * DISTINCT tenant_id, <collectionField> FROM <source table> [WHERE <filter>] ON
-     * CONFLICT (tenant_id, name) DO NOTHING} — same idiom as {@code
-     * CollectionRegistryFkExtraTest#runBackfillStub}.
+     * jOOQ: {@code INSERT INTO nexus.catalog_collections (tenant_id, name,
+     * content_type, owner_id, embedding_model, lifecycle_state) SELECT DISTINCT
+     * tenant_id, <collectionField>, 'unknown', tenant_id, 'bge-base-en-v15-768',
+     * 'live' FROM <source table> [WHERE <filter>] ON CONFLICT (tenant_id, name) DO
+     * NOTHING} — same idiom as {@code CollectionRegistryFkExtraTest#runBackfillStub}.
+     *
+     * <p>nexus-ft04v.4/.5 fix (critic T2 critique-nexus-ft04v-4-walk-changeset-b42549f03
+     * [24941]): see {@code CollectionRegistryFkExtraTest#runBackfillStub}'s identical
+     * fix javadoc for the full derivation — the four backfilled columns mirror this
+     * bead's own walk's catch-all branch D (content_type 'unknown', owner_id the
+     * row's own tenant_id, the seeded local fallback model, lifecycle_state 'live').
      */
     private static void runCollectionBackfillStub(
             DSLContext ctx, org.jooq.TableField<?, String> tenantField,
             org.jooq.TableField<?, String> collectionField, org.jooq.Condition filter) {
+        var contentTypeField = DSL.val("unknown").as(CATALOG_COLLECTIONS.CONTENT_TYPE);
+        var ownerIdField = tenantField.as(CATALOG_COLLECTIONS.OWNER_ID.getName());
+        var embeddingModelField = DSL.val("bge-base-en-v15-768").as(CATALOG_COLLECTIONS.EMBEDDING_MODEL);
+        var lifecycleStateField = DSL.val("live").as(CATALOG_COLLECTIONS.LIFECYCLE_STATE);
         var select = filter == null
-            ? ctx.selectDistinct(tenantField, collectionField).from(tenantField.getTable())
-            : ctx.selectDistinct(tenantField, collectionField).from(tenantField.getTable()).where(filter);
-        ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+            ? ctx.selectDistinct(tenantField, collectionField, contentTypeField, ownerIdField,
+                    embeddingModelField, lifecycleStateField).from(tenantField.getTable())
+            : ctx.selectDistinct(tenantField, collectionField, contentTypeField, ownerIdField,
+                    embeddingModelField, lifecycleStateField).from(tenantField.getTable()).where(filter);
+        ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
             .select(select)
             .onConflictDoNothing()
             .execute();

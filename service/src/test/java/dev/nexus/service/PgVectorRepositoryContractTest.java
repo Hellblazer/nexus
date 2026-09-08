@@ -164,10 +164,7 @@ class PgVectorRepositoryContractTest {
                 "knowledge__nulsan__voyage-context-3__v1", "knowledge__v3disp__voyage-3__v1")) {
             for (String tenant : List.of(TENANT_A, TENANT_B)) {
                 tenantScope.withTenant(tenant, ctx -> {
-                    ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-                       .values(tenant, collection)
-                       .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME).doNothing()
-                       .execute();
+                    PgContainerHelper.insertCollection(ctx, tenant, collection);
                     return null;
                 });
             }

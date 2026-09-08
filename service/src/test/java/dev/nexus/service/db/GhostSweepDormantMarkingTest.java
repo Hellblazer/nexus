@@ -117,10 +117,8 @@ class GhostSweepDormantMarkingTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(TENANT_PARAM, ANCHOR_COLL).execute();
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(TENANT_PARAM, ANCHOR_TOPICS_COLL).execute();
+            PgContainerHelper.insertCollection(ctx, TENANT_PARAM, ANCHOR_COLL);
+            PgContainerHelper.insertCollection(ctx, TENANT_PARAM, ANCHOR_TOPICS_COLL);
             ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                            CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
                .values(TENANT_PARAM, ANCHOR_DOC, "Anchor Doc", ANCHOR_COLL).execute();
@@ -177,8 +175,7 @@ class GhostSweepDormantMarkingTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(TENANT_PARAM, coll).execute();
+            PgContainerHelper.insertCollection(ctx, TENANT_PARAM, coll);
             seedOneRowFor(ctx, t.countKey(), coll);
         }
 
@@ -191,9 +188,14 @@ class GhostSweepDormantMarkingTest {
                 .fetchOne();
             assertThat(row).as("row referenced only from " + t.countKey() + " must survive the sweep").isNotNull();
             if (CHUNK_COUPLED.contains(t.countKey())) {
+                // RDR-204 nexus-ft04v.4/.5: lifecycle_state is NOT NULL after hygiene-002-1
+                // (PgContainerHelper.insertCollection always writes a real value now, "live"
+                // for this conformant name), so "UNCHANGED, not dormant" means the seeded
+                // value survives untouched, not that the column stays NULL as it could
+                // before the walk/constraints landed.
                 assertThat(row.value1())
                     .as(t.countKey() + " carries a live chunks row (FK-coupled) -> UNCHANGED, not dormant")
-                    .isNull();
+                    .isEqualTo("live");
             } else {
                 assertThat(row.value1())
                     .as(t.countKey() + " has no collection_vector_stats row -> dormant")
@@ -305,9 +307,7 @@ class GhostSweepDormantMarkingTest {
         String coll = "knowledge__gs-unref__minilm-l6-v2-384__v1";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            DSL.using(su, SQLDialect.POSTGRES)
-               .insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(tenant, coll).execute();
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, coll);
         }
         CollectionRegistry.markKnown(tenant, coll);
 
@@ -340,10 +340,8 @@ class GhostSweepDormantMarkingTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(tenantA, ghostA).execute();
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(tenantB, ghostB).execute();
+            PgContainerHelper.insertCollection(ctx, tenantA, ghostA);
+            PgContainerHelper.insertCollection(ctx, tenantB, ghostB);
         }
 
         repo.ensureGhostSweepRanOnce(tenantA);
@@ -379,9 +377,7 @@ class GhostSweepDormantMarkingTest {
         String secondGhost = "knowledge__gs-boot2-ghost__minilm-l6-v2-384__v1";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            DSL.using(su, SQLDialect.POSTGRES)
-               .insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(tenant, firstGhost).execute();
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, firstGhost);
         }
 
         // "Boot 1": a fresh CatalogRepository instance (fresh in-process gate) sweeps
@@ -398,9 +394,7 @@ class GhostSweepDormantMarkingTest {
         // A collection that becomes a ghost between boots.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            DSL.using(su, SQLDialect.POSTGRES)
-               .insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(tenant, secondGhost).execute();
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, secondGhost);
         }
 
         // "Boot 2": a SECOND fresh CatalogRepository instance (empty in-process gate,
@@ -429,14 +423,11 @@ class GhostSweepDormantMarkingTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(tenant, ghost).execute();
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(tenant, dormant).execute();
+            PgContainerHelper.insertCollection(ctx, tenant, ghost);
+            PgContainerHelper.insertCollection(ctx, tenant, dormant);
             ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
                .values(tenant, dormant).execute();
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(tenant, unchanged).execute();
+            PgContainerHelper.insertCollection(ctx, tenant, unchanged);
             insertChunk384(ctx, tenant, unchanged, chashBytes(unchanged), vector(384));
         }
 

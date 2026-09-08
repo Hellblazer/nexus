@@ -155,4 +155,27 @@ $$;
         <rollback>DROP FUNCTION IF EXISTS nexus_test.grant_execute_on_function(text, text)</rollback>
     </changeSet>
 
+    <changeSet id="test-objects-9-insert-chunk-bare-vector" author="nexus-ft04v.4">
+        <comment>nexus_test.insert_chunk_bare_vector(text, text, bytea, int): plpgsql wrapper inserting one nexus.chunks row with a BARE (unqualified) ::vector cast built entirely server-side -- for tests that seed vector data at a migration point BEFORE search-path-001-relocate-vector-extensions.xml has relocated the pgvector extension into the nexus schema (Hygiene002CollectionAttributesWalkTest.walkPopulatesEveryBranchAcrossTwoTenants...: hygiene-002-1 runs before search-path-001 in the changelog, so a jOOQ-generated INSERT -- whose compiled binding casts to the schema-qualified "nexus.vector" fixed at codegen time against a FULLY relocated cluster -- fails with "type nexus.vector does not exist" at that point; a bare, unqualified ::vector cast resolves via whatever the connecting role's search_path finds at EXECUTION time, exactly like Hygiene001NotNullMigrationRlsTest's own seedLegacyChunkAndManifest raw-SQL precedent, generalised into a reusable function so no Java caller needs its own raw SQL string). The bare cast is deliberately the ONLY form valid against BOTH substrates this function's callers use: a pre-walk dedicated container (extension still in public, in every role's default search_path) and the shared, fully-migrated cluster (extension relocated to nexus, which search-path-002 adds to the migrating role's own search_path) -- a schema-qualified cast picks one and breaks the other. p_dim selects which embedding_&lt;dim&gt; column receives the value via %I-quoted dynamic column name; the "[0.1,0.1,...]" literal of length p_dim is built via generate_series/string_agg, never string-concatenated in Java. SECURITY INVOKER so the caller's own privilege authorizes the INSERT.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.insert_chunk_bare_vector(
+    p_tenant text, p_collection text, p_chash bytea, p_dim int
+) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+DECLARE
+    v_lit text;
+BEGIN
+    SELECT '[' || string_agg('0.1', ',') || ']' INTO v_lit FROM generate_series(1, p_dim);
+    EXECUTE format(
+        'INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, %I) VALUES ($1, $2, $3, $4, $5::vector)',
+        'embedding_' || p_dim)
+        USING p_tenant, p_collection, p_chash, 'text', v_lit;
+END;
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.insert_chunk_bare_vector(text, text, bytea, int)</rollback>
+    </changeSet>
+
 </databaseChangeLog>

@@ -234,11 +234,7 @@ class CatalogDocumentCascadeTest {
     private static void seedDocument(Connection su, String tenant, String tumbler) throws Exception {
         DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
         // Register the collection first (document_aspects/queue carry an fk-003 collection FK).
-        ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-           .values(tenant, COLL)
-           .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-           .doNothing()
-           .execute();
+        PgContainerHelper.insertCollection(ctx, tenant, COLL);
         ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                        CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
            .values(tenant, tumbler, "Doc", COLL)
@@ -287,11 +283,7 @@ class CatalogDocumentCascadeTest {
      *  no FK to catalog_documents — see the class javadoc / nexus-sa14p). */
     private static void seedTopicAssignment(Connection su, String tenant, String docId) throws Exception {
         DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-        ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-           .values(tenant, COLL)
-           .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-           .doNothing()
-           .execute();
+        PgContainerHelper.insertCollection(ctx, tenant, COLL);
         // Mask to 32 bits before widening so Math.abs cannot overflow on Integer.MIN_VALUE.
         long topicId = (tenant + docId).hashCode() & 0xFFFFFFFFL;
         ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,

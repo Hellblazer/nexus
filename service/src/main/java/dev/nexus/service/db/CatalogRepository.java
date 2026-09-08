@@ -6326,6 +6326,14 @@ public final class CatalogRepository {
                 // Discarded on conflict (EMBEDDING_MODEL is not in the SET list below) —
                 // bound only because the INSERT's VALUES list requires a value.
                 effectiveModel = nne(existingModel);
+                // RDR-204 nexus-ft04v.4/.5: lifecycle_state carries a NOT NULL constraint
+                // (hygiene-002) that PostgreSQL enforces on the VALUES tuple of an
+                // INSERT ... ON CONFLICT DO UPDATE BEFORE it resolves the conflict — a
+                // NULL here 23502s even though this branch always takes the conflict
+                // path and LIFECYCLE_STATE is (deliberately) absent from the SET list
+                // below. Any valid enum value is correct: it is discarded on conflict
+                // exactly like effectiveModel above.
+                lifecycleState = "live";
             } else {
                 String  profileModel     = null;
                 Integer profileDimension = null;
@@ -7182,6 +7190,7 @@ public final class CatalogRepository {
                         CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                         CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
                         CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
+                        CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
                         CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_AT,
                         CATALOG_COLLECTIONS.CREATED_AT)
                     .select(ctx.select(
@@ -7189,6 +7198,13 @@ public final class CatalogRepository {
                             CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                             CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
                             CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
+                            // RDR-204 nexus-ft04v.4/.5: catalog_collections.dimension and
+                            // lifecycle_state carry a NOT NULL / CHECK constraint (hygiene-002)
+                            // on lifecycle_state, so the fresh-insert arm below must carry X's
+                            // values forward the same way every other attribute does — an
+                            // omitted column here is not "leave it unset", it is a 23502 on
+                            // every rename that takes this branch.
+                            CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
                             // nexus-c29vr: the new row is LIVE by construction — never copy the
                             // source's tombstone markers. This select-list used to carry
                             // SUPERSEDED_BY/SUPERSEDED_AT straight through, and only the
@@ -7209,6 +7225,8 @@ public final class CatalogRepository {
                     .set(CATALOG_COLLECTIONS.MODEL_VERSION,        DSL.excluded(CATALOG_COLLECTIONS.MODEL_VERSION))
                     .set(CATALOG_COLLECTIONS.DISPLAY_NAME,         DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME))
                     .set(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, DSL.excluded(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED))
+                    .set(CATALOG_COLLECTIONS.DIMENSION,            DSL.excluded(CATALOG_COLLECTIONS.DIMENSION))
+                    .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE,      DSL.excluded(CATALOG_COLLECTIONS.LIFECYCLE_STATE))
                     // Revive: clear the tombstone markers rather than copying X's (which
                     // are '' / NULL anyway — the CLI refuses to rename an already-
                     // superseded row, so X is live). Explicit beats incidental here.

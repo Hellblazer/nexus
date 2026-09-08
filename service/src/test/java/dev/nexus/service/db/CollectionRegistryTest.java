@@ -95,14 +95,7 @@ class CollectionRegistryTest {
 
     private void seedRegistered(String collection) {
         tenantScope.withTenant(TENANT, ctx -> {
-            ctx.insertInto(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS,
-                            dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID,
-                            dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME)
-               .values(TENANT, collection)
-               .onConflict(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID,
-                           dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME)
-               .doNothing()
-               .execute();
+            PgContainerHelper.insertCollection(ctx, TENANT, collection);
             return null;
         });
     }

@@ -1118,6 +1118,18 @@
          ordering per nexus-ft04v.1/.2's NOTES). -->
     <include file="db/changelog/catalog-036-embedding-profile.xml"/>
 
+    <!-- RDR-204 Phase 1 items 1/5 (beads nexus-ft04v.4 / .5, reserved changeset
+         family hygiene-002 per nexus-ft04v.1): the one-time catalog_collections
+         attribute backfill walk plus its constraints, ONE changeset on the
+         hygiene-001-6 shape — see the included file's own header for the full
+         mechanism and branch derivation. Placed immediately after
+         catalog-036-embedding-profile.xml (whose nullable dimension/
+         lifecycle_state columns this walk populates) and before
+         search-path-001 — it references no vector-typed object (an int
+         dimension column, text model names, the collection_vector_stats
+         view), so it is safe ahead of the extension relocation. -->
+    <include file="db/changelog/hygiene-002-collection-attributes-walk.xml"/>
+
     <!--
         nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): relocates the
         pgvector-family extensions into the nexus schema. GUARDED (a

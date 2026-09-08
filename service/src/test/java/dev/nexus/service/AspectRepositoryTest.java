@@ -142,11 +142,7 @@ class AspectRepositoryTest {
                     "qbatch-coll-a", "qbatch-coll-b", "qbatch-dup", "qbatch-fid",
                     "qbatch-skip")) {
                 for (String tenant : List.of(TENANT_A, TENANT_B)) {
-                    DSL.using(su, SQLDialect.POSTGRES)
-                       .insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-                       .values(tenant, collection)
-                       .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME).doNothing()
-                       .execute();
+                    PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, collection);
                 }
             }
         }
@@ -459,14 +455,8 @@ class AspectRepositoryTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext suCtx = DSL.using(su, SQLDialect.POSTGRES);
-            suCtx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-                .values(TENANT_A, "good-coll")
-                .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME).doNothing()
-                .execute();
-            suCtx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-                .values(TENANT_B, "bad-coll")
-                .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME).doNothing()
-                .execute();
+            PgContainerHelper.insertCollection(suCtx, TENANT_A, "good-coll");
+            PgContainerHelper.insertCollection(suCtx, TENANT_B, "bad-coll");
         }
 
         // isLocal=true (SET LOCAL) needs an explicit transaction to survive to the
@@ -1410,10 +1400,7 @@ class AspectRepositoryTest {
      */
     private void registerFixtureCollection(String tenant, String collection) {
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(tenant, collection)
-               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME).doNothing()
-               .execute();
+            PgContainerHelper.insertCollection(ctx, tenant, collection);
             return null;
         });
     }
