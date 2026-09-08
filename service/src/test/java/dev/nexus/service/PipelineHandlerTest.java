@@ -16,10 +16,13 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.PDF_PIPELINE;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -138,9 +141,11 @@ class PipelineHandlerTest {
         // Age the heartbeat past STALE_THRESHOLD via superuser.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "UPDATE nexus.pdf_pipeline SET updated_at = now() - interval '10 minutes' "
-                + "WHERE content_hash = '" + hash + "'");
+            DSL.using(su, SQLDialect.POSTGRES)
+                .update(PDF_PIPELINE)
+                .set(PDF_PIPELINE.UPDATED_AT, OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10))
+                .where(PDF_PIPELINE.CONTENT_HASH.eq(hash))
+                .execute();
         }
         var r = post("/v1/pipeline/create", TOKEN, TENANT,
             "{\"content_hash\":\"" + hash + "\",\"pdf_path\":\"/tmp/b.pdf\",\"collection\":\"knowledge__t\"}");
