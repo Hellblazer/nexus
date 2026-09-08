@@ -304,11 +304,36 @@ def _seed_chunk(service, *, text: str, collection: str, token: str | None = None
     import httpx
 
     base_url, default_token, _ = service
+    write_token = token or default_token
+    # RDR-204 (nexus-f5wwx): the engine no longer auto-registers a
+    # collection on first write, and this seed posts to
+    # /v1/vectors/upsert-chunks directly -- bypassing HttpVectorClient's
+    # own write_with_registration_retry self-heal entirely. Register
+    # explicitly first, under the SAME bearer this write uses (some
+    # callers pass a non-default tenant token; the collection must be
+    # registered under that tenant, not 'default'). NX_LOCAL=1 pinned for
+    # the derivation window so the derived embedding_model matches this
+    # ONNX engine's bge-768 profile (RDR-160), not a managed-mode
+    # voyage-context-3 guess -- consistent with the model segment already
+    # baked into every _coll()-built name.
+    saved = {k: os.environ.get(k) for k in ("NX_LOCAL", "NX_SERVICE_URL", "NX_SERVICE_TOKEN")}
+    os.environ["NX_LOCAL"] = "1"
+    os.environ["NX_SERVICE_URL"] = base_url
+    os.environ["NX_SERVICE_TOKEN"] = write_token
+    try:
+        from nexus.corpus import ensure_collection_registered
+        ensure_collection_registered(collection)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
     chash = _ch(text)
     resp = httpx.post(
         f"{base_url}/v1/vectors/upsert-chunks",
         headers={
-            "Authorization": f"Bearer {token or default_token}",
+            "Authorization": f"Bearer {write_token}",
             "Content-Type": "application/json",
         },
         json={

@@ -632,7 +632,7 @@ fi
 
 echo "── 5/10 store put: catalog row + manifest (the f1itv assertions) ──"
 SENTINEL="fresh-mvv-sentinel: portable pgvector never ships the builder ISA"
-echo "$SENTINEL" | _nx store put - --title "fresh-mvv-sentinel" \
+echo "$SENTINEL" | _nx store put - --collection fresh-mvv --title "fresh-mvv-sentinel" \
     >"$LOGS/store.log" 2>&1 || _fail "store put failed (see $LOGS/store.log)"
 grep -Eq "Stored: [0-9a-f]{64}" "$LOGS/store.log" \
     || _fail "store put did not emit a full-digest doc id (RDR-180 shape)"
@@ -650,7 +650,7 @@ grep -q "fresh-mvv-sentinel" "$LOGS/catalog-store.log" \
 # content, because source_uri was always empty and the engine's
 # upsert-on-(tenant, source_uri) identity never matched.
 SENTINEL_V2="fresh-mvv-sentinel-v2: the re-put must win, not duplicate"
-echo "$SENTINEL_V2" | _nx store put - --title "fresh-mvv-sentinel" \
+echo "$SENTINEL_V2" | _nx store put - --collection fresh-mvv --title "fresh-mvv-sentinel" \
     >"$LOGS/store-reput.log" 2>&1 || _fail "re-put failed (see $LOGS/store-reput.log)"
 grep -Eq "Stored: [0-9a-f]{64}" "$LOGS/store-reput.log" \
     || _fail "re-put did not emit a full-digest doc id (RDR-180 shape)"

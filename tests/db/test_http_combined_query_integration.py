@@ -383,7 +383,10 @@ def vec_client(local_service: tuple[str, str], monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
     monkeypatch.setenv("NX_SERVICE_URL", base_url)
     monkeypatch.setenv("NX_SERVICE_TOKEN", token)
-    monkeypatch.delenv("NX_LOCAL", raising=False)
+    # RDR-204 (nexus-f5wwx): registration derives the model from the mode;
+    # NX_SERVICE_URL alone reads as managed (voyage-context-3), and the
+    # engine under test is ONNX local (bge-base-en-v15-768).
+    monkeypatch.setenv("NX_LOCAL", "1")
     monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     reset_http_vector_client_for_tests()

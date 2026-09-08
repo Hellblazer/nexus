@@ -350,7 +350,7 @@ FAIL_REASONS=()
 STORE_TITLE="pcwg-store-$RUN_ID"
 echo "[gate] store put: title=$STORE_TITLE"
 STORE_PUT_OUT="$(printf 'published-client-write-gate probe %s\n' "$RUN_ID" \
-  | _client_nx store put - --title "$STORE_TITLE" --collection knowledge 2>&1)" || true
+  | _client_nx store put - --title "$STORE_TITLE" --collection pcwg 2>&1)" || true
 printf '%s\n' "$STORE_PUT_OUT" | sed 's/^/       /' | tee "$LOGS/store-put.log" >/dev/null
 STORE_SHOW_JSON="$(_provisioner_nx catalog show "$STORE_TITLE" --json 2>/dev/null)" || STORE_SHOW_JSON=""
 if [ -n "$STORE_SHOW_JSON" ]; then

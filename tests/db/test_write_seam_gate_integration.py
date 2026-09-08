@@ -355,7 +355,12 @@ def test_over_300_record_upsert_round_trip(
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
     monkeypatch.setenv("NX_SERVICE_URL", base_url)
     monkeypatch.setenv("NX_SERVICE_TOKEN", token)
-    monkeypatch.delenv("NX_LOCAL", raising=False)
+    # RDR-204 (nexus-f5wwx): the client registers the collection before the
+    # first write with the model effective_embedding_model_for_writes
+    # derives, and NX_SERVICE_URL alone reads as managed mode, which names
+    # voyage-context-3 for knowledge. The engine under test is ONNX local
+    # (profile bge-base-en-v15-768), so the client must be local too.
+    monkeypatch.setenv("NX_LOCAL", "1")
     monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     reset_http_vector_client_for_tests()
@@ -400,7 +405,12 @@ def test_duplicate_chash_dedup_collapse(
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
     monkeypatch.setenv("NX_SERVICE_URL", base_url)
     monkeypatch.setenv("NX_SERVICE_TOKEN", token)
-    monkeypatch.delenv("NX_LOCAL", raising=False)
+    # RDR-204 (nexus-f5wwx): the client registers the collection before the
+    # first write with the model effective_embedding_model_for_writes
+    # derives, and NX_SERVICE_URL alone reads as managed mode, which names
+    # voyage-context-3 for knowledge. The engine under test is ONNX local
+    # (profile bge-base-en-v15-768), so the client must be local too.
+    monkeypatch.setenv("NX_LOCAL", "1")
     monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     reset_http_vector_client_for_tests()
@@ -447,7 +457,12 @@ def test_on_conflict_idempotency(
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
     monkeypatch.setenv("NX_SERVICE_URL", base_url)
     monkeypatch.setenv("NX_SERVICE_TOKEN", token)
-    monkeypatch.delenv("NX_LOCAL", raising=False)
+    # RDR-204 (nexus-f5wwx): the client registers the collection before the
+    # first write with the model effective_embedding_model_for_writes
+    # derives, and NX_SERVICE_URL alone reads as managed mode, which names
+    # voyage-context-3 for knowledge. The engine under test is ONNX local
+    # (profile bge-base-en-v15-768), so the client must be local too.
+    monkeypatch.setenv("NX_LOCAL", "1")
     monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     reset_http_vector_client_for_tests()
@@ -524,7 +539,12 @@ def test_nul_bytes_sanitized_server_side(
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
     monkeypatch.setenv("NX_SERVICE_URL", base_url)
     monkeypatch.setenv("NX_SERVICE_TOKEN", token)
-    monkeypatch.delenv("NX_LOCAL", raising=False)
+    # RDR-204 (nexus-f5wwx): the client registers the collection before the
+    # first write with the model effective_embedding_model_for_writes
+    # derives, and NX_SERVICE_URL alone reads as managed mode, which names
+    # voyage-context-3 for knowledge. The engine under test is ONNX local
+    # (profile bge-base-en-v15-768), so the client must be local too.
+    monkeypatch.setenv("NX_LOCAL", "1")
     monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     reset_http_vector_client_for_tests()

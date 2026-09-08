@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -916,8 +917,33 @@ def test_reindex_self_heals_missing_manifest(
     from tests._catalog_fixture_ops import seed_manifest_chunks  # noqa: PLC0415
 
     def _mirror_to_engine(collection, ids) -> None:  # noqa: ANN001
-        if ids:
+        if not ids:
+            return
+        # RDR-204 (nexus-f5wwx): this file's autouse _legacy_vector_backend
+        # pins NX_STORAGE_BACKEND_VECTORS=local for local_t3's own in-memory
+        # double, but seed_manifest_chunks's bare HttpVectorClient() writes
+        # to the REAL (service-mode) engine -- ambient NX_STORAGE_BACKEND_
+        # VECTORS=local at that moment makes effective_embedding_model_for_
+        # writes fall through to the client-local EF tier (minilm-l6-v2-384)
+        # instead of this engine's actual bge-768 profile, so the collection
+        # registration 422s on a model the engine never advertised. Pin
+        # service+local posture for the duration of this ONE real-engine
+        # write, then restore local_t3's own env exactly as the autouse
+        # fixture left it.
+        saved = {
+            k: os.environ.get(k)
+            for k in ("NX_LOCAL", "NX_STORAGE_BACKEND_VECTORS")
+        }
+        os.environ["NX_LOCAL"] = "1"
+        os.environ["NX_STORAGE_BACKEND_VECTORS"] = "service"
+        try:
             seed_manifest_chunks(collection, list(ids))
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
     _orig_upsert_chunks = local_t3.upsert_chunks
     _orig_upsert_chunks_with_embeddings = local_t3.upsert_chunks_with_embeddings

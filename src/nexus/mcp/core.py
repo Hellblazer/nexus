@@ -25,9 +25,11 @@ except ImportError:  # pragma: no cover — future SDK restructure
     _FastMCPSettings = None
 
 from nexus.corpus import (
+    _refuse_placeholder_subject,
     embedding_model_for_collection,
     embedding_model_for_collection_name,
     index_model_for_collection,
+    is_conformant_collection_name,
     resolve_corpus,
     t3_collection_name,
 )
@@ -3879,6 +3881,13 @@ def store_put(
         # empty string for every MCP write with no explicit agent.
         agent_arg = agent.strip() or _os.environ.get("NX_AGENT", "").strip() or "mcp"
         session_arg = session.strip() or _os.environ.get("NX_SESSION_ID", "").strip()
+        # nexus-0fw11: refuse a placeholder subject BEFORE any engine contact.
+        # ``_get_t3()`` runs the managed-engine floor probe in cloud mode, and
+        # an unreachable or below-floor engine would otherwise answer first
+        # and mask the refusal (the same check t3_collection_name repeats
+        # below, where it is too late to be the first thing a caller sees).
+        if not is_conformant_collection_name(collection):
+            _refuse_placeholder_subject(collection)
         t3 = _get_t3()
         # nexus-hmxi: pass t3 so the resolver grandfathers an existing
         # legacy 2-segment collection ahead of the auto-promoted

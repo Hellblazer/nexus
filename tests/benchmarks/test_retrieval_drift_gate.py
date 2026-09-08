@@ -232,8 +232,13 @@ def seeded_client(java_service):
     base_url, token = java_service
     saved = {
         k: os.environ.get(k)
-        for k in ("NX_SERVICE_URL", "NX_SERVICE_TOKEN")
+        for k in ("NX_LOCAL", "NX_SERVICE_URL", "NX_SERVICE_TOKEN")
     }
+    # RDR-204 (nexus-f5wwx): with only NX_SERVICE_URL set the client reads
+    # as managed and registers a knowledge collection as voyage-context-3,
+    # which this ONNX engine's bge-768 profile refuses with 422 (same shape
+    # as e08f68c82 / 034043c65 on this branch).
+    os.environ["NX_LOCAL"] = "1"
     os.environ["NX_SERVICE_URL"] = base_url
     os.environ["NX_SERVICE_TOKEN"] = token
 
@@ -294,6 +299,10 @@ def _service_env(java_service, monkeypatch):
     base_url, token = java_service
     monkeypatch.setenv("NX_SERVICE_URL", base_url)
     monkeypatch.setenv("NX_SERVICE_TOKEN", token)
+    # RDR-204 (nexus-f5wwx): NX_SERVICE_URL alone reads as managed mode,
+    # which derives voyage-context-3 for a knowledge write -- this ONNX
+    # engine's bge-768 profile refuses that with 422.
+    monkeypatch.setenv("NX_LOCAL", "1")
 
 
 def _run_benchmark(client, chash_to_doc) -> dict:

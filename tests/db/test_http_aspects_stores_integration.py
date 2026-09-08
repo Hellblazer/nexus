@@ -271,6 +271,60 @@ def _seed_catalog_docs(pg_instance, service):
     yield
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _register_collections(service):
+    """Register every collection this file's tests write to, against THIS
+    module's own service, before any test body runs (RDR-204, nexus-f5wwx).
+
+    The engine no longer auto-registers a collection on first write.
+    ``HttpDocumentAspectsStore.upsert`` / ``HttpDocumentHighlightsStore
+    .upsert`` / ``HttpAspectQueue.enqueue`` self-heal via
+    ``write_with_registration_retry``, but its DEFAULT registrar
+    (``nexus.catalog.factory.make_catalog_writer``) resolves ``NX_SERVICE_URL``
+    from the AMBIENT env, not from this module's own ``base_url`` -- either
+    nothing this test spawned (connection refused, before the suite-wide
+    ``_pin_t2_substrate`` fixture has fired for any test) or a DIFFERENT,
+    shared substrate service (once it has) that has nothing to do with this
+    module's engine -- registration there "succeeds" and caches the name,
+    but the actual write against THIS module's own service then 422s "not
+    registered". Pre-registering every name here, bound explicitly to this
+    module's own ``base_url``/``token``, warms
+    ``ensure_collection_registered``'s per-process cache so neither failure
+    mode can occur. NX_LOCAL=1 pinned for the derivation window so
+    ``collection_registration_kwargs`` picks the local ONNX engine's
+    bge-768 profile (RDR-160), not a managed-mode voyage-context-3 guess.
+    """
+    base_url, token, _ = service
+    names = (
+        "knowledge__inttest",
+        "knowledge__rename-src-inttest",
+        "knowledge__rename-dst-inttest",
+        "knowledge__rls-inttest",
+        "knowledge__etl-inttest",
+        "knowledge__highlights-inttest",
+        "knowledge__concurrency-inttest",
+        "knowledge__queue-inttest",
+        "knowledge__claimbatch-inttest",
+        "knowledge__queue-etl-inttest",
+        "knowledge__queue-fk-pos-inttest",
+    )
+    saved = {k: os.environ.get(k) for k in ("NX_LOCAL", "NX_SERVICE_URL", "NX_SERVICE_TOKEN")}
+    os.environ["NX_LOCAL"] = "1"
+    os.environ["NX_SERVICE_URL"] = base_url
+    os.environ["NX_SERVICE_TOKEN"] = token
+    try:
+        from nexus.corpus import ensure_collection_registered
+        for name in names:
+            ensure_collection_registered(name)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    yield
+
+
 @pytest.fixture(scope="module")
 def aspects_store(service):
     """HttpDocumentAspectsStore (tenant='default') connected to the real Java service."""
