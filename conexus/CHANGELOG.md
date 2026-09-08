@@ -4,6 +4,38 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.36.0] - 2026-09-07
+
+- `rdr-gate` skill and command: the outcome is computed by
+  `nx rdr preamble rdr-verdict`, never by hand (nexus-yxo2l); Layer 0 fires
+  after PASSED gates too and sweeps the critic's `Sites:` list, a
+  diff-scoped Fix check layer runs before Layer 1, and Gate Aggregation
+  blocks on any Critical in rounds 1-2 and on `ship_blockers` only from
+  round 3, recording the rest as residuals (nexus-g7zgw); the gate record
+  gains `ship_blockers:`, `fix_check:`, `residuals:`, `prior:`.
+- `rdr-research` skill: pre-edit capture for gate fixes — a research entry
+  written before the edit, quote or "inferred, not read" per clause, a
+  census for universals; a T3 file:line hit is a lead, re-read from the
+  tree before it is cited or quoted (nexus-g7zgw.5).
+- `rdr_hook.py` (SessionStart): names `nx index repo <root>` alone now that
+  `nx catalog setup` is retired everywhere (nexus-owna8, the hook's false
+  NOT-indexed verdict); also names any draft RDR whose file moved past its
+  gated commit and points at `/conexus:rdr-fix` (nexus-zbdm0).
+- `rdr-accept` skill: residuals in the gate record must be dispositioned
+  (commit sha or bead id) before accept; a `fix_check:` sha that differs
+  from `commit:` blocks accept (nexus-g7zgw.2).
+- `substantive-critic` agent: the canonical Issue format carries a
+  `Sites:` line (nexus-g7zgw.4).
+- New `rdr-fix` command and skill: the fix step's own surface, wired to
+  `nx rdr preamble rdr-fix` (nexus-zbdm0); `rdr-gate`'s Fixing findings
+  section points at it.
+- `using-nx-skills` skill: `rdr-fix` in the lifecycle line; two Red Flags
+  rows for the filing-as-deferral and one-more-pass pathologies (Sam,
+  2026-09-07).
+- `code-review` skill, `orchestration` skill, `strategic-planner` agent:
+  round numbers cite the new `review-rounds.toml` table instead of a
+  hardcoded literal (nexus-dv7gw).
+
 ## [7.35.0] - 2026-09-07
 
 Plugin version aligned with conexus 7.35.0. No plugin-side changes.

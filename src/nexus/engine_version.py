@@ -419,7 +419,19 @@ from __future__ import annotations
 #: forced-precondition probe going 20/20 40P01 on v0.1.94 -> 0/20 on
 #: v0.1.95. One Liquibase changeset pair, so the PITR fork walk WAS run
 #: (fork census == live census row-for-row) rather than skipped.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 107)
+#: ->(0,1,108) 2026-09-07: paired with conexus 7.36.0. The engine delta over
+#: v0.1.107 is additive only: POST /v1/catalog/restore and GET
+#: /v1/catalog/trash (nexus-dkymw), the t3 gc alive-set keeping tombstoned
+#: documents' chunks until purge_trash reclaims the row (nexus-dkymw,
+#: superseding nexus-mqd6t for that one read), the opt-in
+#: tombstone_protected_count field on /manifest/chashes (nexus-zewg3), and
+#: the schema-qualified SET CONSTRAINTS in deferManifestChunkFk (nexus-cbo4a,
+#: surfaced by deleting every role-level search_path in the test tree). No
+#: Liquibase changesets in the delta, so no PITR fork walk; the one wire-ledger
+#: entry leads with [additive], so the engine is deployed before this client
+#: tag (nexus-1emxn choreography (a)). Local-mode installs get the restore
+#: verb and the tombstone protection ONLY through this pin.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 108)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

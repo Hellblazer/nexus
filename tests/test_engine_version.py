@@ -511,7 +511,14 @@ class TestRequiredEngineVersion:
         # store walks 1) with NX_INSTALL_PING_TRUSTED_PROXIES keying. The
         # client half (daily ping from the MCP lifespan, nx telemetry
         # status/off/on) ships in 7.35.0, paired with this engine.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 107)
+        # ->(0,1,108) 2026-09-07: additive engine only (catalog restore/trash
+        # routes, t3 gc alive-set protecting tombstoned docs, opt-in
+        # tombstone_protected_count on /manifest/chashes, schema-qualified
+        # SET CONSTRAINTS); no changesets, no /version fields. Paired with
+        # conexus 7.36.0; engine deployed before the client tag (additive
+        # choreography). Local-mode installs get nx catalog restore and the
+        # tombstone protection only through this pin.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 108)
 
 
 class TestParseEngineVersion:

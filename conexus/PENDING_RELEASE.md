@@ -29,18 +29,6 @@ mechanize, it matters enough to ship.
 ---
 
 
-## Awaiting the next release or plugin cut (pinned: v7.35.0)
+## Awaiting the next release or plugin cut (pinned: v7.36.0)
 
-- `conexus/skills/rdr-gate/SKILL.md` — nexus-yxo2l: the outcome is computed by `nx rdr preamble rdr-verdict`, never by hand; nexus-g7zgw: Layer 0 fires after PASSED gates too and sweeps the critic's `Sites:` list; the diff-scoped Fix check layer; round-numbered Gate Aggregation (any Critical in rounds 1-2, `ship_blockers` only from round 3, residuals recorded); the fix-commit rule.; T3 file:line hits are leads, re-read from the tree before citing
-- `conexus/commands/rdr-gate.md` — nexus-yxo2l: outcome via `nx rdr preamble rdr-verdict`; nexus-g7zgw: the same Layer 0, Fix check and aggregation rules; gate record gains `ship_blockers:`, `fix_check:`, `residuals:`, `prior:`.
-- `conexus/skills/rdr-research/SKILL.md` — nexus-g7zgw.5: pre-edit capture for gate fixes (entry before the edit, quote or "inferred, not read" per clause, census for universals).; T3 file:line hits re-read from the tree before quoting
-- `conexus/hooks/scripts/rdr_hook.py` — SessionStart text names `nx index repo <root>` alone; `nx catalog setup` is retired and its mention was the false remedy (the false NOT-indexed verdict itself is nexus-owna8); nexus-zbdm0: it also names draft RDRs whose file moved past the gated commit and points at /conexus:rdr-fix
-- `conexus/skills/rdr-accept/SKILL.md` — nexus-g7zgw.2: residuals in the gate record are dispositioned (commit sha or bead id) before accept; a `fix_check:` sha that differs from `commit:` blocks accept.
-- `conexus/agents/substantive-critic.md` — nexus-g7zgw.4: the canonical Issue format carries a `Sites:` line.
-- `conexus/commands/rdr-fix.md` — nexus-zbdm0: the fix step's command (`nx rdr preamble rdr-fix`).
-- `conexus/skills/rdr-fix/SKILL.md` — nexus-zbdm0: the fix step's skill; rdr-gate's Fixing findings points at it.
-- `conexus/skills/using-nx-skills/SKILL.md` — nexus-zbdm0: rdr-fix in the lifecycle line; Red Flags rows for filing-as-deferral and one-more-pass (Sam, 2026-09-07).
-- `conexus/skills/code-review/SKILL.md` — nexus-dv7gw: round numbers cite `review-rounds.toml`.
-- `conexus/skills/orchestration/SKILL.md` — nexus-dv7gw: the round cap cites `review-rounds.toml`.
-- `conexus/agents/strategic-planner.md` — nexus-dv7gw: the plan-audit cap cites `review-rounds.toml`.
-- `conexus/commands/devonthink-index.md` — nexus-i0cwh: the DEVONthink route's command over `nx dt index` (`nx command-context devonthink-index`).
+(none)
