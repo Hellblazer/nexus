@@ -54,7 +54,7 @@ mcp__plugin_conexus_nexus__nx_enrich_beads()                             # desig
 mcp__plugin_conexus_nexus__nx_plan_audit()                               # plan library quality sweep
 
 # Memory (T2)
-mcp__plugin_conexus_nexus__memory_put(content="content", project="{repo}", title="file.md"
+mcp__plugin_conexus_nexus__memory_put(content="content", project="{repo}", title="file.md", ttl=None)   # ttl=None for a record of record; omit ttl for a 30-day session finding; omitting ttl never means permanent
 mcp__plugin_conexus_nexus__memory_get(project="{repo}", title="file.md"       # exact-then-unique-prefix match
 mcp__plugin_conexus_nexus__memory_search(query="query", project="{repo}"
 

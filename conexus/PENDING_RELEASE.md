@@ -31,4 +31,11 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.37.0)
 
-(none)
+- `conexus/skills/using-nx-skills/SKILL.md`: nexus-um2h1 — the T2 ttl
+  convention (`ttl=None` for records of record; the 30-day default for
+  session findings; omitting `ttl` never means permanent) and its row in
+  Common Mistakes.
+- `conexus/skills/knowledge-tidying/SKILL.md`: nexus-um2h1 — the T2
+  write-back bullet carries `ttl=None` and the convention.
+- `conexus/skills/nexus/SKILL.md`: nexus-um2h1 — the `memory_put` example
+  carries `ttl=None` and the convention.
