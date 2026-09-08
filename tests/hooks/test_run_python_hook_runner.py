@@ -72,3 +72,29 @@ def test_a_dangling_current_link_is_skipped(tmp_path: Path) -> None:
 def test_runner_keeps_the_named_python_probes_after_the_generation_check() -> None:
     text = RUNNER.read_text()
     assert text.index("current/bin/python") < text.index("python3.13") < text.index('exec python3 "$@"')
+
+
+def test_a_generation_python_that_cannot_run_is_skipped(tmp_path: Path) -> None:
+    """A partially reaped or wrong-arch generation: the file is executable
+    but does not run. The runner must fall through, not exec into a 127."""
+    tools = tmp_path / "tools"
+    gen = tools / "gen-broken"
+    (gen / "bin").mkdir(parents=True)
+    py = gen / "bin" / "python"
+    py.write_text("#!/nonexistent/interpreter\n")
+    py.chmod(py.stat().st_mode | stat.S_IXUSR)
+    (tools / "current").symlink_to(gen)
+    hook = tmp_path / "hook.py"
+    hook.write_text("print('fallback ran')\n")
+    proc = _run(tools, hook)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "fallback ran"
+
+
+def test_no_home_and_no_tools_dir_still_runs_the_hook(tmp_path: Path) -> None:
+    hook = tmp_path / "hook.py"
+    hook.write_text("print('no home ok')\n")
+    env = {k: v for k, v in os.environ.items() if k not in {"HOME", "NX_TOOLS_DIR"}}
+    proc = subprocess.run(["bash", str(RUNNER), str(hook)], env=env, capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "no home ok"

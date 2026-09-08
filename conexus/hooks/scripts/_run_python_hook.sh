@@ -16,9 +16,12 @@
 #      (3.10) that wins PATH precedence does not run the hook.
 #   3. Plain python3, so the hook's own version guard can print its error.
 set -u
-tools="${NX_TOOLS_DIR:-$HOME/.local/share/nexus/tools}"
+# ${HOME:-} so a hook launched with no HOME (a scrubbed env) falls through
+# instead of dying on `set -u`; the run check so a partially reaped or
+# wrong-arch generation python falls through instead of exec failing.
+tools="${NX_TOOLS_DIR:-${HOME:-}/.local/share/nexus/tools}"
 gen_py="$tools/current/bin/python"
-if [ -x "$gen_py" ]; then
+if [ -x "$gen_py" ] && "$gen_py" -c '' >/dev/null 2>&1; then
   exec "$gen_py" "$@"
 fi
 for py in python3.13 python3.12; do

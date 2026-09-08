@@ -4,11 +4,12 @@
 must talk to the engine's T2 HTTP API, never the retired SQLite
 ``memory.db``.
 
-The plugin's ``_run_python_hook.sh`` wrapper probes bare ``python3.13`` /
+The plugin's ``_run_python_hook.sh`` wrapper prefers the installed
+generation's python (nexus-4ti7e) and otherwise probes bare ``python3.13`` /
 ``python3.12`` to invoke ``session_start_hook.py``, which calls
-``t2_prefix_scan.py``. On a ``uv tool install conexus`` deployment the
-wrapper's resolved interpreter cannot import the ``nexus`` package (it
-lives in conexus's own venv) — this pins that the script runs under a
+``t2_prefix_scan.py``. On a ``uv tool install conexus`` deployment, or a box
+with no generation, the wrapper's resolved interpreter cannot import the
+``nexus`` package (it lives in conexus's own venv) — this pins that the script runs under a
 vanilla Python with only stdlib available, over a stdlib ``urllib``
 client against a mocked HTTP engine (never a real ``nexus`` import, never
 SQLite).
