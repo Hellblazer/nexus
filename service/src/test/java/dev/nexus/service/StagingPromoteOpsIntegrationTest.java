@@ -215,6 +215,34 @@ class StagingPromoteOpsIntegrationTest {
         svcDs = new com.zaxxer.hikari.HikariDataSource(config);
         scope = new TenantScope(svcDs);
         ops = new StagingPromoteOps(scope);
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK to catalog_collections — StagingPromoteOps.
+        // promoteCollection's stub-insert is retired, so a real row must exist
+        // before the content INSERT into chunks_<dim>, or the FK itself rejects it.
+        // This suite's promoteCollection tests predate that requirement and use a
+        // small, distinct, per-test collection name purely for row isolation, not to
+        // exercise registration behavior itself (CollectionRegistryTest owns the
+        // fail-loud contract). Registered here, once, under BOTH tenants this file
+        // promotes against (RLS isolation is a DATA guarantee, never a registration
+        // one). Tests that ALREADY register their own collection explicitly via a
+        // real catalog_collections INSERT (finalizeTenant paths not reached through
+        // promoteCollection) are unaffected either way.
+        for (String col : List.of(COLL_A, COLL_B, COLL_LATE, COLL_GATE, COLL_GATE2,
+                COLL_F12B, COLL_G6,
+                "knowledge__kmulti-a__bge-base-en-v15-768__v1",
+                "knowledge__kmulti-b__bge-base-en-v15-768__v1",
+                "knowledge__kg8z__bge-base-en-v15-768__v1")) {
+            for (String tenant : List.of(T1, T_REJECT)) {
+                scope.withTenant(tenant, ctx -> {
+                    ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+                       .values(tenant, col)
+                       .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME).doNothing()
+                       .execute();
+                    return null;
+                });
+            }
+        }
     }
 
     @AfterAll

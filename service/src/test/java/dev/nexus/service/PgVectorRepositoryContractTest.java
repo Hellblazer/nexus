@@ -3,6 +3,7 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.PgVectorRepository;
@@ -122,6 +123,55 @@ class PgVectorRepositoryContractTest {
         repo1024 = new PgVectorRepository(tenantScope, embedder1024, embedder1024);
         repo768  = new PgVectorRepository(tenantScope, embedder768,  embedder768);
         repo384  = new PgVectorRepository(tenantScope, embedder384,  embedder384);
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK to catalog_collections — PgVectorRepository's stub-insert
+        // is retired, so a real row (not just a CollectionRegistry cache entry) must
+        // exist before any chunk write, or the FK itself rejects the insert regardless
+        // of what the in-process cache believes. This suite's tests predate that
+        // requirement and use a small, distinct, per-test collection name purely for
+        // row isolation, not to exercise registration behavior itself
+        // (CollectionRegistryTest owns the fail-loud contract). Seeded here, once, for
+        // BOTH tenants (RLS isolation is a DATA guarantee enforced on chunk rows,
+        // never on collection registration).
+        for (String collection : List.of(
+                "code__alpha__voyage-code-3__v1", "code__attribution__voyage-code-3__v1",
+                "code__countexact__voyage-code-3__v1", "code__dedup__voyage-code-3__v1",
+                "code__deleteempty__voyage-code-3__v1", "code__deleteown__voyage-code-3__v1",
+                "code__deleterls__voyage-code-3__v1", "code__emptybatch__voyage-code-3__v1",
+                "code__exactvec__voyage-code-3__v1", "code__existsk__voyage-code-3__v1",
+                "code__getallmeta__voyage-code-3__v1", "code__getallmetaempty__voyage-code-3__v1",
+                "code__getallmetatenant__voyage-code-3__v1", "code__getallmetawhere__voyage-code-3__v1",
+                "code__getbyids__voyage-code-3__v1", "code__getoffset__voyage-code-3__v1",
+                "code__getrls__voyage-code-3__v1", "code__getwheregte__voyage-code-3__v1",
+                "code__getwherene__voyage-code-3__v1", "code__listpage__voyage-code-3__v1",
+                "code__listrls__voyage-code-3__v1", "code__manifest__voyage-code-3__v1",
+                "code__manifestbroken__voyage-code-3__v1", "code__manifestrls__voyage-code-3__v1",
+                "code__manifestshared__voyage-code-3__v1", "code__neverwritten__voyage-code-3__v1",
+                "code__reupsert__voyage-code-3__v1", "code__searchand__voyage-code-3__v1",
+                "code__searchbadop__voyage-code-3__v1", "code__searchcap__voyage-code-3__v1",
+                "code__searchcompound__voyage-code-3__v1", "code__searcheq__voyage-code-3__v1",
+                "code__searcheqtyping__voyage-code-3__v1", "code__searchgte__voyage-code-3__v1",
+                "code__searchin__voyage-code-3__v1", "code__searchlex__voyage-code-3__v1",
+                "code__searchmcx__voyage-code-3__v1", "code__searchmcy__voyage-code-3__v1",
+                "code__searchne__voyage-code-3__v1", "code__searchnemiss__voyage-code-3__v1",
+                "code__searchnetyping__voyage-code-3__v1", "code__searchnin__voyage-code-3__v1",
+                "code__searchorder__voyage-code-3__v1", "code__searchrls__voyage-code-3__v1",
+                "code__searchwhere__voyage-code-3__v1", "code__updatemeta-align__voyage-code-3__v1",
+                "code__updatemeta-rls__voyage-code-3__v1", "code__updatemeta__voyage-code-3__v1",
+                "docs__alpha__bge-base-en-v15-768__v1", "knowledge__alpha__minilm-l6-v2-384__v1",
+                "knowledge__alpha__voyage-context-3__v1", "knowledge__mismatch__minilm-l6-v2-384__v1",
+                "knowledge__nulsan__voyage-context-3__v1", "knowledge__v3disp__voyage-3__v1")) {
+            for (String tenant : List.of(TENANT_A, TENANT_B)) {
+                tenantScope.withTenant(tenant, ctx -> {
+                    ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+                       .values(tenant, collection)
+                       .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME).doNothing()
+                       .execute();
+                    return null;
+                });
+            }
+        }
     }
 
     @AfterAll

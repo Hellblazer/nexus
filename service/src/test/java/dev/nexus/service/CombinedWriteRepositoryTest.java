@@ -88,6 +88,33 @@ class CombinedWriteRepositoryTest {
         repo = new CatalogRepository(tenantScope);
         embedder = new CountingFakeEmbedder();
         svc = new CombinedWriteService(tenantScope, repo, new EmbedderRouter(embedder, "document"));
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK to catalog_collections — CombinedWriteService's
+        // stub-insert is retired, so a real row must exist before any chunk write
+        // (writeManifestRows -> upsertManifestChunkVectors), or the FK itself rejects
+        // the insert. This suite's tests predate that requirement and use a small,
+        // distinct, per-test collection name purely for row isolation
+        // (CollectionRegistryTest owns the fail-loud contract itself).
+        for (String col : List.of(
+                "code__cw1__minilm-l6-v2-384__v1", "code__cw2__minilm-l6-v2-384__v1",
+                "code__cw3__minilm-l6-v2-384__v1", "code__cw4__minilm-l6-v2-384__v1",
+                "code__cw5__minilm-l6-v2-384__v1", "code__cw6__minilm-l6-v2-384__v1",
+                "code__cw7__minilm-l6-v2-384__v1", "code__cw8__minilm-l6-v2-384__v1",
+                "code__cw9b__minilm-l6-v2-384__v1", "code__cw10__minilm-l6-v2-384__v1",
+                "code__cw11__minilm-l6-v2-384__v1", "code__cw12__minilm-l6-v2-384__v1",
+                "code__cw13__minilm-l6-v2-384__v1", "code__cw14__minilm-l6-v2-384__v1")) {
+            tenantScope.withTenant(TENANT_A, ctx -> {
+                ctx.insertInto(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS,
+                                dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID,
+                                dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME)
+                   .values(TENANT_A, col)
+                   .onConflict(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID,
+                               dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME).doNothing()
+                   .execute();
+                return null;
+            });
+        }
     }
 
     @AfterAll

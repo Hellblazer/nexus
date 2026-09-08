@@ -82,6 +82,24 @@ class PgVectorMetadataBatchParityTest {
 
         embedder = new CountingEmbedder(1024);
         repo = new PgVectorRepository(tenantScope, embedder, embedder);
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK — PgVectorRepository's stub-insert is retired, so a real
+        // row must exist before any chunk write, or this suite's writes exercise an
+        // FK violation instead of metadata-batch parity.
+        for (String col : List.of("code__metabatch-mixed__voyage-code-3__v1",
+                "code__metabatch-refresh__voyage-code-3__v1")) {
+            tenantScope.withTenant(TENANT, ctx -> {
+                ctx.insertInto(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS,
+                                dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID,
+                                dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME)
+                   .values(TENANT, col)
+                   .onConflict(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID,
+                               dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME).doNothing()
+                   .execute();
+                return null;
+            });
+        }
     }
 
     @AfterAll

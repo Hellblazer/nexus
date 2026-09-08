@@ -99,6 +99,19 @@ class ReferenceOnlyChunkUpsertTest {
         FakeEmbedder embedder = new FakeEmbedder(1024);
         repo = new PgVectorRepository(scope, embedder, embedder);
 
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): PgVectorRepository's stub-insert is
+        // retired — the upsertChunks seed call below now requires COL to already be
+        // registered (CollectionRegistry.requireRegistered), or it fails loud.
+        try (Connection conn = ds.getConnection()) {
+            DSL.using(conn, SQLDialect.POSTGRES)
+                .insertInto(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS,
+                            dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID,
+                            dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME)
+                .values(TENANT, COL)
+                .onConflictDoNothing()
+                .execute();
+        }
+
         // Seed a full-content chunk for the full→reference-only guard test.
         // upsertChunks is safe today (no retention column on the existing INSERT).
         repo.upsertChunks(TENANT, COL,

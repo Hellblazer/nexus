@@ -2,8 +2,12 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import org.jooq.DSLContext;
+
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 
 /**
  * Bead nexus-h8rf6.2 — in-process cache of {@code (tenant, collection)} pairs KNOWN
@@ -120,5 +124,36 @@ public final class CollectionRegistry {
     /** Test-only: clears all cached entries. */
     static void clearForTests() {
         KNOWN.clear();
+    }
+
+    /**
+     * Fail loud when {@code (tenant, collection)} has no row in {@code
+     * nexus.catalog_collections} (RDR-204 Phase 1, bead nexus-ft04v.7).
+     *
+     * <p>Replaces the seven {@code ensureCollectionRegistered}-shaped stub inserts
+     * this bead retires: those wrote a blank-attribute row on first write so their
+     * own {@code (tenant, collection)} FK could never fail; this checks existence
+     * instead and never writes anything. Checks the in-process cache first (skips
+     * a round trip once a pair is known-registered by a real registration —
+     * {@code CatalogRepository.upsertCollection} and siblings mark it via {@link
+     * #markKnown} post-commit); on a cache miss, asks the database directly and
+     * marks the cache on a hit so repeat writes to the same collection skip the
+     * SELECT too.
+     *
+     * @throws UnregisteredCollectionException if no row exists for the pair
+     */
+    public static void requireRegistered(DSLContext ctx, String tenant, String collection) {
+        if (isKnown(tenant, collection)) {
+            return;
+        }
+        boolean exists = ctx.fetchExists(
+            ctx.selectOne()
+               .from(CATALOG_COLLECTIONS)
+               .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_COLLECTIONS.NAME.eq(collection))));
+        if (!exists) {
+            throw new UnregisteredCollectionException(tenant, collection);
+        }
+        markKnown(tenant, collection);
     }
 }

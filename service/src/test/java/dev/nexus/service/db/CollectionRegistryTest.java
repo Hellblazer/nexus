@@ -13,44 +13,32 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.util.List;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Bead nexus-h8rf6.2 — deterministic, non-flaky proof of the {@link CollectionRegistry}
- * contention-relief mechanism.
+ * Bead nexus-h8rf6.2 (pure-cache semantics) + RDR-204 Phase 1 bead nexus-ft04v.7
+ * ({@link CollectionRegistry#requireRegistered} fail-loud contract).
  *
- * <p>{@code ChashVectorConcurrencyTest} demonstrates the bug and fix end-to-end over real
- * HTTP + a real connection pool, but wall-clock races over Testcontainers' near-zero-RTT
- * localhost Postgres are inherently timing-sensitive. This suite proves the SAME mechanism
- * directly and deterministically: hold an uncommitted lock on a {@code catalog_collections}
- * row on one connection, then drive {@code ensureCollectionRegistered} for that exact {@code (tenant, collection)}
- * on another thread — via {@link ChashRepository#renameCollection}, the surviving
- * production caller after RDR-187 retired the upsert write path (PgVectorRepository's
- * ingest registration mirrors the same seam) — and observe whether it blocks.
+ * <p><strong>Retired by nexus-ft04v.7:</strong> the lock-contention tests this class used
+ * to carry (a held, uncommitted lock on a {@code catalog_collections} row, racing {@code
+ * ensureCollectionRegistered}'s {@code INSERT ... ON CONFLICT DO NOTHING} on another
+ * thread) tested a mechanism that no longer exists. {@code ChashRepository
+ * .ensureCollectionRegistered} — like the other six stub-insert paths this bead retires —
+ * no longer writes a row at all; it calls {@link CollectionRegistry#requireRegistered},
+ * a read-only existence check that never contends for a row lock, cached or not. The
+ * contention story survives only for the FOUR write paths that carry real, client-supplied
+ * attributes ({@code CatalogRepository.upsertCollection} and siblings), which this bead does
+ * not touch and this class does not exercise.
  *
- * <ul>
- *   <li><strong>Never-registered collection, no cache:</strong> registration blocks —
- *       its {@code ensureCollectionRegistered} INSERT races the held (first-ever-insert)
- *       row lock. This is the documented, UNCHANGED-by-design first-touch cost (see
- *       {@link CollectionRegistry} class doc) — the fix does not (and cannot) eliminate
- *       it.</li>
- *   <li><strong>Already-registered collection, no cache:</strong> registration STILL
- *       blocks against a concurrent UPDATE lock on that row — empirically verified here
- *       (Postgres blocks {@code INSERT ... ON CONFLICT DO NOTHING} on ANY uncommitted
- *       concurrent write to the conflicting row, not merely a concurrent INSERT). This is
- *       what makes the bug RECURRING, not a one-off startup cost: every repeat
- *       registration attempt for a collection another process happens to be concurrently
- *       touching pays this tax, for the collection's whole lifetime.</li>
- *   <li><strong>Already-registered collection, cached:</strong> the caller returns
- *       immediately — {@code ensureCollectionRegistered} skips the INSERT entirely, so it
- *       never contends for the held row lock at all. This is the fix.</li>
- * </ul>
+ * <p>This class now proves two things: the {@link CollectionRegistry#requireRegistered}
+ * contract (throws {@link UnregisteredCollectionException} and writes nothing when the
+ * pair is absent; succeeds and marks the cache when the row exists — driven through
+ * {@link ChashRepository#renameCollection}, the surviving production caller after RDR-187
+ * retired the upsert write path), and the pure in-process cache semantics
+ * (isKnown/markKnown/evict/evictTenant) unaffected by this bead.
  *
  * <p>Hermetic: Testcontainers pgvector/pgvector:pg17, {@code nexus_svc} role (full DML via
  * {@code grants-nexus-svc.xml}), PER_CLASS. {@link CollectionRegistry#clearForTests()} runs
@@ -101,170 +89,83 @@ class CollectionRegistryTest {
     }
 
     // -------------------------------------------------------------------------
-    // Helper: hold an uncommitted lock on the catalog_collections row for
-    // `collection`, simulating a concurrent writer mid-registration.
+    // Helper: seed a real catalog_collections row via the generated jOOQ DSL
+    // (never raw SQL) — the "already registered" fixture for the tests below.
     // -------------------------------------------------------------------------
 
-    /** A held, uncommitted registration lock; call {@link #release()} to free it. */
-    private final class HeldLock implements AutoCloseable {
-        final Connection conn;
+    private void seedRegistered(String collection) {
+        tenantScope.withTenant(TENANT, ctx -> {
+            ctx.insertInto(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS,
+                            dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID,
+                            dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME)
+               .values(TENANT, collection)
+               .onConflict(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID,
+                           dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME)
+               .doNothing()
+               .execute();
+            return null;
+        });
+    }
 
-        /**
-         * @param collection the (tenant, collection) row to lock
-         * @param rowExists  false: lock via an uncommitted first-ever INSERT (the
-         *                   row does not exist yet — a genuine first-touch race).
-         *                   true: lock via an uncommitted UPDATE of an ALREADY
-         *                   committed row (a second concurrent writer touching the
-         *                   same collection after it is already registered) — a
-         *                   {@code INSERT ... ON CONFLICT} targeting this row still
-         *                   has to wait for this UPDATE's row lock to release
-         *                   before it can determine the conflict outcome.
-         */
-        HeldLock(String collection, boolean rowExists) throws Exception {
-            conn = svcDs.getConnection();
-            conn.setAutoCommit(false);
-            PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT, true);
-            if (rowExists) {
-                try (var ps = conn.prepareStatement(
-                        "UPDATE nexus.catalog_collections SET name = name "
-                        + "WHERE tenant_id = ? AND name = ?")) {
-                    ps.setString(1, TENANT);
-                    ps.setString(2, collection);
-                    int updated = ps.executeUpdate();
-                    if (updated != 1) {
-                        throw new IllegalStateException(
-                            "expected row to already exist for rowExists=true: " + collection);
-                    }
-                }
-            } else {
-                try (var ps = conn.prepareStatement(
-                        "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
-                        + "ON CONFLICT (tenant_id, name) DO NOTHING")) {
-                    ps.setString(1, TENANT);
-                    ps.setString(2, collection);
-                    ps.execute();
-                }
-            }
-            // Deliberately NOT committed — the row lock is held until release().
-        }
-
-        void release() throws Exception {
-            conn.commit();
-            conn.close();
-        }
-
-        @Override
-        public void close() throws Exception {
-            release();
-        }
+    private boolean rowExists(String collection) {
+        return tenantScope.withTenant(TENANT, ctx -> ctx.fetchExists(
+            ctx.selectOne()
+               .from(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+               .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)
+                   .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(collection)))));
     }
 
     // -------------------------------------------------------------------------
-    // Test 1: cache MISS — registration blocks on the held lock (documented, unchanged
-    // first-touch cost; NOT what the fix targets).
+    // RDR-204 Phase 1 (bead nexus-ft04v.7): CollectionRegistry.requireRegistered's
+    // fail-loud contract, driven through ChashRepository.renameCollection — the
+    // surviving in-txn ensureCollectionRegistered caller after RDR-187 retired the
+    // upsert write path (PgVectorRepository's ingest registration mirrors the same
+    // seam).
     // -------------------------------------------------------------------------
 
     @Test
-    void upsert_blocksOnHeldLock_whenCollectionNotCached() throws Exception {
+    void requireRegistered_throwsAndWritesNoRow_whenCollectionNeverRegistered() {
         String collection = "code__cr-miss__voyage-code-3__v1";
         assertThat(CollectionRegistry.isKnown(TENANT, collection)).isFalse();
+        assertThat(rowExists(collection)).isFalse();
 
-        try (HeldLock lock = new HeldLock(collection, false)) {
-            var executor = Executors.newSingleThreadExecutor();
-            CountDownLatch started = new CountDownLatch(1);
-            CompletableFuture<Void> registrationDone = CompletableFuture.runAsync(() -> {
-                started.countDown();
-                // RDR-187: renameCollection is the surviving in-txn
-                // ensureCollectionRegistered caller (0-row source = pure
-                // registration, same contended INSERT).
-                repo.renameCollection(TENANT, "cr-miss-src", collection);
-            }, executor);
+        assertThatThrownBy(
+                () -> repo.renameCollection(TENANT, "cr-miss-src", collection))
+            .isInstanceOf(UnregisteredCollectionException.class)
+            .hasMessageContaining(collection)
+            .hasMessageContaining("POST /v1/catalog/collections/upsert");
 
-            assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
-            // The upsert call is racing the held (uncommitted) row lock — it must NOT
-            // complete while the lock is held.
-            assertThat(registrationDone)
-                .as("registration must block while a concurrent transaction holds an "
-                    + "uncommitted registration for the same (tenant, collection) — "
-                    + "this is the pre-existing, correct-by-design first-touch cost")
-                .failsWithin(500, TimeUnit.MILLISECONDS);
-
-            executor.shutdownNow();
-        }
-        // Lock released by try-with-resources — any still-running registration can now proceed;
-        // no further assertion needed (the block above is the point of this test).
+        assertThat(CollectionRegistry.isKnown(TENANT, collection)).isFalse();
+        assertThat(rowExists(collection))
+            .as("a write against an unregistered collection must create NO catalog_collections row")
+            .isFalse();
     }
 
-    // -------------------------------------------------------------------------
-    // Test 2: cache HIT — registration completes immediately even while a SECOND
-    // concurrent writer holds an uncommitted lock on the (already-registered) row
-    // — the fix: ensureCollectionRegistered skips the INSERT entirely once known,
-    // so it never contends for that lock in the first place.
-    // -------------------------------------------------------------------------
-
     @Test
-    void upsert_skipsRegistration_whenCollectionCached() throws Exception {
+    void requireRegistered_succeedsAndMarksKnown_whenCollectionAlreadyRegistered() {
         String collection = "code__cr-hit__voyage-code-3__v1";
-
-        // Real registration via the actual code path: renameCollection both
-        // creates the catalog_collections row (in-txn ensureCollectionRegistered)
-        // AND marks CollectionRegistry known post-commit.
-        repo.renameCollection(TENANT, "cr-hit-src", collection);
-        assertThat(CollectionRegistry.isKnown(TENANT, collection))
-            .as("renameCollection() must mark the collection known after a successful commit")
-            .isTrue();
-
-        // A second writer now holds an uncommitted UPDATE lock on that SAME,
-        // already-registered row — simulating another concurrent indexing worker
-        // touching the collection. Pre-fix, ensureCollectionRegistered's
-        // INSERT ... ON CONFLICT DO NOTHING would have to wait for this lock to
-        // determine the conflict outcome; with the cache, it never issues that
-        // INSERT at all.
-        try (HeldLock lock = new HeldLock(collection, true)) {
-            assertThat(CompletableFuture.runAsync(() -> repo.renameCollection(TENANT, "cr-hit-src", collection)))
-                .as("registration must complete immediately when CollectionRegistry already "
-                    + "knows the collection — ensureCollectionRegistered must skip the "
-                    + "redundant INSERT entirely, never contending for the held lock")
-                .succeedsWithin(2, TimeUnit.SECONDS);
-        }
-
-        assertThat(CollectionRegistry.isKnown(TENANT, collection)).isTrue();
-    }
-
-    /**
-     * Negative control for Test 2: WITHOUT the cache (freshly cleared), the SAME
-     * held-UPDATE-lock-on-an-ALREADY-registered-row scenario ALSO blocks {@code
-     * upsert} when the cache is cleared — verified empirically (this test failed
-     * loudly on first write, disproving the assumption that {@code INSERT ...
-     * ON CONFLICT DO NOTHING} against a merely-being-updated row is lock-free;
-     * Postgres blocks on ANY uncommitted concurrent write to the conflicting row,
-     * not only a concurrent INSERT). This is the more general and more accurate
-     * statement of the bug: EVERY repeat registration attempt for a collection
-     * that some other transaction happens to be concurrently touching pays the
-     * lock-wait tax, for as long as that process's writes to
-     * {@code catalog_collections} keep happening — which, absent the cache, is
-     * every single batch write for the life of an indexing run. See
-     * {@link #upsert_blocksOnHeldLock_whenCollectionNotCached} for the sibling
-     * first-touch-race case; together they show the cache is not merely a
-     * throughput micro-optimization but removes a real, recurring lock-wait
-     * hazard for the whole collection's lifetime, not just its first touch.
-     */
-    @Test
-    void upsert_alsoBlocks_whenLockHeldOnRegisteredRow_andCacheCleared() throws Exception {
-        String collection = "code__cr-control__voyage-code-3__v1";
-        repo.renameCollection(TENANT, "cr-control-src", collection);
-        // Deliberately clear the cache AFTER seeding, so ensureCollectionRegistered
-        // WILL attempt the INSERT again for the next call (pre-fix-equivalent path).
-        CollectionRegistry.clearForTests();
+        seedRegistered(collection);
         assertThat(CollectionRegistry.isKnown(TENANT, collection)).isFalse();
 
-        try (HeldLock lock = new HeldLock(collection, true)) {
-            assertThat(CompletableFuture.runAsync(() -> repo.renameCollection(TENANT, "cr-control-src", collection)))
-                .as("without the cache, a concurrent UPDATE lock on an ALREADY-registered "
-                    + "row still blocks the next registration's redundant ON CONFLICT DO NOTHING — "
-                    + "the recurring lock-wait hazard the cache eliminates")
-                .failsWithin(500, TimeUnit.MILLISECONDS);
-        }
+        assertThatCode(() -> repo.renameCollection(TENANT, "cr-hit-src", collection))
+            .doesNotThrowAnyException();
+
+        assertThat(CollectionRegistry.isKnown(TENANT, collection))
+            .as("requireRegistered must mark the pair known after confirming the row exists")
+            .isTrue();
+    }
+
+    @Test
+    void requireRegistered_skipsDbCheck_whenAlreadyCached() {
+        // Cache the pair WITHOUT a real row — proves requireRegistered trusts the
+        // cache and never re-checks the database once a pair is known-registered.
+        String collection = "code__cr-cached__voyage-code-3__v1";
+        CollectionRegistry.markKnown(TENANT, collection);
+        assertThat(rowExists(collection)).isFalse();
+
+        assertThatCode(() -> repo.renameCollection(TENANT, "cr-cached-src", collection))
+            .as("a cached (tenant, collection) pair must skip the DB existence check entirely")
+            .doesNotThrowAnyException();
     }
 
     // -------------------------------------------------------------------------

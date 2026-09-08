@@ -152,27 +152,23 @@ public final class AspectRepository {
      * surrogate id of the inserted/updated row, or -1 if rejected.
      */
     /**
-     * RDR-164 P1a: ensure catalog_collections has a stub row for {@code collection}
-     * before any document_aspects / document_highlights / aspect_extraction_queue write,
-     * so the NOT VALID collection FKs (fk-003) cannot reject a live serving write whose
-     * collection has not yet been registered by the catalog ETL or a chunk upsert.
-     * Idempotent (ON CONFLICT DO NOTHING); a no-op for null/blank collection
-     * (document_highlights.collection is nullable — MATCH SIMPLE lets null escape the FK).
+     * RDR-204 Phase 1 (bead nexus-ft04v.7): require catalog_collections to already
+     * carry a row for {@code collection} before any document_aspects /
+     * document_highlights / aspect_extraction_queue write; fails loud
+     * ({@link UnregisteredCollectionException}, mapped to 422) instead of the
+     * RDR-164-era stub INSERT ... ON CONFLICT DO NOTHING that used to paper over a
+     * missing row with blank content_type/owner_id/embedding_model. A no-op for a
+     * null collection (document_highlights.collection is NOT NULL and FK'd to
+     * catalog_collections — document_highlights_collection_fk — but the aspect/queue
+     * callers already reject a blank collection before reaching here, so they never
+     * pass null in practice). A caller that nne()-defaults a blank collection to ""
+     * now needs that EXACT row registered, or the write fails loud — the
+     * document_highlights default no longer registers itself (RDR-204 §Technical
+     * Design step 4).
      */
     private static void ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
-        // hygiene-001 (nexus-tk070.p6a follow-on): "" is a legitimate value to
-        // register now -- document_highlights.collection is NOT NULL AND FK'd
-        // to catalog_collections (document_highlights_collection_fk), so a
-        // caller that nne()-defaults a blank collection to "" needs that row
-        // to actually exist. null alone still means "nothing to register"
-        // (the aspect/queue callers already reject a blank collection before
-        // reaching here, so they never hit this branch in practice).
         if (collection == null) return;
-        ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-           .values(tenant, collection)
-           .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-           .doNothing()
-           .execute();
+        CollectionRegistry.requireRegistered(ctx, tenant, collection);
     }
 
     public long upsertAspect(String tenant, Map<String, Object> body) {

@@ -1079,7 +1079,10 @@ class RawSqlGateTest {
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 28 -> 30 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         Map.entry("dev/nexus/service/VectorsUnifyChunksIntegrationTest.java", 30),
         Map.entry("dev/nexus/service/db/BackendReaperIntegrationTest.java", 1),
-        Map.entry("dev/nexus/service/db/CollectionRegistryTest.java", 2),
+        // CollectionRegistryTest.java: RETIRED at nexus-ft04v.7 — the file's two raw-SQL
+        // sites (HeldLock's UPDATE/INSERT probes for a lock-contention mechanism the
+        // stub-insert retirement deleted) are gone; the file now seeds fixtures via
+        // generated jOOQ DSL only. No entry: actual count is 0.
         Map.entry("dev/nexus/service/db/PgSessionEfSearchReadbackIntegrationTest.java", 2),
         Map.entry("dev/nexus/service/db/PgSessionStatementTimeoutIntegrationTest.java", 7),
         Map.entry("dev/nexus/service/http/AspectHandlerEnqueueErrorTest.java", 1),

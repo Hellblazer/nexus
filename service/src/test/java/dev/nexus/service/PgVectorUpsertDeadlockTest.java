@@ -88,6 +88,22 @@ class PgVectorUpsertDeadlockTest {
         var embedder = new PgVectorRepositoryContractTest.FakeEmbedder(1024);
         pgRepo = new PgVectorRepository(tenantScope, embedder, embedder);
 
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
+        // always-enforced FK — PgVectorRepository's stub-insert is retired, so a real
+        // row (not just a CollectionRegistry cache entry) must exist before any
+        // chunk write, or this suite's writes would hit an FK violation instead of
+        // exercising the deadlock-retry path itself.
+        tenantScope.withTenant(TENANT, ctx -> {
+            ctx.insertInto(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS,
+                            dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID,
+                            dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME)
+               .values(TENANT, COLLECTION)
+               .onConflict(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID,
+                           dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME).doNothing()
+               .execute();
+            return null;
+        });
+
         // Seed the collection once so registration is not part of the raced window.
         pgRepo.upsertChunks(TENANT, COLLECTION,
                 sharedIds(), sharedDocs(), sharedMetas());

@@ -149,11 +149,35 @@ class TaxonomyRepositoryTest {
             }
             // RDR-156 P0.2: topic_assignments.source_collection now enforces a FK to
             // catalog_collections(tenant_id, name).  Seed stub rows for all test collections.
-            for (String col : List.of(COL_A, COL_B)) {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                    "VALUES ('" + TENANT_A + "', '" + col + "') " +
-                    "ON CONFLICT (tenant_id, name) DO NOTHING");
+            // RDR-204 Phase 1 (bead nexus-ft04v.7) widened this list: TaxonomyRepository's
+            // stub-insert is retired, so every ad-hoc collection this file's tests
+            // reference under TENANT_A must already be registered before the test runs
+            // (a per-test dynamic tenant or nanoTime-suffixed name is registered inline
+            // at its point of use instead — see seedHub and the two getAssignmentDetails
+            // tests, and renameCollection_updatesAllRows).
+            for (String col : List.of(COL_A, COL_B, COL_OS, COL_RB, COL_DISC,
+                    "knowledge__purge-temp", "src__col-a-icf", "src__col-b-icf",
+                    "knowledge__q2ign_dup", "knowledge__q2ign_same_id", "knowledge__q2ign_child",
+                    "knowledge__q2ign_batch_dup", "knowledge__meta-import",
+                    "docs__disc_race__bge-base-en-v15-768__v1",
+                    "docs__disc_duplabel__bge-base-en-v15-768__v1",
+                    "docs__rb_duplabel__bge-base-en-v15-768__v1",
+                    "knowledge__dctrg_purge", "knowledge__dctrg_etl", "knowledge__dctrg_xtenant",
+                    "knowledge__dctrg_disc", "knowledge__batch_large", "knowledge__uniq",
+                    "knowledge__batch_meta_x", "knowledge__batch_meta_y",
+                    "code__hub_a", "code__hub_b",
+                    "knowledge__batch_assign", "knowledge__batch_dup", "knowledge__batch_link",
+                    "knowledge__batch_topic")) {
+                // RDR-204 Phase 1 (bead nexus-ft04v.7) widened this to BOTH tenants: a
+                // handful of cross-tenant/RLS tests (docCountTrigger_crossTenantIsolation,
+                // rls_tenantA_cannotReadTenantB, rootTopicUniqueness_...otherTenantAllowed)
+                // write the SAME collection name under TENANT_B too.
+                for (String tenant : List.of(TENANT_A, TENANT_B)) {
+                    su.createStatement().execute(
+                        "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
+                        "VALUES ('" + tenant + "', '" + col + "') " +
+                        "ON CONFLICT (tenant_id, name) DO NOTHING");
+                }
             }
         }
 
@@ -409,6 +433,12 @@ class TaxonomyRepositoryTest {
     void renameCollection_updatesAllRows() {
         String oldCol = "knowledge__rename-old-" + System.nanoTime();
         String newCol = "knowledge__rename-new-" + System.nanoTime();
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): both names are freshly generated
+        // per run (nanoTime-suffixed) — not in the class's bulk fixture registration
+        // — so register them here, matching what a real caller must now do before
+        // insertTopic/renameCollection's own registration check.
+        registerReal(TENANT_A, oldCol);
+        registerReal(TENANT_A, newCol);
         repo.insertTopic(TENANT_A, "rename-topic", null, oldCol, 1, null, null);
         repo.recordDiscoverCount(TENANT_A, oldCol, 1, null);
 
@@ -1484,11 +1514,36 @@ class TaxonomyRepositoryTest {
     // ── Hub staleness (nexus-onjvy) ────────────────────────────────────────────
 
     /**
+     * RDR-204 Phase 1 (bead nexus-ft04v.7): topics_collection_fk is a REAL,
+     * always-enforced FK to catalog_collections — a real row (not just a
+     * CollectionRegistry cache entry) must exist before insertTopic writes, or the
+     * FK itself rejects the insert regardless of what the in-process cache
+     * believes. Used for the per-test dynamic-tenant fixtures below, which fall
+     * outside startAll()'s bulk TENANT_A/TENANT_B registration.
+     */
+    private void registerReal(String tenant, String collection) {
+        tenantScope.withTenant(tenant, ctx -> {
+            ctx.insertInto(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS,
+                            dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID,
+                            dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME)
+               .values(tenant, collection)
+               .onConflict(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID,
+                           dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME).doNothing()
+               .execute();
+            return null;
+        });
+    }
+
+    /**
      * Seed one hub: a topic with projection assignments from two source collections
      * (DF=2), assigned at {@code assignedAt}. Returns the topic id.
      */
     private long seedHub(String tenant, String label, String assignedAt,
                          String sourceA, String sourceB) {
+        // Callers pass a freshly generated, per-test tenant id, so this shared COL_A
+        // fixture is registered here rather than in the class's bulk startAll()
+        // registration (which only covers TENANT_A/TENANT_B).
+        registerReal(tenant, COL_A);
         long topicId = repo.insertTopic(tenant, label, null, COL_A, 0, null, null);
         seedChunk(tenant, sourceA, hexChash(label + "-doc-a"));
         seedChunk(tenant, sourceB, hexChash(label + "-doc-b"));
@@ -1571,6 +1626,9 @@ class TaxonomyRepositoryTest {
         // by assignTopic and projected by no route — getAssignmentsForDocs selects
         // doc_id + topic_id only, which is asserted here so the two stay distinct.
         final String tenant = "tax-detail-" + System.nanoTime();
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): a freshly generated per-test tenant —
+        // COL_A is not pre-registered for it by startAll()'s bulk fixture.
+        registerReal(tenant, COL_A);
         long topicId = repo.insertTopic(tenant, "detail-topic", null, COL_A, 0, null, null);
         seedChunk(tenant, "code__detail_src", hexChash("detail-doc"));
         repo.assignTopic(tenant, hexChash("detail-doc"), topicId, "projection",
@@ -1600,6 +1658,10 @@ class TaxonomyRepositoryTest {
     void getAssignmentDetails_isTenantScopedAndEmptyForUnknownDocs() {
         final String tenant = "tax-detail-rls-" + System.nanoTime();
         final String other  = "tax-detail-other-" + System.nanoTime();
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): both are freshly generated per-test
+        // tenants — COL_A is not pre-registered for either by startAll()'s bulk fixture.
+        registerReal(tenant, COL_A);
+        registerReal(other, COL_A);
         long mine = repo.insertTopic(tenant, "mine-topic", null, COL_A, 0, null, null);
         long theirs = repo.insertTopic(other, "their-topic", null, COL_A, 0, null, null);
         seedChunk(tenant, "code__mine", hexChash("shared-doc-id"));

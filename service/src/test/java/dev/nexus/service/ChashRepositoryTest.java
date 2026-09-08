@@ -109,7 +109,17 @@ class ChashRepositoryTest {
                     {TENANT_A, "coll-a-1024"}, {TENANT_A, "stub-no-chunks"},
                     {TENANT_A, "ren-src"}, {TENANT_A, "ren-collide-src"},
                     {TENANT_A, "ren-collide-dst"},
-                    {TENANT_B, "coll-b-384"}}) {
+                    {TENANT_B, "coll-b-384"},
+                    // RDR-204 Phase 1 (bead nexus-ft04v.7): renameCollection's
+                    // NEW-side name now requires a real catalog_collections row
+                    // (ChashRepository's stub-insert is retired) — pre-register
+                    // every rename DESTINATION these tests target, plus the
+                    // real-ingest-path fixture below.
+                    {TENANT_A, "ren-dst"},
+                    {TENANT_A, "gate-rename-old-1-dst"},
+                    {TENANT_A, "gate-rename-new-1-dst"},
+                    {TENANT_A, "gate-deadlock-a"}, {TENANT_A, "gate-deadlock-b"},
+                    {TENANT_A, "code__cr__minilm-l6-v2-384__v1"}}) {
                 su.createStatement().execute(
                     "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
                     "VALUES ('" + tc[0] + "', '" + tc[1] + "') " +
