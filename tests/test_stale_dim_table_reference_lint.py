@@ -61,6 +61,21 @@ WHAT IS BANNED: ``chunks_384`` / ``chunks_768`` / ``chunks_1024`` /
     real multi-language comment parser; that tradeoff is revisited only
     if a real incident turns on this distinction, not preemptively.
 
+    REVISITED 2026-09-08 (nexus-9gggv): the incident came, from the cost
+    side rather than the detection side. Three fix-forward commits on
+    2026-09-07 moved count pins because a COMMENT named chunks_384, each
+    one a release-battery red on prose. What is built is deliberately
+    NOT the comment parser the paragraph above declines: it is a
+    line-prefix heuristic (``_COMMENT_LINE_RE``, per file suffix: ``#``
+    for .py/.sh, ``//`` ``/*`` ``*`` for .java, ``<!--`` for .xml) that
+    the COUNT PINS consult and nothing else does. Python docstring lines
+    have no prefix and still count as code; a ``/* */`` body line without
+    a leading ``*`` still counts as code. Both errors run in the
+    over-counting direction, which never hides a reference. The trade,
+    stated plainly: comment-only growth inside an already-pinned file is
+    no longer tallied, because a comment cannot be the live query this
+    lint exists to catch; the unlisted-file guard still scans every line.
+
 ALLOWLIST DESIGN — COUNT PINS, NOT FILE-LEVEL EXEMPTIONS (nexus-bxcgh,
 substantive-critic round 1, 2026-08-14): the first version of this lint used
 a bare ``path -> reason`` file-level exemption. That has ZERO detection power
@@ -893,8 +908,9 @@ def _iter_scope_files() -> list[Path]:
     return paths
 
 
-#: A line that is prose, not code: a shell/Python `#` comment, a Java line
-#: comment or block-comment body, or an XML/HTML comment opener. A Python
+#: A line that is prose, not code, by file suffix: a shell/Python `#`
+#: comment, a Java line comment or block-comment body, or an XML comment
+#: opener. A Python
 #: docstring line is NOT recognised (no line marker), so it still counts
 #: as code: that direction over-counts and never hides a reference. The
 #: count pins tally CODE lines only (nexus-9gggv, 2026-09-08): three fix-forward
@@ -902,13 +918,25 @@ def _iter_scope_files() -> list[Path]:
 #: a comment cannot be a stale reference the way a query can. The unlisted-
 #: file guard still scans every line, so prose in live code is still caught
 #: where nothing was ever exempted.
+_COMMENT_LINE_RE_BY_SUFFIX: dict[str, re.Pattern[str]] = {
+    ".py": re.compile(r"^\s*#"),
+    ".sh": re.compile(r"^\s*#"),
+    ".java": re.compile(r"^\s*(?:/\*|\*|//)"),
+    ".xml": re.compile(r"^\s*<!--"),
+}
+#: Any-language fallback for a suffix the table does not name.
 _COMMENT_LINE_RE = re.compile(r"^\s*(?:#|//|/\*|\*|<!--)")
+
+
+def _comment_line_re(file_label: str) -> re.Pattern[str]:
+    return _COMMENT_LINE_RE_BY_SUFFIX.get(Path(file_label).suffix, _COMMENT_LINE_RE)
 
 
 def _scan_text(text: str, *, file_label: str, code_only: bool = False) -> list[Offender]:
     hits: list[Offender] = []
+    comment_re = _comment_line_re(file_label)
     for i, line in enumerate(text.splitlines(), start=1):
-        if code_only and _COMMENT_LINE_RE.match(line):
+        if code_only and comment_re.match(line):
             continue
         for m in _BANNED_RE.finditer(line):
             hits.append(Offender(file=file_label, line_no=i, line=line.strip()[:160], token=m.group(1)))
