@@ -13,10 +13,14 @@ import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.time.OffsetDateTime;
 import java.util.Set;
 
+import static dev.nexus.service.jooq.t1.Tables.SCRATCH;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.jooq.impl.DSL.condition;
+import static org.jooq.impl.DSL.val;
 
 /**
  * RDR-152 bead nexus-gmiaf.13 — Liquibase t1 scratch schema integration test.
@@ -67,9 +71,16 @@ class ScratchSchemaLiquibaseTest {
             // nexus/staging only) -- kept as explicit grants (nexus-cbo4a batch 1b).
             // No session search_path is set (Sam's directive, nexus-zrcj7): every
             // raw statement this class issues already qualifies t1.scratch by hand.
+            // GRANT ... ON SCHEMA has no typed jOOQ DSL form (GrantOnStep#on(...)
+            // resolves to a Table<?> internally -- it can never target a schema) --
+            // kept raw (nexus-cbo4a).
             su.createStatement().execute("GRANT USAGE ON SCHEMA t1 TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON t1.scratch TO " + SVC_ROLE);
+            DSL.using(su, SQLDialect.POSTGRES)
+               .grant(DSL.privilege("SELECT"), DSL.privilege("INSERT"),
+                      DSL.privilege("UPDATE"), DSL.privilege("DELETE"))
+               .on(SCRATCH)
+               .to(DSL.role(SVC_ROLE))
+               .execute();
         }
 
         svcDs = buildSvcDs();
@@ -162,24 +173,30 @@ class ScratchSchemaLiquibaseTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
             PgContainerHelper.setTenant(su, TenantScope.T1_TENANT_GUC, "probe-tenant-scratch", true);
-            su.createStatement().execute(
-                "INSERT INTO t1.scratch " +
-                "(id, tenant_id, session_id, content, tags, flagged, access_count, ts) " +
-                "VALUES " +
-                "('probe-id-1', 'probe-tenant-scratch', 'probe-session', " +
-                " 'training neural networks gradient descent', 'running,ml', false, 0, now())");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(SCRATCH, SCRATCH.ID, SCRATCH.TENANT_ID, SCRATCH.SESSION_ID, SCRATCH.CONTENT,
+                       SCRATCH.TAGS, SCRATCH.FLAGGED, SCRATCH.ACCESS_COUNT, SCRATCH.TS)
+               .values("probe-id-1", "probe-tenant-scratch", "probe-session",
+                   "training neural networks gradient descent", "running,ml", false, 0, OffsetDateTime.now())
+               .execute();
 
-            ResultSet probe = su.createStatement().executeQuery(
-                "SELECT fts_vector @@ plainto_tsquery('english', 'network') AS en_match, " +
-                "       fts_vector @@ plainto_tsquery('simple',  'running') AS si_exact, " +
-                "       fts_vector @@ plainto_tsquery('simple',  'run')     AS si_nostem " +
-                "FROM t1.scratch WHERE id = 'probe-id-1'");
-            assertThat(probe.next()).isTrue();
-            assertThat(probe.getBoolean("en_match"))
+            // @@ / plainto_tsquery have no typed jOOQ operator/function form (same
+            // house idiom as PlanRepository/MemoryRepository's own FTS predicates) --
+            // a bare, statically-imported condition() template, never DSL.condition(...)
+            // qualified (which the scanDslTemplates gate flags as assembled SQL text).
+            var probe = ctx.select(
+                    DSL.field(condition("fts_vector @@ plainto_tsquery('english', {0})", val("network"))),
+                    DSL.field(condition("fts_vector @@ plainto_tsquery('simple', {0})", val("running"))),
+                    DSL.field(condition("fts_vector @@ plainto_tsquery('simple', {0})", val("run"))))
+                .from(SCRATCH)
+                .where(SCRATCH.ID.eq("probe-id-1"))
+                .fetchOne();
+            assertThat(probe).isNotNull();
+            assertThat(probe.value1())
                 .as("english must stem: 'network' matches 'networks' in content").isTrue();
-            assertThat(probe.getBoolean("si_exact"))
+            assertThat(probe.value2())
                 .as("simple must match exact tag 'running'").isTrue();
-            assertThat(probe.getBoolean("si_nostem"))
+            assertThat(probe.value3())
                 .as("simple must NOT match 'run' against 'running' (no stemming)").isFalse();
             su.rollback();
         }
@@ -199,20 +216,20 @@ class ScratchSchemaLiquibaseTest {
 
         // alice sees only her entry
         long aliceCount = tenantScope.withTenant("t1-alice", ScratchRepository.T1_TENANT_GUC, ctx ->
-            (Long) ctx.fetchOne("SELECT COUNT(*) FROM t1.scratch WHERE session_id = 'session-alice'")
-                      .getValue(0));
+            ctx.selectCount().from(SCRATCH).where(SCRATCH.SESSION_ID.eq("session-alice"))
+               .fetchOne(0, Long.class));
         assertThat(aliceCount).as("alice must see exactly 1 row").isEqualTo(1L);
 
         // alice cannot see bob's entry
         long crossCount = tenantScope.withTenant("t1-alice", ScratchRepository.T1_TENANT_GUC, ctx ->
-            (Long) ctx.fetchOne("SELECT COUNT(*) FROM t1.scratch WHERE session_id = 'session-bob'")
-                      .getValue(0));
+            ctx.selectCount().from(SCRATCH).where(SCRATCH.SESSION_ID.eq("session-bob"))
+               .fetchOne(0, Long.class));
         assertThat(crossCount).as("alice must not see bob's session entries").isEqualTo(0L);
 
         // bob sees only his entry
         long bobCount = tenantScope.withTenant("t1-bob", ScratchRepository.T1_TENANT_GUC, ctx ->
-            (Long) ctx.fetchOne("SELECT COUNT(*) FROM t1.scratch WHERE session_id = 'session-bob'")
-                      .getValue(0));
+            ctx.selectCount().from(SCRATCH).where(SCRATCH.SESSION_ID.eq("session-bob"))
+               .fetchOne(0, Long.class));
         assertThat(bobCount).as("bob must see exactly 1 row").isEqualTo(1L);
     }
 
@@ -244,10 +261,9 @@ class ScratchSchemaLiquibaseTest {
         try (Connection svc = svcDs.getConnection()) {
             svc.setAutoCommit(true);
             // No GUC stamp — current_setting('nexus.t1_tenant', true) returns NULL
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT COUNT(*) AS cnt FROM t1.scratch");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getLong("cnt"))
+            Long cnt = DSL.using(svc, SQLDialect.POSTGRES)
+                .selectCount().from(SCRATCH).fetchOne(0, Long.class);
+            assertThat(cnt)
                 .as("unstamped connection must see zero rows (RLS fail-closed)")
                 .isEqualTo(0L);
         }
@@ -259,12 +275,11 @@ class ScratchSchemaLiquibaseTest {
     void rls_withCheck_blocksCrossTenantInsert() {
         assertThatThrownBy(() ->
             tenantScope.withTenant("tenant-gamma", ScratchRepository.T1_TENANT_GUC, ctx ->
-                ctx.execute(
-                    "INSERT INTO t1.scratch " +
-                    "(id, tenant_id, session_id, content, flagged, access_count, ts) " +
-                    "VALUES (?, ?, ?, ?, false, 0, now())",
-                    "cross-id", "tenant-delta",  // tenant_id mismatch!
-                    "session-gamma", "should be blocked")
+                ctx.insertInto(SCRATCH, SCRATCH.ID, SCRATCH.TENANT_ID, SCRATCH.SESSION_ID, SCRATCH.CONTENT,
+                        SCRATCH.FLAGGED, SCRATCH.ACCESS_COUNT, SCRATCH.TS)
+                   .values("cross-id", "tenant-delta",  // tenant_id mismatch!
+                       "session-gamma", "should be blocked", false, 0, OffsetDateTime.now())
+                   .execute()
             )
         )
         .as("INSERT with mismatched tenant_id must be rejected by WITH CHECK")
@@ -287,15 +302,12 @@ class ScratchSchemaLiquibaseTest {
     private void insertRow(Connection su, String tenant, String sessionId,
                            String id, String content, String tags) throws Exception {
         PgContainerHelper.setTenant(su, TenantScope.T1_TENANT_GUC, tenant, true);
-        try (var ps = su.prepareStatement(
-                "INSERT INTO t1.scratch (id, tenant_id, session_id, content, tags, flagged, access_count, ts) " +
-                "VALUES (?, ?, ?, ?, ?, false, 0, now()) ON CONFLICT (id) DO NOTHING")) {
-            ps.setString(1, id);
-            ps.setString(2, tenant);
-            ps.setString(3, sessionId);
-            ps.setString(4, content);
-            ps.setString(5, tags);
-            ps.executeUpdate();
-        }
+        DSL.using(su, SQLDialect.POSTGRES)
+           .insertInto(SCRATCH, SCRATCH.ID, SCRATCH.TENANT_ID, SCRATCH.SESSION_ID, SCRATCH.CONTENT,
+                   SCRATCH.TAGS, SCRATCH.FLAGGED, SCRATCH.ACCESS_COUNT, SCRATCH.TS)
+           .values(id, tenant, sessionId, content, tags, false, 0, OffsetDateTime.now())
+           .onConflict(SCRATCH.ID)
+           .doNothing()
+           .execute();
     }
 }
