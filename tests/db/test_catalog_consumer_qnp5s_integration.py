@@ -298,7 +298,7 @@ def seeded_catalog(cat):
         corpus="knowledge",
         source_uri="file:///Users/hal/git/qnp5s-repo/doc-a.md",
         chunk_count=15,
-        physical_collection="knowledge__qnp5s-repo__voyage-context-3__v1",
+        physical_collection="knowledge__qnp5s-repo__bge-base-en-v15-768__v1",
     )
     doc_b = cat.register(
         str(repo_owner_t),
@@ -307,7 +307,7 @@ def seeded_catalog(cat):
         corpus="knowledge",
         source_uri="file:///Users/hal/git/qnp5s-repo/doc-b.md",
         chunk_count=7,
-        physical_collection="knowledge__qnp5s-repo__voyage-context-3__v1",
+        physical_collection="knowledge__qnp5s-repo__bge-base-en-v15-768__v1",
     )
     doc_c = cat.register(
         str(repo_owner_t),
@@ -318,12 +318,17 @@ def seeded_catalog(cat):
         # chunk_count omitted — stored as 0 by Java service
     )
 
-    # Register a collection under the repo owner (used by collections_by_owner test)
+    # Register a collection under the repo owner (used by collections_by_owner test).
+    # RDR-204 (nexus-f5wwx): this fixture's java_service is a pure ONNX local
+    # engine (no voyage key) -- its embedding_profile for every content type
+    # is bge-base-en-v15-768 (EmbedderRouter.contentTypeModelTokens, local
+    # mode), so a literal voyage-context-3 here 422s regardless of client
+    # posture; the name segment is renamed to match.
     cat.register_collection(
-        "knowledge__qnp5s-repo__voyage-context-3__v1",
+        "knowledge__qnp5s-repo__bge-base-en-v15-768__v1",
         content_type="knowledge",
         owner_id=str(repo_owner_t),
-        embedding_model="voyage-context-3",
+        embedding_model="bge-base-en-v15-768",
     )
 
     # Seed links: doc_a -> doc_b (cites), doc_a -> doc_c (relates)
@@ -490,7 +495,7 @@ class TestReposIdentity:
         colls = cat.collections_by_owner(repo_owner_t)
         # We seeded one collection under repo_owner
         coll_names = [c.get("name") for c in colls]
-        assert "knowledge__qnp5s-repo__voyage-context-3__v1" in coll_names, (
+        assert "knowledge__qnp5s-repo__bge-base-en-v15-768__v1" in coll_names, (
             f"Expected collection missing; got {coll_names}"
         )
 

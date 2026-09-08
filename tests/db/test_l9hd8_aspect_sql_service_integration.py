@@ -35,6 +35,7 @@ Run locally with:
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -274,6 +275,32 @@ def aspects_client(java_service):
     """HttpDocumentAspectsStore (tenant='l9hd8-tenant') connected to the live service."""
     from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore
     base_url, token, _ = java_service
+    # RDR-204 (nexus-f5wwx): the engine no longer auto-registers a collection
+    # on first write. HttpDocumentAspectsStore.upsert's write_with_registration_retry
+    # defaults to nexus.catalog.factory.make_catalog_writer(), which resolves
+    # NX_SERVICE_URL from the AMBIENT env — at module-fixture setup time
+    # (before any function-scoped autouse fixture has run) that is nothing
+    # this test spawned, so registration connection-refuses instead of
+    # 422ing. Register the one collection this file uses directly against
+    # THIS module's own service before any seed write happens, so
+    # ensure_collection_registered's per-process cache is warm and the retry
+    # helper's default registrar is never consulted. NX_LOCAL=1 pinned for
+    # the derivation window so collection_registration_kwargs picks the
+    # local ONNX engine's bge-768 profile (RDR-160), not a managed-mode
+    # voyage-context-3 guess.
+    saved = {k: os.environ.get(k) for k in ("NX_LOCAL", "NX_SERVICE_URL", "NX_SERVICE_TOKEN")}
+    os.environ["NX_LOCAL"] = "1"
+    os.environ["NX_SERVICE_URL"] = base_url
+    os.environ["NX_SERVICE_TOKEN"] = token
+    try:
+        from nexus.corpus import ensure_collection_registered
+        ensure_collection_registered("knowledge__l9hd8")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
     client = HttpDocumentAspectsStore(base_url=base_url, tenant="l9hd8-tenant", _token=token)
     yield client
     client.close()
@@ -382,6 +409,38 @@ def _groups_json(groups: dict[str, list[str]], collection: str = "knowledge__l9h
     ])
 
 
+@contextlib.contextmanager
+def _pinned_service_env(java_service):
+    """Pin NX_LOCAL/NX_SERVICE_URL/NX_SERVICE_TOKEN to THIS module's own
+    service for the duration of the ``with`` block.
+
+    RDR-204 (nexus-f5wwx): a class-scoped ``seed`` fixture runs BEFORE any
+    function-scoped autouse fixture of its class's first test (pytest
+    resolves fixtures by scope, class before function) -- ambient env at
+    that moment is whatever the PRECEDING test's teardown left, which can
+    be pristine (nothing this test spawned) or, after a stale-registration
+    retry (``write_with_registration_retry``'s one-shot repair, RDR-204
+    Technical Design step 3), can force ``ensure_collection_registered``'s
+    default registrar to re-resolve ``NX_SERVICE_URL`` from the ambient env
+    a second time. Pinning explicitly around every seed write removes the
+    ambient-env dependency entirely, regardless of what ran before it in
+    the same pytest session.
+    """
+    base_url, token, _ = java_service
+    saved = {k: os.environ.get(k) for k in ("NX_LOCAL", "NX_SERVICE_URL", "NX_SERVICE_TOKEN")}
+    os.environ["NX_LOCAL"] = "1"
+    os.environ["NX_SERVICE_URL"] = base_url
+    os.environ["NX_SERVICE_TOKEN"] = token
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 # ── Tests ──────────────────────────────────────────────────────────────────────
 
 
@@ -389,15 +448,16 @@ class TestOperatorFilterServiceParity:
     """operator_filter: service path produces EQUAL results to SQLite fast-path."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def seed(self, aspects_client) -> None:
+    def seed(self, aspects_client, java_service) -> None:
         """Seed test rows for this class into Postgres."""
         rows = [
             _make_aspect("filter-paxos", proposed_method="Paxos consensus algorithm"),
             _make_aspect("filter-raft", proposed_method="Raft consensus"),
             _make_aspect("filter-dynamo", proposed_method="Dynamo distributed storage"),
         ]
-        for r in rows:
-            aspects_client.upsert(r)
+        with _pinned_service_env(java_service):
+            for r in rows:
+                aspects_client.upsert(r)
 
     def test_service_path_taken_in_service_mode(
         self, java_service, monkeypatch, tmp_path
@@ -449,7 +509,7 @@ class TestOperatorGroupbyServiceParity:
     """operator_groupby: service path groups by extras.venue and produces EQUAL results."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def seed(self, aspects_client) -> None:
+    def seed(self, aspects_client, java_service) -> None:
         """Seed rows with different venues into Postgres."""
         rows = [
             _make_aspect("groupby-vldb",  venue="VLDB"),
@@ -457,8 +517,9 @@ class TestOperatorGroupbyServiceParity:
             _make_aspect("groupby-sosp2", venue="SOSP"),
             _make_aspect("groupby-nv",    venue=None),   # no venue → unassigned
         ]
-        for r in rows:
-            aspects_client.upsert(r)
+        with _pinned_service_env(java_service):
+            for r in rows:
+                aspects_client.upsert(r)
 
     def test_vldb_group_has_single_item(
         self, java_service, monkeypatch, tmp_path
@@ -497,24 +558,26 @@ class TestOperatorConfidenceAggregateServiceParity:
     """operator_aggregate (confidence): service path produces EQUAL numeric results to SQLite."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def seed(self, aspects_client) -> None:
+    def seed(self, aspects_client, java_service) -> None:
         """Seed rows with known confidence values into Postgres."""
         rows = [
             _make_aspect("conf-a", confidence=0.80),
             _make_aspect("conf-b", confidence=0.90),
             _make_aspect("conf-c", confidence=0.70),
         ]
-        for r in rows:
-            aspects_client.upsert(r)
+        with _pinned_service_env(java_service):
+            for r in rows:
+                aspects_client.upsert(r)
 
 class TestRLSIsolation:
     """Cross-tenant RLS: service-mode operator_filter must not return other tenant's rows."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def seed_tenants(self, aspects_client, other_tenant_client) -> None:
+    def seed_tenants(self, aspects_client, other_tenant_client, java_service) -> None:
         """Seed tenant A rows; tenant B gets nothing."""
         row = _make_aspect("rls-paxos", proposed_method="Paxos consensus algorithm")
-        aspects_client.upsert(row)
+        with _pinned_service_env(java_service):
+            aspects_client.upsert(row)
 
     def test_other_tenant_gets_no_matches(
         self, java_service, other_tenant_token, monkeypatch, tmp_path

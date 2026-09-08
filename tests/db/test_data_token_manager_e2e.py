@@ -51,6 +51,21 @@ def test_data_token_manager_self_mint_round_trip_against_real_engine(
     mint_locked_credential = issued["token"]
     assert mint_locked_credential
 
+    # RDR-204 (nexus-f5wwx): the engine no longer auto-registers a
+    # collection on first write. Register it now, while NX_SERVICE_TOKEN is
+    # still the valid t2_service_env-minted bearer (plain static auth, no
+    # self-mint dance needed) -- ensure_collection_registered's per-process
+    # cache then means the actual write below (after the deliberate
+    # static-token break, self-mint-only) never touches the registrar at
+    # all. Registering AFTER the break would route the registrar's own
+    # catalog-write client through the same DataTokenManager with the
+    # mint-locked credential, whose mint body defaults to tenant='default'
+    # rather than this test's tenant -- 403 (locked to a different tenant),
+    # unrelated to the self-mint behavior this test actually verifies.
+    from nexus.corpus import ensure_collection_registered
+    collection = f"knowledge__wrwb7e2e-{tenant}__bge-base-en-v15-768__v1"
+    ensure_collection_registered(collection)
+
     # Deliberately break the static service_token so the round trip below
     # can ONLY succeed via the self-minted data token actually being
     # presented -- a silent fallback to the static token would 401 loudly,
@@ -65,7 +80,6 @@ def test_data_token_manager_self_mint_round_trip_against_real_engine(
         import nexus.db.http_vector_client as hvc
 
         client = hvc.HttpVectorClient(tenant=tenant)
-        collection = f"knowledge__wrwb7e2e-{tenant}__bge-base-en-v15-768__v1"
         content = f"nexus-wrwb7 self-minted data-token round trip ({tenant})"
         chash = hashlib.sha256(content.encode()).hexdigest()
         embedding = [0.1] * _DIM

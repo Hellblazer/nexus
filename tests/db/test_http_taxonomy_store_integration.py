@@ -43,6 +43,7 @@ NX_STORAGE_BACKEND is NOT touched — default SQLite path is unchanged.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import signal
@@ -515,6 +516,96 @@ def _seed_catalog_docs(pg_instance, service):
     yield
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _register_collections(service):
+    """Register every collection this file's tests write to, against THIS
+    module's own service, before any test body runs (RDR-204, nexus-f5wwx).
+
+    The engine no longer auto-registers a collection on first write. The
+    write paths here (``HttpTaxonomyStore.import_topic`` /
+    ``persist_discovered_topics`` / ...) self-heal via
+    ``write_with_registration_retry``, but its DEFAULT registrar
+    (``nexus.catalog.factory.make_catalog_writer``) resolves ``NX_SERVICE_URL``
+    from the AMBIENT env, not from this module's own ``base_url`` -- at
+    module-fixture setup time that is nothing this test spawned (connection
+    refused, seen in ``TestAnalyticalMethods``/``TestRLSIsolation``'s
+    ``seed``/``seed_tenants`` fixtures, which run before any function-scoped
+    autouse fixture); once the suite-wide ``_pin_t2_substrate`` fixture has
+    fired for some earlier test, the same default registrar instead connects
+    fine but to a DIFFERENT, shared substrate service that has nothing to do
+    with this module's engine -- registration there succeeds and caches the
+    name, but the actual write against THIS module's own service then 422s
+    "not registered" (``TestTaxonomyMVV``'s ``knowledge__papers`` reds).
+    Pre-registering every name here, bound explicitly to this module's own
+    ``base_url``/``token``, warms ``ensure_collection_registered``'s
+    per-process cache so neither failure mode can occur: the retry helper's
+    default registrar is never consulted again for these names. NX_LOCAL=1
+    pinned for the derivation window so ``collection_registration_kwargs``
+    picks the local ONNX engine's bge-768 profile (RDR-160), not a
+    managed-mode voyage-context-3 guess.
+    """
+    base_url, token, _ = service
+    names = (
+        "knowledge__papers",
+        "knowledge__papers-inttest-rb",
+        "knowledge__analytical-a",
+        "knowledge__analytical-b",
+        "knowledge__1di3r-persist-inttest",
+        "knowledge__1di3r-oldstate-inttest",
+        "knowledge__1di3r-purge-inttest",
+        "knowledge__1di3r-rebuild-inttest",
+        "coll-greatest-test-inttest",
+    )
+    saved = {k: os.environ.get(k) for k in ("NX_LOCAL", "NX_SERVICE_URL", "NX_SERVICE_TOKEN")}
+    os.environ["NX_LOCAL"] = "1"
+    os.environ["NX_SERVICE_URL"] = base_url
+    os.environ["NX_SERVICE_TOKEN"] = token
+    try:
+        from nexus.corpus import ensure_collection_registered
+        for name in names:
+            ensure_collection_registered(name)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    yield
+
+
+@contextlib.contextmanager
+def _pinned_service_env(service):
+    """Pin NX_LOCAL/NX_SERVICE_URL/NX_SERVICE_TOKEN to THIS module's own
+    service for the duration of the ``with`` block.
+
+    RDR-204 (nexus-f5wwx): a class-scoped seed fixture (e.g.
+    ``TestAnalyticalMethods.seed_data``) runs BEFORE any function-scoped
+    autouse fixture of its class's first test (pytest resolves fixtures by
+    scope, class before function) -- ambient env at that moment is whatever
+    the PRECEDING test's teardown left, which can be pristine (nothing this
+    test spawned) or, after a stale-registration retry
+    (``write_with_registration_retry``'s one-shot repair, RDR-204 Technical
+    Design step 3), can force ``ensure_collection_registered``'s default
+    registrar to re-resolve ``NX_SERVICE_URL`` from the ambient env a
+    second time. Pinning explicitly around every seed write removes the
+    ambient-env dependency entirely, regardless of what ran before it in
+    the same pytest session.
+    """
+    base_url, token, _ = service
+    saved = {k: os.environ.get(k) for k in ("NX_LOCAL", "NX_SERVICE_URL", "NX_SERVICE_TOKEN")}
+    os.environ["NX_LOCAL"] = "1"
+    os.environ["NX_SERVICE_URL"] = base_url
+    os.environ["NX_SERVICE_TOKEN"] = token
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 class TestTaxonomyMVV:
@@ -756,77 +847,78 @@ class TestAnalyticalMethods:
     _T_B1 = 9003
 
     @pytest.fixture(autouse=True, scope="class")
-    def seed_data(self, taxonomy_store, pg_instance):
+    def seed_data(self, taxonomy_store, pg_instance, service):
         """Seed topics and assignments for analytical method tests."""
-        # Topic A1 in collection A
-        taxonomy_store.import_topic(
-            src_id=self._T_A1,
-            label="analytic-hub-a1-inttest",
-            parent_id=None,
-            collection=self._COLL_A,
-            centroid_hash=None,
-            doc_count=5,
-            created_at="2026-01-01T00:00:00Z",
-            review_status="pending",
-            terms=None,
-        )
-        # Topic A2 in collection A (stopword label for pattern_pollution)
-        taxonomy_store.import_topic(
-            src_id=self._T_A2,
-            label="class-helper-inttest",  # contains stopword "class"
-            parent_id=None,
-            collection=self._COLL_A,
-            centroid_hash=None,
-            doc_count=3,
-            created_at="2026-01-01T00:00:00Z",
-            review_status="pending",
-            terms=None,
-        )
-        # Topic B1 in collection B
-        taxonomy_store.import_topic(
-            src_id=self._T_B1,
-            label="analytic-hub-b1-inttest",
-            parent_id=None,
-            collection=self._COLL_B,
-            centroid_hash=None,
-            doc_count=4,
-            created_at="2026-01-01T00:00:00Z",
-            review_status="pending",
-            terms=None,
-        )
+        with _pinned_service_env(service):
+            # Topic A1 in collection A
+            taxonomy_store.import_topic(
+                src_id=self._T_A1,
+                label="analytic-hub-a1-inttest",
+                parent_id=None,
+                collection=self._COLL_A,
+                centroid_hash=None,
+                doc_count=5,
+                created_at="2026-01-01T00:00:00Z",
+                review_status="pending",
+                terms=None,
+            )
+            # Topic A2 in collection A (stopword label for pattern_pollution)
+            taxonomy_store.import_topic(
+                src_id=self._T_A2,
+                label="class-helper-inttest",  # contains stopword "class"
+                parent_id=None,
+                collection=self._COLL_A,
+                centroid_hash=None,
+                doc_count=3,
+                created_at="2026-01-01T00:00:00Z",
+                review_status="pending",
+                terms=None,
+            )
+            # Topic B1 in collection B
+            taxonomy_store.import_topic(
+                src_id=self._T_B1,
+                label="analytic-hub-b1-inttest",
+                parent_id=None,
+                collection=self._COLL_B,
+                centroid_hash=None,
+                doc_count=4,
+                created_at="2026-01-01T00:00:00Z",
+                review_status="pending",
+                terms=None,
+            )
 
-        # Projection assignments: doc1 projects from COLL_B into T_A1
-        # doc2 projects from COLL_B into T_A2
-        # doc3 projects from COLL_A into T_B1
-        # This creates cross-collection co-occurrence between A1↔B1, A2↔B1
-        _seed_chunks(pg_instance, "default", self._COLL_B, [
-            canonical_chunk_id("analytic-doc1"), canonical_chunk_id("analytic-doc2"),
-        ])
-        _seed_chunk(pg_instance, "default", self._COLL_A, canonical_chunk_id("analytic-doc3"))
-        taxonomy_store.import_assignment(
-            doc_id=canonical_chunk_id("analytic-doc1"), topic_id=self._T_A1,
-            assigned_by="projection", similarity=0.88,
-            assigned_at="2026-03-01T00:00:00Z",
-            source_collection=self._COLL_B,
-        )
-        taxonomy_store.import_assignment(
-            doc_id=canonical_chunk_id("analytic-doc2"), topic_id=self._T_A2,
-            assigned_by="projection", similarity=0.72,
-            assigned_at="2026-03-01T00:00:00Z",
-            source_collection=self._COLL_B,
-        )
-        taxonomy_store.import_assignment(
-            doc_id=canonical_chunk_id("analytic-doc3"), topic_id=self._T_B1,
-            assigned_by="projection", similarity=0.91,
-            assigned_at="2026-03-01T00:00:00Z",
-            source_collection=self._COLL_A,
-        )
-        # hdbscan assignments for co-occurrence: doc1 also hdbscan-assigned to B1
-        taxonomy_store.import_assignment(
-            doc_id=canonical_chunk_id("analytic-doc1"), topic_id=self._T_B1,
-            assigned_by="hdbscan", similarity=None,
-            assigned_at=None, source_collection=self._COLL_B,
-        )
+            # Projection assignments: doc1 projects from COLL_B into T_A1
+            # doc2 projects from COLL_B into T_A2
+            # doc3 projects from COLL_A into T_B1
+            # This creates cross-collection co-occurrence between A1↔B1, A2↔B1
+            _seed_chunks(pg_instance, "default", self._COLL_B, [
+                canonical_chunk_id("analytic-doc1"), canonical_chunk_id("analytic-doc2"),
+            ])
+            _seed_chunk(pg_instance, "default", self._COLL_A, canonical_chunk_id("analytic-doc3"))
+            taxonomy_store.import_assignment(
+                doc_id=canonical_chunk_id("analytic-doc1"), topic_id=self._T_A1,
+                assigned_by="projection", similarity=0.88,
+                assigned_at="2026-03-01T00:00:00Z",
+                source_collection=self._COLL_B,
+            )
+            taxonomy_store.import_assignment(
+                doc_id=canonical_chunk_id("analytic-doc2"), topic_id=self._T_A2,
+                assigned_by="projection", similarity=0.72,
+                assigned_at="2026-03-01T00:00:00Z",
+                source_collection=self._COLL_B,
+            )
+            taxonomy_store.import_assignment(
+                doc_id=canonical_chunk_id("analytic-doc3"), topic_id=self._T_B1,
+                assigned_by="projection", similarity=0.91,
+                assigned_at="2026-03-01T00:00:00Z",
+                source_collection=self._COLL_A,
+            )
+            # hdbscan assignments for co-occurrence: doc1 also hdbscan-assigned to B1
+            taxonomy_store.import_assignment(
+                doc_id=canonical_chunk_id("analytic-doc1"), topic_id=self._T_B1,
+                assigned_by="hdbscan", similarity=None,
+                assigned_at=None, source_collection=self._COLL_B,
+            )
 
     def test_i_compute_icf_map(self, taxonomy_store) -> None:
         """i) compute_icf_map returns a non-empty {topic_id: icf} dict."""

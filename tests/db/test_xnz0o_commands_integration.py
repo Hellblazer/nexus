@@ -281,19 +281,24 @@ def seeded(cat):
     )
 
     # ── Collections ───────────────────────────────────────────────────────────
+    # RDR-204 (nexus-f5wwx): this fixture's java_service is a pure ONNX local
+    # engine (no voyage key) -- EmbedderRouter.contentTypeModelTokens' local
+    # branch maps EVERY content type (code included) to the single injected
+    # local embedder's token, bge-base-en-v15-768 (RDR-160), so a literal
+    # voyage-context-3/voyage-code-3 here 422s regardless of client posture.
     coll_paper = "xnz0o__knowledge__voyage-context-3__v1"
     coll_code  = "xnz0o__code__voyage-code-3__v1"
     cat.register_collection(
         coll_paper,
         content_type="knowledge",
         owner_id=str(repo_a),
-        embedding_model="voyage-context-3",
+        embedding_model="bge-base-en-v15-768",
     )
     cat.register_collection(
         coll_code,
         content_type="code",
         owner_id=str(repo_a),
-        embedding_model="voyage-code-3",
+        embedding_model="bge-base-en-v15-768",
     )
 
     # ── Documents ─────────────────────────────────────────────────────────────
