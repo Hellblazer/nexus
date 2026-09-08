@@ -181,13 +181,20 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             raise ValueError("collection must not be empty")
         if not source_path:
             raise ValueError("source_path must not be empty")
-        self._post("/enqueue", {
+        # RDR-204 Phase 1 (nexus-f5wwx): the engine no longer
+        # auto-registers a collection on first write — ensure it here,
+        # once per process per collection (cached), and retry once if
+        # the engine's per-tenant boot sweep (bead .3) reaped a
+        # registered-but-chunkless row between registration and this
+        # write.
+        from nexus.corpus import write_with_registration_retry  # noqa: PLC0415 — circular-dep avoidance (corpus)
+        write_with_registration_retry(collection, lambda: self._post("/enqueue", {
             "collection": collection,
             "source_path": source_path,
             "content_hash": content_hash,
             "content": content,
             "doc_id": doc_id,
-        })
+        }))
         self._signal_wake()
 
     def enqueue_many(self, rows: list[dict]) -> int:

@@ -187,7 +187,18 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             # the round trip just to hit the engine's own refusal — same
             # message, one call earlier.
             raise ValueError("doc_id required")
-        r = self._post("/upsert", _record_to_body(record))
+        # RDR-204 Phase 1 (nexus-f5wwx): the engine no longer
+        # auto-registers a collection on first write (nexus-ft04v.7
+        # deleted AspectRepository's stub insert) — ensure it here,
+        # once per process per collection (cached), and retry once if
+        # the engine's per-tenant boot sweep (bead .3) reaped a
+        # registered-but-chunkless row between registration and this
+        # write.
+        from nexus.corpus import write_with_registration_retry  # noqa: PLC0415 — circular-dep avoidance (corpus)
+        r = write_with_registration_retry(
+            record.collection,
+            lambda: self._post("/upsert", _record_to_body(record)),
+        )
         return bool(r.get("written", False))
 
     def get(self, collection: str, source_path: str) -> AspectRecord | None:

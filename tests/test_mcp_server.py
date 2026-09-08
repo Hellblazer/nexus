@@ -56,9 +56,42 @@ from tests.conftest import make_vector_test_client
 # (voyage-* embedder names, canonical-set defaults). The cloud_mode
 # fixture sets credentials and forces ``is_local_mode()`` to False so
 # the assertions hold regardless of the host environment.
+#
+# RDR-204 Phase 1 (nexus-f5wwx) latent-mismatch note: this module-wide
+# cloud_mode was ALWAYS a client-side-only mock — it patches
+# ``nexus.config.is_local_mode``, never anything the already-running
+# Java test-engine substrate (``t2_service_env``/``ensure_engine``)
+# reads, and that substrate always boots local mode with the bge-768
+# profile. Pre-Phase-1, the mismatch was invisible: the engine
+# auto-registered a collection with whatever model the client claimed
+# on first write, silently. Phase 1 made the engine the profile
+# authority (a register call naming a model that disagrees with the
+# real profile is a 422), which surfaces this file's latent defect for
+# every ``store_put``-touching test: the client believes cloud/voyage,
+# the substrate is local/bge, and the two now visibly disagree instead
+# of silently diverging — exactly the GH #667 class RDR-204 closes.
+# The ``local_mode_write`` fixture below re-patches ``is_local_mode``
+# back to True for the specific tests that reach the real substrate
+# write, so the client's belief matches the substrate's reality; every
+# other test in this file keeps asserting cloud-mode dispatch logic
+# (corpus resolution, embedder-name defaults) that never touches a
+# real write and is unaffected.
 pytestmark = pytest.mark.usefixtures("cloud_mode")
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+@pytest.fixture()
+def local_mode_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Undo this module's cloud_mode mock for a test that reaches the
+    REAL substrate write (store_put's manifest write / real
+    register_collection call) — see the module docstring's RDR-204
+    Phase 1 note. Depends on cloud_mode having already run (module
+    ``pytestmark``), so this must be requested AFTER it resolves,
+    which pytest guarantees here since fixtures from ``usefixtures``
+    apply before a test's own explicit fixture parameters.
+    """
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
 
 
 def _service_reachable() -> bool:
@@ -278,9 +311,38 @@ class TestNexusHmxiRoundTripGrandfathering:
         assert not sresult.startswith("Error:")
         assert "art-overview" in sresult or "art-followup" in sresult
 
-    def test_no_legacy_collection_promotes_to_conformant(self, t3):
-        # No pre-existing collection; ``store_put`` auto-promotes to
-        # conformant.
+    def test_no_legacy_collection_promotes_to_conformant(self, t3, monkeypatch):
+        """No pre-existing collection; ``store_put`` auto-promotes to
+        conformant.
+
+        RDR-204 Phase 1 (nexus-f5wwx): this test is about CLIENT-SIDE
+        name promotion under the module's cloud_mode belief, not about
+        landing a real write — the real substrate is always local/bge
+        (see the module docstring's latent-mismatch note), so a genuine
+        register_collection call naming voyage-context-3 would 422
+        against it. Fakes both catalog writes this flow reaches (the
+        seed's real chunk upsert, via the SAME ``_post`` stub pattern
+        tests/db/test_http_vector_client.py uses, and the manifest
+        write) so nothing here touches the real substrate; asserts the
+        promoted name AND that the (fake) registrar was actually
+        called with the voyage token, not just that the string
+        happens to appear in the CLI's echo.
+        """
+        from unittest.mock import MagicMock
+
+        fake_writer = MagicMock()
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_writer", lambda: fake_writer,
+        )
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            lambda path, body, **kw: {"upserted": len(body.get("ids", []))},
+        )
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook.store_put_manifest_direct",
+            lambda *a, **kw: None,
+        )
+
         _seed_for_store_put("Greenfield content", "knowledge__greenfield")
         result = store_put(
             content="Greenfield content",
@@ -289,6 +351,13 @@ class TestNexusHmxiRoundTripGrandfathering:
         )
         assert "Stored" in result
         assert "knowledge__greenfield__voyage-context-3__v1" in result
+        fake_writer.register_collection.assert_any_call(
+            "knowledge__greenfield__voyage-context-3__v1",
+            content_type="knowledge",
+            owner_id="greenfield",
+            embedding_model="voyage-context-3",
+            model_version="v1",
+        )
         # ``store_list`` resolves to the same conformant target.
         listing = store_list(collection="knowledge__greenfield", limit=10)
         assert "greenfield-doc" in listing
@@ -556,11 +625,19 @@ def test_clustered_mode_skips_the_diversity_cap():
 
 # ── Store ────────────────────────────────────────────────────────────────────
 
-def test_store_put(t3):
+def test_store_put(t3, local_mode_write):
     _seed_for_store_put("test content", "fixture-subject")
     result = store_put(content="test content", collection="fixture-subject", title="test-doc")
     assert "Stored:" in result
     assert "knowledge__fixture-subject" in result
+    # RDR-204 Phase 1 (nexus-f5wwx): a real assertion the registration
+    # landed with the substrate's actual (local, bge) profile — not
+    # just that the write didn't 422.
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+    with HttpCatalogClient() as cat:
+        row = cat.get_collection("knowledge__fixture-subject__bge-base-en-v15-768__v1")
+    assert row is not None
+    assert row.get("embedding_model") == "bge-base-en-v15-768"
 
 
 def test_store_list(t3):
@@ -578,7 +655,7 @@ def test_store_list(t3):
     pytest.param("qualified content", "knowledge__fixture-subject", "qualified-test",
                  ["qualified content"], id="fully-qualified"),
 ])
-def test_store_get_round_trip(t3, content, collection, title, expect_in):
+def test_store_get_round_trip(t3, local_mode_write, content, collection, title, expect_in):
     doc_id = _put_id(content, collection, title)
     result = store_get(doc_id=doc_id, collection=collection)
     assert not result.startswith("Error:")
@@ -597,13 +674,13 @@ def test_store_get_empty_doc_id(t3):
     assert result.startswith("Error:")
 
 
-def test_store_get_no_ansi(t3):
+def test_store_get_no_ansi(t3, local_mode_write):
     doc_id = _put_id("ansi check content", title="ansi-get-test")
     result = store_get(doc_id=doc_id, collection="fixture-subject")
     assert not ANSI_RE.search(result), f"ANSI codes found in: {result[:100]}"
 
 
-def test_store_get_by_title_fallback(t3):
+def test_store_get_by_title_fallback(t3, local_mode_write):
     """store_get accepts an exact title when the input doesn't look like a
     16-char content hash — fixed in 4.9.6 follow-up (was silent Not found)."""
     _put_id("findable by title", title="title-lookup-test")
@@ -1395,7 +1472,7 @@ def test_store_put_invalidates_page_cache(t3, monkeypatch):
     )
 
 
-def test_store_delete_invalidates_page_cache(t3, monkeypatch):
+def test_store_delete_invalidates_page_cache(t3, monkeypatch, local_mode_write):
     from nexus.mcp import core as mcp_core
     _fresh_page_cache(monkeypatch)
     _seed_for_store_put("delete me", "fixture-subject")
@@ -1442,7 +1519,7 @@ def test_store_put_invalidates_collections_cache(t3, monkeypatch):
     )
 
 
-def test_store_delete_invalidates_collections_cache(t3, monkeypatch):
+def test_store_delete_invalidates_collections_cache(t3, monkeypatch, local_mode_write):
     """Same cache-coherence review finding as the store_put test above,
     for the delete path."""
     from nexus.mcp import core as mcp_core

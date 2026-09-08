@@ -1439,6 +1439,35 @@ def _restore_structlog_after_test():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_collection_registration_cache() -> None:
+    """Clear ``nexus.corpus``'s per-process "known registered" cache
+    around every test.
+
+    RDR-204 Phase 1 (nexus-f5wwx): ``ensure_collection_registered`` /
+    ``write_with_registration_retry`` cache a collection name as
+    registered in a module-level set once the (real or mocked)
+    registrar has been called for it, so a hot write path pays one
+    round trip per NEW collection, never one per write — see that
+    module's own docstring. Left uncleared, the cache is a
+    process-global set that OUTLIVES any one test: two unrelated test
+    files using the same collection name (a common pattern —
+    ``"knowledge__knowledge"``, ``"code__myrepo-1-1__voyage-code-3__v1"``)
+    within the same pytest-xdist worker would have the SECOND test's
+    fresh mock/spy never actually invoked, since the cache from the
+    FIRST test already marked the name "registered" — silently
+    breaking ``assert_called_once()``-style assertions with no
+    relation to the test's own logic. Same isolation pattern as
+    ``_restore_structlog_after_test`` above: cheap, and closes the
+    door for every future test rather than requiring each file to
+    remember its own fixture.
+    """
+    import nexus.corpus as _corpus
+    _corpus._REGISTERED_COLLECTIONS.clear()
+    yield
+    _corpus._REGISTERED_COLLECTIONS.clear()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_claude_code_session_id(monkeypatch: pytest.MonkeyPatch) -> None:
     """Clear the ambient ``CLAUDE_CODE_SESSION_ID`` for every test.
 

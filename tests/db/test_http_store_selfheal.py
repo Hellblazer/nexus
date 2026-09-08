@@ -68,6 +68,24 @@ _SRC_T2_DIR = Path(__file__).resolve().parent.parent.parent / "src" / "nexus" / 
 _BYPASS_PATTERN = re.compile(r"self\._client\.(get|post|put|delete|patch|request)\(")
 
 
+@pytest.fixture(autouse=True)
+def _no_real_catalog_registration(monkeypatch: pytest.MonkeyPatch):
+    """RDR-204 Phase 1 (nexus-f5wwx): taxonomy/aspect_queue/document_aspects
+    writes now route through ``nexus.corpus.write_with_registration_retry``,
+    which registers the collection before the write — an EXTRA HTTP call
+    the fake in-process servers here (``_TaxonomyHandler`` etc.) do not
+    recognise (they 404 any route outside their own scripted contract),
+    unrelated to the self-heal/bypass-guard behaviour this file actually
+    tests. Stub it to a bare passthrough, same fixture as
+    tests/db/test_http_vector_client.py and
+    tests/test_http_aspect_queue_enqueue_many.py.
+    """
+    monkeypatch.setattr(
+        "nexus.corpus.write_with_registration_retry",
+        lambda name, write_fn, **kwargs: write_fn(),
+    )
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))

@@ -24,6 +24,21 @@ from nexus.db.http_vector_client import HttpVectorClient
 from nexus.db.t3 import T3Database
 
 
+@pytest.fixture(autouse=True)
+def _no_real_catalog_registration(monkeypatch: pytest.MonkeyPatch):
+    """RDR-204 Phase 1 (nexus-f5wwx): see the identical fixture in
+    tests/db/test_http_vector_client.py for the full rationale — this
+    file's put()/upsert_chunks() tests are pure HTTP-shape tests using
+    arbitrary collection name strings, so the registration step is
+    stubbed to a bare passthrough here too.
+    """
+    monkeypatch.setattr(
+        "nexus.corpus.write_with_registration_retry",
+        lambda name, write_fn, **kwargs: write_fn(),
+    )
+    yield
+
+
 # ── Parity PIN ───────────────────────────────────────────────────────────────
 
 
