@@ -1419,12 +1419,13 @@ def _invoke_once_batch(prompt: str, *, timeout: int, model: str | None = None) -
         outer = json.loads(result.stdout)
     except (ValueError, TypeError) as exc:
         raise _TransientFailure(f"outer json parse failure: {exc}") from exc
+    if isinstance(outer, dict):
+        _log_usage(outer, model)  # a malformed envelope still cost money
     if not isinstance(outer, dict) or "result" not in outer:
         raise _HardFailure(
             "claude --output-format json wrapper missing 'result' key"
         )
 
-    _log_usage(outer, model)
     inner_text = outer["result"]
     if not isinstance(inner_text, str):
         raise _HardFailure(
@@ -1714,13 +1715,14 @@ def _invoke_once(prompt: str, *, model: str | None = None) -> dict:
         outer = json.loads(result.stdout)
     except (ValueError, TypeError) as exc:
         raise _TransientFailure(f"outer json parse failure: {exc}") from exc
+    if isinstance(outer, dict):
+        _log_usage(outer, model)  # a malformed envelope still cost money
     if not isinstance(outer, dict) or "result" not in outer:
         raise _HardFailure(
             "claude --output-format json wrapper missing 'result' key "
             f"(got keys: {list(outer.keys()) if isinstance(outer, dict) else type(outer).__name__})",
         )
 
-    _log_usage(outer, model)
     inner_text = outer["result"]
     if not isinstance(inner_text, str):
         raise _HardFailure(

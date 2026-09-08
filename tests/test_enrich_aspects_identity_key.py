@@ -221,6 +221,13 @@ def test_the_extraction_verb_refuses_the_same_unknown_collection(wiring, monkeyp
     assert result.exit_code != 0, result.output
     assert "No catalog rows in 'knowledge__dt-papers'" in result.output
     assert "No documents to process" not in result.output
+    # The gap-fill path reads the aspect side, so the refusal names the
+    # orphans exactly as the audit does (the wiring fixture holds four).
+    assert "4 aspect row(s) exist under that exact name" in result.output
+    # --all takes no aspect-side read and still refuses.
+    result = CliRunner().invoke(enrich, ["aspects", "knowledge__dt-papers", "--dry-run", "--all"])
+    assert result.exit_code != 0, result.output
+    assert "No catalog rows in 'knowledge__dt-papers'" in result.output
 
 
 # --------------------------------------------------------------------------
