@@ -1949,7 +1949,9 @@ def test_devonthink_index_exits_zero_and_names_the_verb(tmp_path: Path, monkeypa
     import nexus.commands.command_context as cc
 
     monkeypatch.setattr(cc, "_dt_reachable", lambda: (True, "http"))
-    monkeypatch.setattr(cc, "_knowledge_collections", lambda: ["knowledge__dt-papers__voyage-context-3__v1"])
+    # A local-mode collection name on purpose: the mode-declarations census
+    # reads a cloud embedder token as a cloud_mode claim.
+    monkeypatch.setattr(cc, "_knowledge_collections", lambda: ["knowledge__dt-papers__bge-768__v1"])
     from nexus.cli import main
 
     result = CliRunner().invoke(main, ["command-context", "devonthink-index", "--", "6BCD2BC1-8421-4134-BA67-A5F3E658AA95"])
