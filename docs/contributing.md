@@ -528,7 +528,7 @@ Every step below is **required**. Missing any one of them has caused problems in
     git checkout develop && git pull
     git merge origin/main --no-edit    # trivially clean right after a release:
                                        # the release branch just CONTAINED develop
-    git push origin develop
+    scripts/git-push-develop.sh HEAD     # the merge commit vouches for what it merged in
     ```
     Earned by the 2026-07-23 incident: from 6.12.0 through 6.17.0 no release
     was ever merged back, so develop's seven manifests froze at 6.11.0 — all
@@ -608,7 +608,7 @@ gh pr create --base main --head plugin-release/X.Y.Z-n --title "plugin release: 
 gh pr merge <N> --merge
 git tag -a plugin-vX.Y.Z-n -m "plugin-vX.Y.Z-n" <merge-commit>
 git push origin plugin-vX.Y.Z-n     # fires the verify-only plugin-release.yml
-scripts/plugin_cut_back_merge.sh . && git push origin develop
+scripts/plugin_cut_back_merge.sh . && scripts/git-push-develop.sh HEAD
 ```
 
 The back-merge is NEVER a bare `git merge origin/main`: the cut commit

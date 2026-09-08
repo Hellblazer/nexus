@@ -553,7 +553,7 @@ def perform_cut(
     # while develop still carries them, so the back-merge conflicts on
     # conexus/PENDING_RELEASE.md by construction; the script resolves that
     # one conflict (main wins) and runs develop's drift contract as the net.
-    print("  scripts/plugin_cut_back_merge.sh . && git push origin develop")
+    print("  scripts/plugin_cut_back_merge.sh . && scripts/git-push-develop.sh HEAD")
     return {"n": n, "tag": tag, "branch": branch, "moved_plugins": moved}
 
 

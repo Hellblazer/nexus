@@ -17,6 +17,13 @@
 #   to a commit; short SHAs are fine). With no arguments the script only
 #   reports; a non-empty range is refused, never pushed.
 #
+#   A vouched MERGE commit also vouches for everything it merges in (the
+#   commits reachable from its second and later parents that are not yet on
+#   the remote branch). That is the release back-merge and the plugin-cut
+#   back-merge: the caller made the merge, so main's release-only commits
+#   ride it. Commits under the merge on its FIRST-parent line (a peer's
+#   unpushed work on the local branch) are never covered by it.
+#
 # Environment:
 #   NX_PUSH_REMOTE   remote name (default origin)
 #   NX_PUSH_BRANCH   branch name (default develop)
@@ -76,6 +83,13 @@ for arg in "$@"; do
     exit 5
   fi
   vouched+=("$full")
+  # A merge's non-first parents: what it merges in is covered by vouching it.
+  while IFS= read -r parent; do
+    [[ -z "$parent" ]] && continue
+    while IFS= read -r merged; do
+      [[ -n "$merged" ]] && vouched+=("$merged")
+    done < <(git rev-list "$parent" "^refs/remotes/$remote/$branch")
+  done < <(git rev-list --parents -n 1 "$full" | cut -d' ' -f3-  | tr ' ' '\n')
 done
 
 if [[ ${#range[@]} -eq 0 && ${#vouched[@]} -eq 0 ]]; then

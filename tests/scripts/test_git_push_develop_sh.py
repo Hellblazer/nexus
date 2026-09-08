@@ -116,6 +116,61 @@ class TestDetachedSource:
         assert _remote_tip(origin) == before
 
 
+class TestBackMerge:
+    """The release and plugin-cut back-merges: origin/main merged into
+    develop carries main-only commits nobody on develop authored."""
+
+    def _main_ahead(self, repos, tmp_path):
+        origin, work = repos
+        other = tmp_path / "other"
+        _git("clone", "-q", "-b", "develop", str(origin), str(other), cwd=tmp_path)
+        _git("checkout", "-q", "-b", "main", cwd=other)
+        rel = _commit(other, "release-only")
+        _git("push", "-q", "origin", "main", cwd=other)
+        _git("fetch", "-q", "origin", cwd=work)
+        return origin, work, rel
+
+    def test_vouched_merge_covers_what_it_merges_in(self, repos, tmp_path) -> None:
+        origin, work, rel = self._main_ahead(repos, tmp_path)
+        _git("merge", "-q", "--no-ff", "--no-edit", "origin/main", cwd=work)
+        merge = _git("rev-parse", "HEAD", cwd=work)
+        proc = _run(work, merge)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert proc.stdout.strip() == f"PUSH_OK n=2 tip={merge}"
+        assert _remote_tip(origin) == merge
+
+    def test_fast_forward_back_merge_vouches_head_and_its_merged_in_branch(self, repos, tmp_path) -> None:
+        """Right after a release the back-merge fast-forwards onto main's PR
+        merge commit; vouching HEAD covers the release branch under it."""
+        origin, work = repos
+        other = tmp_path / "other"
+        _git("clone", "-q", "-b", "develop", str(origin), str(other), cwd=tmp_path)
+        _git("checkout", "-q", "-b", "release/x", cwd=other)
+        bump = _commit(other, "bump")
+        _git("checkout", "-q", "-b", "main", "origin/develop", cwd=other)
+        _git("merge", "-q", "--no-ff", "--no-edit", "release/x", cwd=other)
+        pr_merge = _git("rev-parse", "HEAD", cwd=other)
+        _git("push", "-q", "origin", "main", cwd=other)
+        _git("fetch", "-q", "origin", cwd=work)
+        _git("merge", "-q", "--no-edit", "origin/main", cwd=work)
+        assert _git("rev-parse", "HEAD", cwd=work) == pr_merge
+        proc = _run(work, "HEAD")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert proc.stdout.strip() == f"PUSH_OK n=2 tip={pr_merge}"
+        assert bump in _git("rev-list", "refs/heads/develop", cwd=origin)
+
+    def test_vouched_merge_does_not_cover_a_peer_commit_beneath_it(self, repos, tmp_path) -> None:
+        origin, work, rel = self._main_ahead(repos, tmp_path)
+        before = _remote_tip(origin)
+        peer = _commit(work, "peer")
+        _git("merge", "-q", "--no-edit", "origin/main", cwd=work)
+        merge = _git("rev-parse", "HEAD", cwd=work)
+        proc = _run(work, merge)
+        assert proc.returncode == 2
+        assert peer[:7] in proc.stdout and rel[:7] not in proc.stdout
+        assert _remote_tip(origin) == before
+
+
 class TestRefusals:
     def test_unvouched_commit_in_range_is_refused_and_named(self, repos) -> None:
         origin, work = repos
