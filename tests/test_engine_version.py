@@ -559,6 +559,13 @@ class TestRequiredEngineVersion:
         # conexus 7.36.0; engine deployed before the client tag (additive
         # choreography). Local-mode installs get nx catalog restore and the
         # tombstone protection only through this pin.
+        # ->(0,1,109) 2026-09-08 for 7.37.0 (paired, NON-additive): RDR-204
+        # Phase 1, catalog-036 + hygiene-002/003 (nine changesets), the seven
+        # stub-insert paths retired, register-422; the client half is
+        # nexus-f5wwx + nexus-ft04v.34. Gated pre-tag on 2839915eb: full Java
+        # suite 2697/0/0/7, --shakeout PASSED, --candidate-migration PASSED
+        # delta=9 invariants EXACT, write gate EXPECTED-INCOMPATIBLE under
+        # f5wwx. Deploy after this client tag; PITR fork walk before it.
         # nexus-9gggv (2026-09-08): the tuple is no longer hand-typed here.
         # Every client release records its engine pairing in CHANGELOG.md's
         # newest released section (the first engine-service-vX.Y.Z it

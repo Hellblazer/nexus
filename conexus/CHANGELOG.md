@@ -4,6 +4,20 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.37.0] - 2026-09-08
+
+Plugin version aligned with conexus 7.37.0; the pin returns to the client
+form from plugin-v7.36.1-1, which shipped the hook-runner fix early.
+
+- `_run_python_hook.sh` prefers `NX_HOOK_PYTHON`, then an active venv whose
+  editable `nexus` is this checkout's, then the installed generation's
+  python, before the named python3.13/3.12 probes; `rdr_hook.py` names a
+  resolution failure on its verdict line and in `<config>/rdr_hook.log`
+  (nexus-4ti7e; first live at plugin-v7.36.1-1).
+- `skills/nexus/reference.md`: the `store_put` parameter table says
+  `collection` is required and names the refused placeholders (nexus-0fw11;
+  held back from the plugin cut because its bead also changed wheel code).
+
 ## [7.36.1] - 2026-09-08
 
 Plugin version aligned with conexus 7.36.1. Everything below waited in

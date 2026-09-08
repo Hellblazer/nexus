@@ -6,6 +6,72 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.37.0] - 2026-09-08
+
+Paired with engine-service-v0.1.109 (`REQUIRED_ENGINE_VERSION` 0.1.109),
+tagged on 2839915eb: RDR-204 Phase 1, collections stop encoding their
+metadata in their names. The pairing is NOT additive: a client older than
+this release gets a 422 on its first write to an unregistered collection
+against this engine, so the engine is deployed only after this client tag.
+Plugin pin returns to the client form v7.37.0 from plugin-v7.36.1-1.
+
+### Changed
+
+- Collection registration is profile-driven. The client registers a
+  collection before its first write (`nexus.corpus.ensure_collection_registered`),
+  and every store write path (vectors put and upsert_chunks, the aspect
+  queue, document aspects, highlights, taxonomy persist, assign and import,
+  catalog `write_manifest_many`, the per-store rename fan-out) self-heals
+  once on the engine's not-registered 422 by evicting the per-process
+  cache, re-registering, and retrying (nexus-f5wwx, nexus-ft04v.34).
+- `nx index` resolves the embedding model for writes from the install-scoped
+  profile instead of a hardcoded Voyage token (nexus-ft04v.34).
+- Store writes require a subject collection (nexus-0fw11). The MCP
+  `store_put` tool's `collection` argument is required, `nx store put`'s
+  `--collection` is required, and every writer that resolves a collection
+  name (`store put`, MCP `store_put`, `nx memory promote`, `nx index pdf`
+  and `md`, `nx dt index`) refuses the placeholder subjects `default`,
+  `knowledge`, `notes`, `tmp`, `test` as a bare or two-segment name, naming
+  docs/collections.md Rule 1. Reads keep their defaults; a full
+  four-segment name passes through; a recovery-bundle import restores a
+  placeholder-named collection under its recorded name.
+- The aspect worker's `reclaim_stale` sweep backs off on an idle queue, 30 s
+  doubling to the 300 s stale window, resetting on any reclaim: idle
+  traffic drops from about 2,880 reclaim requests a day to about 288; a row
+  stranded on a long-idle queue waits at most 600 s, as before (nexus-e0ypa).
+
+### Fixed
+
+- `nx doctor` no longer prints raw exception text carrying credentials;
+  every exception render goes through `redact_credentials`. The cause was
+  the process-global vector-client singleton reused across doctor checks
+  (nexus-x75kg).
+- Health checks list `nexus.embedding_profile` among the RLS tenant tables.
+- Plugin hooks run under an interpreter that can import `nexus`
+  (nexus-4ti7e; shipped early as plugin-v7.36.1-1, see `conexus/CHANGELOG.md`).
+
+### Engine (engine-service-v0.1.109)
+
+- catalog-036: `nexus.embedding_models` (seeded voyage-code-3,
+  voyage-context-3, bge-base-en-v15-768, minilm-l6-v2-384) and the
+  tenant-scoped `nexus.embedding_profile` (RLS enabled and forced).
+- hygiene-002: one changeset walks every `catalog_collections` row to fill
+  content_type, owner_id, embedding_model, dimension and lifecycle_state
+  (unparseable or unseeded rows become `disputed` on bge-768), then adds
+  the non-empty CHECKs, the FK to embedding_models and lifecycle_state NOT
+  NULL; `gc_quarantine_orphans` and `gc_restore_rereferenced` are re-created
+  carrying catalog-033-2's audit producer.
+- hygiene-003: `assign_from_chashes_{384,768,1024}` no longer stub-insert a
+  collection row; they raise naming `POST /v1/catalog/collections/upsert`.
+- Seven Java stub-insert paths retired: an unregistered collection on any
+  write is a 422 naming the registration route. Ghost sweep and dormant
+  marking run once per tenant at its first request after boot.
+- `POST /v1/catalog/collections/upsert` refuses a differing model, a missing
+  content_type or a blank embedding_model with a field-named 422;
+  `quarantine-` prefixed names register with lifecycle_state `quarantine`.
+- Release harness: `native-smoke.sh` and the local-service gate register
+  their fixture collections before writing.
+
 ## [7.36.1] - 2026-09-08
 
 Client-only patch. Engine unchanged at engine-service-v0.1.108
