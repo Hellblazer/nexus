@@ -49,7 +49,7 @@ def test_conformant_name_local_mode_sends_the_bge_token(
     monkeypatch.setattr(
         "nexus.db.http_vector_client.is_vector_service_mode", lambda: True,
     )
-    name = "docs__myrepo-1-1__voyage-context-3__v1"
+    name = "docs__myrepo-1-1__minilm-l6-v2-384__v1"  # token deliberately not the local write model
 
     kwargs = collection_registration_kwargs(name)
 
@@ -394,7 +394,7 @@ def test_a_different_422_is_never_retried(
     )
     writer = _fake_writer()
     name = "knowledge__retry-profile-mismatch-test"
-    err = _http_422("embedding_model 'voyage-code-3' does not match the "
+    err = _http_422("embedding_model 'some-other-model' does not match the "
                      "install profile's 'bge-base-en-v15-768'")
     write_fn = MagicMock(side_effect=err)
 
