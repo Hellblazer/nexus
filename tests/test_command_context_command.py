@@ -1895,7 +1895,7 @@ def _command_md_files() -> list[Path]:
 
 def test_command_files_exist() -> None:
     """Sanity: the command-context command files are discoverable."""
-    assert len(_command_md_files()) == 16
+    assert len(_command_md_files()) == 17  # 17 since devonthink-index.md (nexus-i0cwh)
 
 
 def test_no_command_context_file_passes_arguments() -> None:
@@ -1937,3 +1937,45 @@ def test_no_command_file_double_quotes_arguments_in_backtick() -> None:
         'command .md backtick lines must not splice "$ARGUMENTS" (double-quoted); '
         "drop the arg or single-quote it:\n" + "\n".join(offenders)
     )
+
+
+# ---------------------------------------------------------------------------
+# nexus-i0cwh: devonthink-index preamble (stage 1 of the DEVONthink route)
+# ---------------------------------------------------------------------------
+
+
+def test_devonthink_index_exits_zero_and_names_the_verb(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    import nexus.commands.command_context as cc
+
+    monkeypatch.setattr(cc, "_dt_reachable", lambda: (True, "http"))
+    monkeypatch.setattr(cc, "_knowledge_collections", lambda: ["knowledge__dt-papers__voyage-context-3__v1"])
+    from nexus.cli import main
+
+    result = CliRunner().invoke(main, ["command-context", "devonthink-index", "--", "6BCD2BC1-8421-4134-BA67-A5F3E658AA95"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "## Context" in out
+    assert "nx dt index --uuid 6BCD2BC1-8421-4134-BA67-A5F3E658AA95" in out
+    assert "DEVONthink MCP: reachable (http)" in out
+    assert "knowledge__dt-papers" in out
+    assert "--allow-page-gap" in out
+    assert "pageCount" in out
+
+
+def test_devonthink_index_group_argument_maps_to_group_selector(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    import nexus.commands.command_context as cc
+
+    monkeypatch.setattr(cc, "_dt_reachable", lambda: (False, "no transport"))
+    monkeypatch.setattr(cc, "_knowledge_collections", lambda: [])
+    from nexus.cli import main
+
+    result = CliRunner().invoke(main, ["command-context", "devonthink-index", "--", "/Papers/Consensus"])
+    assert result.exit_code == 0, result.output
+    assert 'nx dt index --group "/Papers/Consensus"' in result.output
+    assert "DEVONthink MCP: unreachable" in result.output
+    assert "coverage unverified" in result.output
+    result = CliRunner().invoke(main, ["command-context", "devonthink-index"])
+    assert result.exit_code == 0
+    assert "--uuid" in result.output and "--group" in result.output and "--smart-group" in result.output

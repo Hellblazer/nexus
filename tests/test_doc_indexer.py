@@ -2464,6 +2464,8 @@ class TestStreamingReturnMetadata:
             "pages": [1, 2],
             "title": "My Paper",
             "author": "A. Thor",
+            "page_count": 0,
+            "pages_with_text": [],
         }
         # Kill control: assert the metadata-read call actually used the
         # content_hash identity, not merely that the mock happened to return
@@ -2497,6 +2499,8 @@ class TestStreamingReturnMetadata:
             "pages": [1, 4],
             "title": "My Paper",
             "author": "A. Thor",
+            "page_count": 0,
+            "pages_with_text": [],
         }
         mock_meta_for_doc_id.assert_called_once()
         call_args = mock_meta_for_doc_id.call_args

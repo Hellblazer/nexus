@@ -116,6 +116,78 @@ def _resolve_dt_collection(
     return f"docs__{owner}__{model}__v1"
 
 
+# nexus-i0cwh: DEVONthink's own metadata for a record, read once per run over
+# the DT MCP (fail-soft), used for the catalog row (title/url/year) and for
+# the page-coverage check (pageCount).
+_FACTS_CACHE: dict[str, dict | None] = {}
+
+
+def _dt_call(tool: str, args: dict) -> dict | None:
+    """Seam over :func:`nexus.mcp_client.devonthink.dt_call` (tests patch it)."""
+    from nexus.mcp_client.devonthink import dt_call  # noqa: PLC0415 — command-local import (mcp_client.devonthink)
+
+    return dt_call(tool, args)
+
+
+def _reset_facts_cache() -> None:
+    _FACTS_CACHE.clear()
+
+
+def _dt_record_facts(uuid: str) -> dict | None:
+    """``{name, url, year, page_count}`` from ``get_record_properties``, or
+    ``None`` when the DT MCP is unreachable. Cached for the run."""
+    if uuid in _FACTS_CACHE:
+        return _FACTS_CACHE[uuid]
+    result = _dt_call("get_record_properties", {"uuid": uuid})
+    facts: dict | None = None
+    if isinstance(result, dict) and result:
+        created = str(result.get("creationDate") or "")
+        year = int(created[:4]) if re.match(r"^\d{4}", created) else 0
+        raw_pages = result.get("pageCount")
+        facts = {
+            "name": str(result.get("name") or ""),
+            "url": str(result.get("url") or ""),
+            "year": year,
+            "page_count": int(raw_pages) if isinstance(raw_pages, (int, float)) and raw_pages > 0 else 0,
+        }
+    _FACTS_CACHE[uuid] = facts
+    return facts
+
+
+def _missing_pages(pages_seen: list[int], page_count: int) -> list[int]:
+    """Pages 1..page_count that produced no text (chunk page_number is 1-based)."""
+    if page_count <= 0:
+        return []
+    seen = {int(x) for x in pages_seen}
+    return [n for n in range(1, page_count + 1) if n not in seen]
+
+
+def _stamp_page_gap(uuid: str, missing: list[int]) -> bool:
+    """Record a page gap on the catalog row (``meta.page_gap``) so it is
+    queryable after the run, or clear a stale one when *missing* is empty
+    and the row carries a gap from an earlier run; fail-soft."""
+    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — command-local import (catalog.factory)
+
+    reader = make_catalog_reader()
+    if reader is None:
+        return False
+    writer = make_catalog_writer(priority="interactive")
+    try:
+        entry = reader.by_source_uri(f"x-devonthink-item://{uuid}")
+        if entry is None:
+            return False
+        if not missing and not (getattr(entry, "meta", None) or {}).get("page_gap"):
+            return True  # nothing to clear
+        writer.update(entry.tumbler, meta={"page_gap": missing})
+        return True
+    except Exception as e:  # noqa: BLE001 — DEVONthink boundary op is best-effort; failure logged via log.warning
+        _log.warning("dt_page_gap_stamp_failed", uuid=uuid, error=str(e))
+        return False
+    finally:
+        writer.close()
+        reader.close()
+
+
 def _index_record(
     uuid: str,
     path: str,
@@ -147,7 +219,7 @@ def _index_record(
     relocations, and the file path returned by osascript at index time
     is not (DT moves files inside Files.noindex/ on its own schedule).
 
-    Returns ``(stamped, chunks)`` (nexus-5xn3k.6 AC4 — before this, the
+    Returns ``(stamped, chunks, pages)`` (nexus-5xn3k.6 AC4 — before this, the
     indexer's chunk count was discarded and the caller could only do
     ``indexed += 1`` unconditionally, so a no-op re-index of an unchanged
     document reported "Indexed 1 record(s)" identically to a real write).
@@ -156,6 +228,12 @@ def _index_record(
     can surface stamp misses in the summary line. ``chunks`` is the
     indexer's own return (0 means the staleness gate short-circuited —
     the document is unchanged — or the indexer produced no content).
+    ``pages`` (nexus-i0cwh) is the 1-based list of pages the extractor
+    produced text for on a fresh PDF index (``pages_with_text``), ``None``
+    for markdown, unchanged documents, or an extraction that reported no
+    per-page text (the caller then reports coverage unverified, never
+    covered). A 2-tuple ``(stamped, chunks)`` from an older dispatcher is
+    still accepted by the caller.
     Indexing itself is treated as a precondition: an indexer exception
     will propagate.
 
@@ -177,16 +255,31 @@ def _index_record(
         # nexus-pxxyn: thread the operator's --extractor choice through so the
         # documented MinerU-failure recovery ("rerun with --extractor docling")
         # is actionable on the DT path. Markdown has no extractor backend.
-        raw = index_pdf(file_path, corpus=corpus, collection_name=collection, extractor=extractor, force=force)
+        # nexus-i0cwh: return_metadata gives the pages that produced text,
+        # the page-coverage check's input.
+        raw = index_pdf(
+            file_path, corpus=corpus, collection_name=collection, extractor=extractor,
+            force=force, return_metadata=True,
+        )
+        if isinstance(raw, dict):
+            chunks = int(raw.get("chunks", 0) or 0)
+            # Pages the EXTRACTOR produced text for, never chunk starts
+            # (a 20-page deck in 7 chunks starts chunks on 7 pages).
+            pwt = raw.get("pages_with_text")
+            pages = [int(x) for x in pwt] if pwt is not None else None
+        else:
+            chunks = raw if isinstance(raw, int) else 0
+            pages = None
     else:  # .md — extension filtering happens in index_cmd
         raw = index_markdown(file_path, corpus=corpus, collection_name=collection, force=force)
-    chunks = raw if isinstance(raw, int) else 0
+        chunks = raw if isinstance(raw, int) else 0
+        pages = None
 
-    stamped = _stamp_dt_uri_on_entry(file_path, uuid)
-    return stamped, chunks
+    stamped = _stamp_dt_uri_on_entry(file_path, uuid, facts=_dt_record_facts(uuid))
+    return stamped, chunks, pages
 
 
-def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> bool:
+def _stamp_dt_uri_on_entry(file_path: Path, uuid: str, facts: dict | None = None) -> bool:
     """Set ``source_uri`` and ``meta.devonthink_uri`` on the catalog
     entry that was just indexed for ``file_path``.
 
@@ -238,10 +331,22 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> bool:
             return False
 
         tumbler = entry.tumbler
+        # nexus-i0cwh: DEVONthink's own url/pageCount/year travel onto the
+        # row; the indexer's PDF-derived year stands when it has one.
+        meta: dict = {"devonthink_uri": dt_uri}
+        fields: dict = {}
+        if facts:
+            if facts.get("url"):
+                meta["devonthink_url"] = facts["url"]
+            if facts.get("page_count"):
+                meta["devonthink_page_count"] = facts["page_count"]
+            if facts.get("year") and not getattr(entry, "year", 0):
+                fields["year"] = facts["year"]
         writer.update(
             tumbler,
             source_uri=dt_uri,
-            meta={"devonthink_uri": dt_uri},
+            meta=meta,
+            **fields,
         )
         _log.debug(
             "dt_stamp_applied",
@@ -738,6 +843,17 @@ def dt() -> None:
     ),
 )
 @click.option(
+    "--allow-page-gap",
+    is_flag=True,
+    default=False,
+    help=(
+        "Accept a PDF whose extracted pages do not cover DEVONthink's "
+        "pageCount (nexus-i0cwh). By default a gap is a per-record failure "
+        "and the run exits non-zero; the gap is recorded on the catalog row "
+        "as meta.page_gap either way."
+    ),
+)
+@click.option(
     "--force",
     is_flag=True,
     default=False,
@@ -766,6 +882,7 @@ def index_cmd(
     highlights: bool,
     extractor: str,
     force: bool,
+    allow_page_gap: bool = False,
 ) -> None:
     """Index DEVONthink records into Nexus.
 
@@ -816,6 +933,11 @@ def index_cmd(
     unchanged = 0
     skipped = 0
     stamp_failed = 0
+    coverage_failed = 0
+    coverage_unverified = 0
+    unverified_no_pages = 0
+    page_gap_allowed = 0
+    _reset_facts_cache()
     # nexus-l6tr7: refusals that PROPAGATED (streaming/incremental path) and
     # so landed in `failed`, never in `indexed` — the footer splits them out.
     refused_in_failed = 0
@@ -998,7 +1120,7 @@ def index_cmd(
             continue
         resolved_collection = _resolve_dt_collection(collection, corpus, ext)
         try:
-            stamped, chunks = _index_record(
+            _result = _index_record(
                 uuid,
                 path,
                 collection=resolved_collection,
@@ -1007,6 +1129,11 @@ def index_cmd(
                 extractor=extractor,
                 force=force,
             )
+            if len(_result) == 3:
+                stamped, chunks, pages_seen = _result
+            else:
+                stamped, chunks = _result
+                pages_seen = None
         except PER_RECORD_SURVIVABLE_EXCEPTIONS as exc:
             # nexus-5xn3k.6 substantive-critic CRITICAL (nexus-qo84l,
             # 2026-08-02) + nexus-tp8yk D1 / substantive-critic CRITICAL
@@ -1113,6 +1240,31 @@ def index_cmd(
         else:
             unchanged += 1
             click.echo(f"  skipped: index fresh (use --force)  {uuid}\t{path}")
+        # nexus-i0cwh: page coverage against DEVONthink's pageCount, on a
+        # fresh PDF index only (markdown has no pages; an unchanged document
+        # was checked when it was indexed).
+        if ext == ".pdf" and chunks:
+            facts = _dt_record_facts(uuid) if pages_seen is not None else None
+            if pages_seen is None or facts is None:
+                coverage_unverified += 1
+                if pages_seen is None:
+                    unverified_no_pages += 1
+            elif facts["page_count"] > 0:
+                missing = _missing_pages(pages_seen, facts["page_count"])
+                _stamp_page_gap(uuid, missing)  # records a gap, or clears a stale one
+                if missing:
+                    seen_n = len(set(pages_seen))
+                    detail = (
+                        f"page coverage: {seen_n} of {facts['page_count']} pages produced text; "
+                        f"missing pages {', '.join(str(n) for n in missing)} (DEVONthink pageCount vs "
+                        "chunk page_number). Re-run with --extractor mineru, or --allow-page-gap to accept."
+                    )
+                    if allow_page_gap:
+                        page_gap_allowed += 1
+                        click.echo(f"  page gap allowed: {uuid}\t{Path(path).name}: {detail}")
+                    else:
+                        coverage_failed += 1
+                        failed.append((uuid, path, detail))
         if not stamped:
             stamp_failed += 1
             continue
@@ -1152,8 +1304,30 @@ def index_cmd(
         # — flag it so the operator knows the round-trip is broken
         # for those records.
         summary += f", {stamp_failed} DT-URI stamp-failed"
+    if coverage_failed:
+        summary += f", {coverage_failed} page-coverage failed"
+    if page_gap_allowed:
+        summary += f", {page_gap_allowed} page gap allowed"
+    if coverage_unverified:
+        summary += f", {coverage_unverified} page coverage unverified"
     summary += ")."
     click.echo(summary)
+    if coverage_unverified:
+        reasons = []
+        if coverage_unverified - unverified_no_pages:
+            reasons.append(
+                f"{coverage_unverified - unverified_no_pages} with the DEVONthink MCP unreachable "
+                "(pageCount could not be read; re-run with DEVONthink running)"
+            )
+        if unverified_no_pages:
+            reasons.append(
+                f"{unverified_no_pages} where the extractor reported no per-page text "
+                "(resumed from a pipeline buffer written by an older version; --force re-extracts)"
+            )
+        click.echo(
+            f"Page coverage unverified for {coverage_unverified} record(s): {'; '.join(reasons)}. "
+            "Unverified is not covered.",
+        )
     if failed:
         click.echo("\nFailures:")
         for uuid, path, err in failed:
@@ -1216,6 +1390,11 @@ def index_cmd(
         # bead — only a POSITIVE engine verdict or a write/identity
         # failure fails the run.
         raise_identity_drop_exception(subject="record")
+    if coverage_failed:
+        raise click.ClickException(
+            f"{coverage_failed} record(s) failed page coverage (see Failures above); "
+            "the chunks are stored and the gap is recorded as meta.page_gap on the catalog row."
+        )
 
     # nexus-fdk1x: a layer flag was requested but DT never became reachable
     # on ANY transport (HTTP nor stdio) -- the pre-fix behaviour was a

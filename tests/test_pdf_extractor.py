@@ -129,7 +129,11 @@ def test_extract_falls_back_on_docling_exception(extractor, dummy_pdf):
     with patch.object(extractor, "_extract_with_docling", side_effect=RuntimeError("crash")):
         with patch.object(extractor, "_extract_normalized", return_value=expected) as mock_norm:
             result = extractor.extract(dummy_pdf)
-    mock_norm.assert_called_once_with(dummy_pdf, on_page=None)
+    # nexus-i0cwh: extract() always passes its own pages_with_text collector
+    # as on_page (which forwards to the caller's, None here).
+    mock_norm.assert_called_once()
+    assert mock_norm.call_args.args == (dummy_pdf,)
+    assert callable(mock_norm.call_args.kwargs["on_page"])
     assert result.metadata["extraction_method"] == "pymupdf_normalized"
 
 
@@ -406,7 +410,10 @@ class TestAutoDetectRouting:
         ):
             result = extractor.extract(dummy_pdf, extractor="auto")
         assert result.metadata["extraction_method"] == "mineru"
-        m.assert_called_once_with(dummy_pdf, formula_count=10, on_page=None, on_formula_oom="fail")
+        m.assert_called_once()
+        assert m.call_args.args == (dummy_pdf,)
+        assert m.call_args.kwargs["formula_count"] == 10 and m.call_args.kwargs["on_formula_oom"] == "fail"
+        assert callable(m.call_args.kwargs["on_page"])  # nexus-i0cwh: the pages_with_text collector
 
     def test_auto_skips_docling_when_quick_screen_already_routes(self, extractor, dummy_pdf):
         # The 0.1s pymupdf screen settles the math case on its own; the
@@ -427,7 +434,10 @@ class TestAutoDetectRouting:
             "formula_content_detected", formula_count=5,
             path=str(dummy_pdf), source="quick_screen",
         )
-        m.assert_called_once_with(dummy_pdf, formula_count=5, on_page=None, on_formula_oom="fail")
+        m.assert_called_once()
+        assert m.call_args.args == (dummy_pdf,)
+        assert m.call_args.kwargs["formula_count"] == 5 and m.call_args.kwargs["on_formula_oom"] == "fail"
+        assert callable(m.call_args.kwargs["on_page"])  # nexus-i0cwh: the pages_with_text collector
 
     def test_auto_docling_markers_still_route_when_screen_is_low(self, extractor, dummy_pdf):
         # A paper whose math is rendered without Unicode operators: the
@@ -442,7 +452,10 @@ class TestAutoDetectRouting:
             result = extractor.extract(dummy_pdf, extractor="auto")
         assert result.metadata["extraction_method"] == "mineru"
         mock_docling.assert_called_once()
-        m.assert_called_once_with(dummy_pdf, formula_count=9, on_page=None, on_formula_oom="fail")
+        m.assert_called_once()
+        assert m.call_args.args == (dummy_pdf,)
+        assert m.call_args.kwargs["formula_count"] == 9 and m.call_args.kwargs["on_formula_oom"] == "fail"
+        assert callable(m.call_args.kwargs["on_page"])  # nexus-i0cwh: the pages_with_text collector
 
     def test_auto_raises_when_mineru_import_fails_on_formula_pdf(self, extractor, dummy_pdf):
         """nexus-2fyb: ImportError branch — mineru is a default dep, so the
@@ -653,18 +666,23 @@ class TestOnPageCallbackExtract:
 
     def test_extract_passes_on_page_to_docling(self, extractor, dummy_pdf):
         expected = _make_result("docling")
-        cb = lambda *a: None
+        cb = lambda *a: None  # noqa: E731
         with patch.object(extractor, "_extract_with_docling", return_value=expected) as mock_d:
             extractor.extract(dummy_pdf, extractor="docling", on_page=cb)
-        mock_d.assert_called_once_with(dummy_pdf, on_page=cb)
+        # nexus-i0cwh: the backend receives extract()'s pages_with_text
+        # collector, which forwards every call to the caller's callback.
+        mock_d.assert_called_once()
+        forwarded = mock_d.call_args.kwargs["on_page"]
+        assert forwarded is not cb and callable(forwarded)
 
     def test_extract_passes_on_page_to_normalized_fallback(self, extractor, dummy_pdf):
         expected = _make_result("pymupdf_normalized")
-        cb = lambda *a: None
+        cb = lambda *a: None  # noqa: E731
         with patch.object(extractor, "_extract_with_docling", side_effect=RuntimeError("fail")):
             with patch.object(extractor, "_extract_normalized", return_value=expected) as mock_n:
                 extractor.extract(dummy_pdf, extractor="docling", on_page=cb)
-        mock_n.assert_called_once_with(dummy_pdf, on_page=cb)
+        mock_n.assert_called_once()
+        assert callable(mock_n.call_args.kwargs["on_page"])  # nexus-i0cwh: the collector wraps cb
 
     def test_extract_auto_replays_on_page_for_docling_win(self, extractor, dummy_pdf):
         pages = ["# Page One", "## Page Two"]

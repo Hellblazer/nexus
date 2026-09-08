@@ -963,9 +963,26 @@ class PDFExtractor:
                 f"PDF not found or not a regular file: {pdf_path}"
             )
 
+        # nexus-i0cwh: every backend fires on_page per page with
+        # ``text_length``; the pages that produced text are the coverage
+        # oracle's input (chunk page numbers only mark where chunks START,
+        # so a 20-page deck in 7 chunks would read as 13 missing pages).
+        pages_with_text: set[int] = set()
+
+        def _collect(page_index: int, page_text: str, page_metadata: dict) -> None:
+            number = page_metadata.get("page_number")
+            length = page_metadata.get("text_length")
+            if length is None:
+                length = len(page_text or "")
+            if isinstance(number, int) and length and int(length) > 0:
+                pages_with_text.add(number)
+            if on_page is not None:
+                on_page(page_index, page_text, page_metadata)
+
         result = self._extract_dispatch(
-            pdf_path, extractor=extractor, on_formula_oom=on_formula_oom, on_page=on_page,
+            pdf_path, extractor=extractor, on_formula_oom=on_formula_oom, on_page=_collect,
         )
+        result.metadata["pages_with_text"] = sorted(pages_with_text)
         _enforce_extraction_quality(result, pdf_path, allow_degraded=allow_degraded)
         return result
 

@@ -43,3 +43,4 @@ mechanize, it matters enough to ship.
 - `conexus/skills/code-review/SKILL.md` — nexus-dv7gw: round numbers cite `review-rounds.toml`.
 - `conexus/skills/orchestration/SKILL.md` — nexus-dv7gw: the round cap cites `review-rounds.toml`.
 - `conexus/agents/strategic-planner.md` — nexus-dv7gw: the plan-audit cap cites `review-rounds.toml`.
+- `conexus/commands/devonthink-index.md` — nexus-i0cwh: the DEVONthink route's command over `nx dt index` (`nx command-context devonthink-index`).

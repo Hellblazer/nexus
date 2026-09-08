@@ -656,6 +656,11 @@ utility_commands:
     description: "Index PDF files into the T3 knowledge store via nx index pdf"
     disable_model_invocation: false
 
+  devonthink-index:
+    slash_command: /devonthink-index
+    description: "Index DEVONthink records through nx dt index: URI identity, DT metadata, page-coverage check"
+    disable_model_invocation: false
+
   continuation:
     slash_command: /continuation
     description: "Write a paste-ready continuation prompt under ~/.cache/nexus/continuations/ capturing session state, branch, beads, T2 entries, and next-step pointers"

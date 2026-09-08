@@ -1220,6 +1220,86 @@ def pdf_process(args: tuple[str, ...]) -> None:
     print("\n".join(parts))
 
 
+def _dt_reachable() -> tuple[bool, str]:
+    """(reachable, transport-or-reason) over the in-wheel DT MCP client."""
+    try:
+        from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415 — command-local import (mcp_client.devonthink)
+
+        ok = _dt.available(refresh=True)
+        detail = _dt.dt_mcp_transport() if ok else (_dt.last_unreachable_detail() or "unreachable")
+        return ok, str(detail)
+    except Exception as exc:  # noqa: BLE001 — a preamble probe never aborts the command
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def _knowledge_collections() -> list[str]:
+    try:
+        from nexus.db import make_t3  # noqa: PLC0415 — command-local import (db)
+
+        return sorted(c for c in make_t3().list_collections() if str(c).startswith("knowledge__"))
+    except Exception:  # noqa: BLE001 — a preamble probe never aborts the command
+        return []
+
+
+_UUID_RE = re.compile(r"[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}")
+
+
+@command_context.command("devonthink-index")
+@click.argument("args", nargs=-1)
+def devonthink_index(args: tuple[str, ...]) -> None:
+    """Print preamble context for the devonthink-index slash command
+    (nexus-i0cwh): the ``nx dt index`` invocation for the given selector,
+    DEVONthink MCP reachability, existing knowledge subjects, and the
+    page-coverage rule."""
+    tokens = [a for a in args if a.strip() and a != "--"]
+    selector = tokens[0] if tokens else ""
+    rest = " ".join(tokens[1:])
+    if _UUID_RE.fullmatch(selector):
+        verb = f"nx dt index --uuid {selector}"
+    elif selector.startswith("/"):
+        verb = f'nx dt index --group "{selector}"'
+    elif selector:
+        verb = f'nx dt index --smart-group "{selector}"'
+    else:
+        verb = 'nx dt index --uuid <UUID> | --group "/Path" | --smart-group "Name" | --tag <tag> | --selection'
+    if rest:
+        verb += f" {rest}"
+    ok, detail = _dt_reachable()
+    parts: list[str] = ["## Context", "", working_directory_block(Path.cwd()), ""]
+    parts.append(f"DEVONthink MCP: {'reachable' if ok else 'unreachable'} ({detail}).")
+    if not ok:
+        parts.append(
+            "With the MCP unreachable the verb still indexes (AppleScript resolves the records) "
+            "but pageCount cannot be read, so every record reports page coverage unverified."
+        )
+    parts.append("")
+    parts.append("### Invocation")
+    parts.append("")
+    parts.append(f"    {verb} --collection knowledge__<subject>")
+    parts.append("")
+    parts.append(
+        "Identity is the x-devonthink-item URI (stamped by the verb); the file is read in place, "
+        "never copied. A second run is a no-op under the same tumbler; --force re-chunks in place."
+    )
+    parts.append("")
+    parts.append("### Knowledge subjects (reuse one; a subject, never a source app)")
+    parts.append("")
+    cols = _knowledge_collections()
+    if cols:
+        parts.extend(f"- {c}" for c in cols)
+    else:
+        parts.append("(none listed; the default is knowledge__dt-papers)")
+    parts.append("")
+    parts.append("### Page coverage")
+    parts.append("")
+    parts.append(
+        "Pages that produced text are compared with DEVONthink's pageCount; a gap is a per-record "
+        "failure and a non-zero exit (chunks stay stored, meta.page_gap records the missing pages). "
+        "--allow-page-gap accepts it; --extractor mineru is the formula-aware retry."
+    )
+    print("\n".join(parts))
+
+
 @command_context.command("plan-audit")
 @click.argument("args", nargs=-1)
 def plan_audit(args: tuple[str, ...]) -> None:
