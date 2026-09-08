@@ -59,11 +59,18 @@ retired verb — the service owns the catalog now; populate with
 
 ### Aspects
 
-`nx enrich aspects-list --missing` refuses a collection the catalog does
-not know instead of reporting false full coverage (nexus-ngpx0): a bare
-subject name (rather than the physical collection name `nx collection
-list` prints) returned zero catalog rows and therefore zero gaps, on a
-collection where 54 of 58 rows actually had none.
+Aspect extraction runs on the model each row is stamped with (haiku for
+scholarly-paper-v1) and logs its actual cost and model per document
+(nexus-oc98c, nexus-3ygp3). `nx enrich aspects` and `nx enrich aspects-list
+--missing` refuse a collection name the catalog does not know instead of
+reporting a clean, empty run or false full coverage (nexus-ngpx0).
+
+### DEVONthink: `nx dt index` page coverage and metadata (nexus-i0cwh)
+
+`nx dt index` checks page coverage against DEVONthink's pageCount
+(`--allow-page-gap` to accept a gap), records DEVONthink url, year and
+pageCount on the catalog row, and gains the `/conexus:devonthink-index`
+command.
 
 ### Index
 
