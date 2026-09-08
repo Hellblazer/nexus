@@ -1,11 +1,16 @@
 package dev.nexus.service;
 
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.jooq.SQLDialect;
 import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.Table;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.jooq.binding.Vector;
+import dev.nexus.service.jooq.binding.VectorBinding;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -66,6 +71,25 @@ class StagingSchemaLiquibaseTest {
 
     private static final String T_A = "staging-tenant-a";
     private static final String T_B = "staging-tenant-b";
+
+    // staging.* carries no generated jOOQ Table -- jOOQ codegen's <schemata>
+    // only covers nexus/t1 (staging is a typeless landing area, never a
+    // serving-path table) -- so every column below is a plain
+    // DSL.field(DSL.name(colName), ...) handle, the same house pattern
+    // StagingPromoteOpsIntegrationTest (nexus-cbo4a batch 11) already uses.
+    private static final Table<?> STAGING_CHUNKS = DSL.table(DSL.name("staging", "chunks"));
+    private static final Field<String> SC_TENANT_ID = DSL.field(DSL.name("tenant_id"), String.class);
+    private static final Field<String> SC_COLLECTION = DSL.field(DSL.name("collection"), String.class);
+    private static final Field<Integer> SC_DIM = DSL.field(DSL.name("dim"), Integer.class);
+    private static final Field<String> SC_LEGACY_REF = DSL.field(DSL.name("legacy_ref"), String.class);
+    private static final Field<String> SC_CHUNK_TEXT = DSL.field(DSL.name("chunk_text"), String.class);
+    private static final Field<Vector> SC_EMBEDDING = DSL.field(DSL.name("embedding"),
+        SQLDataType.OTHER.asConvertedDataType(new VectorBinding()));
+    private static final Field<String> SC_MODEL = DSL.field(DSL.name("model"), String.class);
+
+    private static final Table<?> STAGING_FRECENCY = DSL.table(DSL.name("staging", "frecency"));
+    private static final Field<String> SF_TENANT_ID = DSL.field(DSL.name("tenant_id"), String.class);
+    private static final Field<String> SF_CHUNK_ID = DSL.field(DSL.name("chunk_id"), String.class);
 
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
@@ -129,29 +153,32 @@ class StagingSchemaLiquibaseTest {
     void chunksVectorColumn_acceptsMixedDims_andAnyWidthLegacyRef() {
         // 16-char pre-RDR-108, 32-hex RDR-108-era, 64-hex canonical — all land.
         tenantScope.withTenant(T_A, ctx -> {
-            ctx.execute("INSERT INTO staging.chunks "
-                + "(tenant_id, collection, dim, legacy_ref, chunk_text, embedding, model) VALUES "
-                + "(?, 'knowledge__k__bge-base-en-v15-768__v1', 768, ?, 'sixteen char era', '[1,0,0]'::nexus.vector, 'bge-768')",
-                T_A, "b46c7915c303245f");
-            ctx.execute("INSERT INTO staging.chunks "
-                + "(tenant_id, collection, dim, legacy_ref, chunk_text, embedding, model) VALUES "
-                + "(?, 'knowledge__k__bge-base-en-v15-768__v1', 768, ?, 'thirty-two hex era', '[1,0,0,0,0]'::nexus.vector, 'bge-768')",
-                T_A, "0123456789abcdef0123456789abcdef");
-            ctx.execute("INSERT INTO staging.chunks "
-                + "(tenant_id, collection, dim, legacy_ref, chunk_text, embedding, model) VALUES "
-                + "(?, 'knowledge__k__bge-base-en-v15-768__v1', 768, ?, 'canonical era', NULL, 'bge-768')",
-                T_A, "a".repeat(64));
+            ctx.insertInto(STAGING_CHUNKS, SC_TENANT_ID, SC_COLLECTION, SC_DIM, SC_LEGACY_REF, SC_CHUNK_TEXT, SC_EMBEDDING, SC_MODEL)
+               .values(T_A, "knowledge__k__bge-base-en-v15-768__v1", 768, "b46c7915c303245f",
+                   "sixteen char era", Vector.of(new float[]{1f, 0f, 0f}), "bge-768")
+               .execute();
+            ctx.insertInto(STAGING_CHUNKS, SC_TENANT_ID, SC_COLLECTION, SC_DIM, SC_LEGACY_REF, SC_CHUNK_TEXT, SC_EMBEDDING, SC_MODEL)
+               .values(T_A, "knowledge__k__bge-base-en-v15-768__v1", 768, "0123456789abcdef0123456789abcdef",
+                   "thirty-two hex era", Vector.of(new float[]{1f, 0f, 0f, 0f, 0f}), "bge-768")
+               .execute();
+            ctx.insertInto(STAGING_CHUNKS, SC_TENANT_ID, SC_COLLECTION, SC_DIM, SC_LEGACY_REF, SC_CHUNK_TEXT, SC_EMBEDDING, SC_MODEL)
+               .values(T_A, "knowledge__k__bge-base-en-v15-768__v1", 768, "a".repeat(64),
+                   "canonical era", null, "bge-768")
+               .execute();
             return null;
         });
         Integer distinctDims = tenantScope.withTenant(T_A, ctx ->
-            ctx.fetchOne("SELECT count(DISTINCT nexus.vector_dims(embedding)) FROM staging.chunks "
-                + "WHERE embedding IS NOT NULL").get(0, Integer.class));
+            ctx.select(DSL.countDistinct(
+                    DSL.function(DSL.name("nexus", "vector_dims"), SQLDataType.INTEGER, SC_EMBEDDING)))
+               .from(STAGING_CHUNKS)
+               .where(SC_EMBEDDING.isNotNull())
+               .fetchOne(0, Integer.class));
         assertThat(distinctDims)
             .as("the untyped vector column must hold MIXED dims (3 and 5 here) — "
                 + "dim is a VALUE in staging, not a type")
             .isEqualTo(2);
         Integer rows = tenantScope.withTenant(T_A, ctx ->
-            ctx.fetchOne("SELECT count(*) FROM staging.chunks").get(0, Integer.class));
+            ctx.selectCount().from(STAGING_CHUNKS).fetchOne(0, Integer.class));
         assertThat(rows).as("all three id widths landed").isEqualTo(3);
     }
 
@@ -161,17 +188,15 @@ class StagingSchemaLiquibaseTest {
         // nexus-piwya.11 — the chash_index landing twin is dropped; the RLS
         // shape under test is identical across the staging tables.)
         tenantScope.withTenant(T_B, ctx -> {
-            ctx.execute("INSERT INTO staging.frecency (tenant_id, chunk_id) "
-                + "VALUES (?, 'feedbeef')", T_B);
+            ctx.insertInto(STAGING_FRECENCY, SF_TENANT_ID, SF_CHUNK_ID).values(T_B, "feedbeef").execute();
             return null;
         });
         Integer aSees = tenantScope.withTenant(T_A, ctx ->
-            ctx.fetchOne("SELECT count(*) FROM staging.frecency").get(0, Integer.class));
+            ctx.selectCount().from(STAGING_FRECENCY).fetchOne(0, Integer.class));
         assertThat(aSees).as("tenant A must not see tenant B's staged rows").isEqualTo(0);
         // WITH CHECK: cross-tenant INSERT rejected.
         assertThatThrownBy(() -> tenantScope.withTenant(T_A, ctx -> {
-            ctx.execute("INSERT INTO staging.frecency (tenant_id, chunk_id) "
-                + "VALUES (?, 'feedbee2')", T_B);
+            ctx.insertInto(STAGING_FRECENCY, SF_TENANT_ID, SF_CHUNK_ID).values(T_B, "feedbee2").execute();
             return null;
         })).as("cross-tenant INSERT must violate the WITH CHECK policy")
            .hasMessageContaining("row-level security");
@@ -196,7 +221,7 @@ class StagingSchemaLiquibaseTest {
     @Test
     void svcRole_canTruncate_theClearSemantics() {
         tenantScope.withTenant(T_A, ctx -> {
-            ctx.execute("INSERT INTO staging.frecency (tenant_id, chunk_id) VALUES (?, 'x1')", T_A);
+            ctx.insertInto(STAGING_FRECENCY, SF_TENANT_ID, SF_CHUNK_ID).values(T_A, "x1").execute();
             return null;
         });
         // TRUNCATE (the /v1/staging/clear implementation) needs the privilege
@@ -204,11 +229,11 @@ class StagingSchemaLiquibaseTest {
         // endpoint's per-tenant clear uses DELETE under withTenant; TRUNCATE
         // is reserved for the single-tenant local box. Both must be possible.
         tenantScope.withTenant(T_A, ctx -> {
-            ctx.execute("DELETE FROM staging.frecency");
+            ctx.deleteFrom(STAGING_FRECENCY).execute();
             return null;
         });
         Integer left = tenantScope.withTenant(T_A, ctx ->
-            ctx.fetchOne("SELECT count(*) FROM staging.frecency").get(0, Integer.class));
+            ctx.selectCount().from(STAGING_FRECENCY).fetchOne(0, Integer.class));
         assertThat(left).isEqualTo(0);
     }
 }
