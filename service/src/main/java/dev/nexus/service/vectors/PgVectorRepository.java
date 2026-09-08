@@ -162,18 +162,6 @@ public final class PgVectorRepository {
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
 
     /**
-     * RDR-103 model-segment to dimension registry. Mirrors the Python authorities:
-     * {@code corpus.py CANONICAL_EMBEDDING_MODELS} (voyage tokens, 1024) and
-     * {@code LOCAL_EMBEDDING_MODELS} (local tokens, dim encoded in the suffix).
-     */
-    private static final Map<String, Integer> MODEL_DIMS = Map.of(
-            "voyage-code-3",       1024,
-            "voyage-context-3",    1024,
-            "voyage-3",            1024,
-            "bge-base-en-v15-768",  768,
-            "minilm-l6-v2-384",     384);
-
-    /**
      * Test-visibility hook (S1, RDR-169 G5): counts invocations of {@link #sourceUrisByChash}
      * so cross-package integration tests (e.g. {@code dev.nexus.service.BridgeAddressFieldsTest})
      * can assert that the default path (includeSourceUri=false) runs ZERO catalog JOINs and the
@@ -261,6 +249,18 @@ public final class PgVectorRepository {
     private final EmbedderRouter queryRouter;    // nullable; preferred over queryEmbedder
 
     /**
+     * The RLS-stamping gateway this repository was constructed with (RDR-204 Phase 2,
+     * bead nexus-ft04v.16) — exposed so a caller holding this repository but no
+     * {@link TenantScope} of its own (e.g. {@code VectorHandler}'s collection-less
+     * {@code /v1/vectors/embed} parity route) can still call {@link
+     * EmbedderRouter#embedForCollectionWithUsage} directly, which now needs one for
+     * its {@link CollectionRegistry} cache-miss fallback.
+     */
+    public TenantScope tenantScope() {
+        return tenantScope;
+    }
+
+    /**
      * Effective cap on {@link #getAllMetadata} result size — see {@link
      * #GET_ALL_METADATA_MAX_ROWS}. Fixed for the lifetime of the instance at
      * construction time: every public constructor wires this to {@link
@@ -343,15 +343,13 @@ public final class PgVectorRepository {
     }
 
     /**
-     * Resolve the pgvector table dimension for a collection name by parsing the
-     * embedding-model segment (RDR-103 collection-name authority).
-     *
-     * <p>Known model tokens (the canonical + local registries in {@code corpus.py}):
-     * <ul>
-     *   <li>{@code voyage-code-3}, {@code voyage-context-3}, {@code voyage-3}: 1024
-     *   <li>{@code bge-base-en-v15-768}: 768
-     *   <li>{@code minilm-l6-v2-384}: 384
-     * </ul>
+     * Resolve the pgvector table dimension for a collection by reading its
+     * {@code catalog_collections} row (RDR-204 Phase 2, bead nexus-ft04v.16 —
+     * supersedes the RDR-103 model-SEGMENT parse this method used to do: the
+     * row's own {@code dimension} — COALESCEd from {@code embedding_models}
+     * when {@code NULL}, see {@link dev.nexus.service.db.CollectionRegistry
+     * #require} — is the authority now, never a segment split out of the
+     * collection's name).
      *
      * <p><strong>DECISION — dim-scoping contract for reads (nexus-hz89h [T2 22539/22540],
      * nexus-3rprg).</strong> Since the chunks_384/768/1024 unification a collection's rows
@@ -400,30 +398,19 @@ public final class PgVectorRepository {
      * covers these nine functions too, end to end across every embedding-read surface in
      * this class's own SQL and its delegated functions.
      *
-     * @param collection four-segment conformant collection name
-     *                   ({@code <content_type>__<owner>__<model>__v<n>})
-     * @return 384, 768, or 1024
-     * @throws IllegalArgumentException if the name is not four-segment conformant or the
-     *                                  model segment is not a known token (fail loud -
-     *                                  no silent fallback dimension)
+     * @param tenant     the tenant that owns {@code collection}
+     * @param collection the collection to resolve a dispatch dimension for
+     * @return 384, 768, or 1024 (or any other dimension a future model seeds)
+     * @throws IllegalArgumentException if {@code collection} is null or blank
+     * @throws dev.nexus.service.db.UnregisteredCollectionException if {@code collection}
+     *         has no {@code catalog_collections} row (fail loud — no silent fallback
+     *         dimension)
      */
-    public static int dimForCollection(String collection) {
+    public int dimForCollection(String tenant, String collection) {
         if (collection == null || collection.isBlank()) {
             throw new IllegalArgumentException("collection must not be null or blank");
         }
-        String[] segments = collection.split("__");
-        if (segments.length != 4) {
-            throw new IllegalArgumentException(
-                "collection '" + collection + "' is not four-segment conformant "
-                + "(<content_type>__<owner>__<model>__v<n>)");
-        }
-        Integer dim = MODEL_DIMS.get(segments[2]);
-        if (dim == null) {
-            throw new IllegalArgumentException(
-                "unknown embedding-model segment '" + segments[2] + "' in collection '"
-                + collection + "' - known tokens: " + MODEL_DIMS.keySet());
-        }
-        return dim;
+        return CollectionRegistry.lookup(tenantScope, tenant, collection).dimension();
     }
 
     /**
@@ -547,7 +534,7 @@ public final class PgVectorRepository {
                                       List<float[]> providedEmbeddings,
                                       boolean forceReEmbed) {
         if (ids.isEmpty()) return;
-        int dim = dimForCollection(collection);
+        int dim = dimForCollection(tenant, collection);
 
         // De-duplicate IDs (first-wins, matching T3Database._write_batch). Also required
         // for correctness: ON CONFLICT cannot affect the same row twice within one
@@ -682,7 +669,7 @@ public final class PgVectorRepository {
             embeddings = List.of();
         } else {
             EmbedResult embedResult = (docRouter != null)
-                    ? docRouter.embedForCollectionWithUsage(collection, docsToEmbed)
+                    ? docRouter.embedForCollectionWithUsage(tenantScope, tenant, collection, docsToEmbed)
                     : docEmbedder.embedWithUsage(docsToEmbed);
             if (tokensOut != null) tokensOut[0] = embedResult.tokens();
             embeddings = embedResult.embeddings();
@@ -903,7 +890,7 @@ public final class PgVectorRepository {
         }
 
         // (2) Dim validation — pre-SQL, fail loud, no silent truncation.
-        int dim = dimForCollection(collection);
+        int dim = dimForCollection(tenant, collection);
         if (embedding.length != dim) {
             throw new IllegalArgumentException(
                 "upsertReferenceOnlyChunk: " + embedding.length + "-dim vector for collection '"
@@ -951,7 +938,7 @@ public final class PgVectorRepository {
 
             // (6) Reference-only chunk INSERT (Phase B — requires retention column;
             // see referenceOnlyInsertQuery for the Phase-A/B contract).
-            referenceOnlyInsertQuery(ctx, dimForCollection(collection), tenant,
+            referenceOnlyInsertQuery(ctx, dimForCollection(tenant, collection), tenant,
                     collection, chash, embedding,
                     toJson(sanitizeNulDeep(metadata))).execute();
             return null;
@@ -1036,9 +1023,9 @@ public final class PgVectorRepository {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return new Tokened<>(List.of(), 0L);
         }
-        int dim = dimForCollection(collectionNames.get(0));
+        int dim = dimForCollection(tenant, collectionNames.get(0));
         for (String col : collectionNames) {
-            int colDim = dimForCollection(col);
+            int colDim = dimForCollection(tenant, col);
             if (colDim != dim) {
                 throw new IllegalArgumentException(
                     "mixed dimensions in one search call: '" + collectionNames.get(0)
@@ -1050,7 +1037,7 @@ public final class PgVectorRepository {
         // Route by the first collection - the same-dim check above guarantees the set is
         // homogeneous, and the Python client never mixes embedder families in one call
         // (same convention as the Chroma path).
-        EmbedResult embedResult = embedQuery(collectionNames.get(0), queryText, dim);
+        EmbedResult embedResult = embedQuery(tenant, collectionNames.get(0), queryText, dim);
         Vector queryVec = Vector.of(embedResult.embeddings().get(0));
         WherePlan wherePlan = planWhere(where);
         String[] colls = collectionNames.toArray(String[]::new);
@@ -1298,9 +1285,9 @@ public final class PgVectorRepository {
             throw new IllegalArgumentException(
                 "selectiveGateMax must be >= 1, got " + selectiveGateMax);
         }
-        int dim = dimForCollection(collectionNames.get(0));
+        int dim = dimForCollection(tenant, collectionNames.get(0));
         for (String col : collectionNames) {
-            int colDim = dimForCollection(col);
+            int colDim = dimForCollection(tenant, col);
             if (colDim != dim) {
                 throw new IllegalArgumentException(
                     "mixed dimensions in one hybrid-search call: '" + collectionNames.get(0)
@@ -1309,7 +1296,7 @@ public final class PgVectorRepository {
             }
         }
 
-        EmbedResult hybridEmbed = embedQuery(collectionNames.get(0), queryText, dim);
+        EmbedResult hybridEmbed = embedQuery(tenant, collectionNames.get(0), queryText, dim);
         if (tokensOut != null) tokensOut[0] = hybridEmbed.tokens();
         Vector queryVec = Vector.of(hybridEmbed.embeddings().get(0));
         WherePlan wherePlan = planWhere(where);
@@ -1428,7 +1415,7 @@ public final class PgVectorRepository {
     public Map<String, Object> get(String tenant, String collection,
                                    List<String> ids, int limit, int offset,
                                    boolean includeSourceUri) {
-        int dim = dimForCollection(collection);
+        int dim = dimForCollection(tenant, collection);
         if (ids == null || ids.isEmpty()) {
             return Map.of("ids", List.of(), "documents", List.of(), "metadatas", List.of());
         }
@@ -1524,7 +1511,7 @@ public final class PgVectorRepository {
      */
     public Map<String, Object> getEmbeddings(String tenant, String collection,
                                              List<String> ids) {
-        int dim = dimForCollection(collection);
+        int dim = dimForCollection(tenant, collection);
         if (ids == null || ids.isEmpty()) {
             return Map.of("ids", List.of(), "embeddings", List.of());
         }
@@ -1620,7 +1607,7 @@ public final class PgVectorRepository {
                                         Map<String, Object> where,
                                         int limit, int offset,
                                         boolean includeSourceUri) {
-        int dim = dimForCollection(collection);
+        int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         org.jooq.Condition cond = ch.collection().eq(collection);
         if (where != null) {
@@ -1706,7 +1693,7 @@ public final class PgVectorRepository {
      */
     public Map<String, Object> getAllMetadata(String tenant, String collection,
                                               Map<String, Object> where) {
-        int dim = dimForCollection(collection);
+        int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         int cap = getAllMetadataMaxRows;
         org.jooq.Condition cond = ch.collection().eq(collection);
@@ -1848,9 +1835,9 @@ public final class PgVectorRepository {
         if (nResults < 1) {
             throw new IllegalArgumentException("nResults must be >= 1, got " + nResults);
         }
-        int dim = requireHomogeneousDim(collectionNames);
-        requireHomogeneousModel(collectionNames);
-        EmbedResult embed = embedQuery(collectionNames.get(0), queryText, dim);
+        int dim = requireHomogeneousDim(tenant, collectionNames);
+        requireHomogeneousModel(tenant, collectionNames);
+        EmbedResult embed = embedQuery(tenant, collectionNames.get(0), queryText, dim);
         Vector queryVec = Vector.of(embed.embeddings().get(0));
         JSONB whereJsonb = (where == null || where.isEmpty()) ? null : JSONB.jsonb(toJson(where));
         String[] colls = collectionNames.toArray(String[]::new);
@@ -1942,9 +1929,9 @@ public final class PgVectorRepository {
                 "unknown aspect field '" + field + "' - must be one of "
                 + ASPECT_SCOPED_FIELD_ALLOWLIST);
         }
-        int dim = requireHomogeneousDim(collectionNames);
-        requireHomogeneousModel(collectionNames);
-        EmbedResult embed = embedQuery(collectionNames.get(0), queryText, dim);
+        int dim = requireHomogeneousDim(tenant, collectionNames);
+        requireHomogeneousModel(tenant, collectionNames);
+        EmbedResult embed = embedQuery(tenant, collectionNames.get(0), queryText, dim);
         Vector queryVec = Vector.of(embed.embeddings().get(0));
         JSONB whereJsonb = (where == null || where.isEmpty()) ? null : JSONB.jsonb(toJson(where));
         String[] colls = collectionNames.toArray(String[]::new);
@@ -1988,8 +1975,8 @@ public final class PgVectorRepository {
         if (nResults < 1) {
             throw new IllegalArgumentException("nResults must be >= 1, got " + nResults);
         }
-        int dim = dimForCollection(collection);
-        EmbedResult embed = embedQuery(collection, queryText, dim);
+        int dim = dimForCollection(tenant, collection);
+        EmbedResult embed = embedQuery(tenant, collection, queryText, dim);
         Vector queryVec = Vector.of(embed.embeddings().get(0));
 
         org.jooq.Table<?> fn = switch (dim) {
@@ -2076,9 +2063,9 @@ public final class PgVectorRepository {
                 "direction must be 'out', 'in', or 'both', got '" + direction + "'");
         }
         int clampedDepth = Math.min(Math.max(depth, 1), 3);  // mirror graphBFS bound
-        int dim = requireHomogeneousDim(collectionNames);
-        requireHomogeneousModel(collectionNames);
-        EmbedResult embed = embedQuery(collectionNames.get(0), queryText, dim);
+        int dim = requireHomogeneousDim(tenant, collectionNames);
+        requireHomogeneousModel(tenant, collectionNames);
+        EmbedResult embed = embedQuery(tenant, collectionNames.get(0), queryText, dim);
         Vector queryVec = Vector.of(embed.embeddings().get(0));
         JSONB whereJsonb = (where == null || where.isEmpty()) ? null : JSONB.jsonb(toJson(where));
         String[] seedArr = seeds.toArray(String[]::new);
@@ -2100,10 +2087,10 @@ public final class PgVectorRepository {
      * Validate every collection dispatches to the same dim and return it.
      * Mirrors the same-dim guard in {@link #search}.
      */
-    private static int requireHomogeneousDim(List<String> collectionNames) {
-        int dim = dimForCollection(collectionNames.get(0));
+    private int requireHomogeneousDim(String tenant, List<String> collectionNames) {
+        int dim = dimForCollection(tenant, collectionNames.get(0));
         for (String col : collectionNames) {
-            int colDim = dimForCollection(col);
+            int colDim = dimForCollection(tenant, col);
             if (colDim != dim) {
                 throw new IllegalArgumentException(
                     "mixed dimensions in one combined-query call: '" + collectionNames.get(0)
@@ -2119,13 +2106,16 @@ public final class PgVectorRepository {
      * nexus-3l6gz): same-DIM, different-MODEL collections pass requireHomogeneousDim but
      * silently mis-embed — one query vector embedded against the FIRST collection's model
      * cannot serve a second collection's different embedding space even at equal
-     * dimensionality (voyage-code-3 and voyage-context-3 are both 1024-dim). Parses the same
-     * 3rd '__' segment {@link #dimForCollection} uses.
+     * dimensionality (voyage-code-3 and voyage-context-3 are both 1024-dim).
+     *
+     * <p>RDR-204 Phase 2 (bead nexus-ft04v.16): reads each collection's {@code
+     * catalog_collections.embedding_model} via {@link CollectionRegistry#lookup} —
+     * never a segment parsed out of the collection's own name.
      */
-    private static void requireHomogeneousModel(List<String> collectionNames) {
-        String model = modelSegment(collectionNames.get(0));
+    private void requireHomogeneousModel(String tenant, List<String> collectionNames) {
+        String model = CollectionRegistry.lookup(tenantScope, tenant, collectionNames.get(0)).embeddingModel();
         for (String col : collectionNames) {
-            String colModel = modelSegment(col);
+            String colModel = CollectionRegistry.lookup(tenantScope, tenant, col).embeddingModel();
             if (!colModel.equals(model)) {
                 throw new IllegalArgumentException(
                     "mixed embedding models in one combined-query call: '" + collectionNames.get(0)
@@ -2135,24 +2125,14 @@ public final class PgVectorRepository {
         }
     }
 
-    private static String modelSegment(String collection) {
-        String[] segments = collection.split("__");
-        if (segments.length != 4) {
-            throw new IllegalArgumentException(
-                "collection '" + collection + "' is not four-segment conformant "
-                + "(<content_type>__<owner>__<model>__v<n>)");
-        }
-        return segments[2];
-    }
-
     /**
      * Embed the query server-side, routing by collection; fail loud on dim mismatch.
      * Returns the embedding result including the token count so callers can propagate
      * it as a return value (bead nexus-ehc4q — no ThreadLocal side-channel).
      */
-    private EmbedResult embedQuery(String collection, String queryText, int dim) {
+    private EmbedResult embedQuery(String tenant, String collection, String queryText, int dim) {
         EmbedResult result = (queryRouter != null)
-                ? queryRouter.embedOneForCollectionWithUsage(collection, queryText)
+                ? queryRouter.embedOneForCollectionWithUsage(tenantScope, tenant, collection, queryText)
                 : queryEmbedder.embedWithUsage(List.of(queryText));
         float[] queryVec = result.embeddings().get(0);
         if (queryVec.length != dim) {
@@ -2339,7 +2319,7 @@ public final class PgVectorRepository {
      */
     public Map<String, Object> list(String tenant, String collection,
                                     int limit, int offset) {
-        int dim = dimForCollection(collection);
+        int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         var result = tenantScope.withTenant(tenant, ctx ->
             ctx.select(ch.chash(), ch.metadata())
@@ -2522,7 +2502,7 @@ public final class PgVectorRepository {
      *         be less than {@code ids.size()} even with no cross-tenant ids present)
      */
     public int delete(String tenant, String collection, List<String> ids) {
-        int dim = dimForCollection(collection);
+        int dim = dimForCollection(tenant, collection);
         if (ids == null || ids.isEmpty()) return 0;
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         return tenantScope.withTenant(tenant, ctx -> {
@@ -2585,7 +2565,7 @@ public final class PgVectorRepository {
      * not the one the reverted revision cited.
      */
     public int count(String tenant, String collection) {
-        int dim = dimForCollection(collection);
+        int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         long c = tenantScope.withTenant(tenant, ctx ->
             (long) ctx.fetchCount(ch.table(), ch.collection().eq(collection)));
@@ -2620,7 +2600,7 @@ public final class PgVectorRepository {
     public QuarantineOutcome quarantineOrphans(String tenant, String collection,
                                                 String quarantineCollection,
                                                 String quarantinedAt, int sampleLimit) {
-        int dim = dimForCollection(collection);
+        int dim = dimForCollection(tenant, collection);
         // nexus-syfes: the quarantine sibling's catalog_collections registration
         // (needed to satisfy chunks_<dim>.collection's FK) now happens INSIDE
         // nexus.gc_quarantine_orphans itself, guarded on there being an orphan
@@ -2641,10 +2621,28 @@ public final class PgVectorRepository {
      * RDR-191 Phase 1: restores quarantined chunks whose chash is referenced
      * again by the catalog manifest (a heal re-referenced them, or content
      * returned) — {@code chunk_quarantine.py}'s {@code restore_rereferenced},
-     * server-side. Dim derives from {@code originCollection}.
+     * server-side.
+     *
+     * <p>RDR-204 Phase 2 (bead nexus-ft04v.16): dim derives from {@code
+     * quarantineCollection}, NOT {@code originCollection} — a deliberate
+     * asymmetry. {@code gc_restore_rereferenced} legitimately self-registers a
+     * genuinely first-ever {@code originCollection} internally (hygiene-002-2's
+     * carve-out: RDR-204 Phase 1's "no more auto-registration from a name"
+     * rule does not apply to this ONE family, since the row it mints there is
+     * a real, known-attribute registration, not a blank stub), so requiring
+     * {@code originCollection}'s row to already exist on the JAVA side before
+     * ever reaching that SQL function would make its own self-registration
+     * unreachable. {@code quarantineCollection} carries no such exception —
+     * restoring FROM it is only ever sensible once something was already
+     * quarantined INTO it, which itself required a real, pre-existing
+     * registration (either the origin's own, or the quarantine SQL function's
+     * own first-quarantine self-registration) — so resolving dim from it here
+     * is never a name-derivation, only ever a real row read. Both collections
+     * share the same embedding space by construction (restore only ever moves
+     * a chunk between the two), so the resolved dim is identical either way.
      */
     public long restoreRereferenced(String tenant, String quarantineCollection, String originCollection) {
-        int dim = dimForCollection(originCollection);
+        int dim = dimForCollection(tenant, quarantineCollection);
         // nexus-syfes: same shape as quarantineOrphans above — the origin
         // collection's registration now happens INSIDE
         // nexus.gc_restore_rereferenced, guarded on there being a restore to
@@ -2665,7 +2663,7 @@ public final class PgVectorRepository {
     public ExpireOutcome expireQuarantine(String tenant, String quarantineCollection, String originCollection,
                                            String cutoff, double floorFraction, int floorMinChunks,
                                            boolean force) {
-        int dim = dimForCollection(originCollection);
+        int dim = dimForCollection(tenant, originCollection);
         var rec = tenantScope.withTenant(tenant, ctx ->
             ctx.selectFrom(GC_EXPIRE_QUARANTINE.call(
                     dim, tenant, quarantineCollection, originCollection, cutoff,
@@ -2720,7 +2718,7 @@ public final class PgVectorRepository {
     public MetadataUpdateOutcome updateMetadataWithMissing(String tenant, String collection,
                                                             List<String> ids,
                                                             List<Map<String, Object>> metadatas) {
-        int dim = dimForCollection(collection);
+        int dim = dimForCollection(tenant, collection);
         if (ids == null || ids.isEmpty()) return new MetadataUpdateOutcome(0, List.of());
         if (ids.size() != metadatas.size()) {
             throw new IllegalArgumentException(
@@ -2891,7 +2889,7 @@ public final class PgVectorRepository {
         if (chashes == null || chashes.isEmpty()) {
             return Set.of();
         }
-        int dim = dimForCollection(collection);
+        int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         return tenantScope.withTenant(tenant, ctx -> selectExistingChashesCtx(ctx, ch, collection, chashes));
     }
@@ -3204,7 +3202,7 @@ public final class PgVectorRepository {
             Map<String, Map<String, String>> textByColThenChash = new HashMap<>();
             for (Map.Entry<String, Set<String>> e : chashesByCollection.entrySet()) {
                 String col = e.getKey();
-                int dim = dimForCollection(col);
+                int dim = dimForCollection(tenant, col);
                 DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
                 var chunks = ctx.select(ch.chash(), ch.chunkText()).from(ch.table())
                                 .where(ch.collection().eq(col).and(ch.chash().in(e.getValue())))
@@ -3264,7 +3262,7 @@ public final class PgVectorRepository {
      * @return the stored {@code chunk_text}, or {@code null} if none
      */
     public String fetchChunkText(String tenant, String collection, String chash) {
-        int dim = dimForCollection(collection);
+        int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(ch.chunkText()).from(ch.table())

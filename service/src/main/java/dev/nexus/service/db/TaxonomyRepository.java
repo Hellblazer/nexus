@@ -676,8 +676,9 @@ public final class TaxonomyRepository {
         // the SQL call working from the identical casing.
         List<String> chashes = rawChashes.stream().map(String::toLowerCase).toList();
         // Fail loud BEFORE opening a transaction — an unresolvable dim means no
-        // per-dim table exists to query at all (dimForCollection's own contract).
-        int dim = dev.nexus.service.vectors.PgVectorRepository.dimForCollection(collection);
+        // per-dim table exists to query at all (RDR-204 Phase 2, bead nexus-ft04v.16:
+        // the row's own dimension via CollectionRegistry, never a name-segment parse).
+        int dim = CollectionRegistry.lookup(tenantScope, tenant, collection).dimension();
         String[] chashArr = chashes.toArray(new String[0]);
 
         // nexus-0uuit: belt, mirroring assignMany's own DeadlockRetry wrap above.

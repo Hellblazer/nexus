@@ -433,21 +433,32 @@ class PgVectorRepositoryGcQuarantineTest {
     }
 
     @Test
-    void restoreRereferenced_zeroMatches_leavesNoCatalogCollectionsRowForOrigin() throws Exception {
+    void restoreRereferenced_neitherCollectionEverTouched_failsLoud_registersNothing() throws Exception {
+        // RDR-204 Phase 2 (bead nexus-ft04v.16): restoreRereferenced now resolves its
+        // dim from quarantineCollection (see that method's own javadoc) -- a
+        // quarantine collection that was never quarantined INTO has no row at all,
+        // so calling restore against it is now a genuinely invalid/degenerate
+        // operation (there is nothing to restore FROM a collection nobody ever wrote
+        // to) and fails loud, rather than the old silent 0-match no-op. Neither
+        // collection gets registered by a call that never reaches the SQL function.
         String originCol = originCol("reg3");
         String quarantineCol = quarantineCol("reg3");
-        // Neither collection has ever been written to — restoreRereferenced finds
-        // nothing in quarantineCol at all.
+        // Neither collection has ever been written to.
         assertThat(collectionRegistered(TENANT_A, originCol))
             .as("precondition: origin never touched")
             .isFalse();
+        assertThat(collectionRegistered(TENANT_A, quarantineCol))
+            .as("precondition: quarantine collection never touched either")
+            .isFalse();
 
-        long restored = vectorRepo.restoreRereferenced(TENANT_A, quarantineCol, originCol);
+        assertThatThrownBy(() -> vectorRepo.restoreRereferenced(TENANT_A, quarantineCol, originCol))
+            .as("a quarantine collection that was never quarantined into has no row to "
+                + "resolve a dim from -- fail loud")
+            .isInstanceOf(dev.nexus.service.db.UnregisteredCollectionException.class)
+            .hasMessageContaining(quarantineCol);
 
-        assertThat(restored).isEqualTo(0L);
         assertThat(collectionRegistered(TENANT_A, originCol))
-            .as("a zero-match restore pass must not register an origin collection "
-                + "that never received anything back from quarantine")
+            .as("a failed-loud restore attempt must not register the origin either")
             .isFalse();
     }
 
@@ -622,7 +633,13 @@ class PgVectorRepositoryGcQuarantineTest {
     // ── tenant isolation (RLS, SECURITY INVOKER) ─────────────────────────────
 
     @Test
-    void quarantineOrphans_crossTenant_movesNothing() throws Exception {
+    void quarantineOrphans_crossTenant_failsLoud_movesNothing() throws Exception {
+        // RDR-204 Phase 2 (bead nexus-ft04v.16, coordinator ruling): originCol is
+        // registered only under TENANT_A -- dispatch now resolves the row through
+        // CollectionRegistry before the RLS-scoped sweep ever runs, so TENANT_B fails
+        // loud (UnregisteredCollectionException) rather than the old silent
+        // zero-orphans-moved result. RLS still scopes the underlying rows exactly as
+        // before; this is the registration boundary firing first.
         String originCol = originCol("case8");
         String quarantineCol = quarantineCol("case8");
         String chash = ch("gcq-iso-1");
@@ -630,11 +647,14 @@ class PgVectorRepositoryGcQuarantineTest {
         // No manifest row -> would be an orphan for TENANT_A, but TENANT_B's
         // GUC scope must see zero rows of TENANT_A's data (RLS).
 
-        var outcome = vectorRepo.quarantineOrphans(TENANT_B, originCol, quarantineCol, "2026-08-10T00:00:00Z", 20);
+        assertThatThrownBy(() -> vectorRepo.quarantineOrphans(
+                TENANT_B, originCol, quarantineCol, "2026-08-10T00:00:00Z", 20))
+            .as("tenant B has no catalog_collections row for originCol (RLS) -- fail loud")
+            .isInstanceOf(dev.nexus.service.db.UnregisteredCollectionException.class)
+            .hasMessageContaining(originCol);
 
-        assertThat(outcome.moved()).isEqualTo(0L);
         assertThat(chunkText(originCol, chash))
-            .as("tenant A's row survives a tenant B GC pass untouched")
+            .as("tenant A's row survives a failed-loud tenant B GC attempt untouched")
             .isEqualTo("tenant A only");
     }
 

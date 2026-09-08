@@ -3,6 +3,7 @@
 package dev.nexus.service.vectors;
 
 import dev.nexus.service.db.CollectionRegistry;
+import dev.nexus.service.db.CollectionRow;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.DSLContext;
 import org.slf4j.Logger;
@@ -345,9 +346,13 @@ public final class EmbedderRouter implements Embedder {
     /**
      * The single upsert primitive both seed methods share. Derives {@code
      * dimension} from {@code nexus.embedding_models} (a SELECT first, then
-     * the write) rather than duplicating {@code PgVectorRepository
-     * .MODEL_DIMS}'s model → dimension mapping a second time in this class.
-     * {@code ON CONFLICT (tenant_id, content_type) DO UPDATE} — a real
+     * the write) — the same table {@link CollectionRegistry#require} now
+     * COALESCEs a NULL {@code catalog_collections.dimension} from (RDR-204
+     * Phase 2, bead nexus-ft04v.16 — the model → dimension mapping this class
+     * and {@code PgVectorRepository} used to each duplicate as a hand-typed
+     * {@code MODEL_DIMS}/similar map is retired; this table is the one place
+     * that mapping lives now). {@code ON CONFLICT (tenant_id, content_type)
+     * DO UPDATE} — a real
      * upsert, not {@code DO NOTHING} — so a mode switch's next boot actually
      * overwrites a stale row rather than leaving it pinned to whichever mode
      * first wrote it.
@@ -381,14 +386,20 @@ public final class EmbedderRouter implements Embedder {
     }
 
     /**
-     * Embed texts for a specific collection — picks the correct embedder by prefix.
+     * Embed texts for a specific collection — picks the correct embedder by reading
+     * the collection's {@code catalog_collections} row (RDR-204 Phase 2, bead
+     * nexus-ft04v.16; see {@link #resolveEmbedderStrict}).
      *
-     * @param collection collection name (four-segment conformant), used for routing
+     * @param scope      the RLS-stamping gateway, used only on a {@link
+     *                   CollectionRegistry} cache miss
+     * @param tenant     the tenant that owns {@code collection}
+     * @param collection collection name, used for routing
      * @param texts      texts to embed
      * @return embedding vectors aligned with input
      */
-    public List<float[]> embedForCollection(String collection, List<String> texts) {
-        Embedder embedder = resolveEmbedderStrict(collection);
+    public List<float[]> embedForCollection(
+            TenantScope scope, String tenant, String collection, List<String> texts) {
+        Embedder embedder = resolveEmbedderStrict(scope, tenant, collection);
         log.debug("event=embed_router collection={} embedder={} count={}",
                 collection, embedder.getClass().getSimpleName(), texts.size());
         return embedder.embed(texts);
@@ -415,8 +426,9 @@ public final class EmbedderRouter implements Embedder {
     /**
      * Embed a single text for a specific collection.
      */
-    public float[] embedOneForCollection(String collection, String text) {
-        return embedForCollection(collection, List.of(text)).get(0);
+    public float[] embedOneForCollection(
+            TenantScope scope, String tenant, String collection, String text) {
+        return embedForCollection(scope, tenant, collection, List.of(text)).get(0);
     }
 
     /**
@@ -427,12 +439,16 @@ public final class EmbedderRouter implements Embedder {
      * delegates to {@link Embedder#embedWithUsage} to capture the token count.
      * No second embed call — the token count comes from the same API response.
      *
-     * @param collection collection name (four-segment conformant), used for routing
+     * @param scope      the RLS-stamping gateway, used only on a {@link
+     *                   CollectionRegistry} cache miss
+     * @param tenant     the tenant that owns {@code collection}
+     * @param collection collection name, used for routing
      * @param texts      texts to embed
      * @return {@link EmbedResult} carrying vectors aligned with input and the token count
      */
-    public EmbedResult embedForCollectionWithUsage(String collection, List<String> texts) {
-        Embedder embedder = resolveEmbedderStrict(collection);
+    public EmbedResult embedForCollectionWithUsage(
+            TenantScope scope, String tenant, String collection, List<String> texts) {
+        Embedder embedder = resolveEmbedderStrict(scope, tenant, collection);
         log.debug("event=embed_router_with_usage collection={} embedder={} count={}",
                 collection, embedder.getClass().getSimpleName(), texts.size());
         return embedder.embedWithUsage(texts);
@@ -442,8 +458,9 @@ public final class EmbedderRouter implements Embedder {
      * Embed a single text for a specific collection, returning the vector and token count
      * (bead nexus-ehc4q). Convenience wrapper over {@link #embedForCollectionWithUsage}.
      */
-    public EmbedResult embedOneForCollectionWithUsage(String collection, String text) {
-        return embedForCollectionWithUsage(collection, List.of(text));
+    public EmbedResult embedOneForCollectionWithUsage(
+            TenantScope scope, String tenant, String collection, String text) {
+        return embedForCollectionWithUsage(scope, tenant, collection, List.of(text));
     }
 
     /**
@@ -456,8 +473,9 @@ public final class EmbedderRouter implements Embedder {
      * For Voyage/CCE, calls the embedder's {@code embedDouble} method to preserve
      * the original JSON double values without float32 truncation.
      */
-    public List<double[]> embedDoubleForCollection(String collection, List<String> texts) {
-        Embedder embedder = resolveEmbedderStrict(collection);
+    public List<double[]> embedDoubleForCollection(
+            TenantScope scope, String tenant, String collection, List<String> texts) {
+        Embedder embedder = resolveEmbedderStrict(scope, tenant, collection);
         log.debug("event=embed_double_router collection={} embedder={} count={}",
                 collection, embedder.getClass().getSimpleName(), texts.size());
 
@@ -479,54 +497,72 @@ public final class EmbedderRouter implements Embedder {
     }
 
     /**
-     * Strict, model-segment-authoritative resolution (bead nexus-pebfx.2).
+     * Strict, registry-row-authoritative resolution (RDR-204 Phase 2, bead
+     * nexus-ft04v.16 — supersedes bead nexus-pebfx.2's model-SEGMENT reading of
+     * this same invariant, nexus-0n7uc: the model decides the embedder, never a
+     * string parsed from the collection's own name).
      *
-     * <p>For a four-segment conformant name, the RDR-103 model segment decides
-     * the embedder — never the prefix. Model identity is validated by
+     * <p>Reads {@code collection}'s {@code catalog_collections} row via {@link
+     * CollectionRegistry#lookup} and dispatches by the row's {@code
+     * embedding_model} — never by a segment split out of {@code collection}
+     * itself, so a collection whose NAME disagrees with its registered row (a
+     * grandfathered rename, a name that predates a profile change) still routes
+     * to the model the row actually says. Model identity is validated by
      * construction: the dispatched embedder's {@link Embedder#modelToken()}
-     * keys the table, so a same-dimension wrong-model embed cannot happen.
-     * A conformant name whose model token has no embedder in this mode is
-     * REFUSED loudly instead of silently embedded with the wrong model
-     * (no-silent-fallbacks-for-correctness):
+     * keys the table, so a same-dimension wrong-model embed cannot happen. A
+     * row whose model has no embedder in this mode is REFUSED loudly instead of
+     * silently embedded with the wrong model (no-silent-fallbacks-for-correctness):
      * <ul>
-     *   <li>onnx-local mode + {@code voyage-*} segment → refuse (no credentials)
-     *   <li>any mode + a segment with no embedder wired in this mode → refuse
+     *   <li>onnx-local mode + a {@code voyage-*} row → refuse (no credentials)
+     *   <li>any mode + a row with no embedder wired in this mode → refuse
      *       (e.g. {@code minilm-l6-v2-384} on the RDR-160 bge-768 local service,
      *       or {@code bge-base-en-v15-768} in a MiniLM-wired test router)
-     *   <li>pure-voyage cloud (PRODUCTION) + {@code minilm-l6-v2-384} segment →
+     *   <li>pure-voyage cloud (PRODUCTION) + a {@code minilm-l6-v2-384} row →
      *       refuse (422): no ONNX in cloud (nexus-0n7uc)
-     *   <li>onnx-cloud (TESTS / parity-gate only) + {@code minilm-l6-v2-384} segment
-     *       → ONNX (the segment is the authority; prefix routing wrongly sent these
+     *   <li>onnx-cloud (TESTS / parity-gate only) + a {@code minilm-l6-v2-384} row
+     *       → ONNX (the row is the authority; prefix routing wrongly sent these
      *       to CCE)
      * </ul>
      *
-     * <p>Non-conformant names keep legacy {@link #resolveEmbedder prefix
-     * routing} (test fixtures and the parity-gate /embed endpoint).
+     * <p>{@code collection == null} keeps legacy {@link #resolveEmbedder prefix
+     * routing} — there is no name to look a row up by, and this is the ONLY
+     * remaining caller of that fallback outside the collection-less
+     * {@code /v1/vectors/embed} parity path itself. A non-null collection
+     * ALWAYS goes through the registry now — a name that would previously have
+     * fallen through to prefix routing (non-4-segment, or with no model
+     * segment at all) must be registered exactly like any other collection
+     * (RDR-204 Phase 1's universal-registration requirement); an unregistered
+     * one throws {@link dev.nexus.service.db.UnregisteredCollectionException}.
      *
-     * @throws EmbeddingModelUnavailableException when a conformant collection's
-     *         model segment cannot be served in the current mode (→ HTTP 422)
+     * @param scope      the RLS-stamping gateway, used only on a {@link
+     *                   CollectionRegistry} cache miss
+     * @param tenant     the tenant that owns {@code collection}
+     * @param collection the collection to resolve an embedder for
+     * @throws EmbeddingModelUnavailableException when the row's model cannot be
+     *         served in the current mode (→ HTTP 422): "this install's profile
+     *         names a model this mode cannot serve"
+     * @throws dev.nexus.service.db.UnregisteredCollectionException when {@code
+     *         collection} has no {@code catalog_collections} row
      */
-    public Embedder resolveEmbedderStrict(String collection) {
-        if (collection != null) {
-            String[] segments = collection.split("__");
-            if (segments.length == 4) {
-                Embedder embedder = modelEmbedders.get(segments[2]);
-                if (embedder == null) {
-                    throw new EmbeddingModelUnavailableException(
-                        "service (embedding mode " + modeName() + ") has no embedder for "
-                        + "model '" + segments[2] + "' — refusing to embed collection '"
-                        + collection + "' with a different model. Available models: "
-                        + availableModels()
-                        + ("onnx-local".equals(modeName())
-                           ? ". Voyage collections need NX_VOYAGE_API_KEY in the service "
-                             + "environment (supervisor plumbs it from the nexus credential "
-                             + "chain when set)."
-                           : "."));
-                }
-                return embedder;
-            }
+    public Embedder resolveEmbedderStrict(TenantScope scope, String tenant, String collection) {
+        if (collection == null) {
+            return resolveEmbedder(null);
         }
-        return resolveEmbedder(collection);
+        CollectionRow row = CollectionRegistry.lookup(scope, tenant, collection);
+        Embedder embedder = modelEmbedders.get(row.embeddingModel());
+        if (embedder == null) {
+            throw new EmbeddingModelUnavailableException(
+                "this install's profile names a model this mode cannot serve — collection '"
+                + collection + "' resolves to model '" + row.embeddingModel() + "', which "
+                + "embedding mode " + modeName() + " has no embedder for. Available models: "
+                + availableModels()
+                + ("onnx-local".equals(modeName())
+                   ? ". Voyage collections need NX_VOYAGE_API_KEY in the service "
+                     + "environment (supervisor plumbs it from the nexus credential "
+                     + "chain when set)."
+                   : "."));
+        }
+        return embedder;
     }
 
     /**

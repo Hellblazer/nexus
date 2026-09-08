@@ -167,17 +167,21 @@ class VectorHybridHttpTest {
 
     @Test
     void hybridSearch_tenantResolvedServerSide_fromBearer() throws Exception {
-        // TOKEN_B is bound to TENANT_B, which owns no rows: the same request body
-        // must return zero rows. RLS + server-resolved tenant is the boundary; there
-        // is no client-supplied field that can widen it.
+        // TOKEN_B is bound to TENANT_B, which owns no catalog_collections row for COL
+        // (only TENANT_A does). RDR-204 Phase 2 (bead nexus-ft04v.16, coordinator
+        // ruling): dispatch now resolves the collection's row through
+        // CollectionRegistry BEFORE the RLS-scoped query ever runs, so this is now a
+        // 422 (UnregisteredCollectionException) naming COL, not the old silent
+        // empty-row-list result — there is still no client-supplied field that can
+        // widen visibility across the RLS boundary; the boundary itself just fails
+        // loud now instead of silently.
         var resp = post(service, TOKEN_B,
             Map.of("query", Q, "collections", List.of(COL), "n_results", 10));
 
-        assertThat(resp.statusCode()).isEqualTo(200);
-        List<?> rows = MAPPER.readValue(resp.body(), List.class);
-        assertThat(rows)
-            .as("a bearer bound to another tenant sees exactly 0 rows")
-            .isEmpty();
+        assertThat(resp.statusCode())
+            .as("a bearer bound to another tenant with no row for COL fails loud, 422")
+            .isEqualTo(422);
+        assertThat(resp.body()).contains(COL);
     }
 
     @Test

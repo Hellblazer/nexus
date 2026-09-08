@@ -14,17 +14,29 @@ package dev.nexus.service.db;
  * process rather than re-queried on every write.
  *
  * <p>{@code dimension} is a primitive {@code int}, not {@code Integer}: the
- * database column is nullable (a dormant or disputed-model row has no single
- * agreed dimension — {@code hygiene-002-collection-attributes-walk.xml}), and
- * a {@code NULL} value is normalized to {@code 0} at the point this record is
- * constructed ({@link CollectionRegistry#require}). {@code 0} is not a valid
- * embedding dimension, so it is unambiguous as "unknown/disputed" to any
- * caller that inspects the field.
+ * database column {@code catalog_collections.dimension} is nullable (a
+ * walked zero-chunk row, or a dormant/disputed row has no single agreed
+ * dimension — {@code hygiene-002-collection-attributes-walk.xml}), but a
+ * {@code NULL} column is never handed to a caller as a fabricated {@code 0}.
+ * {@link CollectionRegistry#require} instead COALESCEs a {@code NULL}
+ * {@code catalog_collections.dimension} with the row's own {@code
+ * embedding_model}'s dimension in {@code nexus.embedding_models} (NOT NULL,
+ * FK-backed since {@code hygiene-002-1}) — a real, known-correct dimension
+ * for the model the row is registered under, not a guess. If somehow
+ * neither resolves (unreachable given the FK, but never silently trusted),
+ * {@code require} throws {@link IllegalStateException} rather than caching
+ * a sentinel a caller could misread as a real dimension (RDR-204 Phase 2
+ * follow-up, bead nexus-ft04v.16 — the {@code 0}-sentinel this javadoc used
+ * to describe was landed by nexus-ft04v.14 with no consumer reading it yet,
+ * and is retired here before one could).
  *
  * @param contentType    {@code catalog_collections.content_type}
  * @param ownerId        {@code catalog_collections.owner_id}
  * @param embeddingModel {@code catalog_collections.embedding_model}
- * @param dimension      {@code catalog_collections.dimension}, or {@code 0} when the column is {@code NULL}
+ * @param dimension      the row's resolved dimension — {@code
+ *                        catalog_collections.dimension} when non-NULL, else
+ *                        {@code embedding_models.dimension} for {@code
+ *                        embeddingModel}
  * @param lifecycleState {@code catalog_collections.lifecycle_state}
  */
 public record CollectionRow(

@@ -526,6 +526,11 @@ class BridgeAddressFieldsTest {
     @Test
     void storeGet_maxBatchIdsBoundary_1000Serves_1001Rejects() throws Exception {
         String col = "knowledge__g5e2__voyage-context-3__v1";
+        // RDR-204 Phase 2 (bead nexus-ft04v.16): dimForCollection now requires a real
+        // catalog_collections row before the batch-size guard is ever reached.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, col);
+        }
 
         List<String> ids1000 = new ArrayList<>(1000);
         for (int i = 0; i < 1000; i++) {

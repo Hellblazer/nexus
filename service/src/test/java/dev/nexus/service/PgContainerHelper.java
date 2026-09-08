@@ -422,12 +422,47 @@ public final class PgContainerHelper {
         step.onConflictDoNothing().execute();
     }
 
-    /** The RDR-103 4-segment conformant name shape, {@code <ct>__<owner>__<model>__v<n>},
-     *  same regex as hygiene-002-collection-attributes-walk.xml's own branch A --
+    /** The RDR-103 4-segment conformant name shape, {@code <ct>__<owner>__<model>__v<n>} —
      *  used only to derive constraint-satisfying attributes for {@link #insertCollection},
-     *  never a general-purpose parser. */
+     *  never a general-purpose parser.
+     *
+     *  <p>RDR-204 Phase 2 (bead nexus-ft04v.16 fix): the owner group now allows {@code _}
+     *  in addition to {@code [a-zA-Z0-9-]} — WIDER than {@code
+     *  hygiene-002-collection-attributes-walk.xml}'s branch-A regex this used to match
+     *  byte-for-byte. The production walk's stricter pattern governs REAL data and is out
+     *  of this bead's scope; this helper only INFERS attributes for test-fixture
+     *  convenience, and dozens of fixtures across the tree (this test's own {@code
+     *  "code__afc_own1__voyage-code-3__v1"}-style dedicated names, deliberately
+     *  underscored for readability/uniqueness — see e.g. {@code
+     *  TaxonomyAssignFromChashesRepositoryTest}'s per-test "dedicated collection"
+     *  comments) use an owner segment containing {@code _}. Under the pre-nexus-ft04v.16
+     *  name-SEGMENT dispatch authority this mismatch was invisible ({@code
+     *  collection.split("__")} tolerates an internal {@code _} fine, since it only
+     *  splits on the literal {@code "__"} delimiter) — it surfaced only once dispatch
+     *  moved to reading THIS ROW's {@code embedding_model}/{@code dimension}: a
+     *  non-matching owner segment silently routed every such fixture into branch D
+     *  (content_type {@code "unknown"}, embedding_model the {@code bge-base-en-v15-768}
+     *  fallback), which resolved the WRONG dimension for every non-768 fixture and
+     *  produced a silent "0 rows assigned/matched" everywhere the dispatched dim
+     *  disagreed with the collection's actual stored dimension — never an exception,
+     *  since the row still existed and still resolved to SOME real, FK-valid model. */
     private static final Pattern CONFORMANT_COLLECTION_NAME = Pattern.compile(
-        "^(code|docs|rdr|knowledge)__([a-zA-Z0-9-]+)__([a-z][a-z0-9-]*)__v[0-9]+$");
+        "^(code|docs|rdr|knowledge)__([a-zA-Z0-9_-]+)__([a-z][a-z0-9-]*)__v[0-9]+$");
+
+    /** The {@code quarantine-} prefixed sibling of {@link #CONFORMANT_COLLECTION_NAME}
+     *  (hygiene-002-collection-attributes-walk.xml's branch B) — RDR-204 Phase 2 fix
+     *  (bead nexus-ft04v.16): this branch did not exist before, so every
+     *  quarantine-prefixed fixture name (e.g. {@code
+     *  "quarantine-code__gcq-case4__voyage-code-3__v1"}) fell through to {@link
+     *  #CONFORMANT_COLLECTION_NAME} (which never matches — the name does not START
+     *  with {@code code|docs|rdr|knowledge}, {@code quarantine-} is prepended) and
+     *  landed in the generic fallback (embedding_model {@code bge-base-en-v15-768},
+     *  768-dim) regardless of what model the name's own suffix names. Invisible under
+     *  the pre-nexus-ft04v.16 name-segment dispatch authority; surfaced as a silent
+     *  wrong-dim dispatch (a 1024-dim embedder writing to a collection whose
+     *  registered row says 768) once dispatch started reading this row. */
+    private static final Pattern CONFORMANT_QUARANTINE_COLLECTION_NAME = Pattern.compile(
+        "^quarantine-(code|docs|rdr|knowledge)__([a-zA-Z0-9_-]+)__([a-z][a-z0-9-]*)__v[0-9]+$");
 
     /**
      * Seed a minimal {@code nexus.catalog_collections} row via generated jOOQ DSL
@@ -506,8 +541,17 @@ public final class PgContainerHelper {
         String embeddingModel = "bge-base-en-v15-768";
         String lifecycleState = name.startsWith("quarantine-") ? "quarantine" : "live";
 
+        Matcher mq = CONFORMANT_QUARANTINE_COLLECTION_NAME.matcher(name);
         Matcher m = CONFORMANT_COLLECTION_NAME.matcher(name);
-        if (m.matches()) {
+        if (mq.matches()) {
+            contentType = mq.group(1);
+            ownerId = mq.group(2);
+            String token = mq.group(3);
+            boolean modelKnown = dsl.fetchExists(dsl.selectOne().from(EMBEDDING_MODELS)
+                .where(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(token)));
+            embeddingModel = modelKnown ? token : "bge-base-en-v15-768";
+            lifecycleState = "quarantine";
+        } else if (m.matches()) {
             contentType = m.group(1);
             ownerId = m.group(2);
             String token = m.group(3);

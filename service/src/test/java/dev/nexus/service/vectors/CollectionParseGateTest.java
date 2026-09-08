@@ -66,11 +66,23 @@ import java.util.stream.Stream;
  * whose count goes to zero must have its entry REMOVED, not left at {@code
  * 0} — the "no entry means zero expected" default already covers that, and a
  * stray {@code file -> 0} entry is dead weight the stale-fingerprint check
- * cannot distinguish from a real ceiling. Both {@link
- * #COLLECTION_LITERAL_CENSUS} and {@link #COLLECTION_SPLIT_CENSUS} — plus
- * their total ceilings — are expected to fall to zero at nexus-ft04v.16 once
- * the parse sites read the registry row instead of the collection-name
- * string itself.
+ * cannot distinguish from a real ceiling.
+ *
+ * <p><b>Outcome at nexus-ft04v.16 (correcting the prediction above — this
+ * paragraph originally said BOTH censuses would reach zero; they did not, and
+ * the fact is corrected here rather than left standing next to the number
+ * that disagrees with it).</b> {@link #COLLECTION_SPLIT_CENSUS} DID reach
+ * zero (empty map, ceiling 0) — both {@code split("__")} call sites this gate
+ * ever pinned are gone. {@link #COLLECTION_LITERAL_CENSUS} did NOT: {@code
+ * EmbedderRouter.java} keeps a 5-literal entry, because {@code
+ * CCE_PREFIXES}/{@code CODE_PREFIX}/{@code stripTrailingSeparator}'s {@code
+ * endsWith("__")} survive for two uses this bead's scope never touched —
+ * {@code resolveEmbedder}'s legacy prefix routing (kept only for the
+ * collection-less {@code /v1/vectors/embed} parity path) and {@code
+ * contentTypeModelTokens}'s profile-seeding map. See {@link
+ * #COLLECTION_LITERAL_CENSUS}'s own javadoc for the full accounting. {@code
+ * PgVectorRepository.java} DID reach zero on both censuses and lost both
+ * entries, matching the original prediction for that file.
  *
  * <p>This gate is a pure source scanner (no jOOQ, no DB, no {@code
  * scripts/mvnw-leased.sh} substrate beyond plain {@code javac}/JUnit) — it
@@ -160,39 +172,53 @@ class CollectionParseGateTest {
      * Per-file declared count of {@link #countDunderLiterals}, relative to
      * {@code src/main/java} (same path convention as {@link
      * dev.nexus.service.db.RawSqlGateTest#TEST_TREE_RAW_SQL_CEILING}).
-     * Measured against develop @ 3e7b7b78e (2026-09-08, before nexus-ft04v.16
-     * touches either site):
+     * Measured after nexus-ft04v.16 (RDR-204 Phase 2 item 2): every remaining
+     * engine collection-name PARSE site (both {@code split("__")} call sites
+     * and their message literals) now reads the {@link
+     * dev.nexus.service.db.CollectionRegistry} row instead — {@code
+     * PgVectorRepository.java} reaches ZERO literals and loses its census
+     * entry entirely (a file at zero carries no entry, per this gate's own
+     * reduce-only rule).
      *
-     * <ul>
-     *   <li>{@code EmbedderRouter.java}: {@code CCE_PREFIXES}' three entries
-     *       ({@code "knowledge__"}, {@code "docs__"}, {@code "rdr__"}),
-     *       {@code CODE_PREFIX} ({@code "code__"}), {@code
-     *       stripTrailingSeparator}'s {@code endsWith("__")}, and {@code
-     *       resolveEmbedderStrict}'s {@code split("__")} — 6.</li>
-     *   <li>{@code PgVectorRepository.java}: {@code dimForCollection}'s
-     *       {@code split("__")} plus its four-segment error-message literal
-     *       ({@code "(<content_type>__<owner>__<model>__v<n>)"}), and {@code
-     *       modelSegment}'s identical pair — 4.</li>
-     * </ul>
+     * <p>{@code EmbedderRouter.java} keeps 5 — the ONE surviving literal group
+     * this bead's own instructions name as legitimate to keep: {@code
+     * CCE_PREFIXES}' three entries ({@code "knowledge__"}, {@code "docs__"},
+     * {@code "rdr__"}), {@code CODE_PREFIX} ({@code "code__"}), and {@code
+     * stripTrailingSeparator}'s {@code endsWith("__")}. These are NOT a
+     * collection-name PARSE site in the sense this gate exists to close —
+     * {@code resolveEmbedderStrict} (the real parse site, whose {@code
+     * split("__")} is gone) never calls them any more. They remain load-bearing
+     * for two OTHER, still-legitimate uses: (1) {@code resolveEmbedder}'s
+     * legacy prefix routing, kept ONLY for the truly collection-less {@code
+     * /v1/vectors/embed} parity path ({@code resolveEmbedderStrict(collection
+     * == null)} — see that method's own javadoc); and (2) {@code
+     * contentTypeModelTokens}, which reuses the SAME constants to build the
+     * content-type → model-token mapping {@code seedEmbeddingProfile}/{@code
+     * seedEmbeddingProfileForContentType} write into {@code
+     * nexus.embedding_profile} at registration time — a profile-SEEDING
+     * concern, not a per-request collection-name parse. Neither remaining use
+     * derives a model/dimension/content-type FOR AN EXISTING COLLECTION from
+     * its name; both are outside this bead's acceptance scope, hence the
+     * surviving pin here per nexus-ft04v.16's own instructions ("if any
+     * literal must survive... keep exactly its pin, write why").
      */
     private static final Map<String, Integer> COLLECTION_LITERAL_CENSUS = Map.ofEntries(
-        Map.entry("dev/nexus/service/vectors/EmbedderRouter.java", 6),
-        Map.entry("dev/nexus/service/vectors/PgVectorRepository.java", 4));
+        Map.entry("dev/nexus/service/vectors/EmbedderRouter.java", 5));
 
-    private static final int COLLECTION_LITERAL_TOTAL_CEILING = 10;
+    private static final int COLLECTION_LITERAL_TOTAL_CEILING = 5;
 
     /**
      * Per-file declared count of {@link #countSplitDunderCalls} — the
-     * narrower subset pin nexus-ft04v.16 is expected to drive to zero.
-     * Measured at the same commit: {@code EmbedderRouter.java}'s
-     * {@code resolveEmbedderStrict} (1); {@code PgVectorRepository.java}'s
-     * {@code dimForCollection} and {@code modelSegment} (2).
+     * narrower subset pin nexus-ft04v.16 drives to zero, in the same edit
+     * that lowers {@link #COLLECTION_LITERAL_CENSUS} above: both {@code
+     * split("__")} call sites this gate ever pinned (EmbedderRouter's
+     * {@code resolveEmbedderStrict}; PgVectorRepository's {@code
+     * dimForCollection} and {@code modelSegment}) are gone, so BOTH files
+     * lose their entry (a file at zero carries no entry).
      */
-    private static final Map<String, Integer> COLLECTION_SPLIT_CENSUS = Map.ofEntries(
-        Map.entry("dev/nexus/service/vectors/EmbedderRouter.java", 1),
-        Map.entry("dev/nexus/service/vectors/PgVectorRepository.java", 2));
+    private static final Map<String, Integer> COLLECTION_SPLIT_CENSUS = Map.of();
 
-    private static final int COLLECTION_SPLIT_TOTAL_CEILING = 3;
+    private static final int COLLECTION_SPLIT_TOTAL_CEILING = 0;
 
     /**
      * Compares an {@code actual} per-file census against a {@code declared}
@@ -234,8 +260,9 @@ class CollectionParseGateTest {
      * checks both censuses against {@link #COLLECTION_LITERAL_CENSUS}/
      * {@link #COLLECTION_SPLIT_CENSUS} in both directions, plus their
      * aggregate ceilings. Passes on the tree as it stands at the measured
-     * pins; nexus-ft04v.16 is expected to lower every number here to zero
-     * in the same edit that replaces the parse sites.
+     * pins, lowered by nexus-ft04v.16 in the same edit that replaced the
+     * parse sites — see {@link #COLLECTION_LITERAL_CENSUS}'s javadoc for
+     * why one 5-literal entry survives rather than reaching zero.
      */
     @Test
     void collectionNameParseCensus_pinnedAtMeasuredCount() throws IOException {

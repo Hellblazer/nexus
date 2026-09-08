@@ -35,7 +35,6 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.DimTables;
-import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.DeleteConditionStep;
@@ -4465,7 +4464,10 @@ public final class CatalogRepository {
             if (resolved.containsKey(c)) toWrite.add(c); else mustAlreadyExist.add(c);
         }
 
-        int dim = PgVectorRepository.dimForCollection(collection);
+        // RDR-204 Phase 2 (bead nexus-ft04v.16): the row's dimension, read through
+        // the ALREADY-OPEN ctx (require, not lookup — a nested withTenant here
+        // would borrow a second pooled connection mid-transaction for no reason).
+        int dim = CollectionRegistry.require(ctx, tenant, collection).dimension();
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
 
         if (!mustAlreadyExist.isEmpty()) {

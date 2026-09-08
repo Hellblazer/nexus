@@ -455,6 +455,15 @@ class PgVectorEmbedSkipIntegrationTest {
         // catch (RuntimeException) branch specifically, while leaving the LATER
         // catalog_collections registration + chunk INSERT transactions (2nd/3rd
         // getConnection() calls, against the same real Postgres) unaffected.
+        // RDR-204 Phase 2 (bead nexus-ft04v.16): dimForCollection now reads the row
+        // through CollectionRegistry, which is itself the FIRST DB access
+        // upsertChunksInternal makes on a cache MISS -- warm the cache here, on the
+        // REAL (non-flaky) tenantScope, so the fault injection below still lands
+        // exactly where this test targets it (resolveNeedEmbedIdx's own inline catch),
+        // deterministically regardless of whether an earlier test in this class
+        // already warmed it.
+        dev.nexus.service.db.CollectionRegistry.lookup(tenantScope, TENANT_A, col);
+
         FailFirstConnectionDataSource flakyDs = new FailFirstConnectionDataSource(svcDs);
         TenantScope flakyScope = new TenantScope(flakyDs);
         CountingEmbedder failsafeEmbedder = new CountingEmbedder(1024);

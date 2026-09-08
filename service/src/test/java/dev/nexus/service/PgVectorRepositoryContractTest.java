@@ -11,8 +11,6 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
@@ -41,10 +39,12 @@ import static org.assertj.core.api.Assertions.within;
  *
  * <p>Contract pinned here (RDR-155 §Proposed Solution, §Query path; §Approach item 2):
  * <ul>
- *   <li><strong>Runtime per-dim dispatch</strong> — the collection-name embedding-model
- *       segment routes to {@code embedding_384}/{@code embedding_768}/{@code embedding_1024} on
- *       the unified {@code nexus.chunks} table (RDR-191 Phase 4)
- *       (RDR-103 collection-name authority); unknown segments fail loud, nothing written.
+ *   <li><strong>Runtime per-dim dispatch</strong> — the collection's registered
+ *       {@code catalog_collections} row (RDR-204 Phase 2, bead nexus-ft04v.16 —
+ *       supersedes the RDR-103 collection-name model-segment authority this bullet
+ *       used to pin) routes to {@code embedding_384}/{@code embedding_768}/{@code
+ *       embedding_1024} on the unified {@code nexus.chunks} table (RDR-191 Phase 4);
+ *       an unregistered collection fails loud, nothing written.
  *   <li><strong>Collection is a column</strong> — multi-collection search is a filtered
  *       union ({@code collection IN (...)}), one result list ordered by distance.
  *   <li><strong>Server-side embed unchanged</strong> — chunk TEXT in, vector stored; the
@@ -178,34 +178,42 @@ class PgVectorRepositoryContractTest {
     }
 
     // ---------------------------------------------------------------------------
-    // Contract 1: model-segment → dim parse (RDR-103 collection-name authority)
+    // Contract 1: CollectionRegistry-row dim authority (RDR-204 Phase 2, bead
+    // nexus-ft04v.16 — supersedes the RDR-103 model-SEGMENT parse this suite used
+    // to pin: a collection's catalog_collections row is the SOLE dimension
+    // authority now, never a token split out of the collection's own name).
     // ---------------------------------------------------------------------------
 
-    @ParameterizedTest
-    @CsvSource({
-        "code__alpha__voyage-code-3__v1,           1024",
-        "knowledge__alpha__voyage-context-3__v1,   1024",
-        "docs__beta__voyage-context-3__v2,         1024",
-        "knowledge__beta__voyage-3__v1,            1024",
-        "docs__alpha__bge-base-en-v15-768__v1,     768",
-        "knowledge__alpha__minilm-l6-v2-384__v1,   384",
-    })
-    void dimForCollection_knownModelTokens(String collection, int expectedDim) {
-        assertThat(PgVectorRepository.dimForCollection(collection))
-            .as("model segment of %s must dispatch to dim %d", collection, expectedDim)
-            .isEqualTo(expectedDim);
+    @Test
+    void dimForCollection_returnsRowsDimension_evenWhenNameImpliesAnother() {
+        // The name's own model segment (voyage-code-3) implies 1024 — the row's
+        // embedding_model (bge-base-en-v15-768, 768) must win regardless.
+        String collection = "code__dimrow-ft04v16__voyage-code-3__v1";
+        tenantScope.withTenant(TENANT_A, ctx -> {
+            ctx.insertInto(CATALOG_COLLECTIONS,
+                    CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                    CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                    CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.DIMENSION,
+                    CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+                .values(TENANT_A, collection, "code", "dimrow-ft04v16", "bge-base-en-v15-768", 768, "live")
+                .onConflictDoNothing()
+                .execute();
+            return null;
+        });
+
+        assertThat(repo768.dimForCollection(TENANT_A, collection))
+            .as("collection '%s' names voyage-code-3 (1024-dim) but its catalog_collections "
+                + "row's embedding_model is bge-base-en-v15-768 (768-dim) — the row must win, "
+                + "never a segment parsed from the name", collection)
+            .isEqualTo(768);
     }
 
-    @ParameterizedTest
-    @CsvSource({
-        "code__alpha__mystery-model-9000__v1",   // unknown model token
-        "notacontenttype",                       // not four-segment conformant
-        "code__alpha__v1",                       // missing model segment
-    })
-    void dimForCollection_unknownOrMalformed_failsLoud(String collection) {
-        assertThatThrownBy(() -> PgVectorRepository.dimForCollection(collection))
-            .as("unknown/malformed collection name must fail loud, never a fallback dim")
-            .isInstanceOf(IllegalArgumentException.class);
+    @Test
+    void dimForCollection_unregisteredCollection_failsLoud_neverAFallbackDim() {
+        assertThatThrownBy(() -> repo1024.dimForCollection(
+                TENANT_A, "code__never-registered-dimrow-ft04v16__voyage-code-3__v1"))
+            .as("an unregistered collection must fail loud, never dispatch to a fallback dim")
+            .isInstanceOf(dev.nexus.service.db.UnregisteredCollectionException.class);
     }
 
     // ---------------------------------------------------------------------------
@@ -276,11 +284,27 @@ class PgVectorRepositoryContractTest {
     }
 
     @Test
-    void upsert_voyage3_landsInChunks1024Only() throws Exception {
-        String col = "knowledge__v3disp__voyage-3__v1";
+    void upsert_1024dimRow_landsInChunks1024Only() throws Exception {
+        // RDR-204 Phase 2 (bead nexus-ft04v.16): dispatch is by the REGISTERED ROW's
+        // dimension now, never a name-parsed model segment. This test used to name a
+        // "voyage-3" collection to reach dim 1024 (MODEL_DIMS's parse-time mapping);
+        // voyage-3 itself has no nexus.embedding_models row (catalog-036-2's
+        // deliberate exclusion — no client token, no live row) and can never be
+        // legitimately registered under RDR-204's FK-enforced embedding_model column,
+        // so the OLD name would now register (via the shared @BeforeAll seed's
+        // unseeded-token fallback) as bge-768, not 1024, and dispatch to the WRONG
+        // table under the new authority — exactly the class of defect this bead
+        // closes. Registered here with a REAL 1024-dim model (voyage-code-3) instead;
+        // the CONTRACT under test (a 1024-dim row lands only in chunks_1024) is
+        // unchanged, only the collection's registered identity is.
+        String col = "code__v1024disp__voyage-code-3__v1";
+        tenantScope.withTenant(TENANT_A, ctx -> {
+            PgContainerHelper.insertCollection(ctx, TENANT_A, col);
+            return null;
+        });
         repo1024.upsertChunks(TENANT_A, col,
             List.of("8567d6f70cac9a4cccde28d9cb56a963f3d9b490ae47bc84cedeaeef2672c9a4"),
-            List.of("voyage-3 dispatch text"),
+            List.of("1024-dim dispatch text"),
             List.of(Map.of("kind", "d")));
 
         assertThat(superuserCount(1024, col)).as("row in nexus.chunks (dim=1024)").isEqualTo(1L);
@@ -348,12 +372,17 @@ class PgVectorRepositoryContractTest {
     }
 
     @Test
-    void upsert_unknownModelSegment_failsLoud_writesNothing() throws Exception {
+    void upsert_unregisteredCollection_failsLoud_writesNothing() throws Exception {
+        // RDR-204 Phase 2 (bead nexus-ft04v.16): COL_UNKNOWN is deliberately never
+        // registered (not in this class's shared @BeforeAll seed list) — dispatch is
+        // by the registered ROW now, so an unrecognized model TOKEN in the name no
+        // longer matters at all; what fails loud is the collection having no row,
+        // exactly the same contract every other write path enforces (RDR-204 Phase 1).
         assertThatThrownBy(() ->
             repo1024.upsertChunks(TENANT_A, COL_UNKNOWN,
                 List.of("f54714e93fc3fe982da5a57dda5096393e0402d57bfc8eeb8340fe9fdc1499b0"), List.of("unknown model text"), List.of(Map.of())))
-            .as("unknown model segment must fail loud at dispatch")
-            .isInstanceOf(IllegalArgumentException.class);
+            .as("an unregistered collection must fail loud at dispatch, never write a row")
+            .isInstanceOf(dev.nexus.service.db.UnregisteredCollectionException.class);
 
         for (int dim : new int[] {384, 768, 1024}) {
             assertThat(superuserCount(dim, COL_UNKNOWN))

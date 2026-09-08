@@ -1055,6 +1055,11 @@ public final class VectorHandler implements HttpHandler {
             HttpUtil.send(ex, 503, json(Map.of("error", "embed endpoint not configured")));
             return;
         }
+        if (pgRepo == null) {
+            HttpUtil.send(ex, 503, json(Map.of("error", "embed endpoint not configured")));
+            return;
+        }
+        String tenant = RequestContext.tenant();
         Map<String, Object> body = readBody(ex);
         String collection     = requireString(body, "collection");
         List<String> texts    = requireStringList(body, "texts");
@@ -1064,7 +1069,12 @@ public final class VectorHandler implements HttpHandler {
         // (same float32 binary as embedDoubleForCollection — both decode the same base64
         // blob; the only difference was that embedDouble skipped the Java float intermediate,
         // but the source bits are identical). This avoids a double-embed while capturing tokens.
-        EmbedResult embedResult = embedderRouter.embedForCollectionWithUsage(collection, texts);
+        // RDR-204 Phase 2 (bead nexus-ft04v.16): resolveEmbedderStrict now reads collection's
+        // catalog_collections row via CollectionRegistry, needing a TenantScope for its
+        // cache-miss fallback — pgRepo's own scope (same DataSource, same RLS gateway) since
+        // this handler holds no TenantScope of its own.
+        EmbedResult embedResult =
+            embedderRouter.embedForCollectionWithUsage(pgRepo.tenantScope(), tenant, collection, texts);
         List<float[]> float32Vecs = embedResult.embeddings();
 
         // Convert to List<List<Double>> for JSON serialization, promoting float32 → double.

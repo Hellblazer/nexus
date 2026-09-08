@@ -3,13 +3,14 @@
 package dev.nexus.service.db;
 
 import org.jooq.DSLContext;
-import org.jooq.Record5;
+import org.jooq.Record6;
 
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
 
 /**
  * Bead nexus-h8rf6.2 — in-process cache of {@code (tenant, collection)} pairs KNOWN
@@ -174,26 +175,48 @@ public final class CollectionRegistry {
      * repeat writes to the same collection skip the SELECT too.
      *
      * @throws UnregisteredCollectionException if no row exists for the pair
+     * @throws IllegalStateException if the row's own {@code dimension} is {@code NULL}
+     *         (a walked zero-chunk row, or a dormant/disputed row — {@code
+     *         hygiene-002-collection-attributes-walk.xml}) AND its {@code
+     *         embedding_model} — NOT NULL, FK-backed to {@code nexus.embedding_models}
+     *         since that same changeset — somehow has no {@code embedding_models} row
+     *         either (should be unreachable given the FK, but this method never hands
+     *         a caller a fabricated dimension; see {@link CollectionRow}'s javadoc)
      */
     public static CollectionRow require(DSLContext ctx, String tenant, String collection) {
         Optional<CollectionRow> hit = cached(tenant, collection);
         if (hit.isPresent()) {
             return hit.get();
         }
-        Record5<String, String, String, Integer, String> r = ctx.select(
+        Record6<String, String, String, Integer, String, Integer> r = ctx.select(
                 CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                 CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.DIMENSION,
-                CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+                CATALOG_COLLECTIONS.LIFECYCLE_STATE, EMBEDDING_MODELS.DIMENSION)
             .from(CATALOG_COLLECTIONS)
+            .leftJoin(EMBEDDING_MODELS)
+                .on(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
                 .and(CATALOG_COLLECTIONS.NAME.eq(collection)))
             .fetchOne();
         if (r == null) {
             throw new UnregisteredCollectionException(tenant, collection);
         }
-        Integer dimension = r.value4();
-        CollectionRow row = new CollectionRow(
-            r.value1(), r.value2(), r.value3(), dimension == null ? 0 : dimension, r.value5());
+        // RDR-204 Phase 2 follow-up (bead nexus-ft04v.16, hygiene-002 finding):
+        // catalog_collections.dimension is NULL BY DESIGN for a walked zero-chunk row
+        // and for a dormant/disputed row with no single agreed dimension --
+        // embedding_model is never NULL (NOT NULL + FK to embedding_models since
+        // hygiene-002-1), so COALESCE to the model's own seeded dimension rather than
+        // ever caching a fabricated sentinel a caller could silently misread as real.
+        Integer catalogDim = r.value4();
+        Integer modelDim = r.value6();
+        Integer dimension = catalogDim != null ? catalogDim : modelDim;
+        if (dimension == null) {
+            throw new IllegalStateException(
+                "collection '" + collection + "' for tenant '" + tenant + "' has no resolvable "
+                + "dimension: catalog_collections.dimension is NULL and its embedding_model '"
+                + r.value3() + "' has no nexus.embedding_models row to fall back to");
+        }
+        CollectionRow row = new CollectionRow(r.value1(), r.value2(), r.value3(), dimension, r.value5());
         markKnown(tenant, collection, row);
         return row;
     }

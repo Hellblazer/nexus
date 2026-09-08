@@ -297,6 +297,28 @@ class CollectionRegistryTest {
     }
 
     @Test
+    void require_coalescesNullDimensionFromEmbeddingModelsRow_whenCatalogDimensionIsNull() {
+        // RDR-204 Phase 2 follow-up (bead nexus-ft04v.16, hygiene-002 finding):
+        // catalog_collections.dimension is NULL by design for a walked zero-chunk /
+        // dormant / disputed row. A non-conformant name routes insertCollection's
+        // fallback branch (content_type "unknown", embedding_model the seeded
+        // bge-base-en-v15-768 fallback, dimension left unset — NULL) — exactly the
+        // shape ~39 call sites across the tree already produce via this shared helper.
+        String collection = "cr-null-dim-fallback";
+        seedRegistered(collection);
+
+        CollectionRow row = tenantScope.withTenant(TENANT,
+            ctx -> CollectionRegistry.require(ctx, TENANT, collection));
+
+        assertThat(row.embeddingModel()).isEqualTo("bge-base-en-v15-768");
+        assertThat(row.dimension())
+            .as("catalog_collections.dimension is NULL for this row; require() must COALESCE "
+                + "from embedding_models.dimension for bge-base-en-v15-768 (768), never cache "
+                + "the retired 0 sentinel")
+            .isEqualTo(768);
+    }
+
+    @Test
     void require_throwsWithNoRowCached_whenCollectionNeverRegistered() {
         String collection = "code__cr-row-miss__voyage-code-3__v1";
         assertThatThrownBy(() -> tenantScope.withTenant(TENANT,
