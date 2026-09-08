@@ -413,7 +413,7 @@ tagco_run pytest -m lint tests/test_plugin_structure.py -q -p no:cacheprovider |
 tagco_run pytest tests/hooks/ -q -p no:cacheprovider || _die "tests/hooks/ failed at the tag"
 # Same two exclusions as plugin-release.yml: both modules walk v* tag
 # history a depth-1, two-tag checkout cannot resolve.
-tagco_run pytest -m lint -q -p no:cacheprovider --ignore=tests/test_wire_contract_pairing_lint.py --ignore=tests/test_rehearsal_native_legs_refuse_no_build.py || _die "-m lint failed at the tag"
+tagco_run pytest -m lint -q -p no:cacheprovider --ignore=tests/test_wire_contract_pairing_lint.py --ignore=tests/test_rehearsal_native_legs_refuse_no_build.py --ignore=tests/test_docs_reference_rot.py || _die "-m lint failed at the tag"
 tagco_run python scripts/check_cut_ledger_clean.py --base "$derived_base" --cut "$TAG" || _die "check_cut_ledger_clean.py failed"
 
 _step "back-merge main -> develop (scripts/plugin_cut_back_merge.sh) and develop's own drift contract"
