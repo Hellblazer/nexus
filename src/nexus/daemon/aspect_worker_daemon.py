@@ -182,9 +182,14 @@ class AspectWorkerDaemon:
         # (review M1): _stale_timeout is the STALENESS THRESHOLD (a row must be
         # in_progress longer than this to be reclaimed — kept > the 180s
         # extraction budget to avoid false-reclaiming an in-flight row), while
-        # _reclaim_interval is the SWEEP CADENCE (how often we ask the service to
-        # reclaim — a frequent fixed 30s, matching the T2 predecessor, so a
-        # genuinely-stranded row recovers promptly once it crosses the threshold).
+        # _reclaim_interval is the SWEEP CADENCE's BASE (how often we ask the
+        # service to reclaim while the queue is live: 30s, matching the T2
+        # predecessor, so a genuinely-stranded row recovers promptly once it
+        # crosses the threshold). On an idle queue the loop backs off from it
+        # up to the threshold (nexus-e0ypa, next_reclaim_wait), so the
+        # worst case for a row stranded on a long-idle queue is threshold +
+        # threshold, the same as a flat threshold-length cadence; the base
+        # buys promptness only while sweeps are finding rows.
         self._stale_timeout = stale_timeout_seconds
         self._reclaim_interval = (
             float(reclaim_interval) if reclaim_interval is not None else _DEFAULT_RECLAIM_INTERVAL
@@ -322,10 +327,20 @@ class AspectWorkerDaemon:
                     "aspect_worker_daemon.reclaimed_stale",
                     tenant=self._tenant, count=n, stale_timeout_seconds=self._stale_timeout,
                 )
+            previous = self._current_reclaim_wait
             self._current_reclaim_wait = next_reclaim_wait(
-                self._current_reclaim_wait, reclaimed=n,
+                previous, reclaimed=n,
                 base=self._reclaim_interval, stale_timeout=self._stale_timeout,
             )
+            if self._current_reclaim_wait != previous:
+                # Review of 53923fe3e: the backoff is otherwise invisible in
+                # this daemon's own logs and only inferable from edge traffic.
+                _log.info(
+                    "aspect_worker_daemon.reclaim_wait_changed",
+                    tenant=self._tenant, reclaimed=n,
+                    previous_wait_seconds=previous,
+                    next_wait_seconds=self._current_reclaim_wait,
+                )
             return n
         except Exception as exc:  # noqa: BLE001 - reclaim is best-effort; keep the loop alive for the next interval
             _log.warning(
