@@ -183,8 +183,11 @@ def _gate_on_build_lease() -> None:
     (2026-09-07), all one fact. Deciding at session start, on the xdist
     controller (workers spawn after this returns), turns that into one
     line and exit 75 — or, with ``NX_BUILD_LEASE_WAIT=<seconds>``, into a
-    wait that starts the suite when the holder is gone. The per-test check
-    in ``_boot()`` stays as the backstop for a build that starts later.
+    wait that starts the suite when the holder is gone. ``_boot()``'s own
+    check runs once per worker process at its first substrate boot, so a
+    build that starts after this gate and before a worker boots is still
+    refused there; one that starts after every worker has booted is not
+    seen by either (the shell lease's own residual, nexus-06fu4).
 
     ``NX_TEST_T2_SUBSTRATE=none`` runs need no engine and are never gated.
     """
