@@ -439,7 +439,10 @@ repository exists, and no engine primitive enumerates tenants under
 FORCE RLS), that walks `catalog_collections` and deletes every row for which
 `collectionIsEmpty` is true (`catalog_documents.physical_collection` is one
 of the fourteen entries that predicate checks, so it needs no separate
-clause), guarded by a marker row in `nexus.catalog_meta` (the catalog's
+clause), except a row already `lifecycle_state = 'quarantine'` — Branch B
+below assigns that state unconditionally, and this sweep holds such a row
+untouched rather than relitigating Branch B's decision (nexus-snm4y) —
+guarded by a marker row in `nexus.catalog_meta` (the catalog's
 per-tenant key/value table from the baseline changeset) so it runs once
 per tenant.
 A row `collectionIsEmpty` reports non-empty is kept and becomes `dormant`
