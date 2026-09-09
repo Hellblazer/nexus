@@ -1991,7 +1991,20 @@ def _restore_t3_singleton(request: pytest.FixtureRequest):
     import nexus.mcp_infra as mcp_infra
 
     before = mcp_infra._t3_instance
+    # Bind the REAL invalidator now: a test may monkeypatch the module
+    # attribute (some assert it is never called on a cache hit), and this
+    # fixture's teardown can run before monkeypatch's undo.
+    invalidate_rows = mcp_infra.invalidate_collections_cache
     yield
+    # RDR-204 Phase 3 (nexus-ft04v.26 fix round): the collection-row cache
+    # (``_collections_cache``, 60s TTL) is process-wide too, and since the
+    # repoint every row-reading site (resolve_corpus, the class-(d)
+    # diagnostics via resolve_row_preferred) reads it. A cache warmed by one
+    # test in an xdist worker served stale rows to a later test in the same
+    # worker (tests/test_catalog_cli.py::TestVerifyCommand, five reds under
+    # -n 8, green alone). Drop it after every test, unconditionally: the
+    # next reader refetches, exactly as a fresh process would.
+    invalidate_rows()
     after = mcp_infra._t3_instance
     if after is before:
         return
