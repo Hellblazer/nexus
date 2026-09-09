@@ -3496,42 +3496,21 @@ def _prune_collection_serverside(
         expire_quarantine_serverside,
         quarantine_days,
         quarantine_orphans_serverside,
-        quarantine_registration_kwargs,
         restore_rereferenced_serverside,
     )
-    from nexus.corpus import ensure_collection_registered  # noqa: PLC0415 — deferred to avoid import cycle (nexus.corpus)
 
-    # RDR-204 Phase 1 (nexus-f5wwx) retired the engine's auto-register-on-
-    # first-write: every client write path must call
-    # ensure_collection_registered() before writing, or the engine 422s an
-    # unregistered collection. The quarantine sibling's writes are entirely
-    # SERVER-SIDE (the SQL anti-join move inside gc_quarantine_orphans) --
-    # no HttpVectorClient.upsert call ever runs for it, so nothing else
-    # ever registers it. Mint it here, once, before any of the three
-    # server-side routes touch it (restore runs FIRST below and 422s on a
-    # pass with nothing quarantined yet otherwise) -- the coordinator's own
-    # named exception for chunk_quarantine's sibling minting IF IT MUST
-    # (ruling 2026-09-08). Idempotent (ensure_collection_registered's own
-    # per-process cache) and safe even when quarantine_name already has a
-    # row (a later pass on the same collection).
-    #
-    # RDR-204 Phase 3 fix round (nexus-ft04v.28 C1): registered with
-    # collection_name's (the ORIGIN's) own content_type/owner_id/
-    # embedding_model, explicitly -- never derived from quarantine_name
-    # itself. quarantine_name's content_type segment is the synthetic
-    # "quarantine-<content_type>" string; feeding that to the generic
-    # name-derivation seam raised ValueError in cloud mode (and
-    # local+voyage) once effective_embedding_model_for_writes reached
-    # canonical_embedding_model on a content_type outside the four
-    # canonical types -- silently aborting server-side GC for every
-    # collection, forever, via the broad except this function's ONE
-    # caller wraps it in. See quarantine_registration_kwargs's docstring
-    # for the full derivation (row-preferred, origin's own name as
-    # fallback).
-    ensure_collection_registered(
-        quarantine_name, kwargs=quarantine_registration_kwargs(collection_name),
-    )
-
+    # The quarantine sibling is never registered from here. Its only writes
+    # are server-side (the SQL anti-join move inside gc_quarantine_orphans),
+    # and that function registers the sibling itself, from the origin's own
+    # catalog row, only on a pass that actually moves a chunk (catalog-024
+    # register-on-insert, hygiene-005 copy-from-origin). The engine's three
+    # GC routes all resolve the sibling's dimension from the ORIGIN, so a
+    # first pass over a fresh collection (restore runs first, nothing was
+    # ever quarantined) answers 0 rather than 422. A client-side
+    # pre-registration here (nexus-ft04v.26/.28, never released) left an
+    # empty sibling projection row on every zero-orphan pass -- the
+    # nexus-syfes class `nx catalog doctor --collections-drift` flags and
+    # the shakeout's Phase E fails on.
     restored = restore_rereferenced_serverside(db, quarantine_name, collection_name)
     if restored is None:
         return False  # route unavailable — client-side path handles restore too
@@ -3768,18 +3747,14 @@ def _prune_deleted_files(
             if _prune_collection_serverside(db, collection_name, qname, now_stamp()):
                 continue
         except ValueError:
-            # RDR-204 Phase 3 fix round (nexus-ft04v.28 C1): a ValueError
-            # here means the quarantine sibling's registration kwargs
-            # could not be derived (a malformed/non-conformant origin
-            # name with no catalog row and no recognisable
-            # <content_type>__<owner_id> shape) -- a data/config defect,
-            # never a transient engine hiccup. The broad except below
-            # exists ONLY for the nexus-ou4tb transient-failure contract
-            # (ConnectionError/TimeoutError/HTTP errors); silently
-            # swallowing a ValueError here is exactly the class of
-            # data-correctness bug the no-silent-fallback hot rule
-            # forbids -- propagate it loud instead of logging a
-            # warning and quietly leaving GC permanently broken.
+            # A ValueError here is a data/config defect (a malformed origin
+            # name or response shape), never a transient engine hiccup. The
+            # broad except below exists ONLY for the nexus-ou4tb
+            # transient-failure contract (ConnectionError/TimeoutError/HTTP
+            # errors); swallowing a ValueError is the class of
+            # data-correctness bug the no-silent-fallback hot rule forbids --
+            # propagate it loud instead of logging a warning and quietly
+            # leaving GC broken (nexus-ft04v.28 C1 was exactly that shape).
             raise
         except Exception:  # noqa: BLE001 — best-effort; failure logged, sweep continues
             _log.warning("gc_serverside_prune_failed", collection=collection_name,

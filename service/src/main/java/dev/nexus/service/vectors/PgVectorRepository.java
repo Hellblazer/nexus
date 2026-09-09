@@ -2739,26 +2739,33 @@ public final class PgVectorRepository {
      * returned) — {@code chunk_quarantine.py}'s {@code restore_rereferenced},
      * server-side.
      *
-     * <p>RDR-204 Phase 2 (bead nexus-ft04v.16): dim derives from {@code
-     * quarantineCollection}, NOT {@code originCollection} — a deliberate
-     * asymmetry. {@code gc_restore_rereferenced} legitimately self-registers a
-     * genuinely first-ever {@code originCollection} internally (hygiene-002-2's
-     * carve-out: RDR-204 Phase 1's "no more auto-registration from a name"
-     * rule does not apply to this ONE family, since the row it mints there is
-     * a real, known-attribute registration, not a blank stub), so requiring
-     * {@code originCollection}'s row to already exist on the JAVA side before
-     * ever reaching that SQL function would make its own self-registration
-     * unreachable. {@code quarantineCollection} carries no such exception —
-     * restoring FROM it is only ever sensible once something was already
-     * quarantined INTO it, which itself required a real, pre-existing
-     * registration (either the origin's own, or the quarantine SQL function's
-     * own first-quarantine self-registration) — so resolving dim from it here
-     * is never a name-derivation, only ever a real row read. Both collections
-     * share the same embedding space by construction (restore only ever moves
-     * a chunk between the two), so the resolved dim is identical either way.
+     * <p>dim derives from {@code originCollection}, the same registered row
+     * {@link #quarantineOrphans} and {@link #expireQuarantine} resolve from.
+     * The client runs the three GC legs restore, quarantine, expire in that
+     * order on EVERY {@code nx index repo} walk, for every populated
+     * collection, and the first walk over a collection reaches restore before
+     * anything was ever quarantined: the sibling has no row yet, and nothing
+     * needs one, because the SQL function's first statement finds no chunk in
+     * the sibling and returns 0 before it reads or registers anything.
+     * RDR-204 Phase 2 (nexus-ft04v.16, engine-service-v0.1.110, never
+     * deployed) resolved dim from {@code quarantineCollection} instead, so
+     * that first walk answered 422 and the client's best-effort wrapper
+     * logged {@code gc_serverside_prune_failed} and skipped GC for the
+     * collection, every walk, forever (seven such lines in the v0.1.110
+     * shakeout); the client-side pre-registration written to get past it
+     * (nexus-ft04v.26/.28) then left an empty sibling projection row behind
+     * on every zero-orphan pass, the nexus-syfes class the shakeout's Phase E
+     * exists to catch. The two collections share one embedding space by
+     * construction (restore only ever moves a chunk between them, and
+     * hygiene-005 copies the sibling's dimension from the origin), so the
+     * origin's dim is the sibling's dim. {@code gc_restore_rereferenced}
+     * still self-registers a first-ever origin from the sibling's row
+     * (hygiene-005-2) when it has something to restore into it; that path is
+     * reachable only through a direct SQL caller, since an origin the client
+     * asks to restore into is a populated, registered collection.
      */
     public long restoreRereferenced(String tenant, String quarantineCollection, String originCollection) {
-        int dim = dimForCollection(tenant, quarantineCollection);
+        int dim = dimForCollection(tenant, originCollection);
         // nexus-syfes: same shape as quarantineOrphans above — the origin
         // collection's registration now happens INSIDE
         // nexus.gc_restore_rereferenced, guarded on there being a restore to

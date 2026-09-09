@@ -240,6 +240,19 @@ class PgVectorRepositoryGcQuarantineTest {
         }
     }
 
+    /** {@code nexus.gc_restore_rereferenced} called directly (dim 1024, {@link #TENANT_A}),
+     *  bypassing {@link PgVectorRepository#restoreRereferenced}'s origin-registration
+     *  precondition — for the SQL function's own first-ever-origin registration path,
+     *  which no production Java caller reaches. */
+    private long restoreViaSql(String quarantineCol, String originCol) throws SQLException {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            Long restored = dev.nexus.service.jooq.nexus.Routines.gcRestoreRereferenced(
+                DSL.using(su, SQLDialect.POSTGRES).configuration(), 1024, TENANT_A, quarantineCol, originCol);
+            return restored == null ? 0L : restored;
+        }
+    }
+
     /** True when {@code nexus.catalog_collections} has a row for (tenant, name) — the
      *  nexus-syfes regression target: a zero-orphan/zero-restore GC pass must NOT
      *  leave one of these behind for a collection sibling that was never written to. */
@@ -597,17 +610,14 @@ class PgVectorRepositoryGcQuarantineTest {
     }
 
     @Test
-    void restoreRereferenced_neitherCollectionEverTouched_failsLoud_registersNothing() throws Exception {
-        // RDR-204 Phase 2 (bead nexus-ft04v.16): restoreRereferenced now resolves its
-        // dim from quarantineCollection (see that method's own javadoc) -- a
-        // quarantine collection that was never quarantined INTO has no row at all,
-        // so calling restore against it is now a genuinely invalid/degenerate
-        // operation (there is nothing to restore FROM a collection nobody ever wrote
-        // to) and fails loud, rather than the old silent 0-match no-op. Neither
-        // collection gets registered by a call that never reaches the SQL function.
+    void restoreRereferenced_unregisteredOrigin_failsLoud_registersNothing() throws Exception {
+        // restoreRereferenced resolves its dim from originCollection (see that
+        // method's own javadoc): an origin with no registered row is the same
+        // fail-loud precondition quarantineOrphans and expireQuarantine already
+        // apply. Neither collection gets registered by a call that never reaches
+        // the SQL function.
         String originCol = originCol("reg3");
         String quarantineCol = quarantineCol("reg3");
-        // Neither collection has ever been written to.
         assertThat(collectionRegistered(TENANT_A, originCol))
             .as("precondition: origin never touched")
             .isFalse();
@@ -616,13 +626,45 @@ class PgVectorRepositoryGcQuarantineTest {
             .isFalse();
 
         assertThatThrownBy(() -> vectorRepo.restoreRereferenced(TENANT_A, quarantineCol, originCol))
-            .as("a quarantine collection that was never quarantined into has no row to "
-                + "resolve a dim from -- fail loud")
+            .as("an unregistered origin has no row to resolve a dim from -- fail loud")
             .isInstanceOf(dev.nexus.service.db.UnregisteredCollectionException.class)
-            .hasMessageContaining(quarantineCol);
+            .hasMessageContaining(originCol);
 
         assertThat(collectionRegistered(TENANT_A, originCol))
-            .as("a failed-loud restore attempt must not register the origin either")
+            .as("a failed-loud restore attempt must not register the origin")
+            .isFalse();
+        assertThat(collectionRegistered(TENANT_A, quarantineCol))
+            .as("nor the quarantine sibling")
+            .isFalse();
+    }
+
+    @Test
+    void restoreRereferenced_registeredOrigin_siblingNeverTouched_returnsZero_registersNothing() throws Exception {
+        // THE first GC pass over a fresh collection: the client calls restore
+        // BEFORE anything was ever quarantined, so the sibling has no row. This
+        // must answer 0, not 422 -- engine-service-v0.1.110 (never deployed)
+        // resolved dim from the sibling here, the client's best-effort wrapper
+        // swallowed the 422 and GC silently stopped for every collection; the
+        // client-side pre-registration written to get past it then left an
+        // empty sibling projection row on every zero-orphan pass (the
+        // nexus-syfes class, the shakeout's Phase E). Neither side registers the
+        // sibling on a pass with nothing to move.
+        String originCol = originCol("first-pass");
+        String quarantineCol = quarantineCol("first-pass");
+        seedChunk(TENANT_A, originCol, ch("gcq-first-pass"), "live text", "Live Doc");
+        assertThat(collectionRegistered(TENANT_A, originCol))
+            .as("precondition: origin is registered (seedChunk registers it)")
+            .isTrue();
+        assertThat(collectionRegistered(TENANT_A, quarantineCol))
+            .as("precondition: sibling never touched")
+            .isFalse();
+
+        long restored = vectorRepo.restoreRereferenced(TENANT_A, quarantineCol, originCol);
+
+        assertThat(restored).as("nothing was ever quarantined, nothing to restore").isEqualTo(0L);
+        assertThat(collectionRegistered(TENANT_A, quarantineCol))
+            .as("a zero-restore pass must not register the quarantine sibling "
+                + "(nexus-syfes: an empty projection row is exactly the drift Phase E catches)")
             .isFalse();
     }
 
@@ -645,7 +687,11 @@ class PgVectorRepositoryGcQuarantineTest {
                 + "the FK-satisfying row does not pre-exist")
             .isFalse();
 
-        long restored = vectorRepo.restoreRereferenced(TENANT_A, quarantineCol, originCol);
+        // The Java wrapper resolves dim from the origin and refuses an unregistered
+        // one before reaching SQL (restoreRereferenced_unregisteredOrigin_failsLoud_
+        // registersNothing); the SQL function's own first-ever-origin registration
+        // is reachable only by a direct caller, which is what this test is.
+        long restored = restoreViaSql(quarantineCol, originCol);
 
         assertThat(restored).isEqualTo(1L);
         assertThat(collectionRegistered(TENANT_A, originCol))
@@ -699,7 +745,9 @@ class PgVectorRepositoryGcQuarantineTest {
         assertThat(collectionRegistered(TENANT_A, originCol))
             .as("precondition: first-ever restore into this origin").isFalse();
 
-        long restored = vectorRepo.restoreRereferenced(TENANT_A, quarantineCol, originCol);
+        // Direct SQL call: the Java wrapper refuses an unregistered origin (see
+        // restoreRereferenced_nonZeroMatches_stillRegistersOrigin_firstEverRestore).
+        long restored = restoreViaSql(quarantineCol, originCol);
         assertThat(restored).isEqualTo(1L);
 
         var row = collectionRow(TENANT_A, originCol);
@@ -730,13 +778,10 @@ class PgVectorRepositoryGcQuarantineTest {
     @Test
     void restoreRereferenced_unregisteredQuarantineCollection_raisesLoud() throws Exception {
         // nexus-uxd2a item 3 (raise-loud half): PgVectorRepository.restoreRereferenced
-        // normally resolves dim from quarantineCollection at the Java layer
-        // (dimForCollection) BEFORE ever reaching the SQL function -- for a
-        // genuinely never-touched quarantine collection that already fails loud
-        // via UnregisteredCollectionException, see
-        // restoreRereferenced_neitherCollectionEverTouched_failsLoud_registersNothing
-        // above. This test proves the SQL-level guard directly, bypassing the Java
-        // wrapper AND gc_restore_rereferenced's own pre-flight (v_chashes IS NULL
+        // resolves dim from originCollection at the Java layer (dimForCollection)
+        // and never asks the sibling for one, so an unregistered sibling reaches
+        // the SQL function. This test proves the SQL-level guard directly,
+        // bypassing gc_restore_rereferenced's own pre-flight (v_chashes IS NULL
         // -> RETURN 0 early, before ever reaching the registration code): a real
         // chunk is seeded into quarantineCol (nexus_test.insert_chunk_bare_vector,
         // a raw DB insert with no Java-side check, around a momentary FK drop --

@@ -130,10 +130,12 @@ holdouts the row-read treatment, lowering the pin from 50 to 49:
   PREFERS the origin's catalog row (content_type/owner_id/
   embedding_model) and falls to ``split_candidate_collection_name`` (one
   primitive_call, still counted) only when the origin has no row -- see
-  that file's census-entry comment for the full design note, including
-  the paired indexer.py fix that mints the quarantine sibling's own
-  catalog row before any server-side GC route touches it. Site count
-  unchanged (1 -> 1, a primitive_call instead of a raw split).
+  that file's census-entry comment for the full design note. (The
+  paired indexer.py pre-registration of the quarantine sibling that
+  landed with it was deleted 2026-09-09 -- the engine registers the
+  sibling from the origin's row on first insert, and the client-side
+  row was the nexus-syfes drift the shakeout's Phase E caught.) Site
+  count unchanged (1 -> 1, a primitive_call instead of a raw split).
 - ``db/reconcile.py``'s ``_is_same_model_passthrough`` and
   ``_dim_for_collection`` now share a new ``_model_for_collection``
   helper that prefers the row and falls to the same laxer name-split
@@ -191,6 +193,11 @@ a drift risk the way the three primitives are. Attribute-form calls
 not just bare-name imports -- the boundary
 ``test_scanner_is_not_vacuous`` used to pin as "must NOT match" is now
 pinned the other way, deliberately.
+
+2026-09-09, 53 to 52: ``quarantine_registration_kwargs`` and the
+client-side sibling pre-registration it fed were deleted (the engine
+registers the sibling from the origin's row on first insert; the
+client's row was the nexus-syfes drift the shakeout's Phase E caught).
 
 The remaining THREE holdouts (collection_shape.py's 3,
 commands/collection.py's reindex_cmd, db/embed_migrate.py's
@@ -373,28 +380,22 @@ COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {
     # (ruling 2026-09-08). The fallback branch still preserves the ENTIRE
     # tail after the content-type segment (owner + model + version) so the
     # quarantine sibling keeps exactly the source's model/version --
-    # `collection_owner()` alone would discard model/version. A second,
-    # separate fix (indexer.py's `_prune_collection_serverside`, same
-    # bead) mints the quarantine sibling's own catalog row via
-    # `ensure_collection_registered` before any server-side GC route
-    # touches it -- RDR-204 Phase 1 retired the engine's auto-register-on-
-    # first-write, and the quarantine sibling's writes are 100%
-    # server-side (no HttpVectorClient.upsert call ever registers it).
+    # `collection_owner()` alone would discard model/version.
     #
-    # nexus-ft04v.28 items 1 (C1 fix) and 6 (this file, 1 -> 3): the
-    # fifth class's primitive set gained `model_version_for_collection_
-    # name` (previously an uncounted third primitive, same regex-based
-    # shape as the other two -- see nexus.corpus._CANDIDATE_STRING_
-    # PRIMITIVES's own docstring for why it belongs). Two NEW class-(d)
-    # sites: `quarantine_collection_name`'s existing call (line ~91,
-    # reading the origin's own model_version segment -- the catalog row
-    # never carries a version field, so this is the only place that fact
-    # lives, same allowance as the primitive_call above it) and the C1
-    # fix's new `quarantine_registration_kwargs` (line ~156, same reason
-    # -- the quarantine sibling's registration kwargs need the origin's
-    # model_version, which model_version_for_collection_name is the only
-    # source of).
-    "src/nexus/catalog/chunk_quarantine.py": 3,
+    # nexus-ft04v.28 item 6 (this file, 1 -> 2): the fifth class's
+    # primitive set gained `model_version_for_collection_name` (previously
+    # an uncounted third primitive, same regex-based shape as the other
+    # two -- see nexus.corpus._CANDIDATE_STRING_PRIMITIVES's own docstring
+    # for why it belongs). One class-(d) site: `quarantine_collection_
+    # name`'s call (line ~91, reading the origin's own model_version
+    # segment -- the catalog row never carries a version field, so this is
+    # the only place that fact lives, same allowance as the primitive_call
+    # above it). The C1 fix's `quarantine_registration_kwargs` (a second
+    # such call) was deleted 2026-09-09 with the client-side sibling
+    # pre-registration it fed: the engine registers the sibling from the
+    # origin's row on first insert, and the client's row was the
+    # nexus-syfes drift the shakeout's Phase E caught (3 -> 2).
+    "src/nexus/catalog/chunk_quarantine.py": 2,
     # class (d): _content_type_for_collection synthesizes a row for the
     # orphan GC backfill -- the collection being registered has no row by
     # construction.
@@ -918,8 +919,10 @@ def test_pin_matches_documented_total() -> None:
     undercount) and gained a genuinely uncounted third primitive,
     model_version_for_collection_name, whose two chunk_quarantine.py
     callers were already live but invisible to the old two-name
-    hardcoded set) is derived from the same dict the guards above check
+    hardcoded set; then 53 -- 52 on 2026-09-09 when the client-side
+    quarantine-sibling pre-registration and its kwargs derivation were
+    deleted) is derived from the same dict the guards above check
     against -- this catches a hand-edited docstring number drifting from
     the dict it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 53
+    assert PARSE_SITE_PIN == 52

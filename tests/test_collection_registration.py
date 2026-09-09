@@ -634,11 +634,15 @@ class TestRegistrationSeamProfileCheck:
 
 
 class TestEnsureCollectionRegisteredExplicitKwargsOverride:
-    """RDR-204 Phase 3 fix round (nexus-ft04v.28 C1): ``kwargs`` bypasses
-    ``collection_registration_kwargs``'s generic name-derivation for
-    *name*, for a caller (the quarantine sibling) whose registered
-    identity is borrowed from something else entirely -- see
-    ``nexus.catalog.chunk_quarantine.quarantine_registration_kwargs``."""
+    """RDR-204 Phase 3 fix round (nexus-ft04v.28 item 4): ``kwargs``
+    bypasses ``collection_registration_kwargs``'s generic name-derivation
+    for *name*, for the callers that already hold the four fields (the
+    backfill and rename commands, which read them off an existing row).
+    The examples below use a name whose own shape would derive something
+    else entirely, so a passing assertion can only mean the override drove
+    the call. (The quarantine sibling is deliberately NOT a caller: the
+    engine's GC function registers it from the origin's row on first
+    insert; see ``indexer._prune_collection_serverside``.)"""
 
     def test_explicit_kwargs_bypasses_name_derivation(
         self, monkeypatch: pytest.MonkeyPatch,
@@ -686,14 +690,14 @@ class TestEnsureCollectionRegisteredExplicitKwargsOverride:
 
         writer.register_collection.assert_not_called()
 
-    def test_the_old_bug_without_override_raises_under_cloud_mode(
+    def test_a_non_canonical_content_type_without_override_raises_under_cloud_mode(
         self, cloud_mode: None,
     ) -> None:
-        """Regression pin for C1 itself: registering the quarantine
-        sibling's NAME with NO explicit override (the old, broken call
-        shape) still raises ValueError under cloud mode -- proving why
-        the override exists, and pinning the old failure mode so a
-        revert is caught."""
+        """Without an override, a name whose content_type segment is not
+        one of the canonical types cannot derive an embedding model under
+        cloud mode and raises ValueError -- why a caller holding the real
+        fields passes them instead of letting the name be parsed
+        (nexus-ft04v.28 C1 was this failure, swallowed)."""
         with pytest.raises(ValueError, match="unknown content_type"):
             ensure_collection_registered("quarantine-code__myrepo__voyage-code-3__v1")
 

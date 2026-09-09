@@ -195,8 +195,14 @@ def test_serverside_prune_rerun_with_no_new_orphans_is_idempotent(t2_service_env
 
 def test_serverside_prune_noOrphans_movesNothing(t2_service_env) -> None:
     """No orphans present: server path is a clean zero-op — nothing moves,
-    nothing crosses beyond the anti-join's own read."""
+    nothing crosses beyond the anti-join's own read, and the quarantine
+    sibling gets NO catalog row (nexus-syfes: the engine registers the
+    sibling only on a pass that moves a chunk, and the client never
+    registers it; an empty sibling projection row is exactly the drift
+    ``nx catalog doctor --collections-drift`` flags and the shakeout's
+    Phase E failed on for engine-service-v0.1.111's first candidate)."""
     import nexus.db.http_vector_client as hvc
+    from nexus.catalog.chunk_quarantine import quarantine_collection_name
     from nexus.indexer import _prune_deleted_files
     from tests._catalog_fixture_ops import ActiveCatalog
 
@@ -212,6 +218,11 @@ def test_serverside_prune_noOrphans_movesNothing(t2_service_env) -> None:
 
     remaining = set(db.get_collection(coll_name).get_all_metadata()["ids"])
     assert remaining == set(live_chashes)
+    qname = quarantine_collection_name(coll_name)
+    assert cat.get_collection(qname) is None, (
+        f"a zero-orphan GC pass must leave no catalog_collections row for the "
+        f"quarantine sibling {qname!r}"
+    )
 
 
 # ── PER-COLLECTION ISOLATION ─────────────────────────────────────────────
