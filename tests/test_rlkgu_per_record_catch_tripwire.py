@@ -170,13 +170,13 @@ class _LoopAllowlistEntry:
 #: nexus-a1zv2, not resolved here -- this entry's job is only to make the
 #: tripwire's scope claim exhaustive rather than silently inherited.
 _LOOP_ALLOWLIST: dict[tuple[str, str, int], _LoopAllowlistEntry] = {
-    ("db/embed_migrate.py", "_default_reindex", 280): _LoopAllowlistEntry(
+    ("db/embed_migrate.py", "_default_reindex", 287): _LoopAllowlistEntry(
         reason=(
             "unwired module, docstring claims nx init integration "
             "falsely — disposition tracked as nexus-a1zv2"
         ),
     ),
-    ("db/embed_migrate.py", "_default_reindex", 282): _LoopAllowlistEntry(
+    ("db/embed_migrate.py", "_default_reindex", 289): _LoopAllowlistEntry(
         reason=(
             "unwired module, docstring claims nx init integration "
             "falsely — disposition tracked as nexus-a1zv2"
@@ -476,8 +476,8 @@ def test_scanner_finds_the_known_per_record_loop_sites() -> None:
     assert len(sites) == 5, sites
     uncovered = {(s.rel_path, s.function, s.lineno) for s in sites if not s.covered}
     assert uncovered == {
-        ("db/embed_migrate.py", "_default_reindex", 280),
-        ("db/embed_migrate.py", "_default_reindex", 282),
+        ("db/embed_migrate.py", "_default_reindex", 287),
+        ("db/embed_migrate.py", "_default_reindex", 289),
     }, (
         "the set of genuinely-uncovered sites changed -- either a real "
         "coverage regression (fix it) or embed_migrate.py's line numbers "
