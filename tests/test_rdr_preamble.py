@@ -1492,6 +1492,49 @@ class TestPrgUnparsedItemStarts:
         assert "GH #1443" in result.output
         assert "| # | Label | Evidence needed |" not in result.output
 
+    def test_a_numbered_aside_under_a_later_subheading_is_out_of_scope(self):
+        """Critique fix check: the extracted section can run through several
+        `###` subsections (rdr-195: two real items, then a numbered
+        consequences aside under Technical Design). Only the item list's own
+        block is scanned."""
+        from nexus.commands.rdr import _prg_find_unparsed_item_starts  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "1. **Engine**: cap the batch.\n"
+            "2. **Client**: size the byte budget.\n"
+            "\n"
+            "Two consequences follow.\n"
+            "1. Skewed users can still hit the ceiling.\n"
+            "2. The budget must be sized with headroom.\n"
+            "\n"
+            "### Technical Design\n"
+            "1. an aside under a later heading\n"
+        )
+        assert _prg_find_unparsed_item_starts(text) == []
+
+    def test_a_dropped_item_before_the_first_parsed_one_is_reported(self):
+        """rdr-089's wrapped label is item 1 and the first PARSED item is 2:
+        the scan must begin at the block's heading, not at the first parse."""
+        from nexus.commands.rdr import _prg_find_unparsed_item_starts  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "### Approach\n"
+            "1. **A label that wraps onto\n"
+            "   the next line**: description.\n"
+            "2. **Second**: fine.\n"
+        )
+        assert _prg_find_unparsed_item_starts(text) == ["1. **A label that wraps onto"]
+
+    def test_a_plain_line_inside_the_item_block_is_still_reported(self):
+        from nexus.commands.rdr import _prg_find_unparsed_item_starts  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "1. **Engine**: cap the batch.\n"
+            "2. plain step between two items\n"
+            "3. **Client**: size the byte budget.\n"
+            "\n"
+            "### Technical Design\n"
+            "1. an aside that is out of scope\n"
+        )
+        assert _prg_find_unparsed_item_starts(text) == ["2. plain step between two items"]
+
     def test_phase_block_headers_are_not_item_starts(self):
         from nexus.commands.rdr import _prg_find_unparsed_item_starts  # noqa: PLC0415 — deferred, matches the file's other in-test imports
         text = "**Phase 0: Scaffolding**\n- bullet\n**Phase 1: Core**\n- bullet\n"

@@ -3945,24 +3945,55 @@ def _prg_find_unparsed_item_starts(approach_text: str) -> list[str]:
     numbered line is a nested list or a recipe, and a line inside a fenced
     code block is code; the first version of this also flagged unclosed
     bold, which is how this repo writes wrapped emphasis, and refused 11 of
-    its own RDRs. Measured against the corpus after that correction, every
-    numbered-item RDR this refuses has an item the parser really drops.
+    the repo's own RDRs.
+
+    SCOPE. When the section parses numbered items, only the item list's
+    own block is scanned: heading to heading around the parsed items, and
+    within it up to the first numbered line that restarts at ``1.`` after
+    an item (a second list, such as rdr-195's two-point consequences aside
+    under the same heading). The extracted section can span several
+    ``###`` subsections, and a numbered aside under a later one is not a
+    lost item. A section with no parsed items (phase-block structure) is
+    scanned whole. A list where one incidental bold phrase makes one step
+    parse and the rest are plain steps (rdr-063, rdr-102) IS refused: the
+    gate cannot tell which of those steps are items, and enumerating the
+    one would be the silent subset this exists to stop.
+
     The one shape left invisible is a bold label whose number was dropped
     entirely (``**Label**: ...`` at column 0): in this corpus that line is
     a bold aside inside an item far more often than a lost item, so it is
     not flagged. Returned lines are stripped; the caller refuses to
     enumerate rather than pass on a subset, for both §Approach structures.
     """
+    lines = approach_text.splitlines()
+    item_idx = [k for k, line in enumerate(lines) if _PRG_ITEM_RE.match(line)]
+    start, end = 0, len(lines)
+    if item_idx:
+        start = next(
+            (k + 1 for k in range(item_idx[0] - 1, -1, -1) if lines[k].startswith("#")), 0,
+        )
+        end = next(
+            (k for k in range(item_idx[-1] + 1, len(lines)) if lines[k].startswith("#")),
+            len(lines),
+        )
     unparsed: list[str] = []
     in_fence = False
-    for line in approach_text.splitlines():
+    seen_item = False
+    for line in lines[start:end]:
         if _PRG_FENCE_RE.match(line):
             in_fence = not in_fence
             continue
-        if in_fence or _PRG_ITEM_RE.match(line):
+        if in_fence:
             continue
-        if _PRG_ITEM_START_RE.match(line):
-            unparsed.append(line.strip())
+        if _PRG_ITEM_RE.match(line):
+            seen_item = True
+            continue
+        m = _PRG_ITEM_START_RE.match(line)
+        if not m:
+            continue
+        if seen_item and m.group(1) == "1":
+            break  # a second list restarting at 1. after the items: not a lost item
+        unparsed.append(line.strip())
     return unparsed
 
 
