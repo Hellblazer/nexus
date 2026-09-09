@@ -883,25 +883,23 @@ def per_collection_chunk_cap(collection: str) -> int:
     it (nexus-fdn1c); the correct trade here is against an unusable install, and
     that argument does not need a throughput number to stand up.
     """
-    # RDR-204 Phase 3 (nexus-ft04v.26), class (b): the WRITE AUTHORITY
-    # decides the embedding model, never a name parse. *collection* is
-    # about to receive its FIRST-EVER chunks in the common case (this
-    # function sizes the very upsert that will create them), so it
-    # structurally cannot have a row yet in most cases -- but a
-    # freshly-rendered write target IS a full 4-segment conformant name
-    # (t3_collection_name/docs_leaf_fallback_collection_name always
-    # render one for a for_write=True mint), and its embedding_model
-    # segment is exactly the token effective_embedding_model_for_writes
-    # chose when the name was rendered -- reading it back
-    # (embedding_model_for_collection_name, regex, validates the full
-    # conformant shape) is reading that decision, not re-deriving it from
-    # a raw prefix. Prefer the catalog row when one exists (a re-write to
-    # an EXISTING collection, the common non-first-write case, where the
-    # row is authoritative over the name by Gap 1). Only a genuinely
-    # unresolvable case (no row AND a non-conformant/legacy name) falls to
-    # a conservative default -- CCE's smaller cap, never a guessed 300.
-    _model = _write_model_for_collection(collection)
-    is_cce = _model == "voyage-context-3" if _model is not None else True
+    # RDR-204 Phase 3 (nexus-ft04v.26), class (b): CONTENT TYPE, never the
+    # embedding MODEL string, is the correct CCE-vs-code signal here.
+    # content_type is a structural fact (docs__/knowledge__/rdr__ vs
+    # code__) stable across any model rename or non-canonical token; a
+    # literal ``== "voyage-context-3"`` model-string comparison (the
+    # first cut of this repoint) is fragile to exactly that drift --
+    # found live via test_per_collection_chunk_cap_values's own
+    # fixture-only model tokens ("x", "onnx-x"), which are legitimate
+    # conformant names this dispatch must still classify correctly by
+    # PREFIX, the same way the pre-repoint code did. See
+    # :func:`_is_cce_collection`.
+    is_cce = _is_cce_collection(collection)
+    if is_cce is None:
+        # Genuinely unresolvable (no row AND a non-conformant/legacy
+        # name): conservative default is CCE's smaller cap, never a
+        # guessed 300 -- see that function's docstring.
+        is_cce = True
     # nexus-33hpq: onnx-local is a MEMORY-bound mode, not a timeout-bound one —
     # apply the memory-derived cap to every prefix (code included) before the
     # CCE-vs-code split below, which is Voyage-cloud-specific reasoning.
@@ -915,20 +913,57 @@ def per_collection_chunk_cap(collection: str) -> int:
     return _CCE_UPSERT_CHUNK_CAP
 
 
+def _is_cce_collection(collection: str) -> bool | None:
+    """Whether *collection* belongs to the CCE content-type family
+    (``docs``/``knowledge``/``rdr``, voyage-context-3), or ``None`` when
+    it cannot be determined without a network round trip.
+
+    RDR-204 Phase 3 (nexus-ft04v.26), class (b): prefers the catalog
+    row's ``content_type`` when one exists (authoritative, Gap 1); falls
+    to the collection name's own first segment (candidate-string
+    derivation, the write authority's OWN decision at render time, read
+    back rather than re-derived) when no row exists -- the common case
+    for a collection about to receive its first-ever write, which
+    structurally cannot have a row yet. Fixed 2026-09-09 (fixture-seam
+    round): the original repoint compared the embedding MODEL string to
+    the literal ``"voyage-context-3"`` instead of checking content type
+    -- correct for TODAY's real models, but wrong in principle (any
+    future model rename, or a genuinely conformant name carrying a
+    non-canonical/test token, would misclassify a structurally-CCE
+    collection as code, and vice versa). content_type is the stable,
+    structural signal this decision has always meant to test.
+    """
+    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+    row = get_collection_row(collection)
+    if row is not None:
+        content_type = row.get("content_type")
+    else:
+        content_type_probe, owner_probe = split_candidate_collection_name(collection)
+        content_type = None if owner_probe == collection else content_type_probe
+    if content_type is None:
+        return None
+    return content_type in _CCE_COLLECTION_PREFIXES
+
+
 def _write_model_for_collection(collection: str) -> str | None:
     """The embedding model *collection* writes under, or ``None`` when it
     cannot be determined without a network round trip.
 
-    RDR-204 Phase 3 (nexus-ft04v.26): the shared resolution
-    :func:`per_collection_chunk_cap` and :func:`_upsert_byte_budget` both
-    need -- the catalog row when one exists (authoritative, Gap 1), else
-    the model segment of an already-conformant name (the write
-    authority's OWN decision at render time, read back rather than
-    re-derived -- ``embedding_model_for_collection_name`` validates the
-    full 4-segment shape via regex, not a raw prefix split). ``None`` only
-    for a genuinely unresolvable candidate (no row AND non-conformant),
-    which the two callers each default conservatively for their own
-    ceiling.
+    RDR-204 Phase 3 (nexus-ft04v.26): the catalog row's embedding_model
+    when one exists (authoritative, Gap 1), else the model segment of an
+    already-conformant name (the write authority's OWN decision at
+    render time, read back rather than re-derived --
+    ``embedding_model_for_collection_name`` validates the full
+    4-segment shape via regex, not a raw prefix split). ``None`` only
+    for a genuinely unresolvable candidate (no row AND non-conformant).
+
+    NOT used for the CCE-vs-code cap/budget dispatch -- see
+    :func:`_is_cce_collection` for why content_type, not this model
+    string, is that decision's correct signal. Retained for callers
+    (and its own direct unit tests, tests/db/test_collection_parse_
+    funnel_slice2.py::TestWriteModelForCollection) that genuinely need
+    the model token itself.
     """
     from nexus.corpus import embedding_model_for_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
     from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
@@ -958,14 +993,16 @@ def _upsert_byte_budget(collection: str) -> int | None:
     if _serving_embedding_mode() == "onnx-local":
         return None
     # RDR-204 Phase 3 (nexus-ft04v.26), class (b): see
-    # per_collection_chunk_cap's comment -- same resolution
-    # (_write_model_for_collection), same reason. Unlike the chunk cap,
-    # the CONSERVATIVE default here is the OPPOSITE direction: applying
-    # the byte budget (treating a genuinely unresolvable candidate as
-    # code-shaped) bounds the request, where defaulting to "no budget"
-    # would risk exactly the Voyage 400 RDR-195 exists to prevent.
-    _model = _write_model_for_collection(collection)
-    is_cce = _model == "voyage-context-3" if _model is not None else False
+    # per_collection_chunk_cap's comment and :func:`_is_cce_collection`
+    # -- same resolution, same content-type-not-model-string reason.
+    # Unlike the chunk cap, the CONSERVATIVE default here is the
+    # OPPOSITE direction: applying the byte budget (treating a
+    # genuinely unresolvable candidate as code-shaped) bounds the
+    # request, where defaulting to "no budget" would risk exactly the
+    # Voyage 400 RDR-195 exists to prevent.
+    is_cce = _is_cce_collection(collection)
+    if is_cce is None:
+        is_cce = False
     if is_cce:
         return None
     return _CODE_UPSERT_BYTE_BUDGET

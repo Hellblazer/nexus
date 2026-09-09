@@ -222,7 +222,15 @@ def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
 # keyed-mint truth table; cloud_mode (forcing is_local_mode() False) is
 # the wrong declaration for a file whose entire subject is what happens
 # when it's True. Rationale in conftest.py beside the entry.
-_MODE_LINT_EXCLUDE_FILES_CEILING = 59
+# 59 -> 60 (RDR-204 Phase 3 fixture-seam round, nexus-ft04v.26,
+# 2026-09-09): +1, test_collection_parse_funnel_slice2.py — reason
+# "string-literal-as-name". Every test exercises the funnel helpers'
+# row-then-name resolution order against fake catalog rows /
+# collection-NAME fixtures; the census's own full-default-loop run
+# surfaced this as a standing offender (it is vacuous on any shrunk
+# item list, including a solo run of this file). Rationale in
+# conftest.py beside the entry.
+_MODE_LINT_EXCLUDE_FILES_CEILING = 60
 # 43 -> 46 (6.10.1): +3 real keyed integration tests in test_integration.py
 # — cloud_mode's fake credentials broke them against the live Voyage API
 # (their mode declaration is the requires-key gating; see conftest entry).
@@ -353,7 +361,34 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 59
 # resolver's TARGET-collection answer, opaque stand-in data for a
 # mode-changed reinstall; no embedder, no credential, `is_local_mode`
 # never runs. Rationale in conftest.py beside the entries.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 62
+# 62 -> 80 (RDR-204 Phase 3 fixture-seam round, nexus-ft04v.26,
+# 2026-09-09): +18, all reason "string-literal-as-name" or
+# "parametrize-label" — surfaced together by the census's own
+# full-default-loop run (vacuous on any shrunk item list, per this
+# file's docstring; a prior scoped verification round never triggered
+# it). TestSkippedCollectionsHeaderLogging (6) and
+# TestSingleCollectionUnregistered422IsActionable (1) in
+# test_http_vector_client.py: fake-HTTP-response fixtures, no embedder.
+# TestRegistrationSeamProfileCheck (4) in test_collection_registration.py:
+# a FAKE profile reader, no real profile lookup.
+# test_rename_prefix_validity_table in test_collection_rename.py (1
+# nodeid covers all 8 parametrize cases): voyage tokens are
+# parametrize-data source/target name pairs.
+# test_knowledge_collections_filters_by_content_type
+# (test_command_context_command.py), test_source_note_names_document_
+# collection_and_dates (test_context_annotations.py),
+# test_enrich_bare_subject_resolves_to_conformant_collection
+# (test_enrich_command.py, its own comment says the token is
+# install-dependent and only the NAME SHAPE is asserted),
+# test_sample_collection_names_by_prefix_families_pinned
+# (test_planner_few_shot.py), test_salience_boost_conformant_and_
+# lookalike_prefixes (test_rdr_109_phase5_salience.py): each a single
+# collection-NAME fixture fed to a fully-faked/mocked reader.
+# test_hybrid_scoring_code_detection_pinned (test_scoring.py, 1 nodeid
+# covers all 7 parametrize cases): voyage tokens are parametrize-data
+# collection-name/is_code_like pairs. Rationale in conftest.py beside
+# each entry.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 80
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

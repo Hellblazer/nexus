@@ -156,6 +156,20 @@ d, the name-parser this diagnostic's purpose actually calls for)
 instead -- a genuinely NEW tracked site, not a reclassification of an
 existing one, so the pin rises rather than holds.
 
+The SAME fixture-seam round then raised it again, 50 to 51:
+``per_collection_chunk_cap``/``_upsert_byte_budget``'s original
+``_model == "voyage-context-3"`` CCE-vs-code dispatch was itself a real
+regression -- comparing the embedding MODEL string instead of
+content_type broke a structurally-CCE ``docs``/``knowledge``/``rdr``
+collection whose row or name carried any non-canonical model token
+(found live: ``test_per_collection_chunk_cap_values``'s own
+fixture-only tokens "x"/"onnx-x", which were legitimate under the
+pre-repoint prefix-based dispatch). Fixed by adding
+``_is_cce_collection``, a new shared helper that reads content_type
+(row-preferred, falling to ``split_candidate_collection_name`` for the
+no-row case) instead of the model string -- a fourth, genuinely new
+tracked site in ``http_vector_client.py``, not a reclassification.
+
 The remaining THREE holdouts (collection_shape.py's 3,
 commands/collection.py's reindex_cmd, db/embed_migrate.py's
 migrate_collection_safe) were NOT closed by this bead -- they remain
@@ -449,8 +463,17 @@ COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {
     # (reading the model the write authority already embedded in an
     # already-rendered conformant name at mint time, not re-deriving it)
     # only when no row exists; :2364 is an existing, pre-nexus-ft04v.26
-    # call unrelated to this bead's own additions.
-    "src/nexus/db/http_vector_client.py": 3,
+    # call unrelated to this bead's own additions. A fourth site,
+    # _is_cce_collection (fixture-seam fix round, 2026-09-09), was added
+    # to REPLACE per_collection_chunk_cap/_upsert_byte_budget's original
+    # ``_model == "voyage-context-3"`` model-STRING comparison, which was
+    # a real regression: content_type, not the model token, is the
+    # correct CCE-vs-code signal (fragile to any model rename or
+    # non-canonical fixture token otherwise) -- it falls to
+    # split_candidate_collection_name (a DIFFERENT primitive than
+    # embedding_model_for_collection_name above) for the same no-row
+    # first-write case.
+    "src/nexus/db/http_vector_client.py": 4,
     # nexus-ft04v.26 item 6 (THE REPOINT): `_is_same_model_passthrough`
     # (formerly :267) and `_dim_for_collection` (formerly :362) now share
     # a new `_model_for_collection` helper that PREFERS the catalog row's
@@ -797,10 +820,12 @@ def test_pin_matches_documented_total() -> None:
     raising for an unregistered-but-conformant name was silently zeroing
     the whole probe inside a blanket except, masking the nexus-4ijv4
     false-clean-by-omission finding -- fixed by reading the class-(d)
-    name-parser instead, a new tracked site) -- see
-    COLLECTION_NAME_PARSE_CENSUS's own docstring) is derived from the
-    same dict the guards above check against -- this catches a
-    hand-edited docstring number drifting from the dict it claims to
-    summarize."""
+    name-parser instead, a new tracked site), then +1 again for
+    http_vector_client.py's new _is_cce_collection (same round: the
+    original model-STRING CCE check was a real regression, fixed by
+    reading content_type instead) -- see COLLECTION_NAME_PARSE_CENSUS's
+    own docstring) is derived from the same dict the guards above check
+    against -- this catches a hand-edited docstring number drifting from
+    the dict it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 50
+    assert PARSE_SITE_PIN == 51

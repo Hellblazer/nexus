@@ -2121,7 +2121,15 @@ def test_per_collection_chunk_cap_values(monkeypatch):
     assert hvc.per_collection_chunk_cap("knowledge__x__x__v1") == 64
     assert hvc.per_collection_chunk_cap("rdr__x__x__v1") == 64
     assert hvc.per_collection_chunk_cap("code__x__x__v1") == 300
-    assert hvc.per_collection_chunk_cap("weird-no-prefix") == 300
+    # RDR-204 Phase 3 (nexus-ft04v.26): a genuinely unresolvable name (no
+    # row, no "__" at all) now falls to the CONSERVATIVE default -- CCE's
+    # smaller cap, never a guessed 300 -- per _is_cce_collection's own
+    # documented intent (a deliberate change from the pre-repoint
+    # default this test was pinning; the test was not updated to match
+    # at the time). "docs"/"knowledge"/"rdr"/"code" above are all
+    # RESOLVABLE by content-type prefix and are unaffected by this
+    # default -- only the truly-unparseable case changes.
+    assert hvc.per_collection_chunk_cap("weird-no-prefix") == 64
 
     # Voyage serving -> identical conservative split (non-vacuity, as above).
     monkeypatch.setattr(hvc, "_serving_embedding_mode", lambda: "voyage")
@@ -2270,6 +2278,37 @@ class TestOnnxLocalUpsertChunkCapValidation:
 class TestUpsertChunksPaging:
     """A single oversize upsert is paged into <=cap sub-POSTs so no request
     exceeds the control-plane requestTimeout (nexus-nf3n7)."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_collection_row(self, monkeypatch):
+        # RDR-204 Phase 3 (nexus-ft04v.26) fixture-seam fix: per_collection_
+        # chunk_cap/_upsert_byte_budget now call _is_cce_collection, which
+        # reads nexus.mcp_infra.get_collection_row(). None of this class's
+        # fixture collections (e.g. "code__o__onnx-x__v1") are registered,
+        # so the real answer is "no row" -- but leaving get_collection_row
+        # unmocked makes THAT the first-ever call to mcp_infra.get_t3() in
+        # the process, which lazily constructs a REAL HttpVectorClient and
+        # performs a real /version probe against this box's local test
+        # engine as a side effect, memoizing its answer into this module's
+        # OWN _vector_client_instance global -- poisoning the very next
+        # _serving_embedding_mode() check inside the SAME function call
+        # with this box's actual serving mode ("onnx-local"), diverting
+        # cap=300 to cap=16 for reasons having nothing to do with what
+        # this class is testing. Stubbing "no row" short-circuits that
+        # chain entirely; _is_cce_collection still falls to (correct)
+        # name-based content-type derivation.
+        monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name: None)
+        # ALSO pin _vector_client_instance to None: this file's OTHER
+        # tests legitimately construct real-ish clients earlier in the
+        # SAME process and nothing resets this module-level global
+        # between tests, so _serving_embedding_mode() can silently
+        # answer this box's actual local-engine serving mode
+        # ("onnx-local") instead of the "unprobed" None every test in
+        # this class assumes (CODE=300/CCE=64, the timeout-derived
+        # split, not the memory-derived onnx-local one) unless a test
+        # explicitly overrides it, as test_per_collection_chunk_cap_
+        # values does.
+        monkeypatch.setattr("nexus.db.http_vector_client._vector_client_instance", None)
 
     def _capture(self, monkeypatch):
         calls: list[dict] = []
