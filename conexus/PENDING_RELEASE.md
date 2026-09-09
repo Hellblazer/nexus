@@ -48,3 +48,8 @@ mechanize, it matters enough to ship.
   round-3 rule and the fix preamble's two-list split.
 - `conexus/commands/rdr-gate.md`: nexus-yjf5l.2 — a Fixing findings
   bullet mirroring the same rule.
+- `conexus/hooks/hooks.json`: nexus-xn84f — SessionStart runs `nx self gc`
+  (third, after the upgrade and the preflight) so a generation a
+  long-lived session held at install time is reaped once that session
+  ends, not at the next install; a box without the verb or the layout
+  is silent (`|| true`).

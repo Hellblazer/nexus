@@ -181,11 +181,8 @@ def perform_self_install(
     # RULE (d) IS PASSED HERE. --self names the generation hosting this very
     # process; without it the reap below is free to delete the tree these
     # lines are executing from.
-    _sh(
-        install_dir,
-        f'nx_gc_generations --keep {int(keep)} --self "{host}" "{tools}"',
-        check=False,
-    )
+    for line in _reap_generations(install_dir, tools, keep=keep, self_generation=host):
+        click.echo(line)
 
     # A HYBRID BOX CONVERGES HERE, NOT IN THE elif ABOVE. A generation layout
     # beside a legacy `uv tool install` tree takes the generation branch every
@@ -539,8 +536,9 @@ def _converge_legacy_install(
     return generation
 
 
-def _sh(install_dir: Path, snippet: str, *, check: bool = True) -> None:
-    """Source the install library and run one statement against it."""
+def _sh(install_dir: Path, snippet: str, *, check: bool = True) -> str:
+    """Source the install library and run one statement against it.
+    Returns the statement's stdout."""
     r = subprocess.run(  # noqa: S603 — fixed argv, no shell interpolation of user input
         ["bash", "-c",
          f'. "{install_dir}/layout.sh"; . "{install_dir}/flip.sh"; '
@@ -550,6 +548,74 @@ def _sh(install_dir: Path, snippet: str, *, check: bool = True) -> None:
     )
     if check and r.returncode != 0:
         raise click.ClickException(f"{snippet.split()[0]} failed:\n{r.stderr.strip()}")
+    return r.stdout
+
+
+def _reap_generations(
+    install_dir: Path, tools: Path, *, keep: int,
+    self_generation: Path | None, dry_run: bool = False,
+) -> list[str]:
+    """Run gc.sh's reap once and return its report lines (``reaped``,
+    ``would reap``, ``kept ...: held by ...``). The four never-delete rules
+    live in gc.sh; this passes rule (d) when the caller runs from a
+    generation and never raises: a reap that cannot run leaves the trees
+    where they are, which is the safe direction."""
+    self_arg = f' --self "{self_generation}"' if self_generation is not None else ""
+    dry_arg = " --dry-run" if dry_run else ""
+    out = _sh(
+        install_dir,
+        f'nx_gc_generations --keep {int(keep)}{dry_arg}{self_arg} "{tools}"',
+        check=False,
+    )
+    return [line for line in out.splitlines() if line.strip()]
+
+
+def perform_self_gc(*, keep: int = 3, dry_run: bool = False) -> list[str] | None:
+    """Reap generations WITHOUT installing one (nexus-xn84f).
+
+    ``nx self install`` was the only caller of the reap, so a generation
+    held by a long-lived ``nx-mcp`` at install time stayed on disk until the
+    NEXT install, and on a box whose sessions live for days every generation
+    since those sessions started was held at every install: 1.7 GB per
+    upgrade, never reclaimed. This is the same reap, callable on its own (the
+    SessionStart hook runs it), so a tree goes the moment its holders are
+    gone. Returns the report lines, or ``None`` when this box has no
+    generation layout (nothing to reap; not an error, so a hook on a dev
+    checkout or a legacy uv box stays silent).
+    """
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    tools = install_layout.tools_dir()
+    if not _generation_layout_present(tools):
+        return None
+    install_dir = packaged_install_dir()
+    host = running_generation()
+    self_generation = (
+        host if host.parent == tools and host.name.startswith(install_layout.GENERATION_PREFIX)
+        else None
+    )
+    return _reap_generations(
+        install_dir, tools, keep=keep, self_generation=self_generation, dry_run=dry_run,
+    )
+
+
+def prune_uv_cache() -> str:
+    """``uv cache prune`` after a successful flip (nexus-xn84f): every
+    generation build unpacks its wheels into uv's archive cache and nothing
+    ever removed them (82 GB measured on a box that had been upgrading for
+    months). Best-effort and never raises; returns one line for the
+    operator. ``uv`` is looked up on PATH exactly as the generation build
+    does."""
+    try:
+        r = subprocess.run(  # noqa: S603 — fixed argv
+            ["uv", "cache", "prune"], capture_output=True, text=True, check=False, timeout=600,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"uv cache prune skipped: {exc}"
+    if r.returncode != 0:
+        return f"uv cache prune failed (rc={r.returncode}): {r.stderr.strip()[:200]}"
+    tail = (r.stderr.strip() or r.stdout.strip()).splitlines()
+    return "uv cache prune: " + (tail[-1] if tail else "done")
 
 
 @click.group("self")
@@ -583,4 +649,30 @@ def install_cmd(keep: int, version: str | None, extras: tuple[str, ...], dry_run
     if generation is None:
         return
     click.echo(f"installed {generation.name}")
+    click.echo(prune_uv_cache())
     click.echo("run `nx upgrade` for migrations; live sessions converge at their next spawn")
+
+
+@self_group.command("gc")
+@click.option("--keep", default=3, show_default=True,
+              help="Generations to retain. The four never-delete rules still apply.")
+@click.option("--dry-run", is_flag=True, help="Report what would go; delete nothing.")
+@click.option("--prune-uv-cache", "prune_cache", is_flag=True,
+              help="Also run `uv cache prune` (the wheel archive every build feeds and nothing else empties).")
+def gc_cmd(keep: int, dry_run: bool, prune_cache: bool) -> None:
+    """Reap old generations without installing one.
+
+    The reap `nx self install` runs at the end, on its own: a generation a
+    long-lived session was holding at install time goes here once that
+    session has ended. The SessionStart hook runs this. Silent on a box with
+    no generation layout.
+    """
+    lines = perform_self_gc(keep=keep, dry_run=dry_run)
+    if lines is None:
+        return
+    for line in lines:
+        click.echo(line)
+    if not lines:
+        click.echo("nothing to reap")
+    if prune_cache and not dry_run:
+        click.echo(prune_uv_cache())

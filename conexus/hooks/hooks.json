@@ -16,6 +16,11 @@
           },
           {
             "type": "command",
+            "command": "nx self gc >/dev/null 2>&1 || true",
+            "timeout": 30
+          },
+          {
+            "type": "command",
             "command": "nx hook session-start",
             "timeout": 10
           },

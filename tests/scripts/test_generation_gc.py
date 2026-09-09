@@ -200,6 +200,29 @@ def test_a_held_generation_outside_keep_last_n_is_still_retained(env) -> None:
     )
 
 
+def test_a_held_generation_is_reported_as_kept_with_its_holders(env) -> None:
+    """nexus-xn84f: a reap that only reports what it deleted let a box grow one
+    generation per upgrade with nothing on the terminal saying why. A held tree
+    outside the keep window is named, with the pids holding it, in both the wet
+    and the dry pass."""
+    tools, stub_bin = env
+    gens = [_gen(tools, f"{i:02d}") for i in range(4)]
+    _point(tools, "current", gens[3])
+    _stub_ps(stub_bin, [
+        "  999 /usr/bin/vim unrelated.txt",
+        f" 4242 {gens[0]}/bin/python -m nexus.mcp",
+    ])
+
+    dry = _sh("nx_gc_generations --keep 1 --dry-run", tools, stub_bin).stdout
+    wet = _sh("nx_gc_generations --keep 1", tools, stub_bin).stdout
+
+    for out in (dry, wet):
+        kept = [line for line in out.splitlines() if line.startswith("kept ")]
+        assert kept == [f"kept {gens[0]}: held by 4242"], out
+    assert gens[0].is_dir(), "the held generation was reaped"
+    assert not gens[1].is_dir(), "the free generation outside the window survived (the test proved nothing)"
+
+
 def test_gc_is_a_no_op_on_a_fresh_single_generation_install(env) -> None:
     tools, stub_bin = env
     only = _gen(tools, "00")

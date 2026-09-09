@@ -558,7 +558,10 @@ def _check_generation_holders(
         except Exception:  # noqa: BLE001 — a census failure is not a layout fault
             continue
         if pids:
-            held.append(f"{gen.name}: {len(pids)} ({', '.join(str(p) for p in pids[:4])})")
+            held.append(
+                f"{gen.name}: {len(pids)} ({', '.join(str(p) for p in pids[:4])}), "
+                f"{_format_bytes(_tree_bytes(gen))} on disk"
+            )
     # The legacy uv tree is an "older generation" too -- the oldest one there
     # is -- and it is receipt-less, so it is never in *generations*. Ask the
     # census for it by structure (nexus-k52g0: 9 processes on the 7.19.0 uv
@@ -582,9 +585,37 @@ def _check_generation_holders(
         label="Holders", ok=True,
         detail=(
             "still bound to an older generation, converging at their next "
-            f"spawn — {'; '.join(held)}"
+            f"spawn — {'; '.join(held)}. A held tree is never reaped while "
+            "those processes live (nexus-xn84f): end those sessions, then "
+            "`nx self gc` (or the next `nx self install`) reclaims it."
         ),
     )]
+
+
+def _tree_bytes(root: Path) -> int:
+    """Bytes under *root*, following no symlinks; 0 when unreadable."""
+    total = 0
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))]
+            for name in filenames:
+                fp = os.path.join(dirpath, name)
+                try:
+                    if not os.path.islink(fp):
+                        total += os.stat(fp).st_size
+                except OSError:
+                    continue
+    except OSError:
+        return 0
+    return total
+
+
+def _format_bytes(n: int) -> str:
+    if n >= 1 << 30:
+        return f"{n / (1 << 30):.1f} GB"
+    if n >= 1 << 20:
+        return f"{n / (1 << 20):.0f} MB"
+    return f"{n} B"
 
 
 def _check_process_skew() -> list[HealthResult]:

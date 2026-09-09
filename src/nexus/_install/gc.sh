@@ -141,8 +141,13 @@ $_nx_gc_self"
         done
         [ "$_nx_gc_is_protected" -eq 1 ] && continue
 
-        # Rule (c).
-        if [ -n "$(nx_generation_holder_pids "$_nx_gc_dir" "$_nx_gc_snapshot")" ]; then
+        # Rule (c). Say so on stdout (nexus-xn84f): a held tree outside the
+        # keep window is 1.7 GB the operator cannot see go, and a reap that
+        # only reports what it deleted let a box grow one generation per
+        # upgrade for as long as its sessions lived.
+        _nx_gc_holders="$(nx_generation_holder_pids "$_nx_gc_dir" "$_nx_gc_snapshot")"
+        if [ -n "$_nx_gc_holders" ]; then
+            printf 'kept %s: held by %s\n' "$_nx_gc_dir" "$(printf '%s' "$_nx_gc_holders" | tr '\n' ' ' | sed 's/ *$//')"
             continue
         fi
 

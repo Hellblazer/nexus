@@ -566,6 +566,31 @@ def test_holders_of_older_generations_are_rendered_informationally(layout, monke
     assert "4242" in row.detail or "1" in row.detail, row.detail
 
 
+def test_holders_row_names_the_bytes_held_and_the_remedy(layout, monkeypatch) -> None:
+    """nexus-xn84f: a held generation is 1.7 GB that cannot be reclaimed while
+    its holders live, and the row used to say only that they converge later.
+    It now says how much is held and what releases it."""
+    from nexus import install_census
+
+    tools, bin_dir = layout
+    old = _generation(tools, "20260101T000000Z")
+    new = _generation(tools, "20260826T010000Z")
+    (old / "lib").mkdir()
+    (old / "lib" / "blob.bin").write_bytes(b"x" * (3 * 1024 * 1024))
+    (tools / "current").symlink_to(new)
+    (bin_dir / "nx").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(
+        install_census, "generation_holder_pids",
+        lambda gen, snapshot=None: [4242] if Path(gen).name == old.name else [],
+    )
+
+    row = _result(health._check_generation_layout(), "Holders")
+
+    assert row.ok is True
+    assert "3 MB on disk" in row.detail, row.detail
+    assert "nx self gc" in row.detail, row.detail
+
+
 # --------------------------------------------------------------------------
 # the silent-green regression guard the bead asked for BY NAME
 # --------------------------------------------------------------------------
