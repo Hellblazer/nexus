@@ -2,6 +2,7 @@
 package dev.nexus.service.vectors;
 
 import dev.nexus.service.PgCatalogProbes;
+import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
 import com.zaxxer.hikari.HikariConfig;
@@ -21,6 +22,8 @@ import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -61,6 +64,16 @@ class PgVectorRepositoryGcQuarantineTest {
 
     private static String ch(String seed) {
         return Chash.ofText(seed).toHex();
+    }
+
+    /** A fixed 1024-dim unit vector, for the two nexus-uxd2a tests that seed a
+     *  chunk row directly via {@link PgContainerHelper#insertChunk1024} (bypassing
+     *  {@link PgVectorRepository#upsertChunks}'s own registration precheck) --
+     *  content is irrelevant, only that {@code exactly_one_embedding} is satisfied. */
+    private static float[] constantVector1024() {
+        float[] v = new float[1024];
+        v[0] = 1.0f;
+        return v;
     }
 
     /** Per-test-case collection pair — PER_CLASS lifecycle shares one container/tenant
@@ -423,13 +436,164 @@ class PgVectorRepositoryGcQuarantineTest {
             .isTrue();
         var row = collectionRow(TENANT_A, quarantineCol);
         assertThat(row).isNotNull();
-        // quarantineCol("reg2") = "quarantine-code__gcq-reg2__voyage-code-3__v1" — 4
-        // segments, so the split-on-"__" enrichment applies (parity with the deleted
-        // Java-side PgVectorRepository.ensureCollectionRegistered stub).
-        assertThat(row.contentType()).isEqualTo("quarantine-code");
+        // RDR-204 nexus-uxd2a fix: the quarantine sibling's attributes are copied
+        // from originCol's own registered row (seedChunk registers it via
+        // PgContainerHelper.insertCollection, correctly stripping any quarantine-
+        // prefix -- originCol carries none here since it is the ORIGIN), never
+        // parsed from the sibling's OWN name. Before this fix, the SQL function's
+        // string_to_array(quarantineCol, "__")[1] parse left the literal
+        // "quarantine-" prefix attached, landing content_type = "quarantine-code"
+        // -- exactly the shipped defect this test now proves is fixed.
+        assertThat(row.contentType()).isEqualTo("code");
         assertThat(row.ownerId()).isEqualTo("gcq-reg2");
         assertThat(row.embeddingModel()).isEqualTo("voyage-code-3");
-        assertThat(row.modelVersion()).isEqualTo("v1");
+        // model_version is copied from originCol's REAL registered value, not parsed
+        // from either name -- PgContainerHelper.insertCollection never sets it (stays
+        // at its catalog-001-5 default ''), so that is exactly what is copied here,
+        // not the sibling name's own "v1" segment the pre-fix body would have parsed.
+        assertThat(row.modelVersion()).isEqualTo("");
+    }
+
+    @Test
+    void quarantineOrphans_registersSiblingFromOriginRowAttributes_notParsedFromEitherName() throws Exception {
+        // nexus-uxd2a item 1: every attribute (content_type, owner_id,
+        // embedding_model, model_version, dimension) is copied verbatim from the
+        // ORIGIN's own registered row -- proven with an origin whose registered
+        // row carries values a name-parse could never produce (a real dimension;
+        // model_version "v7" instead of the name's own "v1"), so a passing
+        // assertion can only mean the row, not either name, was read.
+        String originCol = originCol("uxd2a-origin-attrs");
+        String quarantineCol = quarantineCol("uxd2a-origin-attrs");
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES)
+                .insertInto(CATALOG_COLLECTIONS,
+                    CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                    CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                    CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
+                    CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+                .values(TENANT_A, originCol, "code", "gcq-uxd2a-origin-attrs", "voyage-code-3",
+                    "v7", 1024, "live")
+                .onConflictDoNothing()
+                .execute();
+        }
+        String chashOrphan = ch("gcq-uxd2a-origin-attrs-orphan");
+        // seedChunk's own insertCollection call is a redundant ON CONFLICT DO
+        // NOTHING against the row just seeded above -- the explicit attributes win.
+        seedChunk(TENANT_A, originCol, chashOrphan, "orphan text", "Orphan Doc");
+
+        var outcome = vectorRepo.quarantineOrphans(TENANT_A, originCol, quarantineCol,
+            "2026-09-09T00:00:00Z", 20);
+        assertThat(outcome.moved()).isEqualTo(1L);
+
+        var row = collectionRow(TENANT_A, quarantineCol);
+        assertThat(row).isNotNull();
+        assertThat(row.contentType()).as("content_type copied from origin, not parsed").isEqualTo("code");
+        assertThat(row.ownerId()).as("owner_id copied from origin").isEqualTo("gcq-uxd2a-origin-attrs");
+        assertThat(row.embeddingModel()).as("embedding_model copied from origin").isEqualTo("voyage-code-3");
+        assertThat(row.modelVersion())
+            .as("model_version copied from origin's real value, not the sibling name's own \"v1\"")
+            .isEqualTo("v7");
+        try (Connection su = pg.createConnection("")) {
+            Integer dimension = DSL.using(su, SQLDialect.POSTGRES)
+                .select(CATALOG_COLLECTIONS.DIMENSION)
+                .from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A))
+                .and(CATALOG_COLLECTIONS.NAME.eq(quarantineCol))
+                .fetchOne(CATALOG_COLLECTIONS.DIMENSION);
+            assertThat(dimension)
+                .as("dimension copied from origin -- the pre-fix body never even attempted this column")
+                .isEqualTo(1024);
+        }
+    }
+
+    @Test
+    void quarantineOrphans_unregisteredOrigin_raisesLoud_registersNothing() throws Exception {
+        // nexus-uxd2a item 2: chunks_collection_fk normally makes an "orphan chunk
+        // with an unregistered origin" state unreachable (a chunk write requires
+        // its collection to already be registered), and PgVectorRepository.
+        // upsertChunks carries its OWN Java-level registration check on top of
+        // that -- both are bypassed here the same way
+        // Hygiene004OwnerGrammarUnderscoreTest seeds a bare chunk row (
+        // nexus_test.insert_chunk_bare_vector, a raw DB insert with no Java-side
+        // check), around a momentary FK drop (PgContainerHelper.dropConstraint /
+        // addFkNotValid, this file's own seedManifestBypassingFk idiom), to prove
+        // the SQL-level guard itself (RAISE EXCEPTION), not just that the Java
+        // layer's own dimForCollection precheck already blocks it.
+        String originCol = originCol("uxd2a-unreg-origin");
+        String quarantineCol = quarantineCol("uxd2a-unreg-origin");
+        String chash = ch("gcq-uxd2a-unreg-origin-orphan");
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            org.jooq.DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.dropConstraint(su, CHUNKS, "chunks_collection_fk");
+            PgContainerHelper.insertChunk1024(ctx, TENANT_A, originCol,
+                java.util.HexFormat.of().parseHex(chash), Vector.of(constantVector1024()));
+            PgContainerHelper.addFkNotValid(su, CHUNKS, "chunks_collection_fk", "collection",
+                CATALOG_COLLECTIONS, "name", "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
+        }
+        assertThat(collectionRegistered(TENANT_A, originCol))
+            .as("precondition: the origin has a chunk but was never registered")
+            .isFalse();
+
+        assertThatThrownBy(() -> vectorRepo.quarantineOrphans(TENANT_A, originCol, quarantineCol,
+                "2026-09-09T00:00:00Z", 20))
+            .as("an unregistered origin is a fail-loud precondition -- attributes are "
+                + "copied from its row, never parsed from either name")
+            .hasMessageContaining(originCol)
+            .hasMessageContaining(TENANT_A);
+        assertThat(collectionRegistered(TENANT_A, quarantineCol))
+            .as("a failed-loud quarantine attempt must not register the sibling")
+            .isFalse();
+    }
+
+    @Test
+    void quarantineOrphans_priorMislabelledSibling_correctedOnConflictUpdate() throws Exception {
+        // nexus-uxd2a item 5: a sibling ALREADY registered with the shipped
+        // defect's exact signature (content_type = "quarantine-code", left behind
+        // by the buggy pre-fix body, or by hygiene-005-3's migration correction
+        // never having run against this row) is corrected the next time
+        // gc_quarantine_orphans writes to it — ON CONFLICT (tenant_id, name) DO
+        // UPDATE, not DO NOTHING. The engine self-heals every mislabelled sibling
+        // it still actively writes to, without waiting for an operator to re-run
+        // the migration-time data correction.
+        String originCol = originCol("uxd2a-selfheal");
+        String quarantineCol = quarantineCol("uxd2a-selfheal");
+        String chashFirst = ch("gcq-uxd2a-selfheal-first");
+        seedChunk(TENANT_A, originCol, chashFirst, "first orphan text", "First Orphan Doc");
+        // Simulate the shipped defect directly: register the sibling exactly as
+        // the pre-fix body would have (content_type carrying the literal
+        // "quarantine-" prefix) via a DIRECT insert -- not through
+        // gc_quarantine_orphans, which this fix would never again write this way.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES)
+                .insertInto(CATALOG_COLLECTIONS,
+                    CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                    CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                    CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
+                    CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+                .values(TENANT_A, quarantineCol, "quarantine-code", "gcq-uxd2a-selfheal",
+                    "voyage-code-3", "v1", "quarantine")
+                .onConflictDoNothing()
+                .execute();
+        }
+        assertThat(collectionRow(TENANT_A, quarantineCol).contentType())
+            .as("precondition: the sibling carries the shipped defect's exact signature")
+            .isEqualTo("quarantine-code");
+
+        String chashSecond = ch("gcq-uxd2a-selfheal-second");
+        seedChunk(TENANT_A, originCol, chashSecond, "second orphan text", "Second Orphan Doc");
+        var outcome = vectorRepo.quarantineOrphans(TENANT_A, originCol, quarantineCol,
+            "2026-09-09T00:00:00Z", 20);
+        // Neither chash has a manifest row -- both chashFirst and chashSecond are
+        // orphans by the time this single call runs.
+        assertThat(outcome.moved()).isEqualTo(2L);
+
+        assertThat(collectionRow(TENANT_A, quarantineCol).contentType())
+            .as("ON CONFLICT DO UPDATE corrects the mislabelled sibling's content_type "
+                + "on its next write, from the origin's own attributes")
+            .isEqualTo("code");
     }
 
     @Test
@@ -490,10 +654,153 @@ class PgVectorRepositoryGcQuarantineTest {
         var row = collectionRow(TENANT_A, originCol);
         assertThat(row).isNotNull();
         // originCol("reg4") = "code__gcq-reg4__voyage-code-3__v1" — 4 segments.
+        // RDR-204 nexus-uxd2a fix: these attributes are now copied from
+        // quarantineCol's own registered row (seedChunk registers it via
+        // PgContainerHelper.insertCollection's correct regex parse), which
+        // happens to agree with originCol's own name here — the DEDICATED
+        // proof that this is a copy, not a coincidence, is
+        // restoreRereferenced_firstEverOrigin_copiesQuarantineRowAttributes_notEitherName
+        // below, where the two disagree.
         assertThat(row.contentType()).isEqualTo("code");
         assertThat(row.ownerId()).isEqualTo("gcq-reg4");
         assertThat(row.embeddingModel()).isEqualTo("voyage-code-3");
-        assertThat(row.modelVersion()).isEqualTo("v1");
+        // model_version copied from quarantineCol's REAL registered value (never set
+        // by PgContainerHelper.insertCollection, stays at its default ''), not
+        // parsed from either name.
+        assertThat(row.modelVersion()).isEqualTo("");
+    }
+
+    @Test
+    void restoreRereferenced_firstEverOrigin_copiesQuarantineRowAttributes_notEitherName() throws Exception {
+        // nexus-uxd2a item 3: quarantineCol's registered row carries attributes a
+        // name-parse of EITHER collection's own name could never produce (a real
+        // dimension; model_version "v9") -- a passing assertion can only mean the
+        // quarantine row, not a name, was read.
+        String originCol = originCol("uxd2a-restore-origin-attrs");
+        String quarantineCol = quarantineCol("uxd2a-restore-origin-attrs");
+        String chash = ch("gcq-uxd2a-restore-origin-attrs");
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES)
+                .insertInto(CATALOG_COLLECTIONS,
+                    CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                    CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                    CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
+                    CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+                .values(TENANT_A, quarantineCol, "code", "gcq-uxd2a-restore-origin-attrs",
+                    "voyage-code-3", "v9", 1024, "quarantine")
+                .onConflictDoNothing()
+                .execute();
+        }
+        // seedChunk's own insertCollection call for quarantineCol is a redundant
+        // ON CONFLICT DO NOTHING against the row just seeded above.
+        seedChunk(TENANT_A, quarantineCol, chash, "quarantined text", "Quarantined Doc");
+        seedManifestBypassingFk(TENANT_A, "gcq.doc.uxd2a-restore-origin-attrs", chash, originCol);
+        assertThat(collectionRegistered(TENANT_A, originCol))
+            .as("precondition: first-ever restore into this origin").isFalse();
+
+        long restored = vectorRepo.restoreRereferenced(TENANT_A, quarantineCol, originCol);
+        assertThat(restored).isEqualTo(1L);
+
+        var row = collectionRow(TENANT_A, originCol);
+        assertThat(row).isNotNull();
+        assertThat(row.contentType()).isEqualTo("code");
+        assertThat(row.ownerId())
+            .as("owner_id copied from the quarantine row, not originCol's own name")
+            .isEqualTo("gcq-uxd2a-restore-origin-attrs");
+        assertThat(row.modelVersion())
+            .as("model_version copied from the quarantine row's real value \"v9\", "
+                + "not originCol's own name (which would parse to \"v1\")")
+            .isEqualTo("v9");
+        try (Connection su = pg.createConnection("")) {
+            var r = DSL.using(su, SQLDialect.POSTGRES)
+                .select(CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+                .from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A))
+                .and(CATALOG_COLLECTIONS.NAME.eq(originCol))
+                .fetchOne();
+            assertThat(r).isNotNull();
+            assertThat(r.get(CATALOG_COLLECTIONS.DIMENSION))
+                .as("dimension copied from the quarantine row").isEqualTo(1024);
+            assertThat(r.get(CATALOG_COLLECTIONS.LIFECYCLE_STATE))
+                .as("first-ever origin registration is lifecycle_state 'live'").isEqualTo("live");
+        }
+    }
+
+    @Test
+    void restoreRereferenced_unregisteredQuarantineCollection_raisesLoud() throws Exception {
+        // nexus-uxd2a item 3 (raise-loud half): PgVectorRepository.restoreRereferenced
+        // normally resolves dim from quarantineCollection at the Java layer
+        // (dimForCollection) BEFORE ever reaching the SQL function -- for a
+        // genuinely never-touched quarantine collection that already fails loud
+        // via UnregisteredCollectionException, see
+        // restoreRereferenced_neitherCollectionEverTouched_failsLoud_registersNothing
+        // above. This test proves the SQL-level guard directly, bypassing the Java
+        // wrapper AND gc_restore_rereferenced's own pre-flight (v_chashes IS NULL
+        // -> RETURN 0 early, before ever reaching the registration code): a real
+        // chunk is seeded into quarantineCol (nexus_test.insert_chunk_bare_vector,
+        // a raw DB insert with no Java-side check, around a momentary FK drop --
+        // the same idiom quarantineOrphans_unregisteredOrigin_raisesLoud_
+        // registersNothing above uses) and a manifest row references originCol for
+        // the same chash (seedManifestBypassingFk, this file's own idiom for
+        // exactly this "chunk sits only in the quarantine collection" shape) --
+        // so v_chashes is non-NULL and the function actually reaches the
+        // registration guard, which then finds quarantineCol itself unregistered.
+        String originCol = originCol("uxd2a-restore-unreg-quar");
+        String quarantineCol = quarantineCol("uxd2a-restore-unreg-quar");
+        String chash = ch("gcq-uxd2a-restore-unreg-quar");
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            org.jooq.DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.dropConstraint(su, CHUNKS, "chunks_collection_fk");
+            PgContainerHelper.insertChunk1024(ctx, TENANT_A, quarantineCol,
+                java.util.HexFormat.of().parseHex(chash), Vector.of(constantVector1024()));
+            PgContainerHelper.addFkNotValid(su, CHUNKS, "chunks_collection_fk", "collection",
+                CATALOG_COLLECTIONS, "name", "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
+        }
+        seedManifestBypassingFk(TENANT_A, "gcq.doc.uxd2a-restore-unreg-quar", chash, originCol);
+        assertThat(collectionRegistered(TENANT_A, quarantineCol))
+            .as("precondition: the quarantine collection has a chunk but was never registered")
+            .isFalse();
+
+        try (Connection su = pg.createConnection("")) {
+            org.jooq.DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThatThrownBy(() ->
+                    dev.nexus.service.jooq.nexus.Routines.gcRestoreRereferenced(
+                        ctx.configuration(), 1024, TENANT_A, quarantineCol, originCol))
+                .as("an unregistered quarantine collection is a fail-loud precondition for "
+                    + "a first-ever origin registration")
+                .hasMessageContaining(quarantineCol)
+                .hasMessageContaining(TENANT_A);
+        }
+        assertThat(collectionRegistered(TENANT_A, originCol))
+            .as("a failed-loud restore attempt must not register the origin either")
+            .isFalse();
+    }
+
+    @Test
+    void restoreRereferenced_existingOrigin_untouchedByRestore() throws Exception {
+        // nexus-uxd2a item 4: an origin row that already exists keeps its OWN
+        // attributes and state — ON CONFLICT (tenant_id, name) DO NOTHING — even
+        // though the quarantine row's attributes disagree.
+        String originCol = originCol("uxd2a-restore-existing-origin");
+        String quarantineCol = quarantineCol("uxd2a-restore-existing-origin");
+        String chash = ch("gcq-uxd2a-restore-existing-origin");
+        seedChunk(TENANT_A, originCol, chash, "will be orphaned then healed", "Pre-existing Doc");
+        var originBefore = collectionRow(TENANT_A, originCol);
+        assertThat(originBefore).isNotNull();
+
+        seedChunk(TENANT_A, quarantineCol, chash, "quarantined text", "Quarantined Doc");
+        seedManifestBypassingFk(TENANT_A, "gcq.doc.uxd2a-restore-existing-origin", chash, originCol);
+
+        long restored = vectorRepo.restoreRereferenced(TENANT_A, quarantineCol, originCol);
+        assertThat(restored).isEqualTo(1L);
+
+        var originAfter = collectionRow(TENANT_A, originCol);
+        assertThat(originAfter)
+            .as("an existing origin row must be byte-identical after a restore — "
+                + "ON CONFLICT DO NOTHING, never touched")
+            .isEqualTo(originBefore);
     }
 
     // ── expire: grace-window floor refuses a mass hard-delete, force overrides ─

@@ -1217,6 +1217,19 @@
     <include file="db/changelog/hygiene-004-owner-grammar-underscore.xml"/>
 
     <!--
+        RDR-204 engine, bead nexus-uxd2a: shipped-defect fix — gc_quarantine_orphans
+        / gc_restore_rereferenced no longer self-register a sibling collection by
+        parsing its own name (the shipped defect: a real quarantine-CT__owner__model__vN
+        sibling name landed with content_type = "quarantine-CT", prefix still attached).
+        Both functions now copy attributes from a real, already-registered sibling row;
+        hygiene-005-3 is a one-off data correction for rows the buggy body already
+        mis-registered. Placed after hygiene-004 (must run after hygiene-002-1's own
+        registration-shape constraints exist) and before the grants tail, matching the
+        established late-append convention.
+    -->
+    <include file="db/changelog/hygiene-005-gc-registration-from-origin-row.xml"/>
+
+    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when

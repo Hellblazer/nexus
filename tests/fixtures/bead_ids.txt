@@ -5478,6 +5478,7 @@ nexus-uvn3t.1
 nexus-uvv1
 nexus-uwkw
 nexus-uxar
+nexus-uxd2a
 nexus-uxg4u
 nexus-uxg4u.1
 nexus-uxkq5

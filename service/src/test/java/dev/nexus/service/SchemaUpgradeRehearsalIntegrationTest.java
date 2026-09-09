@@ -449,6 +449,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   hygiene-001-11 nexus-tk070.p6a
                 //   hygiene-002-1 nexus-ft04v.4
                 //   hygiene-004-1 nexus-ztafa
+                //   hygiene-005-3 nexus-uxd2a
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -891,6 +892,45 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // this leg only needs to prove the row survives the FULL
                     // aged-fleet hop correctly classified under real RLS.
                     registerCollection(su, "t1", "code__h004_owner__bge-base-en-v15-768__v1");
+
+                    // hygiene-005-3 (nexus-uxd2a, RDR-204 engine, seed-coverage lint
+                    // follow-up): the one-off data correction for
+                    // nexus.catalog_collections rows a live buggy gc_quarantine_orphans
+                    // self-registration (hygiene-002-2's OWN shipped defect, fixed by
+                    // this same hop's hygiene-005-1) already mislabelled. This leg
+                    // cannot reproduce that RUNTIME shape directly (gc_quarantine_orphans
+                    // is called by application code at runtime, never by a Liquibase
+                    // changeset), so it seeds the one shape reachable through a pure
+                    // migration-only hop instead: a SUFFIX-shaped quarantine sibling name
+                    // ("<name>__quarantine" -- see hygiene-005's own header for why the
+                    // suffix shape is covered defensively alongside the real PREFIX
+                    // production shape) never matches hygiene-002-1's OR hygiene-004-1's
+                    // m4/mq/m2 regexes (both require a "__v<n>" ending; this name ends
+                    // in "__quarantine"), so it is always classified content_type =
+                    // 'unknown' / lifecycle_state = 'disputed' by hygiene-002-1's branch D
+                    // -- exactly hygiene-005-3's own correction predicate
+                    // (content_type = 'unknown' AND a quarantine-shaped name). Two
+                    // DEDICATED rows, registered the same bare (tenant_id, name) way as
+                    // the hygiene-002-1/hygiene-004-1 fixtures above (lifecycle_state does
+                    // not exist yet at seed time):
+                    //   -uxd2a1: a suffix-shaped sibling WHOSE ORIGIN (the name with the
+                    //   suffix stripped) IS ALSO seeded below and correctly classified
+                    //   'live'/'code' by hygiene-002-1's own branch A -- hygiene-005-3
+                    //   must copy the origin's attributes and set lifecycle_state =
+                    //   'quarantine'.
+                    //   -uxd2a2: a suffix-shaped sibling with NO registered origin --
+                    //   hygiene-005-3's "no origin" branch leaves content_type = 'unknown'
+                    //   unchanged (no literal "quarantine-" prefix to strip) and never
+                    //   touches lifecycle_state (stays 'disputed').
+                    // The FULL branch-selection logic itself (both name shapes, the
+                    // origin-copy vs no-origin-strip split, the dormant-promotion branch)
+                    // is proven separately, free of this fixture's aged-fleet constraints,
+                    // by Hygiene005GcRegistrationFromOriginRowDataCorrectionTest's
+                    // HEAD-schema fixtures; this leg only needs to prove the row survives
+                    // the FULL aged-fleet hop correctly classified under real RLS.
+                    registerCollection(su, "t1", "code__uxd2a1__bge-base-en-v15-768__v1");
+                    registerCollection(su, "t1", "code__uxd2a1__bge-base-en-v15-768__v1__quarantine");
+                    registerCollection(su, "t1", "code__uxd2a2__bge-base-en-v15-768__v1__quarantine");
 
                     assertThat(count(su, "SELECT count(*) FROM nexus.chash_index"))
                         .as("superuser ground truth after seeding").isEqualTo(5);
@@ -1948,6 +1988,43 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "name hygiene-002-1's own owner grammar cannot match -- 'live' "
                             + "with the name's own attributes, not branch D's 'unknown' / "
                             + "disputed")
+                        .isEqualTo(1);
+
+                    // hygiene-005-3 (nexus-uxd2a): the suffix-shaped sibling WITH a
+                    // registered origin must have every attribute copied from that
+                    // origin's own row and lifecycle_state set to 'quarantine'.
+                    assertThat(h002Dsl.fetchCount(CATALOG_COLLECTIONS,
+                        CATALOG_COLLECTIONS.TENANT_ID.eq("t1")
+                            .and(CATALOG_COLLECTIONS.NAME.eq("code__uxd2a1__bge-base-en-v15-768__v1__quarantine"))
+                            .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq("code"))
+                            .and(CATALOG_COLLECTIONS.OWNER_ID.eq("uxd2a1"))
+                            .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq("bge-base-en-v15-768"))
+                            .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("quarantine"))))
+                        .as("hygiene-005-3 must copy the suffix-shaped sibling's attributes "
+                            + "from its registered origin sibling and set lifecycle_state = "
+                            + "'quarantine' -- never leave it at branch D's 'unknown' / disputed")
+                        .isEqualTo(1);
+                    // The origin itself is untouched by hygiene-005-3 (it was never
+                    // quarantine-shaped, so no branch's WHERE ever selects it).
+                    assertThat(h002Dsl.fetchCount(CATALOG_COLLECTIONS,
+                        CATALOG_COLLECTIONS.TENANT_ID.eq("t1")
+                            .and(CATALOG_COLLECTIONS.NAME.eq("code__uxd2a1__bge-base-en-v15-768__v1"))
+                            .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq("code"))
+                            .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("live"))))
+                        .as("the origin sibling itself is untouched -- hygiene-005-3 never "
+                            + "selects a non-quarantine-shaped name")
+                        .isEqualTo(1);
+                    // The suffix-shaped sibling with NO registered origin: content_type
+                    // stays 'unknown' (no literal "quarantine-" prefix to strip),
+                    // lifecycle_state is never touched (stays 'disputed').
+                    assertThat(h002Dsl.fetchCount(CATALOG_COLLECTIONS,
+                        CATALOG_COLLECTIONS.TENANT_ID.eq("t1")
+                            .and(CATALOG_COLLECTIONS.NAME.eq("code__uxd2a2__bge-base-en-v15-768__v1__quarantine"))
+                            .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq("unknown"))
+                            .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("disputed"))))
+                        .as("hygiene-005-3 with no registered origin sibling leaves "
+                            + "content_type = 'unknown' unchanged (nothing to strip) and "
+                            + "never touches lifecycle_state")
                         .isEqualTo(1);
 
                     assertThat(h002Dsl.fetchCount(CATALOG_COLLECTIONS,
