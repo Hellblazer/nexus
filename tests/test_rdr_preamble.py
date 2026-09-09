@@ -1050,6 +1050,34 @@ class TestPhaseReviewGate:
         assert "File fallback" in result.output
         assert "Item3" in result.output
 
+    def test_phase_review_gate_refuses_a_subset_when_an_item_start_fails_to_parse(self, rdr_env):
+        """GH #1443: a `5a.` item used to be absorbed into item 5 and the gate
+        enumerated 2 of 3 items; now it refuses with the offending line."""
+        body = (
+            "## Problem Statement\n\nProblem.\n\n"
+            "### Approach\n\n"
+            "1. **T2 read**: Read from T2 database.\n"
+            "1a. **T2 lease**: added after drafting.\n"
+            "2. **File fallback**: Fall back to .md files.\n\n"
+            "## Tradeoffs\n\nSome tradeoffs."
+        )
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-130-command-preambles.md",
+            {"title": "Command Preambles", "status": "accepted", "type": "decision", "priority": "P0"},
+            body=body,
+        )
+        result = _runner().invoke(
+            rdr,
+            ["preamble", "phase-review-gate", "--", "130", "--phase", "1", "--evidence", "Item1=nexus-aaaa,Item2=nexus-bbbb"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "ERROR" in result.output
+        assert "GH #1443" in result.output
+        assert "1a. **T2 lease**" in result.output
+        assert "CROSS-WALK PASSED" not in result.output
+        assert "| # | Label | Evidence needed |" not in result.output
+
     def test_phase_review_gate_pass2_all_covered_passes(self, rdr_env):
         """Pass 2 with all items covered: APPROACH CROSS-WALK PASSED printed."""
         body = (
@@ -1365,6 +1393,52 @@ class TestApproachSectionExtractor:
         from nexus.commands.rdr import _prg_extract_approach_section
         text = "## Intro\n\nx.\n\n## Proposed Solution\n\nbody.\n\n## Next\n\ny."
         assert _prg_extract_approach_section(text) == ""
+
+
+class TestPrgUnparsedItemStarts:
+    """GH #1443: the three §Approach shapes the item regex misses must be
+    reported, never absorbed into the previous item."""
+
+    def test_clean_numbered_list_has_no_unparsed_lines(self):
+        from nexus.commands.rdr import _prg_find_unparsed_item_starts  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "1. **T2 read**: read from T2.\n"
+            "   continuation prose of item one\n"
+            "2. **File fallback**: fall back to files.\n"
+            "- a sub bullet\n"
+        )
+        assert _prg_find_unparsed_item_starts(text) == []
+
+    def test_non_integer_item_number_is_reported(self):
+        from nexus.commands.rdr import _prg_find_unparsed_item_starts, _prg_parse_approach_items  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "5. **Daemon**: stand it up.\n"
+            "5a. **Daemon lease**: added after drafting.\n"
+            "6. **Routes**: wire reads.\n"
+        )
+        assert [n for n, _, _ in _prg_parse_approach_items(text)] == [5, 6]
+        assert _prg_find_unparsed_item_starts(text) == ["5a. **Daemon lease**: added after drafting."]
+
+    def test_wrapped_bold_label_is_reported(self):
+        from nexus.commands.rdr import _prg_find_unparsed_item_starts  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "1. **Short**: fine.\n"
+            "2. **A label long enough that the author wrapped it\n"
+            "   onto the next line**: description.\n"
+        )
+        assert _prg_find_unparsed_item_starts(text) == [
+            "2. **A label long enough that the author wrapped it",
+        ]
+
+    def test_label_on_the_following_line_is_reported(self):
+        from nexus.commands.rdr import _prg_find_unparsed_item_starts  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = "1. **First**: fine.\n2.\n**Second**: label below its number.\n"
+        assert _prg_find_unparsed_item_starts(text) == ["2."]
+
+    def test_phase_block_headers_are_not_item_starts(self):
+        from nexus.commands.rdr import _prg_find_unparsed_item_starts  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = "**Phase 0: Scaffolding**\n- bullet\n**Phase 1: Core**\n- bullet\n"
+        assert _prg_find_unparsed_item_starts(text) == []
 
 
 class TestPhaseBlockParser:

@@ -3746,6 +3746,9 @@ def _prg_extract_approach_section(text: str) -> str:
     return ""
 
 
+_PRG_ITEM_RE = re.compile(r"^(\d+)\.\s+\*\*([^*]+)\*\*[:\s]*(.*)")
+
+
 def _prg_parse_approach_items(
     approach_text: str,
 ) -> list[tuple[int, str, str]]:
@@ -3760,7 +3763,7 @@ def _prg_parse_approach_items(
     current_lines: list[str] = []
 
     for line in lines:
-        m = re.match(r"^(\d+)\.\s+\*\*([^*]+)\*\*[:\s]*(.*)", line)
+        m = _PRG_ITEM_RE.match(line)
         if m:
             if current_num is not None:
                 items.append(
@@ -3779,6 +3782,38 @@ def _prg_parse_approach_items(
             (current_num, current_label, " ".join(current_lines).strip())
         )
     return items
+
+
+_PRG_ITEM_START_RE = re.compile(r"^\s*(\d+[a-z]?)\.(\s|$)")
+_PRG_OPEN_BOLD_RE = re.compile(r"^\s*\*\*[^*]*$")
+_PRG_PHASE_HEADER_RE = re.compile(r"^\s*\*\*Phase\s+[0-9.]+")
+
+
+def _prg_find_unparsed_item_starts(approach_text: str) -> list[str]:
+    """Lines of §Approach that look like the start of an item but that
+    :func:`_prg_parse_approach_items` would silently absorb as continuation
+    text of the previous item (GH #1443).
+
+    Three shapes go invisible to the item regex and were measured to do so
+    on a downstream RDR (8 of 10 items enumerated, gate reported PASSED):
+    a non-integer item number (``5a.``), a bold label that wraps onto the
+    next line (the ``**`` opens but does not close on the line), and a
+    number on a line by itself with the label on the following line. Each
+    is a numbered line that fails the item regex, or a line that opens a
+    bold span without closing it. A ``**Phase N`` header is the
+    phase-block structure and is not an item start. Returned lines are
+    stripped; the caller refuses to enumerate rather than pass on a subset.
+    """
+    unparsed: list[str] = []
+    for line in approach_text.splitlines():
+        if _PRG_ITEM_RE.match(line):
+            continue
+        if _PRG_ITEM_START_RE.match(line):
+            unparsed.append(line.strip())
+            continue
+        if _PRG_OPEN_BOLD_RE.match(line) and not _PRG_PHASE_HEADER_RE.match(line):
+            unparsed.append(line.strip())
+    return unparsed
 
 
 def _prg_parse_phase_block_items(
@@ -3959,6 +3994,26 @@ def preamble_phase_review_gate(args: tuple[str, ...]) -> None:
         return
 
     items = _prg_parse_approach_items(approach_text)
+    unparsed = _prg_find_unparsed_item_starts(approach_text) if items else []
+    if unparsed:
+        # GH #1443: a line that looks like an item start but fails the item
+        # regex used to be absorbed as continuation text, so the gate
+        # enumerated a SUBSET of §Approach and could report PASSED on it.
+        # Refuse to enumerate: a partial cross-walk is the silent scope
+        # reduction this gate exists to catch.
+        print(
+            f"> **ERROR**: §Approach has {len(unparsed)} line(s) that look like "
+            "an item start but do not parse as `N. **Label**: description` "
+            "(GH #1443). The gate does not cross-walk a subset."
+        )
+        for raw in unparsed:
+            print(f">   - `{raw[:120]}`")
+        print(
+            "> Fix the RDR: integer item numbers only (no `5a.`; renumber or "
+            "nest as a bullet), the bold label opened and closed on the item's "
+            "own line, and the label on the same line as its number."
+        )
+        return
     if not items:
         # nexus-4u6mt: fall back to phase-block sub-bullet enumeration
         # (RDR-120-style §Approach). Filters to the requested --phase
