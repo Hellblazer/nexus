@@ -625,8 +625,10 @@ def _classify_never_chunked(e: object, owner_roots: dict[str, str] | None = None
     anomalous and worth investigating, not something to wave through as
     "legitimate by design".
     """
+    from nexus.corpus import collection_content_type  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
     if (
-        e.physical_collection.startswith("knowledge__")
+        collection_content_type(e.physical_collection) == "knowledge"
         and not e.file_path
         and not e.source_uri
     ):

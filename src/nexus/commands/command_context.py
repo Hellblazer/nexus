@@ -1234,9 +1234,10 @@ def _dt_reachable() -> tuple[bool, str]:
 
 def _knowledge_collections() -> list[str]:
     try:
+        from nexus.corpus import collection_content_type  # noqa: PLC0415 — command-local import (nexus.corpus)
         from nexus.db import make_t3  # noqa: PLC0415 — command-local import (db)
 
-        return sorted(c for c in make_t3().list_collections() if str(c).startswith("knowledge__"))
+        return sorted(c for c in make_t3().list_collections() if collection_content_type(str(c)) == "knowledge")
     except Exception:  # noqa: BLE001 — a preamble probe never aborts the command
         return []
 

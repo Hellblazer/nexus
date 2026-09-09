@@ -99,9 +99,11 @@ class _CatalogBackedRegistry:
         if "docs_collection" in fields and self._writer is not None:
             new_name = fields["docs_collection"]
             if new_name:
+                from nexus.corpus import collection_content_type  # noqa: PLC0415 — circular-dep avoidance (corpus)
+
                 owner = self._writer.ensure_owner_for_repo(repo)
                 owner_id = str(owner).replace(".", "-")
-                ct = new_name.split("__", 1)[0]
+                ct = collection_content_type(new_name)
                 try:
                     # RDR-204 P1.10 (nexus-ft04v.34): route through the
                     # client's write-time profile instead of hardcoding
@@ -1029,10 +1031,12 @@ def index_repo_cmd(
             # otherwise synthesize from the catalog-known docs collection
             # for this owner so the rewrite still fires on first-index
             # runs (where the docs__ default has not yet been registered).
+            from nexus.corpus import collection_content_type  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
             info = reg.get(path) or {}
             existing_docs = info.get("docs_collection", "")
             new_docs = ""
-            if existing_docs.startswith("docs__"):
+            if collection_content_type(existing_docs) == "docs":
                 new_docs = "knowledge__" + existing_docs.removeprefix("docs__")
             else:
                 # Synthesize from the conformant docs-collection shape.
@@ -1041,7 +1045,7 @@ def index_repo_cmd(
                 synth = _resolve_repo_collection(
                     path, "docs", cat=cat_for_resolve,
                 )
-                if synth.startswith("docs__"):
+                if collection_content_type(synth) == "docs":
                     new_docs = "knowledge__" + synth.removeprefix("docs__")
             if new_docs:
                 # RDR-137 followup SIG-10 (nexus-43qgm.10): gate the echo
@@ -1722,11 +1726,13 @@ def _discover_subset(
     pre-fetch probe in ``discover_for_collection`` still makes the kept
     call cheap when topics exist.
     """
+    from nexus.corpus import collection_content_type  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
     if not isinstance(files_changed_by_kind, dict):
         return list(collections)
     changed = {
         col for col in collections
-        if files_changed_by_kind.get(col.split("__", 1)[0], 1) > 0
+        if files_changed_by_kind.get(collection_content_type(col), 1) > 0
     }
     unchanged = [col for col in collections if col not in changed]
     if not unchanged:
@@ -2880,7 +2886,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 )
 def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, monitor: bool, source_uri: str | None) -> None:
     """Extract and index a Markdown file into T3 docs__CORPUS (or --collection)."""
-    from nexus.corpus import t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+    from nexus.corpus import collection_content_type, t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
     from nexus.doc_indexer import index_markdown  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
     from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
         ChunkLandingUnverifiedError,
@@ -2906,7 +2912,7 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
         # For paper-shaped Markdown this is correct. For general prose / design
         # notes it will hallucinate paper fields. A general-prose extractor is
         # tracked as GH #981 fix #2 (deferred). Reverted attempt: nexus-z70w / #377.
-        if collection.startswith("knowledge__"):
+        if collection_content_type(collection) == "knowledge":
             click.echo(
                 "Note: 'nx enrich aspects' on knowledge__ collections applies the "
                 "scholarly-paper extractor (title, abstract, methods, venue). "

@@ -630,7 +630,7 @@ def export_cmd(
     """
     from datetime import date  # noqa: PLC0415 — stdlib import kept branch-local
 
-    from nexus.corpus import t3_collection_name as _t3col  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.corpus import collection_content_type, t3_collection_name as _t3col  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.errors import EmbeddingModelMismatch, FormatVersionError  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.exporter import export_collection  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
@@ -673,7 +673,7 @@ def export_cmd(
                 click.echo(f"ERROR exporting {col_name}: {exc}", err=True)
         click.echo(f"\nTotal: {total_exported} records across {len(collections_info)} collections.")
     else:
-        col_name = collection if "__" in collection else _t3col(collection)
+        col_name = collection if collection_content_type(collection) else _t3col(collection)
         out_path = Path(output) if output else Path(f"{col_name}.nxexp")
         try:
             result = export_collection(

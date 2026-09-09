@@ -91,7 +91,7 @@ def migrate_fallback_cmd(
       nx catalog migrate-fallback docs__default --yes
     """
     from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
-        is_conformant_collection_name, voyage_model_for_collection,
+        collection_content_type, is_conformant_collection_name, voyage_model_for_collection,
     )
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
@@ -111,12 +111,12 @@ def migrate_fallback_cmd(
             f"fallback collection."
         )
 
-    if "__" not in source:
+    content_type = collection_content_type(source)
+    if not content_type:
         raise click.ClickException(
             f"source {source!r} has no content-type prefix; cannot "
             f"derive a migration target."
         )
-    content_type = source.split("__", 1)[0]
 
     if not target_model:
         target_model = voyage_model_for_collection(source)

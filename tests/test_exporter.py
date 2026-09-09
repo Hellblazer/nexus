@@ -766,6 +766,37 @@ class TestExportImportCLI:
         assert result.exit_code == 0
         assert out_file.exists() and "5" in result.output
 
+    def test_export_bare_name_normalizes_through_t3_collection_name(
+        self, runner, env_creds, tmp_path,
+    ):
+        """nexus-ft04v.23: ``collection if "__" in collection else
+        _t3col(collection)`` funnelled to ``collection if
+        collection_content_type(collection) else _t3col(collection)`` --
+        a bare subject with no "__" at all must still be normalized via
+        ``t3_collection_name`` (the exact branch that would silently stop
+        firing if the funneled condition were wrong)."""
+        from unittest.mock import MagicMock, patch
+        from nexus.cli import main
+        # export_collection is a deferred function-local import in
+        # commands/store.py (`from nexus.exporter import export_collection`)
+        # -- patch the SOURCE attribute, not a module-level name on
+        # commands.store (it never binds one).
+        with patch("nexus.commands.store._t3", return_value=MagicMock(spec=HttpVectorClient)), \
+                patch("nexus.exporter.export_collection") as mock_export:
+            mock_export.return_value = {
+                "exported_count": 0, "file_bytes": 0, "elapsed_seconds": 0.0,
+            }
+            result = runner.invoke(main, ["store", "export", "mynotes"])
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_export.call_args
+        # The exact embedding-model token depends on install mode
+        # (voyage vs. bge); what this test pins is that the bare name WAS
+        # routed through t3_collection_name at all, not left as the raw
+        # "mynotes" a "__" in collection` funnel-condition regression
+        # would silently produce.
+        assert kwargs["collection_name"].startswith("knowledge__mynotes__")
+        assert kwargs["collection_name"] != "mynotes"
+
     def test_import_embedding_mismatch_shows_error(
         self, runner, env_creds, tmp_path, populated_db: T3Database,
     ):

@@ -158,6 +158,28 @@ class TestBackfillKnowledge:
         rows = (len(cat.all_documents()),)
         assert rows[0] == 0
 
+    def test_backfill_knowledge_excludes_non_knowledge_prefixes(self, catalog_env):
+        """nexus-ft04v.23 funnelled the ``startswith("knowledge__")``
+        filter to ``collection_content_type(name) == "knowledge"`` --
+        byte-identical means a name that merely CONTAINS "knowledge" but
+        does not start with the exact "knowledge__" prefix, a legacy-bare
+        name with no "__" at all, and a code__/docs__ name are all still
+        excluded, same as before the funnel."""
+        from nexus.commands.catalog import _backfill_knowledge
+
+        cat = ActiveCatalog()
+        t3 = _mock_t3([
+            {"name": "knowledgefoo__bar", "count": 5},  # boundary: not the knowledge__ prefix
+            {"name": "bare-legacy-name", "count": 5},  # no "__" at all
+            {"name": "code__myrepo", "count": 5},
+            {"name": "knowledge__delos", "count": 20},  # the one real match
+        ])
+
+        count = _backfill_knowledge(cat, t3, dry_run=False)
+        assert count == 1
+        registered = [d.physical_collection for d in cat.all_documents() if d.content_type == "knowledge"]
+        assert registered == ["knowledge__delos"]
+
 
 class TestBackfillCommand:
     @patch("nexus.commands.catalog._make_t3")
@@ -371,6 +393,23 @@ class TestBackfillFromT3:
             )
         assert "owner" in str(exc_info.value).lower() or "no repo" in str(exc_info.value).lower()
 
+    def test_per_file_recovery_rejects_no_double_underscore(self, catalog_env):
+        """nexus-ft04v.23: the ``"__" not in collection`` / ``split("__",
+        1)[1]`` pair funnelled to ``collection_owner()`` -- a name with NO
+        "__" separator at all must still raise the SAME "no
+        double-underscore prefix" ClickException, before ever reaching T3
+        or the owner lookup (byte-identical to the pre-funnel guard)."""
+        from nexus.commands.catalog import _backfill_per_file_from_t3
+
+        cat = ActiveCatalog()
+        t3 = MagicMock(spec=HttpVectorClient)
+
+        with pytest.raises(Exception) as exc_info:
+            _backfill_per_file_from_t3(
+                cat, t3, "bare-legacy-name-no-separator", dry_run=True,
+            )
+        assert "double-underscore" in str(exc_info.value).lower()
+
 
 class TestBackfillFromT3CLI:
     """CLI surface: ``nx catalog backfill --from-t3 [<COL>|--all-repo-collections]``."""
@@ -448,6 +487,40 @@ class TestBackfillFromT3CLI:
             if d.file_path
         ]
         assert len(registered) == 3
+
+    @patch("nexus.commands.catalog._backfill_per_file_from_t3")
+    @patch("nexus.commands.catalog._make_t3")
+    @patch("nexus.commands.catalog._make_registry")
+    def test_all_repo_collections_filters_by_content_type_and_hash_suffix(
+        self, mock_reg_fn, mock_t3_fn, mock_recover_fn, catalog_env, tmp_path,
+    ):
+        """nexus-ft04v.23: the ``--all-repo-collections`` target filter
+        (``(startswith(docs__) or startswith(code__)) and "-" in
+        split("__",1)[1]``) funnelled to ``collection_content_type(...) in
+        ("docs","code") and "-" in collection_owner(...)``. Byte-identical
+        means: docs__/code__ repo-hash collections are kept, a
+        knowledge__ collection is dropped (wrong content type), and a
+        docs__/code__ collection with no ``-`` in its owner segment
+        (no repo-hash suffix) is dropped too."""
+        mock_reg_fn.return_value = _mock_registry(tmp_path)
+        mock_t3_fn.return_value = _mock_t3([
+            {"name": "code__myrepo-cafebabe", "count": 5},   # kept: code__, has "-"
+            {"name": "docs__myrepo-deadbeef", "count": 5},   # kept: docs__, has "-"
+            {"name": "knowledge__delos-abc123", "count": 5},  # dropped: wrong content type
+            {"name": "docs__nodashsuffix", "count": 5},      # dropped: owner has no "-"
+            {"name": "rdr__somedoc-11112222", "count": 5},   # dropped: wrong content type
+        ])
+        mock_recover_fn.return_value = 0
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "backfill",
+            "--from-t3",
+            "--all-repo-collections",
+        ])
+        assert result.exit_code == 0, result.output
+        called_with = sorted(c.args[2] for c in mock_recover_fn.call_args_list)
+        assert called_with == ["code__myrepo-cafebabe", "docs__myrepo-deadbeef"]
 
 
 class TestBackfillRdrsRepoOwner:

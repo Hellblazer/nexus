@@ -2902,6 +2902,31 @@ class TestWhh61MigrationCarve:
         assert "docs__default: 1 doc(s) ->" in result.output
         cat.list_by_collection.assert_called_once_with("docs__default")
 
+    def test_migrate_fallback_rejects_no_double_underscore(self):
+        """nexus-ft04v.23: the ``"__" not in source`` / ``source.split("__",
+        1)[0]`` pair funnelled to ``collection_content_type(source)`` --
+        a source with NO "__" separator at all still raises the SAME
+        "no content-type prefix" ClickException, byte-identical to the
+        pre-funnel guard."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+        from nexus.cli import main
+
+        cat = MagicMock(spec=HttpCatalogClient)
+        cat.get_collection.return_value = {"name": "bare-legacy-name"}  # non-None: passes the registration check
+        with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
+                patch(
+                    "nexus.commands.catalog._get_catalog_writer",
+                    return_value=MagicMock(spec=list(CATALOG_WRITE_OPS)),
+                ):
+            result = CliRunner().invoke(
+                main, ["catalog", "migrate-fallback", "bare-legacy-name"],
+            )
+        assert result.exit_code != 0
+        assert "no content-type prefix" in result.output
+
 
 class TestWhh61MaintenanceCarve:
     """Contract pins for the nexus-whh61.4 maintenance carve.

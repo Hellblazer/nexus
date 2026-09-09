@@ -38,8 +38,34 @@ sites in the entire tree, and only those) because they strip an
 ``mcp__...__`` tool-name prefix, not a collection name -- see
 ``_EXCLUDED_SITES`` below, each with its own reason and each independently
 verified (``test_excluded_sites_are_real_matches_not_omissions``) to be a
-genuine raw match rather than a stale or invented entry. The pin is
-79 == 83 - 4.
+genuine raw match rather than a stale or invented entry. The pin was
+79 == 83 - 4 at that baseline.
+
+nexus-ft04v.21 (Phase 3 funnel slice 1, corpus.py/scoring.py/
+collection_shape.py/context.py/search_engine.py/exporter.py/mcp/core.py)
+landed 2026-09-09 and lowered the pin from 79 to 54 (-25): scoring.py,
+context.py, search_engine.py, exporter.py and mcp/core.py reached zero
+and were dropped; corpus.py fell from 16 to 2 (the two helpers' own
+shared internal parse is the accepted floor they leave behind).
+collection_shape.py's 3 sites (188, 191, 195) were LEFT UNFUNNELLED, not
+overlooked, per the coordinator's ruling on nexus-ft04v.21's hand-off:
+``collection_attributes``'s positional 4-field decode of a malformed name
+cannot be reproduced byte-for-byte by the funnel helpers' "owner = whole
+remainder" convention. These stay raw and counted until nexus-ft04v.26
+(the repoint), where the decode reads the catalog row directly.
+
+nexus-ft04v.23 (Phase 3 funnel slice 3, the commands/ CLI surface)
+funnelled 32 of the 54-site nexus-ft04v.21 baseline to the three
+``CollectionName`` helpers, lowering the pin to 22. One site,
+``src/nexus/commands/collection.py``'s ``reindex_cmd`` (the ``corpus =
+name.split("__", 1)[1] if "__" in name else ""`` re-index provenance
+label), was deliberately left raw rather than funnelled through
+``collection_owner()`` -- confirmed by the coordinator's ruling on this
+bead's hand-off report -- see the comment on that file's census entry
+below for why the two are not equivalent for a genuinely conformant
+4-segment name; nexus-ft04v.26 (the repoint) resolves it against the
+row's owner/model instead of the name tail. Slice 2 (nexus-ft04v.22)
+lowers the remaining files independently.
 
 RDR-204'S OTHER NAMED EXCLUSION -- ``rdr-`` document ids -- MATCHES ZERO
 SITES HERE. The one ``rdr-`` id parse in the tree,
@@ -108,44 +134,49 @@ _EXCLUDED_SITES: dict[tuple[str, int], str] = {
 }
 
 #: 2026-09-09 census of collection-name parse sites, per file, AFTER the
-#: `_EXCLUDED_SITES` filter. This may only shrink — each of
-#: nexus-ft04v.21/.22/.23 (the funnel slices) lowers the entries for its
-#: files as raw sites move to the three CollectionName helpers; when a
-#: file reaches zero, drop its entry (a dropped key and an absent file
-#: both read as zero to the guards below).
+#: `_EXCLUDED_SITES` filter. Pin sum: 22 (nexus-ft04v.21 lowered the
+#: 79-site 2026-09-09 baseline to 54; nexus-ft04v.23 funnelled a further
+#: 32 of those 54 -- the commands/ CLI surface -- lowering the pin to
+#: 22). This may only shrink — each of nexus-ft04v.21/.22/.23 (the funnel
+#: slices) lowers the entries for its files as raw sites move to the
+#: three CollectionName helpers; when a file reaches zero, drop its entry
+#: (a dropped key and an absent file both read as zero to the guards
+#: below).
 #:
 #: nexus-ft04v.21 (funnel slice 1, corpus.py/scoring.py/collection_shape.py/
-#: context.py/search_engine.py/exporter.py/mcp/core.py) landed 2026-09-09
-#: and lowered the pin from 79 to 54 (-25): scoring.py, context.py,
-#: search_engine.py, exporter.py and mcp/core.py reached zero and were
-#: dropped; corpus.py fell from 16 to 2 (the two `collection_content_type`
-#: / `collection_owner` helpers' own shared internal parse -- see
-#: `_split_legacy_collection_name` in nexus/corpus.py -- is the accepted
-#: floor those two helpers leave behind, per the bead's "sites inside the
-#: three helpers themselves ... stay counted" rule). collection_shape.py's
-#: 3 sites (188, 191, 195) were LEFT UNFUNNELLED, not overlooked, per the
-#: coordinator's ruling on nexus-ft04v.21's hand-off report: `collection_
-#: attributes`'s positional 4-field decode of a malformed name is the same
-#: class as a commands/collection.py slice-3 site -- the funnel helpers'
-#: "owner = whole remainder" convention cannot reproduce a strict
-#: positional decode byte-for-byte, and this bead forbids behaviour
-#: change. These stay raw and counted until nexus-ft04v.26 (the repoint),
-#: where the decode reads the catalog row directly instead of parsing.
+#: context.py/search_engine.py/exporter.py/mcp/core.py) landed 2026-09-09:
+#: scoring.py, context.py, search_engine.py, exporter.py and mcp/core.py
+#: reached zero and were dropped; corpus.py fell from 16 to 2 (the two
+#: `collection_content_type` / `collection_owner` helpers' own shared
+#: internal parse -- see `_split_legacy_collection_name` in nexus/corpus.py
+#: -- is the accepted floor those two helpers leave behind, per the bead's
+#: "sites inside the three helpers themselves ... stay counted" rule).
+#: collection_shape.py's 3 sites (188, 191, 195) were LEFT UNFUNNELLED, not
+#: overlooked, per the coordinator's ruling on nexus-ft04v.21's hand-off
+#: report: `collection_attributes`'s positional 4-field decode of a
+#: malformed name is the same class as the commands/collection.py site
+#: below -- the funnel helpers' "owner = whole remainder" convention
+#: cannot reproduce a strict positional decode byte-for-byte, and this
+#: bead forbids behaviour change. These stay raw and counted until
+#: nexus-ft04v.26 (the repoint), where the decode reads the catalog row
+#: directly instead of parsing.
 COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {
     "src/nexus/catalog/chunk_quarantine.py": 1,
     "src/nexus/catalog/orphan_backfill.py": 1,
     "src/nexus/catalog/recovery_bundle.py": 1,
     "src/nexus/collection_shape.py": 3,
-    "src/nexus/commands/catalog.py": 10,
-    "src/nexus/commands/catalog_cmds/integrity.py": 1,
-    "src/nexus/commands/catalog_cmds/migration.py": 2,
-    "src/nexus/commands/catalog_cmds/reconcile_stale.py": 2,
-    "src/nexus/commands/collection.py": 10,
-    "src/nexus/commands/command_context.py": 1,
-    "src/nexus/commands/doctor.py": 1,
-    "src/nexus/commands/enrich.py": 1,
-    "src/nexus/commands/index.py": 5,
-    "src/nexus/commands/store.py": 1,
+    # nexus-ft04v.23: :748 `corpus = name.split("__", 1)[1] if "__" in
+    # name else ""` in `reindex_cmd` is deliberately left raw. It derives
+    # a re-index provenance label from EVERYTHING after the first "__",
+    # not just the owner segment -- for a genuinely conformant 4-segment
+    # name (`<type>__<owner>__<model>__v<n>`) that differs from
+    # `collection_owner()` (which returns only the second segment), so
+    # funnelling it would silently truncate the label instead of leaving
+    # behaviour byte-identical. Every other collection.py site in this
+    # slice funnelled cleanly; confirmed by the coordinator's ruling on
+    # this bead's hand-off report -- nexus-ft04v.26 (the repoint)
+    # resolves it against the row's owner/model instead of the name tail.
+    "src/nexus/commands/collection.py": 2,
     "src/nexus/corpus.py": 2,
     "src/nexus/db/embed_migrate.py": 4,
     "src/nexus/db/http_vector_client.py": 3,
@@ -396,9 +427,10 @@ def test_census_has_no_stale_entries() -> None:
 
 
 def test_pin_matches_documented_total() -> None:
-    """The PARSE_SITE_PIN docstring claim (54, after nexus-ft04v.21's
-    funnel slice 1) is derived from the same dict the guards above check
-    against -- this catches a hand-edited docstring number drifting from
-    the dict it claims to summarize."""
+    """The PARSE_SITE_PIN docstring claim (22, after nexus-ft04v.21's
+    funnel slice 1 and nexus-ft04v.23's funnel slice 3) is derived from
+    the same dict the guards above check against -- this catches a
+    hand-edited docstring number drifting from the dict it claims to
+    summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 54
+    assert PARSE_SITE_PIN == 22

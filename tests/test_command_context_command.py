@@ -1981,3 +1981,34 @@ def test_devonthink_index_group_argument_maps_to_group_selector(tmp_path: Path, 
     result = CliRunner().invoke(main, ["command-context", "devonthink-index"])
     assert result.exit_code == 0
     assert "--uuid" in result.output and "--group" in result.output and "--smart-group" in result.output
+
+
+def test_knowledge_collections_filters_by_content_type(monkeypatch) -> None:
+    """nexus-ft04v.23: ``_knowledge_collections``'s
+    ``str(c).startswith("knowledge__")`` filter funnelled to
+    ``collection_content_type(str(c)) == "knowledge"``. A boundary name
+    that merely contains "knowledge" but is not the exact prefix, a
+    code__ collection, and a legacy-bare name with no "__" at all all
+    stay excluded, byte-identical to the pre-funnel filter."""
+    import nexus.commands.command_context as cc
+    import nexus.db as _db
+
+    class _FakeT3:
+        def list_collections(self):
+            return [
+                "knowledgefoo__bar",       # boundary: not the knowledge__ prefix
+                "code__myrepo",
+                "bare-legacy-name",        # no "__" at all
+                "knowledge__delos__voyage-context-3__v1",
+                "knowledge__notes",
+            ]
+
+    # _knowledge_collections() does a fresh `from nexus.db import make_t3`
+    # inside its own body every call -- patch the source attribute, not a
+    # module-level name on `cc` (it never binds one).
+    monkeypatch.setattr(_db, "make_t3", lambda: _FakeT3())
+    result = cc._knowledge_collections()
+    assert result == sorted([
+        "knowledge__delos__voyage-context-3__v1",
+        "knowledge__notes",
+    ])

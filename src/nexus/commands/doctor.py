@@ -1416,6 +1416,7 @@ def _report_fanout_floor_census() -> None:
     round trip, no write, no effect on ``nx doctor``'s exit code —
     informational only, same posture as ``--check-engine-activity``.
     """
+    from nexus.corpus import collection_content_type  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
     from nexus.mcp.core import _fanout_exclusions_for_group  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
 
     try:
@@ -1442,7 +1443,12 @@ def _report_fanout_floor_census() -> None:
 
     groups: dict[str, list[str]] = {}
     for name in names:
-        prefix = name.split("__", 1)[0]
+        # `or name`: collection_content_type() returns "" when *name* has
+        # no "__" separator at all; the pre-funnel bare `split("__", 1)[0]`
+        # returned the WHOLE name in that case (never ""), which is what
+        # keeps such a name in its own single-entry group below instead of
+        # silently dropping out of the census.
+        prefix = collection_content_type(name) or name
         if prefix:
             groups.setdefault(prefix, []).append(name)
 

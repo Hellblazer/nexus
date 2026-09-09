@@ -504,8 +504,10 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
     embedding-model space and are rejected unless ``--force-prefix-change``
     is set; otherwise search hits would be garbage.
     """
-    old_prefix = old.split("__", 1)[0] if "__" in old else ""
-    new_prefix = new.split("__", 1)[0] if "__" in new else ""
+    from nexus.corpus import collection_content_type  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    old_prefix = collection_content_type(old)
+    new_prefix = collection_content_type(new)
     if old_prefix != new_prefix and not force_prefix_change:
         raise click.ClickException(
             f"prefix mismatch: {old_prefix!r} → {new_prefix!r} would change "
@@ -560,6 +562,7 @@ def reindex_cmd(name: str, force: bool) -> None:
     """Delete and re-index a collection from its source files."""
     from pathlib import Path  # noqa: PLC0415 — stdlib import kept branch-local
 
+    from nexus.corpus import collection_content_type  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.db.t3 import verify_collection_deep  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.doc_indexer import batch_index_markdowns, index_markdown, index_pdf  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
@@ -683,7 +686,7 @@ def reindex_cmd(name: str, force: bool) -> None:
     # unreachable; with a WORKING delete it would silently destroy the
     # collection (chunks + catalog + taxonomy + registry) and exit 0 with
     # "0 sources processed" (nexus-caifp). Refuse BEFORE deleting anything.
-    if name.startswith("code__"):
+    if collection_content_type(name) == "code":
         raise click.ClickException(
             f"Refusing to reindex code collection '{name}': this verb has "
             "no re-index driver for code — it would delete the collection "
@@ -749,7 +752,7 @@ def reindex_cmd(name: str, force: bool) -> None:
 
     # (code__ collections are refused before the delete above, nexus-caifp —
     # this dispatch starts at the prose families.)
-    if name.startswith("rdr__"):
+    if collection_content_type(name) == "rdr":
         rdr_files = [Path(sp) for sp in source_paths if Path(sp).exists()]
         missing = [sp for sp in source_paths if not Path(sp).exists()]
         if rdr_files:
@@ -778,7 +781,7 @@ def reindex_cmd(name: str, force: bool) -> None:
                 raise click.exceptions.Exit(1)
             indexed = len(rdr_files)
 
-    elif name.startswith("docs__") or name.startswith("knowledge__"):
+    elif collection_content_type(name) in ("docs", "knowledge"):
         for sp in source_paths:
             p = Path(sp)
             if not p.exists():

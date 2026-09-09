@@ -333,6 +333,30 @@ def test_fanout_floor_census_ignores_negative_count_sentinel(runner, mock_reg):
     assert "code__mystery" not in result.output
 
 
+def test_fanout_floor_census_groups_legacy_bare_name_under_itself(runner, mock_reg):
+    """nexus-ft04v.23: the grouping key funnelled ``name.split("__",
+    1)[0]`` (bare split, always non-empty) to
+    ``collection_content_type(name) or name``. A legacy collection name
+    with NO "__" separator at all still forms its own single-entry
+    group keyed by the WHOLE name, not "" -- byte-identical to the
+    pre-funnel bare split, which never returns an empty string for a
+    non-empty input."""
+    mock_t3 = MagicMock()
+    mock_t3.list_collections.return_value = [
+        {"name": "bare-legacy-name", "count": 1},
+    ]
+    result = _invoke(
+        runner, mock_reg,
+        extra_patches=[patch("nexus.db.make_t3", return_value=mock_t3)],
+    )
+    assert result.exit_code == 0
+    # A lone collection under its own group is never excluded (same
+    # sibling-relative rule as the prefix-grouped case above) -- the
+    # census must say so, proving the name reached a real (non-empty)
+    # group rather than being silently dropped.
+    assert "no collections currently excluded" in result.output
+
+
 def test_fanout_floor_census_unavailable_on_t3_failure(runner, mock_reg):
     result = _invoke(
         runner, mock_reg,

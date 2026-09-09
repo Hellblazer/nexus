@@ -1176,6 +1176,7 @@ def enrich_aspects(
     error out at the config-selection step.
     """
     from nexus.aspect_extractor import select_config  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+    from nexus.corpus import collection_content_type  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
 
     config = select_config(collection)
     if config is None:
@@ -1184,7 +1185,7 @@ def enrich_aspects(
             f"'{collection}'. Supported prefixes: knowledge__*, "
             f"rdr__*. Aborting."
         )
-        if collection.startswith("docs__"):
+        if collection_content_type(collection) == "docs":
             click.echo(
                 "Note: docs__* collections are not paper-shaped (nexus-z70w "
                 "reverted the #377 routing). Index academic PDFs into "
