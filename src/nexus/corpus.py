@@ -33,6 +33,19 @@ def validate_collection_name(name: str) -> None:
     2. Cloud byte-length limit: name must not exceed 128 bytes when UTF-8 encoded.
        Relevant if names ever contain multi-byte characters; all current ASCII names
        are well within this limit since they cap at 63 chars = 63 bytes.
+
+    This is CHARSET legality of the WHOLE name string (start/end
+    alphanumeric, alphanumeric+hyphen+underscore in between) -- it has no
+    concept of segments and is deliberately NOT the owner-segment
+    ambiguity rule (RDR-204 Phase 3 item 7, coordinator grammar decision
+    2026-09-08): that structural check -- an owner admits single
+    underscores only, never a run of two, because "__" is always the
+    segment separator -- lives in :func:`is_conformant_collection_name` /
+    :data:`_OWNER_SEGMENT_RE`. Do not re-derive it here: this function
+    validates names that legitimately contain three literal "__"
+    separators (a full 4-segment conformant name), so a segment-aware
+    rule cannot live in this flat charset check without rejecting every
+    conformant name at creation time.
     """
     # Length check fires first for <3 chars; regex rejects other invalid patterns.
     # Both gates are needed: length for clear error messages, regex for charset/boundary validation.
