@@ -71,8 +71,10 @@ _TARGET = "parse_conformant_collection_name"
 #: instead of parsing, exactly the retirement their old entries here
 #: predicted ("Still parses until nexus-ft04v.26 repoints it at the
 #: catalog row"). collection_registration_kwargs's own entry moved
-#: 1183 -> 1295 (line shift from the surrounding repoint, same call,
-#: same reason). SIX new entries added: all mint-time /
+#: 1183 -> 1295 -> 1427 (line shift from the surrounding repoint, twice
+#: now -- item 3's _write_intent_embedding_model/_profile_model_for_content_type
+#: split added more lines above it -- same call, same reason). SIX new
+#: entries added: all mint-time /
 #: re-registration-after-row-deletion sites this SAME bead's row-based
 #: repoint of collection_content_type/collection_owner/collection_model
 #: made necessary -- a name with no catalog row (by construction, since
@@ -82,7 +84,7 @@ _TARGET = "parse_conformant_collection_name"
 #: conformant via is_conformant_collection_name, a pure regex check with
 #: no row lookup).
 ALLOWED_CALLERS: dict[tuple[str, int], str] = {
-    ("src/nexus/corpus.py", 1295): (
+    ("src/nexus/corpus.py", 1427): (
         "collection_registration_kwargs: the write-time registration "
         "derivation used by HttpCatalogClient.register_collection's OWN "
         "bare-call fallback and by ensure_collection_registered (T3 chunk "

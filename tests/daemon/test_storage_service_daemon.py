@@ -1619,7 +1619,14 @@ class TestSpawnServiceVoyageKeyPlumbing:
     def test_shared_predicate_true_drives_both_sites_to_voyage(
         self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from nexus.corpus import effective_embedding_model_for_writes
+        # RDR-204 Phase 3 item 3 (nexus-ft04v.26): _write_intent_embedding_model,
+        # not effective_embedding_model_for_writes -- this test's own subject
+        # is the daemon-spawn/client SHARED PREDICATE, not profile validation.
+        # The latter now makes a real network call (a catalog client
+        # construction reaching for data-token minting), which this test's
+        # own blanket `patch("nexus.config.get_credential", ...)` would feed
+        # garbage into for an entirely unrelated credential lookup.
+        from nexus.corpus import _write_intent_embedding_model
 
         monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
@@ -1631,7 +1638,7 @@ class TestSpawnServiceVoyageKeyPlumbing:
         monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "BAAI/bge-base-en-v1.5")
         with patch("nexus.config.get_credential", return_value="shared-key"):
             env = self._spawn_env(config_dir, clock, monkeypatch)
-            client_model = effective_embedding_model_for_writes("code")
+            client_model = _write_intent_embedding_model("code")
         # Engine side: key plumbed (voyage-capable engine).
         assert env["NX_VOYAGE_API_KEY"] == "shared-key"
         # Client side: mints the matching voyage token, not bge.
@@ -1640,7 +1647,13 @@ class TestSpawnServiceVoyageKeyPlumbing:
     def test_shared_predicate_false_drives_both_sites_to_local(
         self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from nexus.corpus import LOCAL_EMBEDDING_MODELS, effective_embedding_model_for_writes
+        # RDR-204 Phase 3 item 3 (nexus-ft04v.26): _write_intent_embedding_model,
+        # not effective_embedding_model_for_writes -- see the sibling test
+        # above for why. This test's own get_cred.assert_not_called() also
+        # requires it: effective_embedding_model_for_writes's real profile
+        # read would reach unrelated credential lookups this bare
+        # patch("nexus.config.get_credential") (no return_value) intercepts.
+        from nexus.corpus import LOCAL_EMBEDDING_MODELS, _write_intent_embedding_model
 
         monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
         monkeypatch.setenv("VOYAGE_API_KEY", "ambient-key-must-not-be-used")
@@ -1653,7 +1666,7 @@ class TestSpawnServiceVoyageKeyPlumbing:
         monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
         with patch("nexus.config.get_credential") as get_cred:
             env = self._spawn_env(config_dir, clock, monkeypatch)
-            client_model = effective_embedding_model_for_writes("code")
+            client_model = _write_intent_embedding_model("code")
         # Engine side: no key plumbed (bge-only engine).
         get_cred.assert_not_called()
         assert "NX_VOYAGE_API_KEY" not in env

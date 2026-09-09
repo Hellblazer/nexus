@@ -46,7 +46,7 @@ from typing import Any
 import pytest
 
 from nexus.corpus import (
-    effective_embedding_model_for_writes,
+    _write_intent_embedding_model,
     is_conformant_collection_name,
     parse_conformant_collection_name,
 )
@@ -59,7 +59,12 @@ from tests._catalog_fixture_ops import ActiveCatalog
 # registration for a content_type already carries the box's real model, and a
 # hardcoded "voyage-code-3" literal here 422s against it. Resolve the real
 # write-time model instead of hardcoding a foreign token.
-_CODE_MODEL = effective_embedding_model_for_writes("code")
+#
+# RDR-204 Phase 3 item 3 (nexus-ft04v.26): _write_intent_embedding_model, not
+# effective_embedding_model_for_writes -- see test_catalog_backfill_collections.py's
+# identical comment for why (the latter now makes a real network call, unsafe
+# at module collection time).
+_CODE_MODEL = _write_intent_embedding_model("code")
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────

@@ -57,7 +57,7 @@ from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbed
 from click.testing import CliRunner
 
 from nexus.cli import main
-from nexus.corpus import effective_embedding_model_for_writes
+from nexus.corpus import _write_intent_embedding_model
 from nexus.db.t3 import T3Database
 from tests._catalog_fixture_ops import ActiveCatalog
 from tests.conftest import make_vector_test_client
@@ -72,7 +72,12 @@ from tests.conftest import make_vector_test_client
 # registers a knowledge__* collection for real, that hardcoded token
 # conflicts. Resolve the box's REAL write-time model instead (never a
 # mocked mode against a real substrate that cannot honor a foreign token).
-_KNOWLEDGE_MODEL = effective_embedding_model_for_writes("knowledge")
+#
+# RDR-204 Phase 3 item 3 (nexus-ft04v.26): _write_intent_embedding_model, not
+# effective_embedding_model_for_writes -- see test_catalog_backfill_collections.py's
+# identical comment for why (the latter now makes a real network call, unsafe
+# at module collection time).
+_KNOWLEDGE_MODEL = _write_intent_embedding_model("knowledge")
 
 
 @pytest.fixture()

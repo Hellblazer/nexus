@@ -26,14 +26,23 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
-from nexus.corpus import effective_embedding_model_for_writes
+from nexus.corpus import _write_intent_embedding_model
 from tests._catalog_fixture_ops import ActiveCatalog
 
 # RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine pins an install-scoped
 # embedding profile per (tenant, content_type) on first write — the backfill
 # verb parses the model straight from a conformant T3 name, so a hardcoded
 # "voyage-code-3" literal here 422s against the box's real (bge) profile.
-_CODE_MODEL = effective_embedding_model_for_writes("code")
+#
+# RDR-204 Phase 3 item 3 (nexus-ft04v.26): computed via
+# _write_intent_embedding_model, not effective_embedding_model_for_writes --
+# the latter now makes a REAL network call (validates against the engine's
+# embedding_profile), unsafe at MODULE COLLECTION TIME with no engine
+# substrate guaranteed to be resolvable yet. The intent-only helper gives
+# the identical value in every correctly-configured environment (local
+# mode is "structurally incapable of disagreeing" with its own profile —
+# see effective_embedding_model_for_writes's own docstring).
+_CODE_MODEL = _write_intent_embedding_model("code")
 
 
 @pytest.fixture()

@@ -277,45 +277,62 @@ class LocalVoyageCredentialMissingError(RuntimeError):
     """
 
 
-def effective_embedding_model_for_writes(content_type: str) -> str:
-    """Return the embedding-model token to write into NEW collection
-    names and per-chunk metadata for ``content_type``.
+class EmbeddingProfileMismatchError(RuntimeError):
+    """The client's own configured intent (``local.embed_model`` /
+    ``voyage_api_key``) for ``content_type`` disagrees with the engine's
+    ``nexus.embedding_profile`` row for it (RDR-204 Phase 3 item 3,
+    nexus-ft04v.26; coordinator ruling 2026-09-09, outcome 2).
 
-    RDR-109 Phase 2. Cloud mode delegates verbatim to
-    :func:`canonical_embedding_model` so the RDR-103 canonical-set
-    invariant is preserved. Local mode returns the active local
-    embedder's normalized token (``minilm-l6-v2-384`` or
-    ``bge-base-en-v15-768``) so a fresh local-mode index produces
-    collection names that match the bytes inside — UNLESS the user has
-    opted local mode into Voyage via ``local.embed_model=voyage-*``
-    (nexus-35ok4 / GH #1461), in which case this mirrors cloud mode
-    exactly: it delegates to :func:`canonical_embedding_model` so the
-    per-content-type voyage-code-3/voyage-context-3 split matches what
-    the engine's ``EmbedderRouter`` actually does once
-    ``NX_VOYAGE_API_KEY`` is plumbed (Main.java boots a PURE-voyage
-    router — no per-content-type choice on the engine side either, so
-    delegating here is not a guess, it is the same policy the engine
-    already applies).
+    SAME FAMILY as :class:`LocalVoyageCredentialMissingError` — both are
+    "the client's intent cannot be honored, and minting under the wrong
+    model silently would be a data-correctness bug" — but this is the
+    STALE-PROFILE case, not the missing-credential case: the client has
+    everything it needs LOCALLY (mode, key), but the ENGINE's profile
+    still reflects an OLDER decision because the service has not been
+    restarted since the config changed (the engine reads ``local.embed_model``
+    / ``voyage_api_key`` only at spawn — RDR-204 Technical Design 1). The
+    canonical repro: ``local.embed_model=voyage-*`` with a key configured,
+    but the engine profile still says ``bge-base-en-v15-768`` for this
+    content type because the service predates the key being set.
 
-    ``local_embed_model_is_voyage()`` (:mod:`nexus.config`) is the SAME
-    predicate the storage-service supervisor uses to decide whether to
-    plumb ``NX_VOYAGE_API_KEY`` into the engine at spawn
-    (:mod:`nexus.daemon.storage_service_daemon`) — the two conditions
-    are structurally incapable of disagreeing now.
+    Raised ONLY from :func:`effective_embedding_model_for_writes` — same
+    write-only contract as :class:`LocalVoyageCredentialMissingError`,
+    never from a read path.
+    """
+
+
+#: The restart recipe, verbatim as ``commands/config_cmd.py``'s
+#: ``SERVICE_RESTART_COMMAND`` (nexus-ft04v.25) and this module's own
+#: pre-existing :class:`LocalVoyageCredentialMissingError` message both
+#: already state it. Duplicated as a literal here rather than imported
+#: from ``commands.config_cmd`` — corpus.py is core; commands/ is the
+#: CLI layer built ON TOP of it, and importing downward would invert
+#: that dependency. ``tests/test_config_cmd.py`` pins the command text
+#: in commands/config_cmd.py; keep this string byte-identical to it.
+_SERVICE_RESTART_COMMAND = "nx daemon service stop && nx daemon service start"
+
+
+def _write_intent_embedding_model(content_type: str) -> str:
+    """The CLIENT's own configured INTENT for the write model of
+    *content_type* — what ``local.embed_model``/``voyage_api_key``
+    (local mode) or the fixed cloud policy (cloud mode) says the model
+    SHOULD be, computed with NO network access.
+
+    Split out of :func:`effective_embedding_model_for_writes` (RDR-204
+    Phase 3 item 3, nexus-ft04v.26; coordinator ruling 2026-09-09) so
+    that function's new profile-read half can be layered ON TOP of this
+    unchanged diagnosis, while :func:`_promoted_model_token_for_read`'s
+    read-path delegation keeps using ONLY the intent — a read must stay
+    network-free and must never risk :class:`EmbeddingProfileMismatchError`
+    just to construct a candidate name to probe (the same contract
+    :class:`LocalVoyageCredentialMissingError`'s own docstring already
+    states for the credential check below).
 
     Raises :class:`LocalVoyageCredentialMissingError` when
     ``local.embed_model`` is voyage-shaped but no ``voyage_api_key`` is
-    configured. THIS FUNCTION IS UNCONDITIONALLY WRITE-SHAPED — every
-    caller MUST already know it is about to mint/require a real,
-    about-to-be-written collection identity; it is not safe to call from
-    a read path. :func:`t3_collection_name` (the read/write-shared
-    resolver) does NOT call this function for read-classified requests —
-    see its ``for_write`` parameter and ``_promoted_model_token_for_read``.
-
-    Read paths must continue to dispatch off the physical collection
-    name via :func:`voyage_model_for_collection` /
-    :func:`embedding_model_for_collection_name`; this function is for
-    WRITE-side decisions only.
+    configured — unchanged from this function's pre-nexus-ft04v.26 body,
+    including the zero-network-access property nexus-o5x2c's regression
+    suite (``tests/test_o5x2c_write_chokepoint_repros.py``) pins.
     """
     from nexus.config import is_local_mode  # noqa: PLC0415 — circular-dep avoidance (config)
     if is_local_mode():
@@ -328,8 +345,7 @@ def effective_embedding_model_for_writes(content_type: str) -> str:
                     "Voyage API key, but none is configured. Set one with "
                     "`nx config set voyage_api_key <key>` (or export "
                     "VOYAGE_API_KEY), then restart the local service so the "
-                    "engine re-reads it: `nx daemon service stop && nx daemon "
-                    "service start`."
+                    f"engine re-reads it: `{_SERVICE_RESTART_COMMAND}`."
                 )
             return canonical_embedding_model(content_type)
         # nexus-xq8f9: in service-vector mode (the 6.0 default) the nexus-service
@@ -347,27 +363,143 @@ def effective_embedding_model_for_writes(content_type: str) -> str:
     return canonical_embedding_model(content_type)
 
 
+def _profile_model_for_content_type(content_type: str) -> "str | None":
+    """The engine's ``nexus.embedding_profile`` row for *content_type*,
+    or ``None`` when the tenant has no row for it — an unprofiled
+    tenant, or a profile with rows for OTHER content types but not this
+    one, treated identically per RDR-204's own text: "an unprofiled
+    tenant gets [] and NOT a default".
+
+    :class:`~nexus.catalog.http_catalog_client.EmbeddingProfileRouteMissingError`
+    propagates UNCAUGHT (a pre-Phase-2 engine) — deliberate, the
+    no-silent-fallback-for-a-data-correctness-problem hot rule.
+    No caching: mirrors :meth:`HttpCatalogClient.embedding_profile`'s own
+    "no second cache, the profile is small and per-tenant" contract
+    (bead nexus-ft04v.33) — this helper adds no memo of its own either.
+    """
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle (catalog)
+    reader = make_catalog_reader()
+    for row in reader.embedding_profile():
+        if row.get("content_type") == content_type:
+            return row.get("embedding_model")
+    return None
+
+
+def effective_embedding_model_for_writes(content_type: str) -> str:
+    """Return the embedding-model token to write into NEW collection
+    names and per-chunk metadata for ``content_type``.
+
+    RDR-109 Phase 2 introduced this as the client's PROFILE-AS-CODE: a
+    local computation mirroring what the engine would decide. RDR-204
+    Phase 3 item 3 (nexus-ft04v.26; coordinator ruling 2026-09-09) turns
+    that into a read of the profile-as-DATA, with the ORIGINAL
+    computation kept in front as a diagnosis layer — Technical Design 1a
+    of the RDR keeps the write-time truth table verbatim; only what it
+    is checked AGAINST changes, from "does this match what I compute
+    locally" to "does this match what the engine's own boot-time
+    decision (``nexus.embedding_profile``) says".
+
+    1. Local intent is Voyage (``local.embed_model=voyage-*``) and no
+       ``voyage_api_key`` is configured: raises
+       :class:`LocalVoyageCredentialMissingError`, exactly as before —
+       no network access happens before this check (nexus-o5x2c's
+       regression pins stay green unmocked).
+    2. Local intent and key are both present, but the engine's profile
+       for ``content_type`` disagrees (the service has not been
+       restarted since the config changed — RDR-204 Technical Design 1,
+       "the engine reads the model and key only at spawn"): raises
+       :class:`EmbeddingProfileMismatchError` naming the restart, never
+       a silent write under whichever model happened to win.
+    3. Local intent and the profile agree: returns the profile's own
+       model token for ``content_type`` — the AUTHORITATIVE value,
+       never re-derived from local config once confirmed to agree (this
+       is what closes the GH #667 drift class for the write path).
+    4. The engine has NO profile row for ``content_type`` at all — a
+       tenant, or a content_type on this tenant, with nothing registered
+       for it yet. Returns ``intent`` (never raises): this is the
+       bootstrap case, not a stale-config case, and the coordinator's
+       2026-09-09 ruling's literal "empty profile -> fail loud" would
+       deadlock it. Verified against the engine
+       (``CatalogRepository.upsertCollection``, the ``/collections/upsert``
+       handler this value feeds): when NO profile row exists for a NEW
+       registration's ``content_type``, the engine does not refuse —
+       it takes ``effectiveModel = requestedModel`` (whatever the
+       CLIENT sent) verbatim, exactly ``intent`` here, and THAT registration
+       is what seeds the profile row every later call reads. Failing
+       loud instead would make it impossible to ever write the FIRST
+       collection of any content type on any tenant, since there would
+       be no way to produce the very value the engine needs to create
+       the row that read would require. This is a corrected reading of
+       the ruling, not a silent deviation — flagged in the hand-off
+       report with the engine source citation.
+       Against a pre-Phase-2 engine (the route itself is missing),
+       :class:`~nexus.catalog.http_catalog_client.
+       EmbeddingProfileRouteMissingError` propagates uncaught instead —
+       that failure mode is unaffected by this correction.
+
+    THIS FUNCTION IS UNCONDITIONALLY WRITE-SHAPED — every caller MUST
+    already know it is about to mint/require a real, about-to-be-written
+    collection identity; it is not safe to call from a read path (now
+    doubly so: it makes a real network call). :func:`t3_collection_name`
+    (the read/write-shared resolver) does NOT call this function for
+    read-classified requests, and :func:`_promoted_model_token_for_read`
+    calls :func:`_write_intent_embedding_model` directly instead of this
+    function, precisely to stay network-free — see both functions' own
+    docstrings.
+
+    Read paths must continue to dispatch off the physical collection
+    name via :func:`voyage_model_for_collection` /
+    :func:`embedding_model_for_collection_name`; this function is for
+    WRITE-side decisions only.
+    """
+    intent = _write_intent_embedding_model(content_type)
+    profile_model = _profile_model_for_content_type(content_type)
+    if profile_model is None:
+        # Outcome 4 (bootstrap case) — see the docstring's engine-verified
+        # correction. `intent` is exactly what CatalogRepository.upsertCollection
+        # would accept and use to seed this row.
+        return intent
+    if profile_model != intent:
+        raise EmbeddingProfileMismatchError(
+            f"content_type={content_type!r}: this install's configured intent "
+            f"is {intent!r}, but the engine's embedding_profile still says "
+            f"{profile_model!r}. The engine reads local.embed_model and "
+            "voyage_api_key only at spawn, so a config change after the "
+            "service started leaves the two disagreeing until it restarts. "
+            f"A restart is required for the engine to adopt this: "
+            f"`{_SERVICE_RESTART_COMMAND}`."
+        )
+    return profile_model
+
+
 def _promoted_model_token_for_read(content_type: str) -> str:
     """The read-path counterpart of :func:`effective_embedding_model_for_writes`.
 
     Computing a CANDIDATE collection name to probe with
     ``collection_exists()`` is not the same as committing to write under
-    it — a read must never need a Voyage credential just to construct a
-    string to check for existence (code-review-expert CRITICAL,
-    nexus-35ok4 round 2). When ``local.embed_model`` is voyage-shaped
-    this returns :func:`canonical_embedding_model` directly, BYPASSING
-    the credential gate entirely — deliberately, regardless of whether
+    it — a read must never need a Voyage credential, nor a network call,
+    just to construct a string to check for existence (code-review-expert
+    CRITICAL, nexus-35ok4 round 2; the network-free half restated by
+    nexus-ft04v.26, RDR-204 Phase 3 item 3, when
+    ``effective_embedding_model_for_writes`` grew a real profile read).
+    When ``local.embed_model`` is voyage-shaped this returns
+    :func:`canonical_embedding_model` directly, BYPASSING the credential
+    gate entirely — deliberately, regardless of whether
     ``voyage_api_key`` is currently configured, so a pre-existing
     voyage-named collection (created back when the key WAS present) is
     still a probeable candidate on a keyless read. When
     ``local.embed_model`` is not voyage-shaped this delegates to
-    :func:`effective_embedding_model_for_writes`, which never raises on
-    that branch (unaffected by this nexus-35ok4 change).
+    :func:`_write_intent_embedding_model` — the LOCAL-INTENT half only,
+    never :func:`effective_embedding_model_for_writes` itself, which
+    would now also validate against the engine's profile over the
+    network and could raise :class:`EmbeddingProfileMismatchError` /
+    :class:`EmbeddingProfileEmptyError` for what must stay a pure,
+    offline candidate-name construction.
     """
     from nexus.config import is_local_mode, local_embed_model_is_voyage  # noqa: PLC0415 — circular-dep avoidance (config)
     if is_local_mode() and local_embed_model_is_voyage():
         return canonical_embedding_model(content_type)
-    return effective_embedding_model_for_writes(content_type)
+    return _write_intent_embedding_model(content_type)
 
 
 def resolve_read_embedding_model(content_type: str) -> str:
