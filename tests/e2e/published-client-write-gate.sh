@@ -143,8 +143,16 @@ cd "$REPO_ROOT"
 # auto-registration, so every published client before nexus-f5wwx's
 # register-before-write (conexus 7.37.0, the paired client release) gets a
 # 422 on its first write to a new collection: the same shape, a new bead.
-EXPECTED_LAG_BEAD="nexus-f5wwx"
-FIXED_IN_VERSION="7.37.0"
+# nexus-ft04v.16 (client half), 2026-09-09: the RDR-204 Phase 2 engine
+# (engine-service-v0.1.110) answers 422 to any read of a collection with no
+# catalog_collections row; the published 7.37.0 client's `nx index md` reads
+# the target collection (POST /v1/vectors/get, the incremental-sync probe)
+# BEFORE registering it on a first index, so its manifest never lands.
+# Fixed on develop by 31cc9923a (register before the read); ships in the
+# client release paired with that engine. Retire this ack when the published
+# client resolves >= FIXED_IN_VERSION (the script refuses it then anyway).
+EXPECTED_LAG_BEAD="nexus-ft04v.16"
+FIXED_IN_VERSION="7.38.0"
 
 NEXUS_SERVICE_TAG="${NEXUS_SERVICE_TAG:-}"
 NX_PUBLISHED_CLIENT_VERSION="${NX_PUBLISHED_CLIENT_VERSION:-}"
@@ -434,5 +442,5 @@ print('1' if cv >= fv else '0')
   exit 2
 fi
 
-echo "PUBLISHED-CLIENT WRITE GATE FAILED — published conexus $CLIENT_VERSION cannot register manifests against the candidate engine (${#FAIL_REASONS[@]} check(s) failed). If this is the known nexus-sh9v2 window, re-run with NX_EXPECTED_CLIENT_LAG=nexus-sh9v2 to acknowledge it explicitly."
+echo "PUBLISHED-CLIENT WRITE GATE FAILED — published conexus $CLIENT_VERSION cannot register manifests against the candidate engine (${#FAIL_REASONS[@]} check(s) failed). If this is the known $EXPECTED_LAG_BEAD window, re-run with NX_EXPECTED_CLIENT_LAG=$EXPECTED_LAG_BEAD to acknowledge it explicitly."
 exit 1
