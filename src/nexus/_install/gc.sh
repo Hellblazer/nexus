@@ -62,6 +62,10 @@ _nx_gc_protected() {
 #   --self <dir>    the generation running this installer (rule d)
 #   --dry-run       report exactly what would go, delete nothing
 #   $1 optional trailing tools root
+#: Minutes a receipt-less gen-* tree is presumed to be a build in progress.
+#: A generation build takes minutes; an hour is well past any of them.
+NX_GC_BUILD_GRACE_MINUTES="${NX_GC_BUILD_GRACE_MINUTES:-60}"
+
 nx_gc_generations() {
     _nx_gc_keep=3
     _nx_gc_self=""
@@ -126,6 +130,17 @@ $_nx_gc_self"
             if [ $((_nx_gc_total - _nx_gc_index)) -lt "$_nx_gc_keep" ]; then
                 continue
             fi
+        elif [ ! -L "$_nx_gc_dir" ] && [ -n "$(find "$_nx_gc_dir" -mmin "-$NX_GC_BUILD_GRACE_MINUTES" -print -quit 2>/dev/null)" ]; then
+            # A receipt-less tree that something wrote to within the grace
+            # window is a BUILD IN PROGRESS, not wreckage (review of
+            # nexus-xn84f): install_generation.sh writes the receipt last,
+            # and its `uv venv`/pip argv names the bare directory, which the
+            # holder census does not match. With the reap on every
+            # session's SessionStart hook, another session's install is the
+            # normal case, not the edge. Wreckage is what is still
+            # receipt-less after the window.
+            printf 'kept %s: build in progress (receipt-less, written within %s min)\n' "$_nx_gc_dir" "$NX_GC_BUILD_GRACE_MINUTES"
+            continue
         fi
         # A receipt-less directory falls through here deliberately: reapable,
         # and never counted toward the keep window.

@@ -223,6 +223,31 @@ def test_a_held_generation_is_reported_as_kept_with_its_holders(env) -> None:
     assert not gens[1].is_dir(), "the free generation outside the window survived (the test proved nothing)"
 
 
+def test_a_receipt_less_tree_being_built_right_now_is_not_wreckage(env) -> None:
+    """Review of nexus-xn84f: with the reap on every session's SessionStart
+    hook, another session's `nx self install` is mid-build (receipt written
+    last, `uv venv <dir>` argv unmatched by the holder census) exactly when a
+    sibling session starts. A receipt-less tree written to inside the grace
+    window is kept and named; one older than the window is still wreckage."""
+    tools, stub_bin = env
+    gens = [_gen(tools, f"{i:02d}") for i in range(2)]
+    _point(tools, "current", gens[1])
+    building = tools / "gen-03"
+    (building / "lib").mkdir(parents=True)
+    (building / "lib" / "half.py").write_text("in progress")
+    stale = tools / "gen-00-old"
+    (stale / "lib").mkdir(parents=True)
+    old = 1_700_000_000
+    for path in (stale / "lib", stale):
+        os.utime(path, (old, old))
+
+    out = _sh("nx_gc_generations --keep 1", tools, stub_bin).stdout
+
+    assert building.is_dir(), "a build in progress was reaped"
+    assert f"kept {building}: build in progress" in out, out
+    assert not stale.exists(), "receipt-less wreckage older than the grace window survived (the test proved nothing)"
+
+
 def test_gc_is_a_no_op_on_a_fresh_single_generation_install(env) -> None:
     tools, stub_bin = env
     only = _gen(tools, "00")
@@ -290,6 +315,12 @@ def test_a_receipt_less_directory_is_not_treated_as_a_generation(env) -> None:
     _point(tools, "current", gens[2])
     wreckage = tools / "gen-99-crashed"
     (wreckage / "bin").mkdir(parents=True)  # no nexus-install.json
+    # Past the build-in-progress grace (nexus-xn84f): a crashed build is
+    # wreckage once nothing has written to it for an hour; a fresh one is
+    # another session's build and is kept (its own test above).
+    old = 1_700_000_000
+    for path in (wreckage / "bin", wreckage):
+        os.utime(path, (old, old))
 
     _sh("nx_gc_generations --keep 2", tools, stub_bin)
 

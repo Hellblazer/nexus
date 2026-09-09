@@ -3282,6 +3282,17 @@ each held generation's size on disk and the remedy: end those sessions, then
 | `--dry-run` | Report what would go; delete nothing. |
 | `--prune-uv-cache` | Also run `uv cache prune`. Every generation build unpacks its wheels into uv's archive cache and nothing else ever removes them (82 GB measured on a box that had upgraded for months); `nx self install` runs the prune after every successful flip. |
 
+`--keep N` bounds the unheld generations, not the total: a held generation
+is retained outside the window by rule, so a box with many long-lived
+staggered sessions retains one generation per distinct holder set until those
+sessions end, and the Holders row is where that count shows. A receipt-less
+`gen-*` tree written to within the last hour (`NX_GC_BUILD_GRACE_MINUTES`) is
+another session's build in progress and is kept and named, never reaped as
+wreckage; the receipt is written last, so wreckage is what is still
+receipt-less after the window. `uv cache prune` is best-effort: uv holds its
+own lock on the cache, so a prune that lands beside another uv process either
+waits or fails, and the one line printed says which.
+
 Silent and exit 0 on a box with no generation layout.
 
 ## nx upgrade

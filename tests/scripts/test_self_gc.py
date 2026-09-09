@@ -54,7 +54,7 @@ def _five_generations(tools: Path) -> list[Path]:
 
 
 def test_gc_reaps_without_installing(bed, monkeypatch) -> None:
-    from nexus.commands.self_cmd import perform_self_gc
+    from nexus.commands.self_cmd import perform_self_gc  # noqa: PLC0415 — deferred, matches the file's other in-test imports
 
     tools, _, _ = bed
     gens = _five_generations(tools)
@@ -70,7 +70,7 @@ def test_gc_reaps_without_installing(bed, monkeypatch) -> None:
 
 
 def test_a_held_generation_is_kept_and_named(bed, monkeypatch) -> None:
-    from nexus.commands.self_cmd import perform_self_gc
+    from nexus.commands.self_cmd import perform_self_gc  # noqa: PLC0415 — deferred, matches the file's other in-test imports
 
     tools, _, stub_bin = bed
     gens = _five_generations(tools)
@@ -87,7 +87,7 @@ def test_a_held_generation_is_kept_and_named(bed, monkeypatch) -> None:
 def test_gc_never_reaps_the_generation_it_runs_from(bed, monkeypatch) -> None:
     """Rule (d), passed by this caller: the running process's tree is outside
     the keep window here and still survives."""
-    from nexus.commands.self_cmd import perform_self_gc
+    from nexus.commands.self_cmd import perform_self_gc  # noqa: PLC0415 — deferred, matches the file's other in-test imports
 
     tools, _, _ = bed
     gens = _five_generations(tools)
@@ -100,7 +100,7 @@ def test_gc_never_reaps_the_generation_it_runs_from(bed, monkeypatch) -> None:
 
 
 def test_dry_run_deletes_nothing(bed, monkeypatch) -> None:
-    from nexus.commands.self_cmd import perform_self_gc
+    from nexus.commands.self_cmd import perform_self_gc  # noqa: PLC0415 — deferred, matches the file's other in-test imports
 
     tools, _, _ = bed
     gens = _five_generations(tools)
@@ -115,7 +115,7 @@ def test_dry_run_deletes_nothing(bed, monkeypatch) -> None:
 def test_no_generation_layout_is_a_silent_no_op(bed, monkeypatch) -> None:
     """The SessionStart hook runs this on every box; a dev checkout or a
     legacy uv box has nothing to reap and must say nothing."""
-    from nexus.commands.self_cmd import perform_self_gc
+    from nexus.commands.self_cmd import perform_self_gc  # noqa: PLC0415 — deferred, matches the file's other in-test imports
 
     tools, _, _ = bed
     monkeypatch.setattr(sys, "prefix", str(tools.parent / "checkout" / ".venv"))
@@ -125,7 +125,7 @@ def test_no_generation_layout_is_a_silent_no_op(bed, monkeypatch) -> None:
 
 
 def test_the_click_surface(bed, monkeypatch) -> None:
-    from nexus.commands.self_cmd import self_group
+    from nexus.commands.self_cmd import self_group  # noqa: PLC0415 — deferred, matches the file's other in-test imports
 
     tools, _, _ = bed
     gens = _five_generations(tools)
@@ -139,7 +139,7 @@ def test_the_click_surface(bed, monkeypatch) -> None:
 
 
 def test_prune_uv_cache_flag_runs_uv_cache_prune(bed, monkeypatch) -> None:
-    from nexus.commands.self_cmd import self_group
+    from nexus.commands.self_cmd import self_group  # noqa: PLC0415 — deferred, matches the file's other in-test imports
 
     tools, _, stub_bin = bed
     gens = _five_generations(tools)
@@ -164,7 +164,7 @@ def test_prune_uv_cache_flag_runs_uv_cache_prune(bed, monkeypatch) -> None:
 def test_install_prunes_the_uv_cache_after_a_flip(bed, monkeypatch) -> None:
     """nexus-xn84f: the wheel archive every build feeds is emptied of
     unreachable objects after every successful install."""
-    from nexus.commands import self_cmd
+    from nexus.commands import self_cmd  # noqa: PLC0415 — deferred, matches the file's other in-test imports
 
     tools, _, _ = bed
     gens = _five_generations(tools)

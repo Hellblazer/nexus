@@ -570,7 +570,7 @@ def test_holders_row_names_the_bytes_held_and_the_remedy(layout, monkeypatch) ->
     """nexus-xn84f: a held generation is 1.7 GB that cannot be reclaimed while
     its holders live, and the row used to say only that they converge later.
     It now says how much is held and what releases it."""
-    from nexus import install_census
+    from nexus import install_census  # noqa: PLC0415 — deferred, matches the file's other in-test imports
 
     tools, bin_dir = layout
     old = _generation(tools, "20260101T000000Z")
