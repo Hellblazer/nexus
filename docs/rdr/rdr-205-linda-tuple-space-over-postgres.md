@@ -115,6 +115,7 @@ mailbox, orchestration, scratch, session, daemon, substrate.
 | RDR-184 (orchestration protocol hardening) | Precedent | Diagnosed Gaps 2 and 3 with counts and shipped the flat ledger and the inbox rule. This RDR does not re-diagnose; it gives those remedies a key and a store. The ledger's fail-open hook contract is inherited unchanged. |
 | RDR-105 and JDR-001 (T1 identity, three scopes) | Adjacent, untouched | The T1 session lease file holds the MCP server's minted credential so a CLI borrows it instead of re-minting; `current_session` is the no-harness fallback; the handoff marker is a hook message to a live MCP server. A draft of this design proposed moving them into the space and a review pass withdrew it: a reader needs a credential before it can read a tuple, and the identity inventory (T2 `nexus/s1-t1-identity-inventory-2026-08-22`) rules KEEP. This RDR consumes session identity from that layer and does not own it. |
 | RDR-152, RDR-155, RDR-158 | Origin of the substrate | The engine, the PG-only storage rule, and the removal of the SQLite and Chroma paths. The `aspect_extraction_queue` claim in RDR-152's engine is the proven statement this RDR generalises. |
+| RDR-116 and RDR-117 (drafts at 8cce803b7 on the archive branch, never accepted; the RDR-110 post-mortem calls them accepted, which their frontmatter contradicts) | Precedent | 116 recorded the single-writer-lock ceiling (every op serialised on one connection, modelled at 70 to 300 ops/s) and cross-subspace wake amplification (one event per file woke every parked caller); both are answered by construction here with one transaction per call, `SKIP LOCKED`, and a per-subspace waiter. 117 recorded that the tuple store shipped with no backup or restore story; the PG substrate closes it, and its one design statement survives in §Cross-Cutting Concerns: after a restore, active claims are re-earned by lease lapse and the claim log is the only history. |
 | RDR-149 (service registry) | Adjacent, untouched | Daemon discovery and lifecycle stay in the shared primitive. Nothing here changes how the engine is found. |
 | RDR-204 (embedding profile, ghost sweep) | Precedent | Its ghost-sweep and quarantine-reclaim pattern is the retention model for tuples; its tenant premise (one model per content type per tenant, verified on both production tenants) is the reason the semantic column can be one fixed dimension. |
 | RDR-127 (surface rendering is downstream) | Lineage | The one surviving successor of the RDR-110 arc. It decided nexus ships no surface rendering, which is why nothing about surfaces, the ORB, or cockpit projection appears here. |
@@ -168,12 +169,25 @@ mailbox, lock) are still the shapes that come up.
   unvalidated to the engine, whose `AuthFilter` is the check.
 - Client: Python 3.12, `HttpScratchStore` for T1, HTTP stores for T2,
   MCP tools in `nexus.mcp`, hooks in `conexus/hooks/scripts/`.
-- Harness facts (Claude Code 2.1.251, measured in `expectations.sh`):
-  the `SubagentStart` payload carries an opaque per-instance `agent_id`
-  and the `subagent_type`; the Agent tool has no name parameter; the
+- Harness facts (Claude Code 2.1.251 in `expectations.sh`; 2.1.266
+  re-measured in research 5): the `SubagentStart` payload carries an
+  opaque per-instance `agent_id` and the `subagent_type`; the
+  `SubagentStop` payload carries the same `agent_id`, an
+  `agent_transcript_path` named by it, `last_assistant_message` and
+  `stop_hook_active`; the Agent tool has no name parameter; the
   `PreToolUse` payload's `tool_use_id` is absent from `SubagentStart`.
-  The conexus `SubagentStart` hook already injects context into the
-  agent.
+  Two scripts are registered on `SubagentStart`: `subagent-start.sh`
+  injects context through the `hookSpecificOutput.additionalContext`
+  envelope and does not read `agent_id`; `subagent-start-stamp.sh` reads
+  `agent_id` for the ledger and is contractually silent on stdout.
+  Command hooks accept `async: true` on every event, all matching hooks
+  run in parallel, and Claude Code waits for a blocking hook's stdout
+  and stderr to close, not for its exit.
+- Engine HTTP layer: `HttpUtil.send` computes the whole body and commits
+  headers and body together; there is no streaming response path. The
+  Hikari pool defaults to ten connections (`NX_POOL_SIZE`).
+  `RequestContext` and `RequestDeadline` are embed-budget machinery only
+  and have nothing to do with a parked read.
 - This box binds tenant `nexus` with a mint-locked credential
   (`~/.config/nexus/config.yml`; `config.py:569-577`).
 
@@ -188,6 +202,14 @@ db-scheduler, JobRunr, Oban, Graphile Worker, River, Solid Queue), each
 checked against its source by the external fact-check. Load was measured
 from the 44 session ledgers on this box.
 
+Six research passes ran in parallel on 2026-09-09, each recorded in T2
+under `nexus_rdr/205-research-N`: (1) the engine-side implementation
+map; (2) the client, MCP, CLI, ledger and hook-path map; (3) the CA 1
+spike on the bundled Postgres 17.5; (4) what transfers from the May
+implementation on the archive branch; (5) the CA 2 and CA 4 hook spikes
+on Claude Code 2.1.266; (6) blocking reads through the edge, the in-JVM
+waiter, deploy-gap retry and the deferred `LISTEN` path.
+
 #### Dependency Source Verification
 
 | Dependency | Source Searched? | Key Findings |
@@ -198,7 +220,11 @@ from the 44 session ledgers on this box.
 | jOOQ 3.20.11 | Yes | `forNoKeyUpdate()` since 3.12; chains `.skipLocked()`. |
 | `AspectRepository` | Yes (`:1056-1132`, `:1206`) | `claimNext` is `forUpdate().skipLocked()` inside one tenant-scoped transaction; `claimBatch` loops `claimNext`, one transaction per row; `reclaimStale` releases in-progress rows past a timeout. The table carries a foreign key (`fk-003`) and forced RLS, and passes the transaction-mode PgBouncer isolation test. |
 | Liquibase changelog | Yes | No changeset sets a per-table autovacuum factor or fillfactor today; this RDR introduces the first. |
-| Claude Code hook payloads | Yes (`expectations.sh:20-63`, `agent-dispatch-expect.sh:7-36`) | Per-instance `agent_id` exists only on the `SubagentStart` side; whether `SubagentStop` carries the same id is not recorded and is a spike. |
+| Claude Code hook payloads | Yes (`expectations.sh:20-63`, `agent-dispatch-expect.sh:7-36`; research 5 spike at 2.1.266) | Per-instance `agent_id` is present and equal on `SubagentStart` and `SubagentStop`; `additionalContext` injection round-trips it; the docs' `agent_name`, `agent_model` and `stop_reason` are absent from measured payloads and nothing keys on them. |
+| Claude Code hook runner | Yes (docs § Run hooks in the background; research 5 spike) | A blocking hook is done when its stdout and stderr close; a child inheriting them holds the dispatch. `async: true` hooks are never read, never timed out, and killed without grace at session end. |
+| Engine HTTP and pool | Yes (`HttpUtil.java:18-25`, `Main.java:71`, `NexusService.java:485`) | Headers and body commit together, no streaming variant; `NX_POOL_SIZE` default 10; virtual-thread-per-task executor. |
+| `nexus.retry`, `edge_refusal.py` | Yes | 502, 503, 504 and 429 already classified retryable; edge-signed 5xx rendered as transient. Reused, not reinvented. |
+| `subagent-start.sh`, `subagent-start-stamp.sh`, `subagent-stop.sh` | Yes | Injection and ledger stamping are two scripts on one event; the stop hook already keys on the Stop payload's `agent_id` (2,083 of 2,083 stop-side ledger rows match a start row). |
 | pgvector | Yes | `vector(1024)` column type; nullable. |
 
 ### Key Discoveries
@@ -239,6 +265,85 @@ from the 44 session ledgers on this box.
   re-minting, which would rotate the live token (`t1.py:836-848`,
   nexus-5daww). It is a credential cache, not discovery state, and
   cannot be a tuple.
+- **Verified** (research 3, spike on the bundled PostgreSQL 17.5, ten
+  concurrent `psql` claimants, a 50 ms sleep injected between the select
+  and the update) — 200 of 200 rounds produced exactly one winner and
+  nine `None` under `FOR NO KEY UPDATE SKIP LOCKED`, and 50 of 50 under
+  `FOR UPDATE SKIP LOCKED`; zero deadlocks. Ten workers drained 10,000
+  rows in 5.15 s with claim latency p50 3.96 ms and p99 6.01 ms through a
+  local `psql` round trip, every row acked exactly once. Those latencies
+  are the statement's cost, not the end-to-end cost through the engine
+  and the edge.
+- **Verified** (research 3) — With the partial index on `(tenant_id,
+  subspace, created_at) WHERE consumed_at IS NULL AND claim_state IS
+  NULL`, 2,000 claim and ack updates were 0 % HOT; with the index dropped
+  the same workload was 48.6 % HOT. Both state transitions write
+  predicate columns, as the design predicted.
+- **Verified** (research 3) — Bloat under churn: 100,000 claim, ack and
+  reopen cycles on a 1,000-row table (300,000 non-HOT updates, committed
+  every 200 cycles) left 300,000 dead tuples with default autovacuum and
+  zero after one naptime once churn stopped; with
+  `autovacuum_vacuum_scale_factor = 0.01` autovacuum ran twice during the
+  churn. The default self-heals at this load; the tuned factor's
+  measured benefit is reclaim during sustained churn, not rescue from
+  unbounded growth. A sweep that holds one long transaction across many
+  cycles defeats either setting.
+- **Verified** (research 1) — The engine's claim uses
+  `forUpdate().skipLocked()`; `forNoKeyUpdate()` exists in jOOQ 3.20.11
+  (`SelectForUpdateStep`) and has no call site anywhere in the codebase.
+  It is new code with `forUpdate()` as the fallback if it surprises.
+  `RawSqlGateTest` binds any new repository to the generated DSL with no
+  exception path. No changeset sets a per-table autovacuum factor or a
+  nullable `vector` column today; both are firsts and the changeset
+  comment says so.
+- **Verified** (research 1) — RDR-204's ghost sweep is triggered from
+  `AuthFilter` once per tenant per JVM lifetime, a different mechanism
+  from the hourly all-tenant `sweepScheduler` in `NexusService`. The tuple
+  sweep extends the scheduler and borrows the ghost sweep's counted
+  outcome record, not its trigger.
+- **Verified** (research 4, archive branch at 17428ba77) — The May API
+  contracts the skills and the MVV audit relied on: `ack` and `nack`
+  take the claimant and check ownership, with `ClaimNotFound` and
+  `ClaimOwnership` as distinct errors; a same-claimant retake returns the
+  existing claim id without a new log row; the availability predicate
+  makes a lapsed lease claimable before any sweep runs; `take` returns
+  `None` rather than an error on no candidate. The May registry format
+  transfers almost verbatim; its pinned key set was `take.match_keys`.
+  May's `SubagentStop` bridge docstring (2026-05-14) recorded `agent_id`
+  in the stop payload, a prior for CA 2 that research 5 then verified.
+- **Verified** (research 5, Claude Code 2.1.266) — One dispatch with both
+  hooks logging raw stdin: `agent_id` is the same value on
+  `SubagentStart` and `SubagentStop`, the Stop payload's
+  `agent_transcript_path` is named by it, and an injected
+  `additionalContext` line carrying the id came back verbatim in the
+  agent's reply. Across 44 session ledgers every one of 2,083 stop-side
+  rows keyed on the Stop payload's id matched a start row.
+- **Verified** (research 5) — Claude Code waits for a blocking hook's
+  stdout and stderr to close: a detached child inheriting them held the
+  dispatch for 20.03 s against a 3 ms hook exit; the same child with all
+  three fds on `/dev/null` cost 18 ms; a separate `async: true` hook
+  entry cost 5 ms and was killed without trace when the session ended
+  during its 15 s sleep. Today's ledger hooks run in 30 to 40 ms. A
+  projection that shells `uv run nx` pays 0.8 to 0.9 s of CPU importing
+  the CLI; a `curl` POST pays about 10 ms. The data-token lease file is
+  readable from a shell, and only the guarded Python path may mint
+  (burst five per credential and tenant per minute).
+- **Verified** (research 2) — Six MCP tools cost two hand-maintained
+  exact-set literals in `test_mcp_package.py`; a `tuple_cmd.py` module
+  needs a `_MODULE_TO_CLI` entry because `tuple` is a builtin name; the
+  raw-handle-guard roster is a hand-maintained list of nine store classes.
+  No client enforces a pre-send request-body cap today; `edge_refusal.py`
+  is a post-rejection renderer. No hook backgrounds a subprocess today.
+- **Documented** (research 6) — Sending headers early and delaying the
+  body would need a new streaming path beside `HttpUtil.send` and depends
+  on the nginx sidecar forwarding headers before a delayed chunked body,
+  which nginx's own issue tracker records as not guaranteed under
+  `proxy_buffering`. Raising the control-plane knob is a change to a
+  system this RDR does not own and the ALB's 60 s becomes the next
+  ceiling. Capping at 25 s and looping needs neither. No prior RDR
+  decided for long-polling or streaming through the public edge; the one
+  precedent is nexus-bwulw, where the edge silently broke three features
+  that passed every engine-direct gate.
 - **Verified** (conexus session, 2026-09-09, each measured on the live
   estate) — Tenant: one laptop, one client config, every real agent
   instance mints against tenant `nexus`; the other tenants on the store
@@ -253,19 +358,26 @@ from the 44 session ledgers on this box.
 
 ### Critical Assumptions
 
-- [ ] **CA 1: A single-statement claim on the new table is atomic across
-      concurrent claimants, including through a transaction-mode
-      pooler.** — **Status**: Verified for the aspect queue by source
-      search and the existing isolation test; Unverified for the new
-      table until the ten-worker harness runs. — **Method**: Source
-      Search, then Spike (Phase 1 Step 6).
-- [ ] **CA 2: The `SubagentStart` hook can inject the harness's
+- [x] **CA 1: A single-statement claim on the new table is atomic across
+      concurrent claimants.** — **Status**: Verified (research 3): the
+      RDR's own table shape, ten claimants, a 50 ms injected race window,
+      200 of 200 rounds with exactly one winner, zero deadlocks, under
+      both lock modes. The pooler case is moot for production (CA 7) and
+      already proven for the aspect queue's statement. Phase 1 Step 6
+      re-runs the same harness against the engine's repository, which is
+      a regression pin, not the verification. — **Method**: Spike, then
+      Source Search.
+- [x] **CA 2: The `SubagentStart` hook can inject the harness's
       per-instance `agent_id` into the agent's context, and the same id
-      is recoverable at `SubagentStop`.** — **Status**: Unverified. The
-      start-side id is documented; the stop side is not. If the stop
-      payload lacks it, the report tuple is keyed by the injected id the
-      agent carries, and the stop hook matches on type as today. —
-      **Method**: Spike (one dispatch, both hooks logged).
+      arrives on the `SubagentStop` payload.** — **Status**: Verified
+      (research 5, Claude Code 2.1.266): the same opaque id on both
+      payloads, the transcript path named by it, the injected line
+      returned verbatim, and 2,083 of 2,083 stop-side ledger rows matched
+      to a start row. The shipped stop hook has relied on the equality
+      since it landed; the prose now says so. Design consequence: the
+      report tuple is written by the stop hook without the agent's
+      cooperation, and the agent's own writes use the injected id as
+      claimant. — **Method**: Spike plus Source Search.
 - [x] **CA 3: A parked long-poll survives the public edge in front of
       the managed engine.** — **Status**: Verified as a constraint,
       not a capability: the control plane times out a response that has
@@ -276,11 +388,21 @@ from the 44 session ledgers on this box.
       — **Method**: Docs Only (conexus's measurement of the live edge),
       confirmed by a Spike through `tests/e2e/cloud-client-path-gate.sh`
       in Phase 1 Step 6.
-- [ ] **CA 4: The hook-path write can be projected to the engine without
-      ever blocking a dispatch.** — **Status**: Unverified. — **Method**:
-      Spike: the projection runs after the TSV append, in the background,
-      and the hook's exit code and latency are measured with the engine
-      up, down, and rate-limiting mints.
+- [x] **CA 4: The hook-path write can be projected to the engine without
+      ever blocking a dispatch.** — **Status**: Verified as a mechanism
+      with one shape excluded (research 5). Claude Code waits for the
+      blocking hook's fds to close, so a child that inherits them holds
+      the dispatch; a separate `async: true` hook entry, or a child with
+      all three fds on `/dev/null`, does not (5 ms and 18 ms measured
+      against 20.03 s for the inheriting shape). The projection is a
+      separate async hook that reads the data-token lease file, POSTs
+      with `curl`, never mints, and skips with a stderr reason when the
+      lease is missing or near expiry. Residual: an async hook is killed
+      without trace at session end; the census's newest-row-age
+      comparison is the detector. What research 5 did not run, and Phase
+      3 must: the real projection script's timing with the engine up,
+      down, and rate limiting. — **Method**: Spike plus Docs plus Source
+      Search.
 - [x] **CA 5: One engine JVM at any time.** — **Status**: Verified
       (one container, stop-then-start deploys, measured gap about 25 s).
       The in-process wake is therefore the mechanism, not an
@@ -339,7 +461,9 @@ a *subspace* is a concrete instance. The *keys* of a tuple are the
 registered dimensions the destructive read matches on; *dims* are the
 rest. A *claim* is the state between `in` and `ack`/`nack`, held under a
 *lease* (a deadline after which the claim is released by a sweep). A
-*claimant* is the id doing the taking.
+*claimant* is the id doing the taking. A *nonce* is a per-instance
+value mixed into a tuple's id so two otherwise identical tuples stay
+distinct.
 
 **Table (illustrative; the changeset is the authority):**
 
@@ -354,6 +478,7 @@ nexus.tuples
   dims           jsonb         validated against the template's schema
   body           text
   embedding      vector(1024)  nullable; present only when the template declares embed_from
+                               (the schema's first nullable vector column; the changeset says so)
   claim_state    text          NULL | 'claimed'
   claimant       text
   claim_id       text
@@ -364,7 +489,8 @@ nexus.tuples
   created_at     timestamptz
 
 nexus.tuple_claim_log             append-only: claim | ack | nack | expire
-  log_id, tuple_id REFERENCES nexus.tuples(id), claim_id, claimant, transition, at
+  log_id, tenant_id (own RLS policy, like every audit table here),
+  tuple_id REFERENCES nexus.tuples(id), claim_id, claimant, transition, at
 ```
 
 The nonce in the id is the claimant or instance id for coordination
@@ -391,10 +517,21 @@ insert claim_log(tuple_id, claim_id, c, 'claim', now)
 ```
 
 `FOR NO KEY UPDATE` because the update touches no key column and the
-weaker lock lets the log's foreign key coexist. `SKIP LOCKED` because a
-contended row is skipped, not waited on. The transaction holds the claim
-and nothing else, so the taxonomy-015 class (a lock upgrade inside one
-transaction) has nothing to upgrade.
+weaker lock lets the log's foreign key coexist; it has no call site in
+the engine today and `forUpdate()` is the fallback. `SKIP LOCKED`
+because a contended row is skipped, not waited on. The transaction holds
+the claim and nothing else, so the taxonomy-015 class (a lock upgrade
+inside one transaction) has nothing to upgrade.
+
+Two rules from the May implementation travel with the statement. The
+availability predicate is `consumed_at IS NULL AND (claim_state IS NULL
+OR lease_until < now())`, so a lapsed lease is claimable the moment it
+lapses; the sweep's `expire` row is bookkeeping, not the release. And a
+same-claimant retake is idempotent: before the claim statement, `in`
+reads for a live claim held by this claimant on a matching tuple and, if
+one exists, returns its claim id with no new update and no log row.
+Without that read a retry after a lost response could never recover its
+claim.
 
 **Operations (HTTP under `/v1/tuples`; signatures are the contract, the
 handler is the implementation):**
@@ -405,30 +542,64 @@ rd (subspace, keys_pattern, *, where=None, n=1, timeout_s=0) -> [Tuple]   # non-
 rdp(subspace, keys_pattern, *, where=None, n=1) -> [Tuple]                # probe
 in (subspace, keys_pattern, *, claimant, lease_s, timeout_s=0) -> (Tuple, claim_id) | None
 inp(subspace, keys_pattern, *, claimant, lease_s) -> (Tuple, claim_id) | None
-ack(claim_id) ; nack(claim_id)
-subspaces() -> [TemplateSchema] ; subspace_stats(subspace) -> counts by state
+ack(claim_id, claimant) ; nack(claim_id, claimant)                      # ownership checked
+subspaces() -> [TemplateSchema] ; subspace_stats(subspace) -> {total, available, claimed, consumed}
 ```
 
 `timeout_s` is capped at 25 seconds by default (CA 3: the edge times
 out a response that has not started within 30 s), settable on the
 engine; a call at the cap returns the probe result and the caller
-loops. A body over the edge is bounded by the WAF's 8 KB request limit,
-which the client enforces before sending. Errors are typed: `UnknownSubspace`, `SchemaViolation`
-(field and reason, before any write), `TakeDisabled`, `TimeoutTooLong`.
+loops. The client's own HTTP timeout is set above `timeout_s` so the
+server's cap fires first. A body over the edge is bounded by the WAF's
+8 KB request limit; the client enforces that before sending, and that
+guard is new code (nothing pre-checks a body size today). Errors are
+typed: `UnknownSubspace`, `SchemaViolation` (field and reason, before any
+write), `TakeDisabled`, `TimeoutTooLong`, `ClaimNotFound` (no live claim
+with that id), `ClaimOwnership` (a live claim held by someone else); a
+`ttl_seconds` or `lease_s` at or below zero and a negative `timeout_s`
+are refused. Retry across the deploy gap: `rd` and `rdp` are freely
+retryable on a 502 or 504; a retried `in` shares the ambiguity of a crash
+after `in`, which the lease and sweep already cover. The client reuses
+the retry classification in `nexus.retry` rather than a new one.
 
 **Wake.** There is one engine JVM (CA 5) and every `out` passes through
-it. The handler that commits an `out` signals a per-subspace waiter set
-in the same JVM; parked `rd`/`in` calls sit on virtual threads and re-run
-their query on signal. A one-second timer re-runs the query regardless,
-as defence against a missed signal, not as a replica story. During a
-deploy the edge returns 502 or 504 for about 25 seconds; the client
-treats that as a retry of the same call. `LISTEN/NOTIFY` is available on
-the direct connection (CA 7) and deferred until a second JVM exists; the
-one thing to measure first when it is adopted is Crunchy's idle and
-statement timeouts on a held-open connection.
+it. The waiter is a per-subspace `Condition` (one lock and condition per
+subspace key in a concurrent map). The `out` handler signals all waiters
+on that subspace after the tenant-scoped transaction lambda has
+returned, which is the commit, never from a transaction listener. Waking
+every waiter on a subspace is the intended behaviour: each re-runs its
+own equality query, `SKIP LOCKED` makes the fan-out cheap, and the pool
+bounds it. A parked call is a loop: open a short transaction, run the
+query, return the connection, then park outside any transaction until
+the signal or a one-second timer, then repeat. A parked call never holds
+one of the ten pooled connections while parked. The waiter is registered
+before the query, not after, so a commit between query and park is not
+lost. Per-claimant and global park caps are engine settings with a typed
+refusal. On shutdown every waiter is signalled so parked calls return
+the probe result instead of riding out their budget, which is what makes
+the 25-second deploy gap a retry rather than a stall on top of it.
+Parked callers on subspace B do not wake on commits in subspace A.
+`LISTEN/NOTIFY` is available on the direct connection (CA 7) and
+deferred until a second JVM exists; when it is adopted, the listening
+connection lives outside the pool, `getNotifications` is polled with a
+non-zero timeout (the zero form hangs on a partition), and the first
+thing to measure is TCP keepalive on a held-open connection to Crunchy,
+whose public docs override none of Postgres's disabled-by-default idle
+and statement timeouts.
 
 **Registry.** Templates ship as YAML in engine resources, loaded and
 validated at boot; a breach fails boot with the file and field named.
+The document shape is the May format with the substrate keys dropped:
+`name`, `dimensions` (name to type, values, required), `keys` (the pinned
+key set, May's `take.match_keys`; a template with take enabled declares
+at least one), `embed_from` as a declaration, `retention_seconds`,
+`default_lease_seconds`, `idempotent_out`. Dropped: `tier`, `tiers`,
+`content_type`, `floor`, `margin`, the read defaults, `match_text`, and
+retention zero meaning never. Load rules verbatim from May: a literal
+name is looked up before templates; a `<param>` matches one path
+segment; a duplicate name or an empty parameter fails the load. A refire
+on an idempotent template refreshes `expires_at` and leaves `created_at`
+alone, so it does not move the tuple to the back of the claim order.
 Schema evolution is additive in v1. v1 templates: `ledger/<session_id>`
 (keys: `agent_id`, `kind` in {start, report}; nonce: agent_id),
 `mailbox/<address>` (keys: `to`; dims: `from`, `kind`, `correlation_id`;
@@ -440,14 +611,20 @@ Gap 5 request is `out` to `mailbox/conexus-ed` and its ack is `out` back.
 created_at) WHERE consumed_at IS NULL AND claim_state IS NULL` for the
 claim scan; a GIN index on `keys` only if a consumer's pattern needs it.
 Claims and acks write predicate columns and are therefore not HOT
-updates; at the measured load the index churn is affordable and the
-sweep budget assumes it. `autovacuum_vacuum_scale_factor = 0.01` on
-both tables (new precedent; the changeset comment says so). TTL on every
-row; the existing sweep scheduler deletes expired and consumed-past-
-retention rows in batches of a few hundred, in the RDR-204 sweep shape,
-with the same non-vacuity assertion on the sweep's own row counts. If a
-consumer ever pushes the table into millions of rows, the Solid Queue
-shape (a separate claimable table) is the fix, not a fillfactor.
+updates (measured 0 % HOT with the index, research 3); at the measured
+load the index churn is affordable and the sweep budget assumes it.
+`autovacuum_vacuum_scale_factor = 0.01` on both tables, the first
+per-table storage parameter in the changelog; its measured benefit is
+reclaim during sustained churn, since the default already self-heals
+once churn stops. TTL on every row; the hourly all-tenant
+`sweepScheduler` in `NexusService` gains one more sweep that releases
+lapsed claims with an `expire` log row and purges expired and
+consumed-past-retention rows in batches of a few hundred, committing per
+batch (one long transaction would defeat autovacuum), and logs a counted
+outcome record every run in the RDR-204 ghost sweep's convention with a
+non-vacuity assertion on its own counts. If a consumer ever pushes the
+table into millions of rows, the Solid Queue shape (a separate claimable
+table) is the fix, not a fillfactor.
 
 **Client.** `nexus.db.t2.http_tuple_store.HttpTupleStore`, constructor-
 injected like the other stores; MCP tools `tuple_out`, `tuple_rd`,
@@ -455,18 +632,28 @@ injected like the other stores; MCP tools `tuple_out`, `tuple_rd`,
 {out,rd,in,ack,nack,list,stats}`; two `nx doctor` rows (oldest unclaimed
 age per subspace; dead-tuple ratio and last autovacuum on the table).
 
-**Identity and scope.** The `SubagentStart` hook mints nothing: it takes
-the harness's `agent_id`, writes the start tuple, and injects the same id
-into the agent's context as its claimant id and mailbox address. The
-`PreToolUse` expectation row keeps covering a dispatch that never starts.
-Every tuple's `scope` value comes from that injected id or from the
-existing session lease, never from resolving the session at write time.
+**Identity and scope.** No hook mints anything. `subagent-start.sh`,
+the one script on `SubagentStart` that may write to stdout, parses
+`agent_id` from its own payload (the stamp script parses the same
+payload and stays silent) and adds one line to the `additionalContext`
+envelope it already emits, giving the agent its claimant id and mailbox
+address. The stamp script's start tuple and the stop hook's report tuple
+are both keyed on the harness id, so the report needs no cooperation
+from the agent. The `PreToolUse` expectation row keeps covering a
+dispatch that never starts. Every tuple's `scope` value comes from that
+injected id or from the existing session lease, never from resolving the
+session at write time.
 
 **Hook path.** The TSV append stays exactly as it is and stays the
-write-ahead. The projection to the engine runs after the append, detached
-from the hook's exit, and its failure is logged and never propagated. The
-census reads the space and falls back to the TSV with a named reason when
-the engine is unreachable.
+write-ahead. The projection is a separate `async: true` hook entry on
+the same matcher, never a child of the blocking hook (a child that
+inherits the hook's fds holds the dispatch, CA 4). It reads the
+data-token lease file, POSTs with `curl`, never mints, and skips with a
+stderr reason when the lease is missing or near expiry; its failure is
+never propagated. The census reads the space and falls back to the TSV
+with a named reason when the engine is unreachable, and reports the
+space's newest-row age against the TSV's so a stalled projection is a
+finding.
 
 ### Existing Infrastructure Audit
 
@@ -474,18 +661,23 @@ the engine is unreachable.
 | --- | --- | --- |
 | Atomic claim | `AspectRepository.claimNext` / `reclaimStale` | Reuse the statement shape and the tenant-scoped transaction; new repository, since the queue's columns are aspect-specific. |
 | Batch claim | `AspectRepository.claimBatch` (a loop) | Do not reuse; a real `LIMIT n` claim is new work and lands only when a consumer asks. |
-| Sweep | `NexusService` sweep scheduler; RDR-204 ghost sweep | Extend: one more scheduled sweep with the same batch and non-vacuity discipline. |
+| Sweep | `NexusService.sweepScheduler` (hourly, all tenants); RDR-204 ghost sweep (`AuthFilter`, once per tenant per JVM) | Extend the scheduler; borrow the ghost sweep's counted outcome record, not its trigger. |
+| Pre-send body cap | none (`edge_refusal.py` is post-rejection; `limits.py` holds store quotas) | New: an 8 KB guard in `HttpTupleStore.out`. |
+| Retry across the deploy gap | `nexus.retry` (502, 503, 504, 429 retryable) | Reuse unchanged. |
 | Tenant scoping | `TenantScope`, forced RLS changesets | Reuse unchanged. |
 | HTTP store client | `http_aspect_queue.py` | Reuse the shape (constructor injection, typed errors, data-token handling). |
 | Dispatch ledger | `expectations.sh`, `agent-dispatch-expect.sh`, `subagent-start.sh` | Extend: the start hook writes a tuple and injects the id; the census gains a space-backed path. The TSV and its readers stay. |
 | Session identity | `t1.py` lease and handoff, JDR-001 | Untouched, by decision. |
-| Registry loader | RDR-110's YAML registry (archive branch) | Reuse the schema format; the loader moves to the engine. |
+| Registry loader | RDR-110's YAML registry (archive branch, `registry.py`) | Reuse the document shape and load rules named in §Technical Design; drop the tier, similarity and Chroma keys; the loader moves to the engine. |
 
 ### Decision Rationale
 
-Three things decide the shape. The claim statement is already proven in
-this engine, so the risk in the primitive is near zero and the cost is a
-table and a handler. The two consumers are the two most-measured failures
+Three things decide the shape. The claim statement's shape is already
+proven in this engine and the exact statement passed its own spike, so
+the risk in the primitive is near zero and the cost is a table and a
+handler. RDR-116's ceiling, every operation serialised behind one
+connection, cannot recur: each call is its own transaction and a
+contended row is skipped. The two consumers are the two most-measured failures
 in the orchestration record and each is a small change to a hook that
 already exists. And RDR-120's rule about co-shipped consumers is the only
 structural difference between the attempt that shipped and the attempt
@@ -579,9 +771,12 @@ the record; the RDR-184 failures are exactly what this produced.
   **Mitigation**: The default cap of 25 s sits under the edge's 30 s
   response-start timeout; the call returns the probe result at the cap;
   the gate runs through the public edge.
-- **Risk**: Table bloat from claim/ack churn on non-HOT updates.
-  **Mitigation**: Per-table autovacuum factor, TTL on every row, batched
-  sweep, doctor row; the Solid Queue shape as the named next step.
+- **Risk**: Table bloat under sustained claim/ack churn that outlasts an
+  autovacuum naptime (the default self-heals once churn stops, research
+  3).
+  **Mitigation**: Per-table autovacuum factor for reclaim during churn,
+  TTL on every row, a sweep that commits per batch, doctor row; the
+  Solid Queue shape as the named next step.
 - **Risk**: Two same-type dispatches collapse into one ledger tuple.
   **Mitigation**: The nonce in the id for coordination templates,
   pinned by a test that writes two identical starts and reads two rows.
@@ -601,17 +796,20 @@ the record; the RDR-184 failures are exactly what this produced.
   the sweep releases the row with an `expire` log entry.
 - Silent, resolved: two claimants race; `SKIP LOCKED` gives each a
   distinct row or `None`.
-- Silent, open until CA 4: the projection silently stops and the census
-  reads a space that is behind the TSV. Mitigation: the census reports
-  the space's newest row age against the TSV's, and a gap is a finding.
+- Silent, recorded: an async projection hook is killed without trace at
+  session end, so the space can be behind the TSV. The census reports
+  the space's newest-row age against the TSV's, and a gap is a finding.
 
 ## Implementation Plan
 
 ### Prerequisites
 
-- [ ] CA 1, CA 2 and CA 4 verified by their named spikes; CA 3 confirmed
-      through the cloud client-path gate. CA 5 to CA 7 are recorded from
-      conexus's measurements of 2026-09-09.
+- [x] CA 1, CA 2 and CA 4 verified by the research 3 and research 5
+      spikes; CA 5 to CA 7 recorded from conexus's measurements of
+      2026-09-09.
+- [ ] CA 3 confirmed through the cloud client-path gate (Phase 1 Step
+      6); nexus-bwulw is why that gate, and not an engine-direct check,
+      is the proof.
 - [ ] The RDR-120 lift statement in §Relationship to Prior RDRs stands
       unchallenged at the gate.
 - [ ] `PgBouncerTenantIsolationTest`'s comment corrected to say it
@@ -640,9 +838,13 @@ statement stands.
 
 #### Step 2: Changesets
 
-`tuples-001-baseline.xml`: both tables, the partial index, forced RLS
-and grants in the house pattern, the per-table autovacuum factor with a
-comment naming this RDR as the first use.
+`tuples-001-baseline.xml`: both tables each with `tenant_id`, a separate
+RLS changeset per table in the catalog-036 shape, the partial index, the
+per-table autovacuum factor and the nullable `vector` column each with a
+comment naming this RDR as the first use, and complete rollback blocks
+(the rollback round-trip test replays the whole chain). No per-changeset
+grants: the `runAlways` grant changesets cover every relation. One
+include line in the master changelog before the grant includes.
 
 #### Step 3: Registry
 
@@ -657,22 +859,46 @@ re-run timer; typed errors.
 
 #### Step 5: Sweep
 
-One scheduled sweep on the existing scheduler: release lapsed claims with
-a log entry, purge expired and consumed-past-retention rows in batches,
-assert non-vacuity on its own counts.
+One more sweep in `runScheduledSweep`'s hourly all-tenant loop: release
+lapsed claims with an `expire` log row, purge expired and
+consumed-past-retention rows in batches with a commit per batch, log the
+counted outcome record every run, assert non-vacuity on its own counts.
 
 #### Step 6: Spikes
 
-CA 1 on the new table (the ten-worker harness with an injected delay
-between select and update), CA 3 through the cloud client-path gate.
+The research 3 harness re-run against `TupleRepository` with a
+test-only delay between select and update (a regression pin for CA 1);
+CA 3 through the cloud client-path gate, including a 31 s park to pin
+the 504 that justifies the cap.
 
 ### Phase 2: Client
 
-#### Step 1: `HttpTupleStore` and tests against the engine substrate.
+#### Step 1: `HttpTupleStore`
 
-#### Step 2: MCP tools and `nx tuple`; doctor rows.
+The `HttpAspectQueue` shape (both mixins, route-prefix overrides,
+constructor injection), a `db.tuples` attribute on the facade with
+reverse-order close, typed errors, the 8 KB pre-send guard, the retry
+classification from `nexus.retry` on parked calls, an HTTP timeout above
+`timeout_s`. Tests against the engine substrate. The raw-handle-guard
+roster gains the class by hand.
 
-#### Step 3: CA 2 and CA 4 spikes (hook injection and hook-path timing).
+#### Step 2: MCP tools, `nx tuple`, doctor rows
+
+Six tools in `nexus.mcp` (`structured_output=False` only where the
+return annotation is a union or a list); both exact-set literals in
+`test_mcp_package.py` updated. `commands/tuple_cmd.py` as a click group
+with a `_MODULE_TO_CLI` entry, documented in `docs/cli-reference.md`.
+Two doctor rows in `health.py` on the RDR-204 pattern with every report
+class covered.
+
+#### Step 3: Hook wiring
+
+`subagent-start.sh` parses `agent_id` and adds the injection line; the
+stop hook writes the report tuple; the async projection hook entry is
+added to `hooks.json`. CA 2 and CA 4 are discharged by research 5; what
+this step measures is the real projection script with the engine up,
+down, and rate limiting, and that the blocking hooks still run in their
+30 to 40 ms.
 
 ### Phase 3: Consumer one, the ledger
 
@@ -719,6 +945,19 @@ None. Postgres, pgvector, jOOQ and Liquibase are in place.
   claimant takes it.
 - **Scenario**: `ack` — **Verify**: `consumed_at` set, `ack` logged, the
   row invisible to `rd` and `in`.
+- **Scenario**: `ack` or `nack` by a claimant that does not hold the
+  claim — **Verify**: `ClaimOwnership`; a second `ack` on the same claim
+  — **Verify**: `ClaimNotFound`.
+- **Scenario**: the same claimant calls `in` twice within its lease —
+  **Verify**: the same claim id both times, one `claim` log row.
+- **Scenario**: parked callers on subspace B while `out` commits on
+  subspace A — **Verify**: B's callers do not re-run (RDR-116's
+  scenario).
+- **Scenario**: ten workers drain N tuples — **Verify**: N consumed, zero
+  claimed, zero available, exactly N `claim` and N `ack` log rows, zero
+  `expire` rows, no tuple with two claim ids (the May MVV audit).
+- **Scenario**: a parked `rd` receives a 502 from the edge — **Verify**:
+  the client retries within its bounded policy and returns the tuple.
 - **Scenario**: a less specific key pattern against a more specific
   tuple — **Verify**: no match (equality, not containment).
 - **Scenario**: tenant A's `rd` against tenant B's mailbox — **Verify**:
@@ -774,8 +1013,11 @@ rest on the conexus session's measurements of 2026-09-09, recorded in
 | `forNoKeyUpdate().skipLocked()` | jOOQ 3.20.11 | Source Search |
 | `SELECT … FOR NO KEY UPDATE SKIP LOCKED` | PostgreSQL 17 | Docs |
 | `vector(1024)` | pgvector | Docs |
-| `SubagentStart` payload `agent_id` | Claude Code 2.1.251 | Source Search (`expectations.sh`) |
-| `SubagentStop` payload | Claude Code | Spike (CA 2) |
+| `SubagentStart` payload `agent_id` | Claude Code 2.1.251, 2.1.266 | Source Search (`expectations.sh`), Spike (research 5) |
+| `SubagentStop` payload `agent_id` | Claude Code 2.1.266 | Spike (research 5) |
+| `async: true` command hook | Claude Code 2.1.266 | Docs plus Spike (research 5) |
+| `SELECT … FOR NO KEY UPDATE SKIP LOCKED` under ten claimants | PostgreSQL 17.5 | Spike (research 3) |
+| `HttpExchange.sendResponseHeaders(status, 0)` (streaming, not taken) | JDK 25 | Docs |
 
 ### Scope Verification
 
@@ -799,7 +1041,11 @@ and Phase 1 deliverables, not deferred._
 - **Secret/credential lifecycle**: unchanged; the data token discipline
   applies; tenant binding decides visibility.
 - **Memory management**: TTL on every row; batched sweep; parked calls
-  on virtual threads.
+  on virtual threads holding no pooled connection.
+- **Recovery**: after a point-in-time restore, content and dimensions
+  come back from the snapshot, active claims are re-earned by lease
+  lapse, and the claim log is the only claim history (RDR-117's
+  statement, carried here).
 
 ### Proportionality
 
@@ -842,3 +1088,19 @@ agent instance, direct Postgres with no pooler, one engine JVM with
 stop-then-start deploys, and a 30 s response-start timeout at the edge.
 Gap 5 went from conditional to a same-tenant mailbox; the wake became the
 mechanism rather than an optimisation; the blocking cap became 25 s.
+
+### 2026-09-09 — Research pass (six parallel records, T2 `nexus_rdr/205-research-1` to `-6`)
+
+CA 1, CA 2 and CA 4 verified by spike; the spike numbers are in §Key
+Discoveries. Changes to the design text: `ack` and `nack` take the
+claimant and check ownership; the same-claimant retake and the
+availability predicate are stated as rules; the claim log carries its
+own `tenant_id` and policy; the waiter is a per-subspace `Condition`
+signalled after commit, parked calls hold no pooled connection; the
+sweep extends the hourly scheduler and commits per batch; the registry
+document shape and load rules are named; the injection lands in
+`subagent-start.sh` and the projection is a separate async hook that
+never mints; the pre-send body cap is named as new code; RDR-116 and
+RDR-117 join the prior-RDR table; the recovery statement joins
+§Cross-Cutting Concerns. `forNoKeyUpdate()` is recorded as having no
+call site in the engine today, with `forUpdate()` as the fallback.
