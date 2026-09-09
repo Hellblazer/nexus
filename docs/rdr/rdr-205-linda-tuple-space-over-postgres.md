@@ -1257,9 +1257,9 @@ count, Gap 2's wording, template lifecycle, frontmatter `related_rdrs`,
 the load bullet's citation, the seventh MCP tool and third doctor row,
 and first-use glosses for T1, T2, beads, TSV, HOT, WAF, ALB and PITR.
 
-### 2026-09-09 — Fix check on 8ec08d5af (FAIL), second fix
+### 2026-09-09 — Fix check on the round-1 fix commit (FAIL), second fix
 
-T2 `nexus_rdr/205-fix-check-8ec08d5af`. C4 had survived in the Existing
+T2 `nexus_rdr/205-fix-check-` plus that commit's sha. C4 had survived in the Existing
 Infrastructure Audit's dispatch-ledger row; closed. C5's Gap 4 query
 needed a time field on `subspace_list`; added (oldest and newest
 `created_at`). The sweep's tenant set is the default tenant plus every
