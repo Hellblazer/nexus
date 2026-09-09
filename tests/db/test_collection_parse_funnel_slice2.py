@@ -239,7 +239,14 @@ class TestIsSameModelPassthrough:
     representative name/target pair per the four-segment shape
     ``_is_same_model_passthrough`` parses via ``name.split("__")``. No
     prior direct unit test existed (only indirectly, through the full
-    verify-fill round trip in tests/migration/test_vector_etl_pg_source.py)."""
+    verify-fill round trip in tests/migration/test_vector_etl_pg_source.py).
+
+    nexus-ft04v.26 item 6 (THE REPOINT) repointed the model source to
+    ``_model_for_collection`` (row-preferred, falling to the same
+    name-split only when no row exists) -- the tests below pin that
+    ordering; the tests above (unmodified) continue to pin the no-row
+    fallback path, since none of these synthetic names has a real
+    catalog row in this suite's substrate."""
 
     def test_cross_model_is_never_passthrough(self) -> None:
         from nexus.db.reconcile import _is_same_model_passthrough
@@ -257,22 +264,56 @@ class TestIsSameModelPassthrough:
         name = "code__nexus__voyage-code-3__v1"
         assert _is_same_model_passthrough(name, name) is True
 
-    def test_same_name_unwired_model_is_not_passthrough(self) -> None:
+    def test_same_name_unwired_model_is_not_passthrough(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """minilm is deliberately absent from _PASSTHROUGH_MODELS -- the
         service wires no embedder for it, so it must be cross-model
-        remapped even when name == target."""
+        remapped even when name == target. Overrides the file's autouse
+        row fixture with no-row: this test is specifically about the
+        NAME-SPLIT fallback path, and the fixture's own row always
+        assigns a canonical CCE/code model regardless of the literal
+        token in the test name, which would mask the exact case under
+        test."""
+        import nexus.mcp_infra as mi
         from nexus.db.reconcile import _is_same_model_passthrough
 
+        monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
         name = "docs__proj__minilm-l6-v2-384__v1"
         assert _is_same_model_passthrough(name, name) is False
 
-    def test_non_four_segment_name_is_not_passthrough(self) -> None:
+    def test_non_four_segment_name_is_not_passthrough(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A legacy two-segment name has no model segment to match against
         _PASSTHROUGH_MODELS -- len(segments) != 4 short-circuits False even
-        when name == target."""
+        when name == target. No-row override -- see the comment on
+        test_same_name_unwired_model_is_not_passthrough."""
+        import nexus.mcp_infra as mi
         from nexus.db.reconcile import _is_same_model_passthrough
 
+        monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
         assert _is_same_model_passthrough("docs__proj", "docs__proj") is False
+
+    def test_row_wins_over_a_disagreeing_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The NAME says an unwired model (minilm); the ROW (the GH #667
+        drift class) says a wired one and must win."""
+        import nexus.mcp_infra as mi
+        from nexus.db.reconcile import _is_same_model_passthrough
+
+        monkeypatch.setattr(
+            mi, "get_collection_row",
+            lambda name: {"embedding_model": "bge-base-en-v15-768"},
+        )
+        name = "docs__proj__minilm-l6-v2-384__v1"
+        assert _is_same_model_passthrough(name, name) is True
+
+    def test_row_present_but_unwired_model_is_not_passthrough(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import nexus.mcp_infra as mi
+        from nexus.db.reconcile import _is_same_model_passthrough
+
+        monkeypatch.setattr(
+            mi, "get_collection_row",
+            lambda name: {"embedding_model": "minilm-l6-v2-384"},
+        )
+        name = "docs__proj__bge-base-en-v15-768__v1"
+        assert _is_same_model_passthrough(name, name) is False
 
 
 # ── db/reconcile.py:343 — _dim_for_collection ───────────────────────────────
@@ -281,11 +322,23 @@ class TestIsSameModelPassthrough:
 class TestDimForCollection:
     """nexus-ft04v.22: pins the pgvector-dim resolution (or classification
     failure reason) for a representative set of conformant and
-    non-conformant names. No prior direct unit test existed."""
+    non-conformant names. No prior direct unit test existed.
 
-    def test_conformant_known_model_resolves_dim(self) -> None:
+    nexus-ft04v.26 item 6 (THE REPOINT) repointed the model source to
+    prefer the catalog row -- the tests below pin that path; the tests
+    above (unmodified) continue to pin the no-row fallback."""
+
+    def test_conformant_known_model_resolves_dim(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No-row override: the file's autouse row fixture always assigns
+        the canonical CCE/code model by content_type, which would silently
+        replace the literal bge-base-en-v15-768 token in the second name
+        below with voyage-context-3 -- a different (and here, still valid,
+        but NOT what this test is pinning) dim. See the comment on
+        TestIsSameModelPassthrough.test_same_name_unwired_model_is_not_passthrough."""
+        import nexus.mcp_infra as mi
         from nexus.db.reconcile import _dim_for_collection
 
+        monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
         dim, reason = _dim_for_collection("code__nexus__voyage-code-3__v1")
         assert dim == 1024
         assert reason == ""
@@ -294,19 +347,59 @@ class TestDimForCollection:
         assert dim == 768
         assert reason == ""
 
-    def test_non_four_segment_name_cannot_dim_dispatch(self) -> None:
+    def test_non_four_segment_name_cannot_dim_dispatch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import nexus.mcp_infra as mi
         from nexus.db.reconcile import _dim_for_collection
 
+        monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
         dim, reason = _dim_for_collection("docs__proj")
         assert dim is None
         assert "not four-segment conformant" in reason
 
-    def test_unknown_model_segment_cannot_dim_dispatch(self) -> None:
+    def test_unknown_model_segment_cannot_dim_dispatch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import nexus.mcp_infra as mi
         from nexus.db.reconcile import _dim_for_collection
 
+        monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
         dim, reason = _dim_for_collection("docs__proj__unknown-model-xyz__v1")
         assert dim is None
         assert "unknown embedding-model segment" in reason
+        assert "unknown-model-xyz" in reason
+
+    def test_row_wins_over_a_disagreeing_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The NAME says voyage-code-3 (1024-dim); the ROW disagrees (768)
+        and must win (RDR-204 Gap 1)."""
+        import nexus.mcp_infra as mi
+        from nexus.db.reconcile import _dim_for_collection
+
+        monkeypatch.setattr(
+            mi, "get_collection_row",
+            lambda name: {"embedding_model": "bge-base-en-v15-768"},
+        )
+        dim, reason = _dim_for_collection("code__nexus__voyage-code-3__v1")
+        assert dim == 768
+        assert reason == ""
+
+    def test_row_present_with_no_embedding_model_cannot_dim_dispatch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import nexus.mcp_infra as mi
+        from nexus.db.reconcile import _dim_for_collection
+
+        monkeypatch.setattr(mi, "get_collection_row", lambda name: {"embedding_model": ""})
+        dim, reason = _dim_for_collection("code__nexus__voyage-code-3__v1")
+        assert dim is None
+        assert "no embedding_model recorded" in reason
+
+    def test_row_present_with_unknown_model_cannot_dim_dispatch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import nexus.mcp_infra as mi
+        from nexus.db.reconcile import _dim_for_collection
+
+        monkeypatch.setattr(
+            mi, "get_collection_row",
+            lambda name: {"embedding_model": "unknown-model-xyz"},
+        )
+        dim, reason = _dim_for_collection("code__nexus__voyage-code-3__v1")
+        assert dim is None
+        assert "unknown embedding-model" in reason
         assert "unknown-model-xyz" in reason
 
 

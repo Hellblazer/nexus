@@ -231,6 +231,35 @@ _VOYAGE_MODELS: frozenset[str] = frozenset(
 _PASSTHROUGH_MODELS: frozenset[str] = frozenset({"bge-base-en-v15-768"}) | _VOYAGE_MODELS
 
 
+def _model_for_collection(name: str) -> str:
+    """The model token for *name*: prefers the catalog row's
+    ``embedding_model`` column (RDR-204 Gap 1 — a row that disagrees with
+    the name wins), falling to the LAXER ``len(segments) == 4`` name split
+    only when *name* has no row (a legacy or not-yet-registered migration
+    source, which is the normal case here — this module runs over
+    collections that may predate RDR-204 Phase 1 registration entirely).
+
+    Deliberately NOT :func:`nexus.corpus.collection_model` — that funnel
+    helper requires :func:`nexus.corpus.is_conformant_collection_name`
+    internally (``[a-zA-Z0-9-]+`` owner charset, no underscore) and fails
+    loud (``CollectionNotRegisteredError``) on a name with no row; both
+    would silently NARROW this migration tool from accepting an
+    underscored-owner name (e.g. ``my_repo``) or an unregistered source
+    to rejecting it outright, forbidden by the RDR-204 Phase 3 bead
+    (nexus-ft04v.22's ruling on this exact site).
+
+    Shared by :func:`_is_same_model_passthrough` and its caller's
+    ``declared_model`` derivation so the two can never disagree about
+    which model backed the passthrough decision (nexus-ft04v.26 item 6).
+    """
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — deferred to avoid import cycle (nexus.mcp_infra)
+    row = get_collection_row(name)
+    if row is not None:
+        return str(row.get("embedding_model") or "")
+    segments = name.split("__")
+    return segments[2] if len(segments) == 4 else ""
+
+
 def _is_same_model_passthrough(name: str, target: str) -> bool:
     """True when this collection migrates SAME-model into a WIRED model.
 
@@ -247,25 +276,17 @@ def _is_same_model_passthrough(name: str, target: str) -> bool:
     already exist — same logical waste, copied instead of recomputed (nexus-hxry2).
     Cross-model migrations and unsupported-model collections (minilm, which must be
     remapped) return False and re-embed, as required.
+
+    RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26 item 6): the model comes
+    from :func:`_model_for_collection` — the catalog row when *name* has
+    one, else the same laxer name-split fallback this site always used
+    (see that helper's docstring for why it is not the conformant-gated
+    funnel helper).
     """
     if name != target:
         return False
-    # RDR-204 Phase 3 funnel (nexus-ft04v.22): LEFT RAW, deliberately, per
-    # the coordinator's ruling -- same excluded shape as collection_shape.
-    # py's positional decode (nexus-ft04v.21's hand-off report). This
-    # `len(segments) == 4` count-based check is LAXER than
-    # `is_conformant_collection_name` (which :func:`collection_model` and
-    # :func:`collection_content_type` require internally): an owner
-    # segment containing a single underscore (e.g. "my_repo") still
-    # produces exactly 4 segments here, since `split("__")` only breaks on
-    # the literal DOUBLE underscore, but fails the conformant regex
-    # (`[a-zA-Z0-9-]+`, no underscore allowed) -- `collection_model()`
-    # would return "" for such a name and silently NARROW this function
-    # from True to False. Funnelling would change behaviour; forbidden by
-    # the bead. Stays counted until nexus-ft04v.26 reads the model
-    # directly from the catalog row.
-    segments = name.split("__")
-    return len(segments) == 4 and segments[2] in _PASSTHROUGH_MODELS
+    model = _model_for_collection(name)
+    return bool(model) and model in _PASSTHROUGH_MODELS
 
 
 @dataclass(frozen=True)
@@ -353,12 +374,36 @@ class MigrationReport:
 
 def _dim_for_collection(name: str) -> tuple[int | None, str]:
     """Resolve the pgvector dim for *name*, or (None, reason) when the name
-    cannot dim-dispatch (the server would 400 it — classify, don't send)."""
-    # RDR-204 Phase 3 funnel (nexus-ft04v.22): LEFT RAW, deliberately --
-    # same excluded shape as :func:`_is_same_model_passthrough` above (see
-    # its comment for the full underscored-owner divergence this laxer
-    # `len(segments) == 4` count-check preserves that the conformant-gated
-    # funnel helpers cannot).
+    cannot dim-dispatch (the server would 400 it — classify, don't send).
+
+    RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26 item 6): prefers the
+    catalog row's ``embedding_model`` column when *name* has one (Gap 1 —
+    a row that disagrees with the name wins); falls to the same laxer
+    ``len(segments) == 4`` name split as :func:`_model_for_collection`
+    (kept inline rather than sharing that helper directly — this function
+    needs two DISTINCT fallback-path error reasons, "not four-segment
+    conformant" vs "unknown embedding-model segment", that a single
+    plain-string return cannot carry) only when *name* has no row -- the
+    normal case for a migration source that may predate RDR-204 Phase 1
+    registration entirely.
+    """
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — deferred to avoid import cycle (nexus.mcp_infra)
+    row = get_collection_row(name)
+    if row is not None:
+        model = str(row.get("embedding_model") or "")
+        if not model:
+            return None, (
+                f"collection '{name}' has a catalog row with no "
+                "embedding_model recorded — cannot dim-dispatch"
+            )
+        dim = _MODEL_DIMS.get(model)
+        if dim is None:
+            return None, (
+                f"collection '{name}' has unknown embedding-model "
+                f"'{model}' — not conformant with the dim registry "
+                f"(known: {sorted(_MODEL_DIMS)})"
+            )
+        return dim, ""
     segments = name.split("__")
     if len(segments) != 4:
         return None, (
@@ -601,13 +646,16 @@ def _verify_fill_one(
         return CollectionResult(name, 0, 0, "failed", reason, target_collection=target if is_cross_model else None)
 
     passthrough = _is_same_model_passthrough(name, target)
-    # RDR-204 Phase 3 funnel (nexus-ft04v.22): LEFT RAW, deliberately --
-    # same excluded shape and reason as _is_same_model_passthrough's own
-    # `segments[2]` read above (the laxer 4-segment count check this
-    # `passthrough` guard already passed can accept an underscored-owner
-    # name `collection_model()` would reject, so swapping this line alone
-    # would disagree with the guard that gated it).
-    declared_model = name.split("__")[2] if passthrough else None
+    # RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26 item 6): shares
+    # _model_for_collection with the `passthrough` guard above so the two
+    # can never disagree about which model backed the decision -- reading
+    # `name.split("__")[2]` here independently would drift the moment
+    # `_is_same_model_passthrough` resolved the model from a catalog row
+    # that disagrees with the name (Gap 1). `passthrough` being True
+    # already guarantees a nonempty, PASSTHROUGH-listed model, so this
+    # never lands on the `else None` branch of `_model_for_collection`'s
+    # own empty-string case.
+    declared_model = _model_for_collection(name) if passthrough else None
 
     def _provenance_ok(c: dict) -> bool:
         # Mirrors _migrate_one's MISMATCH-ONLY provenance check (nexus-bfdri)

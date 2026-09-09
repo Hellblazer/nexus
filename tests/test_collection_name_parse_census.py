@@ -123,19 +123,30 @@ is now regex-based); and the fifth pattern class (above) was ADDED per
 the coordinator's ruling, raising the pin from 13 to 50 -- an increase
 that reflects the gate becoming HONEST about a parsing surface it
 previously could not see (the two primitives' external callers), not a
-regression. Item 6 of this SAME bead then closed ONE of the five original
-holdouts named above: ``catalog/chunk_quarantine.py``'s
-``quarantine_collection_name`` now PREFERS the origin's catalog row
-(content_type/owner_id/embedding_model) and falls to
-``split_candidate_collection_name`` (one primitive_call, still counted)
-only when the origin has no row -- see that file's census-entry comment
-for the full design note, including the paired indexer.py fix that mints
-the quarantine sibling's own catalog row before any server-side GC route
-touches it. The remaining FOUR holdouts (collection_shape.py's 3,
+regression. Item 6 of this SAME bead then gave TWO of the five original
+holdouts the row-read treatment, lowering the pin from 50 to 49:
+
+- ``catalog/chunk_quarantine.py``'s ``quarantine_collection_name`` now
+  PREFERS the origin's catalog row (content_type/owner_id/
+  embedding_model) and falls to ``split_candidate_collection_name`` (one
+  primitive_call, still counted) only when the origin has no row -- see
+  that file's census-entry comment for the full design note, including
+  the paired indexer.py fix that mints the quarantine sibling's own
+  catalog row before any server-side GC route touches it. Site count
+  unchanged (1 -> 1, a primitive_call instead of a raw split).
+- ``db/reconcile.py``'s ``_is_same_model_passthrough`` and
+  ``_dim_for_collection`` now share a new ``_model_for_collection``
+  helper that prefers the row and falls to the same laxer name-split
+  only when there is none; the third site (the passthrough
+  ``declared_model`` read) now calls that same helper instead of
+  re-parsing the name itself, closing it entirely. Site count: 3 -> 2
+  (see that file's census-entry comment for the full design note).
+
+The remaining THREE holdouts (collection_shape.py's 3,
 commands/collection.py's reindex_cmd, db/embed_migrate.py's
-migrate_collection_safe, db/reconcile.py's 3) were NOT closed by this
-bead -- they remain exactly as nexus-ft04v.21/.22/.23 left them, tracked
-as open work in the bead's hand-off report.
+migrate_collection_safe) were NOT closed by this bead -- they remain
+exactly as nexus-ft04v.21/.22/.23 left them, tracked as open work in
+the bead's hand-off report.
 
 RDR-204'S OTHER NAMED EXCLUSION -- ``rdr-`` document ids -- MATCHES ZERO
 SITES HERE. The one ``rdr-`` id parse in the tree,
@@ -386,20 +397,29 @@ COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {
     # only when no row exists; :2364 is an existing, pre-nexus-ft04v.26
     # call unrelated to this bead's own additions.
     "src/nexus/db/http_vector_client.py": 3,
-    # nexus-ft04v.22: :267 `_is_same_model_passthrough`, :362
-    # `_dim_for_collection`, and :610's passthrough `declared_model` read
-    # are ALL deliberately left raw. Each uses a LAXER
-    # `len(name.split("__")) == 4` count-based check than
-    # `is_conformant_collection_name` (which `collection_model()` /
-    # `collection_content_type()` require internally): an owner segment
-    # with a single underscore (e.g. "my_repo") still produces 4 segments
-    # under a literal "__" split but FAILS the conformant regex
-    # (`[a-zA-Z0-9-]+`, no underscore) -- funnelling would NARROW these
-    # functions from accepting such a name to rejecting it, forbidden by
-    # the bead. Confirmed by the coordinator's ruling on this bead's
-    # hand-off report; nexus-ft04v.26 did not touch these three sites
-    # (item 6) -- open work, tracked in the hand-off report.
-    "src/nexus/db/reconcile.py": 3,
+    # nexus-ft04v.26 item 6 (THE REPOINT): `_is_same_model_passthrough`
+    # (formerly :267) and `_dim_for_collection` (formerly :362) now share
+    # a new `_model_for_collection` helper that PREFERS the catalog row's
+    # `embedding_model` column (RDR-204 Gap 1 -- a row that disagrees with
+    # the name wins) and falls to the SAME LAXER `len(segments) == 4`
+    # count-based name split -- deliberately still not the conformant-
+    # gated `collection_model()` funnel helper, which requires
+    # `is_conformant_collection_name` internally (`[a-zA-Z0-9-]+` owner
+    # charset, no underscore) and fails loud on a name with no row; both
+    # would silently NARROW this migration tool from accepting an
+    # underscored-owner name or an unregistered source to rejecting it,
+    # forbidden by the nexus-ft04v.22 ruling this class still honors --
+    # only when the name has no row (the normal case: a migration source
+    # that may predate RDR-204 Phase 1 registration entirely). The former
+    # third site, the passthrough `declared_model` read (formerly :610),
+    # is now `_model_for_collection(name) if passthrough else None` --
+    # no raw parse of its own, since it shares the SAME resolution
+    # `_is_same_model_passthrough` already made, closing that site
+    # entirely (3 raw sites -> 2: one inside `_model_for_collection`'s
+    # fallback branch, one inside `_dim_for_collection`'s own fallback,
+    # which needs distinct error-reason strings the shared helper's plain
+    # string return cannot carry).
+    "src/nexus/db/reconcile.py": 2,
     # _infer_content_type (write-path metadata normalization, prefers the
     # row, falls to its own documented "anything but code -> prose"
     # default) and the two TTL-expire sweeps (class (c), a collection
@@ -715,10 +735,12 @@ def test_census_has_no_stale_entries() -> None:
 
 
 def test_pin_matches_documented_total() -> None:
-    """The PARSE_SITE_PIN docstring claim (50, after nexus-ft04v.26 added
-    the fifth pattern class -- see COLLECTION_NAME_PARSE_CENSUS's own
-    docstring) is derived from the same dict the guards above check
-    against -- this catches a hand-edited docstring number drifting from
-    the dict it claims to summarize."""
+    """The PARSE_SITE_PIN docstring claim (49 -- 50 after nexus-ft04v.26
+    added the fifth pattern class, then -1 when that SAME bead's item 6
+    gave db/reconcile.py's three sites the row-read treatment, closing
+    one of them -- see COLLECTION_NAME_PARSE_CENSUS's own docstring) is
+    derived from the same dict the guards above check against -- this
+    catches a hand-edited docstring number drifting from the dict it
+    claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 50
+    assert PARSE_SITE_PIN == 49
