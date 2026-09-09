@@ -35,8 +35,13 @@
     needing to recompute the old, narrower regexes here to prove it.
 
     Candidates are then re-matched against the WIDENED grammar (owner
-    [a-zA-Z0-9_-]+, byte-for-byte hygiene-002-1's own m4/mq/m2 shapes with
-    only the owner character class changed) and, for whichever of the three
+    [a-zA-Z0-9-]+(?:_[a-zA-Z0-9-]+)* — single underscores admitted BETWEEN
+    alnum/hyphen tokens, "__" never admitted inside the owner itself, since
+    that stays reserved for the segment separator; see this changeset's
+    FIX ROUND note above for why the grammar is stated this way rather
+    than the simpler-but-ambiguous [a-zA-Z0-9_-]+ — byte-for-byte
+    hygiene-002-1's own m4/mq/m2 shapes with only the owner character class
+    changed) and, for whichever of the three
     now matches, re-classified using EXACTLY hygiene-002-1's own branch A/B/C
     rules (embedding_model resolution against nexus.embedding_models,
     dimension from nexus.collection_vector_stats agreement, lifecycle_state
@@ -91,6 +96,30 @@
     rereferenced stub-inserts: those functions' string_to_array-based owner
     extraction is a SEPARATE question (bead nexus-ft04v.29 S1), out of this
     bead's scope.
+
+    FIX ROUND (nexus-ztafa, review finding 2c, coordinator nexus-71): the
+    owner class above, [a-zA-Z0-9_-]+, admits a DOUBLE underscore inside
+    the owner itself, which makes a name like "code__foo__bar__v9"
+    genuinely ambiguous between the 4-segment reading (owner "foo", model
+    "bar") and the 2-segment reading (owner "foo__bar__v9") — branch C's
+    precedence guard picked the 4-segment reading silently, with no test
+    covering the other direction (a name that was GENUINELY only ever
+    meant as 2-segment, whose owner happens to end in a
+    "__<model-shaped-token>__v<n>" tail, would be silently reclassified as
+    4-segment). The owner grammar is tightened to
+    [a-zA-Z0-9-]+(?:_[a-zA-Z0-9-]+)*: single underscores remain legal
+    BETWEEN two alnum/hyphen tokens, but "__" can never appear inside an
+    owner segment — it stays reserved, unconditionally, for the "__"
+    segment separator. This removes the ambiguity at the grammar itself
+    rather than relying on the precedence guard to arbitrate it, and this
+    fix round also tightens PgContainerHelper's two Java patterns and
+    docs/collections.md's grammar paragraph to match. Editing this
+    changeset's own body (rather than adding a further hygiene-004-2) is
+    safe here specifically because hygiene-004-1 has landed only on
+    develop and has never shipped in an engine tag (a git query for tags
+    containing the commit that introduced it returns nothing) — the hot
+    rule against editing an applied changeset protects changesets that
+    have run against a real install; this one has not yet reached one.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
@@ -104,7 +133,9 @@
             misclassified solely because their owner segment carries an
             underscore, which that changeset's owner grammar
             ([a-zA-Z0-9-]+) rejects but the client/test-helper grammar
-            ([a-zA-Z0-9_-]+) admits. Candidate selection is branch D's own
+            ([a-zA-Z0-9-]+(?:_[a-zA-Z0-9-]+)*, a single underscore between
+            two alnum/hyphen tokens, never a bare "__") admits. Candidate
+            selection is branch D's own
             exclusive signature (content_type = 'unknown' AND owner_id =
             tenant_id AND lifecycle_state = 'disputed'); re-classification
             copies hygiene-002-1's branch A/B/C rules verbatim, restricted
@@ -131,16 +162,22 @@ BEGIN
     -- Candidates: exactly hygiene-002-1's branch-D signature (see this
     -- changeset's header for why that signature alone identifies "the old,
     -- narrower owner grammar failed to match this row"), re-matched against
-    -- the WIDENED owner grammar [a-zA-Z0-9_-]+.
+    -- the WIDENED owner grammar [a-zA-Z0-9-]+(?:_[a-zA-Z0-9-]+)* -- a
+    -- single underscore is legal only BETWEEN two alnum/hyphen tokens; a
+    -- bare "__" can never appear inside the owner group itself, since that
+    -- stays reserved, unconditionally, for the segment separator (FIX
+    -- ROUND, this changeset's header note above -- removes the m2/m4
+    -- ambiguity at the grammar rather than relying on branch C's
+    -- precedence guard below to arbitrate it).
     CREATE TEMP TABLE _h004_walk ON COMMIT DROP AS
     SELECT
         c.tenant_id,
         c.name,
         regexp_match(c.name,
-            '^(code|docs|rdr|knowledge)__([a-zA-Z0-9_-]+)__([a-z][a-z0-9-]*)__v[0-9]+$') AS m4,
+            '^(code|docs|rdr|knowledge)__([a-zA-Z0-9-]+(?:_[a-zA-Z0-9-]+)*)__([a-z][a-z0-9-]*)__v[0-9]+$') AS m4,
         regexp_match(c.name,
-            '^quarantine-(code|docs|rdr|knowledge)__([a-zA-Z0-9_-]+)__([a-z][a-z0-9-]*)__v[0-9]+$') AS mq,
-        regexp_match(c.name, '^(code|docs|rdr|knowledge)__([a-zA-Z0-9_-]+)$') AS m2,
+            '^quarantine-(code|docs|rdr|knowledge)__([a-zA-Z0-9-]+(?:_[a-zA-Z0-9-]+)*)__([a-z][a-z0-9-]*)__v[0-9]+$') AS mq,
+        regexp_match(c.name, '^(code|docs|rdr|knowledge)__([a-zA-Z0-9-]+(?:_[a-zA-Z0-9-]+)*)$') AS m2,
         (SELECT count(DISTINCT s.dim) FROM nexus.collection_vector_stats s
           WHERE s.tenant_id = c.tenant_id AND s.collection = c.name) AS stats_dim_count,
         (SELECT min(s.dim) FROM nexus.collection_vector_stats s
@@ -188,20 +225,31 @@ BEGIN
     -- nexus.embedding_profile is still empty for every tenant at this point
     -- in the changelog, same as hygiene-002-1's own branch C.
     --
-    -- EXPLICIT PRECEDENCE GUARD (AND w.m4 IS NULL AND w.mq IS NULL), absent
-    -- from hygiene-002-1's own branch C: m2's pattern has no trailing anchor
-    -- after the owner group, so once the owner class admits "_" -- the very
-    -- character a "__" separator is made of -- its greedy owner group can
-    -- absorb straight through a genuine "__model__vN" suffix to the end of
-    -- the string, making m2 ALSO match a name m4 or mq already matched
-    -- correctly (e.g. "code__agree_owner__voyage-code-3__v1" satisfies m2
-    -- with owner_id = "agree_owner__voyage-code-3__v1" -- clearly wrong).
-    -- hygiene-002-1's own m2 never has this exposure: its narrow
-    -- [a-zA-Z0-9-]+ owner class has no legal "_" character at all, so its
-    -- greedy owner group structurally cannot cross a literal "__" and stays
-    -- naturally exclusive of its own m4/mq. Branch A and B need no such
-    -- guard in the other direction: their own trailing "__model__vN" anchor
-    -- means a genuinely 2-segment name (which has no such suffix) never
+    -- PRECEDENCE GUARD (AND w.m4 IS NULL AND w.mq IS NULL) -- NOW
+    -- UNREACHABLE, kept only as defense-in-depth and as a record of the
+    -- exposure the FIX ROUND above closed at the grammar itself.
+    -- Originally added because the FIRST widened grammar
+    -- ([a-zA-Z0-9_-]+, unrestricted -- see this changeset's header FIX
+    -- ROUND note) let a "_" appear anywhere, including immediately
+    -- adjacent to another "_": m2's owner group, which has no trailing
+    -- anchor, could then absorb straight through a genuine "__model__vN"
+    -- suffix to the end of the string, making m2 ALSO match a name m4 or
+    -- mq already matched correctly (e.g. under that FIRST grammar,
+    -- "code__agree_owner__voyage-code-3__v1" satisfied m2 with owner_id =
+    -- "agree_owner__voyage-code-3__v1" -- clearly wrong). The CURRENT
+    -- grammar, [a-zA-Z0-9-]+(?:_[a-zA-Z0-9-]+)*, structurally forbids a
+    -- bare "__" from ever appearing inside an owner segment (a "_" is
+    -- legal only singly, between two alnum/hyphen tokens), so m2's owner
+    -- group can no longer cross a literal "__" at all -- exactly the same
+    -- structural guarantee hygiene-002-1's own narrow [a-zA-Z0-9-]+ owner
+    -- class already had, and for the same reason: neither grammar has a
+    -- legal way to spell "__" inside the owner. m4 and mq are therefore
+    -- ALWAYS disjoint from m2 again, this guard can never fire, and it is
+    -- retained rather than deleted so a future re-widening of the owner
+    -- grammar does not silently reopen this exposure without a reviewer
+    -- seeing why the guard exists. Branch A and B need no such guard in
+    -- the other direction: their own trailing "__model__vN" anchor means
+    -- a genuinely 2-segment name (which has no such suffix) never
     -- satisfies m4 or mq to begin with, and mq/m4 can never both match
     -- (disjoint on the literal "quarantine-" prefix).
     UPDATE nexus.catalog_collections c

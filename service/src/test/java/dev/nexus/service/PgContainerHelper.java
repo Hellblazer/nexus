@@ -445,9 +445,21 @@ public final class PgContainerHelper {
      *  fallback), which resolved the WRONG dimension for every non-768 fixture and
      *  produced a silent "0 rows assigned/matched" everywhere the dispatched dim
      *  disagreed with the collection's actual stored dimension — never an exception,
-     *  since the row still existed and still resolved to SOME real, FK-valid model. */
+     *  since the row still existed and still resolved to SOME real, FK-valid model.
+     *
+     *  <p>RDR-204 engine, bead nexus-ztafa (fix round, review finding 2c): the owner
+     *  group is {@code [a-zA-Z0-9-]+(?:_[a-zA-Z0-9-]+)*}, NOT the simpler
+     *  {@code [a-zA-Z0-9_-]+} — a single underscore remains legal only BETWEEN two
+     *  alnum/hyphen tokens, and a bare {@code __} can never appear inside the owner
+     *  itself, since that stays reserved, unconditionally, for the segment
+     *  separator. The simpler grammar made a name like {@code
+     *  "code__foo__bar__v9"} ambiguous between this 4-segment pattern (owner
+     *  {@code "foo"}) and {@link #CONFORMANT_COLLECTION_NAME}'s 2-segment sibling
+     *  below with owner {@code "foo__bar__v9"} — this tightened grammar removes
+     *  that ambiguity structurally, matching {@code
+     *  hygiene-004-owner-grammar-underscore.xml}'s own widened grammar exactly. */
     private static final Pattern CONFORMANT_COLLECTION_NAME = Pattern.compile(
-        "^(code|docs|rdr|knowledge)__([a-zA-Z0-9_-]+)__([a-z][a-z0-9-]*)__v[0-9]+$");
+        "^(code|docs|rdr|knowledge)__([a-zA-Z0-9-]+(?:_[a-zA-Z0-9-]+)*)__([a-z][a-z0-9-]*)__v[0-9]+$");
 
     /** The {@code quarantine-} prefixed sibling of {@link #CONFORMANT_COLLECTION_NAME}
      *  (hygiene-002-collection-attributes-walk.xml's branch B) — RDR-204 Phase 2 fix
@@ -460,9 +472,13 @@ public final class PgContainerHelper {
      *  768-dim) regardless of what model the name's own suffix names. Invisible under
      *  the pre-nexus-ft04v.16 name-segment dispatch authority; surfaced as a silent
      *  wrong-dim dispatch (a 1024-dim embedder writing to a collection whose
-     *  registered row says 768) once dispatch started reading this row. */
+     *  registered row says 768) once dispatch started reading this row.
+     *
+     *  <p>RDR-204 engine, bead nexus-ztafa (fix round): owner group tightened to
+     *  {@code [a-zA-Z0-9-]+(?:_[a-zA-Z0-9-]+)*}, same rationale as {@link
+     *  #CONFORMANT_COLLECTION_NAME}'s own javadoc above. */
     private static final Pattern CONFORMANT_QUARANTINE_COLLECTION_NAME = Pattern.compile(
-        "^quarantine-(code|docs|rdr|knowledge)__([a-zA-Z0-9_-]+)__([a-z][a-z0-9-]*)__v[0-9]+$");
+        "^quarantine-(code|docs|rdr|knowledge)__([a-zA-Z0-9-]+(?:_[a-zA-Z0-9-]+)*)__([a-z][a-z0-9-]*)__v[0-9]+$");
 
     /**
      * Seed a minimal {@code nexus.catalog_collections} row via generated jOOQ DSL

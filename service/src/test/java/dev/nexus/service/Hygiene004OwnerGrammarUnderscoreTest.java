@@ -58,6 +58,15 @@ class Hygiene004OwnerGrammarUnderscoreTest {
     private static final String CONTROL_CONFORMANT = "code__control-owner__voyage-code-3__v1";
     private static final String UNPARSEABLE = "onesegmentname";
 
+    // RDR-204 fix round (review finding 2c): fixtures proving the TIGHTENED
+    // owner grammar ([a-zA-Z0-9-]+(?:_[a-zA-Z0-9-]+)*, single underscores
+    // only, "__" never) still admits a single underscore (i, iii) while a
+    // name whose owner would need a DOUBLE underscore to spell is left
+    // genuinely unparseable rather than silently misclassified (ii).
+    private static final String SINGLE_UNDERSCORE_FOUR_SEGMENT = "code__my_repo__voyage-code-3__v1";
+    private static final String DOUBLE_UNDERSCORE_STAYS_DISPUTED = "code__my__repo__voyage-code-3__v1";
+    private static final String SINGLE_UNDERSCORE_TWO_SEGMENT = "code__my_repo";
+
     @Test
     void refilesOnlyTheUnderscoredOwnerRowsHygiene002MisclassifiedAsDisputed() throws Exception {
         PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
@@ -106,6 +115,9 @@ class Hygiene004OwnerGrammarUnderscoreTest {
                     assertPreHygiene004MisclassifiedAsBranchD(ctx, BRANCH_A_AGREE);
                     assertPreHygiene004MisclassifiedAsBranchD(ctx, BRANCH_B_QUARANTINE);
                     assertPreHygiene004MisclassifiedAsBranchD(ctx, BRANCH_C_WITH_CHUNKS);
+                    assertPreHygiene004MisclassifiedAsBranchD(ctx, SINGLE_UNDERSCORE_FOUR_SEGMENT);
+                    assertPreHygiene004MisclassifiedAsBranchD(ctx, DOUBLE_UNDERSCORE_STAYS_DISPUTED);
+                    assertPreHygiene004MisclassifiedAsBranchD(ctx, SINGLE_UNDERSCORE_TWO_SEGMENT);
                     controlBefore = readRow(ctx, CONTROL_CONFORMANT);
                     assertThat(controlBefore.contentType())
                         .as("the control fixture must already be correctly classified by "
@@ -167,6 +179,58 @@ class Hygiene004OwnerGrammarUnderscoreTest {
                     assertThat(d.lifecycleState()).as("unparseable lifecycle_state stays 'disputed'")
                         .isEqualTo("disputed");
 
+                    // (4a) RDR-204 fix round (review finding 2c): a single
+                    // underscore in a four-segment owner is still admitted --
+                    // the tightening did not over-correct into rejecting the
+                    // very case nexus-ztafa's original round exists to fix.
+                    Row e = readRow(ctx, SINGLE_UNDERSCORE_FOUR_SEGMENT);
+                    assertThat(e.contentType()).as("single-underscore branch A content_type")
+                        .isEqualTo("code");
+                    assertThat(e.ownerId()).as("single-underscore branch A owner_id")
+                        .isEqualTo("my_repo");
+                    assertThat(e.embeddingModel()).as("single-underscore branch A embedding_model")
+                        .isEqualTo("voyage-code-3");
+                    assertThat(e.dimension()).as("single-underscore branch A dimension")
+                        .isEqualTo(1024);
+                    assertThat(e.lifecycleState()).as("single-underscore branch A lifecycle_state")
+                        .isEqualTo("live");
+
+                    // (4b) an owner that would need a DOUBLE underscore to
+                    // spell (e.g. "my" and "repo" joined by "__") can never be
+                    // expressed under the tightened grammar -- "__" stays
+                    // reserved, unconditionally, for the segment separator.
+                    // This name matches NEITHER m4 nor m2 and is left exactly
+                    // where hygiene-002-1 (and hygiene-004-1, finding no
+                    // candidate re-match) left it: 'unknown' / disputed /
+                    // owner = tenant. Under the FIRST, unrestricted
+                    // [a-zA-Z0-9_-]+ owner grammar this exact name would have
+                    // matched BOTH m4 (owner "my__repo") and m2 (owner
+                    // "my__repo__voyage-code-3__v1") -- precisely the
+                    // ambiguity this fix round closes at the grammar itself,
+                    // proving branch C's precedence guard is now unreachable.
+                    Row f = readRow(ctx, DOUBLE_UNDERSCORE_STAYS_DISPUTED);
+                    assertThat(f.contentType()).as("double-underscore-shaped name stays 'unknown'")
+                        .isEqualTo("unknown");
+                    assertThat(f.ownerId()).as("double-underscore-shaped name owner_id stays the tenant")
+                        .isEqualTo(TENANT);
+                    assertThat(f.lifecycleState()).as("double-underscore-shaped name lifecycle_state stays 'disputed'")
+                        .isEqualTo("disputed");
+
+                    // (4c) single underscore, two-segment (grandfathered) --
+                    // branch C, still admitted. No chunks were seeded for
+                    // this fixture, so branch C's stats_dim_count = 0 case
+                    // applies directly: 'live', dimension NULL.
+                    Row g = readRow(ctx, SINGLE_UNDERSCORE_TWO_SEGMENT);
+                    assertThat(g.contentType()).as("single-underscore branch C content_type")
+                        .isEqualTo("code");
+                    assertThat(g.ownerId()).as("single-underscore branch C owner_id")
+                        .isEqualTo("my_repo");
+                    assertThat(g.dimension()).as("single-underscore branch C dimension, no chunks seeded")
+                        .isNull();
+                    assertThat(g.lifecycleState())
+                        .as("single-underscore branch C lifecycle_state, no chunks -> live")
+                        .isEqualTo("live");
+
                     // (5) the control fixture -- already correctly classified
                     // by hygiene-002-1 alone -- is byte-identical before and
                     // after hygiene-004-1 (excluded by the WHERE: its
@@ -177,29 +241,37 @@ class Hygiene004OwnerGrammarUnderscoreTest {
                             + "byte-identical after hygiene-004-1 -- its WHERE excludes it")
                         .isEqualTo(controlBefore);
 
-                    // (6) non-vacuity: exactly the three underscored-owner
-                    // candidate rows flipped away from content_type =
-                    // 'unknown' -- no more, no fewer. A post-walk count query
-                    // stands in for the RAISE NOTICE count this changeset
-                    // also emits (not independently observable through the
-                    // JDBC driver without extra listener wiring).
+                    // (6) non-vacuity: exactly the five underscored-owner
+                    // candidate rows that DO match the tightened grammar
+                    // flipped away from content_type = 'unknown' -- no more,
+                    // no fewer. The double-underscore-shaped fixture (4b) is
+                    // deliberately EXCLUDED from this list: it matches
+                    // neither m4 nor m2 under the tightened grammar and must
+                    // stay 'unknown', same as the genuinely unparseable
+                    // fixture. A post-walk count query stands in for the
+                    // RAISE NOTICE count this changeset also emits (not
+                    // independently observable through the JDBC driver
+                    // without extra listener wiring).
                     int reclassifiedCount = ctx.selectCount().from(CATALOG_COLLECTIONS)
                         .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT))
-                        .and(CATALOG_COLLECTIONS.NAME.in(BRANCH_A_AGREE, BRANCH_B_QUARANTINE, BRANCH_C_WITH_CHUNKS))
+                        .and(CATALOG_COLLECTIONS.NAME.in(BRANCH_A_AGREE, BRANCH_B_QUARANTINE, BRANCH_C_WITH_CHUNKS,
+                            SINGLE_UNDERSCORE_FOUR_SEGMENT, SINGLE_UNDERSCORE_TWO_SEGMENT))
                         .and(CATALOG_COLLECTIONS.CONTENT_TYPE.ne("unknown"))
                         .fetchOne(0, int.class);
                     assertThat(reclassifiedCount)
-                        .as("exactly the three underscored-owner candidates must have been "
-                            + "re-filed away from content_type = 'unknown'")
-                        .isEqualTo(3);
+                        .as("exactly the five underscored-owner candidates that match the "
+                            + "tightened grammar must have been re-filed away from "
+                            + "content_type = 'unknown'")
+                        .isEqualTo(5);
                     int stillUnknownCount = ctx.selectCount().from(CATALOG_COLLECTIONS)
                         .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT))
                         .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq("unknown"))
                         .fetchOne(0, int.class);
                     assertThat(stillUnknownCount)
-                        .as("only the genuinely unparseable fixture may remain content_type "
-                            + "= 'unknown' after hygiene-004-1")
-                        .isEqualTo(1);
+                        .as("only the genuinely unparseable fixture and the double-underscore"
+                            + "-shaped fixture (matches neither m4 nor m2) may remain "
+                            + "content_type = 'unknown' after hygiene-004-1")
+                        .isEqualTo(2);
                 }
 
                 // Phase 6: re-applying the FULL changelog against this SAME,
@@ -242,6 +314,22 @@ class Hygiene004OwnerGrammarUnderscoreTest {
             chashBytes(TENANT + "-control"), 1024);
 
         PgContainerHelper.insertCollection(ctx, TENANT, UNPARSEABLE);
+
+        // (i) single underscore, four-segment -- still admitted under the
+        // tightened grammar; a chunk with the agreeing dimension (1024, the
+        // name's own voyage-code-3 token) proves branch A's 'live' outcome.
+        PgContainerHelper.insertCollection(ctx, TENANT, SINGLE_UNDERSCORE_FOUR_SEGMENT);
+        Routines.insertChunkBareVector(ctx.configuration(), TENANT, SINGLE_UNDERSCORE_FOUR_SEGMENT,
+            chashBytes(TENANT + "-single-underscore-four-segment"), 1024);
+
+        // (ii) an owner that would need a DOUBLE underscore to spell -- no
+        // chunks needed; this name matches neither m4 nor m2 under the
+        // tightened grammar and is left exactly as hygiene-002-1 wrote it.
+        PgContainerHelper.insertCollection(ctx, TENANT, DOUBLE_UNDERSCORE_STAYS_DISPUTED);
+
+        // (iii) single underscore, two-segment (grandfathered) -- no chunks,
+        // so branch C's stats_dim_count = 0 case applies directly ('live').
+        PgContainerHelper.insertCollection(ctx, TENANT, SINGLE_UNDERSCORE_TWO_SEGMENT);
     }
 
     // ── Assertions ───────────────────────────────────────────────────────
