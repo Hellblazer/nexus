@@ -6,6 +6,102 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.38.0] - 2026-09-09
+
+Paired engine: engine-service-v0.1.112 (tagged on 9f0a5397c; deployed and
+live before this client tag, so a fresh local install converges to it and
+the managed service already answers it). `REQUIRED_ENGINE_VERSION` is
+(0, 1, 112); v0.1.110 and v0.1.111 were tagged on the way and superseded
+before any deploy.
+
+### RDR-204 Phases 2 and 3: `catalog_collections` is the authority, on both sides
+
+- Engine (Phase 2, v0.1.112): every parse site reads the registry row;
+  the embedder router resolves by the row's `embedding_model`; a vector
+  read of a collection with no row answers 422 and the five fan-out reads
+  skip such names, reporting them in an `X-Nexus-Skipped-Collections`
+  header; `/v1/vectors/embed` takes exactly one of `collection` or
+  `model`; `/v1/vectors/stats` rows carry `content_type`, `owner_id`,
+  `embedding_model` and `lifecycle_state`; `/v1/catalog/collections/list`
+  gains `content_type` and `lifecycle_state` filters and rows gain
+  `dimension` and `lifecycle_state`; `GET /v1/catalog/embedding_profile`
+  returns the tenant's install-scoped profile.
+- Client (Phase 3): the collection-name helpers read the catalog row;
+  corpus resolution and model grouping go by column, and `quarantine`,
+  `dormant` and `disputed` rows are excluded from search by
+  `lifecycle_state` (Gap 4 closed); the six registration sites and four
+  diagnostics stop parsing names the client itself rendered; the parse
+  census gate (`tests/test_collection_name_parse_census.py`) ends at a
+  classified floor of 53 sites in four named classes, and the RDR's
+  acceptance wording now says so.
+- The profile-as-data check lives at the registration seam:
+  `ensure_collection_registered` reads the engine's profile before it
+  registers, refuses a Voyage intent against a bge profile with an error
+  naming the service restart, proceeds on an empty profile (bootstrap),
+  and fails loud on a pre-Phase-2 engine or a missing catalog reader.
+  `effective_embedding_model_for_writes` stays pure local.
+- `nx config set local.embed_model` and `nx config set voyage_api_key`
+  print the service-restart hint; `nx doctor` gains the embedding-profile
+  rows (engine profile, client intent, off-profile, disputed, dormant and
+  quarantined collections, with remedies); `nx collection list` prints
+  the catalog columns (content type, owner, model, dimension, state)
+  instead of a parsed name.
+- Owner segments admit single underscores (`[a-zA-Z0-9-]+(_[a-zA-Z0-9-]+)*`)
+  on both sides; changeset hygiene-004-1 re-files rows the old walk had
+  marked disputed for that reason.
+- A first `nx index md` or `nx index pdf` into a brand-new collection
+  registers it before its incremental-sync read (the 7.37.0 client read
+  first and the Phase 2 engine answered 422). The engine resolves a
+  quarantine sibling's dimension from the origin collection again, so the
+  first server-side GC pass over any collection no longer fails silently.
+- Ghost sweep: a non-empty quarantine row is held, a drained one is
+  deleted as a ghost, and neither is relabelled dormant (nexus-snm4y,
+  nexus-n060e). Changeset hygiene-005 makes the GC functions register from
+  the origin row, never a parsed name, and corrects mislabelled quarantine
+  siblings (nexus-uxd2a).
+
+### Work-box fixes (GH #1489, #1512, #1522 to #1528)
+
+- Changeset hygiene-006-1 advances every `schema-nexus` sequence that sits
+  behind its column's imported ids at boot (GH #1489); a taxonomy persist
+  conflict on a collection with no topics fails `nx taxonomy discover`
+  loudly, naming the constraint (GH #1489, GH #1526).
+- `nx doctor`'s stale-fence row splits its remedy by owner kind, and
+  `nx catalog reconcile-fences [--dry-run] [--limit N]` stamps non-repo
+  documents that carry no fence (GH #1512).
+- First-time owner registration allocates its prefix under a per-tenant
+  advisory lock with a 5 s timeout; eight concurrent registrations no
+  longer collapse to one owner row (GH #1522).
+- `nx_answer` keeps its scope on the single-step fast path, and a
+  registered owner name is accepted wherever a subtree tumbler is,
+  including `nx search --repo NAME` (GH #1523, GH #1527); a corpus name
+  is never captured by an owner of the same name.
+- Identical chunks across collections collapse to one result that names
+  the others (`also_in`, `also_in_ids`), and the RDR indexing pass skips
+  the template's process documents (GH #1524); the RDR pass has its own
+  counter and ETA (GH #1525).
+- Taxonomy projection: the ICF pass thresholds the raw cosine and only
+  ever suppresses (an ICF of 0 still fails the threshold);
+  `nx taxonomy project --prune-below-threshold` and the engine's
+  `POST /v1/taxonomy/assignments/prune_projection` recover a pass that
+  admitted weak matches (GH #1528).
+- `write_manifest_many_timing` engine event with per-call sweep outcome
+  counts (nexus-h6d89, engine half).
+
+### Other
+
+- `nx_answer` hydrated chunks carry a `[source: ...]` line and every
+  operator prompt says how to read it; search and query text renders lead
+  with a reader instruction and annotate each result's age, expiry and
+  index state (nexus-onn7s).
+- Bib enrichment stops stamping a cited paper's record on a preprint, and
+  the arXiv banner shape passes the same citation guards as a bare
+  mention (nexus-g276c).
+- Test harness: one full Python suite per box; the row cache is dropped
+  after every test; fixtures register the collections they write; the
+  shakeout's memory verb prints both commands' output on a miss.
+
+
 ## [7.37.0] - 2026-09-08
 
 Paired with engine-service-v0.1.109 (`REQUIRED_ENGINE_VERSION` 0.1.109),
