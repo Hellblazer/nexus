@@ -1733,16 +1733,21 @@ class TaxonomyRepositoryTest {
         String strongCode = hexChash("prune-strong-code");
         String weakDocs = hexChash("prune-weak-docs");
         String weakManual = hexChash("prune-weak-manual");
-        for (String c : java.util.List.of(weakCode, strongCode, weakDocs, weakManual)) {
-            seedChunk(TENANT_A, COL_A, c);
-        }
+        // An assignment's chunk must exist in the SOURCE collection it names
+        // (taxonomy-012's chunk FK); seedChunk registers the collection too.
+        String codeSrc = "code__prune-src__bge-base-en-v15-768__v1";
+        String docsSrc = "docs__prune-src__bge-base-en-v15-768__v1";
+        seedChunk(TENANT_A, codeSrc, weakCode);
+        seedChunk(TENANT_A, codeSrc, strongCode);
+        seedChunk(TENANT_A, docsSrc, weakDocs);
+        seedChunk(TENANT_A, codeSrc, weakManual);
         // Projection rows: two under a code__ source (one weak, one strong), one
         // weak under a docs__ source; and one weak MANUAL row, which is never
         // a prune target (only assigned_by='projection' rows are).
-        repo.assignTopic(TENANT_A, weakCode,   topicId, "projection", 0.31, "code__prune-src__bge-base-en-v15-768__v1", null);
-        repo.assignTopic(TENANT_A, strongCode, topicId, "projection", 0.91, "code__prune-src__bge-base-en-v15-768__v1", null);
-        repo.assignTopic(TENANT_A, weakDocs,   topicId, "projection", 0.31, "docs__prune-src__bge-base-en-v15-768__v1", null);
-        repo.assignTopic(TENANT_A, weakManual, topicId, "manual",     0.31, "code__prune-src__bge-base-en-v15-768__v1", null);
+        repo.assignTopic(TENANT_A, weakCode,   topicId, "projection", 0.31, codeSrc, null);
+        repo.assignTopic(TENANT_A, strongCode, topicId, "projection", 0.91, codeSrc, null);
+        repo.assignTopic(TENANT_A, weakDocs,   topicId, "projection", 0.31, docsSrc, null);
+        repo.assignTopic(TENANT_A, weakManual, topicId, "manual",     0.31, codeSrc, null);
 
         int removed = repo.pruneProjectionBelow(TENANT_A, "code__", 0.70);
 

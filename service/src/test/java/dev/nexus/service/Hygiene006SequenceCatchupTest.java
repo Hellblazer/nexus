@@ -97,8 +97,9 @@ class Hygiene006SequenceCatchupTest {
                     // by the serial itself): the is_called/max arithmetic must leave it
                     // exactly where it is (review of bace74903, Significant 2).
                     ctx.insertInto(PLANS, PLANS.TENANT_ID, PLANS.PROJECT, PLANS.QUERY, PLANS.PLAN_JSON,
-                                   PLANS.CREATED_AT)
-                       .values(TENANT, "h006", "serial-minted", org.jooq.JSONB.valueOf("{}"), OffsetDateTime.now())
+                                   PLANS.VERB, PLANS.CREATED_AT)
+                       .values(TENANT, "h006", "serial-minted", org.jooq.JSONB.valueOf("{}"), "research",
+                               OffsetDateTime.now())
                        .execute();
                     plansSeqBefore = lastValue(ctx, "plans_id_seq");
                     assertThat(plansSeqBefore)
