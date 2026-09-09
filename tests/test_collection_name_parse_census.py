@@ -170,6 +170,28 @@ pre-repoint prefix-based dispatch). Fixed by adding
 no-row case) instead of the model string -- a fourth, genuinely new
 tracked site in ``http_vector_client.py``, not a reclassification.
 
+The Phase 3 FIX ROUND (nexus-ft04v.28 item 6, 2026-09-09) then raised
+the pin 51 to 53: the fifth class's primitive set moved from a
+hand-duplicated literal in THIS file to ``nexus.corpus.
+_CANDIDATE_STRING_PRIMITIVES``, single-sourced so a rename can no
+longer silently stop matching (the failure mode the critique flagged --
+"so a renamed parsing primitive evades it"). That audit surfaced a
+genuinely uncounted THIRD primitive of the exact same shape as the
+other two -- ``model_version_for_collection_name``, regex-based
+(``_CONFORMANT_COLLECTION_RE``), never carried by the row cache -- with
+TWO already-live callers in ``catalog/chunk_quarantine.py`` (one
+pre-existing, in ``quarantine_collection_name``; one new, in this same
+bead's C1 fix, ``quarantine_registration_kwargs``) that the old
+two-name hardcoded set could never have seen. ``is_conformant_
+collection_name``/``parse_conformant_collection_name`` were considered
+and deliberately excluded -- see ``_CANDIDATE_STRING_PRIMITIVES``'s own
+docstring in corpus.py for why they are the sanctioned public API, not
+a drift risk the way the three primitives are. Attribute-form calls
+(``corpus.split_candidate_collection_name(x)``) are now ALSO matched,
+not just bare-name imports -- the boundary
+``test_scanner_is_not_vacuous`` used to pin as "must NOT match" is now
+pinned the other way, deliberately.
+
 The remaining THREE holdouts (collection_shape.py's 3,
 commands/collection.py's reindex_cmd, db/embed_migrate.py's
 migrate_collection_safe) were NOT closed by this bead -- they remain
@@ -358,7 +380,21 @@ COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {
     # touches it -- RDR-204 Phase 1 retired the engine's auto-register-on-
     # first-write, and the quarantine sibling's writes are 100%
     # server-side (no HttpVectorClient.upsert call ever registers it).
-    "src/nexus/catalog/chunk_quarantine.py": 1,
+    #
+    # nexus-ft04v.28 items 1 (C1 fix) and 6 (this file, 1 -> 3): the
+    # fifth class's primitive set gained `model_version_for_collection_
+    # name` (previously an uncounted third primitive, same regex-based
+    # shape as the other two -- see nexus.corpus._CANDIDATE_STRING_
+    # PRIMITIVES's own docstring for why it belongs). Two NEW class-(d)
+    # sites: `quarantine_collection_name`'s existing call (line ~91,
+    # reading the origin's own model_version segment -- the catalog row
+    # never carries a version field, so this is the only place that fact
+    # lives, same allowance as the primitive_call above it) and the C1
+    # fix's new `quarantine_registration_kwargs` (line ~156, same reason
+    # -- the quarantine sibling's registration kwargs need the origin's
+    # model_version, which model_version_for_collection_name is the only
+    # source of).
+    "src/nexus/catalog/chunk_quarantine.py": 3,
     # class (d): _content_type_for_collection synthesizes a row for the
     # orphan GC backfill -- the collection being registered has no row by
     # construction.
@@ -537,21 +573,58 @@ def _get_str_const(node: ast.expr) -> str | None:
     return None
 
 
-#: The two candidate-string PRIMITIVES the funnel helpers themselves are
+#: The candidate-string PRIMITIVES the funnel helpers themselves are
 #: allowed to use (RDR-204 Phase 3 repoint, nexus-ft04v.26 THE REPOINT --
-#: coordinator ruling 2026-09-09). A caller reaching for either OUTSIDE
-#: corpus.py's own helper bodies is doing the same name-derives-a-fact
-#: parsing the original four classes exist to catch, just relocated behind
-#: a function call instead of a raw split/partition -- "parsing that moves
-#: into one helper with N callers while the gate reads zero" is the exact
-#: failure this fifth class exists to close. corpus.py's OWN internal use
-#: (split_candidate_collection_name's definition, and the other funnel
-#: helpers' calls into it) is excluded -- see ``_raw_collection_name_parse_sites``.
-_PRIMITIVE_CALL_NAMES = frozenset({
-    "split_candidate_collection_name", "embedding_model_for_collection_name",
-})
+#: coordinator ruling 2026-09-09). A caller reaching for one of these
+#: OUTSIDE corpus.py's own helper bodies is doing the same name-derives-
+#: a-fact parsing the original four classes exist to catch, just
+#: relocated behind a function call instead of a raw split/partition --
+#: "parsing that moves into one helper with N callers while the gate
+#: reads zero" is the exact failure this fifth class exists to close.
+#: corpus.py's OWN internal use (each primitive's own definition, and
+#: the other funnel helpers' calls into them) is excluded -- see
+#: ``_raw_collection_name_parse_sites``.
+#:
+#: SINGLE-SOURCED in ``nexus.corpus._CANDIDATE_STRING_PRIMITIVES``
+#: (RDR-204 Phase 3 fix round, nexus-ft04v.28 item 6) rather than
+#: hand-duplicated as a literal here: a hardcoded copy in THIS file,
+#: ~400 lines from any of the three definitions, is exactly "a renamed
+#: parsing primitive evades it" -- nothing forces this list to track a
+#: rename. Importing the source-of-truth tuple means a rename that
+#: forgets to update it is caught by
+#: ``test_candidate_string_primitives_all_resolve_to_real_functions``
+#: below, loud, rather than silently under-counting forever. See that
+#: constant's own docstring in corpus.py for why
+#: ``is_conformant_collection_name``/``parse_conformant_collection_name``
+#: are deliberately NOT primitives here despite also being regex-based.
+from nexus.corpus import _CANDIDATE_STRING_PRIMITIVES  # noqa: E402 — import after the module docstring/constants above it, matching this file's existing style
+
+_PRIMITIVE_CALL_NAMES = frozenset(_CANDIDATE_STRING_PRIMITIVES)
 
 _CORPUS_PY_REL = "src/nexus/corpus.py"
+
+
+def test_candidate_string_primitives_all_resolve_to_real_functions() -> None:
+    """Non-vacuity for the single-sourcing itself: every name in
+    ``nexus.corpus._CANDIDATE_STRING_PRIMITIVES`` must be a real,
+    currently-defined function in that module. Catches the failure mode
+    this whole repoint exists to prevent -- a rename that updates the
+    function but not the tuple would otherwise leave a stale STRING in
+    the primitive set that matches nothing (silently undercounting,
+    since no call site can ever match a name nothing is defined under),
+    with no test noticing."""
+    import inspect
+
+    import nexus.corpus as corpus_mod
+
+    assert _CANDIDATE_STRING_PRIMITIVES, "the primitive tuple must not be empty"
+    for name in _CANDIDATE_STRING_PRIMITIVES:
+        obj = getattr(corpus_mod, name, None)
+        assert obj is not None and inspect.isfunction(obj), (
+            f"{name!r} in nexus.corpus._CANDIDATE_STRING_PRIMITIVES does not "
+            f"resolve to a real function -- renamed or removed without "
+            f"updating the tuple."
+        )
 
 
 def _scan_tree(path: pathlib.Path) -> list[tuple[int, str]]:
@@ -562,9 +635,16 @@ def _scan_tree(path: pathlib.Path) -> list[tuple[int, str]]:
     ``split``/``rsplit``/``partition``/``rpartition``/``startswith``/
     ``endswith`` with a literal argument, an actual ``ast.Compare`` with
     ``In``/``NotIn`` against the literal ``"__"``, or an actual ``ast.Call``
-    to one of the two :data:`_PRIMITIVE_CALL_NAMES` functions (pattern class
+    to one of :data:`_PRIMITIVE_CALL_NAMES`'s functions (pattern class
     ``"primitive_call"``) -- never a text match, so a comment or docstring
-    mentioning ``"__"`` or either function name cannot contribute a hit.
+    mentioning ``"__"`` or a primitive's name cannot contribute a hit. A
+    primitive call counts in EITHER form (RDR-204 Phase 3 fix round,
+    nexus-ft04v.28 item 6): bare-name (``split_candidate_collection_name(x)``,
+    a module-level import) or attribute (``corpus.split_candidate_
+    collection_name(x)``, a module-qualified reference) -- the earlier
+    bare-name-only check let an attribute-form caller (``import
+    nexus.corpus as corpus; corpus.split_candidate_collection_name(x)``)
+    through undetected.
     """
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -589,6 +669,10 @@ def _scan_tree(path: pathlib.Path) -> list[tuple[int, str]]:
                                 matched = True
                 if matched:
                     hits.append((node.lineno, attr))
+            elif attr in _PRIMITIVE_CALL_NAMES:
+                # Attribute-form primitive call, e.g.
+                # ``corpus.split_candidate_collection_name(x)``.
+                hits.append((node.lineno, "primitive_call"))
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             if node.func.id in _PRIMITIVE_CALL_NAMES:
                 hits.append((node.lineno, "primitive_call"))
@@ -654,12 +738,13 @@ def _shrunk(live: dict[str, int], census: dict[str, int]) -> list[str]:
 
 def test_scanner_is_not_vacuous(tmp_path: pathlib.Path) -> None:
     """Prove the AST walk actually matches all five classes, and that the
-    TYPE_PREFIXES filter and the primitive-name match are not accidentally
+    TYPE_PREFIXES filter and the primitive-name match (bare-name AND
+    attribute-form, nexus-ft04v.28 item 6) are not accidentally
     permissive, on a sample with a known answer -- independent of how
     large the live debt happens to be."""
     sample = tmp_path / "sample.py"
     sample.write_text(
-        "def f(name, other):\n"
+        "def f(name, other, corpus):\n"
         '    a = name.split("__", 1)\n'          # split: MUST match
         '    b = name.rsplit("__", 1)\n'         # rsplit: MUST match
         '    c = name.partition("__")\n'         # partition: MUST match
@@ -670,11 +755,13 @@ def test_scanner_is_not_vacuous(tmp_path: pathlib.Path) -> None:
         '    i = "__" not in name\n'             # not in: MUST match
         '    j = name.startswith("mcp__")\n'     # not a type prefix: must NOT match
         '    k = name.split("-", 1)\n'           # wrong literal: must NOT match
-        '    m = split_candidate_collection_name(name)\n'      # primitive_call: MUST match
-        '    n = embedding_model_for_collection_name(name)\n'  # primitive_call: MUST match
-        '    o = other.split_candidate_collection_name(name)\n'  # attribute access, not a bare call: must NOT match
-        '    p = some_other_function(name)\n'    # unrelated call: must NOT match
-        "    return a, b, c, d, e, g, h, i, j, k, m, n, o, p\n",
+        '    m = split_candidate_collection_name(name)\n'      # primitive_call (bare): MUST match
+        '    n = embedding_model_for_collection_name(name)\n'  # primitive_call (bare): MUST match
+        '    q = model_version_for_collection_name(name)\n'    # primitive_call (bare, third primitive): MUST match
+        '    o = corpus.split_candidate_collection_name(name)\n'  # primitive_call (attribute form, item 6): MUST match
+        '    r = other.some_unrelated_method(name)\n'  # attribute call to a NON-primitive name: must NOT match
+        '    p = some_other_function(name)\n'    # unrelated bare call: must NOT match
+        "    return a, b, c, d, e, g, h, i, j, k, m, n, q, o, r, p\n",
         encoding="utf-8",
     )
     hits = _scan_tree(sample)
@@ -682,12 +769,13 @@ def test_scanner_is_not_vacuous(tmp_path: pathlib.Path) -> None:
     assert classes == [
         "split", "rsplit", "partition", "rpartition",
         "startswith", "endswith", "in", "not_in",
-        "primitive_call", "primitive_call",
+        "primitive_call", "primitive_call", "primitive_call", "primitive_call",
     ], (
         f"scanner drifted from the five RDR-204 pattern classes (four from "
-        f"Phase 3 item 1, plus nexus-ft04v.26's primitive_call): {hits}. "
-        f"Either a real class stopped matching, or a negative case (mcp__/"
-        f"wrong-literal/attribute-access/unrelated-call) started matching "
+        f"Phase 3 item 1, plus nexus-ft04v.26's primitive_call, widened to "
+        f"attribute form by nexus-ft04v.28 item 6): {hits}. Either a real "
+        f"class stopped matching, or a negative case (mcp__/wrong-literal/"
+        f"non-primitive-attribute-access/unrelated-call) started matching "
         f"-- both make every guard below pass by doing nothing or by "
         f"over-counting."
     )
@@ -824,8 +912,14 @@ def test_pin_matches_documented_total() -> None:
     http_vector_client.py's new _is_cce_collection (same round: the
     original model-STRING CCE check was a real regression, fixed by
     reading content_type instead) -- see COLLECTION_NAME_PARSE_CENSUS's
-    own docstring) is derived from the same dict the guards above check
+    own docstring -- then 51 -- 53 for nexus-ft04v.28 item 6: the fifth
+    class's primitive set is now single-sourced from nexus.corpus.
+    _CANDIDATE_STRING_PRIMITIVES (a rename can no longer silently
+    undercount) and gained a genuinely uncounted third primitive,
+    model_version_for_collection_name, whose two chunk_quarantine.py
+    callers were already live but invisible to the old two-name
+    hardcoded set) is derived from the same dict the guards above check
     against -- this catches a hand-edited docstring number drifting from
     the dict it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 51
+    assert PARSE_SITE_PIN == 53

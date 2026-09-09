@@ -816,6 +816,51 @@ def split_candidate_collection_name(name: str) -> tuple[str, str]:
     return m.group(1), m.group(2)
 
 
+#: The candidate-string-derivation PRIMITIVES tests/test_collection_name_
+#: parse_census.py's fifth pattern class counts callers of, outside this
+#: module (RDR-204 Phase 3 fix round, nexus-ft04v.28 item 6). SINGLE-
+#: SOURCED here (the census used to hand-duplicate this list as a
+#: literal in the test file, ~400 lines from any of these definitions --
+#: a rename here silently stopped updating that copy, which is exactly
+#: "so a renamed parsing primitive evades it") -- the test imports this
+#: constant directly and additionally asserts every name in it still
+#: resolves to a real function defined in this module, so a rename that
+#: forgets to update this tuple fails loud instead of silently
+#: undercounting.
+#:
+#: Each of these three derives a NAME-LEVEL fact (embedding_model /
+#: model_version / content_type+owner) that COULD instead come from the
+#: authoritative catalog row (:func:`nexus.mcp_infra.get_collection_row`)
+#: -- a caller reaching for one of these where a row is available is
+#: doing exactly what the row-based funnel helpers
+#: (:func:`collection_content_type` / :func:`collection_owner` /
+#: :func:`collection_model`) exist to replace, RDR-204's whole "the row
+#: is authoritative, GH #667" premise. All three are deliberately
+#: REGEX-based (:data:`_LEGACY_SPLIT_RE` / :data:`_CONFORMANT_COLLECTION_RE`),
+#: never a raw ``split``/``partition``/``startswith``/``"__" in`` --
+#: :func:`split_candidate_collection_name`'s own docstring names this
+#: explicitly ("this regex-based primitive stays invisible to that
+#: scan"), which is WHY this fifth class exists as a distinct pattern
+#: from the first four: a name-derivation primitive that hides its own
+#: parsing behind a function call evades a text/AST-shape scan for raw
+#: string operations entirely.
+#:
+#: :func:`is_conformant_collection_name` / :func:`parse_conformant_collection_name`
+#: are DELIBERATELY excluded, even though they too use a regex
+#: (``_CONFORMANT_COLLECTION_RE``, the SAME one two of the three above
+#: use): they answer "is this STRING itself well-formed" / "what are its
+#: four segments", a question NO catalog row can ever answer (a row
+#: doesn't tell you whether the NAME is conformant-shaped) -- calling
+#: them is never a drift risk the way asking a name for a FIELD a row
+#: could instead supply is. They are the sanctioned, unrestricted public
+#: API; the three below are the ones worth a caller pausing on.
+_CANDIDATE_STRING_PRIMITIVES: tuple[str, ...] = (
+    "split_candidate_collection_name",
+    "embedding_model_for_collection_name",
+    "model_version_for_collection_name",
+)
+
+
 def collection_content_type(name: str) -> str:
     """RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26): the content-type
     column of collection *name*'s catalog row.

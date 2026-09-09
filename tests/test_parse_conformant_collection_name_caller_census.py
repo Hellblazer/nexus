@@ -87,7 +87,7 @@ _TARGET = "parse_conformant_collection_name"
 #: conformant via is_conformant_collection_name, a pure regex check with
 #: no row lookup).
 ALLOWED_CALLERS: dict[tuple[str, int], str] = {
-    ("src/nexus/corpus.py", 1426): (  # line shifted again (fixture-seam round 2: CatalogReaderUnavailableError + cache-invalidation call added above it)
+    ("src/nexus/corpus.py", 1471): (  # line shifted again (nexus-ft04v.28 item 5: resolve_corpus's bounded-refresh docstring/code added above it)
         "collection_registration_kwargs: the write-time registration "
         "derivation used by HttpCatalogClient.register_collection's OWN "
         "bare-call fallback and by ensure_collection_registered (T3 chunk "
@@ -102,30 +102,40 @@ ALLOWED_CALLERS: dict[tuple[str, int], str] = {
         "Pre-existing single caller (http_catalog_client.py's "
         "collection_for) unaffected by this bead."
     ),
-    ("src/nexus/commands/collection.py", 757): (
+    ("src/nexus/commands/collection.py", 777): (  # line shifted (nexus-ft04v.28 item 4: routed through ensure_collection_registered; discard_cached_registration + the seam call added above it)
         "reindex_cmd: `name`'s catalog row was JUST DELETED by "
         "purge_collection_cascade a few lines above -- this call is what "
         "RECREATES it, so the row-based funnel helpers would raise "
         "CollectionNotRegisteredError every time. `name` is already "
         "confirmed conformant by an is_conformant_collection_name guard, "
         "so its own segments (parsed once, pure regex) are what this "
-        "re-registration needs. NOT the same call nexus-ft04v.27 retired "
-        "at this location (that RETIRED_SITES entry predates this bead's "
-        "row-based repoint, which is what makes this reintroduction "
-        "necessary here)."
+        "re-registration needs (now fed as an EXPLICIT ensure_collection_"
+        "registered kwargs override, nexus-ft04v.28 item 4 -- the "
+        "generic seam derivation would recompute embedding_model via "
+        "write-intent instead of preserving the name's own segment). NOT "
+        "the same call nexus-ft04v.27 retired at this location (that "
+        "RETIRED_SITES entry predates this bead's row-based repoint, "
+        "which is what makes this reintroduction necessary here)."
     ),
-    ("src/nexus/commands/catalog_cmds/collections.py", 128): (
+    ("src/nexus/commands/catalog_cmds/collections.py", 135): (  # line shifted (nexus-ft04v.28 item 4: routed through ensure_collection_registered)
         "backfill_collections_cmd: `to_register` names are, by the loop's "
         "own filter, exactly the ones with no catalog row yet -- this "
         "call is what creates one. Same is_conformant_collection_name "
         "guard as the other new sites; not the retired backfill_collections_cmd "
-        "site (that one predates the row-based repoint too)."
+        "site (that one predates the row-based repoint too). Now feeds an "
+        "EXPLICIT ensure_collection_registered kwargs override "
+        "(nexus-ft04v.28 item 4) rather than a bare register_collection "
+        "call, so a physically-existing T3 collection's real model "
+        "survives instead of being recomputed via write-intent."
     ),
-    ("src/nexus/commands/catalog_cmds/collections.py", 342): (
+    ("src/nexus/commands/catalog_cmds/collections.py", 364): (  # line shifted (nexus-ft04v.28 item 4: routed through ensure_collection_registered)
         "rename_collection_cmd: `new` was just confirmed CollectionState."
         "ABSENT above -- it has no catalog row yet by construction. Same "
         "guard and rationale as the backfill site above; not the retired "
-        "rename_collection_cmd site (predates the row-based repoint)."
+        "rename_collection_cmd site (predates the row-based repoint). Now "
+        "feeds an EXPLICIT ensure_collection_registered kwargs override "
+        "(nexus-ft04v.28 item 4) preserving the operator-typed segments "
+        "rather than recomputing embedding_model via write-intent."
     ),
     ("src/nexus/catalog/recovery_bundle.py", 392): (
         "target_collection_for: `recorded` names a collection on the "
