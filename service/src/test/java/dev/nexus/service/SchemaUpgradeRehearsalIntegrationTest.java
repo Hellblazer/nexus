@@ -448,6 +448,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   hygiene-001-10 nexus-tk070.p6a
                 //   hygiene-001-11 nexus-tk070.p6a
                 //   hygiene-002-1 nexus-ft04v.4
+                //   hygiene-004-1 nexus-ztafa
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -872,6 +873,24 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // owner_id the row's own tenant_id, lifecycle_state 'disputed'
                     // UNCONDITIONALLY, embedding_model the fallback.
                     registerCollection(su, "t1", "h002d-no-separator");
+
+                    // hygiene-004-1 (nexus-ztafa, RDR-204 engine, seed-coverage lint
+                    // follow-up): a 4-segment conformant name whose OWNER SEGMENT
+                    // carries an underscore -- hygiene-002-1's own owner grammar
+                    // ([a-zA-Z0-9-]+) cannot match this, so on THIS SAME hop it first
+                    // misfiles the row into branch D exactly like h002d-no-separator
+                    // above, before hygiene-004-1 (later in this same changelog file)
+                    // re-files it into branch A using the widened owner grammar
+                    // ([a-zA-Z0-9_-]+). Registered the same way as the other four
+                    // hygiene-002-1 fixtures -- lifecycle_state does not exist yet at
+                    // seed time, so the bare (tenant_id, name) insert leaves every
+                    // attribute column blank, same starting shape. The
+                    // misfile-then-refile TRANSITION itself is proven separately,
+                    // free of this fixture's aged-fleet chash-width constraint, by
+                    // Hygiene004OwnerGrammarUnderscoreTest's HEAD-schema fixtures;
+                    // this leg only needs to prove the row survives the FULL
+                    // aged-fleet hop correctly classified under real RLS.
+                    registerCollection(su, "t1", "code__h004_owner__bge-base-en-v15-768__v1");
 
                     assertThat(count(su, "SELECT count(*) FROM nexus.chash_index"))
                         .as("superuser ground truth after seeding").isEqualTo(5);
@@ -1908,6 +1927,29 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "embedding_model = the fallback, and "
                             + "lifecycle_state = 'disputed' unconditionally")
                         .isEqualTo(1);
+
+                    // hygiene-004-1 (nexus-ztafa): the underscored-owner fixture must
+                    // land EXACTLY where hygiene-002-1 alone would have landed a
+                    // non-underscored branch-A conformant name -- 'live', the name's
+                    // own content_type/owner_id/embedding_model, dimension NULL (this
+                    // fixture's own zero-chunks constraint, same as the four
+                    // hygiene-002-1 fixtures above) -- NOT hygiene-002-1's branch D
+                    // ('unknown' / disputed), which is where the walk lands it before
+                    // hygiene-004-1 re-files it, later in this same hop.
+                    assertThat(h002Dsl.fetchCount(CATALOG_COLLECTIONS,
+                        CATALOG_COLLECTIONS.TENANT_ID.eq("t1")
+                            .and(CATALOG_COLLECTIONS.NAME.eq("code__h004_owner__bge-base-en-v15-768__v1"))
+                            .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq("code"))
+                            .and(CATALOG_COLLECTIONS.OWNER_ID.eq("h004_owner"))
+                            .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq("bge-base-en-v15-768"))
+                            .and(CATALOG_COLLECTIONS.DIMENSION.isNull())
+                            .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("live"))))
+                        .as("hygiene-004-1 must re-file the underscored-owner 4-segment "
+                            + "name hygiene-002-1's own owner grammar cannot match -- 'live' "
+                            + "with the name's own attributes, not branch D's 'unknown' / "
+                            + "disputed")
+                        .isEqualTo(1);
+
                     assertThat(h002Dsl.fetchCount(CATALOG_COLLECTIONS,
                         CATALOG_COLLECTIONS.CONTENT_TYPE.eq("")
                             .or(CATALOG_COLLECTIONS.OWNER_ID.eq(""))

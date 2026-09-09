@@ -428,6 +428,19 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # agreement/disagreement sub-arm is proven separately by
         # Hygiene002CollectionAttributesWalkTest's HEAD-schema fixture.
         ("hygiene-002-1", "nexus-ft04v.4"),
+        # nexus-ztafa (RDR-204 engine): hygiene-004-1 re-files exactly the
+        # catalog_collections rows hygiene-002-1 (above) misfiled into branch
+        # D because their owner segment carries an underscore, which that
+        # changeset's owner grammar rejects but the client's collection-name
+        # check and PgContainerHelper's own fixture grammar both admit —
+        # see the changeset's own header for the full derivation. Seeded as
+        # ONE dedicated 4-segment conformant row with an underscored owner
+        # (registerCollection(), same pre-lifecycle_state bare-insert shape
+        # as the four hygiene-002-1 fixtures above); effect-asserted 'live'
+        # with the name's own attributes, not branch D's 'unknown'/disputed.
+        # The misfile-then-refile TRANSITION itself is proven separately by
+        # Hygiene004OwnerGrammarUnderscoreTest's dedicated HEAD-schema fixtures.
+        ("hygiene-004-1", "nexus-ztafa"),
     }
 )
 

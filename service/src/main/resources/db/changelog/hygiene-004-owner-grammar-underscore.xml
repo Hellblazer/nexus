@@ -1,0 +1,262 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-204 engine, bead nexus-ztafa: re-files exactly the rows
+    hygiene-002-collection-attributes-walk.xml's hygiene-002-1 misclassified
+    because its owner-segment grammar, [a-zA-Z0-9-]+, rejects an underscore
+    that the client's own collection-name check (src/nexus/corpus.py's
+    _COLLECTION_NAME_RE, [a-zA-Z0-9][a-zA-Z0-9_-]{1,61}[a-zA-Z0-9]) and the
+    Java test helper's fixture grammar (PgContainerHelper's
+    CONFORMANT_COLLECTION_NAME / CONFORMANT_QUARANTINE_COLLECTION_NAME,
+    widened at nexus-ft04v.16) both admit. Fork rehearsal 2026-09-08 found
+    two real rows (knowledge__nexus_rdr, knowledge__rdr_postmortem__nexus)
+    on tenant nexus landed 'disputed'/branch-D for exactly this reason.
+
+    DECISION (coordinator nexus-71, this bead's NOTES): the owner grammar
+    admits underscores, in all three places named above — the client and
+    the test helper already do; this changeset brings the engine walk's OWN
+    classification into agreement for every row hygiene-002-1 already ran
+    over, without editing that applied changeset (hot rule: never edit an
+    applied changeset).
+
+    MECHANISM: hygiene-002-1's branch D is the ONLY branch that can have
+    produced this misclassification — a name whose owner segment carries an
+    underscore never matched branch D's m4/mq/m2 regexes (all still using
+    the narrow [a-zA-Z0-9-]+ grammar at that changeset's own point in
+    history), so it fell through to branch D's unconditional content_type =
+    'unknown', owner_id = the row's own tenant_id, lifecycle_state =
+    'disputed'. That triple — content_type = 'unknown' AND owner_id =
+    tenant_id AND lifecycle_state = 'disputed' — is branch D's exact,
+    exclusive signature: no other branch ever writes content_type =
+    'unknown', and no other branch ever sets owner_id to the bare tenant_id
+    (branch C's owner_id is the name's own second segment, which only
+    equals tenant_id by coincidence, and branch C never writes content_type
+    'unknown'). Selecting on that signature is therefore equivalent to
+    selecting on "hygiene-002-1's old m4/mq/m2 all failed to match", without
+    needing to recompute the old, narrower regexes here to prove it.
+
+    Candidates are then re-matched against the WIDENED grammar (owner
+    [a-zA-Z0-9_-]+, byte-for-byte hygiene-002-1's own m4/mq/m2 shapes with
+    only the owner character class changed) and, for whichever of the three
+    now matches, re-classified using EXACTLY hygiene-002-1's own branch A/B/C
+    rules (embedding_model resolution against nexus.embedding_models,
+    dimension from nexus.collection_vector_stats agreement, lifecycle_state
+    from the same CASE expressions) — copied verbatim from that changeset
+    so the two walks can never disagree on a case both could classify.
+    Branch C's UPDATE carries an EXPLICIT precedence guard (m4 IS NULL AND
+    mq IS NULL) that hygiene-002-1's own branch C does not need: once the
+    owner class admits "_", the 2-segment pattern's owner group — which has
+    no trailing anchor — can greedily absorb straight through a genuine
+    "__model__vN" suffix, so a name m4 or mq already matches correctly would
+    ALSO satisfy the bare 2-segment shape without the guard (see that
+    UPDATE's own comment for the full derivation). A name that still matches
+    none of the three (genuinely unparseable, not merely underscore-shaped)
+    is left exactly as hygiene-002-1 wrote it: 'unknown' / disputed. This
+    changeset NEVER fails on data (2026-08-16
+    never-wedge directive): every branch below is a plain UPDATE ... FROM,
+    no RAISE EXCEPTION path, so an install with zero eligible rows (the
+    common case — most installs never had an underscored owner) runs as a
+    no-op DML pass.
+
+    SCOPE: touches ONLY rows matching branch D's signature above; a row
+    hygiene-002-1 already classified into branch A/B/C (content_type is a
+    real type, never 'unknown') is untouched by construction — the
+    candidate temp table itself is built with that WHERE, so no branch
+    UPDATE below can ever reach such a row.
+
+    IDEMPOTENCE: after this changeset runs once, every row it touches no
+    longer carries content_type = 'unknown' AND owner_id = tenant_id (a
+    re-filed row's content_type is now its real type, or — for the subset
+    that still ends up 'disputed' post-reclassification, e.g. an unseeded
+    model token — its content_type is still the REAL type, not 'unknown').
+    So the candidate temp table's WHERE finds zero rows on any hypothetical
+    re-run, independent of Liquibase's own once-only checksum guarantee.
+    Liquibase itself still only ever executes this changeset once; the
+    re-run proof in the paired test class is at the Liquibase level
+    (re-applying the full changelog against an already-migrated database is
+    a no-op), matching hygiene-002-1's own idiom.
+
+    RLS: same posture as hygiene-002-1 — catalog_collections (the DML
+    target) and chunks/catalog_document_chunks/catalog_documents (read via
+    nexus.collection_vector_stats -> nexus.live_chunks) all carry FORCE ROW
+    LEVEL SECURITY, so all four are toggled NO FORCE for the DO block's
+    duration and restored FORCE LIFO afterward, exactly like hygiene-002-1.
+    nexus.embedding_profile is read (branch C) but not toggled — it is
+    tenant-scoped RLS and this walk reads it per-row via a join keyed on the
+    row's own w.tenant_id, the same non-issue hygiene-002-1's own header
+    already argues for its own branch C read of the same table (the table
+    is also still empty at this point in the changelog: the engine writes
+    it only after Liquibase finishes, at boot).
+
+    NOT touching hygiene-002-2's gc_quarantine_orphans / gc_restore_
+    rereferenced stub-inserts: those functions' string_to_array-based owner
+    extraction is a SEPARATE question (bead nexus-ft04v.29 S1), out of this
+    bead's scope.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="hygiene-004-1" author="nexus-ztafa">
+        <comment>
+            Re-files nexus.catalog_collections rows hygiene-002-1's branch D
+            misclassified solely because their owner segment carries an
+            underscore, which that changeset's owner grammar
+            ([a-zA-Z0-9-]+) rejects but the client/test-helper grammar
+            ([a-zA-Z0-9_-]+) admits. Candidate selection is branch D's own
+            exclusive signature (content_type = 'unknown' AND owner_id =
+            tenant_id AND lifecycle_state = 'disputed'); re-classification
+            copies hygiene-002-1's branch A/B/C rules verbatim, restricted
+            to that candidate set only.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+LOCK TABLE nexus.catalog_collections, nexus.chunks, nexus.catalog_document_chunks,
+           nexus.catalog_documents IN ACCESS EXCLUSIVE MODE;
+        </sql>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.catalog_collections NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_document_chunks NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_documents NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_branch_a_count     BIGINT;
+    v_branch_b_count     BIGINT;
+    v_branch_c_count     BIGINT;
+    v_unseeded_tokens    TEXT;
+BEGIN
+    -- Candidates: exactly hygiene-002-1's branch-D signature (see this
+    -- changeset's header for why that signature alone identifies "the old,
+    -- narrower owner grammar failed to match this row"), re-matched against
+    -- the WIDENED owner grammar [a-zA-Z0-9_-]+.
+    CREATE TEMP TABLE _h004_walk ON COMMIT DROP AS
+    SELECT
+        c.tenant_id,
+        c.name,
+        regexp_match(c.name,
+            '^(code|docs|rdr|knowledge)__([a-zA-Z0-9_-]+)__([a-z][a-z0-9-]*)__v[0-9]+$') AS m4,
+        regexp_match(c.name,
+            '^quarantine-(code|docs|rdr|knowledge)__([a-zA-Z0-9_-]+)__([a-z][a-z0-9-]*)__v[0-9]+$') AS mq,
+        regexp_match(c.name, '^(code|docs|rdr|knowledge)__([a-zA-Z0-9_-]+)$') AS m2,
+        (SELECT count(DISTINCT s.dim) FROM nexus.collection_vector_stats s
+          WHERE s.tenant_id = c.tenant_id AND s.collection = c.name) AS stats_dim_count,
+        (SELECT min(s.dim) FROM nexus.collection_vector_stats s
+          WHERE s.tenant_id = c.tenant_id AND s.collection = c.name) AS stats_dim
+      FROM nexus.catalog_collections c
+     WHERE c.lifecycle_state = 'disputed'
+       AND c.content_type = 'unknown'
+       AND c.owner_id = c.tenant_id;
+
+    -- Branch A: 4-segment conformant names, widened owner grammar.
+    UPDATE nexus.catalog_collections c
+       SET content_type    = w.m4[1],
+           owner_id        = w.m4[2],
+           embedding_model = CASE WHEN em.embedding_model IS NOT NULL
+                                  THEN w.m4[3] ELSE 'bge-base-en-v15-768' END,
+           dimension       = CASE WHEN w.stats_dim_count = 1 THEN w.stats_dim ELSE NULL END,
+           lifecycle_state = CASE
+                                WHEN em.embedding_model IS NULL THEN 'disputed'
+                                WHEN w.stats_dim_count = 0 THEN 'live'
+                                WHEN w.stats_dim_count = 1 AND em.dimension = w.stats_dim THEN 'live'
+                                ELSE 'disputed'
+                              END
+      FROM _h004_walk w
+      LEFT JOIN nexus.embedding_models em ON em.embedding_model = w.m4[3]
+     WHERE c.tenant_id = w.tenant_id AND c.name = w.name AND w.m4 IS NOT NULL;
+    GET DIAGNOSTICS v_branch_a_count = ROW_COUNT;
+    RAISE NOTICE 'hygiene-004-1: branch A (4-segment, widened owner grammar) re-filed % row(s)', v_branch_a_count;
+
+    -- Branch B: quarantine-CT__owner__model__vN, widened owner grammar --
+    -- lifecycle_state is ALWAYS 'quarantine', same as hygiene-002-1.
+    UPDATE nexus.catalog_collections c
+       SET content_type    = w.mq[1],
+           owner_id        = w.mq[2],
+           embedding_model = CASE WHEN em.embedding_model IS NOT NULL
+                                  THEN w.mq[3] ELSE 'bge-base-en-v15-768' END,
+           dimension       = CASE WHEN w.stats_dim_count = 1 THEN w.stats_dim ELSE NULL END,
+           lifecycle_state = 'quarantine'
+      FROM _h004_walk w
+      LEFT JOIN nexus.embedding_models em ON em.embedding_model = w.mq[3]
+     WHERE c.tenant_id = w.tenant_id AND c.name = w.name AND w.mq IS NOT NULL;
+    GET DIAGNOSTICS v_branch_b_count = ROW_COUNT;
+    RAISE NOTICE 'hygiene-004-1: branch B (quarantine, widened owner grammar) re-filed % row(s)', v_branch_b_count;
+
+    -- Branch C: grandfathered 2-segment CT__owner, widened owner grammar --
+    -- nexus.embedding_profile is still empty for every tenant at this point
+    -- in the changelog, same as hygiene-002-1's own branch C.
+    --
+    -- EXPLICIT PRECEDENCE GUARD (AND w.m4 IS NULL AND w.mq IS NULL), absent
+    -- from hygiene-002-1's own branch C: m2's pattern has no trailing anchor
+    -- after the owner group, so once the owner class admits "_" -- the very
+    -- character a "__" separator is made of -- its greedy owner group can
+    -- absorb straight through a genuine "__model__vN" suffix to the end of
+    -- the string, making m2 ALSO match a name m4 or mq already matched
+    -- correctly (e.g. "code__agree_owner__voyage-code-3__v1" satisfies m2
+    -- with owner_id = "agree_owner__voyage-code-3__v1" -- clearly wrong).
+    -- hygiene-002-1's own m2 never has this exposure: its narrow
+    -- [a-zA-Z0-9-]+ owner class has no legal "_" character at all, so its
+    -- greedy owner group structurally cannot cross a literal "__" and stays
+    -- naturally exclusive of its own m4/mq. Branch A and B need no such
+    -- guard in the other direction: their own trailing "__model__vN" anchor
+    -- means a genuinely 2-segment name (which has no such suffix) never
+    -- satisfies m4 or mq to begin with, and mq/m4 can never both match
+    -- (disjoint on the literal "quarantine-" prefix).
+    UPDATE nexus.catalog_collections c
+       SET content_type    = w.m2[1],
+           owner_id        = w.m2[2],
+           embedding_model = COALESCE(ep.embedding_model, 'bge-base-en-v15-768'),
+           dimension       = CASE WHEN w.stats_dim_count = 1 THEN w.stats_dim ELSE NULL END,
+           lifecycle_state = CASE
+                                WHEN w.stats_dim_count = 0 THEN 'live'
+                                WHEN w.stats_dim_count = 1 AND ep.embedding_model IS NOT NULL
+                                     AND ep.dimension = w.stats_dim THEN 'live'
+                                ELSE 'disputed'
+                              END
+      FROM _h004_walk w
+      LEFT JOIN nexus.embedding_profile ep
+             ON ep.tenant_id = w.tenant_id AND ep.content_type = w.m2[1]
+     WHERE c.tenant_id = w.tenant_id AND c.name = w.name AND w.m2 IS NOT NULL
+       AND w.m4 IS NULL AND w.mq IS NULL;
+    GET DIAGNOSTICS v_branch_c_count = ROW_COUNT;
+    RAISE NOTICE 'hygiene-004-1: branch C (grandfathered 2-segment, widened owner grammar) re-filed % row(s)', v_branch_c_count;
+
+    -- Census of re-filed rows whose name carries a model token this install
+    -- does not recognise -- same courtesy notice as hygiene-002-1's own.
+    SELECT string_agg(DISTINCT tok, ', ') INTO v_unseeded_tokens
+      FROM (
+          SELECT (w.m4)[3] AS tok FROM _h004_walk w
+           WHERE w.m4 IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM nexus.embedding_models em WHERE em.embedding_model = (w.m4)[3])
+          UNION
+          SELECT (w.mq)[3] AS tok FROM _h004_walk w
+           WHERE w.mq IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM nexus.embedding_models em WHERE em.embedding_model = (w.mq)[3])
+      ) unseeded;
+    IF v_unseeded_tokens IS NOT NULL THEN
+        RAISE NOTICE 'hygiene-004-1: unseeded model token(s) found among re-filed collection names, backfilled to bge-base-en-v15-768 instead: %', v_unseeded_tokens;
+    END IF;
+END $$;
+
+ALTER TABLE nexus.catalog_documents FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_document_chunks FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_collections FORCE ROW LEVEL SECURITY;
+        </sql>
+        <rollback>
+            <!-- No schema object is added by this changeset (only the DML
+                 re-file plus a RLS toggle already reverted within the same
+                 changeset), so there is nothing to DROP. The re-filed
+                 VALUES are not reversed either, matching hygiene-002-1's own
+                 rollback discipline for its backfill: recovering the
+                 pre-walk 'unknown'/disputed state would require a stored
+                 pre-image this changeset never keeps, and the re-filed
+                 values are correct facts derived from the collection's own
+                 name and stored vectors, not something a rollback should
+                 want to undo. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
