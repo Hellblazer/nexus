@@ -92,10 +92,20 @@ migrated tomorrow.
 
 Subject names are lowercase, hyphen-separated, two or three words, ASCII.
 The owner segment of the four-segment name (and of the grandfathered
-two-segment form) admits letters, digits, hyphens, and underscores —
-`[a-zA-Z0-9_-]+` — one grammar shared by the client's collection-name check
-(`src/nexus/corpus.py`), the engine's attribute-backfill walk, and the Java
-test helper that seeds fixtures against it (nexus-ztafa).
+two-segment form) admits letters, digits, hyphens, and a SINGLE underscore
+between two such tokens — `[a-zA-Z0-9-]+(_[a-zA-Z0-9-]+)*` — never a bare
+`__`, which stays reserved, unconditionally, for the segment separator. The
+engine's attribute-backfill walk (`hygiene-004-owner-grammar-underscore.xml`'s
+`hygiene-004-1`) and the Java test helper that seeds fixtures against it
+(`PgContainerHelper`'s `CONFORMANT_COLLECTION_NAME` /
+`CONFORMANT_QUARANTINE_COLLECTION_NAME`) both use exactly this grammar
+(nexus-ztafa). The client's own collection-name PARSING functions
+(`is_conformant_collection_name` / `parse_conformant_collection_name` in
+`src/nexus/corpus.py`, via `_CONFORMANT_COLLECTION_RE`) do not yet admit an
+underscored owner at all — `src/nexus/corpus.py`'s `_COLLECTION_NAME_RE` is a
+separate, whole-string ChromaDB shape check with no owner-segment concept,
+not the parser these functions use. Widening the client's parse functions to
+match is tracked as nexus-ft04v.26, not yet done.
 
 ## Rule 4: a collection holds many documents
 
