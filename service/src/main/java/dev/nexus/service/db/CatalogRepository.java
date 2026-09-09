@@ -7523,22 +7523,38 @@ public final class CatalogRepository {
     /**
      * THE SWEEP ITSELF (RDR-204 Technical Design step 3, bead nexus-ft04v.3's
      * DECISIONS: "this job does two things only" — now four dispositions,
-     * nexus-snm4y). Walks every {@code catalog_collections} row for {@code
-     * tenant} and, for each:
+     * nexus-snm4y, refined by nexus-n060e). Walks every {@code
+     * catalog_collections} row for {@code tenant} and, for each:
      * <ul>
-     *   <li>HOLDS it, untouched, when {@code lifecycle_state} is already
+     *   <li>DELETEs it when {@link #collectionIsEmpty} is true — a ghost: no row
+     *       in ANY {@link #COLLECTION_SCOPED_TABLES} entry names it — REGARDLESS
+     *       of {@code lifecycle_state}, quarantine included. A quarantine
+     *       sibling that has fully drained (every chunk expired by {@code
+     *       gc_expire_quarantine} or restored by {@code gc_restore_rereferenced})
+     *       is reclaimed exactly like any other ghost row (nexus-n060e). This is
+     *       safe because none of the SQL GC functions delete a {@code
+     *       catalog_collections} row themselves — {@code gc_quarantine_orphans}
+     *       re-creates the sibling row {@code ON CONFLICT DO NOTHING} the next
+     *       time it needs one (RDR-191), so deleting an EMPTY sibling here loses
+     *       no data and costs nothing but a future re-registration;</li>
+     *   <li>else HOLDS it, untouched, when {@code lifecycle_state} is already
      *       {@code 'quarantine'} — hygiene-002 Branch B
      *       ({@code hygiene-002-collection-attributes-walk.xml}) assigns that
-     *       state UNCONDITIONALLY, regardless of chunk count or dimension
-     *       agreement; a quarantined collection is a deliberately held row,
-     *       neither a ghost nor dormant, and this sweep must not silently
-     *       relitigate a decision Branch B already made. Fork rehearsal of
+     *       STATE UNCONDITIONALLY, regardless of chunk count or dimension
+     *       agreement, but that is a statement about which state a
+     *       quarantine-prefixed row gets, not a promise that the ROW itself is
+     *       immortal. A quarantine row something still references is held
+     *       (neither deleted nor marked dormant, never relitigated); a quarantine
+     *       row nothing references any more was already caught by the DELETE
+     *       branch above and never reaches this one. Fork rehearsal of
      *       engine-service-v0.1.109 on a PITR fork of production (nexus-snm4y)
-     *       found the sweep re-marking one quarantine row dormant and
-     *       deleting another as a ghost — Branch B's "unconditional" held
-     *       only until this method's first pass;</li>
-     *   <li>else DELETEs it when {@link #collectionIsEmpty} is true — a ghost: no row
-     *       in ANY {@link #COLLECTION_SCOPED_TABLES} entry names it;</li>
+     *       found an EARLIER version of this method re-marking one quarantine
+     *       row dormant and deleting another as a ghost with no reclaim
+     *       counterpart; the fix (nexus-snm4y) held every quarantine row
+     *       unconditionally, which the substantive critique of that landing
+     *       then found left a fully-drained quarantine row with no automated
+     *       reclaim path at all (nexus-n060e) — this ordering (empty check
+     *       first, quarantine-hold second) is the fix for that gap;</li>
      *   <li>else, when it has no row in {@code nexus.collection_vector_stats}
      *       (referenced elsewhere but no live chunks to embed or read), sets
      *       {@code lifecycle_state = 'dormant'};</li>
@@ -7591,14 +7607,19 @@ public final class CatalogRepository {
             for (var r : nameAndState) {
                 String name = r.value1();
                 String lifecycleState = r.value2();
-                if ("quarantine".equals(lifecycleState)) {
-                    // nexus-snm4y: hygiene-002 Branch B's assignment is unconditional and
-                    // this sweep never relitigates it — neither collectionIsEmpty nor the
-                    // vector-stats check below is even evaluated for this row.
-                    out.add(new SweptRow(name, SweepDisposition.HELD_QUARANTINE));
-                } else if (collectionIsEmpty(ctx, name)) {
+                if (collectionIsEmpty(ctx, name)) {
+                    // nexus-n060e: a true ghost is reclaimed regardless of lifecycle_state --
+                    // a drained quarantine sibling included. Checked BEFORE the quarantine
+                    // branch below so a quarantine row never reaches that branch once it has
+                    // fully drained; see this method's javadoc for why the delete is safe.
                     ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute();
                     out.add(new SweptRow(name, SweepDisposition.DELETED));
+                } else if ("quarantine".equals(lifecycleState)) {
+                    // nexus-n060e (refining nexus-snm4y): hygiene-002 Branch B's assignment
+                    // is unconditional on STATE, not on the row's immortality -- a quarantine
+                    // row still referenced somewhere (the collectionIsEmpty check above was
+                    // false) is held here, never relitigated into 'dormant'.
+                    out.add(new SweptRow(name, SweepDisposition.HELD_QUARANTINE));
                 } else if (!ctx.fetchExists(ctx.selectOne().from(COLLECTION_VECTOR_STATS)
                         .where(COLLECTION_VECTOR_STATS.COLLECTION.eq(name)))) {
                     ctx.update(CATALOG_COLLECTIONS)
