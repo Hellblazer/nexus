@@ -654,7 +654,15 @@ def catalog_resolve(
             if entry and entry.physical_collection:
                 collections.add(entry.physical_collection)
         if owner:
-            entries = cat.by_owner(_parse_tumbler_or_raise(owner, "owner"))
+            # GH #1527 (nexus-qiah5): a registered owner NAME is accepted
+            # here too, the same way `nx catalog resolve --owner` already
+            # does; the owner table maps it to the tumbler.
+            from nexus.catalog.owner_scope import OwnerScopeError, resolve_owner_scope  # noqa: PLC0415 — deferred, branch-local
+            try:
+                owner_tumbler = resolve_owner_scope(cat, owner)
+            except OwnerScopeError as exc:
+                raise ValueError(f"owner {exc}") from exc
+            entries = cat.by_owner(_parse_tumbler_or_raise(owner_tumbler, "owner"))
             for e in entries:
                 if e.physical_collection:
                     collections.add(e.physical_collection)

@@ -1267,3 +1267,47 @@ def test_max_file_chunks_warns_when_catalog_unavailable(
     assert result.exit_code == 0, result.output
     assert "no catalog available" in result.output
     assert "c1" in result.output or "x" in result.output
+
+
+# ── GH #1527 (nexus-qiah5): --repo NAME scopes to one owner's collections ──
+
+
+def test_repo_flag_resolves_an_owner_name_to_its_collections(
+    runner: CliRunner, cloud_env,
+) -> None:
+    from types import SimpleNamespace
+
+    from nexus.catalog.tumbler import Tumbler
+
+    reader = MagicMock()
+    reader.owner_tumblers_by_name.return_value = [Tumbler.parse("1.61")]
+    reader.by_owner.return_value = [
+        SimpleNamespace(physical_collection="code__1-61__bge-base-en-v15-768__v1"),
+        SimpleNamespace(physical_collection="docs__1-61__bge-base-en-v15-768__v1"),
+        SimpleNamespace(physical_collection="code__1-61__bge-base-en-v15-768__v1"),
+    ]
+    mock_t3 = _mock_t3(["code__1-61__bge-base-en-v15-768__v1", "docs__1-61__bge-base-en-v15-768__v1"])
+    mock_t3.collection_exists_raw.return_value = True
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
+         patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]) as ms:
+        result = runner.invoke(main, ["search", "query", "--repo", "aip-unified-recs-intelligent"])
+    assert result.exit_code == 0, result.output
+    reader.owner_tumblers_by_name.assert_called_once_with("aip-unified-recs-intelligent")
+    reader.by_owner.assert_called_once_with("1.61")
+    call_kwargs = ms.call_args.kwargs if ms.call_args else {}
+    targets = call_kwargs.get("collections") or (ms.call_args.args[1] if ms.call_args else [])
+    assert sorted(targets) == [
+        "code__1-61__bge-base-en-v15-768__v1", "docs__1-61__bge-base-en-v15-768__v1",
+    ], "the default --corpus prefixes are dropped; only the owner's collections are searched"
+
+
+def test_repo_flag_names_an_unknown_owner(runner: CliRunner, cloud_env) -> None:
+    reader = MagicMock()
+    reader.owner_tumblers_by_name.return_value = []
+    mock_t3 = _mock_t3(["knowledge__test"])
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
+         patch("nexus.catalog.factory.make_catalog_reader", return_value=reader):
+        result = runner.invoke(main, ["search", "query", "--repo", "no-such-repo"])
+    assert result.exit_code != 0
+    assert "--repo 'no-such-repo' is neither a dotted tumbler" in result.output, result.output

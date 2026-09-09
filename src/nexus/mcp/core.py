@@ -3313,6 +3313,14 @@ def query(
             if cat is None:
                 return "Error: catalog not initialized — catalog params (author, content_type, follow_links, subtree) require 'nx catalog setup'"
 
+            # GH #1527 (nexus-qiah5): a registered owner NAME is accepted
+            # wherever a subtree tumbler is; the owner table maps it.
+            if subtree:
+                from nexus.catalog.owner_scope import OwnerScopeError, resolve_owner_scope  # noqa: PLC0415 — deferred, branch-local
+                try:
+                    subtree = resolve_owner_scope(cat, subtree)
+                except OwnerScopeError as exc:
+                    return f"Error: subtree {exc}"
             # Guard: document-level subtree address (3+ segments) cannot have descendants
             if subtree:
                 subtree_depth = len(subtree.split("."))
@@ -8137,6 +8145,8 @@ async def nx_answer(
     Args:
         question: Natural-language question to answer.
         scope: Catalog subtree or corpus filter (e.g. ``"1.2"`` or ``"knowledge"``).
+            Honoured on every path, the single-step ``query()`` fast path
+            included (it is passed as that call's ``subtree``, GH #1523).
         context: Supplementary caller-supplied context for the plan matcher.
         max_steps: Cap on plan DAG size (passed to inline planner on miss).
         budget_usd: Soft per-invocation cost GUIDANCE in USD, not a hard
@@ -8327,6 +8337,19 @@ async def nx_answer(
     import time  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
     import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
     from types import SimpleNamespace  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site (nexus-nyry9.2 pre-Step-2 budget stand-in)
+
+    # GH #1527 (nexus-qiah5): ``scope`` may name a registered owner; resolve
+    # it to the owner's tumbler once, here, so the plan-run binding and the
+    # single-step fast path see the same value. A corpus name (the other
+    # documented form) matches no owner and passes through unchanged.
+    if scope:
+        from nexus.catalog.owner_scope import OwnerScopeError, resolve_owner_scope  # noqa: PLC0415 — deferred, branch-local
+        _scope_cat = _get_catalog()
+        if _scope_cat is not None:
+            try:
+                scope = resolve_owner_scope(_scope_cat, scope, strict=False)
+            except OwnerScopeError as exc:
+                return f"Error: scope {exc}"
 
     from nexus.mcp_infra import get_t1_plan_cache  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
     from nexus.plans.budget_default import (  # noqa: PLC0415 — deferred for startup cost; call-time import so a test's monkeypatch on the module attribute is honored every call (RDR-196 .p3c, nexus-nyry9.21)
@@ -9408,7 +9431,13 @@ async def nx_answer(
             # the structured envelope already contains enough to
             # synthesize a result summary.
             if structured:
-                q_struct = query(question=q, corpus=corpus, limit=limit, structured=True)
+                # GH #1523 (nexus-hfflc): the caller's scope is a catalog
+                # subtree filter and rode only the plan-run path as the
+                # _nx_scope binding; this fast path dropped it and answered
+                # from every collection. Pass it through as query()'s own
+                # subtree so both paths honour the same filter.
+                q_struct = query(question=q, corpus=corpus, limit=limit, structured=True,
+                                 subtree=scope or "")
                 chunks: list[dict] = []
                 if isinstance(q_struct, dict):
                     ids = q_struct.get("ids", [])
@@ -9452,7 +9481,7 @@ async def nx_answer(
                 else:
                     result_text = "No results."
             else:
-                result_text = query(question=q, corpus=corpus, limit=limit)
+                result_text = query(question=q, corpus=corpus, limit=limit, subtree=scope or "")
                 chunks = []
 
             elapsed_ms = int((time.monotonic() - start) * 1000)
