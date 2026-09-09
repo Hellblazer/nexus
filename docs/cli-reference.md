@@ -3286,10 +3286,12 @@ each held generation's size on disk and the remedy: end those sessions, then
 is retained outside the window by rule, so a box with many long-lived
 staggered sessions retains one generation per distinct holder set until those
 sessions end, and the Holders row is where that count shows. A receipt-less
-`gen-*` tree written to within the last hour (`NX_GC_BUILD_GRACE_MINUTES`) is
-another session's build in progress and is kept and named, never reaped as
-wreckage; the receipt is written last, so wreckage is what is still
-receipt-less after the window. `uv cache prune` is best-effort: uv holds its
+`gen-*` tree written to within the last hour (`NX_GC_BUILD_GRACE_MINUTES`), or
+carrying the builder's `.nx-building` claim marker younger than six hours
+(`NX_GC_BUILD_CLAIM_MINUTES`, since a slow resolve or download writes into
+uv's cache, not the tree), is another session's build in progress and is kept
+and named, never reaped as wreckage; the receipt is written last, so wreckage
+is what is still receipt-less after both windows. `uv cache prune` is best-effort: uv holds its
 own lock on the cache, so a prune that lands beside another uv process either
 waits or fails, and the one line printed says which.
 

@@ -128,6 +128,10 @@ for _suffix in "" a b c d e f g h; do
     _candidate="$(nx_generation_dir "${STAMP}${_suffix}" "$TOOLS_DIR")" || exit $?
     if mkdir "$_candidate" 2>/dev/null; then
         GEN="$_candidate"
+        # Claim the tree for gc.sh (nexus-xn84f): a receipt-less gen-* with a
+        # young marker is a build in progress even while resolve/download
+        # writes nothing under it. The receipt, written last, supersedes it.
+        : > "$GEN/$NX_BUILDING_MARKER_NAME"
         break
     fi
 done

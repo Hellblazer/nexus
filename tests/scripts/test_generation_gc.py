@@ -248,6 +248,34 @@ def test_a_receipt_less_tree_being_built_right_now_is_not_wreckage(env) -> None:
     assert not stale.exists(), "receipt-less wreckage older than the grace window survived (the test proved nothing)"
 
 
+def test_a_claimed_tree_survives_a_long_quiet_download_phase(env) -> None:
+    """Fix check on nexus-xn84f: resolve/download writes into uv's cache, not
+    the tree, so a slow install can leave the tree untouched for over the
+    write grace. The builder's claim marker keeps it for the claim window;
+    a marker older than that window is a crashed build and goes."""
+    tools, stub_bin = env
+    gens = [_gen(tools, f"{i:02d}") for i in range(2)]
+    _point(tools, "current", gens[1])
+    quiet = tools / "gen-03"
+    quiet.mkdir()
+    (quiet / ".nx-building").write_text("")
+    two_hours_ago = int(__import__("time").time()) - 2 * 3600
+    os.utime(quiet, (two_hours_ago, two_hours_ago))
+    os.utime(quiet / ".nx-building", (two_hours_ago, two_hours_ago))
+    crashed = tools / "gen-00-old"
+    crashed.mkdir()
+    (crashed / ".nx-building").write_text("")
+    old = 1_700_000_000
+    os.utime(crashed / ".nx-building", (old, old))
+    os.utime(crashed, (old, old))
+
+    out = _sh("nx_gc_generations --keep 1", tools, stub_bin).stdout
+
+    assert quiet.is_dir(), "a claimed build two hours into a quiet download was reaped"
+    assert f"kept {quiet}: build in progress" in out, out
+    assert not crashed.exists(), "a crashed build past the claim window survived (the test proved nothing)"
+
+
 def test_gc_is_a_no_op_on_a_fresh_single_generation_install(env) -> None:
     tools, stub_bin = env
     only = _gen(tools, "00")
