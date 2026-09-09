@@ -1565,22 +1565,22 @@ def resolve_corpus(corpus: str, all_collections: list[str]) -> list[str]:
         for c in all_collections:
             row = get_collection_row(c)
             if row is None:
-                structlog.get_logger().debug(
-                    "resolve_corpus: candidate has no catalog row, dropped from fan-out",
+                _log.debug(
+                    "resolve_corpus_candidate_dropped_no_row",
                     corpus=corpus, collection=c,
                 )
                 continue
             if row["content_type"] != corpus:
                 continue
             if row.get("lifecycle_state") != "live":
-                structlog.get_logger().debug(
-                    "resolve_corpus: candidate excluded by lifecycle_state",
+                _log.debug(
+                    "resolve_corpus_candidate_excluded_lifecycle",
                     corpus=corpus, collection=c, lifecycle_state=row.get("lifecycle_state"),
                 )
                 continue
             matches.append(c)
         if not matches:
-            structlog.get_logger().debug("resolve_corpus: no collections matched", corpus=corpus)
+            _log.debug("resolve_corpus_no_collections_matched", corpus=corpus, stage="content_type_fanout")
         return matches
 
     # Stage 3: legacy string-prefix recovery (unchanged pure string match).
@@ -1589,5 +1589,5 @@ def resolve_corpus(corpus: str, all_collections: list[str]) -> list[str]:
     prefix = f"{corpus}__"
     matches = [c for c in all_collections if c.startswith(prefix)]
     if not matches:
-        structlog.get_logger().debug("resolve_corpus: no collections matched", corpus=corpus)
+        _log.debug("resolve_corpus_no_collections_matched", corpus=corpus, stage="legacy_prefix")
     return matches

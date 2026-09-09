@@ -64,16 +64,25 @@ SRC = REPO_ROOT / "src" / "nexus"
 _TARGET = "parse_conformant_collection_name"
 
 #: (relative-path, lineno) -> reason the call survives nexus-ft04v.27.
+#:
+#: nexus-ft04v.26 (THE REPOINT) update: collection_content_type (was
+#: corpus.py:626) and collection_owner (was corpus.py:658) DROPPED --
+#: both now read the catalog row (nexus.mcp_infra.get_collection_row)
+#: instead of parsing, exactly the retirement their old entries here
+#: predicted ("Still parses until nexus-ft04v.26 repoints it at the
+#: catalog row"). collection_registration_kwargs's own entry moved
+#: 1183 -> 1295 (line shift from the surrounding repoint, same call,
+#: same reason). SIX new entries added: all mint-time /
+#: re-registration-after-row-deletion sites this SAME bead's row-based
+#: repoint of collection_content_type/collection_owner/collection_model
+#: made necessary -- a name with no catalog row (by construction, since
+#: registering IS what creates the row) can no longer be read via the
+#: now-row-based funnel helpers, so these fall back to parsing the
+#: STRING's own segments (safe: each site first confirms the name is
+#: conformant via is_conformant_collection_name, a pure regex check with
+#: no row lookup).
 ALLOWED_CALLERS: dict[tuple[str, int], str] = {
-    ("src/nexus/corpus.py", 626): (
-        "collection_content_type: RDR-204 Phase 3 funnel helper #1. Still "
-        "parses until nexus-ft04v.26 repoints it at the catalog row."
-    ),
-    ("src/nexus/corpus.py", 658): (
-        "collection_owner: RDR-204 Phase 3 funnel helper #2. Still parses "
-        "until nexus-ft04v.26 repoints it at the catalog row."
-    ),
-    ("src/nexus/corpus.py", 1183): (
+    ("src/nexus/corpus.py", 1295): (
         "collection_registration_kwargs: the write-time registration "
         "derivation used by HttpCatalogClient.register_collection's OWN "
         "bare-call fallback and by ensure_collection_registered (T3 chunk "
@@ -87,6 +96,51 @@ ALLOWED_CALLERS: dict[tuple[str, int], str] = {
         "CollectionName.parse: the render path's own parse counterpart. "
         "Pre-existing single caller (http_catalog_client.py's "
         "collection_for) unaffected by this bead."
+    ),
+    ("src/nexus/commands/collection.py", 757): (
+        "reindex_cmd: `name`'s catalog row was JUST DELETED by "
+        "purge_collection_cascade a few lines above -- this call is what "
+        "RECREATES it, so the row-based funnel helpers would raise "
+        "CollectionNotRegisteredError every time. `name` is already "
+        "confirmed conformant by an is_conformant_collection_name guard, "
+        "so its own segments (parsed once, pure regex) are what this "
+        "re-registration needs. NOT the same call nexus-ft04v.27 retired "
+        "at this location (that RETIRED_SITES entry predates this bead's "
+        "row-based repoint, which is what makes this reintroduction "
+        "necessary here)."
+    ),
+    ("src/nexus/commands/catalog_cmds/collections.py", 128): (
+        "backfill_collections_cmd: `to_register` names are, by the loop's "
+        "own filter, exactly the ones with no catalog row yet -- this "
+        "call is what creates one. Same is_conformant_collection_name "
+        "guard as the other new sites; not the retired backfill_collections_cmd "
+        "site (that one predates the row-based repoint too)."
+    ),
+    ("src/nexus/commands/catalog_cmds/collections.py", 342): (
+        "rename_collection_cmd: `new` was just confirmed CollectionState."
+        "ABSENT above -- it has no catalog row yet by construction. Same "
+        "guard and rationale as the backfill site above; not the retired "
+        "rename_collection_cmd site (predates the row-based repoint)."
+    ),
+    ("src/nexus/catalog/recovery_bundle.py", 392): (
+        "target_collection_for: `recorded` names a collection on the "
+        "SOURCE install a recovery bundle is being restored from -- it "
+        "may have no catalog row on THIS install at all yet (restoring "
+        "it is what creates one). Reads the string's own parsed "
+        "segments, never the row-based helpers, which would raise "
+        "CollectionNotRegisteredError for a name this install has never "
+        "seen."
+    ),
+    ("src/nexus/db/t3.py", 1327): (
+        "T3Database.list_collections()'s _derived_row_fields: class (d) "
+        "-- synthesizes a row for a substrate (the retired, TEST-ONLY "
+        "Chroma-era client) with no catalog to join against, the same "
+        "shape as orphan_backfill.py's _content_type_for_collection. "
+        "Without this, nexus.mcp_infra's row cache reports 'no row' for "
+        "every T3Database-backed test, silently emptying resolve_corpus's "
+        "bare-content-type fan-out for the entire test suite's primary "
+        "substrate (found live: test_store_put_invalidates_page_cache / "
+        "test_store_delete_invalidates_page_cache in tests/test_mcp_server.py)."
     ),
 }
 
