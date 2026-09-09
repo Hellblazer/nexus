@@ -1352,6 +1352,7 @@ class TestRdrGateLoopRemedies:
     GATE_CMD = PLUGIN_DIR / "commands" / "rdr-gate.md"
     RESEARCH_SKILL = SKILLS_DIR / "rdr-research" / "SKILL.md"
     ACCEPT_SKILL = SKILLS_DIR / "rdr-accept" / "SKILL.md"
+    ACCEPT_CMD = PLUGIN_DIR / "commands" / "rdr-accept.md"
 
     def test_fix_check_layer_in_gate_skill_and_command(self) -> None:
         """Remedy 1: a diff-scoped fix check stands between a fix and Layer 3."""
@@ -1460,10 +1461,15 @@ class TestRdrGateLoopRemedies:
         assert "rdr-fix:" in registry and "commands/rdr-fix.md" in registry
 
     def test_accept_dispositions_residuals(self) -> None:
-        text = self.ACCEPT_SKILL.read_text()
-        assert "residuals:" in text
-        assert "disposition" in text
-        assert "bead" in text and "commit" in text
+        """The disposition rule, and the fix check a sha disposition carries,
+        in the accept skill and its command mirror."""
+        for path in (self.ACCEPT_SKILL, self.ACCEPT_CMD):
+            text = path.read_text()
+            assert "residuals:" in text, path
+            assert "disposition" in text, path
+            assert "bead" in text and "commit" in text, path
+            assert "fix-check-" in text, f"{path}: the T2 title a sha disposition's check goes under"
+            assert "bead id" in text and "needs none" in text, f"{path}: the bead-disposition exemption"
 
 
 class TestReviewRoundContracts:

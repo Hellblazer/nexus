@@ -31,4 +31,10 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.38.0)
 
-(none)
+- `conexus/skills/rdr-accept/SKILL.md`: nexus-yjf5l.1 — step 1c and its
+  Success Criteria row: a residual dispositioned by a change to the RDR
+  file carries a fix check on that change, stored as
+  `{id}-fix-check-<sha>`; a bead-id disposition needs none.
+- `conexus/commands/rdr-accept.md`: nexus-yjf5l.1 — Step 2b mirrors the
+  skill: the residual disposition rule and the fix check a sha
+  disposition carries.

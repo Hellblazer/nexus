@@ -386,6 +386,22 @@ class TestRdrAccept:
         assert "`residuals:`" in result.output
         assert "blocks accept" in result.output
 
+    def test_rdr_accept_names_the_fix_check_a_sha_disposition_carries(self, rdr_env):
+        """A residual dispositioned by a change to the RDR file gets a fix check
+        on that change; a residual dispositioned by a bead id does not."""
+        _write_rdr(
+            rdr_env["rdr_dir"], "rdr-204-example.md",
+            {"title": "Example", "status": "draft", "type": "Architecture", "priority": "medium"},
+            body="## Problem\n\nText.\n",
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-accept", "--", "204"])
+        assert result.exit_code == 0, result.output
+        out = result.output
+        assert "204-fix-check-<sha>" in out, "the T2 title the disposition's check goes under"
+        assert "docs/rdr/rdr-204-example.md" in out, "the range names the RDR file"
+        assert "tip" in out, "the sha is the RDR file's tip after the disposition"
+        assert "bead id" in out and "needs none" in out, "the bead-disposition exemption"
+
     def test_rdr_accept_with_draft_rdr_prints_planning_handoff(self, rdr_env):
         """Draft RDR with plan section: prints Planning Handoff block."""
         body = (
@@ -1934,8 +1950,10 @@ class TestRdrGateRoundAndFixCheck:
         assert "enumeration" in out and "universal" in out
         assert "Do not enter Layer 1 or Layer 3" in out
 
-    def test_fix_check_not_applicable_past_the_gate(self, rdr_env, monkeypatch):
-        """An accepted RDR's post-accept edits are not gate fixes."""
+    def test_no_regate_fix_check_past_the_gate(self, rdr_env, monkeypatch):
+        """Past the gate there is no re-gate to gate, and the branch says so —
+        but a residual dispositioned by a change to the RDR file still carries a
+        fix check on that change, and this surface names it."""
         gated = self._commit(rdr_env, self._BODY, "gated")
         path = _write_rdr(
             rdr_env["rdr_dir"], "rdr-204-example.md",
@@ -1946,8 +1964,11 @@ class TestRdrGateRoundAndFixCheck:
         subprocess.run(["git", "-C", root, "add", str(path)], check=True, capture_output=True)
         subprocess.run(["git", "-C", root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "accept"], check=True, capture_output=True)
         out = self._gate(rdr_env, monkeypatch, outcome="PASSED", commit=gated, prior=None).output
-        assert "Fix check: not applicable (RDR status is `accepted`" in out, out
-        assert "### Fix check (required" not in out
+        assert "past the gate" in out and "`accepted`" in out, out
+        assert "### Fix check (required" not in out, "no re-gate fix check past the gate"
+        assert "204-fix-check-<sha>" in out, "the disposition's own fix check is named"
+        assert f"git diff {gated}..HEAD -- docs/rdr/rdr-204-example.md" in out, out
+        assert "bead id" in out and "needs none" in out, "the bead-disposition exemption"
 
     def test_fix_check_not_required_when_nothing_changed(self, rdr_env, monkeypatch):
         gated = self._commit(rdr_env, self._BODY, "gated")
@@ -2111,6 +2132,8 @@ class TestRdrFixPreamble:
         out = _runner().invoke(rdr, ["preamble", "rdr-fix", "--", "204"]).output
         assert "past the gate" in out and "accepted" in out
         assert "#### Before the edit" not in out, "past the gate, the instructions do not print"
+        assert "204-fix-check-<sha>" in out, "the pointer at rdr-accept names the check it carries"
+        assert "bead id" in out and "needs none" in out, "the bead-disposition exemption"
 
     def test_unreachable_t2_is_named(self, rdr_env, monkeypatch):
         import nexus.commands.rdr as rdr_mod

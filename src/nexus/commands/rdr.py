@@ -1909,10 +1909,18 @@ def _preamble_regate_block(
                 lines.append("")
                 if stat and status.strip().lower() not in ("", "draft", "open"):
                     # Post-accept edits (the status flip itself, residual
-                    # dispositions) are not gate fixes (deep critique [24873]).
+                    # dispositions) are not gate fixes (deep critique [24873]),
+                    # so there is no re-gate to gate. The disposition still
+                    # carries its own fix check (nexus-yjf5l.1) — saying only
+                    # "not applicable" here contradicted rdr-accept.
                     lines.append(
-                        f"Fix check: not applicable (RDR status is `{status.strip()}`; the "
-                        "fix check gates re-gates of a draft, and this RDR is past the gate)."
+                        f"Fix check: no re-gate fix check (RDR status is `{status.strip()}`; "
+                        "that check gates a re-gate of a draft, and this RDR is past the "
+                        "gate). A residual dispositioned by a change to the RDR file still "
+                        f"carries a fix check on that change: `git diff {gated_commit}..HEAD "
+                        f"-- {rel}`, verdict stored as `{t2_key}-fix-check-<sha>`, `<sha>` "
+                        "the RDR file's tip after the disposition. A residual dispositioned "
+                        "by a bead id changed nothing in the file and needs none."
                     )
                 else:
                     lines.extend(_fix_check_lines(
@@ -2228,6 +2236,14 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
         "   Every `residuals:` line in that record needs a disposition (the commit sha "
         "that fixed it, or the bead id that carries it) recorded in Revision History "
         "before the T2 write; a residual with no disposition blocks accept (nexus-g7zgw.2)."
+    )
+    print(
+        "   A residual dispositioned by a change to the RDR file carries a fix check on "
+        f"that change: read `git diff <the record's commit:>..HEAD -- "
+        f"{os.path.relpath(str(rdr_file), repo_root)}` and store the verdict as "
+        f"`{t2_key}-fix-check-<sha>` (project `{repo_name}_rdr`), `<sha>` the RDR file's "
+        "tip after the disposition. A residual dispositioned by a bead id changed nothing "
+        "in the file and needs none (nexus-yjf5l.1)."
     )
     print()
     print(f"**RDR file path:** `{rdr_file}`")
@@ -2815,8 +2831,12 @@ def preamble_rdr_fix(args: tuple[str, ...]) -> None:
     if status.lower() not in ("", "draft", "open"):
         print(
             f"> RDR-{t2_key} is past the gate (status `{status}`). Post-accept edits are "
-            "not gate fixes; residual dispositions go through rdr-accept, and a design "
-            "change reopens the RDR. Nothing to fix here."
+            "not gate fixes and there is no gate fix to make here; residual dispositions "
+            "go through rdr-accept, and a design change reopens the RDR. A residual "
+            "dispositioned by a change to the RDR file carries a fix check on that change, "
+            f"stored as `{t2_key}-fix-check-<sha>` with `<sha>` the RDR file's tip after "
+            "the disposition; a residual dispositioned by a bead id changed nothing in the "
+            "file and needs none."
         )
         return
 
