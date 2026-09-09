@@ -309,10 +309,12 @@ waiter, deploy-gap retry and the deferred `LISTEN` path.
   RDR-204's ghost sweep is triggered from `AuthFilter` once per tenant
   per JVM lifetime, a different mechanism from the `sweepScheduler` in
   `NexusService`, which runs every `SWEEP_INTERVAL_HOURS` (six hours
-  today) over the default tenant plus every tenant with a row in
-  `service_tokens` (`NexusService.java:558-580`); a tenant that has
-  tuples has minted a token, so that set covers it. The tuple sweep extends the
-  scheduler at that cadence and borrows the ghost sweep's counted outcome
+  today). The scheduler's existing arms enumerate tenants as the default
+  tenant plus every row in `service_tokens` (`NexusService.java:558-580`),
+  and the same cycle deletes expired rows from that table, so its tenant
+  set is not the tuple table's. The tuple arm enumerates its own tenants
+  with a distinct `tenant_id` over `nexus.tuples`. It runs at the
+  scheduler's cadence and borrows the ghost sweep's counted outcome
   record, not its trigger. Nothing in the design needs the sweep sooner:
   a lapsed lease is claimable by the availability predicate, and the
   sweep's `expire` row and purge are bookkeeping with a worst-case
@@ -432,9 +434,8 @@ waiter, deploy-gap retry and the deferred `LISTEN` path.
       a missed signal, and a parked client must treat a 502/504 during a
       deploy as a retry, not an error. — **Method**: a named authority's
       live measurement (the conexus session's reading of the engine
-      host's containers and the `/version` gap during the v0.1.111
-      deploy, 2026-09-09, recorded in T2 `nexus_rdr/205` under "cloud
-      facts"), not documentation; re-checked at the Phase 1 close.
+      host on 2026-09-09, recorded verbatim in T2 `nexus_rdr/205` under
+      "cloud facts"), not documentation; re-checked at the Phase 1 close.
 - [x] **CA 6: Both instances mint against one tenant.** — **Status**:
       Verified (one box, one config, `mint_tenant: nexus`). Gap 5 is a
       same-tenant mailbox. — **Method**: a named authority's live
@@ -460,9 +461,9 @@ by someone else and not documentation.
 ### Approach
 
 Ship one engine-owned table, `nexus.tuples`, with its append-only claim
-log, a registry of subspace schemas checked at engine boot, seven HTTP
-operations (`out`, `rd`, `rdp`, `in`, `inp`, `ack`, `nack`) plus registry
-introspection, a Python HTTP store shaped like the aspect-queue client, a
+log, a registry of subspace schemas checked at engine boot, eleven HTTP
+operations (`out`, `rd`, `rdp`, `in`, `inp`, `ack`, `nack`, `subspaces`,
+`registry`, `subspace_list`, `subspace_stats`), a Python HTTP store shaped like the aspect-queue client, a
 small MCP tool set and an `nx tuple` verb over it. The destructive read
 matches on equality over a pinned key set per subspace; the
 non-destructive read may additionally rank by pgvector similarity in a
@@ -652,8 +653,9 @@ version skew the pinned engine version per client release already
 governs. `registry()` returns a digest of the loaded templates beside
 them, so a client or a hook script that expects a shape can detect skew
 and report it rather than guess. (RDR-110 held the registry client-side
-in the plugin, with daemon-side registration and a digest check added
-later for exactly this drift; one copy in the engine removes the class.)
+in the plugin, and its daemon persisted registered schemas with a digest
+and gated third-party additions by reserved prefix, research 4; one copy
+in the engine removes the class.)
 The document shape is the May format with the substrate keys dropped:
 `name`, `dimensions` (name to type, values, required), `keys` (the pinned
 key set, May's `take.match_keys`), `take` (`enabled`,
@@ -688,8 +690,8 @@ per-table storage parameter in the changelog; its measured benefit is
 reclaim during sustained churn, since the default already self-heals
 once churn stops. TTL on every row; the `sweepScheduler` in
 `NexusService`, every `SWEEP_INTERVAL_HOURS` (six hours today,
-`NexusService.java:78`) over the default tenant and every tenant in
-`service_tokens`, gains one more sweep that releases
+`NexusService.java:78`), gains one more arm that enumerates its tenants
+from `nexus.tuples` itself and releases
 lapsed claims with an `expire` log row, purges expired and
 consumed-past-retention tuple rows (which sets the log's `tuple_id` to
 null), then purges log rows past the log's own longer TTL, in batches of
@@ -753,7 +755,7 @@ against the TSV's so a stalled projection is a finding.
 | --- | --- | --- |
 | Atomic claim | `AspectRepository.claimNext` / `reclaimStale` | Reuse the statement shape and the tenant-scoped transaction; new repository, since the queue's columns are aspect-specific. |
 | Batch claim | `AspectRepository.claimBatch` (a loop) | Do not reuse; a real `LIMIT n` claim is new work and lands only when a consumer asks. |
-| Sweep | `NexusService.sweepScheduler` (every `SWEEP_INTERVAL_HOURS`, the default tenant plus every tenant in `service_tokens`); RDR-204 ghost sweep (`AuthFilter`, once per tenant per JVM) | Extend the scheduler; borrow the ghost sweep's counted outcome record, not its trigger. |
+| Sweep | `NexusService.sweepScheduler` (every `SWEEP_INTERVAL_HOURS`; the tuple arm enumerates tenants from `nexus.tuples`); RDR-204 ghost sweep (`AuthFilter`, once per tenant per JVM) | Extend the scheduler; borrow the ghost sweep's counted outcome record, not its trigger. |
 | Pre-send body cap | none (`edge_refusal.py` is post-rejection; `limits.py` holds store quotas) | New: an 8 KB guard in `HttpTupleStore.out`. |
 | Retry across the deploy gap | `nexus.retry` (502, 503, 504, 429 retryable) | Reuse unchanged. |
 | Tenant scoping | `TenantScope`, forced RLS changesets | Reuse unchanged. |
@@ -958,9 +960,10 @@ re-run timer; typed errors.
 
 #### Step 5: Sweep
 
-One more sweep in `runScheduledSweep`'s tenant loop (the default tenant
-plus every tenant in `service_tokens`) at its existing cadence
-(`SWEEP_INTERVAL_HOURS`): release lapsed claims with an `expire`
+One more arm in `runScheduledSweep` at its existing cadence
+(`SWEEP_INTERVAL_HOURS`), enumerating its tenants with a distinct
+`tenant_id` over `nexus.tuples` rather than the other arms' token-derived
+set: release lapsed claims with an `expire`
 log row, purge expired and consumed-past-retention tuple rows, then log
 rows past the log's own TTL, in batches with a commit per batch; log the
 counted outcome record every run. The sweep test seeds expired rows and
@@ -1030,7 +1033,7 @@ requests from the space. A scenario test with two sessions on one box.
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| Templates (resource files) | `nx tuple list` | `nx tuple stats <subspace>` | Removed in an engine release; a removal with live rows needs a data changeset | Boot validation | git |
+| Templates (resource files) | `nx tuple templates` | `nx tuple stats <subspace>` | Removed in an engine release; a removal with live rows needs a data changeset | Boot validation | git |
 | `nexus.tuples` | `nx tuple stats` | doctor rows | TTL sweep; purge by tenant via admin SQL | `nx doctor` | PG bundle / managed backups |
 | `nexus.tuple_claim_log` | via stats | per-claim history | retention sweep | `nx doctor` | same |
 
@@ -1273,3 +1276,12 @@ record that carries the measurement. Added, from the author's question:
 the engine is the only holder of the registry, no client carries a
 copy, `registry()` returns a digest so skew is detected rather than
 guessed.
+
+### 2026-09-09 — Fix check on the second fix (FAIL), third fix
+
+T2 `nexus_rdr/205-fix-check-6c8fa32d4`. The tuple sweep enumerates its
+tenants from `nexus.tuples`, not from `service_tokens`, whose rows the
+same cycle deletes (four sites). Day 2 points templates at `nx tuple
+templates`. CA 5 cites the T2 record that carries the measurement
+verbatim. The registry parenthetical says what research 4 records.
+Approach counts eleven operations.
