@@ -85,7 +85,8 @@ GH #667 exploited.
 `catalog_collections` has the columns; roughly a hundred code sites parse
 the name instead. The fix funnels every raw string site through three
 helpers, repoints the helpers at the table, and deletes what is left,
-enforced on both sides by a census gate that only shrinks to zero.
+enforced on both sides by a census gate that only shrinks: the engine's
+to zero, the client's to the classified floor Phase 3 items 4 and 5 name.
 
 #### Gap 2: The table cannot be trusted because stub rows carry blanks
 
@@ -522,9 +523,12 @@ is already fetched and cached for collection counts) and
 `corpus="code"` becomes
 `GET /v1/catalog/collections/list?content_type=code&lifecycle_state=live`.
 `_group_collections_by_model` groups by the column. `CollectionName.render`
-stays as the way a new name is minted; `parse` survives only inside the
-backfill and the census gate. The census gate pins the raw-site count at
-each step and only shrinks; the repoint is one change, not sixty.
+stays as the way a new name is minted; on the client, `parse` survives only
+inside the helpers that render and register names, and a second gate pins
+their callers. The census gate pins the raw-site count at each step and
+only shrinks within its pattern classes (adding a class raises it once: a
+fifth class was added when the repoint introduced a candidate-string
+primitive); the repoint is one change, not sixty.
 
 **6. Optional, last, and out of the accepted scope:** once nothing parses,
 a new collection may be given an opaque name. Existing names never change.
@@ -643,7 +647,8 @@ A local-mode install with a `code` and a `docs` collection, after the
 changeset: both rows carry `bge-768`/`768` from the profile; a register
 call naming `voyage-code-3` is refused with a 422; `nx search
 --corpus code` resolves through the catalog. The engine parse census
-reaches zero in Phase 2 and the client parse census in Phase 3; each is
+reaches zero in Phase 2 and the client parse census reaches its classified
+floor in Phase 3 (items 4 and 5); each is
 that phase's validation, not deferred. This runs inside
 `tests/e2e/migration-rehearsal/run.sh --candidate-migration`, because it
 walks the tree's own changeset over a populated store.
@@ -717,10 +722,19 @@ Phases 1 and 2 ride one engine cut.
 3. `nx config set` prints the restart hint for `local.embed_model` and
    `voyage_api_key` (the client's only touch on the profile story).
 4. Repoint the three helpers and `resolve_corpus` / `_resolve_corpus_target`
-   / `_group_collections_by_model` at the row; the gate falls to zero
-   outside the backfill.
-5. `CollectionName.parse` callers reduce to the census gate and the
-   backfill.
+   / `_group_collections_by_model` at the row; the gate falls to its
+   floor: 52 sites on develop `b55ea3021`, every one classified in the
+   gate itself as (a) mint-time, where the collection name is the CLI's
+   own input, (b) write-model resolution through the write authority,
+   (c) filter-by-row-absence, or (d) the backfill, reconcile and doctor
+   diagnostics that exist to report a name-versus-row disagreement. Zero
+   is unreachable while `nx` accepts a collection name as an argument;
+   that is the opaque-name step (6), out of the accepted scope.
+5. `parse_conformant_collection_name` callers reduce to the three
+   helpers, `collection_registration_kwargs` and `CollectionName.parse`
+   (the render path), pinned by a second gate; the six registration sites
+   and four diagnostics that parsed a name the client itself rendered are
+   retired.
 
 Client-only release.
 
