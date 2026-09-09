@@ -34,13 +34,14 @@ gate round number (derived from the record's `prior:` chain), the critique's
 Critical and Significant lines verbatim, the diff of the RDR file since the
 gated commit, and the Fix check section. Do this before anything else:
 
-1. For every prior finding, sweep every site in its `Sites:` list (the critic
-   emits one per finding; see the Layer 3 brief). Where a prior critique has
-   no `Sites:` list, grep the RDR file for the refuted phrasing AND the
-   corrected one. Every occurrence must agree. A fact lives in the Problem
-   Statement, Research Findings, Technical Design and the Implementation Plan
-   at once; the last two paraphrase the design and are where survivors hide.
-   Fix every site.
+1. For every prior finding that is not a recorded residual (dispositioned at
+   accept, never a survivor to re-sweep), sweep every site in its `Sites:`
+   list (the critic emits one per finding; see the Layer 3 brief). Where a
+   prior critique has no `Sites:` list, grep the RDR file for the refuted
+   phrasing AND the corrected one. Every occurrence must agree. A fact lives
+   in the Problem Statement, Research Findings, Technical Design and the
+   Implementation Plan at once; the last two paraphrase the design and are
+   where survivors hide. Fix every site.
 2. If a finding changed a design decision, read Implementation Plan, Test Plan,
    Day 2 Operations, Trade-offs and Proportionality in full.
 3. Brief the Layer 3 critic with the prior findings and ask it to verify each is

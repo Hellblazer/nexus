@@ -1395,6 +1395,11 @@ class TestRdrGateLoopRemedies:
         assert "Sites:" in cmd
         critic = (PLUGIN_DIR / "agents" / "substantive-critic.md").read_text()
         assert "- **Sites**:" in critic, "the canonical Issue format carries the Sites line"
+        # nexus-yjf5l.3: a finding recorded on the prior round's residuals:
+        # lines is dispositioned at accept, not a survivor — Layer 0's sweep
+        # instruction states the exemption in both surfaces.
+        assert "recorded residual" in skill, "Layer 0 must exempt recorded residuals from the sweep"
+        assert "recorded residual" in cmd, "Layer 0 must exempt recorded residuals from the sweep"
 
     def test_command_and_skill_agree_on_fix_check_scope(self) -> None:
         cmd = self.GATE_CMD.read_text()

@@ -1874,21 +1874,52 @@ def _preamble_regate_block(
     ))
 
     findings = _critique_findings(str(critique.get("content", ""))) if isinstance(critique, dict) else []
+    # nexus-yjf5l.3: a finding recorded on the prior round's residuals: lines
+    # was dispositioned at accept, not left open — it is not a survivor to
+    # re-sweep. Match it out of the sweep list by the same normalisation
+    # nexus-yjf5l.2's fix-preamble split uses, so the two never carry
+    # separate copies of the comparison.
+    residual_titles = _residual_titles(content)
+    residual_keys = {_finding_title_key(t) for t in residual_titles}
     if findings:
+        survivors: list[str] = []
+        recorded: list[str] = []
+        matched_keys: set[str] = set()
+        is_residual = False
+        for f in findings:
+            if not f.startswith("  "):
+                is_residual = _finding_title_key(f) in residual_keys
+                if is_residual:
+                    matched_keys.add(_finding_title_key(f))
+            (recorded if is_residual else survivors).append(f)
+
+        if recorded:
+            lines.append("Recorded residuals (dispositioned at accept; not survivors — do not re-open):")
+            lines.extend(f"- {f}" for f in recorded)
+            lines.append("")
+        unmatched = [t for t in residual_titles if _finding_title_key(t) not in matched_keys]
+        for t in unmatched:
+            lines.append(f"- Recorded residual, no matching finding in the critique: {t}")
+        if unmatched:
+            lines.append("")
+
         lines.append("Prior findings (each must be closed EVERYWHERE in the file, not at the quoted line):")
         # Cap on FINDINGS, not lines: a canonical issue is four lines (Issue,
         # Location, Recommendation, Sites) and a line cap dropped the Sites
         # lists Layer 0 sweeps (deep critique [24873] S2).
         shown = 0
-        cut = len(findings)
-        for i, f in enumerate(findings):
+        cut = len(survivors)
+        for i, f in enumerate(survivors):
             if not f.startswith("  "):
                 shown += 1
                 if shown > _REGATE_MAX_FINDINGS:
                     cut = i
                     break
-        lines.extend(f"- {f}" for f in findings[:cut])
-        hidden = sum(1 for f in findings[cut:] if not f.startswith("  "))
+        if survivors:
+            lines.extend(f"- {f}" for f in survivors[:cut])
+        else:
+            lines.append("(none — every finding this round matched the gate record's `residuals:` field)")
+        hidden = sum(1 for f in survivors[cut:] if not f.startswith("  "))
         if hidden:
             lines.append(f"- ... and {hidden} more findings in the critique")
     elif fetch_failed:
@@ -1952,8 +1983,17 @@ def _preamble_regate_block(
             lines.append(f"Changed since the gated commit `{gated_commit}`: (git diff failed: {exc})")
         lines.append("")
 
+    # The exemption clause names itself only when this round actually
+    # recorded a residual — an unconditional clause would print on every
+    # first-gate and every round-1/round-2 record too, and the no-residuals
+    # regression pin (nexus-yjf5l.3) is byte-for-byte on that path.
+    exempt_clause = (
+        " that is not a recorded residual (dispositioned at accept, not swept as a survivor here)"
+        if residual_keys else ""
+    )
     lines.extend([
-        "**Layer 0 (survivor sweep, before Layer 3):** for every prior finding, sweep every "
+        "**Layer 0 (survivor sweep, before Layer 3):** for every prior finding"
+        f"{exempt_clause}, sweep every "
         "site in its `Sites:` list; where a finding has none, grep the RDR for the refuted "
         "phrasing AND the corrected one; every occurrence must agree. A "
         "fact lives in Problem Statement, Research Findings, Technical Design and the "

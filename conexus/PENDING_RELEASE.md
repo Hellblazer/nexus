@@ -53,3 +53,8 @@ mechanize, it matters enough to ship.
   long-lived session held at install time is reaped once that session
   ends, not at the next install; a box without the verb or the layout
   is silent (`|| true`).
+- `conexus/skills/rdr-gate/SKILL.md`: nexus-yjf5l.3 — Layer 0 step 1 exempts
+  a recorded residual from the survivor sweep: dispositioned at accept, not
+  swept again.
+- `conexus/commands/rdr-gate.md`: nexus-yjf5l.3 — the Layer 0 bullet mirrors
+  the same exemption.

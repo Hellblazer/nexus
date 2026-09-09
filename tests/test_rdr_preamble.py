@@ -1826,6 +1826,99 @@ class TestRdrGateRegateBlock:
         assert "T2 unreachable" in result.output and "engine down" in result.output
         assert "Section Structure" in result.output, "the rest of the preamble still prints"
 
+    def test_recorded_residual_is_exempt_from_the_survivor_sweep(self, rdr_env, monkeypatch):
+        """nexus-yjf5l.3: a finding recorded on the prior round's `residuals:`
+        lines was dispositioned at accept, not left open — it is not a
+        survivor to re-sweep. It prints under its own heading, is excluded
+        from the "Prior findings" sweep list, and Layer 0's instruction
+        names the exemption."""
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                "outcome: \"PASSED\"\ndate: \"2026-09-09\"\n"
+                "critique: nexus_rdr/204-gate-critique-2026-09-09z\n"
+                "residuals:\n  - unused variable in the fallback branch\n"
+            ),
+            "204-gate-critique-2026-09-09z": (
+                "## Critical Issues\n\n### Issue: query timeout doubles under load\n"
+                "- **Location**: L100\n\n"
+                "## Significant Issues\n\n### Issue: unused variable in the fallback branch\n"
+                "- **Location**: L200\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"])
+        assert result.exit_code == 0, result.output
+        out = result.output
+        assert "Recorded residuals (dispositioned at accept; not survivors" in out, out
+        rec_idx = out.index("Recorded residuals")
+        pf_idx = out.index("Prior findings (each must be closed EVERYWHERE")
+        res_finding_idx = out.index("unused variable in the fallback branch")
+        blocker_finding_idx = out.index("query timeout doubles under load")
+        assert rec_idx < res_finding_idx < pf_idx, (
+            "the recorded residual is listed under its own heading, before Prior findings"
+        )
+        assert pf_idx < blocker_finding_idx, "the unmatched finding stays under Prior findings"
+        prior_section = out[pf_idx:out.index("Layer 0")]
+        assert "unused variable in the fallback branch" not in prior_section, (
+            "a recorded residual must not also appear in the survivor sweep list"
+        )
+        assert "that is not a recorded residual" in out, "Layer 0 states the exemption"
+
+    def test_unmatched_residual_is_named_not_dropped(self, rdr_env, monkeypatch):
+        """A residual recorded on the prior round that matches no finding in
+        the critique is named under its own line, never silently dropped."""
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                "outcome: \"PASSED\"\ndate: \"2026-09-09\"\n"
+                "critique: nexus_rdr/204-gate-critique-2026-09-09y\n"
+                "residuals:\n  - a residual the critique no longer states\n"
+            ),
+            "204-gate-critique-2026-09-09y": (
+                "## Significant Issues\n\n### Issue: unrelated finding\n- **Location**: L1\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        out = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"]).output
+        assert (
+            "Recorded residual, no matching finding in the critique: "
+            "a residual the critique no longer states" in out
+        ), out
+
+    def test_no_residuals_regate_output_is_unchanged(self, rdr_env, monkeypatch):
+        """Regression pin (round-1/round-2 path, nexus-yjf5l.3): a gate
+        record with no `residuals:` field prints the same Prior-findings and
+        Layer 0 text as before this bead. Scoped to those two sections only
+        — not the Fix check wording, which nexus-yjf5l.1 already changed."""
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                "outcome: \"BLOCKED\"\ndate: \"2026-09-07\"\n"
+                "critique: nexus_rdr/204-gate-critique-2026-09-07c\n"
+            ),
+            "204-gate-critique-2026-09-07c": (
+                "## Critical Issues\n\n### Issue: ghost sweep omits topic_assignments\n"
+                "- **Location**: L1\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        out = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"]).output
+        assert "Prior findings (each must be closed EVERYWHERE in the file, not at the quoted line):" in out
+        assert (
+            "**Layer 0 (survivor sweep, before Layer 3):** for every prior finding, sweep every "
+            in out
+        ), out
+        assert "Recorded residuals" not in out
+        assert "no matching finding in the critique" not in out
+        assert "that is not a recorded residual" not in out
+
 
 class TestRdrGateRoundAndFixCheck:
     """nexus-g7zgw.1 / .2: the re-gate block carries the gate round number,
