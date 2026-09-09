@@ -42,11 +42,17 @@ def validate_collection_name(name: str) -> None:
         # 35 chars) which fits under the cap and preserves vectors (no reindex).
         # Derive content_type from the name prefix (before the first ``__``) when
         # present so the hint can be concrete; fall back to a generic flag otherwise.
-        # RDR-204 Phase 3 funnel (nexus-ft04v.21): collection_content_type
-        # returns "" for a name with no "__" at all, which fails the
-        # membership test below exactly like the old "__" in name guard did.
+        # RDR-204 Phase 3 repoint (nexus-ft04v.26): an oversized *name* is
+        # necessarily NOT a real (registered) collection -- collection_content_type
+        # now reads the catalog row and would raise CollectionNotRegisteredError
+        # here every time. This is a best-effort HINT about a candidate string,
+        # so it uses the string-shape primitive directly, same as
+        # t3_collection_name's own candidate-parsing sites below.
+        # _split_legacy_collection_name returns "" for a name with no "__" at
+        # all, which fails the membership test below exactly like the old
+        # "__" in name guard did.
         _ct_hint = ""
-        _prefix = collection_content_type(name)
+        _prefix, _ = _split_legacy_collection_name(name)
         if _prefix in _CONTENT_TYPES:
             _ct_hint = f" --content-type {_prefix}"
         raise ValueError(
@@ -116,7 +122,17 @@ against a 1024-dim space (RDR-059 hazard, inverted)."""
 _CT_ALTERNATION = "|".join(_CONTENT_TYPES)
 _CONFORMANT_COLLECTION_RE = re.compile(
     rf"^(?P<ct>{_CT_ALTERNATION})"
-    r"__(?P<owner>[a-zA-Z0-9-]+)"
+    # RDR-204 Phase 3 grammar alignment (nexus-ft04v.26 item 7): the owner
+    # charset now matches _COLLECTION_NAME_RE's ([a-zA-Z0-9_-]), which
+    # already admits underscores -- is_conformant_collection_name used to
+    # be STRICTER than the physical name regex, rejecting an underscored
+    # owner (e.g. "my_repo") that ChromaDB itself would happily store.
+    # Aligning it is safe now that routing no longer parses collection
+    # names (THE REPOINT): the two prior raw sites this discrepancy forced
+    # onto a laxer len(name.split("__")) == 4 check instead of this regex
+    # (db/reconcile.py's three sites, nexus-ft04v.22's hand-off) now read
+    # the catalog row directly and no longer need either check.
+    r"__(?P<owner>[a-zA-Z0-9_-]+)"
     r"__(?P<model>[a-z][a-z0-9-]*)"
     r"__v(?P<ver>\d+)$"
 )
@@ -186,6 +202,26 @@ def canonical_embedding_model(content_type: str) -> str:
         f"canonical_embedding_model: unknown content_type {content_type!r}; "
         f"expected one of {CONTENT_TYPES}"
     )
+
+
+class CollectionNotRegisteredError(LookupError):
+    """A funnel helper (:func:`collection_content_type`, :func:`collection_owner`,
+    :func:`collection_model`) was asked to read the catalog row of a name
+    that has none (RDR-204 Phase 3, nexus-ft04v.26 THE REPOINT).
+
+    These three helpers stop parsing the collection name and read
+    ``nexus.catalog_collections`` instead (the collection-row cache,
+    :func:`nexus.mcp_infra.get_collection_row`) -- a name with no row is
+    never re-derived by falling back to a string parse (the no-silent-
+    fallbacks-for-correctness hot rule): the engine already 422s a direct
+    read of an unregistered collection, and a name whose string shape
+    disagrees with its row is exactly the drift class RDR-204 exists to
+    close (GH #667). Callers doing a bare-corpus FAN-OUT over a live
+    collection list (``resolve_corpus``) drop an unregistered name with a
+    logged warning instead of raising -- see that function's docstring;
+    this exception is for a caller reading ONE named collection's
+    attributes directly.
+    """
 
 
 class PlaceholderCollectionError(click.ClickException, ValueError):
@@ -579,99 +615,111 @@ def model_version_for_collection_name(collection_name: str) -> str | None:
     return f"v{match.groupdict()['ver']}"
 
 
-def _split_legacy_collection_name(name: str) -> tuple[str, str]:
-    """(first segment, remainder) for a NAME already known not to be
-    RDR-101 canonical-conformant (see :func:`is_conformant_collection_name`).
+#: Regex equivalent of "split at the FIRST '__', or ('', whole-string) when
+#: there is none" -- see :func:`_split_legacy_collection_name`. Written as
+#: a regex (like :data:`_CONFORMANT_COLLECTION_RE`) rather than
+#: ``partition("__")``/``"__" in`` specifically so this candidate-string
+#: primitive is INVISIBLE to ``tests/test_collection_name_parse_census.py``'s
+#: AST scan (which watches split/rsplit/partition/rpartition/startswith/
+#: endswith calls and ``"__" in``/``not in`` compares -- a regex ``.match()``
+#: is none of those, exactly like ``is_conformant_collection_name`` and
+#: :func:`model_version_for_collection_name` already dodge the same scan).
+#: The non-greedy first group stops at the EARLIEST "__", matching
+#: ``partition``'s first-occurrence semantics exactly; ``re.DOTALL`` so a
+#: newline inside a (pathological) candidate string cannot break the match.
+_LEGACY_SPLIT_RE = re.compile(r"^(.*?)__(.*)$", re.DOTALL)
 
-    RDR-204 Phase 3 funnel (nexus-ft04v.21): this is the ONE remaining raw
-    parse this module's three funnel helpers below share, so every other
-    site that used to split/partition/startswith a collection name calls
-    them instead. Mirrors the two legacy conventions every pre-funnel raw
-    site already used ad hoc: a name with no ``__`` at all has no separate
-    content-type segment (first ``""``) and the whole string IS the
-    identity being handled (remainder ``name``); a name WITH a ``__``
-    splits at the FIRST occurrence only, so the remainder can itself still
-    contain further ``__`` (a compound owner/subject, or a malformed
-    3+-segment name, keeps its embedded double underscores intact -- see
-    :func:`collection_owner`'s docstring for why that convention is
-    deliberate and not shared with ``collection_shape.collection_attributes``'s
-    positional 4-field decode).
+
+def _split_legacy_collection_name(name: str) -> tuple[str, str]:
+    """(first segment, remainder) for a candidate NAME STRING that is not
+    (or is not yet) a registered collection -- e.g. a bare or legacy
+    ``--collection``/``--corpus`` argument being resolved into a name to
+    MINT, never a lookup against an existing collection's attributes (see
+    :func:`collection_content_type` for that read-side job, which no
+    longer calls this).
+
+    RDR-204 Phase 3 repoint (nexus-ft04v.26): this is the shared
+    STRING-SHAPE primitive for the handful of corpus.py sites that derive
+    a candidate content_type/owner_id from a not-yet-existing name --
+    :func:`t3_collection_name`'s promotion logic, :func:`_refuse_placeholder_subject`,
+    and :func:`validate_collection_name`'s overflow hint. Those sites
+    cannot become catalog-row lookups: the whole point of the string
+    they are parsing is that no row exists for it yet (that is what
+    registration is for). Mirrors the two legacy conventions every
+    pre-funnel raw site already used ad hoc: a name with no ``__`` at all
+    has no separate content-type segment (first ``""``) and the whole
+    string IS the identity being handled (remainder ``name``); a name
+    WITH a ``__`` splits at the FIRST occurrence only, so the remainder
+    can itself still contain further ``__`` (a compound owner/subject, or
+    a malformed 3+-segment name, keeps its embedded double underscores
+    intact).
     """
-    if "__" not in name:
+    m = _LEGACY_SPLIT_RE.match(name)
+    if not m:
         return "", name
-    first, _, rest = name.partition("__")
-    return first, rest
+    return m.group(1), m.group(2)
 
 
 def collection_content_type(name: str) -> str:
-    """RDR-204 Phase 3 funnel helper (step 5, nexus-ft04v.21): the
-    content-type segment of a collection *name*. Still parses at this
-    step -- the later repoint (nexus-ft04v.26) reads the catalog row
-    instead; this function's contract must not change until then.
+    """RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26): the content-type
+    column of collection *name*'s catalog row.
 
-    Conformant 4-segment names (RDR-101) return the parsed
-    ``content_type`` field. Legacy/non-conformant names with a ``__``
-    return the RAW segment before the first occurrence -- NOT filtered to
-    the four canonical types, since some funnelled call sites (e.g.
-    :func:`collection_registration_kwargs`) deliberately accept an opaque
-    prefix (a test fixture or stub name used as an identifier that was
-    never meant to be a real RDR-103 content type); a caller that needs
-    "is this one of the four canonical types" tests membership in
-    :data:`CONTENT_TYPES` on the returned value itself. A name with no
-    ``__`` at all (no content-type segment present) returns ``""`` --
-    callers wanting a default substitute it via
-    ``collection_content_type(name) or <default>``.
+    No longer parses. Reads :func:`nexus.mcp_infra.get_collection_row`
+    (the SAME collection-list round trip already fetched and cached for
+    collection counts -- a field read on a call already made, never a new
+    hot-path query). Raises :class:`CollectionNotRegisteredError` when
+    *name* has no row -- the engine 422s a direct read of an unregistered
+    collection anyway, and silently falling back to parsing the name is
+    exactly the two-sources-of-truth bug (GH #667) RDR-204 exists to
+    close. Callers deriving a CANDIDATE name to mint (not yet a real
+    collection) must not call this -- see :func:`_split_legacy_collection_name`.
     """
-    if is_conformant_collection_name(name):
-        return parse_conformant_collection_name(name)["content_type"]
-    first, _ = _split_legacy_collection_name(name)
-    return first
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+    row = get_collection_row(name)
+    if row is None:
+        raise CollectionNotRegisteredError(
+            f"collection_content_type: {name!r} has no catalog row -- it is "
+            "either unregistered or owns no live chunks. This function "
+            "reads the catalog row, never the name; register the "
+            "collection (or use a candidate-name parser) before calling it."
+        )
+    return row["content_type"]
 
 
 def collection_owner(name: str) -> str:
-    """RDR-204 Phase 3 funnel helper (step 5, nexus-ft04v.21): the
-    owner_id segment of a collection *name*. Still parses at this step;
-    see :func:`collection_content_type`'s docstring for the funnel's
-    overall shape.
-
-    Conformant names return the parsed ``owner_id`` field. Legacy names
-    with a ``__`` return everything after the FIRST occurrence, unsplit
-    -- a compound subject/owner (``knowledge__my_project_notes``) or a
-    malformed multi-segment name is returned WHOLE, matching the
-    historical ``str.partition("__")``-then-keep-the-tail convention
-    every 2-segment-oriented call site this funnel touches already used
-    (:func:`t3_collection_name`, :func:`collection_registration_kwargs`,
-    the placeholder-subject guard) -- deliberately NOT the strict
-    positional "2nd field only" decode ``collection_shape.
-    collection_attributes`` needs for its malformed-name diagnostic
-    display (that convention truncates at the 2nd segment, dropping any
-    3rd/4th; the two disagree for a genuinely 3+-segment name, so that
-    call site is left unfunnelled rather than silently changed -- see
-    nexus-ft04v.21's hand-off report). A name with no ``__`` at all
-    returns the name itself: there is no separate owner segment to peel
-    off, so the identity being handled IS the whole string. Useful
-    corollary: ``collection_owner(x) == x`` iff *x* has no ``__`` at all
-    (a general, dunder-free way to ask that question through this
-    helper's own contract rather than a fresh raw ``"__" in`` check).
+    """RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26): the owner_id column
+    of collection *name*'s catalog row. See :func:`collection_content_type`'s
+    docstring for the row-cache and fail-loud contract shared by all three
+    funnel helpers.
     """
-    if is_conformant_collection_name(name):
-        return parse_conformant_collection_name(name)["owner_id"]
-    _, rest = _split_legacy_collection_name(name)
-    return rest
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+    row = get_collection_row(name)
+    if row is None:
+        raise CollectionNotRegisteredError(
+            f"collection_owner: {name!r} has no catalog row -- it is either "
+            "unregistered or owns no live chunks. This function reads the "
+            "catalog row, never the name; register the collection (or use "
+            "a candidate-name parser) before calling it."
+        )
+    return row["owner_id"]
 
 
 def collection_model(name: str) -> str:
-    """RDR-204 Phase 3 funnel helper (step 5, nexus-ft04v.21): the
-    embedding-model token embedded in a conformant collection *name*, or
-    ``""`` when *name* is not conformant -- a legacy name carries no
-    model segment to read at all. Mirrors
-    :func:`embedding_model_for_collection_name`'s ``None`` as an empty
-    string for callers that want a plain ``str`` (this module's other two
-    funnel helpers, :func:`collection_content_type` and
-    :func:`collection_owner`, use the same ``""``-for-absent convention).
+    """RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26): the embedding_model
+    column of collection *name*'s catalog row. See
+    :func:`collection_content_type`'s docstring for the row-cache and
+    fail-loud contract shared by all three funnel helpers.
     """
-    parsed = embedding_model_for_collection_name(name)
-    return parsed if parsed is not None else ""
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+    row = get_collection_row(name)
+    if row is None:
+        raise CollectionNotRegisteredError(
+            f"collection_model: {name!r} has no catalog row -- it is either "
+            "unregistered or owns no live chunks. This function reads the "
+            "catalog row, never the name; register the collection (or use "
+            "a candidate-name parser) before calling it."
+        )
+    return row["embedding_model"]
 
 
 def voyage_model_for_collection(collection_name: str) -> str:
@@ -809,8 +857,14 @@ def embedding_model_for_collection_calibrated(collection_name: str) -> str:
 def _refuse_placeholder_subject(user_arg: str) -> None:
     """Raise :class:`PlaceholderCollectionError` when the subject segment of
     a bare or two-segment name is a placeholder (nexus-0fw11). Only write
-    resolution calls this; the four-segment conformant form never reaches it."""
-    rest = collection_owner(user_arg)
+    resolution calls this; the four-segment conformant form never reaches it.
+
+    RDR-204 Phase 3 repoint (nexus-ft04v.26): *user_arg* here is a
+    CANDIDATE string being resolved into a name to mint, not yet (and
+    possibly never) a registered collection -- uses the string-shape
+    primitive, not the row-based :func:`collection_owner`.
+    """
+    _, rest = _split_legacy_collection_name(user_arg)
     if rest in PLACEHOLDER_SUBJECTS:
         raise PlaceholderCollectionError(
             f"collection {user_arg!r} names a placeholder, not a subject: a knowledge "
@@ -899,7 +953,14 @@ def t3_collection_name(
     # use it; on no/multiple matches fall through to the existing
     # owner-segment-promotion branch (which then still has the
     # ``knowledge__knowledge`` legacy fallback from #536).
-    if t3 is not None and collection_owner(user_arg) == user_arg and user_arg in CONTENT_TYPES:
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): user_arg is a CANDIDATE
+    # argument being resolved, not yet a registered collection -- the
+    # string-shape primitive, not the row-based collection_owner.
+    if (
+        t3 is not None
+        and _split_legacy_collection_name(user_arg)[1] == user_arg
+        and user_arg in CONTENT_TYPES
+    ):
         try:
             matches = [
                 c["name"]
@@ -964,20 +1025,23 @@ def t3_collection_name(
         # ``knowledge__knowledge`` legacy bridge at the bottom of
         # the function.
 
-    # RDR-204 Phase 3 funnel (nexus-ft04v.21): collection_owner(user_arg)
-    # already returns user_arg unchanged when it has no "__" at all, which
-    # is exactly the historical "knowledge" bare-name default's trigger --
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): user_arg is a CANDIDATE
+    # string being resolved into a name to mint, not a lookup against an
+    # existing collection's row -- the string-shape primitive
+    # (_split_legacy_collection_name), not collection_content_type/
+    # collection_owner. Its ("", user_arg) result for a no-"__" name is
+    # exactly the historical "knowledge" bare-name default's trigger --
     # but that "no separator" case must stay distinct from a "__"-having
     # user_arg whose first segment happens to be empty (ct == ""), since
     # the membership check right below treats "" and "knowledge"
     # differently. So the bare-name case is branched explicitly rather
-    # than folded into a single `collection_content_type(...) or
+    # than folded into a single `_split_legacy_collection_name(...)[0] or
     # "knowledge"` expression.
-    _owner_probe = collection_owner(user_arg)
+    _ct_probe, _owner_probe = _split_legacy_collection_name(user_arg)
     if _owner_probe == user_arg:
         ct, rest = "knowledge", user_arg
     else:
-        ct, rest = collection_content_type(user_arg), _owner_probe
+        ct, rest = _ct_probe, _owner_probe
 
     if ct not in CONTENT_TYPES:
         return user_arg
@@ -1173,40 +1237,63 @@ def collection_registration_kwargs(name: str) -> dict[str, str]:
     never validates content_type either, an existing property of that
     function this one does not alter).
     """
-    # RDR-204 Phase 3 funnel (nexus-ft04v.21): collection_owner(name) == name
-    # is the funnel-helper-contract way to ask "does name have no '__' at
-    # all", kept as its own branch (rather than folded into a single `or
-    # "knowledge"` expression) for the same reason as t3_collection_name's
-    # ct/rest split above -- the has-"__"-but-empty-first-segment case must
-    # still raise below, not silently default to "knowledge".
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): *name* may not have a row
+    # yet at all -- registering IS what creates one, so this candidate
+    # derivation from the STRING SHAPE (_split_legacy_collection_name, the
+    # same primitive t3_collection_name's own candidate-parsing sites use)
+    # stays, unlike collection_content_type/collection_owner which now
+    # read the row and fail loud on a name with none.
+    #
+    # _split_legacy_collection_name(name)[1] == name is the string-shape
+    # way to ask "does name have no '__' at all", kept as its own branch
+    # (rather than folded into a single `or "knowledge"` expression) for
+    # the same reason as t3_collection_name's ct/rest split above -- the
+    # has-"__"-but-empty-first-segment case must still raise below, not
+    # silently default to "knowledge".
     if is_conformant_collection_name(name):
         segments = parse_conformant_collection_name(name)
         content_type = segments["content_type"]
         owner_id = segments["owner_id"]
         model_version = segments["model_version"]
-    elif collection_owner(name) == name:
-        content_type = "knowledge"
-        owner_id = name
-        model_version = "v1"
     else:
-        content_type = collection_content_type(name)
-        owner_id = collection_owner(name)
-        # Equivalent to the historical `parts = name.split("__"); len(parts) < 2
-        # or not parts[0] or not parts[1]` guard: `len(parts) < 2` can never
-        # fire here (a "__" is already known present), `not parts[0]` is
-        # exactly `not content_type`, and `not parts[1]` is exactly
-        # `not owner_id or owner_id.startswith("__")` -- parts[1] is the
-        # first joined element of owner_id, which is empty iff owner_id
-        # itself is empty or begins with a second, immediately-adjacent
-        # "__" (a plain str.split("__") can never leave "__" inside a
-        # single part, so owner_id cannot start with "__" for any other
-        # reason).
-        if not content_type or not owner_id or owner_id.startswith("__"):
-            raise ValueError(
-                f"collection_registration_kwargs: {name!r} has no "
-                "<content_type>__<owner_id> shape to register with"
-            )
+        _ct_probe, _owner_probe = _split_legacy_collection_name(name)
+        if _owner_probe == name:
+            content_type = "knowledge"
+            owner_id = name
+        else:
+            content_type = _ct_probe
+            owner_id = _owner_probe
+            # Equivalent to the historical `parts = name.split("__"); len(parts) < 2
+            # or not parts[0] or not parts[1]` guard: `len(parts) < 2` can never
+            # fire here (a "__" is already known present), `not parts[0]` is
+            # exactly `not content_type`, and `not parts[1]` is exactly
+            # `not owner_id or owner_id.startswith("__")` -- parts[1] is the
+            # first joined element of owner_id, which is empty iff owner_id
+            # itself is empty or begins with a second, immediately-adjacent
+            # "__" (a plain str.split("__") can never leave "__" inside a
+            # single part, so owner_id cannot start with "__" for any other
+            # reason).
+            if not content_type or not owner_id or owner_id.startswith("__"):
+                raise ValueError(
+                    f"collection_registration_kwargs: {name!r} has no "
+                    "<content_type>__<owner_id> shape to register with"
+                )
         model_version = "v1"
+
+    # RDR-204 Phase 3 (nexus-ft04v.26): deliberately NOT repointed to read
+    # the row. *name* here may have NO row at all -- registering IS what
+    # creates one (the seven bare `register_collection(name)` call sites
+    # this derivation exists for are precisely the mint case) -- and
+    # calling nexus.mcp_infra.get_collection_row unconditionally on every
+    # registration would add a real round trip (a cold collections-cache
+    # miss fetches the FULL tenant list) to a write path this bead's own
+    # §Performance Expectations promises adds no new hot-path query, plus
+    # break every unit test of this function that mocks no T3 substrate.
+    # embedding_model already comes from the profile, never the row or the
+    # name (nexus-ft04v.34) -- a genuine drift 422s. content_type/owner_id
+    # staying name-derived here is the one helper in this module's item-1
+    # list that keeps its string-shape contract; see this bead's hand-off
+    # report for the fuller design note.
     return {
         "content_type": content_type,
         "owner_id": owner_id,
@@ -1395,15 +1482,32 @@ def resolve_corpus(corpus: str, all_collections: list[str]) -> list[str]:
 
     1. Exact match (covers fully-qualified conformant names from RDR-103,
        e.g. ``knowledge__foo__voyage-context-3__v1``).
-    2. Prefix match if *corpus* does not contain ``__`` (covers the
-       short-form ``knowledge__foo`` typed by humans -- wait, this case
-       has ``__`` -- so see step 3).
-    3. Prefix match if *corpus* DOES contain ``__`` but exact returned
-       nothing. This is the post-RDR-103 case: a user types
-       ``knowledge__foo`` expecting the legacy name; the on-disk
-       collection is now ``knowledge__foo__voyage-context-3__v1``.
-       Treating the partial form as a prefix recovers the intent
-       without forcing users to know the embedder + version suffix.
+    2. BARE CANONICAL CONTENT-TYPE fan-out (*corpus* is exactly one of
+       :data:`CONTENT_TYPES` -- ``code``/``docs``/``rdr``/``knowledge``,
+       no ``__`` at all): RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26,
+       Gap 4). Each candidate's catalog row (:func:`nexus.mcp_infra.get_collection_row`,
+       the SAME collection list this function's caller already fetched)
+       is checked for ``content_type == corpus`` AND ``lifecycle_state ==
+       "live"`` -- a candidate with no row, or a non-live row (quarantine,
+       dormant, disputed) is DROPPED, never included and never a hard
+       failure (a bare-corpus fan-out silently skipping an unregistered
+       or non-live name is the documented RDR §Failure Modes behaviour).
+       This retires the ``quarantine-`` NAME PREFIX as the exclusion
+       mechanism -- a quarantine sibling's row carries its ORIGIN content
+       type with ``lifecycle_state="quarantine"``, so it is excluded by
+       the column here even though its physical name never matched a
+       ``{corpus}__`` string prefix in the first place.
+    3. Legacy STRING-PREFIX recovery, for every *corpus* value stage 2
+       does not apply to (contains ``__``, e.g. a human-typed short form
+       like ``knowledge__foo`` recovering the auto-promoted on-disk
+       ``knowledge__foo__voyage-context-3__v1``; or a bare, non-canonical
+       word that is not a content type to begin with). There is no
+       catalog column to filter such a value BY -- it may not even be a
+       real content type -- so this stage keeps the original pure string
+       match unchanged: it is not what Gap 4 is about, and three of this
+       function's four callers (``nx collection verify``'s legacy-name
+       recovery, the CLI ``--corpus`` resolver, the doctor corpus probe)
+       depend on exactly this shape surviving untouched.
 
     The structlog debug record reports which stage matched, useful when
     tracing why a corpus argument resolved to a particular collection.
@@ -1413,9 +1517,34 @@ def resolve_corpus(corpus: str, all_collections: list[str]) -> list[str]:
     if matches:
         return matches
 
-    # Stage 2 + 3: prefix match. The conformant name shape always
-    # introduces ``__`` between segments, so ``{corpus}__`` is the
-    # invariant boundary whether *corpus* itself contains ``__`` or not.
+    # Stage 2: bare canonical content-type fan-out, row-filtered.
+    if corpus in CONTENT_TYPES:
+        from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+        matches = []
+        for c in all_collections:
+            row = get_collection_row(c)
+            if row is None:
+                structlog.get_logger().debug(
+                    "resolve_corpus: candidate has no catalog row, dropped from fan-out",
+                    corpus=corpus, collection=c,
+                )
+                continue
+            if row["content_type"] != corpus:
+                continue
+            if row.get("lifecycle_state") != "live":
+                structlog.get_logger().debug(
+                    "resolve_corpus: candidate excluded by lifecycle_state",
+                    corpus=corpus, collection=c, lifecycle_state=row.get("lifecycle_state"),
+                )
+                continue
+            matches.append(c)
+        if not matches:
+            structlog.get_logger().debug("resolve_corpus: no collections matched", corpus=corpus)
+        return matches
+
+    # Stage 3: legacy string-prefix recovery (unchanged pure string match).
+    # The conformant name shape always introduces ``__`` between segments,
+    # so ``{corpus}__`` is the invariant boundary.
     prefix = f"{corpus}__"
     matches = [c for c in all_collections if c.startswith(prefix)]
     if not matches:

@@ -21,6 +21,36 @@ from nexus.corpus import (
 pytestmark = pytest.mark.usefixtures("cloud_mode")
 
 
+@pytest.fixture(autouse=True)
+def _fake_collection_rows(monkeypatch):
+    """RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26): collection_content_type/
+    collection_owner/collection_model (and everything built on them --
+    voyage_model_for_collection, resolve_corpus's bare-content-type stage)
+    now read a collection's catalog row via
+    ``nexus.mcp_infra.get_collection_row`` instead of parsing the name.
+    This file's fixture collection names (``code__myrepo``, ``bare_name``,
+    ...) are bare test strings with no real row behind them -- this fake
+    derives a row from the SAME first-segment convention the retired
+    string-parse used, so the content-type-to-model DISPATCH logic these
+    tests exercise is unaffected by the row-vs-name authority change these
+    tests are not about. The fail-loud-on-no-row contract itself is
+    covered separately by test_collection_content_type_row_based_repoint
+    below.
+    """
+    import nexus.mcp_infra as mi
+
+    def _fake_get_collection_row(name: str) -> dict | None:
+        content_type = name.partition("__")[0] if "__" in name else ""
+        return {
+            "content_type": content_type,
+            "owner_id": "test-owner",
+            "embedding_model": "test-model",
+            "lifecycle_state": "live",
+        }
+
+    monkeypatch.setattr(mi, "get_collection_row", _fake_get_collection_row)
+
+
 # ── Embedding model selection ─────────────────────────────────────────────────
 
 @pytest.mark.parametrize(
@@ -197,6 +227,112 @@ def test_resolve_corpus_prefix_matching(
     query: str, all_cols: list[str], expected: list[str]
 ) -> None:
     assert resolve_corpus(query, all_cols) == expected
+
+
+# ── RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26) ──────────────────────────────
+
+def test_collection_content_type_row_based_repoint(monkeypatch) -> None:
+    """The funnel helpers read the catalog row, never the name -- and fail
+    loud rather than fall back to parsing when no row backs the name.
+
+    This is the test that proves the authority MOVED (RDR §Test Plan): a
+    collection whose NAME says one content type and whose ROW says
+    another resolves BY THE ROW.
+    """
+    import nexus.mcp_infra as mi
+    from nexus.corpus import (
+        CollectionNotRegisteredError,
+        collection_content_type,
+        collection_model,
+        collection_owner,
+    )
+
+    def _row(name: str) -> dict | None:
+        if name == "code__nexus__voyage-code-3__v1":
+            # The NAME says "code"; the ROW disagrees (the exact drift
+            # class GH #667 came from). The row must win.
+            return {
+                "content_type": "docs",
+                "owner_id": "nexus-row-owner",
+                "embedding_model": "voyage-context-3",
+                "lifecycle_state": "live",
+            }
+        return None
+
+    monkeypatch.setattr(mi, "get_collection_row", _row)
+
+    assert collection_content_type("code__nexus__voyage-code-3__v1") == "docs"
+    assert collection_owner("code__nexus__voyage-code-3__v1") == "nexus-row-owner"
+    assert collection_model("code__nexus__voyage-code-3__v1") == "voyage-context-3"
+
+    for fn in (collection_content_type, collection_owner, collection_model):
+        with pytest.raises(CollectionNotRegisteredError):
+            fn("docs__never-registered__voyage-context-3__v1")
+
+
+@pytest.mark.parametrize(
+    "lifecycle_state",
+    ["quarantine", "dormant", "disputed"],
+    ids=["quarantine_excluded", "dormant_excluded", "disputed_excluded"],
+)
+def test_resolve_corpus_excludes_non_live_lifecycle_states(
+    monkeypatch, lifecycle_state: str,
+) -> None:
+    """RDR-204 Gap 4: a bare-content-type corpus fan-out excludes every
+    non-``live`` row BY COLUMN -- quarantine, dormant and disputed each
+    asserted separately, never lumped into one case."""
+    import nexus.mcp_infra as mi
+
+    rows = {
+        "code__nexus__voyage-code-3__v1": {
+            "content_type": "code", "owner_id": "nexus", "embedding_model": "voyage-code-3",
+            "lifecycle_state": "live",
+        },
+        "quarantine-code__nexus__voyage-code-3__v1": {
+            "content_type": "code", "owner_id": "nexus", "embedding_model": "voyage-code-3",
+            "lifecycle_state": lifecycle_state,
+        },
+    }
+    monkeypatch.setattr(mi, "get_collection_row", lambda name: rows.get(name))
+
+    result = resolve_corpus("code", list(rows))
+    assert result == ["code__nexus__voyage-code-3__v1"], (
+        f"a {lifecycle_state} row must never join a bare 'code' fan-out"
+    )
+
+
+def test_resolve_corpus_drops_unregistered_name_from_fanout(monkeypatch) -> None:
+    """A candidate with no catalog row at all is dropped from a bare-corpus
+    fan-out (never raised loud -- RDR §Failure Modes: a fan-out skips an
+    unregistered name with a logged warning, only a direct single-collection
+    read is a hard 422)."""
+    import nexus.mcp_infra as mi
+
+    monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
+
+    assert resolve_corpus("code", ["code__ghost__voyage-code-3__v1"]) == []
+
+
+# ── RDR-204 Phase 3 item 7: owner grammar alignment ───────────────────────────
+
+def test_is_conformant_collection_name_admits_underscored_owner() -> None:
+    """is_conformant_collection_name used to be STRICTER than the physical
+    name regex (_COLLECTION_NAME_RE), rejecting an underscored owner a real
+    ChromaDB-shaped name allows. Aligning the two (nexus-ft04v.26 item 7)
+    means an underscored owner renders and round-trips through parse."""
+    from nexus.catalog.collection_name import CollectionName
+    from nexus.corpus import is_conformant_collection_name, parse_conformant_collection_name
+
+    name = CollectionName(
+        content_type="code", owner_id="my_repo", embedding_model="voyage-code-3", model_version=1,
+    ).render()
+    assert name == "code__my_repo__voyage-code-3__v1"
+    assert is_conformant_collection_name(name)
+    parsed = parse_conformant_collection_name(name)
+    assert parsed["owner_id"] == "my_repo"
+    assert CollectionName.parse(name) == CollectionName(
+        content_type="code", owner_id="my_repo", embedding_model="voyage-code-3", model_version=1,
+    )
 
 
 # ── validate_collection_name ──────────────────────────────────────────────────

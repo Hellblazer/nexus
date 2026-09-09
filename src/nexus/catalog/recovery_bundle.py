@@ -373,21 +373,24 @@ def target_collection_for(recorded: str, t3: Any) -> str:
     active model. A non-conformant recorded name passes through to the
     resolver unchanged, exactly as an operator-typed --collection would."""
     from nexus.corpus import (  # noqa: PLC0415 — deferred to avoid circular import
-        collection_content_type,
-        collection_owner,
         is_conformant_collection_name,
+        parse_conformant_collection_name,
         t3_collection_name,
     )
 
     base = recorded
     if is_conformant_collection_name(recorded):
-        # RDR-204 Phase 3 funnel (nexus-ft04v.22): safe here (unlike the
-        # sites left raw elsewhere in this slice) because `recorded` is
-        # ALREADY confirmed conformant by the `if` above -- for a
-        # conformant name both helpers return exactly the parsed
-        # `content_type`/`owner_id` fields, byte-identical to
-        # `parts[0]`/`parts[1]` of the same regex match.
-        base = f"{collection_content_type(recorded)}__{collection_owner(recorded)}"
+        # RDR-204 Phase 3 repoint (nexus-ft04v.26): `recorded` names a
+        # collection on the SOURCE install a recovery bundle is being
+        # restored from -- it may have no catalog row on THIS install at
+        # all yet (restoring it is what creates one), so this reads the
+        # STRING'S OWN parsed segments (parse_conformant_collection_name,
+        # safe here because `recorded` is ALREADY confirmed conformant by
+        # the `if` above), never the row-based collection_content_type/
+        # collection_owner, which would raise CollectionNotRegisteredError
+        # for a name this install has never seen.
+        parsed = parse_conformant_collection_name(recorded)
+        base = f"{parsed['content_type']}__{parsed['owner_id']}"
     # nexus-0fw11: the recorded collection already exists on the source
     # install, placeholder-named or not (docs__default and
     # knowledge__knowledge are live on the production tenant); restoring it

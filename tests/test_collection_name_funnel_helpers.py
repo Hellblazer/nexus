@@ -1,22 +1,27 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-204 Phase 3 funnel slice 1 (nexus-ft04v.21): unit tests for the
-three collection-name identity helpers introduced in ``nexus.corpus``
-(``collection_content_type``, ``collection_owner``, ``collection_model``)
-and pinning tests for every call site this slice funnelled through them.
+"""RDR-204 Phase 3 (nexus-ft04v.21 funnel, nexus-ft04v.26 THE REPOINT):
+unit tests for the three collection-name identity helpers in
+``nexus.corpus`` (``collection_content_type``, ``collection_owner``,
+``collection_model``) and pinning tests for every downstream call site
+this slice funnelled through them.
 
-The funnel is explicitly BEHAVIOR-PRESERVING at this step (the RDR's
-"first the funnel, then the repoint" split, step 5): these helpers still
-parse the collection name, exactly reproducing what the raw
-split/partition/startswith/``"__" in`` call at each site used to compute.
-Every parametrize table below pins the value produced BEFORE this bead
-(verified against ``git show HEAD~1:src/nexus/corpus.py`` while writing
-this file) and now, so a later regression in the funnel or the eventual
-repoint (nexus-ft04v.26) has something concrete to diff against.
+nexus-ft04v.26 landed: these three helpers no longer parse the collection
+name at all -- they read ``nexus.catalog_collections`` (the collection-row
+cache, ``nexus.mcp_infra.get_collection_row``) and raise
+``CollectionNotRegisteredError`` when a name has no row, never falling
+back to a string parse. The row-read + fail-loud contract is pinned
+directly below; the "authority moved" story (a name whose string
+disagrees with its row resolves BY THE ROW) is pinned in
+``tests/test_corpus.py::test_collection_content_type_row_based_repoint``.
 
-Covers, per input class named in the bead: RDR-101 conformant names,
-legacy 2-segment (bare content-type prefix) names, ``quarantine-``
-prefixed names, bare/no-separator names, and garbage/unrecognized-prefix
-and malformed multi-segment names.
+The DOWNSTREAM functions this file also pins
+(``voyage_model_for_collection``, ``default_projection_threshold``,
+``_legacy_content_type_for_collection``) still call
+``collection_content_type`` internally, so their tests fake a catalog row
+per input (``_fake_collection_rows`` below) deriving content_type from
+the SAME first-segment convention the retired parser used -- these tests
+are about the content-type-to-model DISPATCH table, not the row-lookup
+mechanism, which is covered separately.
 """
 from __future__ import annotations
 
@@ -24,6 +29,7 @@ import pytest
 
 from nexus.corpus import (
     CONTENT_TYPES,
+    CollectionNotRegisteredError,
     PlaceholderCollectionError,
     _legacy_content_type_for_collection,
     collection_content_type,
@@ -39,91 +45,70 @@ from nexus.corpus import (
 pytestmark = pytest.mark.usefixtures("cloud_mode")
 
 
-# ── The three helpers themselves ───────────────────────────────────────────
+@pytest.fixture
+def fake_row(monkeypatch):
+    """Install a single-name-to-row map as ``nexus.mcp_infra.get_collection_row``
+    and return the dict so a test can populate it. Absent from the dict ->
+    ``None`` (no catalog row), matching the real accessor's contract."""
+    import nexus.mcp_infra as mi
+
+    rows: dict[str, dict] = {}
+    monkeypatch.setattr(mi, "get_collection_row", lambda name: rows.get(name))
+    return rows
+
+
+@pytest.fixture(autouse=True)
+def _fake_collection_rows(monkeypatch):
+    """For the DOWNSTREAM content-type-to-model dispatch tests below
+    (voyage_model_for_collection / default_projection_threshold /
+    _legacy_content_type_for_collection): derives a row from the same
+    first-segment convention the retired parser used, so those tests keep
+    exercising their own dispatch table rather than the row-lookup
+    mechanism. Tests of the three funnel helpers THEMSELVES override this
+    via the ``fake_row`` fixture (function-scoped, applied after this one)."""
+    import nexus.mcp_infra as mi
+
+    def _fake_get_collection_row(name: str) -> dict | None:
+        content_type = name.partition("__")[0] if "__" in name else ""
+        return {
+            "content_type": content_type,
+            "owner_id": "test-owner",
+            "embedding_model": "test-model",
+            "lifecycle_state": "live",
+        }
+
+    monkeypatch.setattr(mi, "get_collection_row", _fake_get_collection_row)
+
+
+# ── The three helpers themselves: row-read + fail-loud ─────────────────────
 
 @pytest.mark.parametrize(
-    "name, expected",
+    "field, accessor",
     [
-        # conformant
-        ("code__myrepo__voyage-code-3__v1", "code"),
-        ("docs__myrepo__voyage-context-3__v1", "docs"),
-        # legacy 2-segment
-        ("code__myrepo", "code"),
-        ("docs__myrepo", "docs"),
-        ("knowledge__myrepo", "knowledge"),
-        ("rdr__myrepo", "rdr"),
-        # unrecognized prefix (still returned raw, unfiltered)
-        ("other__x", "other"),
-        ("test__coll", "test"),
-        # quarantine-prefixed (raw, unfiltered -- callers strip separately)
-        ("quarantine-docs__x", "quarantine-docs"),
-        # malformed multi-segment (first segment only)
-        ("foo__bar__baz__qux", "foo"),
-        # bare / no separator at all
-        ("nodunder", ""),
-        ("", ""),
-        # degenerate
-        ("__", ""),
-        ("__b", ""),
+        ("content_type", collection_content_type),
+        ("owner_id", collection_owner),
+        ("embedding_model", collection_model),
     ],
-    ids=[
-        "conformant_code", "conformant_docs", "legacy_code", "legacy_docs",
-        "legacy_knowledge", "legacy_rdr", "unrecognized_prefix",
-        "opaque_test_fixture_prefix", "quarantine_prefixed_raw",
-        "malformed_multi_segment", "bare_no_dunder", "empty_string",
-        "degenerate_bare_dunder", "degenerate_dunder_then_char",
-    ],
+    ids=["collection_content_type", "collection_owner", "collection_model"],
 )
-def test_collection_content_type(name: str, expected: str) -> None:
-    assert collection_content_type(name) == expected
-
-
-@pytest.mark.parametrize(
-    "name, expected",
-    [
-        ("code__myrepo__voyage-code-3__v1", "myrepo"),
-        ("code__myrepo", "myrepo"),
-        ("knowledge__my_project_notes", "my_project_notes"),
-        ("foo__bar__baz__qux", "bar__baz__qux"),  # whole remainder, unsplit
-        ("nodunder", "nodunder"),  # no separator: identity is the whole name
-        ("", ""),
-        ("__", ""),
-        ("__b", "b"),
-        ("foo____bar", "__bar"),  # partition stops at the FIRST "__"
-    ],
-    ids=[
-        "conformant", "legacy_two_segment", "compound_owner_keeps_underscores",
-        "malformed_keeps_whole_remainder", "bare_no_dunder_returns_whole_name",
-        "empty_string", "degenerate_bare_dunder", "degenerate_dunder_then_char",
-        "adjacent_double_dunder",
-    ],
-)
-def test_collection_owner(name: str, expected: str) -> None:
-    assert collection_owner(name) == expected
+def test_funnel_helper_reads_the_row_field(fake_row, field, accessor) -> None:
+    fake_row["code__myrepo__voyage-code-3__v1"] = {
+        "content_type": "docs", "owner_id": "row-owner", "embedding_model": "row-model",
+        "lifecycle_state": "live",
+    }
+    assert accessor("code__myrepo__voyage-code-3__v1") == fake_row[
+        "code__myrepo__voyage-code-3__v1"
+    ][field]
 
 
 @pytest.mark.parametrize(
-    "name, expected",
-    [
-        ("code__myrepo__voyage-code-3__v1", "voyage-code-3"),
-        ("docs__myrepo__voyage-context-3__v1", "voyage-context-3"),
-        ("code__myrepo", ""),  # legacy: no model segment to read
-        ("nodunder", ""),
-        ("", ""),
-    ],
-    ids=["conformant_code", "conformant_docs", "legacy_no_model", "bare", "empty"],
+    "accessor",
+    [collection_content_type, collection_owner, collection_model],
+    ids=["collection_content_type", "collection_owner", "collection_model"],
 )
-def test_collection_model(name: str, expected: str) -> None:
-    assert collection_model(name) == expected
-
-
-def test_collection_owner_equals_input_iff_no_separator() -> None:
-    """The corollary the funnel relies on at several call sites (a
-    dunder-free substitute for a raw ``"__" in x`` test)."""
-    for name in ["nodunder", "", "abc", "distributed-systems"]:
-        assert collection_owner(name) == name
-    for name in ["a__b", "__", "__x", "code__myrepo__voyage-code-3__v1"]:
-        assert collection_owner(name) != name
+def test_funnel_helper_fails_loud_on_no_row(fake_row, accessor) -> None:
+    with pytest.raises(CollectionNotRegisteredError):
+        accessor("docs__never-registered__voyage-context-3__v1")
 
 
 # ── Pinned call sites: content-type-derived functions ──────────────────────

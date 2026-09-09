@@ -56,6 +56,33 @@ from __future__ import annotations
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _fake_collection_rows(monkeypatch: pytest.MonkeyPatch):
+    """RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26) landed after this
+    file's Phase-A/B pins: collection_content_type/collection_owner/
+    collection_model now read the catalog row
+    (``nexus.mcp_infra.get_collection_row``) instead of parsing the name
+    string. This file's tables are about the DOWNSTREAM dispatch (byte
+    budgets, classify buckets, corpus derivation) each site computes from
+    a content_type/owner, not about the row-lookup mechanism -- fake a
+    row per name using the SAME first-segment convention the retired
+    parser used, so every fixture name below keeps resolving to the
+    content_type/owner its table already documents.
+    """
+    import nexus.mcp_infra as mi
+
+    def _fake_get_collection_row(name: str) -> dict | None:
+        content_type = name.partition("__")[0] if "__" in name else ""
+        return {
+            "content_type": content_type,
+            "owner_id": name.partition("__")[2] if "__" in name else name,
+            "embedding_model": "test-model",
+            "lifecycle_state": "live",
+        }
+
+    monkeypatch.setattr(mi, "get_collection_row", _fake_get_collection_row)
+
+
 # ── db/http_vector_client.py:869 — _upsert_byte_budget ─────────────────────
 
 
