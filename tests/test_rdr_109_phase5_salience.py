@@ -171,6 +171,29 @@ def test_salience_boost_ignores_code_collections(monkeypatch) -> None:
     assert fake.requested == []  # aspects store never consulted
 
 
+def test_salience_boost_conformant_and_lookalike_prefixes(monkeypatch) -> None:
+    """RDR-204 Phase 3 funnel (nexus-ft04v.21): the collection-gating test
+    (``.startswith(("knowledge__", "docs__"))``) is now
+    ``collection_content_type(...) in ("knowledge", "docs")``. Pin both a
+    conformant 4-segment name (still targeted) and a near-miss prefix that
+    must stay excluded (``knowledgebase__`` starts with "knowledge" but its
+    first '__'-delimited segment is "knowledgebase", not "knowledge")."""
+    fake = _FakeAspectsStore({
+        "D": ["hybrid retrieval cross-encoder reranking"],
+        "E": ["hybrid retrieval cross-encoder reranking"],
+    })
+    monkeypatch.setattr(_ASPECTS_SEAM, lambda: fake)
+
+    from nexus.search_engine import _apply_salience_boost
+    results = [
+        _make_result("d", "docs__nexus__voyage-context-3__v1", "D", score=0.50),
+        _make_result("e", "knowledgebase__foo", "E", score=0.60),
+    ]
+    out = _apply_salience_boost(results, query="hybrid retrieval cross-encoder", weight=0.5)
+    assert fake.requested == ["D"]  # only the conformant docs__ result is targeted
+    assert [r.hybrid_score for r in out if r.id == "e"] == [0.60]  # lookalike untouched
+
+
 # TOMBSTONE (nexus-i711w Stage 2 A3): test_salience_boost_no_op_when_db_missing
 # deleted. Its premise — a missing local ``memory.db`` file makes
 # ``_apply_salience_boost`` early-return — DIED with the SQLite arm.

@@ -68,6 +68,37 @@ def test_hybrid_score_weighted_sum():
     assert hybrid_score(0.8, 0.5) == pytest.approx(0.71, abs=1e-6)
 
 
+# ── RDR-204 Phase 3 funnel (nexus-ft04v.21): the three `.collection
+# .startswith("code__")` sites now call `collection_content_type(...) ==
+# "code"` -- pin the has_code / frecency-eligibility decision across the
+# input classes the bead names, since a wrong verdict here silently
+# changes which results get the frecency-blended score. ──────────────────
+
+@pytest.mark.parametrize(
+    "coll, is_code_like",
+    [
+        ("code__repo", True),                            # legacy 2-segment
+        ("code__repo__voyage-code-3__v1", True),          # conformant
+        ("docs__papers", False),
+        ("knowledge__notes", False),
+        ("quarantine-code__repo", False),                 # NOT "code__"-prefixed
+        ("other__repo", False),                           # unrecognized prefix
+        ("codebase__repo", False),                        # startswith("code") but not "code__"
+    ],
+)
+def test_hybrid_scoring_code_detection_pinned(coll: str, is_code_like: bool) -> None:
+    r = _r(coll=coll, dist=0.2, frecency=0.8)
+    with patch("nexus.scoring._log") as mock_log:
+        results = apply_hybrid_scoring([r], hybrid=True)
+    warned = any(
+        call.kwargs.get("event") == "--hybrid has no effect — no code corpus in scope"
+        or (call.args and call.args[0] == "--hybrid has no effect — no code corpus in scope")
+        for call in mock_log.warning.call_args_list
+    )
+    assert warned == (not is_code_like)
+    assert results[0].hybrid_score is not None
+
+
 # ── round_robin_interleave ───────────────────────────────────────────────────
 
 @pytest.mark.parametrize("groups,expected_dists", [

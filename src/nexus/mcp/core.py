@@ -26,6 +26,8 @@ except ImportError:  # pragma: no cover — future SDK restructure
 
 from nexus.corpus import (
     _refuse_placeholder_subject,
+    collection_content_type,
+    collection_owner,
     embedding_model_for_collection,
     embedding_model_for_collection_name,
     index_model_for_collection,
@@ -2448,7 +2450,13 @@ def _resolve_corpus_target(
     if corpus == "all":
         seen: list[str] = []
         for n in all_names:
-            prefix = n.split("__", 1)[0]
+            # RDR-204 Phase 3 funnel (nexus-ft04v.21): the explicit
+            # collection_owner(n) == n branch (rather than
+            # `collection_content_type(n) or n`) keeps a "__"-having name
+            # whose first segment is genuinely empty from being silently
+            # replaced by the whole name -- see collection_owner's
+            # docstring for the "== n iff no separator" contract.
+            prefix = n if collection_owner(n) == n else collection_content_type(n)
             if prefix and prefix not in seen:
                 seen.append(prefix)
         corpus = ",".join(seen) if seen else "knowledge,code,docs,rdr"
@@ -2457,7 +2465,9 @@ def _resolve_corpus_target(
         part = part.strip()
         if not part:
             continue
-        if "__" in part:
+        # collection_owner(part) != part is the funnel-helper-contract
+        # substitute for a raw "__" in part test (see its docstring).
+        if collection_owner(part) != part:
             target.append(t3_collection_name(part, t3=t3))
         else:
             fanned_out = resolve_corpus(part, all_names)
@@ -7619,7 +7629,10 @@ def _sample_collection_names_by_prefix(names: list[str], limit: int) -> list[str
     alphabetical truncation. Deterministic: families and names sorted."""
     by_prefix: dict[str, list[str]] = {}
     for n in sorted(set(names)):
-        by_prefix.setdefault(n.split("__", 1)[0], []).append(n)
+        # RDR-204 Phase 3 funnel (nexus-ft04v.21): see _resolve_corpus_target's
+        # identical pattern above for why this is not `collection_content_type(n) or n`.
+        family = n if collection_owner(n) == n else collection_content_type(n)
+        by_prefix.setdefault(family, []).append(n)
     out: list[str] = []
     queues = [by_prefix[k] for k in sorted(by_prefix)]
     i = 0

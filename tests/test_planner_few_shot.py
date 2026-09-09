@@ -298,3 +298,16 @@ def test_collection_hint_samples_every_prefix_family(cloud_mode) -> None:  # RDR
     assert any(n.startswith("rdr__") for n in shown)
     assert len(set(shown)) == 24
     assert _sample_collection_names_by_prefix([], 24) == []
+
+
+def test_sample_collection_names_by_prefix_families_pinned() -> None:
+    """RDR-204 Phase 3 funnel (nexus-ft04v.21): the family key derivation
+    (``n.split("__", 1)[0]``) became a funnel-helper branch. Pin: a
+    dunder-free name is its own family (not an empty-string bucket), and
+    an unrecognized/quarantine-prefixed name families under its raw first
+    segment, unfiltered."""
+    from nexus.mcp.core import _sample_collection_names_by_prefix
+
+    names = ["rgcache", "quarantine-docs__x", "code__myrepo__voyage-code-3__v1"]
+    shown = _sample_collection_names_by_prefix(names, limit=10)
+    assert set(shown) == set(names)  # all three distinct families, nothing dropped

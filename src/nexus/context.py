@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from nexus.corpus import collection_content_type, collection_owner
+
 if TYPE_CHECKING:
     from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 
@@ -151,7 +153,17 @@ def generate_context_l1(
     for collection, label, doc_count in rows:
         if allowed is not None and collection not in allowed:
             continue
-        prefix = collection.split("__")[0] if "__" in collection else collection
+        # RDR-204 Phase 3 funnel (nexus-ft04v.21): `collection_owner(x) ==
+        # x` iff x has no "__" at all (the funnel helper's own contract --
+        # see its docstring), which is exactly the old ternary's `else
+        # collection` branch. NOT `collection_content_type(collection) or
+        # collection`: that conflates "no '__' present" with "'__' present
+        # but the first segment happens to be empty" (a name like "__foo"),
+        # which the plain `or` cannot tell apart from the no-separator case.
+        if collection_owner(collection) == collection:
+            prefix = collection
+        else:
+            prefix = collection_content_type(collection)
         if prefix not in prefixes:
             prefixes[prefix] = []
         if len(prefixes[prefix]) < _TOPICS_PER_PREFIX:

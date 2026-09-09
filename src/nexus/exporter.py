@@ -26,7 +26,12 @@ import msgpack
 import numpy as np
 import structlog
 
-from nexus.corpus import embedding_model_for_collection_name, index_model_for_collection
+from nexus.corpus import (
+    collection_content_type,
+    collection_owner,
+    embedding_model_for_collection_name,
+    index_model_for_collection,
+)
 from nexus.db.limits import QUOTAS
 from nexus.db.local_ef import _MODEL_DIMS as _LOCAL_RAW_MODEL_DIMS
 from nexus.db.local_ef import _MODEL_TOKENS as _LOCAL_MODEL_TOKENS
@@ -289,7 +294,15 @@ def export_collection(
     )
 
     # Determine database_type from collection prefix.
-    prefix = collection_name.split("__")[0] if "__" in collection_name else "knowledge"
+    # RDR-204 Phase 3 funnel (nexus-ft04v.21): collection_owner(x) == x iff
+    # x has no "__" at all (see its docstring) -- kept as an explicit
+    # branch rather than `collection_content_type(...) or "knowledge"`,
+    # which would wrongly default to "knowledge" for a "__"-having name
+    # whose first segment happens to be empty too.
+    if collection_owner(collection_name) == collection_name:
+        prefix = "knowledge"
+    else:
+        prefix = collection_content_type(collection_name)
 
     # Write header (record_count/embedding_dim filled after streaming).
     # The header is written first so the file is valid even during writing.

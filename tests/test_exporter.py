@@ -826,6 +826,20 @@ class TestEmptyCollectionRoundTrip:
         result = import_collection(ephemeral_db, out)
         assert result["imported_count"] == 0
 
+    def test_database_type_defaults_to_knowledge_for_dunder_free_name(
+        self, ephemeral_db: T3Database, tmp_path: Path,
+    ) -> None:
+        """RDR-204 Phase 3 funnel (nexus-ft04v.21): the header's
+        ``database_type`` derivation (``collection_name.split("__")[0] if
+        "__" in collection_name else "knowledge"``) became a funnel-helper
+        branch. A collection name with no "__" at all still defaults to
+        "knowledge", not an empty string."""
+        ephemeral_db.get_or_create_collection("rgcache", strict=False)
+        out, stats = _export(ephemeral_db, "rgcache", tmp_path)
+        with open(out, "rb") as f:
+            header = json.loads(f.readline().decode())
+        assert header["database_type"] == "knowledge"
+
 
 # ── Corrupt msgpack body ─────────────────────────────────────────────────────
 

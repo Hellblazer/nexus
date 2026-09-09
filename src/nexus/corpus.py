@@ -42,11 +42,13 @@ def validate_collection_name(name: str) -> None:
         # 35 chars) which fits under the cap and preserves vectors (no reindex).
         # Derive content_type from the name prefix (before the first ``__``) when
         # present so the hint can be concrete; fall back to a generic flag otherwise.
+        # RDR-204 Phase 3 funnel (nexus-ft04v.21): collection_content_type
+        # returns "" for a name with no "__" at all, which fails the
+        # membership test below exactly like the old "__" in name guard did.
         _ct_hint = ""
-        if "__" in name:
-            _prefix = name.split("__", 1)[0]
-            if _prefix in _CONTENT_TYPES:
-                _ct_hint = f" --content-type {_prefix}"
+        _prefix = collection_content_type(name)
+        if _prefix in _CONTENT_TYPES:
+            _ct_hint = f" --content-type {_prefix}"
         raise ValueError(
             f"Collection name {name!r} must be 3–63 characters (got {len(name)}). "
             f"The name is too long for ChromaDB's 63-character cap. "
@@ -549,6 +551,101 @@ def embedding_model_for_collection_name(collection_name: str) -> str | None:
     return match.groupdict()["model"]
 
 
+def _split_legacy_collection_name(name: str) -> tuple[str, str]:
+    """(first segment, remainder) for a NAME already known not to be
+    RDR-101 canonical-conformant (see :func:`is_conformant_collection_name`).
+
+    RDR-204 Phase 3 funnel (nexus-ft04v.21): this is the ONE remaining raw
+    parse this module's three funnel helpers below share, so every other
+    site that used to split/partition/startswith a collection name calls
+    them instead. Mirrors the two legacy conventions every pre-funnel raw
+    site already used ad hoc: a name with no ``__`` at all has no separate
+    content-type segment (first ``""``) and the whole string IS the
+    identity being handled (remainder ``name``); a name WITH a ``__``
+    splits at the FIRST occurrence only, so the remainder can itself still
+    contain further ``__`` (a compound owner/subject, or a malformed
+    3+-segment name, keeps its embedded double underscores intact -- see
+    :func:`collection_owner`'s docstring for why that convention is
+    deliberate and not shared with ``collection_shape.collection_attributes``'s
+    positional 4-field decode).
+    """
+    if "__" not in name:
+        return "", name
+    first, _, rest = name.partition("__")
+    return first, rest
+
+
+def collection_content_type(name: str) -> str:
+    """RDR-204 Phase 3 funnel helper (step 5, nexus-ft04v.21): the
+    content-type segment of a collection *name*. Still parses at this
+    step -- the later repoint (nexus-ft04v.26) reads the catalog row
+    instead; this function's contract must not change until then.
+
+    Conformant 4-segment names (RDR-101) return the parsed
+    ``content_type`` field. Legacy/non-conformant names with a ``__``
+    return the RAW segment before the first occurrence -- NOT filtered to
+    the four canonical types, since some funnelled call sites (e.g.
+    :func:`collection_registration_kwargs`) deliberately accept an opaque
+    prefix (a test fixture or stub name used as an identifier that was
+    never meant to be a real RDR-103 content type); a caller that needs
+    "is this one of the four canonical types" tests membership in
+    :data:`CONTENT_TYPES` on the returned value itself. A name with no
+    ``__`` at all (no content-type segment present) returns ``""`` --
+    callers wanting a default substitute it via
+    ``collection_content_type(name) or <default>``.
+    """
+    if is_conformant_collection_name(name):
+        return parse_conformant_collection_name(name)["content_type"]
+    first, _ = _split_legacy_collection_name(name)
+    return first
+
+
+def collection_owner(name: str) -> str:
+    """RDR-204 Phase 3 funnel helper (step 5, nexus-ft04v.21): the
+    owner_id segment of a collection *name*. Still parses at this step;
+    see :func:`collection_content_type`'s docstring for the funnel's
+    overall shape.
+
+    Conformant names return the parsed ``owner_id`` field. Legacy names
+    with a ``__`` return everything after the FIRST occurrence, unsplit
+    -- a compound subject/owner (``knowledge__my_project_notes``) or a
+    malformed multi-segment name is returned WHOLE, matching the
+    historical ``str.partition("__")``-then-keep-the-tail convention
+    every 2-segment-oriented call site this funnel touches already used
+    (:func:`t3_collection_name`, :func:`collection_registration_kwargs`,
+    the placeholder-subject guard) -- deliberately NOT the strict
+    positional "2nd field only" decode ``collection_shape.
+    collection_attributes`` needs for its malformed-name diagnostic
+    display (that convention truncates at the 2nd segment, dropping any
+    3rd/4th; the two disagree for a genuinely 3+-segment name, so that
+    call site is left unfunnelled rather than silently changed -- see
+    nexus-ft04v.21's hand-off report). A name with no ``__`` at all
+    returns the name itself: there is no separate owner segment to peel
+    off, so the identity being handled IS the whole string. Useful
+    corollary: ``collection_owner(x) == x`` iff *x* has no ``__`` at all
+    (a general, dunder-free way to ask that question through this
+    helper's own contract rather than a fresh raw ``"__" in`` check).
+    """
+    if is_conformant_collection_name(name):
+        return parse_conformant_collection_name(name)["owner_id"]
+    _, rest = _split_legacy_collection_name(name)
+    return rest
+
+
+def collection_model(name: str) -> str:
+    """RDR-204 Phase 3 funnel helper (step 5, nexus-ft04v.21): the
+    embedding-model token embedded in a conformant collection *name*, or
+    ``""`` when *name* is not conformant -- a legacy name carries no
+    model segment to read at all. Mirrors
+    :func:`embedding_model_for_collection_name`'s ``None`` as an empty
+    string for callers that want a plain ``str`` (this module's other two
+    funnel helpers, :func:`collection_content_type` and
+    :func:`collection_owner`, use the same ``""``-for-absent convention).
+    """
+    parsed = embedding_model_for_collection_name(name)
+    return parsed if parsed is not None else ""
+
+
 def voyage_model_for_collection(collection_name: str) -> str:
     """Return the Voyage AI model for a T3 collection (index and query).
 
@@ -560,7 +657,7 @@ def voyage_model_for_collection(collection_name: str) -> str:
 
     In local mode, callers bypass this and use ``LocalEmbeddingFunction``.
     """
-    if collection_name.startswith(("docs__", "knowledge__", "rdr__")):
+    if collection_content_type(collection_name) in ("docs", "knowledge", "rdr"):
         return "voyage-context-3"
     return "voyage-code-3"
 
@@ -585,11 +682,10 @@ def default_projection_threshold(collection_name: str) -> float:
     Unknown prefixes fall back to 0.70 (safer under-match bias).
     See ``docs/exploration/taxonomy-projection-tuning.md`` for calibration methodology.
     """
-    if collection_name.startswith("code__"):
-        return 0.70
-    if collection_name.startswith("knowledge__"):
+    content_type = collection_content_type(collection_name)
+    if content_type == "knowledge":
         return 0.50
-    if collection_name.startswith(("docs__", "rdr__")):
+    if content_type in ("docs", "rdr"):
         return 0.55
     return 0.70
 
@@ -622,13 +718,15 @@ def _legacy_content_type_for_collection(collection_name: str) -> str:
     ``rdr__`` map to their own type; everything else (including
     ``code__``) defaults to ``"code"``.
     """
-    if collection_name.startswith("docs__"):
-        return "docs"
-    if collection_name.startswith("knowledge__"):
-        return "knowledge"
-    if collection_name.startswith("rdr__"):
-        return "rdr"
-    return "code"
+    # NOT `collection_content_type(...) or "code"`: that only substitutes
+    # on an EMPTY (no-"__") result, but this function's historical
+    # contract defaults to "code" for ANY unrecognized prefix too (e.g.
+    # "other__x" -> "code"), not just a dunder-free name -- and
+    # collection_content_type deliberately returns an unrecognized raw
+    # prefix UNFILTERED (see its docstring), so it must be filtered here
+    # explicitly.
+    content_type = collection_content_type(collection_name)
+    return content_type if content_type in ("docs", "knowledge", "rdr") else "code"
 
 
 def embedding_model_for_collection_calibrated(collection_name: str) -> str:
@@ -684,7 +782,7 @@ def _refuse_placeholder_subject(user_arg: str) -> None:
     """Raise :class:`PlaceholderCollectionError` when the subject segment of
     a bare or two-segment name is a placeholder (nexus-0fw11). Only write
     resolution calls this; the four-segment conformant form never reaches it."""
-    _, _, rest = user_arg.partition("__") if "__" in user_arg else ("", "", user_arg)
+    rest = collection_owner(user_arg)
     if rest in PLACEHOLDER_SUBJECTS:
         raise PlaceholderCollectionError(
             f"collection {user_arg!r} names a placeholder, not a subject: a knowledge "
@@ -773,7 +871,7 @@ def t3_collection_name(
     # use it; on no/multiple matches fall through to the existing
     # owner-segment-promotion branch (which then still has the
     # ``knowledge__knowledge`` legacy fallback from #536).
-    if t3 is not None and "__" not in user_arg and user_arg in CONTENT_TYPES:
+    if t3 is not None and collection_owner(user_arg) == user_arg and user_arg in CONTENT_TYPES:
         try:
             matches = [
                 c["name"]
@@ -838,10 +936,20 @@ def t3_collection_name(
         # ``knowledge__knowledge`` legacy bridge at the bottom of
         # the function.
 
-    if "__" in user_arg:
-        ct, _, rest = user_arg.partition("__")
-    else:
+    # RDR-204 Phase 3 funnel (nexus-ft04v.21): collection_owner(user_arg)
+    # already returns user_arg unchanged when it has no "__" at all, which
+    # is exactly the historical "knowledge" bare-name default's trigger --
+    # but that "no separator" case must stay distinct from a "__"-having
+    # user_arg whose first segment happens to be empty (ct == ""), since
+    # the membership check right below treats "" and "knowledge"
+    # differently. So the bare-name case is branched explicitly rather
+    # than folded into a single `collection_content_type(...) or
+    # "knowledge"` expression.
+    _owner_probe = collection_owner(user_arg)
+    if _owner_probe == user_arg:
         ct, rest = "knowledge", user_arg
+    else:
+        ct, rest = collection_content_type(user_arg), _owner_probe
 
     if ct not in CONTENT_TYPES:
         return user_arg
@@ -1037,24 +1145,39 @@ def collection_registration_kwargs(name: str) -> dict[str, str]:
     never validates content_type either, an existing property of that
     function this one does not alter).
     """
+    # RDR-204 Phase 3 funnel (nexus-ft04v.21): collection_owner(name) == name
+    # is the funnel-helper-contract way to ask "does name have no '__' at
+    # all", kept as its own branch (rather than folded into a single `or
+    # "knowledge"` expression) for the same reason as t3_collection_name's
+    # ct/rest split above -- the has-"__"-but-empty-first-segment case must
+    # still raise below, not silently default to "knowledge".
     if is_conformant_collection_name(name):
         segments = parse_conformant_collection_name(name)
         content_type = segments["content_type"]
         owner_id = segments["owner_id"]
         model_version = segments["model_version"]
-    elif "__" not in name:
+    elif collection_owner(name) == name:
         content_type = "knowledge"
         owner_id = name
         model_version = "v1"
     else:
-        parts = name.split("__")
-        if len(parts) < 2 or not parts[0] or not parts[1]:
+        content_type = collection_content_type(name)
+        owner_id = collection_owner(name)
+        # Equivalent to the historical `parts = name.split("__"); len(parts) < 2
+        # or not parts[0] or not parts[1]` guard: `len(parts) < 2` can never
+        # fire here (a "__" is already known present), `not parts[0]` is
+        # exactly `not content_type`, and `not parts[1]` is exactly
+        # `not owner_id or owner_id.startswith("__")` -- parts[1] is the
+        # first joined element of owner_id, which is empty iff owner_id
+        # itself is empty or begins with a second, immediately-adjacent
+        # "__" (a plain str.split("__") can never leave "__" inside a
+        # single part, so owner_id cannot start with "__" for any other
+        # reason).
+        if not content_type or not owner_id or owner_id.startswith("__"):
             raise ValueError(
                 f"collection_registration_kwargs: {name!r} has no "
                 "<content_type>__<owner_id> shape to register with"
             )
-        content_type = parts[0]
-        owner_id = "__".join(parts[1:])
         model_version = "v1"
     return {
         "content_type": content_type,

@@ -254,7 +254,12 @@ def apply_hybrid_scoring(
     if not results:
         return results
 
-    has_code = any(r.collection.startswith("code__") for r in results)
+    # RDR-204 Phase 3 funnel (nexus-ft04v.21): local import mirrors the
+    # circular-dep-avoidance pattern _resolve_calibration_factors already
+    # uses for nexus.corpus below.
+    from nexus.corpus import collection_content_type  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
+
+    has_code = any(collection_content_type(r.collection) == "code" for r in results)
 
     if hybrid and not has_code:
         _log.warning("--hybrid has no effect — no code corpus in scope")
@@ -276,7 +281,7 @@ def apply_hybrid_scoring(
     frecencies = [
         r.metadata.get("frecency_score", 0.0)
         for r in results
-        if r.collection.startswith("code__")
+        if collection_content_type(r.collection) == "code"
     ]
 
     for r in results:
@@ -302,7 +307,7 @@ def apply_hybrid_scoring(
             # Non-code__ results have no frecency signal, so f_norm is
             # simply 0.0 for them; code__ keeps its existing frecency-
             # window blend.
-            if r.collection.startswith("code__"):
+            if collection_content_type(r.collection) == "code":
                 f_score = r.metadata.get("frecency_score", 0.0)
                 f_norm = min_max_normalize(f_score, frecencies) if frecencies else 0.0
             else:

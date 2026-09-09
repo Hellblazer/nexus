@@ -11,7 +11,7 @@ from typing import Any
 import structlog
 
 from nexus.config import TuningConfig, get_telemetry_config, load_config
-from nexus.corpus import embedding_model_for_collection_name
+from nexus.corpus import collection_content_type, embedding_model_for_collection_name
 from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
 from nexus.types import SearchResult
 
@@ -1490,7 +1490,7 @@ def _apply_salience_boost(
 
     targeted = [
         r for r in results
-        if r.collection.startswith(("knowledge__", "docs__"))
+        if collection_content_type(r.collection) in ("knowledge", "docs")
     ]
     if not targeted:
         return results

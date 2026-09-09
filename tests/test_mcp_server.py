@@ -2425,3 +2425,26 @@ def test_search_render_leads_with_the_reader_instruction_and_annotates_age(t3):
     # structured output is untouched by the annotation
     structured = _search_render(query="annotated retrieval context", corpus=coll, limit=5, offset=0, structured=True)
     assert set(structured) == {"ids", "tumblers", "distances", "collections", "chunk_collections", "chunk_text_hash"}
+
+
+# ── RDR-204 Phase 3 funnel (nexus-ft04v.21): _resolve_corpus_target ─────────
+
+def test_resolve_corpus_target_funnel_pinned(monkeypatch):
+    """The two raw sites in ``_resolve_corpus_target`` (the ``corpus ==
+    "all"`` prefix-collection loop's ``n.split("__", 1)[0]``, and the
+    per-part ``"__" in part`` dispatch) became funnel-helper calls. Pin:
+    a dunder-free collection name, a quarantine-prefixed non-conformant
+    name, and a conformant name all resolve exactly as the raw string ops
+    used to."""
+    from nexus.mcp import core as mcp_core
+
+    all_names = ["rgcache", "quarantine-docs__x", "code__myrepo__voyage-code-3__v1"]
+    monkeypatch.setattr(mcp_core, "_get_collection_names", lambda: all_names)
+    monkeypatch.setattr(
+        mcp_core, "_get_collection_counts", lambda: dict.fromkeys(all_names, 100),
+    )
+
+    target = mcp_core._resolve_corpus_target(
+        "rgcache,quarantine-docs__x,code__myrepo__voyage-code-3__v1", t3=None,
+    )
+    assert target == all_names

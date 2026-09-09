@@ -437,3 +437,28 @@ class TestServiceModeL1(object):
         text = out.read_text()
         assert "T7" in text  # highest doc_count survives the top-5 cut
         assert "T1" not in text and "T2" not in text  # lowest two cut
+
+    def test_prefix_grouping_pinned_for_dunder_free_and_quarantine_names(
+        self, tmp_path: Path,
+    ) -> None:
+        """RDR-204 Phase 3 funnel (nexus-ft04v.21): the prefix-grouping
+        loop's ``collection.split("__")[0] if "__" in collection else
+        collection`` became a funnel-helper-based branch. Pin the two
+        edge classes that raw ternary handled specially: a collection
+        with NO "__" at all groups under its own full name (not an
+        empty-string bucket), and a "__"-having but unrecognized/
+        quarantine-prefixed collection groups under its raw first
+        segment, unfiltered."""
+        from nexus.context import generate_context_l1
+
+        fake = self._FakeHttpTaxonomy([
+            {"collection": "rgcache", "label": "Bare Name Topic", "doc_count": 30},
+            {"collection": "quarantine-docs__x", "label": "Quarantined Topic", "doc_count": 20},
+        ])
+        out = generate_context_l1(fake, output_path=tmp_path / "l1.md")
+        assert out is not None
+        text = out.read_text()
+        assert "rgcache:" in text
+        assert "quarantine-docs:" in text
+        assert "Bare Name Topic" in text
+        assert "Quarantined Topic" in text

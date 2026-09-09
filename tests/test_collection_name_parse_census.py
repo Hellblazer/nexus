@@ -84,7 +84,10 @@ _TYPE_PREFIXES = frozenset({"code__", "docs__", "rdr__", "knowledge__", "quarant
 #: ``test_excluded_sites_are_real_matches_not_omissions`` — an exclusion
 #: that no longer matches anything is a stale entry, not a quieter gate.
 _EXCLUDED_SITES: dict[tuple[str, int], str] = {
-    ("src/nexus/mcp/core.py", 7887): (
+    # Line moved 7887 -> 7900 when nexus-ft04v.21 funnelled this file's
+    # other three sites (2451, 2460, 7622) and the new imports/comments
+    # shifted everything below them.
+    ("src/nexus/mcp/core.py", 7900): (
         "mcp__ tool name: `raw_tool.rsplit(\"__\", 1)[-1] if "
         'raw_tool.startswith("mcp__")` strips an MCP tool-name prefix for '
         "planner-step normalization, not a collection name."
@@ -105,11 +108,29 @@ _EXCLUDED_SITES: dict[tuple[str, int], str] = {
 }
 
 #: 2026-09-09 census of collection-name parse sites, per file, AFTER the
-#: `_EXCLUDED_SITES` filter. Pin sum: 79. This may only shrink — each of
+#: `_EXCLUDED_SITES` filter. This may only shrink — each of
 #: nexus-ft04v.21/.22/.23 (the funnel slices) lowers the entries for its
 #: files as raw sites move to the three CollectionName helpers; when a
 #: file reaches zero, drop its entry (a dropped key and an absent file
 #: both read as zero to the guards below).
+#:
+#: nexus-ft04v.21 (funnel slice 1, corpus.py/scoring.py/collection_shape.py/
+#: context.py/search_engine.py/exporter.py/mcp/core.py) landed 2026-09-09
+#: and lowered the pin from 79 to 54 (-25): scoring.py, context.py,
+#: search_engine.py, exporter.py and mcp/core.py reached zero and were
+#: dropped; corpus.py fell from 16 to 2 (the two `collection_content_type`
+#: / `collection_owner` helpers' own shared internal parse -- see
+#: `_split_legacy_collection_name` in nexus/corpus.py -- is the accepted
+#: floor those two helpers leave behind, per the bead's "sites inside the
+#: three helpers themselves ... stay counted" rule). collection_shape.py's
+#: 3 sites (188, 191, 195) were LEFT UNFUNNELLED, not overlooked, per the
+#: coordinator's ruling on nexus-ft04v.21's hand-off report: `collection_
+#: attributes`'s positional 4-field decode of a malformed name is the same
+#: class as a commands/collection.py slice-3 site -- the funnel helpers'
+#: "owner = whole remainder" convention cannot reproduce a strict
+#: positional decode byte-for-byte, and this bead forbids behaviour
+#: change. These stay raw and counted until nexus-ft04v.26 (the repoint),
+#: where the decode reads the catalog row directly instead of parsing.
 COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {
     "src/nexus/catalog/chunk_quarantine.py": 1,
     "src/nexus/catalog/orphan_backfill.py": 1,
@@ -125,19 +146,11 @@ COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {
     "src/nexus/commands/enrich.py": 1,
     "src/nexus/commands/index.py": 5,
     "src/nexus/commands/store.py": 1,
-    "src/nexus/context.py": 2,
-    "src/nexus/corpus.py": 16,
+    "src/nexus/corpus.py": 2,
     "src/nexus/db/embed_migrate.py": 4,
     "src/nexus/db/http_vector_client.py": 3,
     "src/nexus/db/reconcile.py": 3,
     "src/nexus/db/t3.py": 2,
-    "src/nexus/exporter.py": 2,
-    # 4 raw rsplit(__) sites in this file; 1 excluded (mcp__ tool name,
-    # line 7887, see _EXCLUDED_SITES) -- the remaining 3 are collection-name
-    # parses (:2451 split, :2460 "__" in, :7622 split).
-    "src/nexus/mcp/core.py": 3,
-    "src/nexus/scoring.py": 3,
-    "src/nexus/search_engine.py": 1,
 }
 
 PARSE_SITE_PIN: int = sum(COLLECTION_NAME_PARSE_CENSUS.values())
@@ -383,8 +396,9 @@ def test_census_has_no_stale_entries() -> None:
 
 
 def test_pin_matches_documented_total() -> None:
-    """The PARSE_SITE_PIN docstring claim (79) is derived from the same
-    dict the guards above check against -- this catches a hand-edited
-    docstring number drifting from the dict it claims to summarize."""
+    """The PARSE_SITE_PIN docstring claim (54, after nexus-ft04v.21's
+    funnel slice 1) is derived from the same dict the guards above check
+    against -- this catches a hand-edited docstring number drifting from
+    the dict it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 79
+    assert PARSE_SITE_PIN == 54
