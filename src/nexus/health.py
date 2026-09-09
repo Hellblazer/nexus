@@ -5906,6 +5906,10 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
     # real anchor is not known until the walk ends; filtered against it after.
     candidates: list[tuple[str, datetime]] = []
     candidates_truncated = 0
+    # GH #1512 (nexus-kt7f4): the owner prefix of each named candidate, so the
+    # remedy can be split by owner kind below -- `nx index <path> --force`
+    # applies to a repo file and to nothing else.
+    candidate_prefix: dict[str, str] = {}
     # nexus-oiu1t: the install's OWN evidence that it has run a fenced
     # producer — the earliest document carrying a real index_state. A fact
     # about THIS install, unlike a release-tag date, which assumes the user
@@ -5975,6 +5979,8 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
                             or "?"
                         )
                         candidates.append((ident, ia_dt))
+                        _tumbler = str(getattr(entry, "tumbler", "") or "")
+                        candidate_prefix[ident] = ".".join(_tumbler.split(".")[:2])
                     else:
                         candidates_truncated += 1
                 continue
@@ -6090,6 +6096,26 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
     anchor = proven_anchor if proven_anchor is not None else earliest_stamped_dt
     post_anchor = [c for c in candidates if anchor is not None and c[1] > anchor]
 
+    # GH #1512 (nexus-kt7f4): a candidate under a NON-repo owner (the curator
+    # owner of the knowledge store, 1.1.*) has no file path, so the repo
+    # remedy cannot apply; those get their own count and remedy. Owner kinds
+    # come from the owner table; a table that cannot be read leaves every
+    # candidate classified as a repo file, the pre-GH-1512 behaviour.
+    non_repo_count = 0
+    if post_anchor:
+        try:
+            owner_types = {
+                str(o.get("tumbler_prefix", "")): str(o.get("owner_type", ""))
+                for o in cat.list_owners(include_deactivated=True)
+            }
+        except Exception as exc:  # noqa: BLE001 — best-effort classification, must not crash `nx doctor`
+            _log.debug("doctor_fence_owner_kinds_unavailable", error=str(exc))
+            owner_types = {}
+        non_repo_count = sum(
+            1 for ident, _at in post_anchor
+            if owner_types.get(candidate_prefix.get(ident, ""), "repo") != "repo"
+        )
+
     if post_anchor:
         # A document landed AFTER this install demonstrably had a fully-fenced
         # client and still carries no stamp — a NEW producer regression. Never
@@ -6134,6 +6160,15 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
             "boundary — this check cannot attribute them."
             if undated_reported_null > 0 else ""
         )
+        non_repo_note = (
+            f" {non_repo_count} of the named document(s) belong to a non-repo "
+            "owner (the knowledge store's curator owner): they have no file "
+            "path, so `nx index --force` cannot apply to them; a store put or "
+            "a bulk import wrote them before that path was fenced, and "
+            "`nx catalog reconcile-fences` stamps the ones whose manifest is "
+            "whole (GH #1512)."
+            if non_repo_count else ""
+        )
         results.append(HealthResult(
             label=label, ok=False, warn=True,
             detail=(
@@ -6168,9 +6203,14 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
                     "— this reading is the cautious one.)"
                     if run_ids_dropped and proven_anchor is None else ""
                 )
-                + f"{legacy_note}{undated_note}"
+                + f"{legacy_note}{undated_note}{non_repo_note}"
             ),
             fix_suggestions=(
+                [
+                    "nx catalog reconcile-fences --dry-run   (the non-repo "
+                    "document(s): stamp the whole ones, then drop --dry-run)",
+                ] if non_repo_count else []
+            ) + (
                 [
                     "nx index <path> --force   (re-index ONLY the named "
                     "document(s) above — this clears the symptom, not the "

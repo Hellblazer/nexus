@@ -1395,6 +1395,14 @@ nx catalog reconcile-stale --execute tombstone-ghost-notes             # dry-run
 nx catalog reconcile-stale --execute drop-orphan-collections           # dry-run plan
 ```
 
+### nx catalog reconcile-fences
+
+```
+nx catalog reconcile-fences [--dry-run] [--limit N]
+```
+
+Stamps index-run fences on non-repo documents that carry none (GH #1512). `nx doctor`'s "stale index-run fences" row names documents whose `index_state` is reported NULL although they were indexed after the install's fence baseline. For a repo file the remedy is `nx index <path> --force`; a document of a non-repo owner (the knowledge store's curator owner, `1.1.*`) has no file path, so that remedy cannot apply. Such rows come from `nx store put` / `store_put` before that path fenced its writes (7.3.x) or from a bulk import in a migration window, and until this command nothing could stamp or clear them. It walks the catalog once, selects non-repo documents with a NULL reported `index_state` and a non-empty manifest, and runs the same begin + verify-then-stamp pair the fenced write paths run; the engine refuses a document whose manifest chunks are not all present in T3, and the command names those, exits non-zero, and stamps nothing for them. `--dry-run` names what would be stamped. The recorded `index_content_hash` is the chunk's chash for a one-chunk document (what `store put` records) and a digest over the manifest chashes otherwise, so the next real index of a multi-chunk document sees "changed" once and re-records the real value.
+
 ### nx catalog trash / restore
 
 ```
