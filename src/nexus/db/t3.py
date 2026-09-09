@@ -33,10 +33,10 @@ _InvalidArgumentErrors = vector_argument_errors()
 
 from nexus.corpus import (
     LOCAL_EMBEDDING_MODELS,
-    collection_content_type,
     embedding_model_for_collection,
     embedding_model_for_collection_name,
     index_model_for_collection,
+    split_candidate_collection_name,
 )
 from nexus.db.limits import QUOTAS
 from nexus.metadata_schema import CONTENT_TYPES, normalize, validate
@@ -75,10 +75,14 @@ def _infer_content_type(metadata: dict, collection_name: str) -> str:
     if store_type in _STORE_TYPE_TO_CONTENT_TYPE:
         return _STORE_TYPE_TO_CONTENT_TYPE[store_type]
 
-    # RDR-204 Phase 3 funnel (nexus-ft04v.22): `startswith("code__")` <=>
-    # `collection_content_type(name) == "code"`, no edge divergence -- the
-    # "__" is baked into the compared literal.
-    if collection_content_type(collection_name) == "code":
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): this runs on EVERY write
+    # (_normalize_for_write) -- including a collection's FIRST-EVER
+    # chunk, which structurally has no catalog row yet. Candidate-string
+    # derivation, not the row-based collection_content_type.
+    # `startswith("code__")` <=> `split_candidate_collection_name(name)[0]
+    # == "code"`, no edge divergence -- the "__" is baked into the
+    # compared literal.
+    if split_candidate_collection_name(collection_name)[0] == "code":
         return "code"
     return "prose"
 
@@ -1205,11 +1209,14 @@ class T3Database:
             return 0
         for col_or_name in collections:
             name = col_or_name if isinstance(col_or_name, str) else col_or_name.name
-            # RDR-204 Phase 3 funnel (nexus-ft04v.22): `startswith(
-            # "knowledge__")` <=> `collection_content_type(name) ==
-            # "knowledge"`, no edge divergence -- HttpVectorClient.expire's
+            # RDR-204 Phase 3 repoint (nexus-ft04v.26): a background TTL
+            # sweep must not abort over ONE unregistered legacy
+            # collection -- candidate-string derivation, not the
+            # row-based collection_content_type. `startswith(
+            # "knowledge__")` <=> `split_candidate_collection_name(name)[0]
+            # == "knowledge"`, no edge divergence -- HttpVectorClient.expire's
             # identical filter takes the same substitution.
-            if collection_content_type(name) != "knowledge":
+            if split_candidate_collection_name(name)[0] != "knowledge":
                 continue
             col = kc.get_collection(name)
             # Paginated accumulation: gather all expired IDs before deleting.

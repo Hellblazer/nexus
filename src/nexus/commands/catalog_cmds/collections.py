@@ -111,22 +111,27 @@ def backfill_collections_cmd(dry_run: bool) -> None:
     # the reader's owner_id JOIN excludes them from owner-scoped
     # lookups, which is the desired behaviour.
     from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
-        collection_content_type,
-        collection_model,
-        collection_owner,
         is_conformant_collection_name,
-        model_version_for_collection_name,
+        parse_conformant_collection_name,
     )
     for name in to_register:
         if is_conformant_collection_name(name):
-            # nexus-ft04v.27: the four funnel-style helpers replace the
-            # retired parse_conformant_collection_name dict.
+            # RDR-204 Phase 3 repoint (nexus-ft04v.26): `to_register`
+            # names are, BY THE LOOP'S OWN FILTER, exactly the ones with
+            # NO catalog row yet -- this call is what creates one, so the
+            # row-based collection_content_type/collection_owner/
+            # collection_model (funnelled by nexus-ft04v.27) would raise
+            # CollectionNotRegisteredError every time. `name` is already
+            # confirmed conformant by the `if` above, so its own segments
+            # (parsed once, pure regex, no row lookup) are what a
+            # first-time registration needs.
+            parsed = parse_conformant_collection_name(name)
             writer.register_collection(
                 name,
-                content_type=collection_content_type(name),
-                owner_id=collection_owner(name),
-                embedding_model=collection_model(name),
-                model_version=model_version_for_collection_name(name),
+                content_type=parsed["content_type"],
+                owner_id=parsed["owner_id"],
+                embedding_model=parsed["embedding_model"],
+                model_version=parsed["model_version"],
             )
             continue
         # Non-conformant fallback (legacy 2-segment names).
@@ -236,11 +241,8 @@ def rename_collection_cmd(
         rename_collection_data_plane,
     )
     from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
-        collection_content_type,
-        collection_model,
-        collection_owner,
         is_conformant_collection_name,
-        model_version_for_collection_name,
+        parse_conformant_collection_name,
     )
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
 
@@ -328,14 +330,22 @@ def rename_collection_cmd(
     # plan in front of them.
     try:
         if is_conformant_collection_name(new):
-            # nexus-ft04v.27: the four funnel-style helpers replace the
-            # retired parse_conformant_collection_name dict.
+            # RDR-204 Phase 3 repoint (nexus-ft04v.26): `new` was just
+            # confirmed CollectionState.ABSENT above -- it has no catalog
+            # row yet by construction, so the row-based
+            # collection_content_type/collection_owner/collection_model
+            # (funnelled by nexus-ft04v.27) would raise
+            # CollectionNotRegisteredError. `new` is already confirmed
+            # conformant by the `if` above, so its own segments (parsed
+            # once, pure regex, no row lookup) are what this first-time
+            # registration needs.
+            parsed = parse_conformant_collection_name(new)
             writer.register_collection(
                 new,
-                content_type=collection_content_type(new),
-                owner_id=collection_owner(new),
-                embedding_model=collection_model(new),
-                model_version=model_version_for_collection_name(new),
+                content_type=parsed["content_type"],
+                owner_id=parsed["owner_id"],
+                embedding_model=parsed["embedding_model"],
+                model_version=parsed["model_version"],
             )
         else:
             # nexus-cecqy: --allow-legacy documents that a non-conformant name

@@ -184,9 +184,32 @@ def _patch_t2(t2_path, monkeypatch):
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _mock_t3(collections: list[dict]) -> MagicMock:
-    """Create a mock T3 with preset list_collections and inject it."""
+    """Create a mock T3 with preset list_collections and inject it.
+
+    RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26): mcp_infra's collection
+    cache (and therefore corpus.collection_content_type/collection_owner/
+    collection_model, which now read it instead of parsing) is fed by
+    exactly this ``list_collections()`` response. Every dict here that
+    does not already carry a catalog-row field gets one derived from its
+    name's first segment (the SAME convention the retired name parser
+    used) -- a real Phase-2 engine joins these onto the identical
+    ``/v1/vectors/stats`` response this mock replaces, so back-filling
+    them here is what makes the mock a faithful stand-in, not a
+    workaround. A caller that wants to test the NO-ROW case passes those
+    keys explicitly omitted-and-then-popped, or a dict with them already
+    set to something else -- this only fills gaps, never overwrites.
+    """
+    filled = []
+    for c in collections:
+        row = dict(c)
+        name = row.get("name", "")
+        row.setdefault("content_type", name.partition("__")[0] if "__" in name else "")
+        row.setdefault("owner_id", name.partition("__")[2] if "__" in name else name)
+        row.setdefault("embedding_model", "test-model")
+        row.setdefault("lifecycle_state", "live")
+        filled.append(row)
     mock = MagicMock()
-    mock.list_collections.return_value = collections
+    mock.list_collections.return_value = filled
     _inject_t3(mock)
     return mock
 

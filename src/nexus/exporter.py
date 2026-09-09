@@ -27,10 +27,9 @@ import numpy as np
 import structlog
 
 from nexus.corpus import (
-    collection_content_type,
-    collection_owner,
     embedding_model_for_collection_name,
     index_model_for_collection,
+    split_candidate_collection_name,
 )
 from nexus.db.limits import QUOTAS
 from nexus.db.local_ef import _MODEL_DIMS as _LOCAL_RAW_MODEL_DIMS
@@ -294,15 +293,19 @@ def export_collection(
     )
 
     # Determine database_type from collection prefix.
-    # RDR-204 Phase 3 funnel (nexus-ft04v.21): collection_owner(x) == x iff
-    # x has no "__" at all (see its docstring) -- kept as an explicit
-    # branch rather than `collection_content_type(...) or "knowledge"`,
-    # which would wrongly default to "knowledge" for a "__"-having name
-    # whose first segment happens to be empty too.
-    if collection_owner(collection_name) == collection_name:
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): `collection_name` may be a
+    # legacy/unregistered-but-live collection the operator named directly
+    # -- candidate-string derivation, not the row-based
+    # collection_content_type/collection_owner. split_candidate_collection_name(x)[1]
+    # == x iff x has no "__" at all (see its docstring) -- kept as an
+    # explicit branch rather than `split_candidate_collection_name(...)[0]
+    # or "knowledge"`, which would wrongly default to "knowledge" for a
+    # "__"-having name whose first segment happens to be empty too.
+    _ct_probe, _owner_probe = split_candidate_collection_name(collection_name)
+    if _owner_probe == collection_name:
         prefix = "knowledge"
     else:
-        prefix = collection_content_type(collection_name)
+        prefix = _ct_probe
 
     # Write header (record_count/embedding_dim filled after streaming).
     # The header is written first so the file is valid even during writing.

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from nexus.corpus import collection_content_type, collection_owner
+from nexus.corpus import split_candidate_collection_name
 
 if TYPE_CHECKING:
     from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
@@ -153,17 +153,21 @@ def generate_context_l1(
     for collection, label, doc_count in rows:
         if allowed is not None and collection not in allowed:
             continue
-        # RDR-204 Phase 3 funnel (nexus-ft04v.21): `collection_owner(x) ==
-        # x` iff x has no "__" at all (the funnel helper's own contract --
-        # see its docstring), which is exactly the old ternary's `else
-        # collection` branch. NOT `collection_content_type(collection) or
-        # collection`: that conflates "no '__' present" with "'__' present
-        # but the first segment happens to be empty" (a name like "__foo"),
-        # which the plain `or` cannot tell apart from the no-separator case.
-        if collection_owner(collection) == collection:
+        # RDR-204 Phase 3 repoint (nexus-ft04v.26): `collection` may be a
+        # legacy/unregistered-but-live collection -- candidate-string
+        # derivation, not the row-based collection_content_type/
+        # collection_owner. split_candidate_collection_name(x)[1] == x iff
+        # x has no "__" at all (see its docstring), which is exactly the
+        # old ternary's `else collection` branch. NOT
+        # `split_candidate_collection_name(collection)[0] or collection`:
+        # that conflates "no '__' present" with "'__' present but the
+        # first segment happens to be empty" (a name like "__foo"), which
+        # the plain `or` cannot tell apart from the no-separator case.
+        _ct_probe, _owner_probe = split_candidate_collection_name(collection)
+        if _owner_probe == collection:
             prefix = collection
         else:
-            prefix = collection_content_type(collection)
+            prefix = _ct_probe
         if prefix not in prefixes:
             prefixes[prefix] = []
         if len(prefixes[prefix]) < _TOPICS_PER_PREFIX:

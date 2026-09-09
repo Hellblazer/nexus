@@ -264,7 +264,7 @@ def _resolve_provenance(entry: object, owner_roots: dict[str, str]) -> tuple[Pat
     a relative file_path is anchored at ``owner_roots[owner_id]`` or,
     absent that, treated as unresolvable. Never falls back to cwd.
     """
-    from nexus.corpus import collection_content_type  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     fp = entry.file_path or ""
     source_uri = getattr(entry, "source_uri", "") or ""
@@ -298,7 +298,12 @@ def _resolve_provenance(entry: object, owner_roots: dict[str, str]) -> tuple[Pat
         # there was never a resolvable path to confirm absent.
         return None, "source_uri_only"
 
-    if collection_content_type(entry.physical_collection) != "knowledge":
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): reconciliation exists
+    # specifically to diagnose drifted/stale catalog entries, which can
+    # include a physical_collection with no catalog row -- candidate-string
+    # derivation, never the row-based collection_content_type, so one bad
+    # entry cannot abort the whole reconciliation report.
+    if split_candidate_collection_name(entry.physical_collection)[0] != "knowledge":
         # code__/docs__/rdr__ docs with NEITHER file_path NOR source_uri.
         # RDR-145's "legitimate by design" exemption is scoped to
         # knowledge__ store_put notes only (_classify_never_chunked,
@@ -354,7 +359,7 @@ def _store_put_signature_reason(entry: object) -> str | None:
     — this function returns ``None`` immediately when one is present, so a
     file-backed doc is never silently reclassified as store_put-origin.
     """
-    from nexus.corpus import collection_content_type  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     if entry.file_path:
         return None
@@ -363,7 +368,7 @@ def _store_put_signature_reason(entry: object) -> str | None:
         return "chroma_uri"
     if (
         not source_uri
-        and collection_content_type(entry.physical_collection) == "knowledge"
+        and split_candidate_collection_name(entry.physical_collection)[0] == "knowledge"
         and entry.chunk_count == 1
     ):
         return "knowledge_single_chunk_no_path"

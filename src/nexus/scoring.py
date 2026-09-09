@@ -254,12 +254,15 @@ def apply_hybrid_scoring(
     if not results:
         return results
 
-    # RDR-204 Phase 3 funnel (nexus-ft04v.21): local import mirrors the
-    # circular-dep-avoidance pattern _resolve_calibration_factors already
-    # uses for nexus.corpus below.
-    from nexus.corpus import collection_content_type  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): a search RESULT's
+    # collection has live chunks but is NOT guaranteed a catalog row --
+    # /v1/vectors/stats lists any collection with data regardless of
+    # registration state, and a legacy pre-Phase-1 collection can be
+    # searchable with no row at all. Scoring must never crash on that;
+    # candidate-string derivation, not the row-based collection_content_type.
+    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
 
-    has_code = any(collection_content_type(r.collection) == "code" for r in results)
+    has_code = any(split_candidate_collection_name(r.collection)[0] == "code" for r in results)
 
     if hybrid and not has_code:
         _log.warning("--hybrid has no effect — no code corpus in scope")
@@ -281,7 +284,7 @@ def apply_hybrid_scoring(
     frecencies = [
         r.metadata.get("frecency_score", 0.0)
         for r in results
-        if collection_content_type(r.collection) == "code"
+        if split_candidate_collection_name(r.collection)[0] == "code"
     ]
 
     for r in results:
@@ -307,7 +310,7 @@ def apply_hybrid_scoring(
             # Non-code__ results have no frecency signal, so f_norm is
             # simply 0.0 for them; code__ keeps its existing frecency-
             # window blend.
-            if collection_content_type(r.collection) == "code":
+            if split_candidate_collection_name(r.collection)[0] == "code":
                 f_score = r.metadata.get("frecency_score", 0.0)
                 f_norm = min_max_normalize(f_score, frecencies) if frecencies else 0.0
             else:

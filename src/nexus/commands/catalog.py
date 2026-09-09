@@ -1052,11 +1052,17 @@ def _backfill_repos(
 
 def _backfill_knowledge(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: object = None) -> int:
     """Register knowledge__* collections in catalog."""
-    from nexus.corpus import collection_content_type  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): this command's entire
+    # purpose is to find and register T3 collections NOT YET in the
+    # catalog -- the row-based collection_content_type would raise
+    # CollectionNotRegisteredError for exactly the unregistered
+    # collections it exists to discover. Candidate-string derivation
+    # instead.
+    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     w = writer if writer is not None else cat
     collections = t3.list_collections()
-    knowledge_cols = [c for c in collections if collection_content_type(c["name"]) == "knowledge"]
+    knowledge_cols = [c for c in collections if split_candidate_collection_name(c["name"])[0] == "knowledge"]
     count = 0
     total = len(knowledge_cols)
 
@@ -1085,11 +1091,13 @@ def _backfill_knowledge(cat: "CatalogReader", t3: object, dry_run: bool, *, writ
 
 def _backfill_rdrs(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: object = None) -> int:
     """Register rdr__* collections in catalog with per-document titles from T3 metadata."""
-    from nexus.corpus import collection_content_type  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): see _backfill_knowledge's
+    # comment -- same reason, same fix.
+    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     w = writer if writer is not None else cat
     collections = t3.list_collections()
-    rdr_cols = [c for c in collections if collection_content_type(c["name"]) == "rdr" and c["count"] > 0]
+    rdr_cols = [c for c in collections if split_candidate_collection_name(c["name"])[0] == "rdr" and c["count"] > 0]
     count = 0
     unreadable: list[str] = []
 
@@ -1225,14 +1233,16 @@ def _backfill_papers(
     *, writer: object = None,
 ) -> int:
     """Register docs__* paper collections, excluding repo-owned collections."""
-    from nexus.corpus import collection_content_type  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): see _backfill_knowledge's
+    # comment -- same reason, same fix.
+    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     w = writer if writer is not None else cat
     collections = t3.list_collections()
     repo_cols = repo_collections or set()
     paper_cols = [
         c for c in collections
-        if collection_content_type(c["name"]) == "docs"
+        if split_candidate_collection_name(c["name"])[0] == "docs"
         and c["count"] > 0
         and c["name"] not in repo_cols
     ]
@@ -1387,7 +1397,7 @@ def _backfill_per_file_from_t3(
     writes and returns the count that *would* register (subject to the
     same dedup logic against existing rows).
     """
-    from nexus.corpus import collection_content_type, collection_owner  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     w = writer if writer is not None else cat
     # Parse the trailing -<8hex> as the repo hash. ``rsplit`` keeps
@@ -1395,19 +1405,26 @@ def _backfill_per_file_from_t3(
     # Splitting on `__` first removes the prefix, then `-` splits name
     # vs hash.
     #
-    # The guard checks collection_content_type(), not collection_owner():
-    # collection_owner() returns the WHOLE name back for a separator-less
-    # input (nexus.corpus's documented "no `__` at all -> the identity
-    # being handled IS the whole string" convention), so it is never
-    # falsy here and cannot detect "no double-underscore prefix" on its
-    # own. collection_content_type() returns "" for exactly that case.
-    if not collection_content_type(collection):
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): this is RECOVERY -- the
+    # collection may be in a partial/broken state (that is the reason
+    # this command exists), so its shape is read from the STRING, not a
+    # catalog row it may not have. split_candidate_collection_name, not
+    # the row-based collection_content_type/collection_owner.
+    #
+    # The guard checks the first-segment result, not the remainder:
+    # split_candidate_collection_name's remainder is the WHOLE name back
+    # for a separator-less input (nexus.corpus's documented "no `__` at
+    # all -> the identity being handled IS the whole string" convention),
+    # so it is never falsy here and cannot detect "no double-underscore
+    # prefix" on its own. The first segment returns "" for exactly that
+    # case.
+    if not split_candidate_collection_name(collection)[0]:
         raise click.ClickException(
             f"collection {collection!r} has no double-underscore prefix; "
             "per-file recovery only supports docs__<repo>-<hash> and "
             "code__<repo>-<hash> shapes."
         )
-    suffix = collection_owner(collection)
+    suffix = split_candidate_collection_name(collection)[1]
     if "-" not in suffix:
         raise click.ClickException(
             f"collection {collection!r} suffix {suffix!r} has no -<hash> tail; "
@@ -1435,7 +1452,7 @@ def _backfill_per_file_from_t3(
     repo_root = (owner_rec.get("repo_root") or "") if owner_rec else ""
 
     # Determine content_type from prefix.
-    _prefix = collection_content_type(collection)
+    _prefix = split_candidate_collection_name(collection)[0]
     if _prefix == "code":
         content_type = "code"
     elif _prefix == "docs":
@@ -1580,7 +1597,12 @@ def backfill_cmd(
                 "--from-t3 requires either --collection <NAME> or "
                 "--all-repo-collections."
             )
-        from nexus.corpus import collection_content_type, collection_owner  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        # RDR-204 Phase 3 repoint (nexus-ft04v.26): this discovers T3
+        # collections to REGISTER -- the row-based collection_content_type/
+        # collection_owner would raise CollectionNotRegisteredError for
+        # exactly the unregistered ones this scan exists to find.
+        # Candidate-string derivation instead.
+        from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         t3 = _make_t3()
         if from_t3_collection:
@@ -1588,8 +1610,8 @@ def backfill_cmd(
         else:
             targets = [
                 c["name"] for c in t3.list_collections()
-                if collection_content_type(c["name"]) in ("docs", "code")
-                and "-" in collection_owner(c["name"])
+                if split_candidate_collection_name(c["name"])[0] in ("docs", "code")
+                and "-" in split_candidate_collection_name(c["name"])[1]
             ]
         total_registered = 0
         for target in targets:

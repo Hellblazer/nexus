@@ -342,7 +342,15 @@ def _find_dimension_mismatched_collections(
     skipped, not flagged — there is no name-derived dim to compare against
     for those, and guessing would risk a false-positive delete.
     """
-    from nexus.corpus import collection_model, is_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): deliberately NOT the
+    # row-based collection_model. This diagnostic's whole point is
+    # comparing what the NAME CLAIMS against the active embedder -- a
+    # mismatch between the row (authoritative) and reality should not
+    # even be possible under Phase 1's constraints, which would make this
+    # scan vacuous if repointed to the row. embedding_model_for_collection_name
+    # (regex, unaffected by the repoint) reads the name's own segment
+    # directly, exactly as this function's docstring describes.
+    from nexus.corpus import embedding_model_for_collection_name, is_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     active_dim, active_label = _active_embedding_dim(t3)
@@ -358,9 +366,9 @@ def _find_dimension_mismatched_collections(
         if not is_conformant_collection_name(name):
             skipped += 1
             continue
-        # nexus-ft04v.27 follow-up: collection_model replaces the retired
-        # parse_conformant_collection_name direct call.
-        token = collection_model(name)
+        # name is already confirmed conformant above -- the regex read
+        # never returns None here.
+        token = embedding_model_for_collection_name(name) or ""
         declared_dim = _dim_for_model_token(token)
         if declared_dim is None:
             skipped += 1
@@ -506,10 +514,16 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
     embedding-model space and are rejected unless ``--force-prefix-change``
     is set; otherwise search hits would be garbage.
     """
-    from nexus.corpus import collection_content_type  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): `new` is the RENAME
+    # TARGET -- it does not exist yet (rename is what creates it), so it
+    # structurally has no catalog row. `old` might ALSO be a legacy,
+    # never-registered collection this very rename is meant to fix.
+    # Candidate-string derivation for both sides keeps the prefix-mismatch
+    # guard symmetric, never a row-based lookup that could raise on either.
+    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-    old_prefix = collection_content_type(old)
-    new_prefix = collection_content_type(new)
+    old_prefix = split_candidate_collection_name(old)[0]
+    new_prefix = split_candidate_collection_name(new)[0]
     if old_prefix != new_prefix and not force_prefix_change:
         raise click.ClickException(
             f"prefix mismatch: {old_prefix!r} → {new_prefix!r} would change "
@@ -564,7 +578,15 @@ def reindex_cmd(name: str, force: bool) -> None:
     """Delete and re-index a collection from its source files."""
     from pathlib import Path  # noqa: PLC0415 — stdlib import kept branch-local
 
-    from nexus.corpus import collection_content_type  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): this command deletes
+    # `name`'s catalog row partway through (purge_collection_cascade
+    # below) and only best-effort re-registers it ("the re-index below
+    # must proceed" even on a failed re-register) -- every
+    # content-type dispatch in this function, before AND after that
+    # window, uses the candidate-string primitive so none of them can
+    # raise CollectionNotRegisteredError depending on where in the
+    # function they happen to run.
+    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.db.t3 import verify_collection_deep  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.doc_indexer import batch_index_markdowns, index_markdown, index_pdf  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
@@ -688,7 +710,7 @@ def reindex_cmd(name: str, force: bool) -> None:
     # unreachable; with a WORKING delete it would silently destroy the
     # collection (chunks + catalog + taxonomy + registry) and exit 0 with
     # "0 sources processed" (nexus-caifp). Refuse BEFORE deleting anything.
-    if collection_content_type(name) == "code":
+    if split_candidate_collection_name(name)[0] == "code":
         raise click.ClickException(
             f"Refusing to reindex code collection '{name}': this verb has "
             "no re-index driver for code — it would delete the collection "
@@ -717,23 +739,28 @@ def reindex_cmd(name: str, force: bool) -> None:
     try:
         from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         from nexus.corpus import (  # noqa: PLC0415 — deferred to avoid import cycle
-            collection_model,
-            collection_owner,
             is_conformant_collection_name,
-            model_version_for_collection_name,
+            parse_conformant_collection_name,
         )
 
         _w = make_catalog_writer()
         try:
             if is_conformant_collection_name(name):
-                # nexus-ft04v.27: the four funnel-style helpers replace the
-                # retired parse_conformant_collection_name dict.
+                # RDR-204 Phase 3 repoint (nexus-ft04v.26): `name`'s row was
+                # JUST DELETED by purge_collection_cascade above -- this call
+                # is what RECREATES it, so the row-based collection_content_type/
+                # collection_owner/collection_model (funnelled by
+                # nexus-ft04v.27) would now raise CollectionNotRegisteredError
+                # every time. `name` is already confirmed conformant by the
+                # `if` above, so its own segments (parsed once, pure regex,
+                # no row lookup) are exactly what a re-registration needs.
+                parsed = parse_conformant_collection_name(name)
                 _w.register_collection(
                     name,
-                    content_type=collection_content_type(name),
-                    owner_id=collection_owner(name),
-                    embedding_model=collection_model(name),
-                    model_version=model_version_for_collection_name(name),
+                    content_type=parsed["content_type"],
+                    owner_id=parsed["owner_id"],
+                    embedding_model=parsed["embedding_model"],
+                    model_version=parsed["model_version"],
                 )
             else:
                 _w.register_collection(name)
@@ -757,7 +784,7 @@ def reindex_cmd(name: str, force: bool) -> None:
 
     # (code__ collections are refused before the delete above, nexus-caifp —
     # this dispatch starts at the prose families.)
-    if collection_content_type(name) == "rdr":
+    if split_candidate_collection_name(name)[0] == "rdr":
         rdr_files = [Path(sp) for sp in source_paths if Path(sp).exists()]
         missing = [sp for sp in source_paths if not Path(sp).exists()]
         if rdr_files:
@@ -786,7 +813,7 @@ def reindex_cmd(name: str, force: bool) -> None:
                 raise click.exceptions.Exit(1)
             indexed = len(rdr_files)
 
-    elif collection_content_type(name) in ("docs", "knowledge"):
+    elif split_candidate_collection_name(name)[0] in ("docs", "knowledge"):
         for sp in source_paths:
             p = Path(sp)
             if not p.exists():

@@ -31,7 +31,7 @@ from typing import Literal
 
 import structlog
 
-from nexus.corpus import _CONFORMANT_COLLECTION_RE, collection_content_type
+from nexus.corpus import _CONFORMANT_COLLECTION_RE, split_candidate_collection_name
 from nexus.db.t3 import T3Database
 
 _log = structlog.get_logger(__name__)
@@ -91,12 +91,18 @@ def _target_name(old: str, active_token: str) -> str:
 
 
 def _classify(name: str, source_paths: frozenset[str], sourceless: int) -> StaleKind:
-    # RDR-204 Phase 3 funnel (nexus-ft04v.22): `startswith("code__")` <=>
-    # `collection_content_type(name) == "code"` with no edge divergence --
-    # the "__" is baked into the compared literal, so a bare "code" (no
-    # separator at all) reads False under both the raw startswith and the
-    # helper (content_type is "" when there is no "__").
-    if collection_content_type(name) == "code":
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): this classifies a STALE
+    # (pre-migration) collection -- migration exists precisely to handle
+    # legacy installs that may predate catalog registration, so the
+    # row-based collection_content_type could raise
+    # CollectionNotRegisteredError on exactly the collections this
+    # function must classify. Candidate-string derivation instead;
+    # `startswith("code__")` <=> `split_candidate_collection_name(name)[0]
+    # == "code"` with no edge divergence -- the "__" is baked into the
+    # compared literal, so a bare "code" (no separator at all) reads
+    # False under both the raw startswith and the helper (first segment
+    # is "" when there is no "__").
+    if split_candidate_collection_name(name)[0] == "code":
         return "code"
     if not source_paths:
         return "sourceless"
@@ -264,9 +270,10 @@ def _default_reindex(
         return int(result or 0)
 
     indexed = 0
-    # RDR-204 Phase 3 funnel (nexus-ft04v.22): same reasoning as _classify's
-    # collection_content_type substitution above -- no edge divergence.
-    if collection_content_type(target_name) == "rdr":
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): `target_name` is the
+    # MIGRATION TARGET (_target_name's model-swapped derivation) -- it may
+    # not be registered yet. Same reasoning as _classify above.
+    if split_candidate_collection_name(target_name)[0] == "rdr":
         rdr_files = [Path(sp) for sp in source_paths if Path(sp).exists()]
         if rdr_files:
             # batch returns {path: "indexed"|"skipped"|"failed"}; "skipped"

@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from nexus.corpus import collection_content_type, collection_owner
+from nexus.corpus import split_candidate_collection_name
 from nexus.db.limits import QUOTAS
 
 if TYPE_CHECKING:
@@ -320,13 +320,17 @@ def _content_type_for_collection(collection: str) -> str:
     docs, not pdf). Falls back to ``"knowledge"`` for a non-conformant name
     with no prefix.
     """
-    # RDR-204 Phase 3 funnel (nexus-ft04v.22): reproduces
-    # `collection.split("__", 1)[0]` byte-identically via the two funnel
-    # helpers -- see http_vector_client.per_collection_chunk_cap's comment
-    # for why the naive `collection_content_type(x) or x` would diverge
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): this derives content_type
+    # for a SYNTHESIZED (registering) catalog row -- the collection this
+    # backfill is registering has, by definition, no row yet. Candidate-
+    # string derivation (split_candidate_collection_name), not the
+    # row-based collection_content_type/collection_owner -- see
+    # http_vector_client.per_collection_chunk_cap's comment for why the
+    # naive `split_candidate_collection_name(x)[0] or x` would diverge
     # (it conflates "no '__' at all" with "'__' present but the first
     # segment is empty", e.g. "__weird").
-    raw_prefix = collection if collection_owner(collection) == collection else collection_content_type(collection)
+    _ct_probe, _owner_probe = split_candidate_collection_name(collection)
+    raw_prefix = collection if _owner_probe == collection else _ct_probe
     prefix = raw_prefix.strip()
     return prefix or "knowledge"
 

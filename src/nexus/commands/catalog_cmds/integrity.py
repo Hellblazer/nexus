@@ -625,10 +625,14 @@ def _classify_never_chunked(e: object, owner_roots: dict[str, str] | None = None
     anomalous and worth investigating, not something to wave through as
     "legitimate by design".
     """
-    from nexus.corpus import collection_content_type  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): this classifies a catalog
+    # document whose collection may itself be drifted/unregistered --
+    # candidate-string derivation, never the row-based
+    # collection_content_type, so one bad entry cannot abort the report.
+    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     if (
-        collection_content_type(e.physical_collection) == "knowledge"
+        split_candidate_collection_name(e.physical_collection)[0] == "knowledge"
         and not e.file_path
         and not e.source_uri
     ):

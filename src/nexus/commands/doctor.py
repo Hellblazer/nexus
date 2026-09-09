@@ -1416,7 +1416,7 @@ def _report_fanout_floor_census() -> None:
     round trip, no write, no effect on ``nx doctor``'s exit code —
     informational only, same posture as ``--check-engine-activity``.
     """
-    from nexus.corpus import collection_content_type  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
     from nexus.mcp.core import _fanout_exclusions_for_group  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
 
     try:
@@ -1432,23 +1432,32 @@ def _report_fanout_floor_census() -> None:
 
     names = [row["name"] for row in rows]
     counts: dict[str, int] = {}
+    row_content_type: dict[str, str] = {}
     for row in rows:
         raw = row.get("count")
-        if raw is None:
-            continue
-        count = int(raw)
-        if count < 0:
-            continue  # failed-count sentinel; unknown, not a real size
-        counts[row["name"]] = count
+        if raw is not None:
+            count = int(raw)
+            if count >= 0:
+                counts[row["name"]] = count
+            # count < 0 is the failed-count sentinel; unknown, not a real size.
+        ct = row.get("content_type")
+        if ct is not None:
+            row_content_type[row["name"]] = ct
 
     groups: dict[str, list[str]] = {}
     for name in names:
-        # `or name`: collection_content_type() returns "" when *name* has
-        # no "__" separator at all; the pre-funnel bare `split("__", 1)[0]`
-        # returned the WHOLE name in that case (never ""), which is what
-        # keeps such a name in its own single-entry group below instead of
-        # silently dropping out of the census.
-        prefix = collection_content_type(name) or name
+        # RDR-204 Phase 3 repoint (nexus-ft04v.26): prefer the catalog
+        # row's content_type -- already carried on `rows` (the SAME fetch
+        # this census already made, never a second round trip). Fall back
+        # to candidate-string derivation, never the row-based
+        # collection_content_type, for a name with no row: this is an
+        # informational diagnostic census over the LIVE T3 collection
+        # list, which by design can include unregistered/legacy names --
+        # exactly what this census must still be able to report on.
+        # `or name`: an empty first-segment result (no "__" separator at
+        # all) keeps such a name in its own single-entry group below
+        # instead of silently dropping out of the census.
+        prefix = row_content_type.get(name) or split_candidate_collection_name(name)[0] or name
         if prefix:
             groups.setdefault(prefix, []).append(name)
 

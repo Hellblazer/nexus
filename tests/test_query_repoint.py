@@ -625,7 +625,21 @@ class TestQueryNoCatalogParamsCollectionsSorted:
 
     def test_no_catalog_params_collections_sorted(self, monkeypatch):
         """H1: structured['collections'] is sorted (not arbitrary set order)."""
+        import nexus.mcp_infra as mi
         import nexus.search_engine as se
+
+        # RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26): scoring.py's
+        # has_code check now reads the catalog row -- these are synthetic
+        # test collection names ("z_col"/"a_col") with no real row; fake
+        # one so the downstream scoring path this test does not otherwise
+        # care about doesn't raise CollectionNotRegisteredError.
+        monkeypatch.setattr(
+            mi, "get_collection_row",
+            lambda name: {
+                "content_type": "knowledge", "owner_id": name, "embedding_model": "x",
+                "lifecycle_state": "live",
+            },
+        )
 
         class _FakeResult:
             def __init__(self, coll, dist):

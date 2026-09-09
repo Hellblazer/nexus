@@ -91,7 +91,7 @@ def migrate_fallback_cmd(
       nx catalog migrate-fallback docs__default --yes
     """
     from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
-        collection_content_type, is_conformant_collection_name, voyage_model_for_collection,
+        is_conformant_collection_name, voyage_model_for_collection,
     )
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
@@ -111,7 +111,13 @@ def migrate_fallback_cmd(
             f"fallback collection."
         )
 
-    content_type = collection_content_type(source)
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): `src_row` (fetched above
+    # via the catalog-tier's own /collections/get) already carries
+    # content_type -- read it directly instead of a second, separately-
+    # cached lookup through collection_content_type (mcp_infra's
+    # /v1/vectors/stats-backed row cache), which would also raise
+    # CollectionNotRegisteredError for a registered-but-chunkless source.
+    content_type = src_row.get("content_type") or ""
     if not content_type:
         raise click.ClickException(
             f"source {source!r} has no content-type prefix; cannot "

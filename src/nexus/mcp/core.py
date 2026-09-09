@@ -25,14 +25,16 @@ except ImportError:  # pragma: no cover — future SDK restructure
     _FastMCPSettings = None
 
 from nexus.corpus import (
+    CollectionNotRegisteredError,
     _refuse_placeholder_subject,
     collection_content_type,
+    collection_model,
     collection_owner,
     embedding_model_for_collection,
-    embedding_model_for_collection_name,
     index_model_for_collection,
     is_conformant_collection_name,
     resolve_corpus,
+    split_candidate_collection_name,
     t3_collection_name,
 )
 from nexus.db.t3 import verify_collection_deep
@@ -2450,13 +2452,7 @@ def _resolve_corpus_target(
     if corpus == "all":
         seen: list[str] = []
         for n in all_names:
-            # RDR-204 Phase 3 funnel (nexus-ft04v.21): the explicit
-            # collection_owner(n) == n branch (rather than
-            # `collection_content_type(n) or n`) keeps a "__"-having name
-            # whose first segment is genuinely empty from being silently
-            # replaced by the whole name -- see collection_owner's
-            # docstring for the "== n iff no separator" contract.
-            prefix = n if collection_owner(n) == n else collection_content_type(n)
+            prefix = _collection_family_prefix(n)
             if prefix and prefix not in seen:
                 seen.append(prefix)
         corpus = ",".join(seen) if seen else "knowledge,code,docs,rdr"
@@ -2465,9 +2461,15 @@ def _resolve_corpus_target(
         part = part.strip()
         if not part:
             continue
-        # collection_owner(part) != part is the funnel-helper-contract
-        # substitute for a raw "__" in part test (see its docstring).
-        if collection_owner(part) != part:
+        # RDR-204 Phase 3 repoint (nexus-ft04v.26): *part* is a user-typed
+        # --corpus TOKEN, not necessarily an existing collection -- the
+        # row-based collection_owner would raise CollectionNotRegisteredError
+        # on a bare "code" or a legacy "docs__foo" that has no row under
+        # that exact string. split_candidate_collection_name(part)[1] !=
+        # part is the STRING-SHAPE substitute for a raw "__" in part test
+        # (see its docstring) -- this is the same class of candidate-string
+        # site as nexus.corpus.t3_collection_name's own ct/rest split.
+        if split_candidate_collection_name(part)[1] != part:
             target.append(t3_collection_name(part, t3=t3))
         else:
             fanned_out = resolve_corpus(part, all_names)
@@ -2489,6 +2491,30 @@ def _resolve_corpus_target(
     return list(dict.fromkeys(target))
 
 
+def _collection_family_prefix(name: str) -> str:
+    """Best-effort corpus-family label for *name*, for the two purely
+    informational groupings in this module (the ``corpus="all"`` prefix
+    expansion above, and the planner's collection-name hint sampler
+    below) -- never for a correctness-sensitive read.
+
+    RDR-204 Phase 3 repoint (nexus-ft04v.26): tries the row-based
+    ``collection_content_type``/``collection_owner`` (correct for the
+    overwhelming common case, since *name* comes from the SAME
+    row-cache-backed list :func:`nexus.mcp_infra.get_collection_names`
+    returns) but degrades to treating *name* as its OWN singleton family
+    when it has no catalog row -- a stats-listed collection with no row
+    is possible only in the pre-ghost-sweep window (RDR §Technical Design
+    step 3) or a genuinely orphaned entry; neither is worth failing an
+    "all" corpus expansion or a planner hint over. Mirrors
+    ``_group_collections_by_model``'s "no info -> own singleton group,
+    never guessed and never dropped" precedent for the model axis.
+    """
+    try:
+        return name if collection_owner(name) == name else collection_content_type(name)
+    except CollectionNotRegisteredError:
+        return name
+
+
 def _group_collections_by_model(target: list[str]) -> list[list[str]]:
     """Group a resolved collection list by embedding model (nexus-3l6gz).
 
@@ -2500,17 +2526,25 @@ def _group_collections_by_model(target: list[str]) -> list[list[str]]:
     silently embeds the query with only the first collection's model and
     mis-ranks/drops every other model's chunks (root cause: nexus-3l6gz).
 
-    Groups collections by :func:`embedding_model_for_collection_name` so
-    each combined-query call is model-homogeneous. A collection whose name
-    is not conformant (the parse returns ``None``) is kept in its OWN
-    singleton group keyed by its raw collection name — never guessed into
-    an inferred model group and never silently dropped.
+    RDR-204 Phase 3 repoint (nexus-ft04v.26): groups by the catalog row's
+    ``embedding_model`` COLUMN (:func:`nexus.corpus.collection_model`)
+    instead of a name parsed via :func:`embedding_model_for_collection_name`
+    -- a collection whose stored vectors' model disagrees with what its
+    name says (the exact drift GH #667 came from) is now grouped by what
+    it actually IS, closing the same authority gap as ``resolve_corpus``.
+    A collection with no catalog row is kept in its OWN singleton group
+    keyed by its raw collection name — never guessed into an inferred
+    model group and never silently dropped, exactly like the prior
+    not-conformant fallback.
 
     Preserves ``target``'s relative ordering both across and within groups.
     """
     groups: dict[str, list[str]] = {}
     for name in target:
-        key = embedding_model_for_collection_name(name) or name
+        try:
+            key = collection_model(name) or name
+        except CollectionNotRegisteredError:
+            key = name
         groups.setdefault(key, []).append(name)
     return list(groups.values())
 
@@ -7629,9 +7663,7 @@ def _sample_collection_names_by_prefix(names: list[str], limit: int) -> list[str
     alphabetical truncation. Deterministic: families and names sorted."""
     by_prefix: dict[str, list[str]] = {}
     for n in sorted(set(names)):
-        # RDR-204 Phase 3 funnel (nexus-ft04v.21): see _resolve_corpus_target's
-        # identical pattern above for why this is not `collection_content_type(n) or n`.
-        family = n if collection_owner(n) == n else collection_content_type(n)
+        family = _collection_family_prefix(n)
         by_prefix.setdefault(family, []).append(n)
     out: list[str] = []
     queues = [by_prefix[k] for k in sorted(by_prefix)]

@@ -11,7 +11,7 @@ from typing import Any
 import structlog
 
 from nexus.config import TuningConfig, get_telemetry_config, load_config
-from nexus.corpus import collection_content_type, embedding_model_for_collection_name
+from nexus.corpus import embedding_model_for_collection_name, split_candidate_collection_name
 from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
 from nexus.types import SearchResult
 
@@ -1488,9 +1488,16 @@ def _apply_salience_boost(
     """
     from nexus.salience import token_overlap_boost  # noqa: PLC0415 — circular-dep avoidance (nexus.salience)
 
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): a search RESULT's
+    # collection has live chunks (that is why it matched) but is NOT
+    # guaranteed to have a catalog row -- /v1/vectors/stats lists any
+    # collection with live data regardless of registration state, and a
+    # legacy pre-Phase-1 collection can be searchable with no row at all.
+    # Search post-processing must never crash on that; candidate-string
+    # derivation, not the row-based collection_content_type.
     targeted = [
         r for r in results
-        if collection_content_type(r.collection) in ("knowledge", "docs")
+        if split_candidate_collection_name(r.collection)[0] in ("knowledge", "docs")
     ]
     if not targeted:
         return results

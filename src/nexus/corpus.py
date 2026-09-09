@@ -757,8 +757,16 @@ def voyage_model_for_collection(collection_name: str) -> str:
     code__ and all others    → voyage-code-3
 
     In local mode, callers bypass this and use ``LocalEmbeddingFunction``.
+
+    RDR-204 Phase 3 (nexus-ft04v.26): deliberately NOT the row-based
+    collection_content_type. This function's own contract is a NAME-PREFIX
+    dispatch table (its docstring above states it in exactly those terms),
+    called broadly on collections that may be live with data but never
+    registered (a legacy pre-Phase-1 collection, or a fresh test/CLI
+    fixture) -- query/index model dispatch must not crash on that.
+    split_candidate_collection_name, the shared candidate-string primitive.
     """
-    if collection_content_type(collection_name) in ("docs", "knowledge", "rdr"):
+    if split_candidate_collection_name(collection_name)[0] in ("docs", "knowledge", "rdr"):
         return "voyage-context-3"
     return "voyage-code-3"
 
@@ -782,8 +790,13 @@ def default_projection_threshold(collection_name: str) -> float:
 
     Unknown prefixes fall back to 0.70 (safer under-match bias).
     See ``docs/exploration/taxonomy-projection-tuning.md`` for calibration methodology.
+
+    RDR-204 Phase 3 (nexus-ft04v.26): candidate-string derivation, not the
+    row-based collection_content_type -- see voyage_model_for_collection's
+    docstring for why (this default calibration table is called on the
+    same broad, possibly-unregistered collection population).
     """
-    content_type = collection_content_type(collection_name)
+    content_type = split_candidate_collection_name(collection_name)[0]
     if content_type == "knowledge":
         return 0.50
     if content_type in ("docs", "rdr"):
@@ -819,14 +832,17 @@ def _legacy_content_type_for_collection(collection_name: str) -> str:
     ``rdr__`` map to their own type; everything else (including
     ``code__``) defaults to ``"code"``.
     """
-    # NOT `collection_content_type(...) or "code"`: that only substitutes
-    # on an EMPTY (no-"__") result, but this function's historical
-    # contract defaults to "code" for ANY unrecognized prefix too (e.g.
-    # "other__x" -> "code"), not just a dunder-free name -- and
-    # collection_content_type deliberately returns an unrecognized raw
-    # prefix UNFILTERED (see its docstring), so it must be filtered here
-    # explicitly.
-    content_type = collection_content_type(collection_name)
+    # RDR-204 Phase 3 (nexus-ft04v.26): candidate-string derivation, not
+    # the row-based collection_content_type -- same reason as
+    # voyage_model_for_collection above.
+    #
+    # NOT `split_candidate_collection_name(...)[0] or "code"`: that only
+    # substitutes on an EMPTY (no-"__") result, but this function's
+    # historical contract defaults to "code" for ANY unrecognized prefix
+    # too (e.g. "other__x" -> "code"), not just a dunder-free name -- and
+    # split_candidate_collection_name deliberately returns an unrecognized
+    # raw prefix UNFILTERED, so it must be filtered here explicitly.
+    content_type = split_candidate_collection_name(collection_name)[0]
     return content_type if content_type in ("docs", "knowledge", "rdr") else "code"
 
 

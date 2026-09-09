@@ -1176,7 +1176,7 @@ def enrich_aspects(
     error out at the config-selection step.
     """
     from nexus.aspect_extractor import select_config  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
-    from nexus.corpus import collection_content_type  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
 
     config = select_config(collection)
     if config is None:
@@ -1185,7 +1185,12 @@ def enrich_aspects(
             f"'{collection}'. Supported prefixes: knowledge__*, "
             f"rdr__*. Aborting."
         )
-        if collection_content_type(collection) == "docs":
+        # RDR-204 Phase 3 repoint (nexus-ft04v.26): best-effort UX hint,
+        # not a correctness read -- candidate-string derivation so a
+        # collection with no catalog row (or a genuinely bad --collection
+        # typo) still gets the plain "no extractor config" message instead
+        # of crashing the command.
+        if split_candidate_collection_name(collection)[0] == "docs":
             click.echo(
                 "Note: docs__* collections are not paper-shaped (nexus-z70w "
                 "reverted the #377 routing). Index academic PDFs into "
