@@ -103,12 +103,13 @@ this bead's hand-off report):
   line) needs the OWNER **and** MODEL/VERSION tail together for a
   conformant name -- byte-identical to commands/collection.py's
   ``reindex_cmd`` site, right down to the source line's shape.
-- ``catalog/chunk_quarantine.py``'s ``quarantine_collection_name`` (:69)
-  needs the same full post-content-type tail preserved (to build an
-  exact-model/version-matching quarantine sibling name); none of the
-  three helpers exposes a combined owner+model+version read.
+- ``catalog/chunk_quarantine.py``'s ``quarantine_collection_name`` (:69,
+  AT THE TIME) needed the same full post-content-type tail preserved (to
+  build an exact-model/version-matching quarantine sibling name); none of
+  the three helpers exposed a combined owner+model+version read. This one
+  was CLOSED by nexus-ft04v.26 item 6 (below) -- it now reads the row.
 
-All three stay counted -- nexus-ft04v.26 (THE REPOINT) did NOT resolve
+The other two stay counted -- nexus-ft04v.26 (THE REPOINT) did NOT resolve
 them against the catalog row's columns; they remain open (see
 COLLECTION_NAME_PARSE_CENSUS's per-site comments).
 
@@ -122,12 +123,19 @@ is now regex-based); and the fifth pattern class (above) was ADDED per
 the coordinator's ruling, raising the pin from 13 to 50 -- an increase
 that reflects the gate becoming HONEST about a parsing surface it
 previously could not see (the two primitives' external callers), not a
-regression. The FIVE holdout sites named above (collection_shape.py's 3,
+regression. Item 6 of this SAME bead then closed ONE of the five original
+holdouts named above: ``catalog/chunk_quarantine.py``'s
+``quarantine_collection_name`` now PREFERS the origin's catalog row
+(content_type/owner_id/embedding_model) and falls to
+``split_candidate_collection_name`` (one primitive_call, still counted)
+only when the origin has no row -- see that file's census-entry comment
+for the full design note, including the paired indexer.py fix that mints
+the quarantine sibling's own catalog row before any server-side GC route
+touches it. The remaining FOUR holdouts (collection_shape.py's 3,
 commands/collection.py's reindex_cmd, db/embed_migrate.py's
-migrate_collection_safe, db/reconcile.py's 3, catalog/chunk_quarantine.py's
-quarantine_collection_name) were NOT closed by this bead -- they remain
-exactly as nexus-ft04v.21/.22/.23 left them, tracked as open work in the
-bead's hand-off report.
+migrate_collection_safe, db/reconcile.py's 3) were NOT closed by this
+bead -- they remain exactly as nexus-ft04v.21/.22/.23 left them, tracked
+as open work in the bead's hand-off report.
 
 RDR-204'S OTHER NAMED EXCLUSION -- ``rdr-`` document ids -- MATCHES ZERO
 SITES HERE. The one ``rdr-`` id parse in the tree,
@@ -260,15 +268,29 @@ _EXCLUDED_SITES: dict[tuple[str, int], str] = {
 #:      name-versus-row disagreement or discover an unregistered
 #:      collection -- the RDR's own named exception
 COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {
-    # nexus-ft04v.22: :69 `quarantine_collection_name`'s `parts =
-    # origin.split("__", 1)` is deliberately left raw -- same excluded
-    # shape as commands/collection.py's reindex_cmd site below. It must
-    # preserve the ENTIRE tail after the content-type segment (owner +
-    # model + version for a conformant name) so the quarantine sibling
-    # keeps exactly the source's model/version; `collection_owner()`
-    # returns only the parsed `owner_id` field for a conformant name,
-    # discarding model/version. Confirmed by the coordinator's ruling on
-    # this bead's hand-off report.
+    # nexus-ft04v.26 item 6: `quarantine_collection_name` (RDR-204 Phase 3
+    # THE REPOINT) no longer raw-splits -- it now PREFERS *origin*'s
+    # catalog row (content_type/owner_id/embedding_model, authoritative
+    # per Gap 1) and falls to the shared candidate-string primitive
+    # `split_candidate_collection_name` (one primitive_call, counted here)
+    # only when *origin* has no row. Live-tested against the real GC
+    # integration suite (tests/test_rdr191_gc_serverside_prune.py): a
+    # fixture collection there frequently has NO catalog row (never
+    # registered before its first GC pass), so this deliberately does NOT
+    # fail loud on a missing row the way collection_content_type/
+    # collection_owner/collection_model do -- one unregistered origin must
+    # not abort the whole GC sweep. This is the coordinator's own named
+    # exception for "chunk_quarantine's sibling minting IF IT MUST"
+    # (ruling 2026-09-08). The fallback branch still preserves the ENTIRE
+    # tail after the content-type segment (owner + model + version) so the
+    # quarantine sibling keeps exactly the source's model/version --
+    # `collection_owner()` alone would discard model/version. A second,
+    # separate fix (indexer.py's `_prune_collection_serverside`, same
+    # bead) mints the quarantine sibling's own catalog row via
+    # `ensure_collection_registered` before any server-side GC route
+    # touches it -- RDR-204 Phase 1 retired the engine's auto-register-on-
+    # first-write, and the quarantine sibling's writes are 100%
+    # server-side (no HttpVectorClient.upsert call ever registers it).
     "src/nexus/catalog/chunk_quarantine.py": 1,
     # class (d): _content_type_for_collection synthesizes a row for the
     # orphan GC backfill -- the collection being registered has no row by

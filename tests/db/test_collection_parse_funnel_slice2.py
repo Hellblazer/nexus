@@ -413,22 +413,62 @@ class TestMigrateCollectionSafeCorpusDerivation:
 
 
 class TestQuarantineCollectionName:
-    """nexus-ft04v.22: pins both branches of ``quarantine_collection_name``,
-    including the no-``"__"``-at-all edge case the existing integration
-    tests (tests/test_rdr191_gc_serverside_prune.py) never exercise
-    directly since they only ever pass real conformant collection names."""
+    """RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26, item 6), class (d):
+    prefers the origin's catalog row (authoritative, Gap 1 -- a row that
+    disagrees with the name wins) but falls to candidate-string
+    derivation, NEVER raises, when there is none -- live-tested against
+    tests/test_rdr191_gc_serverside_prune.py's real GC integration suite,
+    where the fixture collection frequently has no row; one unregistered
+    collection must not abort the whole GC sweep."""
 
-    def test_conformant_name_keeps_content_type_in_prefix(self) -> None:
+    def test_reads_content_type_owner_model_from_the_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import nexus.mcp_infra as mi
+
+        monkeypatch.setattr(
+            mi, "get_collection_row",
+            lambda name: {
+                "content_type": "code", "owner_id": "nexus-1-1",
+                "embedding_model": "voyage-code-3", "lifecycle_state": "live",
+            },
+        )
         from nexus.catalog.chunk_quarantine import quarantine_collection_name
 
         assert quarantine_collection_name("code__nexus-1-1__voyage-code-3__v1") == (
             "quarantine-code__nexus-1-1__voyage-code-3__v1"
         )
+
+    def test_row_wins_over_a_disagreeing_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The name says code__..., the row (the exact drift class GH #667
+        came from) says docs -- the row must win."""
+        import nexus.mcp_infra as mi
+
+        monkeypatch.setattr(
+            mi, "get_collection_row",
+            lambda name: {
+                "content_type": "docs", "owner_id": "proj",
+                "embedding_model": "bge-base-en-v15-768", "lifecycle_state": "live",
+            },
+        )
+        from nexus.catalog.chunk_quarantine import quarantine_collection_name
+
+        assert quarantine_collection_name("code__nexus-1-1__voyage-code-3__v1") == (
+            "quarantine-docs__proj__bge-base-en-v15-768__v1"
+        )
+
+    def test_missing_row_falls_to_conformant_name_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import nexus.mcp_infra as mi
+
+        monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
+        from nexus.catalog.chunk_quarantine import quarantine_collection_name
+
         assert quarantine_collection_name("docs__proj__bge-base-en-v15-768__v1") == (
             "quarantine-docs__proj__bge-base-en-v15-768__v1"
         )
 
-    def test_name_with_no_double_underscore_falls_back_to_x(self) -> None:
+    def test_missing_row_and_no_double_underscore_falls_back_to_x(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import nexus.mcp_infra as mi
+
+        monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
         from nexus.catalog.chunk_quarantine import quarantine_collection_name
 
         assert quarantine_collection_name("noprefixname") == "quarantine-x__noprefixname"

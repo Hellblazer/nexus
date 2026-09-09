@@ -3498,6 +3498,22 @@ def _prune_collection_serverside(
         quarantine_orphans_serverside,
         restore_rereferenced_serverside,
     )
+    from nexus.corpus import ensure_collection_registered  # noqa: PLC0415 — deferred to avoid import cycle (nexus.corpus)
+
+    # RDR-204 Phase 1 (nexus-f5wwx) retired the engine's auto-register-on-
+    # first-write: every client write path must call
+    # ensure_collection_registered() before writing, or the engine 422s an
+    # unregistered collection. The quarantine sibling's writes are entirely
+    # SERVER-SIDE (the SQL anti-join move inside gc_quarantine_orphans) --
+    # no HttpVectorClient.upsert call ever runs for it, so nothing else
+    # ever registers it. Mint it here, once, before any of the three
+    # server-side routes touch it (restore runs FIRST below and 422s on a
+    # pass with nothing quarantined yet otherwise) -- the coordinator's own
+    # named exception for chunk_quarantine's sibling minting IF IT MUST
+    # (ruling 2026-09-08). Idempotent (ensure_collection_registered's own
+    # per-process cache) and safe even when quarantine_name already has a
+    # row (a later pass on the same collection).
+    ensure_collection_registered(quarantine_name)
 
     restored = restore_rereferenced_serverside(db, quarantine_name, collection_name)
     if restored is None:
@@ -3718,6 +3734,10 @@ def _prune_deleted_files(
         from nexus.catalog.chunk_quarantine import (  # noqa: PLC0415 — deferred import
             now_stamp, quarantine_collection_name,
         )
+        # RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26): quarantine_collection_name
+        # now prefers collection_name's catalog row (authoritative) and
+        # falls to candidate-string derivation when there is none -- it
+        # never raises, so this call needs no new error handling here.
         qname = quarantine_collection_name(collection_name)
         # nexus-ou4tb contract (see the comment below): a degraded read must
         # skip THIS collection, not abort the sweep for every collection after
