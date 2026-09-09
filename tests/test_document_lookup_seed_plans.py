@@ -349,6 +349,7 @@ class TestSingleQueryFastPathLiveThroughNxAnswer:
         )
         assert "canned single-query result" in result
 
+    @pytest.mark.asyncio
     async def test_nx_answer_single_query_reroute_passes_scope_as_subtree(
         self, tmp_path: Path, seeded_library, real_plan_cache,
     ) -> None:
