@@ -1042,6 +1042,15 @@ class PgVectorRepositoryContractTest {
             .hasMessageContaining(neverRegistered);
     }
 
+    // RDR-204 Phase 2 fix round 2 (nexus-ft04v.16 fix round 2, S1): the fan-out
+    // skip's caller-visibility contract is now tested at the HTTP level, where a
+    // handler test exists for /v1/vectors/search (VectorHandlerTokenUsageTest's
+    // search_unregisteredInFanOut_headerNamesDropped_bodyStaysBareArray /
+    // search_fullyRegisteredFanOut_headerAbsent) per the coordinator's design
+    // change -- the caller-visible channel is the X-Nexus-Skipped-Collections
+    // response header, not a Tokened accessor a repository-level test can see
+    // the caller's own view of.
+
     // ---------------------------------------------------------------------------
     // Contract 5: get / list / count
     // ---------------------------------------------------------------------------

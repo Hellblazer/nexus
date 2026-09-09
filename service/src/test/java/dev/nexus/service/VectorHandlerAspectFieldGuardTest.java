@@ -183,6 +183,46 @@ class VectorHandlerAspectFieldGuardTest {
             .isEqualTo(200);
     }
 
+    /**
+     * RDR-204 Phase 2 fix round 2 (nexus-ft04v.16 fix round 2, S1, coordinator
+     * design change): a fan-out over a registered + a never-registered
+     * collection reports the dropped name via the
+     * {@code X-Nexus-Skipped-Collections} response header, never a body field.
+     */
+    @Test
+    void searchAspectScoped_unregisteredInFanOut_headerNamesDropped() throws Exception {
+        String ghost = "knowledge__afg-ghost__voyage-context-3__v1";
+        var resp = post("/v1/vectors/search-aspect-scoped", Map.of(
+            "query",       "probe",
+            "collections", List.of(COLL, ghost),
+            "field",       "proposed_method",
+            "pattern",     "anything",
+            "n_results",   5));
+
+        assertThat(resp.statusCode())
+            .as("a fan-out with one dropped name still succeeds: %s", resp.body())
+            .isEqualTo(200);
+        assertThat(resp.headers().firstValue(dev.nexus.service.http.VectorHandler.SKIPPED_COLLECTIONS_HEADER))
+            .as("the dropped name must be visible via the header")
+            .contains(ghost);
+    }
+
+    /** Header ABSENT (not empty) when nothing was dropped from the fan-out. */
+    @Test
+    void searchAspectScoped_fullyRegisteredFanOut_headerAbsent() throws Exception {
+        var resp = post("/v1/vectors/search-aspect-scoped", Map.of(
+            "query",       "probe",
+            "collections", List.of(COLL),
+            "field",       "proposed_method",
+            "pattern",     "anything",
+            "n_results",   5));
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(resp.headers().firstValue(dev.nexus.service.http.VectorHandler.SKIPPED_COLLECTIONS_HEADER))
+            .as("nothing was dropped -- the header must be absent, not empty")
+            .isEmpty();
+    }
+
     /** Minimal fixed-vector stub embedder — the field guard never reaches embed() here. */
     private static final class StubEmbedder implements Embedder {
         private final int dim;

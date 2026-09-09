@@ -240,8 +240,24 @@ public final class PgVectorRepository {
      * <p>Returned by the {@code *WithTokens} sibling methods so the caller (VectorHandler)
      * receives the token count as a plain return value rather than via a side-channel.
      * Tokens = 0 means the embedder does not report billable usage (e.g. ONNX local-mode).
+     *
+     * <p><strong>{@code skippedCollections} (RDR-204 Phase 2 fix round 2, nexus-ft04v.16
+     * fix round 2, S1 -- diff-scoped critic Significant finding).</strong> Populated by
+     * the five multi-collection fan-out read methods ({@link #searchWithTokens}, {@link
+     * #hybridSearchWithTokens}, {@link #searchMetadataScopedWithTokens}, {@link
+     * #searchAspectScopedWithTokens}, {@link #searchGraphHopWithTokens}) with any name
+     * {@link #registeredSurvivors} dropped from the fan-out -- never {@code null}, empty
+     * when nothing was dropped. Before this, a dropped name was visible only in the
+     * server's structured warning log; this return-value side channel is how the CALLER
+     * (VectorHandler, then the HTTP response) can see it too. The 2-arg constructor keeps
+     * every existing {@code new Tokened<>(value, tokens)} call site (single-collection
+     * routes, writes) compiling unchanged, with an empty list.
      */
-    public record Tokened<T>(T value, long tokens) {}
+    public record Tokened<T>(T value, long tokens, List<String> skippedCollections) {
+        public Tokened(T value, long tokens) {
+            this(value, tokens, List.of());
+        }
+    }
 
     private final TenantScope    tenantScope;
     private final Embedder       docEmbedder;
@@ -1027,7 +1043,8 @@ public final class PgVectorRepository {
         // RDR-204 Phase 2 fix round (nexus-ft04v.16 fix round, C1): drop any
         // unregistered name before the dim check rather than aborting the whole
         // fan-out — see registeredSurvivors' own javadoc.
-        collectionNames = registeredSurvivors(tenant, collectionNames, "searchWithTokens");
+        List<String> skippedCollections = new ArrayList<>();
+        collectionNames = registeredSurvivors(tenant, collectionNames, "searchWithTokens", skippedCollections);
         int dim = dimForCollection(tenant, collectionNames.get(0));
         for (String col : collectionNames) {
             int colDim = dimForCollection(tenant, col);
@@ -1092,7 +1109,7 @@ public final class PgVectorRepository {
         }
         // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in)
         enrichSearchRows(tenant, rows, includeSourceUri);
-        return new Tokened<>(rows, embedResult.tokens());
+        return new Tokened<>(rows, embedResult.tokens(), skippedCollections);
     }
 
     /**
@@ -1208,12 +1225,13 @@ public final class PgVectorRepository {
                                                                       Map<String, Object> where,
                                                                       boolean includeSourceUri) {
         long[] tokensOut = {0L};
+        List<String> skippedOut = new ArrayList<>();
         List<Map<String, Object>> rows =
             hybridSearch(tenant, queryText, collectionNames, nResults, where, SELECTIVE_GATE_MAX,
-                         tokensOut);
+                         tokensOut, skippedOut);
         // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in)
         enrichSearchRows(tenant, rows, includeSourceUri);
-        return new Tokened<>(rows, tokensOut[0]);
+        return new Tokened<>(rows, tokensOut[0], skippedOut);
     }
 
     /**
@@ -1238,13 +1256,14 @@ public final class PgVectorRepository {
      *                         gate to HNSW-first and re-enable the collapse, so it is
      *                         rejected).
      */
-    /** Package-private overload for tests pinning selectiveGateMax; discards token count. */
+    /** Package-private overload for tests pinning selectiveGateMax; discards token count
+     *  and any skipped-collection names. */
     public List<Map<String, Object>> hybridSearch(String tenant, String queryText,
                                            List<String> collectionNames,
                                            int nResults,
                                            Map<String, Object> where,
                                            int selectiveGateMax) {
-        return hybridSearch(tenant, queryText, collectionNames, nResults, where, selectiveGateMax, null);
+        return hybridSearch(tenant, queryText, collectionNames, nResults, where, selectiveGateMax, null, null);
     }
 
     /**
@@ -1270,7 +1289,8 @@ public final class PgVectorRepository {
                                            int nResults,
                                            Map<String, Object> where,
                                            int selectiveGateMax,
-                                           long[] tokensOut) {
+                                           long[] tokensOut,
+                                           List<String> skippedOut) {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return List.of();
         }
@@ -1293,7 +1313,7 @@ public final class PgVectorRepository {
         // RDR-204 Phase 2 fix round (nexus-ft04v.16 fix round, C1): drop any
         // unregistered name before the dim check rather than aborting the whole
         // fan-out — see registeredSurvivors' own javadoc.
-        collectionNames = registeredSurvivors(tenant, collectionNames, "hybridSearch");
+        collectionNames = registeredSurvivors(tenant, collectionNames, "hybridSearch", skippedOut);
         int dim = dimForCollection(tenant, collectionNames.get(0));
         for (String col : collectionNames) {
             int colDim = dimForCollection(tenant, col);
@@ -1847,7 +1867,9 @@ public final class PgVectorRepository {
         // RDR-204 Phase 2 fix round (nexus-ft04v.16 fix round, C1): drop any
         // unregistered name before the homogeneity checks rather than aborting the
         // whole fan-out — see registeredSurvivors' own javadoc.
-        collectionNames = registeredSurvivors(tenant, collectionNames, "searchMetadataScopedWithTokens");
+        List<String> skippedCollections = new ArrayList<>();
+        collectionNames = registeredSurvivors(tenant, collectionNames, "searchMetadataScopedWithTokens",
+                                              skippedCollections);
         int dim = requireHomogeneousDim(tenant, collectionNames);
         requireHomogeneousModel(tenant, collectionNames);
         EmbedResult embed = embedQuery(tenant, collectionNames.get(0), queryText, dim);
@@ -1864,7 +1886,7 @@ public final class PgVectorRepository {
                 queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, nResults);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults), embed.tokens());
+        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults), embed.tokens(), skippedCollections);
     }
 
     /**
@@ -1945,7 +1967,9 @@ public final class PgVectorRepository {
         // RDR-204 Phase 2 fix round (nexus-ft04v.16 fix round, C1): drop any
         // unregistered name before the homogeneity checks rather than aborting the
         // whole fan-out — see registeredSurvivors' own javadoc.
-        collectionNames = registeredSurvivors(tenant, collectionNames, "searchAspectScopedWithTokens");
+        List<String> skippedCollections = new ArrayList<>();
+        collectionNames = registeredSurvivors(tenant, collectionNames, "searchAspectScopedWithTokens",
+                                              skippedCollections);
         int dim = requireHomogeneousDim(tenant, collectionNames);
         requireHomogeneousModel(tenant, collectionNames);
         EmbedResult embed = embedQuery(tenant, collectionNames.get(0), queryText, dim);
@@ -1962,7 +1986,7 @@ public final class PgVectorRepository {
                 queryVec, colls, field, pattern, minConfidence, whereJsonb, nResults);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults), embed.tokens());
+        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults), embed.tokens(), skippedCollections);
     }
 
     /**
@@ -2083,7 +2107,9 @@ public final class PgVectorRepository {
         // RDR-204 Phase 2 fix round (nexus-ft04v.16 fix round, C1): drop any
         // unregistered name before the homogeneity checks rather than aborting the
         // whole fan-out — see registeredSurvivors' own javadoc.
-        collectionNames = registeredSurvivors(tenant, collectionNames, "searchGraphHopWithTokens");
+        List<String> skippedCollections = new ArrayList<>();
+        collectionNames = registeredSurvivors(tenant, collectionNames, "searchGraphHopWithTokens",
+                                              skippedCollections);
         int dim = requireHomogeneousDim(tenant, collectionNames);
         requireHomogeneousModel(tenant, collectionNames);
         EmbedResult embed = embedQuery(tenant, collectionNames.get(0), queryText, dim);
@@ -2101,7 +2127,7 @@ public final class PgVectorRepository {
                 queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, nResults);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults), embed.tokens());
+        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults), embed.tokens(), skippedCollections);
     }
 
     /**
@@ -2131,14 +2157,21 @@ public final class PgVectorRepository {
      * not a stale-cache race in a fan-out. This helper is for multi-collection FAN-OUT
      * reads only.
      *
-     * @param opLabel a short label for the structured warning log (the calling
-     *                method's name), so a skipped-collection event is traceable to
-     *                which endpoint saw it
+     * @param opLabel   a short label for the structured warning log (the calling
+     *                  method's name), so a skipped-collection event is traceable to
+     *                  which endpoint saw it
+     * @param droppedOut mutable out-param (mirrors {@code hybridSearch}'s existing
+     *                  {@code long[] tokensOut} side channel): every dropped name is
+     *                  appended here, so the caller can thread it into the response
+     *                  {@link Tokened#skippedCollections()} field (RDR-204 Phase 2 fix
+     *                  round 2, S1). {@code null} is accepted for a caller that only
+     *                  wants the survivors.
      * @throws UnregisteredCollectionException naming every dropped collection when
      *         NONE of {@code collectionNames} survive — a request that is entirely
      *         wrong must still fail loud, exactly like the single-collection case
      */
-    private List<String> registeredSurvivors(String tenant, List<String> collectionNames, String opLabel) {
+    private List<String> registeredSurvivors(String tenant, List<String> collectionNames, String opLabel,
+                                             List<String> droppedOut) {
         List<String> survivors = new ArrayList<>(collectionNames.size());
         List<String> dropped = new ArrayList<>();
         for (String col : collectionNames) {
@@ -2156,6 +2189,9 @@ public final class PgVectorRepository {
         if (!dropped.isEmpty()) {
             log.warn("event=search_skipped_unregistered_collections op={} tenant={} names={}",
                 opLabel, tenant, dropped);
+            if (droppedOut != null) {
+                droppedOut.addAll(dropped);
+            }
         }
         if (survivors.isEmpty()) {
             throw new UnregisteredCollectionException(tenant, String.join(", ", collectionNames));

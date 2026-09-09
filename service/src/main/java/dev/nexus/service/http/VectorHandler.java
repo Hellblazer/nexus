@@ -118,6 +118,21 @@ public final class VectorHandler implements HttpHandler {
      */
     public static final String USAGE_TOKENS_HEADER = "X-Nexus-Usage-Tokens";
 
+    /**
+     * RDR-204 Phase 2 fix round 2 (nexus-ft04v.16 fix round 2, S1, coordinator
+     * design change): names dropped by {@link PgVectorRepository#registeredSurvivors}
+     * from a multi-collection fan-out read, comma-separated (collection names
+     * cannot contain a comma by grammar — see the conformant shape in
+     * {@code docs/collections.md}). Set ONLY when at least one name was dropped;
+     * absent otherwise. A header, never a body field, so the response body stays
+     * byte-identical to before this feature existed on every route in every case
+     * — the shipped 7.37.0 client unwraps a body object envelope only when
+     * {@code rerank=true} was requested, so a body-level field would break every
+     * other caller in exactly the window this mechanism exists to degrade
+     * gracefully through.
+     */
+    public static final String SKIPPED_COLLECTIONS_HEADER = "X-Nexus-Skipped-Collections";
+
     private final EmbedderRouter      embedderRouter;
     private final PgVectorRepository  pgRepo;
     private final RerankStage         rerankStage;
@@ -431,17 +446,31 @@ public final class VectorHandler implements HttpHandler {
     }
 
     /**
-     * Shared tail of the five search handlers: emit the query-embedding token
-     * count (bead nexus-ehc4q), then either the bare-array envelope (unchanged
-     * legacy shape) or — when the caller opted in with {@code rerank=true} —
-     * the {@link RerankStage} object envelope (RDR-188 bead nexus-9o6y2.2).
-     * A {@code rerank_top_k} without {@code rerank=true} is a caller error
-     * (400), not a silently ignored field.
+     * Shared tail of the five multi-collection search handlers: emit the
+     * query-embedding token count (bead nexus-ehc4q) and the skipped-collections
+     * header (RDR-204 Phase 2 fix round 2, nexus-ft04v.16 fix round 2, S1), then
+     * either the bare-array envelope (unchanged legacy shape) or — when the caller
+     * opted in with {@code rerank=true} — the {@link RerankStage} object envelope
+     * (RDR-188 bead nexus-9o6y2.2). A {@code rerank_top_k} without
+     * {@code rerank=true} is a caller error (400), not a silently ignored field.
+     *
+     * <p><strong>Coordinator design change (RDR-204 Phase 2 fix round 2, second
+     * pass):</strong> {@link PgVectorRepository.Tokened#skippedCollections()} is
+     * carried in the {@link #SKIPPED_COLLECTIONS_HEADER} response header, NEVER
+     * the body. The shipped 7.37.0 client (verified against
+     * {@code http_vector_client.py}) unwraps an object envelope only when
+     * {@code rerank} was requested; with rerank off it treats the payload as the
+     * bare list, so a body-level {@code skipped_collections} field would have
+     * broken every non-rerank caller in EXACTLY the stale-cache-race window this
+     * mechanism exists to degrade gracefully through. A header is inert to an old
+     * client and requires zero body-shape branching — one channel, every route,
+     * every case, body byte-identical to before this feature existed.
      */
     private void sendSearchResult(HttpExchange ex, Map<String, Object> body, String queryText,
                                   PgVectorRepository.Tokened<List<Map<String, Object>>> result)
             throws IOException {
         emitTokenUsage(ex, result.tokens());
+        emitSkippedCollections(ex, result.skippedCollections());
         boolean rerank     = optBool(body, "rerank", false);
         Integer rerankTopK = optInteger(body, "rerank_top_k");
         if (!rerank && rerankTopK != null) {
@@ -1136,6 +1165,29 @@ public final class VectorHandler implements HttpHandler {
     private static void emitTokenUsage(HttpExchange ex, long tokens) {
         if (tokens > 0) {
             ex.getResponseHeaders().set(USAGE_TOKENS_HEADER, Long.toString(tokens));
+        }
+    }
+
+    /**
+     * Emit the {@code X-Nexus-Skipped-Collections} response header when a
+     * multi-collection fan-out read dropped one or more unregistered names
+     * (RDR-204 Phase 2 fix round 2, nexus-ft04v.16 fix round 2, S1).
+     *
+     * <p>Must be called BEFORE {@link HttpUtil#send} — once headers are written
+     * the exchange is committed and further header mutations are silently ignored.
+     *
+     * <p>Only sets the header when {@code skipped} is non-empty: an old client
+     * that never inspects this header sees a byte-identical response either way
+     * (no body-shape change, ever) — see {@link #SKIPPED_COLLECTIONS_HEADER}'s
+     * own javadoc for why this is a header and not a body field.
+     *
+     * @param ex      the in-flight HTTP exchange
+     * @param skipped names dropped from the fan-out (never null; empty = nothing
+     *                dropped)
+     */
+    private static void emitSkippedCollections(HttpExchange ex, List<String> skipped) {
+        if (!skipped.isEmpty()) {
+            ex.getResponseHeaders().set(SKIPPED_COLLECTIONS_HEADER, String.join(",", skipped));
         }
     }
 

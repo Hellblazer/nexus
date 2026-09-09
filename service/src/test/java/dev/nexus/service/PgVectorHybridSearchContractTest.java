@@ -541,6 +541,13 @@ class PgVectorHybridSearchContractTest {
             .isInstanceOf(UnregisteredCollectionException.class);
     }
 
+    // RDR-204 Phase 2 fix round 2 (nexus-ft04v.16 fix round 2, S1): the fan-out
+    // skip's caller-visibility contract is now tested at the HTTP level in
+    // VectorHybridHttpTest (which already has a full handler test for this
+    // route) per the coordinator's design change -- the caller-visible channel
+    // is the X-Nexus-Skipped-Collections response header, not a Tokened
+    // accessor a repository-level test can see the caller's own view of.
+
     @Test
     void hybridSearch_emptyCollectionsList_returnsEmpty() {
         assertThat(repo1024.hybridSearch(TENANT_A, Q, List.of(), 10, null))

@@ -242,6 +242,15 @@ class PgVectorCombinedQueryContractTest {
             .hasMessageContaining(COLL_B);
     }
 
+    // RDR-204 Phase 2 fix round 2 (nexus-ft04v.16 fix round 2, S1): the fan-out
+    // skip's caller-visibility contract for metadata-scoped and graph-hop is now
+    // tested at the HTTP level in VectorHandlerCombinedQueryModelGuardTest (which
+    // already has a full handler test for both routes), and for aspect-scoped in
+    // VectorHandlerAspectFieldGuardTest, per the coordinator's design change --
+    // the caller-visible channel is the X-Nexus-Skipped-Collections response
+    // header, not a Tokened accessor a repository-level test can see the
+    // caller's own view of.
+
     @Test
     void topicScoped_chunkLevel_rankedByDistance() {
         List<Map<String, Object>> rows =

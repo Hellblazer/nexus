@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.http.VectorHandler;
 import dev.nexus.service.vectors.PgVectorRepository;
 import liquibase.Liquibase;
 import org.jooq.SQLDialect;
@@ -194,6 +195,54 @@ class VectorHybridHttpTest {
                 + "/embed absent-backend pattern), never a silent fallback")
             .isEqualTo(503);
         assertThat(resp.body()).contains("not configured");
+    }
+
+    /**
+     * RDR-204 Phase 2 fix round 2 (nexus-ft04v.16 fix round 2, S1 -- diff-scoped
+     * critic Significant finding, coordinator design change on the second pass):
+     * a fan-out over a registered + a never-registered collection is not
+     * aborted -- the registered hits still come back -- and the dropped name is
+     * visible to the HTTP caller as the {@code X-Nexus-Skipped-Collections}
+     * response HEADER, never a body field. The shipped 7.37.0 client unwraps a
+     * body object envelope only when {@code rerank=true}; with rerank off it
+     * treats the payload as the bare list, so the body stays a bare JSON array
+     * in EVERY case, skip or no skip -- verified here by parsing the body
+     * directly as a {@code List} even when a name was dropped.
+     */
+    @Test
+    void hybridSearch_overHttp_fanOutSkipsUnregistered_headerNamesDropped_bodyStaysBareArray()
+            throws Exception {
+        String ghost = "knowledge__httph-ghost__voyage-context-3__v1";
+        var resp = post(service, TOKEN_A,
+            Map.of("query", Q, "collections", List.of(COL, ghost), "n_results", 10));
+
+        assertThat(resp.statusCode())
+            .as("a fan-out with one dropped name still succeeds (got: %s)", resp.body())
+            .isEqualTo(200);
+        assertThat(resp.headers().firstValue(VectorHandler.SKIPPED_COLLECTIONS_HEADER))
+            .as("the dropped name must be visible via the header")
+            .contains(ghost);
+        List<Map<String, Object>> rows = MAPPER.readValue(resp.body(), List.class);
+        assertThat(rows.stream().map(r -> r.get("id")).toList())
+            .as("the body stays a bare array -- the registered collection's fused "
+                + "hits must still come back, with no envelope wrapping")
+            .containsExactly(HH_C1, HH_C2);
+    }
+
+    /**
+     * Header ABSENT (not empty) when nothing was dropped -- the common case,
+     * which {@link #hybridSearch_overHttp_returnsFusedRows} above already
+     * exercises for the body shape; this pins the header side of the same call.
+     */
+    @Test
+    void hybridSearch_overHttp_fullyRegisteredFanOut_headerAbsent() throws Exception {
+        var resp = post(service, TOKEN_A,
+            Map.of("query", Q, "collections", List.of(COL), "n_results", 10));
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(resp.headers().firstValue(VectorHandler.SKIPPED_COLLECTIONS_HEADER))
+            .as("nothing was dropped -- the header must be absent, not empty")
+            .isEmpty();
     }
 
     @Test
