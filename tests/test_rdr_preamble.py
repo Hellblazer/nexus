@@ -1451,9 +1451,80 @@ class TestPrgUnparsedItemStarts:
         text = "1. **First**: fine.\n2.\n**Second**: label below its number.\n"
         assert _prg_find_unparsed_item_starts(text) == ["2."]
 
+    def test_decimal_and_paren_numbering_are_reported(self):
+        """Critique of ad158133b: `5.1.` and `2)` reproduce the GH #1443 symptom
+        (absorbed into the previous item) and the first detector missed both."""
+        from nexus.commands.rdr import _prg_find_unparsed_item_starts  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "5. **Daemon**: stand it up.\n"
+            "5.1. **Lease**: a decimal sub-item.\n"
+            "6) **Routes**: paren numbering.\n"
+            "7. plain numbered item with no bold label\n"
+        )
+        assert _prg_find_unparsed_item_starts(text) == [
+            "5.1. **Lease**: a decimal sub-item.",
+            "6) **Routes**: paren numbering.",
+            "7. plain numbered item with no bold label",
+        ]
+
+    def test_phase_block_structure_is_guarded_too(self, rdr_env):
+        """Critique of ad158133b: the guard used to run only when numbered
+        items parsed, so a phase-block §Approach with a stray column-0
+        numbered line fell through to the fallback unguarded."""
+        body = (
+            "## Problem Statement\n\nProblem.\n\n"
+            "### Approach\n\n"
+            "**Phase 1: Core**\n\n"
+            "- **Daemon**: stand it up\n"
+            "2. a numbered line the fallback would drop\n\n"
+            "## Tradeoffs\n\nSome tradeoffs."
+        )
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-120-storage-substrate-split.md",
+            {"title": "Storage substrate split", "status": "accepted", "type": "decision", "priority": "P1"},
+            body=body,
+        )
+        result = _runner().invoke(
+            rdr, ["preamble", "phase-review-gate", "--", "120", "--phase", "1"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "GH #1443" in result.output
+        assert "| # | Label | Evidence needed |" not in result.output
+
     def test_phase_block_headers_are_not_item_starts(self):
         from nexus.commands.rdr import _prg_find_unparsed_item_starts  # noqa: PLC0415 — deferred, matches the file's other in-test imports
         text = "**Phase 0: Scaffolding**\n- bullet\n**Phase 1: Core**\n- bullet\n"
+        assert _prg_find_unparsed_item_starts(text) == []
+
+    def test_indented_numbered_lines_and_fenced_code_are_not_item_starts(self):
+        """Review of ad158133b: rdr-037 (a numbered shell recipe inside a code
+        fence) and rdr-063 (nested numbered checklists) were refused by the
+        first version. Column 0 is the item grammar; nothing indented or
+        fenced is an item."""
+        from nexus.commands.rdr import _prg_find_unparsed_item_starts  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "1. **Consolidate**: one database.\n"
+            "   1. nested step one\n"
+            "   2. nested step two\n"
+            "```bash\n"
+            "1. not an item, a recipe line\n"
+            "2a. also not an item\n"
+            "```\n"
+            "2. **Cut over**: flip.\n"
+        )
+        assert _prg_find_unparsed_item_starts(text) == []
+
+    def test_wrapped_bold_prose_is_not_an_item_start(self):
+        """Review of ad158133b: rdr-146 carries bold emphasis that wraps
+        across two lines inside an item's prose; it is prose, not a label."""
+        from nexus.commands.rdr import _prg_find_unparsed_item_starts  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "1. **Daemon**: stand it up.\n"
+            "   **This matters because the store is behind the\n"
+            "   daemon** and nothing else reaches it.\n"
+            "2. **Routes**: wire reads.\n"
+        )
         assert _prg_find_unparsed_item_starts(text) == []
 
 

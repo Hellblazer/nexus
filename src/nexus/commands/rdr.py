@@ -3924,9 +3924,11 @@ def _prg_parse_approach_items(
     return items
 
 
-_PRG_ITEM_START_RE = re.compile(r"^\s*(\d+[a-z]?)\.(\s|$)")
-_PRG_OPEN_BOLD_RE = re.compile(r"^\s*\*\*[^*]*$")
-_PRG_PHASE_HEADER_RE = re.compile(r"^\s*\*\*Phase\s+[0-9.]+")
+# Column 0, like _PRG_ITEM_RE: an INDENTED numbered line is a nested list or
+# a recipe inside a code fence, never a missed top-level item (review of
+# ad158133b: rdr-037 and rdr-063 both carry them and were refused).
+_PRG_ITEM_START_RE = re.compile(r"^(\d+(?:\.\d+)*[a-z]?)[.)](\s|$)")
+_PRG_FENCE_RE = re.compile(r"^\s*(```|~~~)")
 
 
 def _prg_find_unparsed_item_starts(approach_text: str) -> list[str]:
@@ -3934,24 +3936,32 @@ def _prg_find_unparsed_item_starts(approach_text: str) -> list[str]:
     :func:`_prg_parse_approach_items` would silently absorb as continuation
     text of the previous item (GH #1443).
 
-    Three shapes go invisible to the item regex and were measured to do so
-    on a downstream RDR (8 of 10 items enumerated, gate reported PASSED):
-    a non-integer item number (``5a.``), a bold label that wraps onto the
-    next line (the ``**`` opens but does not close on the line), and a
-    number on a line by itself with the label on the following line. Each
-    is a numbered line that fails the item regex, or a line that opens a
-    bold span without closing it. A ``**Phase N`` header is the
-    phase-block structure and is not an item start. Returned lines are
-    stripped; the caller refuses to enumerate rather than pass on a subset.
+    The shapes measured to go invisible (8 of 10 items enumerated on a
+    downstream RDR, gate reported PASSED) all start at column 0 with a
+    number the item regex then rejects: a sub-number (``5a.``, ``5.1.``), a
+    paren number (``2)``), a bare number whose label sits on the next line,
+    a bold label that wraps before it closes, or a plain ``N. text`` item
+    with no bold label at all. Column 0 is the whole test: an indented
+    numbered line is a nested list or a recipe, and a line inside a fenced
+    code block is code; the first version of this also flagged unclosed
+    bold, which is how this repo writes wrapped emphasis, and refused 11 of
+    its own RDRs. Measured against the corpus after that correction, every
+    numbered-item RDR this refuses has an item the parser really drops.
+    The one shape left invisible is a bold label whose number was dropped
+    entirely (``**Label**: ...`` at column 0): in this corpus that line is
+    a bold aside inside an item far more often than a lost item, so it is
+    not flagged. Returned lines are stripped; the caller refuses to
+    enumerate rather than pass on a subset, for both §Approach structures.
     """
     unparsed: list[str] = []
+    in_fence = False
     for line in approach_text.splitlines():
-        if _PRG_ITEM_RE.match(line):
+        if _PRG_FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence or _PRG_ITEM_RE.match(line):
             continue
         if _PRG_ITEM_START_RE.match(line):
-            unparsed.append(line.strip())
-            continue
-        if _PRG_OPEN_BOLD_RE.match(line) and not _PRG_PHASE_HEADER_RE.match(line):
             unparsed.append(line.strip())
     return unparsed
 
@@ -4134,7 +4144,9 @@ def preamble_phase_review_gate(args: tuple[str, ...]) -> None:
         return
 
     items = _prg_parse_approach_items(approach_text)
-    unparsed = _prg_find_unparsed_item_starts(approach_text) if items else []
+    # Guard BOTH structures (critique of ad158133b): the phase-block fallback
+    # below absorbs a stray column-0 numbered line just as silently.
+    unparsed = _prg_find_unparsed_item_starts(approach_text)
     if unparsed:
         # GH #1443: a line that looks like an item start but fails the item
         # regex used to be absorbed as continuation text, so the gate
@@ -4149,9 +4161,10 @@ def preamble_phase_review_gate(args: tuple[str, ...]) -> None:
         for raw in unparsed:
             print(f">   - `{raw[:120]}`")
         print(
-            "> Fix the RDR: integer item numbers only (no `5a.`; renumber or "
-            "nest as a bullet), the bold label opened and closed on the item's "
-            "own line, and the label on the same line as its number."
+            "> Fix the RDR: integer item numbers only (no `5a.`, `5.1.` or "
+            "`2)`; renumber or nest as an indented bullet), the bold label "
+            "opened and closed on the item's own line, and every label "
+            "carrying its number."
         )
         return
     if not items:
