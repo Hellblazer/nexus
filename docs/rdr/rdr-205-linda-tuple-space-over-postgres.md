@@ -307,9 +307,11 @@ waiter, deploy-gap retry and the deferred `LISTEN` path.
   contrary, which had read a rollback block as the live table.
 - **Verified** (research 1; cadence from `NexusService.java:78`) —
   RDR-204's ghost sweep is triggered from `AuthFilter` once per tenant
-  per JVM lifetime, a different mechanism from the all-tenant
-  `sweepScheduler` in `NexusService`, which runs every
-  `SWEEP_INTERVAL_HOURS` (six hours today). The tuple sweep extends the
+  per JVM lifetime, a different mechanism from the `sweepScheduler` in
+  `NexusService`, which runs every `SWEEP_INTERVAL_HOURS` (six hours
+  today) over the default tenant plus every tenant with a row in
+  `service_tokens` (`NexusService.java:558-580`); a tenant that has
+  tuples has minted a token, so that set covers it. The tuple sweep extends the
   scheduler at that cadence and borrows the ghost sweep's counted outcome
   record, not its trigger. Nothing in the design needs the sweep sooner:
   a lapsed lease is claimable by the availability predicate, and the
@@ -414,8 +416,10 @@ waiter, deploy-gap retry and the deferred `LISTEN` path.
       all three fds on `/dev/null`, does not (5 ms and 18 ms measured
       against 20.03 s for the inheriting shape). The projection is a
       separate async hook that reads the data-token lease file, POSTs
-      with `curl`, never mints, and skips with a stderr reason when the
-      lease is missing or near expiry. Residual: an async hook is killed
+      with `curl`, never mints, and on a missing or near-expiry lease
+      skips, appending the reason to a log file beside the ledger (an
+      async hook's stdout and stderr are never read). Residual: an async
+      hook is killed
       without trace at session end; the census's newest-row-age
       comparison is the detector. What research 5 did not run, and Phase
       3 must: the real projection script's timing with the engine up,
@@ -427,9 +431,10 @@ waiter, deploy-gap retry and the deferred `LISTEN` path.
       optimisation. The one-second re-run timer stays as defence against
       a missed signal, and a parked client must treat a 502/504 during a
       deploy as a retry, not an error. — **Method**: a named authority's
-      live measurement (`docker ps` and the `/version` gap on the engine
-      host, 2026-09-09), not documentation; re-checked at the Phase 1
-      close.
+      live measurement (the conexus session's reading of the engine
+      host's containers and the `/version` gap during the v0.1.111
+      deploy, 2026-09-09, recorded in T2 `nexus_rdr/205` under "cloud
+      facts"), not documentation; re-checked at the Phase 1 close.
 - [x] **CA 6: Both instances mint against one tenant.** — **Status**:
       Verified (one box, one config, `mint_tenant: nexus`). Gap 5 is a
       same-tenant mailbox. — **Method**: a named authority's live
@@ -580,7 +585,9 @@ in (subspace, keys_pattern, *, claimant, lease_s, timeout_s=0) -> (Tuple, claim_
 inp(subspace, keys_pattern, *, claimant, lease_s) -> (Tuple, claim_id) | None
 ack(claim_id, claimant) ; nack(claim_id, claimant)         # ownership checked
 subspaces() -> [TemplateSchema]                             # registered templates
-subspace_list(prefix) -> [{subspace, total, available, claimed, consumed}]   # concrete subspaces that exist
+subspace_list(prefix) -> [{subspace, total, available, claimed, consumed,
+                           oldest_created_at, newest_created_at}]    # concrete subspaces that exist
+registry() -> {digest, templates: [TemplateSchema]}                  # subspaces() is the templates half
 subspace_stats(subspace) -> {total, available, claimed, consumed}
 ```
 
@@ -588,7 +595,9 @@ subspace_stats(subspace) -> {total, available, claimed, consumed}
 `limits.py`) ordered by `created_at`, resuming from `since`, a
 `created_at` watermark the caller keeps; `include_consumed` lets a
 reader see acked rows, which is what a census needs and what a claimant
-never does. `timeout_s` is capped at 25 seconds by default (CA 3: the
+never does. `subspace_list` carries each subspace's newest and oldest
+`created_at`, so "the last five sessions" is a sort over the list, not
+a scan of every ledger. `timeout_s` is capped at 25 seconds by default (CA 3: the
 edge times out a response that has not started within 30 s), settable
 on the engine; a call at the cap returns the probe result and the
 caller loops. The client's own HTTP timeout is set above `timeout_s` so the
@@ -634,6 +643,17 @@ and statement timeouts.
 
 **Registry.** Templates ship as YAML in engine resources, loaded and
 validated at boot; a breach fails boot with the file and field named.
+The engine is the only holder of the registry: no client carries a copy,
+every write is validated by the engine against its own templates, and a
+client learns what exists by asking. Cooperating installations cannot
+drift on the registry because in cloud mode they share one engine; the
+only skew possible is between a client and its engine, which is the
+version skew the pinned engine version per client release already
+governs. `registry()` returns a digest of the loaded templates beside
+them, so a client or a hook script that expects a shape can detect skew
+and report it rather than guess. (RDR-110 held the registry client-side
+in the plugin, with daemon-side registration and a digest check added
+later for exactly this drift; one copy in the engine removes the class.)
 The document shape is the May format with the substrate keys dropped:
 `name`, `dimensions` (name to type, values, required), `keys` (the pinned
 key set, May's `take.match_keys`), `take` (`enabled`,
@@ -666,9 +686,10 @@ load the index churn is affordable and the sweep budget assumes it.
 `autovacuum_vacuum_scale_factor = 0.01` on both tables, the first
 per-table storage parameter in the changelog; its measured benefit is
 reclaim during sustained churn, since the default already self-heals
-once churn stops. TTL on every row; the all-tenant
-`sweepScheduler` in `NexusService`, every `SWEEP_INTERVAL_HOURS` (six
-hours today, `NexusService.java:78`), gains one more sweep that releases
+once churn stops. TTL on every row; the `sweepScheduler` in
+`NexusService`, every `SWEEP_INTERVAL_HOURS` (six hours today,
+`NexusService.java:78`) over the default tenant and every tenant in
+`service_tokens`, gains one more sweep that releases
 lapsed claims with an `expire` log row, purges expired and
 consumed-past-retention tuple rows (which sets the log's `tuple_id` to
 null), then purges log rows past the log's own longer TTL, in batches of
@@ -684,9 +705,10 @@ table) is the fix, not a fillfactor.
 
 **Client.** `nexus.db.t2.http_tuple_store.HttpTupleStore`, constructor-
 injected like the other stores; MCP tools `tuple_out`, `tuple_rd`,
-`tuple_in`, `tuple_ack`, `tuple_nack`, `tuple_subspaces`, `tuple_stats`
-(probes are `rd` and `in` with `timeout_s` zero); `nx tuple
-{out,rd,in,ack,nack,list,stats}`; three `nx doctor` rows (oldest
+`tuple_in`, `tuple_ack`, `tuple_nack`, `tuple_registry` (templates and
+digest), `tuple_list` (concrete subspaces), `tuple_stats` (probes are
+`rd` and `in` with `timeout_s` zero); `nx tuple
+{out,rd,in,ack,nack,templates,list,stats}`; three `nx doctor` rows (oldest
 unclaimed age per subspace; dead-tuple ratio and last autovacuum on the
 table; age of the last tuple sweep).
 
@@ -706,17 +728,18 @@ time.
 **Hook path.** The three blocking hooks that write the TSV today
 (`agent-dispatch-expect.sh` on `PreToolUse`, `subagent-start-stamp.sh`
 on `SubagentStart`, `subagent-stop.sh` on `SubagentStop`) stay exactly
-as they are, and the TSV stays the write-ahead. Three new `async: true`
-entries, one per event beside its blocking hook in `hooks.json`, project
-the same payload to the space: the `PreToolUse` entry writes nothing to
-the space (an expectation has no agent id yet; the TSV row is its only
-record), the `SubagentStart` entry writes the start tuple, the
-`SubagentStop` entry writes the report tuple. None of them is a child
-of a blocking hook (a child that inherits the hook's fds holds the
+as they are, and the TSV stays the write-ahead. Two new `async: true`
+entries, each beside its blocking hook in `hooks.json`, project the same
+payload to the space: the `SubagentStart` entry writes the start tuple
+and the `SubagentStop` entry writes the report tuple. `PreToolUse` gets
+no entry: an expectation has no agent id yet, and its TSV row is its
+only record. Neither entry is a child of a blocking hook (a child that inherits the hook's fds holds the
 dispatch, CA 4). Each reads the data-token lease file (the cached
 credential the client library keeps under `~/.config/nexus/`), POSTs
-with `curl`, never mints, and skips with a stderr reason when the lease
-is missing or near expiry; a failure is never propagated. The census
+with `curl`, never mints, and on a missing or near-expiry lease skips
+and appends the reason to a log file beside the ledger, since an async
+hook's stdout, stderr and exit code are never read; a failure is never
+propagated. The census
 (`expectations_census`, the scripted count the orchestration skill
 requires) gains a space-backed path that reads `ledger/<session_id>`
 with `rd` and `include_consumed`, enumerating sessions with
@@ -730,12 +753,12 @@ against the TSV's so a stalled projection is a finding.
 | --- | --- | --- |
 | Atomic claim | `AspectRepository.claimNext` / `reclaimStale` | Reuse the statement shape and the tenant-scoped transaction; new repository, since the queue's columns are aspect-specific. |
 | Batch claim | `AspectRepository.claimBatch` (a loop) | Do not reuse; a real `LIMIT n` claim is new work and lands only when a consumer asks. |
-| Sweep | `NexusService.sweepScheduler` (every `SWEEP_INTERVAL_HOURS`, all tenants); RDR-204 ghost sweep (`AuthFilter`, once per tenant per JVM) | Extend the scheduler; borrow the ghost sweep's counted outcome record, not its trigger. |
+| Sweep | `NexusService.sweepScheduler` (every `SWEEP_INTERVAL_HOURS`, the default tenant plus every tenant in `service_tokens`); RDR-204 ghost sweep (`AuthFilter`, once per tenant per JVM) | Extend the scheduler; borrow the ghost sweep's counted outcome record, not its trigger. |
 | Pre-send body cap | none (`edge_refusal.py` is post-rejection; `limits.py` holds store quotas) | New: an 8 KB guard in `HttpTupleStore.out`. |
 | Retry across the deploy gap | `nexus.retry` (502, 503, 504, 429 retryable) | Reuse unchanged. |
 | Tenant scoping | `TenantScope`, forced RLS changesets | Reuse unchanged. |
 | HTTP store client | `http_aspect_queue.py` | Reuse the shape (constructor injection, typed errors, data-token handling). |
-| Dispatch ledger | `expectations.sh`, `agent-dispatch-expect.sh`, `subagent-start.sh` | Extend: the start hook writes a tuple and injects the id; the census gains a space-backed path. The TSV and its readers stay. |
+| Dispatch ledger | `expectations.sh`, `agent-dispatch-expect.sh`, `subagent-start.sh`, `subagent-start-stamp.sh`, `subagent-stop.sh` | Extend: `subagent-start.sh` injects the id; two async entries beside the start and stop hooks write the tuples; the census gains a space-backed path. The blocking hooks, the TSV and its readers stay. |
 | Session identity | `t1.py` lease and handoff, JDR-001 | Untouched, by decision. |
 | Registry loader | RDR-110's YAML registry (archive branch, `registry.py`) | Reuse the document shape and load rules named in §Technical Design; drop the tier, similarity and Chroma keys; the loader moves to the engine. |
 
@@ -820,7 +843,7 @@ the record; the RDR-184 failures are exactly what this produced.
 
 ### Consequences
 
-- One new table pair, one handler, one client store, seven MCP tools,
+- One new table pair, one handler, one client store, eight MCP tools,
   one CLI verb. The engine's public surface grows by one route family.
 - The ledger and the mailbox get a real per-instance key and a store that
   can be queried across sessions and processes.
@@ -935,8 +958,9 @@ re-run timer; typed errors.
 
 #### Step 5: Sweep
 
-One more sweep in `runScheduledSweep`'s all-tenant loop at its existing
-cadence (`SWEEP_INTERVAL_HOURS`): release lapsed claims with an `expire`
+One more sweep in `runScheduledSweep`'s tenant loop (the default tenant
+plus every tenant in `service_tokens`) at its existing cadence
+(`SWEEP_INTERVAL_HOURS`): release lapsed claims with an `expire`
 log row, purge expired and consumed-past-retention tuple rows, then log
 rows past the log's own TTL, in batches with a commit per batch; log the
 counted outcome record every run. The sweep test seeds expired rows and
@@ -962,7 +986,7 @@ roster gains the class by hand.
 
 #### Step 2: MCP tools, `nx tuple`, doctor rows
 
-Seven tools in `nexus.mcp` (`structured_output=False` only where the
+Eight tools in `nexus.mcp` (`structured_output=False` only where the
 return annotation is a union or a list); both exact-set literals in
 `test_mcp_package.py` updated. `commands/tuple_cmd.py` as a click group
 with a `_MODULE_TO_CLI` entry, documented in `docs/cli-reference.md`.
@@ -972,9 +996,9 @@ report class covered.
 #### Step 3: Hook wiring
 
 `subagent-start.sh` parses `agent_id` and adds the injection line; the
-three `async: true` projection entries are added to `hooks.json` beside
-their blocking hooks, the `SubagentStart` one writing the start tuple
-and the `SubagentStop` one the report tuple. CA 2 and CA 4 are
+two `async: true` projection entries are added to `hooks.json` beside
+the start and stop hooks, the `SubagentStart` one writing the start
+tuple and the `SubagentStop` one the report tuple. CA 2 and CA 4 are
 discharged by research 5; what this step measures is the real projection
 script with the engine up, down, and rate limiting, and that the
 blocking hooks still run in their 30 to 40 ms.
@@ -1232,3 +1256,20 @@ record replaces the misapplied non-vacuity assertion. Minor: the scrap
 count, Gap 2's wording, template lifecycle, frontmatter `related_rdrs`,
 the load bullet's citation, the seventh MCP tool and third doctor row,
 and first-use glosses for T1, T2, beads, TSV, HOT, WAF, ALB and PITR.
+
+### 2026-09-09 — Fix check on 8ec08d5af (FAIL), second fix
+
+T2 `nexus_rdr/205-fix-check-8ec08d5af`. C4 had survived in the Existing
+Infrastructure Audit's dispatch-ledger row; closed. C5's Gap 4 query
+needed a time field on `subspace_list`; added (oldest and newest
+`created_at`). The sweep's tenant set is the default tenant plus every
+tenant in `service_tokens`, not "all tenants", at four sites. The
+`PreToolUse` async entry that wrote nothing is dropped: two async
+entries. An async hook's skip reason goes to a log file beside the
+ledger, since its stderr is never read. `subspace_list` and the registry
+digest gain their MCP tools (`tuple_list`, `tuple_registry`) and CLI
+verbs (`list`, `templates`); eight tools. CA 5's method names the T2
+record that carries the measurement. Added, from the author's question:
+the engine is the only holder of the registry, no client carries a
+copy, `registry()` returns a digest so skew is detected rather than
+guessed.
