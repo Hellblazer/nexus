@@ -101,11 +101,12 @@ engine's attribute-backfill walk (`hygiene-004-owner-grammar-underscore.xml`'s
 `CONFORMANT_QUARANTINE_COLLECTION_NAME`) both use exactly this grammar
 (nexus-ztafa). The client's own collection-name PARSING functions
 (`is_conformant_collection_name` / `parse_conformant_collection_name` in
-`src/nexus/corpus.py`, via `_CONFORMANT_COLLECTION_RE`) do not yet admit an
-underscored owner at all — `src/nexus/corpus.py`'s `_COLLECTION_NAME_RE` is a
-separate, whole-string ChromaDB shape check with no owner-segment concept,
-not the parser these functions use. Widening the client's parse functions to
-match is tracked as nexus-ft04v.26, not yet done.
+`src/nexus/corpus.py`) admit the same single-underscore owner: both match
+against `_CONFORMANT_COLLECTION_RE`, whose owner group is
+`_OWNER_SEGMENT_RE` — the identical grammar, one symbol, widened by
+nexus-ft04v.26. `src/nexus/corpus.py`'s `_COLLECTION_NAME_RE` stays a
+separate, whole-string ChromaDB shape check with no owner-segment
+concept; it is not the parser these two functions use.
 
 ## Rule 4: a collection holds many documents
 
