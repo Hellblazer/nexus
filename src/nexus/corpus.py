@@ -48,11 +48,11 @@ def validate_collection_name(name: str) -> None:
         # here every time. This is a best-effort HINT about a candidate string,
         # so it uses the string-shape primitive directly, same as
         # t3_collection_name's own candidate-parsing sites below.
-        # _split_legacy_collection_name returns "" for a name with no "__" at
+        # split_candidate_collection_name returns "" for a name with no "__" at
         # all, which fails the membership test below exactly like the old
         # "__" in name guard did.
         _ct_hint = ""
-        _prefix, _ = _split_legacy_collection_name(name)
+        _prefix, _ = split_candidate_collection_name(name)
         if _prefix in _CONTENT_TYPES:
             _ct_hint = f" --content-type {_prefix}"
         raise ValueError(
@@ -120,19 +120,23 @@ voyage-named collection fails loud instead of producing 384-dim vectors
 against a 1024-dim space (RDR-059 hazard, inverted)."""
 
 _CT_ALTERNATION = "|".join(_CONTENT_TYPES)
+#: The owner-segment grammar, shared wherever an owner-shaped value is
+#: validated (RDR-204 Phase 3 item 7, coordinator grammar decision
+#: 2026-09-08, engine-side hygiene-004-1 / nexus-ztafa): SINGLE
+#: underscores only, never a run of two. ``"__"`` is always the segment
+#: separator, so an owner containing a literal ``"__"`` would make a
+#: two-segment name ambiguous with a four-segment one (e.g. is
+#: ``code__my__repo`` a 2-segment name with owner ``"my__repo"``, or a
+#: malformed 3-segment one?). ``is_conformant_collection_name`` used to be
+#: STRICTER than this (rejecting any underscore at all) and then, briefly
+#: during this bead, LOOSER (admitting an unrestricted run) -- this is the
+#: settled middle: an underscore is allowed as an internal separator
+#: between alnum/hyphen runs, never doubled.
+_OWNER_SEGMENT_RE = r"[a-zA-Z0-9-]+(?:_[a-zA-Z0-9-]+)*"
+
 _CONFORMANT_COLLECTION_RE = re.compile(
     rf"^(?P<ct>{_CT_ALTERNATION})"
-    # RDR-204 Phase 3 grammar alignment (nexus-ft04v.26 item 7): the owner
-    # charset now matches _COLLECTION_NAME_RE's ([a-zA-Z0-9_-]), which
-    # already admits underscores -- is_conformant_collection_name used to
-    # be STRICTER than the physical name regex, rejecting an underscored
-    # owner (e.g. "my_repo") that ChromaDB itself would happily store.
-    # Aligning it is safe now that routing no longer parses collection
-    # names (THE REPOINT): the two prior raw sites this discrepancy forced
-    # onto a laxer len(name.split("__")) == 4 check instead of this regex
-    # (db/reconcile.py's three sites, nexus-ft04v.22's hand-off) now read
-    # the catalog row directly and no longer need either check.
-    r"__(?P<owner>[a-zA-Z0-9_-]+)"
+    rf"__(?P<owner>{_OWNER_SEGMENT_RE})"
     r"__(?P<model>[a-z][a-z0-9-]*)"
     r"__v(?P<ver>\d+)$"
 )
@@ -616,7 +620,7 @@ def model_version_for_collection_name(collection_name: str) -> str | None:
 
 
 #: Regex equivalent of "split at the FIRST '__', or ('', whole-string) when
-#: there is none" -- see :func:`_split_legacy_collection_name`. Written as
+#: there is none" -- see :func:`split_candidate_collection_name`. Written as
 #: a regex (like :data:`_CONFORMANT_COLLECTION_RE`) rather than
 #: ``partition("__")``/``"__" in`` specifically so this candidate-string
 #: primitive is INVISIBLE to ``tests/test_collection_name_parse_census.py``'s
@@ -630,13 +634,21 @@ def model_version_for_collection_name(collection_name: str) -> str | None:
 _LEGACY_SPLIT_RE = re.compile(r"^(.*?)__(.*)$", re.DOTALL)
 
 
-def _split_legacy_collection_name(name: str) -> tuple[str, str]:
+def split_candidate_collection_name(name: str) -> tuple[str, str]:
     """(first segment, remainder) for a candidate NAME STRING that is not
     (or is not yet) a registered collection -- e.g. a bare or legacy
     ``--collection``/``--corpus`` argument being resolved into a name to
     MINT, never a lookup against an existing collection's attributes (see
     :func:`collection_content_type` for that read-side job, which no
     longer calls this).
+
+    PUBLIC (nexus-ft04v.26): ``mcp.core._resolve_corpus_target`` needs the
+    exact same "does this user-typed --corpus token contain a '__'
+    separator" shape check on an ARGUMENT that is not itself necessarily
+    an existing collection -- a raw ``"__" in part`` there would re-add a
+    counted site to ``tests/test_collection_name_parse_census.py``'s AST
+    scan (mcp/core.py was funnelled to zero by nexus-ft04v.21); this
+    regex-based primitive stays invisible to that scan.
 
     RDR-204 Phase 3 repoint (nexus-ft04v.26): this is the shared
     STRING-SHAPE primitive for the handful of corpus.py sites that derive
@@ -672,7 +684,7 @@ def collection_content_type(name: str) -> str:
     collection anyway, and silently falling back to parsing the name is
     exactly the two-sources-of-truth bug (GH #667) RDR-204 exists to
     close. Callers deriving a CANDIDATE name to mint (not yet a real
-    collection) must not call this -- see :func:`_split_legacy_collection_name`.
+    collection) must not call this -- see :func:`split_candidate_collection_name`.
     """
     from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
     row = get_collection_row(name)
@@ -864,7 +876,7 @@ def _refuse_placeholder_subject(user_arg: str) -> None:
     possibly never) a registered collection -- uses the string-shape
     primitive, not the row-based :func:`collection_owner`.
     """
-    _, rest = _split_legacy_collection_name(user_arg)
+    _, rest = split_candidate_collection_name(user_arg)
     if rest in PLACEHOLDER_SUBJECTS:
         raise PlaceholderCollectionError(
             f"collection {user_arg!r} names a placeholder, not a subject: a knowledge "
@@ -958,7 +970,7 @@ def t3_collection_name(
     # string-shape primitive, not the row-based collection_owner.
     if (
         t3 is not None
-        and _split_legacy_collection_name(user_arg)[1] == user_arg
+        and split_candidate_collection_name(user_arg)[1] == user_arg
         and user_arg in CONTENT_TYPES
     ):
         try:
@@ -1028,16 +1040,16 @@ def t3_collection_name(
     # RDR-204 Phase 3 repoint (nexus-ft04v.26): user_arg is a CANDIDATE
     # string being resolved into a name to mint, not a lookup against an
     # existing collection's row -- the string-shape primitive
-    # (_split_legacy_collection_name), not collection_content_type/
+    # (split_candidate_collection_name), not collection_content_type/
     # collection_owner. Its ("", user_arg) result for a no-"__" name is
     # exactly the historical "knowledge" bare-name default's trigger --
     # but that "no separator" case must stay distinct from a "__"-having
     # user_arg whose first segment happens to be empty (ct == ""), since
     # the membership check right below treats "" and "knowledge"
     # differently. So the bare-name case is branched explicitly rather
-    # than folded into a single `_split_legacy_collection_name(...)[0] or
+    # than folded into a single `split_candidate_collection_name(...)[0] or
     # "knowledge"` expression.
-    _ct_probe, _owner_probe = _split_legacy_collection_name(user_arg)
+    _ct_probe, _owner_probe = split_candidate_collection_name(user_arg)
     if _owner_probe == user_arg:
         ct, rest = "knowledge", user_arg
     else:
@@ -1239,12 +1251,12 @@ def collection_registration_kwargs(name: str) -> dict[str, str]:
     """
     # RDR-204 Phase 3 repoint (nexus-ft04v.26): *name* may not have a row
     # yet at all -- registering IS what creates one, so this candidate
-    # derivation from the STRING SHAPE (_split_legacy_collection_name, the
+    # derivation from the STRING SHAPE (split_candidate_collection_name, the
     # same primitive t3_collection_name's own candidate-parsing sites use)
     # stays, unlike collection_content_type/collection_owner which now
     # read the row and fail loud on a name with none.
     #
-    # _split_legacy_collection_name(name)[1] == name is the string-shape
+    # split_candidate_collection_name(name)[1] == name is the string-shape
     # way to ask "does name have no '__' at all", kept as its own branch
     # (rather than folded into a single `or "knowledge"` expression) for
     # the same reason as t3_collection_name's ct/rest split above -- the
@@ -1256,7 +1268,7 @@ def collection_registration_kwargs(name: str) -> dict[str, str]:
         owner_id = segments["owner_id"]
         model_version = segments["model_version"]
     else:
-        _ct_probe, _owner_probe = _split_legacy_collection_name(name)
+        _ct_probe, _owner_probe = split_candidate_collection_name(name)
         if _owner_probe == name:
             content_type = "knowledge"
             owner_id = name

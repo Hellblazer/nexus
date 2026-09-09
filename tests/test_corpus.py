@@ -316,10 +316,17 @@ def test_resolve_corpus_drops_unregistered_name_from_fanout(monkeypatch) -> None
 # ── RDR-204 Phase 3 item 7: owner grammar alignment ───────────────────────────
 
 def test_is_conformant_collection_name_admits_underscored_owner() -> None:
-    """is_conformant_collection_name used to be STRICTER than the physical
-    name regex (_COLLECTION_NAME_RE), rejecting an underscored owner a real
-    ChromaDB-shaped name allows. Aligning the two (nexus-ft04v.26 item 7)
-    means an underscored owner renders and round-trips through parse."""
+    """is_conformant_collection_name used to be STRICTER than a physical
+    name allows, rejecting a single-underscored owner (e.g. "my_repo").
+    RDR-204 Phase 3 item 7 (coordinator grammar decision 2026-09-08,
+    aligned to the engine's tightened hygiene-004-1 walk grammar,
+    nexus-ztafa): SINGLE underscores only, never a run of two -- a double
+    underscore inside the owner makes a two-segment name ambiguous with a
+    four-segment one. An underscored owner renders and round-trips through
+    parse; a double-underscored owner renders (CollectionName does not
+    validate owner_id shape at construction) but does NOT round-trip --
+    is_conformant_collection_name rejects it and CollectionName.parse
+    raises on the malformed shape it produces."""
     from nexus.catalog.collection_name import CollectionName
     from nexus.corpus import is_conformant_collection_name, parse_conformant_collection_name
 
@@ -333,6 +340,15 @@ def test_is_conformant_collection_name_admits_underscored_owner() -> None:
     assert CollectionName.parse(name) == CollectionName(
         content_type="code", owner_id="my_repo", embedding_model="voyage-code-3", model_version=1,
     )
+
+    # my__repo (a run of two underscores) is rejected, not accepted.
+    double_underscore_name = CollectionName(
+        content_type="code", owner_id="my__repo", embedding_model="voyage-code-3", model_version=1,
+    ).render()
+    assert double_underscore_name == "code__my__repo__voyage-code-3__v1"
+    assert not is_conformant_collection_name(double_underscore_name)
+    with pytest.raises(ValueError):
+        CollectionName.parse(double_underscore_name)
 
 
 # ── validate_collection_name ──────────────────────────────────────────────────
