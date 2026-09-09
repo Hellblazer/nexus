@@ -559,6 +559,13 @@ class TestRequiredEngineVersion:
         # conexus 7.36.0; engine deployed before the client tag (additive
         # choreography). Local-mode installs get nx catalog restore and the
         # tombstone protection only through this pin.
+        # ->(0,1,112) 2026-09-09 for 7.38.0: RDR-204 Phases 2 and 3 (engine
+        # reads the row, client reads the row), snm4y, ztafa (hygiene-004-1),
+        # uxd2a (hygiene-005), n060e, h6d89, the quarantine-sibling root
+        # cause 14c97916a, hygiene-006 (GH #1489), the owner-registration
+        # lock (GH #1522), prune_projection (GH #1528). Tagged on 9f0a5397c,
+        # battery green, acquire gate passed, LIVE through the edge before
+        # this client tag, so Step 0 runs bare (no paired-deploy flag).
         # ->(0,1,109) 2026-09-08 for 7.37.0 (paired, NON-additive): RDR-204
         # Phase 1, catalog-036 + hygiene-002/003 (nine changesets), the seven
         # stub-insert paths retired, register-422; the client half is

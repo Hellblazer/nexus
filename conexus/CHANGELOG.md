@@ -4,6 +4,16 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.38.0] - 2026-09-09
+
+Plugin version aligned with conexus 7.38.0. Live at this pin, from
+`PENDING_RELEASE.md`:
+
+- `skills/using-nx-skills/SKILL.md` and `skills/knowledge-tidying/SKILL.md`:
+  the T2 ttl convention (`ttl=None` for records of record; the 30-day
+  default for session findings; omitting `ttl` never means permanent) and
+  its row in Common Mistakes (nexus-um2h1).
+
 ## [7.37.0] - 2026-09-08
 
 Plugin version aligned with conexus 7.37.0; the pin returns to the client
