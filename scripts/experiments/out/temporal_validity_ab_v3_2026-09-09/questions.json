@@ -1,0 +1,1082 @@
+[
+ {
+  "qid": "RDR-079a-F-S1",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-079a",
+  "successor": "",
+  "gold": "RDR-079a",
+  "t": "2026-04-15",
+  "question": "What is the guidance on running synchronous subprocess calls inside async FastMCP handlers without blocking the event loop?"
+ },
+ {
+  "qid": "RDR-079a-F-S2",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-079a",
+  "successor": "",
+  "gold": "RDR-079a",
+  "t": "2026-04-15",
+  "question": "Should worker processes for claude -p be pre-warmed in a singleton pool or spawned fresh per operator call?"
+ },
+ {
+  "qid": "RDR-079a-F-S3",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-079a",
+  "successor": "",
+  "gold": "RDR-079a",
+  "t": "2026-04-15",
+  "question": "Does claude -p inherit existing OAuth session credentials, or does each invocation need its own auth check?"
+ },
+ {
+  "qid": "RDR-079a-F-N1",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-079a",
+  "successor": "",
+  "gold": "RDR-079a",
+  "t": "2026-04-15",
+  "question": "What's the current design for routing an operator command to the right handler before it runs?"
+ },
+ {
+  "qid": "RDR-079a-F-N2",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-079a",
+  "successor": "",
+  "gold": "RDR-079a",
+  "t": "2026-04-15",
+  "question": "Is there written guidance on how a multi-step plan is carried through from start to finish?"
+ },
+ {
+  "qid": "RDR-079a-F-N3",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-079a",
+  "successor": "",
+  "gold": "RDR-079a",
+  "t": "2026-04-15",
+  "question": "What decisions govern how execution state gets tracked across the full run of a plan?"
+ },
+ {
+  "qid": "RDR-079a-R-S1",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-079a",
+  "successor": "",
+  "gold": "RDR-079a",
+  "t": "2026-09-09",
+  "question": "Why was the long-lived worker pool design for operator subprocesses abandoned before merging?"
+ },
+ {
+  "qid": "RDR-079a-R-S2",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-079a",
+  "successor": "",
+  "gold": "RDR-079a",
+  "t": "2026-09-09",
+  "question": "What blocking event loop bug in the auth check killed the pooled worker architecture?"
+ },
+ {
+  "qid": "RDR-079a-R-S3",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-079a",
+  "successor": "",
+  "gold": "RDR-079a",
+  "t": "2026-09-09",
+  "question": "How did the eventual operator dispatch implementation avoid managing a pre-warmed subprocess pool?"
+ },
+ {
+  "qid": "RDR-079a-R-N1",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-079a",
+  "successor": "",
+  "gold": "RDR-079a",
+  "t": "2026-09-09",
+  "question": "What was the original proposal for routing operator requests to handlers before it got replaced?"
+ },
+ {
+  "qid": "RDR-079a-R-N2",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-079a",
+  "successor": "",
+  "gold": "RDR-079a",
+  "t": "2026-09-09",
+  "question": "Why did the team abandon the early approach to running multi-step plans end to end?"
+ },
+ {
+  "qid": "RDR-079a-R-N3",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-079a",
+  "successor": "",
+  "gold": "RDR-079a",
+  "t": "2026-09-09",
+  "question": "What design succeeded the older scheme for executing a sequence of operator actions?"
+ },
+ {
+  "qid": "RDR-110-F-S1",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-110",
+  "successor": "",
+  "gold": "RDR-110",
+  "t": "2026-05-14",
+  "question": "Is there guidance on unifying plan matching, scratch memory, and session memory retrieval into one primitive?"
+ },
+ {
+  "qid": "RDR-110-F-S2",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-110",
+  "successor": "",
+  "gold": "RDR-110",
+  "t": "2026-05-14",
+  "question": "What's the current approach to threshold tuning for semantic similarity across our different retrieval surfaces?"
+ },
+ {
+  "qid": "RDR-110-F-S3",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-110",
+  "successor": "",
+  "gold": "RDR-110",
+  "t": "2026-05-14",
+  "question": "Do we support an atomic take operation that removes an item after retrieval anywhere in the system?"
+ },
+ {
+  "qid": "RDR-110-F-N1",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-110",
+  "successor": "",
+  "gold": "RDR-110",
+  "t": "2026-05-14",
+  "question": "How can two independent services coordinate work by posting and matching entries instead of calling each other directly?"
+ },
+ {
+  "qid": "RDR-110-F-N2",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-110",
+  "successor": "",
+  "gold": "RDR-110",
+  "t": "2026-05-14",
+  "question": "What's the recommended way to combine a vector store with a relational database for shared process coordination?"
+ },
+ {
+  "qid": "RDR-110-F-N3",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-110",
+  "successor": "",
+  "gold": "RDR-110",
+  "t": "2026-05-14",
+  "question": "Is there guidance on using similarity matching over shared data as an alternative to explicit message passing between components?"
+ },
+ {
+  "qid": "RDR-110-R-S1",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-110",
+  "successor": "",
+  "gold": "RDR-110",
+  "t": "2026-09-09",
+  "question": "Why was the proposal to unify plan matching, scratch, and memory retrieval into one primitive abandoned?"
+ },
+ {
+  "qid": "RDR-110-R-S2",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-110",
+  "successor": "",
+  "gold": "RDR-110",
+  "t": "2026-09-09",
+  "question": "What replaced the idea of a single coordination abstraction spanning ChromaDB and SQLite retrieval surfaces?"
+ },
+ {
+  "qid": "RDR-110-R-S3",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-110",
+  "successor": "",
+  "gold": "RDR-110",
+  "t": "2026-09-09",
+  "question": "What was the atomic destructive read capability that was proposed but never implemented across retrieval systems?"
+ },
+ {
+  "qid": "RDR-110-R-N1",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-110",
+  "successor": "",
+  "gold": "RDR-110",
+  "t": "2026-09-09",
+  "question": "Why was the plan to build a shared coordination layer on our existing vector and relational stores abandoned?"
+ },
+ {
+  "qid": "RDR-110-R-N2",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-110",
+  "successor": "",
+  "gold": "RDR-110",
+  "t": "2026-09-09",
+  "question": "What did the old proposal for cross-process coordination using our current databases actually specify?"
+ },
+ {
+  "qid": "RDR-110-R-N3",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-110",
+  "successor": "",
+  "gold": "RDR-110",
+  "t": "2026-09-09",
+  "question": "What replaced the earlier idea of combining our vector store and lightweight relational database for inter-process data exchange?"
+ },
+ {
+  "qid": "RDR-111-F-S1",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-111",
+  "successor": "",
+  "gold": "RDR-111",
+  "t": "2026-05-15",
+  "question": "What's the current guidance for making agent lifecycle hook events queryable instead of fire-and-forget scripts?"
+ },
+ {
+  "qid": "RDR-111-F-S2",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-111",
+  "successor": "",
+  "gold": "RDR-111",
+  "t": "2026-05-15",
+  "question": "Is there a recommended pattern for exposing coordination state like resource ownership across multiple running agents?"
+ },
+ {
+  "qid": "RDR-111-F-S3",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-111",
+  "successor": "",
+  "gold": "RDR-111",
+  "t": "2026-05-15",
+  "question": "What design conventions exist today for turning hook bus output into shared observable data for other consumers?"
+ },
+ {
+  "qid": "RDR-111-F-N1",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-111",
+  "successor": "",
+  "gold": "RDR-111",
+  "t": "2026-05-15",
+  "question": "What's the current design for capturing hook events and publishing them onto a shared internal message bus?"
+ },
+ {
+  "qid": "RDR-111-F-N2",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-111",
+  "successor": "",
+  "gold": "RDR-111",
+  "t": "2026-05-15",
+  "question": "Is there a standard binding layer for subscribing external tools to session event streams right now?"
+ },
+ {
+  "qid": "RDR-111-F-N3",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-111",
+  "successor": "",
+  "gold": "RDR-111",
+  "t": "2026-05-15",
+  "question": "What operator dashboard exists today for monitoring and sending commands to live agent sessions?"
+ },
+ {
+  "qid": "RDR-111-R-S1",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-111",
+  "successor": "",
+  "gold": "RDR-111",
+  "t": "2026-09-09",
+  "question": "What was the original proposal for turning agent hook events into a queryable observable bus, and why was it dropped?"
+ },
+ {
+  "qid": "RDR-111-R-S2",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-111",
+  "successor": "",
+  "gold": "RDR-111",
+  "t": "2026-09-09",
+  "question": "Why did the project abandon the idea of a cockpit substrate for hook projection and inter-agent bindings?"
+ },
+ {
+  "qid": "RDR-111-R-S3",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-111",
+  "successor": "",
+  "gold": "RDR-111",
+  "t": "2026-09-09",
+  "question": "What replaced the plan to expose lifecycle hooks like PreToolUse and Stop as shared observable state?"
+ },
+ {
+  "qid": "RDR-111-R-N1",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-111",
+  "successor": "",
+  "gold": "RDR-111",
+  "t": "2026-09-09",
+  "question": "What was the original proposal for exposing internal system events through a shared event backbone and operator control panel?"
+ },
+ {
+  "qid": "RDR-111-R-N2",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-111",
+  "successor": "",
+  "gold": "RDR-111",
+  "t": "2026-09-09",
+  "question": "Why was the plan for a unified event-relay and remote-control substrate ultimately abandoned or set aside?"
+ },
+ {
+  "qid": "RDR-111-R-N3",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-111",
+  "successor": "",
+  "gold": "RDR-111",
+  "t": "2026-09-09",
+  "question": "What design or approach replaced the earlier proposal for a centralized event-hook and operator-console architecture?"
+ },
+ {
+  "qid": "RDR-112-F-S1",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-112",
+  "successor": "RDR-120",
+  "gold": "RDR-112",
+  "t": "2026-05-15",
+  "question": "What's the current approach for letting sandboxed containers share the same sqlite and chroma state as the host CLI?"
+ },
+ {
+  "qid": "RDR-112-F-S2",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-112",
+  "successor": "RDR-120",
+  "gold": "RDR-112",
+  "t": "2026-05-15",
+  "question": "Is there guidance on running shared storage tiers behind a daemon instead of opening them by file path?"
+ },
+ {
+  "qid": "RDR-112-F-S3",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-112",
+  "successor": "RDR-120",
+  "gold": "RDR-112",
+  "t": "2026-05-15",
+  "question": "How should T2 and T3 be exposed to sub-process or container consumers without fragmenting knowledge across silos?"
+ },
+ {
+  "qid": "RDR-112-F-N1",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-112",
+  "successor": "RDR-120",
+  "gold": "RDR-112",
+  "t": "2026-05-15",
+  "question": "What is the current policy for whether a shared-state datastore should run as its own separate process versus embedded in-process?"
+ },
+ {
+  "qid": "RDR-112-F-N2",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-112",
+  "successor": "RDR-120",
+  "gold": "RDR-112",
+  "t": "2026-05-15",
+  "question": "For a new component that needs durable state shared across restarts, when is running it in-container still acceptable today?"
+ },
+ {
+  "qid": "RDR-112-F-N3",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-112",
+  "successor": "RDR-120",
+  "gold": "RDR-112",
+  "t": "2026-05-15",
+  "question": "Is there a rule distinguishing which subsystems must stay in-process versus which need an external service boundary?"
+ },
+ {
+  "qid": "RDR-112-R-S1",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-112",
+  "successor": "RDR-120",
+  "gold": "RDR-112",
+  "t": "2026-09-09",
+  "question": "Why was putting every shared storage tier behind a daemon process abandoned as an approach?"
+ },
+ {
+  "qid": "RDR-112-R-S2",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-112",
+  "successor": "RDR-120",
+  "gold": "RDR-112",
+  "t": "2026-09-09",
+  "question": "What replaced the plan to move T2 and T3 out of library-mode file access into a service?"
+ },
+ {
+  "qid": "RDR-112-R-S3",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-112",
+  "successor": "RDR-120",
+  "gold": "RDR-112",
+  "t": "2026-09-09",
+  "question": "What problem was the daemon-per-tier proposal trying to solve for container sandboxed agent processes?"
+ },
+ {
+  "qid": "RDR-112-R-N1",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-112",
+  "successor": "RDR-120",
+  "gold": "RDR-112",
+  "t": "2026-09-09",
+  "question": "Why did we decide against running every shared-state store as its own daemon process?"
+ },
+ {
+  "qid": "RDR-112-R-N2",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-112",
+  "successor": "RDR-120",
+  "gold": "RDR-112",
+  "t": "2026-09-09",
+  "question": "What replaced the earlier plan to keep only one component running inside the main container?"
+ },
+ {
+  "qid": "RDR-112-R-N3",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-112",
+  "successor": "RDR-120",
+  "gold": "RDR-112",
+  "t": "2026-09-09",
+  "question": "What was the original design for isolating persistent stores from the app process, and why was it abandoned?"
+ },
+ {
+  "qid": "RDR-113-F-S1",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-113",
+  "successor": "",
+  "gold": "RDR-113",
+  "t": "2026-05-16",
+  "question": "What file permission mode should a unix domain socket daemon use to restrict access to one user?"
+ },
+ {
+  "qid": "RDR-113-F-S2",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-113",
+  "successor": "",
+  "gold": "RDR-113",
+  "t": "2026-05-16",
+  "question": "Is TCP loopback binding alone enough to keep a local daemon safe from other users on the host?"
+ },
+ {
+  "qid": "RDR-113-F-S3",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-113",
+  "successor": "",
+  "gold": "RDR-113",
+  "t": "2026-05-16",
+  "question": "What is the current policy on authentication for local daemons that back memory and messaging subsystems?"
+ },
+ {
+  "qid": "RDR-113-F-N1",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-113",
+  "successor": "",
+  "gold": "RDR-113",
+  "t": "2026-05-16",
+  "question": "What permission bits should a local daemon set on its socket file to stop other users on the box from connecting?"
+ },
+ {
+  "qid": "RDR-113-F-N2",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-113",
+  "successor": "",
+  "gold": "RDR-113",
+  "t": "2026-05-16",
+  "question": "Is there a way for a background service to verify the OS user identity of a process connecting over a local socket?"
+ },
+ {
+  "qid": "RDR-113-F-N3",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-113",
+  "successor": "",
+  "gold": "RDR-113",
+  "t": "2026-05-16",
+  "question": "For the first version of daemon security, is multi-user access supported or is it scoped to a single local account only?"
+ },
+ {
+  "qid": "RDR-113-R-S1",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-113",
+  "successor": "",
+  "gold": "RDR-113",
+  "t": "2026-09-09",
+  "question": "What was the original plan for controlling who could connect to the local daemon sockets?"
+ },
+ {
+  "qid": "RDR-113-R-S2",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-113",
+  "successor": "",
+  "gold": "RDR-113",
+  "t": "2026-09-09",
+  "question": "Why was the single-user, no-auth trust assumption for daemon connections abandoned later on?"
+ },
+ {
+  "qid": "RDR-113-R-S3",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-113",
+  "successor": "",
+  "gold": "RDR-113",
+  "t": "2026-09-09",
+  "question": "What mechanism eventually replaced unix file permission checks for daemon peer authentication?"
+ },
+ {
+  "qid": "RDR-113-R-N1",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-113",
+  "successor": "",
+  "gold": "RDR-113",
+  "t": "2026-09-09",
+  "question": "Why was the plan for socket file permissions and peer identity checks between local daemons abandoned?"
+ },
+ {
+  "qid": "RDR-113-R-N2",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-113",
+  "successor": "",
+  "gold": "RDR-113",
+  "t": "2026-09-09",
+  "question": "What approach to verifying which local process owns a connection did we originally propose before scrapping it?"
+ },
+ {
+  "qid": "RDR-113-R-N3",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-113",
+  "successor": "",
+  "gold": "RDR-113",
+  "t": "2026-09-09",
+  "question": "What replaced the single-user local socket authentication scheme we designed for daemon-to-daemon trust?"
+ },
+ {
+  "qid": "RDR-118-F-S1",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-118",
+  "successor": "",
+  "gold": "RDR-118",
+  "t": "2026-05-18",
+  "question": "What surface descriptor protocol are we standardizing on for cockpit panel cells right now?"
+ },
+ {
+  "qid": "RDR-118-F-S2",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-118",
+  "successor": "",
+  "gold": "RDR-118",
+  "t": "2026-05-18",
+  "question": "How should a cockpit cell reference a stable content-addressed span from the catalog layer?"
+ },
+ {
+  "qid": "RDR-118-F-S3",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-118",
+  "successor": "",
+  "gold": "RDR-118",
+  "t": "2026-05-18",
+  "question": "What is the current convention for nesting one surface panel recursively inside another?"
+ },
+ {
+  "qid": "RDR-118-F-N1",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-118",
+  "successor": "",
+  "gold": "RDR-118",
+  "t": "2026-05-18",
+  "question": "What's the current design for representing application UI surfaces as structured data rather than ad hoc view objects?"
+ },
+ {
+  "qid": "RDR-118-F-N2",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-118",
+  "successor": "",
+  "gold": "RDR-118",
+  "t": "2026-05-18",
+  "question": "How should a broker component mediate content routing between an agent-driven UI protocol and existing display surfaces?"
+ },
+ {
+  "qid": "RDR-118-F-N3",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-118",
+  "successor": "",
+  "gold": "RDR-118",
+  "t": "2026-05-18",
+  "question": "Is there approved guidance on adapting hypertext transclusion and stable addressing ideas into our current UI architecture?"
+ },
+ {
+  "qid": "RDR-118-R-S1",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-118",
+  "successor": "",
+  "gold": "RDR-118",
+  "t": "2026-09-09",
+  "question": "What was the original proposal for wiring together the cockpit substrate, the semantic tuple broker, and content-addressed fidelity into one design?"
+ },
+ {
+  "qid": "RDR-118-R-S2",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-118",
+  "successor": "",
+  "gold": "RDR-118",
+  "t": "2026-09-09",
+  "question": "Why was the plan to adopt Google's surface descriptor protocol for composable cells eventually abandoned or superseded?"
+ },
+ {
+  "qid": "RDR-118-R-S3",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-118",
+  "successor": "",
+  "gold": "RDR-118",
+  "t": "2026-09-09",
+  "question": "What approach replaced the idea of using a sibling-surface recursion convention and stable content address references for cells?"
+ },
+ {
+  "qid": "RDR-118-R-N1",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-118",
+  "successor": "",
+  "gold": "RDR-118",
+  "t": "2026-09-09",
+  "question": "What was the original proposal for unifying how UI surfaces were addressed and composed as a single structure?"
+ },
+ {
+  "qid": "RDR-118-R-N2",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-118",
+  "successor": "",
+  "gold": "RDR-118",
+  "t": "2026-09-09",
+  "question": "Why was the plan to route surface handling through a central broker component eventually abandoned?"
+ },
+ {
+  "qid": "RDR-118-R-N3",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-118",
+  "successor": "",
+  "gold": "RDR-118",
+  "t": "2026-09-09",
+  "question": "What architecture ended up replacing the earlier proposal to model surfaces as uniform structured tuples?"
+ },
+ {
+  "qid": "RDR-119-F-S1",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-119",
+  "successor": "",
+  "gold": "RDR-119",
+  "t": "2026-05-18",
+  "question": "What is the current plan for rendering surface descriptors as usable panels on each host medium?"
+ },
+ {
+  "qid": "RDR-119-F-S2",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-119",
+  "successor": "",
+  "gold": "RDR-119",
+  "t": "2026-05-18",
+  "question": "Is there guidance yet on keyboard navigation, focus handling, and modal stacking for cockpit panels?"
+ },
+ {
+  "qid": "RDR-119-F-S3",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-119",
+  "successor": "",
+  "gold": "RDR-119",
+  "t": "2026-05-18",
+  "question": "What native rendering catalog should a web or terminal host implement to display these components?"
+ },
+ {
+  "qid": "RDR-119-F-N1",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-119",
+  "successor": "",
+  "gold": "RDR-119",
+  "t": "2026-05-18",
+  "question": "What's the current approach for automatically arranging generated UI components differently depending on the host application?"
+ },
+ {
+  "qid": "RDR-119-F-N2",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-119",
+  "successor": "",
+  "gold": "RDR-119",
+  "t": "2026-05-18",
+  "question": "Is there guidance on how declarative interface catalogs get rendered with per-host layout adjustments right now?"
+ },
+ {
+  "qid": "RDR-119-F-N3",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-119",
+  "successor": "",
+  "gold": "RDR-119",
+  "t": "2026-05-18",
+  "question": "What design decisions govern automatic panel arrangement when the same UI catalog targets multiple different host environments?"
+ },
+ {
+  "qid": "RDR-119-R-S1",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-119",
+  "successor": "",
+  "gold": "RDR-119",
+  "t": "2026-09-09",
+  "question": "What did the proposal for per-host cockpit rendering over A2UI catalogs actually specify?"
+ },
+ {
+  "qid": "RDR-119-R-S2",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-119",
+  "successor": "",
+  "gold": "RDR-119",
+  "t": "2026-09-09",
+  "question": "Why was the plan for tmux pane and iframe fulfillment adapters abandoned before shipping?"
+ },
+ {
+  "qid": "RDR-119-R-S3",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-119",
+  "successor": "",
+  "gold": "RDR-119",
+  "t": "2026-09-09",
+  "question": "What design ended up replacing the auto-layout engine approach for rendering cockpit surfaces?"
+ },
+ {
+  "qid": "RDR-119-R-N1",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-119",
+  "successor": "",
+  "gold": "RDR-119",
+  "t": "2026-09-09",
+  "question": "What was the original plan for automatically arranging panels in the operator dashboard interface, and why did we abandon it?"
+ },
+ {
+  "qid": "RDR-119-R-N2",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-119",
+  "successor": "",
+  "gold": "RDR-119",
+  "t": "2026-09-09",
+  "question": "Why was the declarative-catalog-driven layout engine for the control interface set aside instead of shipped?"
+ },
+ {
+  "qid": "RDR-119-R-N3",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-119",
+  "successor": "",
+  "gold": "RDR-119",
+  "t": "2026-09-09",
+  "question": "What replaced the earlier proposal for generating dashboard layouts per client from shared UI definitions?"
+ },
+ {
+  "qid": "RDR-123-F-S1",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-123",
+  "successor": "RDR-127",
+  "gold": "RDR-123",
+  "t": "2026-05-20",
+  "question": "What standard should nexus use for rendering structured answer output instead of a markdown blob?"
+ },
+ {
+  "qid": "RDR-123-F-S2",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-123",
+  "successor": "RDR-127",
+  "gold": "RDR-123",
+  "t": "2026-05-20",
+  "question": "How should individual citations from a retrieval response be exposed as separate structured elements?"
+ },
+ {
+  "qid": "RDR-123-F-S3",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-123",
+  "successor": "RDR-127",
+  "gold": "RDR-123",
+  "t": "2026-05-20",
+  "question": "Which hosts currently support rendering structured surface descriptors for composed knowledge base answers?"
+ },
+ {
+  "qid": "RDR-123-F-N1",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-123",
+  "successor": "RDR-127",
+  "gold": "RDR-123",
+  "t": "2026-05-20",
+  "question": "What guidance exists for turning a multi-source answer into distinct visual components in the UI?"
+ },
+ {
+  "qid": "RDR-123-F-N2",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-123",
+  "successor": "RDR-127",
+  "gold": "RDR-123",
+  "t": "2026-05-20",
+  "question": "Is there a recommended way to display retrieval results that combine several sources as separate layout blocks?"
+ },
+ {
+  "qid": "RDR-123-F-N3",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-123",
+  "successor": "RDR-127",
+  "gold": "RDR-123",
+  "t": "2026-05-20",
+  "question": "What's the current approach for rendering an answer built from multiple retrieved chunks as a structured layout?"
+ },
+ {
+  "qid": "RDR-123-R-S1",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-123",
+  "successor": "RDR-127",
+  "gold": "RDR-123",
+  "t": "2026-09-09",
+  "question": "Why was the plan to render nx_answer citations as structured cards abandoned?"
+ },
+ {
+  "qid": "RDR-123-R-S2",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-123",
+  "successor": "RDR-127",
+  "gold": "RDR-123",
+  "t": "2026-09-09",
+  "question": "What replaced the idea of turning composed-retrieval answers into rendered surfaces?"
+ },
+ {
+  "qid": "RDR-123-R-S3",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-123",
+  "successor": "RDR-127",
+  "gold": "RDR-123",
+  "t": "2026-09-09",
+  "question": "What did the proposal to give nx_answer a structured UI layer actually specify?"
+ },
+ {
+  "qid": "RDR-123-R-N1",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-123",
+  "successor": "RDR-127",
+  "gold": "RDR-123",
+  "t": "2026-09-09",
+  "question": "Why was the plan to render answer results as rich structured UI components abandoned instead of shipped?"
+ },
+ {
+  "qid": "RDR-123-R-N2",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-123",
+  "successor": "RDR-127",
+  "gold": "RDR-123",
+  "t": "2026-09-09",
+  "question": "What replaced the proposal to turn retrieval answers into interactive formatted display elements?"
+ },
+ {
+  "qid": "RDR-123-R-N3",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-123",
+  "successor": "RDR-127",
+  "gold": "RDR-123",
+  "t": "2026-09-09",
+  "question": "What did the original design for structured, component-based answer rendering actually propose before it was dropped?"
+ },
+ {
+  "qid": "RDR-124-F-S1",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-124",
+  "successor": "RDR-127",
+  "gold": "RDR-124",
+  "t": "2026-05-20",
+  "question": "What is the current guidance on having subagents return structured cards instead of prose summaries?"
+ },
+ {
+  "qid": "RDR-124-F-S2",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-124",
+  "successor": "RDR-127",
+  "gold": "RDR-124",
+  "t": "2026-05-20",
+  "question": "Is there an approved approach for mapping subagent findings onto A2UI catalog components like cards and lists?"
+ },
+ {
+  "qid": "RDR-124-F-S3",
+  "cls": "F",
+  "provenance": "S",
+  "rdr": "RDR-124",
+  "successor": "RDR-127",
+  "gold": "RDR-124",
+  "t": "2026-05-20",
+  "question": "How should orchestrators avoid losing structured detail when relaying subagent analysis results to users?"
+ },
+ {
+  "qid": "RDR-124-F-N1",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-124",
+  "successor": "RDR-127",
+  "gold": "RDR-124",
+  "t": "2026-05-20",
+  "question": "What's the recommended way for a subagent to hand back a large result without bloating the orchestrator's context?"
+ },
+ {
+  "qid": "RDR-124-F-N2",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-124",
+  "successor": "RDR-127",
+  "gold": "RDR-124",
+  "t": "2026-05-20",
+  "question": "Is there an approved structured output format subagents can return that skips manual summarization by the parent agent?"
+ },
+ {
+  "qid": "RDR-124-F-N3",
+  "cls": "F",
+  "provenance": "N",
+  "rdr": "RDR-124",
+  "successor": "RDR-127",
+  "gold": "RDR-124",
+  "t": "2026-05-20",
+  "question": "What guidance exists for reducing token overhead when multiple subagents report findings back to a coordinating agent?"
+ },
+ {
+  "qid": "RDR-124-R-S1",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-124",
+  "successor": "RDR-127",
+  "gold": "RDR-124",
+  "t": "2026-09-09",
+  "question": "Why was the proposal to have subagents return UI cards instead of prose abandoned?"
+ },
+ {
+  "qid": "RDR-124-R-S2",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-124",
+  "successor": "RDR-127",
+  "gold": "RDR-124",
+  "t": "2026-09-09",
+  "question": "What replaced the plan for subagents to emit structured card output to orchestrators?"
+ },
+ {
+  "qid": "RDR-124-R-S3",
+  "cls": "R",
+  "provenance": "S",
+  "rdr": "RDR-124",
+  "successor": "RDR-127",
+  "gold": "RDR-124",
+  "t": "2026-09-09",
+  "question": "What was the original design for relieving orchestrator context by changing subagent result formats?"
+ },
+ {
+  "qid": "RDR-124-R-N1",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-124",
+  "successor": "RDR-127",
+  "gold": "RDR-124",
+  "t": "2026-09-09",
+  "question": "Why was the plan to have subagents emit structured summary cards abandoned instead of built?"
+ },
+ {
+  "qid": "RDR-124-R-N2",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-124",
+  "successor": "RDR-127",
+  "gold": "RDR-124",
+  "t": "2026-09-09",
+  "question": "What alternative approach did we adopt for keeping subagent output out of the orchestrator's context?"
+ },
+ {
+  "qid": "RDR-124-R-N3",
+  "cls": "R",
+  "provenance": "N",
+  "rdr": "RDR-124",
+  "successor": "RDR-127",
+  "gold": "RDR-124",
+  "t": "2026-09-09",
+  "question": "What was originally proposed for compacting subagent responses before that idea got dropped?"
+ }
+]

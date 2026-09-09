@@ -1,0 +1,8 @@
+{
+ "seed": 20260910,
+ "gen_model": "sonnet",
+ "generated_at": "2026-09-09T01:43:42.463729+00:00",
+ "questions": 108,
+ "dispatch_calls": 36,
+ "gen_cost_usd": 1.9447462
+}
