@@ -16,6 +16,7 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * RDR-152 bead nexus-gmiaf.21 — Embedding parity for the MiniLM {@link OnnxEmbedder}
@@ -149,51 +150,42 @@ class EmbedParityTest {
         }
     }
 
-    // ── Test 2: EmbedderRouter local-mode routing ─────────────────────────────
+    // ── Test 2: EmbedderRouter local-mode model-token routing ─────────────────
 
     @Test
     void embedderRouter_localMode_alwaysOnnx() {
         // Legacy/mechanism shape: a router injected with an OnnxEmbedder routes
-        // local collections to it. Production local mode wires bge-768 per
-        // RDR-160 — see EmbedderRouterBge768Test for that path.
+        // by MODEL TOKEN (RDR-204 Phase 2 fix round, nexus-ft04v.16: prefix
+        // routing / resolveEmbedder(String) is deleted outright — no production
+        // caller ever invoked it with a non-null collection). Production local
+        // mode wires bge-768 per RDR-160 — see EmbedderRouterBge768Test for
+        // that path.
         EmbedderRouter router = new EmbedderRouter(onnxEmbedder, "document");
 
-        // All prefixes should resolve to ONNX in local mode
-        for (String col : List.of("knowledge__nexus__minilm-l6-v2-384__v1",
-                                   "docs__nexus__minilm-l6-v2-384__v1",
-                                   "rdr__nexus__minilm-l6-v2-384__v1",
-                                   "code__nexus__minilm-l6-v2-384__v1")) {
-            assertThat(router.resolveEmbedder(col))
-                    .as("local-mode router should return ONNX for " + col)
-                    .isInstanceOf(OnnxEmbedder.class);
-        }
+        assertThat(router.resolveEmbedderByModel(onnxEmbedder.modelToken()))
+                .as("local-mode router should return ONNX for its own model token")
+                .isInstanceOf(OnnxEmbedder.class);
     }
 
-    // ── Test 3: EmbedderRouter cloud-mode routing ─────────────────────────────
+    // ── Test 3: EmbedderRouter cloud-mode model-token routing ─────────────────
 
     @Test
-    void embedderRouter_cloudMode_routesByPrefix() {
+    void embedderRouter_cloudMode_routesByModelToken() {
         // Use a dummy API key — we're only testing class identity, not calling the API
         EmbedderRouter router = new EmbedderRouter(onnxEmbedder, "dummy-key", "document");
 
-        assertThat(router.resolveEmbedder("knowledge__nexus__voyage-context-3__v1"))
-                .as("knowledge__ → CCE")
+        assertThat(router.resolveEmbedderByModel("voyage-context-3"))
+                .as("voyage-context-3 → CCE")
                 .isInstanceOf(CceEmbedder.class);
-        assertThat(router.resolveEmbedder("docs__nexus__voyage-context-3__v1"))
-                .as("docs__ → CCE")
-                .isInstanceOf(CceEmbedder.class);
-        assertThat(router.resolveEmbedder("rdr__nexus__voyage-context-3__v1"))
-                .as("rdr__ → CCE")
-                .isInstanceOf(CceEmbedder.class);
-        assertThat(router.resolveEmbedder("code__nexus__voyage-code-3__v1"))
-                .as("code__ → VoyageEmbedder")
+        assertThat(router.resolveEmbedderByModel("voyage-code-3"))
+                .as("voyage-code-3 → VoyageEmbedder")
                 .isInstanceOf(VoyageEmbedder.class);
-        assertThat(router.resolveEmbedder("unknown__nexus__model__v1"))
-                .as("unrecognised prefix → ONNX fallback")
+        assertThat(router.resolveEmbedderByModel(onnxEmbedder.modelToken()))
+                .as("the onnx-cloud test router's MiniLM fallback token → ONNX")
                 .isInstanceOf(OnnxEmbedder.class);
-        assertThat(router.resolveEmbedder(null))
-                .as("null collection → ONNX fallback")
-                .isInstanceOf(OnnxEmbedder.class);
+        assertThatThrownBy(() -> router.resolveEmbedderByModel("no-such-model"))
+                .as("an unwired model token must be refused, never silently fall back")
+                .isInstanceOf(dev.nexus.service.vectors.EmbeddingModelUnavailableException.class);
     }
 
     // ── Test 4: CCE embedder live call (integration — requires VOYAGE_API_KEY) ──

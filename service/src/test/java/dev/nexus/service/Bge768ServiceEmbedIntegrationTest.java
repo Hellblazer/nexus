@@ -59,7 +59,6 @@ class Bge768ServiceEmbedIntegrationTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String TOKEN  = "kkgnr-bge-embed-token-0123456789abcdef";
     private static final String TENANT = "kkgnr-tenant";
-    private static final String BGE_COLLECTION = "knowledge__kkgnr__bge-base-en-v15-768__v1";
     private static final double PARITY_MIN_COSINE = 0.9999;
 
     PostgreSQLContainer<?> pg;
@@ -152,7 +151,12 @@ class Bge768ServiceEmbedIntegrationTest {
 
     @Test
     void liveEmbed_yields768DimVectorsMatchingFastembed() throws Exception {
-        var resp = post("/v1/vectors/embed", Map.of("collection", BGE_COLLECTION, "texts", texts));
+        // RDR-204 Phase 2 fix round (nexus-ft04v.16 fix round): POST /v1/vectors/embed
+        // takes a MODEL token directly here, not "collection" -- this test's fixture
+        // registers no catalog_collections row at all, and since bead nexus-ft04v.16
+        // an unregistered "collection" 422s. This is the embed-only parity route's
+        // real shape: a caller comparing a specific model's output directly.
+        var resp = post("/v1/vectors/embed", Map.of("model", "bge-base-en-v15-768", "texts", texts));
         assertThat(resp.statusCode()).as("body=%s", resp.body()).isEqualTo(200);
 
         JsonNode embeddings = MAPPER.readTree(resp.body()).get("embeddings");
@@ -184,11 +188,25 @@ class Bge768ServiceEmbedIntegrationTest {
     }
 
     @Test
-    void minilmCollection_refused_inServiceEmbed() throws Exception {
-        // No silent fallback at the live HTTP boundary either: a non-bge model
-        // segment on the bge-only service must refuse, not degrade.
+    void minilmModel_refused_inServiceEmbed_forTheRightReason() throws Exception {
+        // No silent fallback at the live HTTP boundary either: a model this
+        // bge-only service has no embedder for must refuse, not degrade.
+        //
+        // RDR-204 Phase 2 fix round (nexus-ft04v.16 fix round, code-review-expert
+        // Critical finding): the PRIOR version of this test posted an unregistered
+        // "collection" and asserted a bare 422 -- which passed for the WRONG
+        // reason (UnregisteredCollectionException, "not registered") rather than
+        // the model-unavailable refusal its own comment claimed to test. Posting
+        // "model" directly and asserting the message content closes that gap:
+        // this 422 is EmbeddingModelUnavailableException, never a registration
+        // 422 in disguise.
         var resp = post("/v1/vectors/embed",
-                Map.of("collection", "knowledge__kkgnr__minilm-l6-v2-384__v1", "texts", List.of("x")));
+                Map.of("model", "minilm-l6-v2-384", "texts", List.of("x")));
         assertThat(resp.statusCode()).as("body=%s", resp.body()).isEqualTo(422);
+        assertThat(resp.body())
+                .as("must be refused as an UNSERVABLE MODEL, not an unregistered collection")
+                .contains("this install's profile names a model this mode cannot serve")
+                .contains("minilm-l6-v2-384")
+                .doesNotContain("is not registered");
     }
 }

@@ -68,21 +68,31 @@ import java.util.stream.Stream;
  * stray {@code file -> 0} entry is dead weight the stale-fingerprint check
  * cannot distinguish from a real ceiling.
  *
- * <p><b>Outcome at nexus-ft04v.16 (correcting the prediction above — this
- * paragraph originally said BOTH censuses would reach zero; they did not, and
- * the fact is corrected here rather than left standing next to the number
- * that disagrees with it).</b> {@link #COLLECTION_SPLIT_CENSUS} DID reach
- * zero (empty map, ceiling 0) — both {@code split("__")} call sites this gate
- * ever pinned are gone. {@link #COLLECTION_LITERAL_CENSUS} did NOT: {@code
- * EmbedderRouter.java} keeps a 5-literal entry, because {@code
- * CCE_PREFIXES}/{@code CODE_PREFIX}/{@code stripTrailingSeparator}'s {@code
- * endsWith("__")} survive for two uses this bead's scope never touched —
- * {@code resolveEmbedder}'s legacy prefix routing (kept only for the
- * collection-less {@code /v1/vectors/embed} parity path) and {@code
- * contentTypeModelTokens}'s profile-seeding map. See {@link
- * #COLLECTION_LITERAL_CENSUS}'s own javadoc for the full accounting. {@code
- * PgVectorRepository.java} DID reach zero on both censuses and lost both
- * entries, matching the original prediction for that file.
+ * <p><b>Outcome at nexus-ft04v.16 (superseded by the Phase 2 fix round —
+ * see the next paragraph).</b> At nexus-ft04v.16 itself, {@link
+ * #COLLECTION_SPLIT_CENSUS} reached zero (empty map, ceiling 0) but {@link
+ * #COLLECTION_LITERAL_CENSUS} did not: {@code EmbedderRouter.java} kept a
+ * 5-literal entry ({@code CCE_PREFIXES}/{@code CODE_PREFIX}/{@code
+ * stripTrailingSeparator}'s {@code endsWith("__")}), justified by two uses —
+ * {@code resolveEmbedder}'s legacy prefix routing, kept for what its own
+ * javadoc called "the collection-less {@code /v1/vectors/embed} parity
+ * path," and {@code contentTypeModelTokens}'s profile-seeding map.
+ *
+ * <p><b>Outcome at the Phase 2 fix round (nexus-ft04v.16 fix round,
+ * code-review-expert Critical finding).</b> The "collection-less parity
+ * path" justification above was FALSE: {@code /v1/vectors/embed} always
+ * required a non-null {@code collection} (or, after the fix round, a
+ * {@code model}) — no production caller ever invoked {@code
+ * resolveEmbedder(String)} with a real argument, and {@code
+ * resolveEmbedderStrict}'s {@code collection == null} branch that fell
+ * through to it had no caller either. Both are deleted outright, along with
+ * {@code CCE_PREFIXES}/{@code CODE_PREFIX}/{@code stripTrailingSeparator}:
+ * {@code contentTypeModelTokens} now keys its profile-seeding map on bare
+ * content-type string literals directly, needing no prefix constant to
+ * derive them from. {@link #COLLECTION_LITERAL_CENSUS} now reaches zero
+ * (empty map, ceiling 0) for BOTH files — the prediction the original
+ * nexus-ft04v.15 javadoc made before the true shape of the surviving use
+ * was known.
  *
  * <p>This gate is a pure source scanner (no jOOQ, no DB, no {@code
  * scripts/mvnw-leased.sh} substrate beyond plain {@code javac}/JUnit) — it
@@ -180,32 +190,30 @@ class CollectionParseGateTest {
      * entry entirely (a file at zero carries no entry, per this gate's own
      * reduce-only rule).
      *
-     * <p>{@code EmbedderRouter.java} keeps 5 — the ONE surviving literal group
-     * this bead's own instructions name as legitimate to keep: {@code
-     * CCE_PREFIXES}' three entries ({@code "knowledge__"}, {@code "docs__"},
-     * {@code "rdr__"}), {@code CODE_PREFIX} ({@code "code__"}), and {@code
-     * stripTrailingSeparator}'s {@code endsWith("__")}. These are NOT a
-     * collection-name PARSE site in the sense this gate exists to close —
-     * {@code resolveEmbedderStrict} (the real parse site, whose {@code
-     * split("__")} is gone) never calls them any more. They remain load-bearing
-     * for two OTHER, still-legitimate uses: (1) {@code resolveEmbedder}'s
-     * legacy prefix routing, kept ONLY for the truly collection-less {@code
-     * /v1/vectors/embed} parity path ({@code resolveEmbedderStrict(collection
-     * == null)} — see that method's own javadoc); and (2) {@code
-     * contentTypeModelTokens}, which reuses the SAME constants to build the
-     * content-type → model-token mapping {@code seedEmbeddingProfile}/{@code
-     * seedEmbeddingProfileForContentType} write into {@code
-     * nexus.embedding_profile} at registration time — a profile-SEEDING
-     * concern, not a per-request collection-name parse. Neither remaining use
-     * derives a model/dimension/content-type FOR AN EXISTING COLLECTION from
-     * its name; both are outside this bead's acceptance scope, hence the
-     * surviving pin here per nexus-ft04v.16's own instructions ("if any
-     * literal must survive... keep exactly its pin, write why").
+     * <p>{@code EmbedderRouter.java} reaches ZERO (Phase 2 fix round,
+     * nexus-ft04v.16 fix round): the 5-literal group this gate used to pin
+     * ({@code CCE_PREFIXES}' three entries, {@code CODE_PREFIX}, and {@code
+     * stripTrailingSeparator}'s {@code endsWith("__")}) is deleted outright.
+     * Its two claimed justifications did not survive scrutiny: (1) {@code
+     * resolveEmbedder}'s legacy prefix routing was kept for what its own
+     * javadoc called "the collection-less {@code /v1/vectors/embed} parity
+     * path" — a path that never existed in production (that route always
+     * required a non-null {@code collection} or, after the fix round, a
+     * {@code model}; grepping every call site found zero non-test,
+     * non-null invocations) — so the method itself, and the {@code
+     * resolveEmbedderStrict(collection == null)} branch that was its only
+     * production-reachable caller, are both deleted as dead code; and (2)
+     * {@code contentTypeModelTokens}'s profile-seeding map no longer needs
+     * the prefix constants at all — it now keys its content-type → model-token
+     * map directly on the bare content-type strings ({@code "knowledge"},
+     * {@code "docs"}, {@code "rdr"}, {@code "code"}, {@code "unknown"})
+     * rather than deriving them from name-routing literals. No entry
+     * survives for this file; a file at zero carries no entry, per this
+     * gate's own reduce-only rule.
      */
-    private static final Map<String, Integer> COLLECTION_LITERAL_CENSUS = Map.ofEntries(
-        Map.entry("dev/nexus/service/vectors/EmbedderRouter.java", 5));
+    private static final Map<String, Integer> COLLECTION_LITERAL_CENSUS = Map.of();
 
-    private static final int COLLECTION_LITERAL_TOTAL_CEILING = 5;
+    private static final int COLLECTION_LITERAL_TOTAL_CEILING = 0;
 
     /**
      * Per-file declared count of {@link #countSplitDunderCalls} — the

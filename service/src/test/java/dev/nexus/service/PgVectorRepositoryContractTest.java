@@ -985,6 +985,64 @@ class PgVectorRepositoryContractTest {
     }
 
     // ---------------------------------------------------------------------------
+    // RDR-204 Phase 2 fix round (nexus-ft04v.16 fix round, C1 -- substantive-critic
+    // Critical): an unregistered name inside a multi-collection fan-out is DROPPED
+    // (logged), never an abort of the whole request; a fan-out where NONE of the
+    // names are registered still fails loud, naming them.
+    // ---------------------------------------------------------------------------
+
+    @Test
+    void search_unregisteredCollectionInFanOut_isSkippedNotAborted() {
+        String registeredCol = "code__fanoutskip__voyage-code-3__v1";
+        tenantScope.withTenant(TENANT_A, ctx -> {
+            PgContainerHelper.insertCollection(ctx, TENANT_A, registeredCol);
+            return null;
+        });
+        embedder1024.register("search query", 1.0f, 0.0f);
+        embedder1024.register("fanout hit", 1.0f, 0.0f);
+        repo1024.upsertChunks(TENANT_A, registeredCol,
+            List.of("d05e5c769f6fe13644037dd902ef42faf7a9cecc9830dc2d5c8c4e116b3e4849"),
+            List.of("fanout hit"), List.of(Map.of()));
+        String neverRegistered = "code__fanoutskip-ghost__voyage-code-3__v1";
+
+        var logger = (ch.qos.logback.classic.Logger)
+            org.slf4j.LoggerFactory.getLogger(PgVectorRepository.class);
+        var logs = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        logs.start();
+        logger.addAppender(logs);
+        List<Map<String, Object>> rows;
+        try {
+            rows = repo1024.search(
+                TENANT_A, "search query", List.of(registeredCol, neverRegistered), 10, null);
+        } finally {
+            logger.detachAppender(logs);
+            logs.stop();
+        }
+
+        assertThat(rows).extracting(r -> r.get("id"))
+            .as("the registered survivor's hit must still come back, not an aborted "
+                + "whole-request 422 -- an unregistered collection cannot hold chunks by "
+                + "construction, so dropping it loses no data")
+            .containsExactly("d05e5c769f6fe13644037dd902ef42faf7a9cecc9830dc2d5c8c4e116b3e4849");
+        assertThat(logs.list.stream().map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage))
+            .as("the dropped name must be logged, never silently swallowed")
+            .anyMatch(m -> m.contains("event=search_skipped_unregistered_collections")
+                && m.contains(neverRegistered));
+    }
+
+    @Test
+    void search_allCollectionsUnregistered_failsLoud_namingAll() {
+        // Single-collection addressing stays unconditional 422 -- explicit addressing
+        // of an absent collection is a real error, not a fan-out stale-cache race.
+        String neverRegistered = "code__fanoutskip-allghost__voyage-code-3__v1";
+        assertThatThrownBy(() -> repo1024.search(
+                TENANT_A, "search query", List.of(neverRegistered), 10, null))
+            .as("when NONE of the requested collections are registered, fail loud naming it")
+            .isInstanceOf(dev.nexus.service.db.UnregisteredCollectionException.class)
+            .hasMessageContaining(neverRegistered);
+    }
+
+    // ---------------------------------------------------------------------------
     // Contract 5: get / list / count
     // ---------------------------------------------------------------------------
 

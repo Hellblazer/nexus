@@ -146,13 +146,14 @@ CORPUS = [
     ),
 ]
 
-# Collection names drive Java-side EmbedderRouter.  In cloud mode:
-#   code__  → VoyageEmbedder (voyage-code-3)
-#   knowledge__ → CceEmbedder (voyage-context-3)
-# In local mode (no VOYAGE key): ALL collections → OnnxEmbedder.
-_VOYAGE_COLLECTION = "code__parity-test__voyage-code-3__v1"
-_CCE_COLLECTION    = "knowledge__parity-test__voyage-context-3__v1"
-_ONNX_COLLECTION   = "knowledge__parity-test__bge-base-en-v15-768__v1"
+# RDR-204 Phase 2 fix round (nexus-ft04v.16 fix round): POST /v1/vectors/embed
+# takes a MODEL token directly, not a collection name — this suite never
+# registers a catalog_collections row for any of these, so a "collection"
+# field would 422 (UnregisteredCollectionException) since bead nexus-ft04v.16.
+# Model tokens drive Java-side EmbedderRouter.resolveEmbedderByModel directly.
+_VOYAGE_MODEL = "voyage-code-3"
+_CCE_MODEL    = "voyage-context-3"
+_ONNX_MODEL   = "bge-base-en-v15-768"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -395,12 +396,17 @@ def local_service() -> Generator[tuple[str, str], None, None]:
         _teardown_pg(pgdata)
 
 
-def _java_embed(base_url: str, token: str, collection: str, texts: list[str]) -> list[list[float]]:
-    """Call POST /v1/vectors/embed and return the embedding vectors (float64 from JSON)."""
+def _java_embed(base_url: str, token: str, model: str, texts: list[str]) -> list[list[float]]:
+    """Call POST /v1/vectors/embed and return the embedding vectors (float64 from JSON).
+
+    Posts "model" (a direct model token), not "collection" — this suite has no
+    catalog_collections row to register for any of its probe collections, and
+    since bead nexus-ft04v.16 an unregistered "collection" 422s.
+    """
     import json
     import urllib.request
 
-    payload = json.dumps({"collection": collection, "texts": texts}).encode()
+    payload = json.dumps({"model": model, "texts": texts}).encode()
     req = urllib.request.Request(
         f"{base_url}/v1/vectors/embed",
         data=payload,
@@ -530,7 +536,7 @@ class TestEmbedParity:
         python_f32 = [np.array(v, dtype=np.float32) for v in python_raw]
 
         # Java path: local-mode service → EmbedderRouter → bge-768 OnnxEmbedder.
-        java_vecs = _java_embed(base_url, token, _ONNX_COLLECTION, CORPUS)
+        java_vecs = _java_embed(base_url, token, _ONNX_MODEL, CORPUS)
 
         print(f"\nbge-768 parity ({len(CORPUS)} texts):")
         _assert_parity(
@@ -586,7 +592,7 @@ class TestEmbedParity:
         python_f32 = [np.array(v, dtype=np.float32) for v in result.embeddings]
 
         # Java path: VoyageEmbedder via code__ prefix routing
-        java_vecs = _java_embed(base_url, token, _VOYAGE_COLLECTION, CORPUS)
+        java_vecs = _java_embed(base_url, token, _VOYAGE_MODEL, CORPUS)
 
         print(f"\nVOYAGE standard parity ({len(CORPUS)} texts):")
         # The standard endpoint is NON-DETERMINISTIC across serving replicas, same
@@ -656,7 +662,7 @@ class TestEmbedParity:
         def embed_java() -> None:
             try:
                 java_vecs_holder[0] = _java_embed(
-                    base_url, token, _CCE_COLLECTION, CORPUS
+                    base_url, token, _CCE_MODEL, CORPUS
                 )
             except BaseException as exc:
                 errors.append(exc)

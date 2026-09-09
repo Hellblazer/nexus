@@ -61,8 +61,11 @@ docker run --rm --name "$BUILDER" --platform linux/arm64 --network "$NET" \
     echo -n "search  : "; curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer lintoken" -H "Content-Type: application/json" -X POST -d "{\"query\":\"linux\",\"project\":\"lin\"}" http://localhost:8080/v1/memory/search; echo
     # bge-768 EMBED (nexus-pqatt): the DJL tokenizers JNI + onnx-run path that
     # SIGABRTed at lib.rs:475 under native-image. Model mounted from host cache.
+    # RDR-204 Phase 2 fix round (nexus-ft04v.16 fix round): posts "model" directly
+    # rather than a "collection" -- /v1/vectors/embed no longer serves an
+    # unregistered collection name (422), and this probe registers nothing.
     echo -n "embed   : "
-    ecode=$(curl -s -o /tmp/lin-embed.out -w "%{http_code}" -H "Authorization: Bearer lintoken" -H "Content-Type: application/json" -X POST -d "{\"collection\":\"knowledge__x\",\"texts\":[\"linux native embed\"]}" http://localhost:8080/v1/vectors/embed); echo "$ecode"
+    ecode=$(curl -s -o /tmp/lin-embed.out -w "%{http_code}" -H "Authorization: Bearer lintoken" -H "Content-Type: application/json" -X POST -d "{\"model\":\"bge-base-en-v15-768\",\"texts\":[\"linux native embed\"]}" http://localhost:8080/v1/vectors/embed); echo "$ecode"
     kill -0 $PID 2>/dev/null || { echo "LINUX EMBED FAIL: service died on embed (SIGABRT?)"; tail -30 /tmp/lin-svc.log; exit 1; }
     [ "$ecode" = 200 ] && grep -q "\"embeddings\"" /tmp/lin-embed.out || { echo "LINUX EMBED FAIL: $ecode $(head -c160 /tmp/lin-embed.out)"; tail -30 /tmp/lin-svc.log; exit 1; }
     grep -iE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointer" /tmp/lin-svc.log && { echo "LINUX RUNTIME ERROR"; exit 1; } || true

@@ -122,15 +122,6 @@ class EmbedderRouterBge768Test {
     // already pinned against a real Testcontainers substrate by
     // CollectionRegistryTest#require_throwsWithNoRowCached_whenCollectionNeverRegistered.
 
-    @Test
-    void nullCollection_stillFallsBackToLegacyPrefixRouting() {
-        // The ONLY surviving resolveEmbedderStrict entry point into
-        // resolveEmbedder's prefix routing: no collection name at all to look a
-        // row up by — the truly collection-less /v1/vectors/embed parity path.
-        assertThat(router.resolveEmbedderStrict(null, TENANT, null).modelToken())
-                .isEqualTo("bge-base-en-v15-768");
-    }
-
     /**
      * RDR-160 P4.3 (bead nexus-x9cjh) — the production embed-dispatch composition
      * with the REAL Bge768Embedder (not FakeBge): provisioned model → router

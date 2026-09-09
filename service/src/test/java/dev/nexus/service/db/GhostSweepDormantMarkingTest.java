@@ -328,6 +328,50 @@ class GhostSweepDormantMarkingTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════
+    // A row marked DORMANT is evicted from CollectionRegistry too, not just
+    // a deleted one (RDR-204 Phase 2 fix round, nexus-ft04v.18 substantive-
+    // critique C2: the MARKED_DORMANT branch used to write lifecycle_state
+    // with no eviction, an asymmetry with the DELETED branch above).
+    // ══════════════════════════════════════════════════════════════════════
+
+    @Test @Order(25)
+    void dormantMarking_evictsCollectionRegistry_mirroringDeleteDiscipline() throws Exception {
+        String tenant = "ghost-sweep-dormant-evict";
+        String coll = "knowledge__gs-dormant-evict__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, tenant, coll);
+            // A taxonomy_meta row keeps the collection non-empty (collectionIsEmpty
+            // false) with no collection_vector_stats row -- MARKED_DORMANT, not
+            // DELETED, exactly like countsLoggedPerTenant's "dormant" fixture above.
+            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+               .values(tenant, coll).execute();
+        }
+        CollectionRegistry.markKnown(tenant, coll,
+            new CollectionRow("knowledge", "gs-dormant-evict", "minilm-l6-v2-384", 384, "live"));
+        assertThat(CollectionRegistry.cached(tenant, coll))
+            .as("precondition: the row is cached before the sweep runs").isPresent();
+
+        CatalogRepository.GhostSweepResult result = repo.sweepGhostsAndMarkDormant(tenant);
+
+        assertThat(result.markedDormant()).isEqualTo(1);
+        assertThat(result.ghostsDeleted()).isEqualTo(0);
+        assertThat(CollectionRegistry.cached(tenant, coll))
+            .as("dormant-marking must evict the cache exactly like deleteCollection does -- "
+                + "a reader trusting a stale cached row would never see the lifecycle_state flip")
+            .isEmpty();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var row = ctx.select(CATALOG_COLLECTIONS.LIFECYCLE_STATE).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(coll))
+                .fetchOne();
+            assertThat(row.value1()).as("the row itself is genuinely dormant, not deleted")
+                .isEqualTo("dormant");
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
     // MULTI-TENANT: each tenant is swept at its OWN first request; neither
     // is swept by the other's (TESTS bullet 3).
     // ══════════════════════════════════════════════════════════════════════

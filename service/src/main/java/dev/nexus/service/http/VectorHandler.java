@@ -1030,11 +1030,21 @@ public final class VectorHandler implements HttpHandler {
      * Used by the parity gate (bead nexus-gmiaf.21) to compare Java vs Python
      * embedding output directly (cosine == 1.0 exactly).
      *
-     * <p>Request:
+     * <p>Request — EXACTLY ONE of {@code collection} or {@code model} (RDR-204
+     * Phase 2 fix round, nexus-ft04v.16 fix round: the endpoint's own contract
+     * is embed-only, no storage, so it has no collection to REGISTER — a
+     * caller comparing a specific model's output directly, independent of any
+     * collection's registration state, names {@code model} instead):
      * <pre>
      * {
-     *   "collection": "knowledge__owner__voyage-context-3__v1",  // drives embedder routing
+     *   "collection": "knowledge__owner__voyage-context-3__v1",  // registry-resolved routing
      *   "texts":      ["text0", "text1", ...]
+     * }
+     * </pre>
+     * <pre>
+     * {
+     *   "model": "voyage-code-3",  // direct model-token routing, no collection involved
+     *   "texts": ["text0", "text1", ...]
      * }
      * </pre>
      *
@@ -1047,7 +1057,8 @@ public final class VectorHandler implements HttpHandler {
      *
      * <p>Returns 503 if no EmbedderRouter was configured — a pinned invariant
      * ({@code PgVectorServingContractTest} Order 13): absent backend is an explicit
-     * refusal, never a fallback.
+     * refusal, never a fallback. Returns 400 if the request names neither {@code
+     * collection} nor {@code model}, or both.
      */
     private void handleEmbed(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -1059,22 +1070,39 @@ public final class VectorHandler implements HttpHandler {
             HttpUtil.send(ex, 503, json(Map.of("error", "embed endpoint not configured")));
             return;
         }
-        String tenant = RequestContext.tenant();
         Map<String, Object> body = readBody(ex);
-        String collection     = requireString(body, "collection");
-        List<String> texts    = requireStringList(body, "texts");
+        String collection  = optString(body, "collection");
+        String model       = optString(body, "model");
+        List<String> texts = requireStringList(body, "texts");
+        if ((collection == null) == (model == null)) {
+            throw new IllegalArgumentException(
+                "exactly one of 'collection' or 'model' is required — collection is "
+                + "registry-resolved routing, model is direct model-token routing "
+                + "with no collection involved");
+        }
 
-        // Use embedForCollectionWithUsage to get both embeddings and token count in one
-        // API call (bead nexus-ehc4q). The float32 vectors are promoted to double exactly
-        // (same float32 binary as embedDoubleForCollection — both decode the same base64
-        // blob; the only difference was that embedDouble skipped the Java float intermediate,
-        // but the source bits are identical). This avoids a double-embed while capturing tokens.
-        // RDR-204 Phase 2 (bead nexus-ft04v.16): resolveEmbedderStrict now reads collection's
-        // catalog_collections row via CollectionRegistry, needing a TenantScope for its
-        // cache-miss fallback — pgRepo's own scope (same DataSource, same RLS gateway) since
-        // this handler holds no TenantScope of its own.
-        EmbedResult embedResult =
-            embedderRouter.embedForCollectionWithUsage(pgRepo.tenantScope(), tenant, collection, texts);
+        EmbedResult embedResult;
+        if (collection != null) {
+            // Use embedForCollectionWithUsage to get both embeddings and token count in
+            // one API call (bead nexus-ehc4q). RDR-204 Phase 2 (bead nexus-ft04v.16):
+            // resolveEmbedderStrict now reads collection's catalog_collections row via
+            // CollectionRegistry, needing a TenantScope for its cache-miss fallback —
+            // pgRepo's own scope (same DataSource, same RLS gateway) since this handler
+            // holds no TenantScope of its own.
+            String tenant = RequestContext.tenant();
+            embedResult = embedderRouter.embedForCollectionWithUsage(
+                pgRepo.tenantScope(), tenant, collection, texts);
+        } else {
+            // Direct model-token routing (RDR-204 Phase 2 fix round, nexus-ft04v.16 fix
+            // round): no collection to resolve, no registry lookup, no tenant needed —
+            // resolveEmbedderByModel dispatches purely on the requested model token.
+            var embedder = embedderRouter.resolveEmbedderByModel(model);
+            embedResult = embedder.embedWithUsage(texts);
+        }
+        // The float32 vectors are promoted to double exactly (same float32 binary as
+        // embedDoubleForCollection — both decode the same base64 blob; the only
+        // difference was that embedDouble skipped the Java float intermediate, but the
+        // source bits are identical). This avoids a double-embed while capturing tokens.
         List<float[]> float32Vecs = embedResult.embeddings();
 
         // Convert to List<List<Double>> for JSON serialization, promoting float32 → double.

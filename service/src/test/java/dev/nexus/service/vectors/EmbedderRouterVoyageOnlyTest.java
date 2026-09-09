@@ -87,10 +87,16 @@ class EmbedderRouterVoyageOnlyTest {
     }
 
     @Test
-    void nonConformantName_isRefused_noLocalFallback() {
+    void unknownModelToken_isRefused_noLocalFallback() {
+        // RDR-204 Phase 2 fix round (nexus-ft04v.16 fix round): resolveEmbedder(String)
+        // (prefix routing over a non-conformant NAME) is deleted outright -- no
+        // production caller ever invoked it with a real argument. The equivalent
+        // no-local-fallback proof for voyage-only cloud is now at the MODEL-TOKEN
+        // level: a token this mode has no embedder for is refused, never silently
+        // routed to a local embedder that does not exist in this mode.
         EmbedderRouter r = router();
-        assertThatThrownBy(() -> r.resolveEmbedder("legacy_unprefixed_collection"))
-            .as("non-conformant name has no local fallback in voyage-only cloud")
+        assertThatThrownBy(() -> r.resolveEmbedderByModel("legacy_unprefixed_collection"))
+            .as("an unrecognised model token has no local fallback in voyage-only cloud")
             .isInstanceOf(EmbeddingModelUnavailableException.class);
     }
 

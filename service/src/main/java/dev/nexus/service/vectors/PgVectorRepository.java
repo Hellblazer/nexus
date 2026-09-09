@@ -11,6 +11,7 @@ import dev.nexus.service.db.DeadlockRetry;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.db.UnregisteredCollectionException;
 import org.jooq.DSLContext;
 import org.jooq.JSONB;
 import org.jooq.Record;
@@ -251,8 +252,8 @@ public final class PgVectorRepository {
     /**
      * The RLS-stamping gateway this repository was constructed with (RDR-204 Phase 2,
      * bead nexus-ft04v.16) — exposed so a caller holding this repository but no
-     * {@link TenantScope} of its own (e.g. {@code VectorHandler}'s collection-less
-     * {@code /v1/vectors/embed} parity route) can still call {@link
+     * {@link TenantScope} of its own (e.g. {@code VectorHandler}'s {@code
+     * /v1/vectors/embed} parity route) can still call {@link
      * EmbedderRouter#embedForCollectionWithUsage} directly, which now needs one for
      * its {@link CollectionRegistry} cache-miss fallback.
      */
@@ -1023,6 +1024,10 @@ public final class PgVectorRepository {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return new Tokened<>(List.of(), 0L);
         }
+        // RDR-204 Phase 2 fix round (nexus-ft04v.16 fix round, C1): drop any
+        // unregistered name before the dim check rather than aborting the whole
+        // fan-out — see registeredSurvivors' own javadoc.
+        collectionNames = registeredSurvivors(tenant, collectionNames, "searchWithTokens");
         int dim = dimForCollection(tenant, collectionNames.get(0));
         for (String col : collectionNames) {
             int colDim = dimForCollection(tenant, col);
@@ -1285,6 +1290,10 @@ public final class PgVectorRepository {
             throw new IllegalArgumentException(
                 "selectiveGateMax must be >= 1, got " + selectiveGateMax);
         }
+        // RDR-204 Phase 2 fix round (nexus-ft04v.16 fix round, C1): drop any
+        // unregistered name before the dim check rather than aborting the whole
+        // fan-out — see registeredSurvivors' own javadoc.
+        collectionNames = registeredSurvivors(tenant, collectionNames, "hybridSearch");
         int dim = dimForCollection(tenant, collectionNames.get(0));
         for (String col : collectionNames) {
             int colDim = dimForCollection(tenant, col);
@@ -1835,6 +1844,10 @@ public final class PgVectorRepository {
         if (nResults < 1) {
             throw new IllegalArgumentException("nResults must be >= 1, got " + nResults);
         }
+        // RDR-204 Phase 2 fix round (nexus-ft04v.16 fix round, C1): drop any
+        // unregistered name before the homogeneity checks rather than aborting the
+        // whole fan-out — see registeredSurvivors' own javadoc.
+        collectionNames = registeredSurvivors(tenant, collectionNames, "searchMetadataScopedWithTokens");
         int dim = requireHomogeneousDim(tenant, collectionNames);
         requireHomogeneousModel(tenant, collectionNames);
         EmbedResult embed = embedQuery(tenant, collectionNames.get(0), queryText, dim);
@@ -1929,6 +1942,10 @@ public final class PgVectorRepository {
                 "unknown aspect field '" + field + "' - must be one of "
                 + ASPECT_SCOPED_FIELD_ALLOWLIST);
         }
+        // RDR-204 Phase 2 fix round (nexus-ft04v.16 fix round, C1): drop any
+        // unregistered name before the homogeneity checks rather than aborting the
+        // whole fan-out — see registeredSurvivors' own javadoc.
+        collectionNames = registeredSurvivors(tenant, collectionNames, "searchAspectScopedWithTokens");
         int dim = requireHomogeneousDim(tenant, collectionNames);
         requireHomogeneousModel(tenant, collectionNames);
         EmbedResult embed = embedQuery(tenant, collectionNames.get(0), queryText, dim);
@@ -2063,6 +2080,10 @@ public final class PgVectorRepository {
                 "direction must be 'out', 'in', or 'both', got '" + direction + "'");
         }
         int clampedDepth = Math.min(Math.max(depth, 1), 3);  // mirror graphBFS bound
+        // RDR-204 Phase 2 fix round (nexus-ft04v.16 fix round, C1): drop any
+        // unregistered name before the homogeneity checks rather than aborting the
+        // whole fan-out — see registeredSurvivors' own javadoc.
+        collectionNames = registeredSurvivors(tenant, collectionNames, "searchGraphHopWithTokens");
         int dim = requireHomogeneousDim(tenant, collectionNames);
         requireHomogeneousModel(tenant, collectionNames);
         EmbedResult embed = embedQuery(tenant, collectionNames.get(0), queryText, dim);
@@ -2081,6 +2102,65 @@ public final class PgVectorRepository {
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
         return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults), embed.tokens());
+    }
+
+    /**
+     * RDR-204 Phase 2 fix round (nexus-ft04v.16 fix round, C1 — substantive-critic
+     * Critical): partitions {@code collectionNames} into the subset actually
+     * registered for {@code tenant}, DROPPING (never throwing on) any name with no
+     * {@code catalog_collections} row, and returns the survivors in their original
+     * order.
+     *
+     * <p><strong>Why drop instead of abort the whole request.</strong> Before this
+     * fix, EVERY multi-collection fan-out read ({@link #searchWithTokens}, {@link
+     * #hybridSearch}, and every combined-query method routed through {@link
+     * #requireHomogeneousDim}/{@link #requireHomogeneousModel}) aborted the ENTIRE
+     * request with {@link UnregisteredCollectionException} the instant ONE name in
+     * the list had no row — a client-side collection cache (the shipped 7.37.0
+     * client's is ~60s TTL) naming a just-deleted, just-renamed, or just-ghost-swept
+     * collection could fail an otherwise-fully-servable corpus-wide search. An
+     * unregistered collection cannot hold chunks by construction (RDR-204 Phase 1
+     * requires registration before any chunk write; the delete cascade removes
+     * chunks before the catalog row), so dropping it here loses no data that could
+     * possibly have been returned anyway.
+     *
+     * <p><strong>Why this is not a single-collection change.</strong>
+     * Single-collection routes ({@link #dimForCollection}, {@link
+     * #searchTopicScopedWithTokens}, every write path) keep the unconditional 422 —
+     * a caller explicitly addressing ONE absent collection by name is a real error,
+     * not a stale-cache race in a fan-out. This helper is for multi-collection FAN-OUT
+     * reads only.
+     *
+     * @param opLabel a short label for the structured warning log (the calling
+     *                method's name), so a skipped-collection event is traceable to
+     *                which endpoint saw it
+     * @throws UnregisteredCollectionException naming every dropped collection when
+     *         NONE of {@code collectionNames} survive — a request that is entirely
+     *         wrong must still fail loud, exactly like the single-collection case
+     */
+    private List<String> registeredSurvivors(String tenant, List<String> collectionNames, String opLabel) {
+        List<String> survivors = new ArrayList<>(collectionNames.size());
+        List<String> dropped = new ArrayList<>();
+        for (String col : collectionNames) {
+            if (CollectionRegistry.cached(tenant, col).isPresent()) {
+                survivors.add(col);
+                continue;
+            }
+            try {
+                CollectionRegistry.lookup(tenantScope, tenant, col);
+                survivors.add(col);
+            } catch (UnregisteredCollectionException e) {
+                dropped.add(col);
+            }
+        }
+        if (!dropped.isEmpty()) {
+            log.warn("event=search_skipped_unregistered_collections op={} tenant={} names={}",
+                opLabel, tenant, dropped);
+        }
+        if (survivors.isEmpty()) {
+            throw new UnregisteredCollectionException(tenant, String.join(", ", collectionNames));
+        }
+        return survivors;
     }
 
     /**

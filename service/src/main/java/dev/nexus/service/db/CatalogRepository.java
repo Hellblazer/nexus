@@ -7556,9 +7556,13 @@ public final class CatalogRepository {
      * residual {@link #renameCollectionTxn} already accepts.
      *
      * <p>Post-commit (mirrors {@link #deleteCollection}'s discipline): every
-     * ghost this method deletes is evicted from {@link CollectionRegistry} so a
-     * later write against the same, now-reusable name always re-verifies against
-     * the database instead of trusting a stale cache entry.
+     * ghost this method deletes OR marks dormant is evicted from {@link
+     * CollectionRegistry} so a later read or write against the same name always
+     * re-verifies against the database instead of trusting a stale cache entry
+     * (RDR-204 Phase 2 fix round, nexus-ft04v.18 substantive-critique C2: the
+     * DELETED branch always evicted; the MARKED_DORMANT branch wrote {@code
+     * lifecycle_state} with no eviction, an asymmetry the RDR's own Critical
+     * Assumption 5 and Risks section both omitted as an invalidation point).
      */
     public GhostSweepResult sweepGhostsAndMarkDormant(String tenant) {
         List<SweptRow> rows = tenantScope.withTenant(tenant, ctx -> {
@@ -7591,7 +7595,12 @@ public final class CatalogRepository {
                     deleted++;
                     CollectionRegistry.evict(tenant, r.name());
                 }
-                case MARKED_DORMANT -> dormant++;
+                case MARKED_DORMANT -> {
+                    dormant++;
+                    // nexus-ft04v.18 C2: a cached row's lifecycleState is now stale the
+                    // instant this UPDATE commits — evict so the next reader re-verifies.
+                    CollectionRegistry.evict(tenant, r.name());
+                }
                 case UNCHANGED -> { }
             }
         }

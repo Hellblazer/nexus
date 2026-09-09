@@ -39,12 +39,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * names a model this mode cannot serve"), never silently embedded with a
  * different model. An UNREGISTERED collection fails loud with {@link
  * UnregisteredCollectionException} — there is no more name-shape escape hatch
- * into legacy prefix routing for a non-conformant NAME; {@link
- * EmbedderRouter#resolveEmbedder}'s prefix routing survives only for a
- * {@code null} collection (the truly collection-less {@code
- * /v1/vectors/embed} parity path) — see {@code
- * nonConformantName_stillRoutesByRegistryRow_neverByName} /
- * {@code nullCollection_stillFallsBackToLegacyPrefixRouting} below.
+ * into prefix routing for a non-conformant NAME (RDR-204 Phase 2 fix round,
+ * nexus-ft04v.16 fix round: {@code resolveEmbedder(String)}'s legacy prefix
+ * routing is deleted outright — its "collection-less {@code
+ * /v1/vectors/embed} parity path" justification was false; no production
+ * caller ever invoked it with a non-null argument, and no caller passes a
+ * null collection to {@code resolveEmbedderStrict} either) — see {@code
+ * nonConformantName_stillRoutesByRegistryRow_neverByName} below.
  *
  * <p>Pure in-process mechanism test — no PG substrate. {@link
  * CollectionRegistry#markKnown} seeds the (tenant, collection) → row mapping
@@ -185,7 +186,7 @@ class EmbeddingModeFailLoudTest {
                 .hasMessageContaining("bge-base-en-v15-768");
     }
 
-    // ── Only a null collection keeps legacy prefix routing ───────────────────
+    // ── The row wins, whatever the name looks like ───────────────────────────
 
     @Test
     void nonConformantName_stillRoutesByRegistryRow_neverByName() {
@@ -200,6 +201,26 @@ class EmbeddingModeFailLoudTest {
         assertThat(local.resolveEmbedderStrict(null, TENANT, collection)).isSameAs(onnx);
     }
 
+    @Test
+    void nameClaimsOneModel_rowSaysAnother_rowWins() {
+        // RDR-204 Phase 2 test-validation gap (nexus-ft04v.19 review, item 1):
+        // every prior fixture either matched the name's own model token or
+        // carried no token at all (absence, not disagreement). This is the
+        // literal case the bead's acceptance language names: "routing picks
+        // the right embedder for a collection whose NAME disagrees with its
+        // row." The name here claims voyage-code-3 (a model this ONNX-wired
+        // local router cannot serve at all); the row says minilm-l6-v2-384 (a
+        // grandfathered rename, or a name that predates a profile change).
+        // If dispatch ever reverted to reading the name's own segment, this
+        // would either throw (voyage-code-3 unservable in local mode) or
+        // dispatch wrongly — it does neither, because the row is read, never
+        // the name.
+        String collection = "code__grandfathered__voyage-code-3__v1";
+        mark(collection, "minilm-l6-v2-384", 384);
+        EmbedderRouter local = new EmbedderRouter(onnx, "document");
+        assertThat(local.resolveEmbedderStrict(null, TENANT, collection)).isSameAs(onnx);
+    }
+
     // NOTE: a genuinely UNREGISTERED (tenant, collection) pair — no CollectionRegistry
     // cache entry at all — cannot be exercised in THIS class: the cache-miss branch of
     // CollectionRegistry#lookup needs a real TenantScope backed by a real DataSource to
@@ -207,15 +228,6 @@ class EmbeddingModeFailLoudTest {
     // the class javadoc). That contract — UnregisteredCollectionException, no row ever
     // written — is already pinned against a real Testcontainers substrate by
     // CollectionRegistryTest#require_throwsWithNoRowCached_whenCollectionNeverRegistered.
-
-    @Test
-    void nullCollection_stillFallsBackToLegacyPrefixRouting() {
-        // The ONLY surviving resolveEmbedderStrict entry point into
-        // resolveEmbedder's prefix routing: no collection name at all to look a
-        // row up by — the truly collection-less /v1/vectors/embed parity path.
-        EmbedderRouter cloud = new EmbedderRouter(onnx, "dummy-key", "document");
-        assertThat(cloud.resolveEmbedderStrict(null, TENANT, null)).isSameAs(onnx);
-    }
 
     // ── Banner surface ────────────────────────────────────────────────────────
 
