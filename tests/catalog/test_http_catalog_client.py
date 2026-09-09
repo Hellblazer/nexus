@@ -2726,3 +2726,85 @@ class TestManifestNullCollectionReport:
         c = self._client_get_returning(monkeypatch, None)
         report = c.manifest_null_collection_report()
         assert report == {"total": 0, "backfillable": 0, "unavailable": True}
+
+
+# ── RDR-204 (nexus-ft04v.33): embedding_profile accessor ─────────────────────
+
+
+class TestEmbeddingProfileAccessor:
+    """``HttpCatalogClient.embedding_profile()`` over the live fake server.
+
+    The engine is the only writer of ``nexus.embedding_profile``; the client
+    READS it and never invents a row. Empty stays empty (a hardcoded default
+    here is the GH #667 class), an engine below the Phase 2 route fails loud,
+    and there is no second cache: the profile is small and per-tenant.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset(self) -> None:
+        FakeCatalogHandler.reset_log()
+        yield
+        FakeCatalogHandler.reset_log()
+
+    def test_voyage_profile_round_trips_verbatim(self, client: HttpCatalogClient) -> None:
+        rows = client.embedding_profile()
+        assert rows == VOYAGE_EMBEDDING_PROFILE_ROWS
+        assert {r["content_type"] for r in rows} == {"code", "docs", "rdr", "knowledge"}
+        assert all(isinstance(r["dimension"], int) for r in rows)
+
+    def test_bge_profile_round_trips_verbatim(self, client: HttpCatalogClient) -> None:
+        FakeCatalogHandler.embedding_profile_rows = list(BGE_EMBEDDING_PROFILE_ROWS)
+        rows = client.embedding_profile()
+        assert rows == BGE_EMBEDDING_PROFILE_ROWS
+        assert {r["embedding_model"] for r in rows} == {"bge-base-en-v15-768"}
+        assert {r["dimension"] for r in rows} == {768}
+
+    def test_unprofiled_tenant_returns_empty_not_a_default(self, client: HttpCatalogClient) -> None:
+        FakeCatalogHandler.embedding_profile_rows = []
+        assert client.embedding_profile() == []
+
+    @pytest.mark.parametrize("status", [404, 405])
+    def test_engine_below_the_route_fails_loud(self, client: HttpCatalogClient, status: int) -> None:
+        from nexus.catalog.http_catalog_client import EmbeddingProfileRouteMissingError
+
+        FakeCatalogHandler.embedding_profile_status = status
+        with pytest.raises(EmbeddingProfileRouteMissingError, match="embedding_profile"):
+            client.embedding_profile()
+
+    def test_no_second_cache_every_call_hits_the_wire(self, client: HttpCatalogClient) -> None:
+        client.embedding_profile()
+        client.embedding_profile()
+        assert FakeCatalogHandler.get_ops.count("/embedding_profile") == 2
+        assert not [a for a in vars(client) if "profile" in a.lower()], (
+            "the accessor must not grow a memo attribute; the profile is read fresh"
+        )
+
+    def _client_get_returning(self, monkeypatch: pytest.MonkeyPatch, body: object) -> HttpCatalogClient:
+        c = object.__new__(HttpCatalogClient)
+        monkeypatch.setattr(c, "_get", lambda path, **params: body, raising=False)
+        return c
+
+    def test_count_disagreeing_with_rows_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        c = self._client_get_returning(monkeypatch, {"profile": list(VOYAGE_EMBEDDING_PROFILE_ROWS), "count": 99})
+        with pytest.raises(ValueError, match="count"):
+            c.embedding_profile()
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            {"content_type": "code", "embedding_model": "model-x"},
+            {"content_type": "code", "dimension": 1024},
+            {"embedding_model": "model-x", "dimension": 1024},
+            {"content_type": "code", "embedding_model": "model-x", "dimension": "1024"},
+        ],
+        ids=["no-dimension", "no-model", "no-content-type", "dimension-not-int"],
+    )
+    def test_malformed_row_raises(self, monkeypatch: pytest.MonkeyPatch, row: dict) -> None:
+        c = self._client_get_returning(monkeypatch, {"profile": [row], "count": 1})
+        with pytest.raises(ValueError, match="embedding_profile"):
+            c.embedding_profile()
+
+    def test_none_body_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        c = self._client_get_returning(monkeypatch, None)
+        with pytest.raises(ValueError, match="embedding_profile"):
+            c.embedding_profile()
