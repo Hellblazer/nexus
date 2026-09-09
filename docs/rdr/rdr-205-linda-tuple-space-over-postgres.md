@@ -608,6 +608,9 @@ ack(claim_id, claimant) ; nack(claim_id, claimant)         # ownership checked
 subspaces() -> [TemplateSchema]                             # registered templates
 subspace_list(prefix) -> [{subspace, total, available, claimed, consumed, expired_unpurged,
                            oldest_created_at, newest_created_at}]    # concrete subspaces that exist;
+                                                                     # the two timestamps span all rows,
+                                                                     # expired included (the census needs
+                                                                     # the newest write, not the newest live row);
                                                                      # total counts live rows only
 registry() -> {digest, templates: [TemplateSchema]}                  # subspaces() is the templates half
 subspace_stats(subspace) -> {total, available, claimed, consumed, expired_unpurged}
@@ -714,15 +717,17 @@ reclaim during sustained churn, since the default already self-heals
 once churn stops. TTL on every row; the `sweepScheduler` in
 `NexusService`, every `SWEEP_INTERVAL_HOURS` (six hours today,
 `NexusService.java:78`), gains a second scheduled task that enumerates
-its tenants from `nexus.tuple_tenants` under the same statement bound
-the token loop applies to its own pre-arm enumeration
-(`NexusService.java:560-564`; an unbounded enumeration would stall the
-cycle where no per-tenant bound can reach it) and, per tenant, releases
+its tenants from `nexus.tuple_tenants` and, per tenant, releases
 lapsed claims with an `expire` log row, purges expired and
 consumed-past-retention tuple rows (which sets the log's `tuple_id` to
 null), then purges log rows past the log's own longer TTL, in batches of
 a few hundred, committing per batch (one long transaction would defeat
-autovacuum). Every run logs a counted outcome record in the RDR-204
+autovacuum). The token loop's statement bound
+(`NexusService.java:539-542`: passed to every arm, because bounding one
+of three leaves the cycle unbounded) applies to every statement this
+task issues, the tenant enumeration and each per-tenant batch alike,
+since both tasks share one single-thread scheduler and an unbounded
+purge would stall the T1 sweep for every tenant. Every run logs a counted outcome record in the RDR-204
 ghost sweep's convention: tenants visited, scanned, released, purged,
 log rows purged. A
 run that finds nothing expired is the normal state of a healthy table
@@ -993,12 +998,12 @@ re-run timer; typed errors.
 A second scheduled task on `sweepScheduler` at the same cadence
 (`SWEEP_INTERVAL_HOURS`), separate from `runScheduledSweep` because that
 method builds its token-derived tenant set once before its arms. It
-enumerates `nexus.tuple_tenants` under the same statement bound the
-token loop applies to its own pre-arm enumeration
-(`NexusService.java:560-564`) and, inside `withTenant` for each:
+enumerates `nexus.tuple_tenants` and, inside `withTenant` for each:
 releases lapsed claims with an `expire`
 log row, purges expired and consumed-past-retention tuple rows, then log
-rows past the log's own TTL, in batches with a commit per batch; log the
+rows past the log's own TTL, in batches with a commit per batch, the
+token loop's statement bound on every statement including the
+enumeration (`NexusService.java:539-542`); log the
 counted outcome record every run. The sweep test seeds expired rows and
 asserts the counts; production runs that find nothing are normal.
 
@@ -1359,3 +1364,15 @@ T2 `nexus_rdr/205-fix-check-0e2b22e80`. `subspace_list` reports
 five counted fields as the counted record; the tenant table's no-lock
 property is delivered by a read-before-upsert, not asserted of the
 upsert.
+
+### 2026-09-09 — Fix check on the sixth fix (FAIL, no ship-blocker), seventh fix
+
+T2 `nexus_rdr/205-fix-check-700a741c6`. The statement bound applies to
+every statement the tuple sweep issues, not only its enumeration
+(`NexusService.java:539-542` is the doctrine: bounding one arm of three
+leaves the cycle unbounded), stated in Technical Design and Phase 1 Step
+5. `subspace_list`'s timestamps span all rows, expired included, which
+is what the census's stalled-projection detector needs. Round 2 of the
+gate is run on this text: the sixth check found no ship-blocker, and the
+previous three checks had each found only one-clause drifts adjacent to
+the previous fix.
