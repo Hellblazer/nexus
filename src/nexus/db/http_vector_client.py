@@ -463,6 +463,51 @@ def _keepalive_opener() -> Any:
     )
 
 
+#: RDR-204 Phase 3 item 5 (nexus-ft04v.26): last successful response's
+#: SELECT response headers, thread-local. Populated (never mutated by any
+#: caller) inside :func:`_request_once` on a 2xx response, read and
+#: cleared by :func:`_pop_response_headers` immediately after the
+#: fan-out read routes' own ``_post``/``_get`` call returns.
+#:
+#: Deliberately NOT a new parameter on ``_request_once``/``_request``/
+#: ``_post``/``_get``: :data:`_REQUEST_DEADLINE_MS_BY_PATH_SUFFIX`'s own
+#: comment already names why -- "the many test doubles that replace
+#: ``_post`` with a ``(path, body, *, tenant, timeout)`` callable keep
+#: their exact shape" -- and at least one existing test
+#: (``TestDataTokenResolutionSeamRequestOnce.
+#: test_401_retry_invalidates_the_data_token_cache_entry``) replaces
+#: ``_request_once`` with an explicit ``def fake_once(method, path, *,
+#: tenant, timeout, body):`` carrying NO ``**kwargs`` catch-all, which a
+#: new required-shaped kwarg passed by ``_request``'s own internal call
+#: would break outright. Thread-local, not a bare module global: this
+#: client is called from worker threads (index runs at ``-n 4``+), and a
+#: shared mutable dict would let one thread's capture leak into or race
+#: another's read.
+_response_header_capture = threading.local()
+
+
+def _stash_response_headers(headers: object) -> None:
+    """Best-effort: called from :func:`_request_once` right after a
+    successful response. Never raises -- header capture is a caller-
+    visibility nicety, not a correctness requirement, and must never be
+    the reason a real read fails."""
+    try:
+        value = headers.get("X-Nexus-Skipped-Collections")  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 — best-effort; see docstring
+        return
+    _response_header_capture.skipped_collections = value
+
+
+def _pop_response_headers() -> dict[str, str]:
+    """The current thread's captured headers from the MOST RECENT
+    :func:`_request_once` call, then clear them -- a pop, not a peek, so a
+    later unrelated call in the same thread (or a test that never sets
+    the thread-local at all) never observes a stale prior value."""
+    value = getattr(_response_header_capture, "skipped_collections", None)
+    _response_header_capture.skipped_collections = None
+    return {"X-Nexus-Skipped-Collections": value} if value else {}
+
+
 def _request_once(
     method: str, path: str, *, tenant: str, timeout: int, body: dict | None
 ) -> Any:
@@ -508,6 +553,11 @@ def _request_once(
     # hook, so a sleep-orphaned connection could never be detected. See the
     # transport-section comment above.
     with _keepalive_opener().open(req, timeout=timeout) as resp:
+        # RDR-204 Phase 3 item 5 (nexus-ft04v.26): stash X-Nexus-Skipped-
+        # Collections (when present) for the caller to read via
+        # _pop_response_headers() -- see that function's docstring for why
+        # this is a thread-local capture rather than a new parameter.
+        _stash_response_headers(resp.headers)
         return json.loads(resp.read())
 
 
@@ -1463,6 +1513,45 @@ def _get(path: str, *, tenant: str = "default") -> Any:
         if remedy is None:
             raise
         raise VectorServiceError(f"GET {path} failed: {e}\n{remedy}") from e
+
+
+def _warn_skipped_collections(route: str, requested: list[str]) -> None:
+    """RDR-204 Phase 3 item 5 (nexus-ft04v.26): log (never retry) when a
+    fan-out read's response carried ``X-Nexus-Skipped-Collections``
+    (engine half: bead nexus-ft04v.16 fix round 2, ``0c97fc06e``) — a
+    requested collection had no catalog row at read time and the engine
+    dropped it from the fan-out instead of 422ing the whole request
+    (``registeredSurvivors``, catalog-023). A structlog warning is the
+    entire remedy here: the caller already has its (partial) result, a
+    retry would just re-hit the same registration gap, and this is a
+    caller-VISIBILITY fix (the drop was previously a server-only log,
+    invisible to the client) — not a caller-behavior change.
+
+    Call this immediately after the ``_post``/``_get`` that produced the
+    result, before any other network call on the same thread — see
+    :func:`_pop_response_headers`'s docstring for why the capture is
+    thread-local and pop-not-peek.
+    """
+    raw = _pop_response_headers().get("X-Nexus-Skipped-Collections")
+    if not raw:
+        return
+    skipped = [name for name in raw.split(",") if name]
+    if not skipped:
+        return
+    _log.warning(
+        "vector_read_skipped_unregistered_collections",
+        route=route,
+        requested=requested,
+        skipped=skipped,
+        detail=(
+            "the engine dropped these collections from the fan-out "
+            "because they carry no catalog_collections row at read time "
+            "(RDR-204 Gap 1/registration); the read result reflects only "
+            "the surviving, registered collections. Re-register a "
+            "collection that should be searchable, or drop it from the "
+            "corpus if it is genuinely retired."
+        ),
+    )
 
 
 class VectorServiceError(RuntimeError):
@@ -2546,6 +2635,7 @@ class HttpVectorClient:
             get_brake().wait()
 
         results = _post("/v1/vectors/search", body, tenant=self._tenant)
+        _warn_skipped_collections("search", collection_names)
         # results is a list of {id, content, distance, collection, ...} — or,
         # when rerank was requested against a rerank-capable engine, the
         # RerankStage object envelope.
@@ -2688,7 +2778,9 @@ class HttpVectorClient:
             body["subtree"] = subtree
         if where:
             body["where"] = where
-        return _post("/v1/vectors/search-metadata-scoped", body, tenant=self._tenant)
+        result = _post("/v1/vectors/search-metadata-scoped", body, tenant=self._tenant)
+        _warn_skipped_collections("search_metadata_scoped", collection_names)
+        return result
 
     def search_topic_scoped(
         self,
@@ -2754,7 +2846,9 @@ class HttpVectorClient:
             body["link_type"] = link_type
         if where:
             body["where"] = where
-        return _post("/v1/vectors/search-graph-hop", body, tenant=self._tenant)
+        result = _post("/v1/vectors/search-graph-hop", body, tenant=self._tenant)
+        _warn_skipped_collections("search_graph_hop", collection_names)
+        return result
 
     #: Locked wire contract (RDR-156 Decision 5, bead nexus-ubnwk) — identical
     #: to ``PgVectorRepository.ASPECT_SCOPED_FIELD_ALLOWLIST`` (Java) and the
@@ -2852,7 +2946,9 @@ class HttpVectorClient:
             body["min_confidence"] = min_confidence
         if where:
             body["where"] = where
-        return _post("/v1/vectors/search-aspect-scoped", body, tenant=self._tenant)
+        result = _post("/v1/vectors/search-aspect-scoped", body, tenant=self._tenant)
+        _warn_skipped_collections("search_aspect_scoped", collection_names)
+        return result
 
     def get_by_id(self, collection: str, doc_id: str) -> dict | None:
         """Fetch a single chunk by ID.
