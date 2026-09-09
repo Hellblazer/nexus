@@ -2634,7 +2634,8 @@ def _grouped_combined_query(
 
 
 def _dedup_by_id(rows: list[dict]) -> list[dict]:
-    """Collapse *rows* to one row per ``id``, keeping the best (lowest) distance.
+    """Collapse *rows* to one row per ``id``, keeping the best (lowest) distance,
+    then one row per identical chunk across collections (GH #1524).
 
     Assumes *rows* is already globally distance-ascending (e.g. the output
     of :func:`_grouped_combined_query`) so the FIRST occurrence of an id is
@@ -2650,7 +2651,57 @@ def _dedup_by_id(rows: list[dict]) -> list[dict]:
             continue
         seen.add(rid)
         deduped.append(r)
-    return deduped
+    return _collapse_identical_chunk_rows(deduped)
+
+
+def _collapse_identical_chunk_rows(rows: list[dict]) -> list[dict]:
+    """GH #1524 (nexus-20uv3): a chunk is content-addressed, so the same text
+    indexed in five collections (the RDR template's README, byte-identical
+    in every repo that ships it) is ONE chash in five collections and ranked
+    first five times. Keep the best-ranked row per non-empty ``chash`` and
+    record the other collections on it as ``also_in`` (distinct, in rank
+    order). Rows with no chash are never collapsed."""
+    kept_by_chash: dict[str, dict] = {}
+    out: list[dict] = []
+    for r in rows:
+        chash = r.get("chash", "") or ""
+        if not chash:
+            out.append(r)
+            continue
+        kept = kept_by_chash.get(chash)
+        if kept is None:
+            kept_by_chash[chash] = r
+            out.append(r)
+            continue
+        other = r.get("collection", "")
+        if other and other != kept.get("collection", ""):
+            also = kept.setdefault("also_in", [])
+            if other not in also:
+                also.append(other)
+    return out
+
+
+def _collapse_identical_chunk_results(results: list) -> list:
+    """The :func:`_collapse_identical_chunk_rows` rule for ``SearchResult``
+    lists (the plain query path): keyed on ``metadata["chunk_text_hash"]``,
+    the other collections recorded as ``metadata["also_in"]``."""
+    kept_by_chash: dict = {}
+    out: list = []
+    for r in results:
+        chash = (r.metadata or {}).get("chunk_text_hash", "") or ""
+        if not chash:
+            out.append(r)
+            continue
+        kept = kept_by_chash.get(chash)
+        if kept is None:
+            kept_by_chash[chash] = r
+            out.append(r)
+            continue
+        if r.collection and r.collection != kept.collection:
+            also = kept.metadata.setdefault("also_in", [])
+            if r.collection not in also:
+                also.append(r.collection)
+    return out
 
 
 def _dedup_by_id_keep_best(rows: list[dict], limit: int) -> list[dict]:
@@ -3508,6 +3559,8 @@ def query(
                     "collections": sorted({r.get("collection", "") for r in rows}),
                     # per-row aligned (RDR-086 / review #7)
                     "chunk_collections": [r.get("collection", "") for r in rows],
+                    # GH #1524: the other collections the same chunk was found in.
+                    "also_in": [list(r.get("also_in", [])) for r in rows],
                     # HIGH-1: chash per matched chunk row, not a manifest guess
                     "chunk_text_hash": [r.get("chash", "") for r in rows],
                 }
@@ -3588,6 +3641,8 @@ def query(
                 if chunk_count_svc:
                     lines_svc.append(f"   [{chunk_count_svc} chunks]")
                 lines_svc.append(f"   {collection_svc}")
+                if row.get("also_in"):
+                    lines_svc.append(f"   also in: {', '.join(row['also_in'])}")
                 lines_svc.append(f"   {snippet_svc}")
                 lines_svc.append("")
 
@@ -3666,6 +3721,9 @@ def query(
                 )
             return _append_fanout_excluded_note(no_results_msg, fanout_excluded_q)
 
+        # GH #1524: one row per identical chunk across collections.
+        results = _collapse_identical_chunk_results(results)
+
         if structured:
             page = results[:limit]
             structured_result: dict = {
@@ -3678,6 +3736,9 @@ def query(
                 # Review #7: per-result aligned list for consumers
                 # that need per-chunk origin (e.g. nx_answer envelope).
                 "chunk_collections": [r.collection for r in page],
+                # GH #1524: per-result list of the OTHER collections the same
+                # chunk (by chash) was found in; empty for a unique chunk.
+                "also_in": [list((r.metadata or {}).get("also_in", [])) for r in page],
                 # RDR-086 Phase 3.2: chunk_text_hash forwarded for chash
                 # citation authoring at the document layer.
                 "chunk_text_hash": [
@@ -3793,6 +3854,7 @@ def query(
                         meta.get("_display_path")
                         or meta.get("source_path", "")
                     ),
+                    "also_in": list(meta.get("also_in", [])),
                 }
             elif r.hybrid_score > docs[doc_key]["hybrid_score"]:
                 # Better matching chunk — update snippet
@@ -3851,6 +3913,8 @@ def query(
             if tech_parts:
                 lines.append(f"   [{' · '.join(tech_parts)}]")
             lines.append(f"   {d['collection']}")
+            if d.get("also_in"):
+                lines.append(f"   also in: {', '.join(d['also_in'])}")
             lines.append(f"   {d['snippet']}")
             lines.append("")
 

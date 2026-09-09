@@ -619,6 +619,33 @@ def test_run_index_returns_rdr_stats(tmp_path):
     assert (stats["rdr_indexed"], stats["rdr_current"], stats["rdr_failed"]) == (1, 1, 0)
 
 
+def test_run_index_skips_process_documents_in_the_rdr_directory(tmp_path):
+    """GH #1524 (nexus-20uv3): docs/rdr/README.md (the RDR template's process
+    README, byte-identical across every repo that uses the template) and the
+    agent guidance files beside it are not RDRs and never enter the rdr pass."""
+    from nexus.indexer import RDR_DIR_NON_RDR_BASENAMES, _run_index
+    assert RDR_DIR_NON_RDR_BASENAMES == {"readme.md", "agents.md", "claude.md"}
+    repo = tmp_path / "repo"; repo.mkdir()
+    rdr = repo / "docs" / "rdr"; rdr.mkdir(parents=True)
+    (rdr / "001.md").write_text("# D\n")
+    (rdr / "README.md").write_text("# Recommendation Decisioning Records\n")
+    (rdr / "AGENTS.md").write_text("# guidance\n")
+    db, _, _ = _tracking_db()
+    seen: list[str] = []
+
+    def _prose_side_effect(file, _repo, collection_name, *_a, **_kw):
+        if collection_name.startswith("rdr__"):
+            seen.append(file.name)
+        return 1
+
+    with _patches(db, extra={
+        "nexus.indexer._index_prose_file": {"side_effect": _prose_side_effect},
+    }):
+        stats = _run_index(repo, _reg())
+    assert seen == ["001.md"], seen
+    assert stats["rdr_indexed"] == 1
+
+
 @pytest.mark.parametrize("rdr_indexed,expect", [(1, True), (0, False)])
 def test_index_repo_cmd_rdr_summary(tmp_path, rdr_indexed, expect):
     from click.testing import CliRunner; from nexus.cli import main

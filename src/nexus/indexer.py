@@ -77,6 +77,13 @@ DEFAULT_IGNORE: list[str] = _DEFAULT_IGNORE
 FLUSH_CONCURRENCY: int = min(3, QUOTAS.MAX_CONCURRENT_WRITES)
 
 
+
+#: Basenames under a configured RDR directory that are process documents, never
+#: RDRs (GH #1524, nexus-20uv3): the RDR template's README and the agent
+#: guidance files kept beside the records. Skipped by the RDR pass; the docs
+#: pass owns them if the directory is not excluded from it.
+RDR_DIR_NON_RDR_BASENAMES: frozenset[str] = frozenset({"readme.md", "agents.md", "claude.md"})
+
 def _git_metadata(repo: Path) -> dict:
     """Collect git metadata for *repo*. Returns empty strings for missing values."""
     def run(args: list[str]) -> str:
@@ -4304,6 +4311,12 @@ def _run_index(
         if rdr_dir.is_dir():
             for md_file in sorted(rdr_dir.rglob("*.md")):
                 if md_file.is_file() and not md_file.is_symlink():
+                    if md_file.name.lower() in RDR_DIR_NON_RDR_BASENAMES:
+                        # GH #1524 (nexus-20uv3): the RDR process template's
+                        # README (and the agent guidance files beside it) are
+                        # not RDRs; indexed as one, the byte-identical README
+                        # outranked every real RDR in five collections at once.
+                        continue
                     if (delta_changed is not None
                             and str(md_file.relative_to(repo)) not in delta_changed):
                         continue  # nexus-fltb4: outside the delta
