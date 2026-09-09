@@ -529,8 +529,9 @@ nexus.tuples
 nexus.tuple_tenants               tenant_id PK, first_seen, last_seen
                                   no RLS (it names tenants and holds no tenant data, the
                                   service_tokens / embedding_models posture); upserted by out
-                                  with last_seen refreshed at most once a minute per tenant,
-                                  so an ordinary out touches no row here and takes no lock;
+                                  out reads the tenant's row first (a plain select, no lock) and
+                                  issues the upsert only when the row is missing or last_seen is
+                                  older than a minute, so an ordinary out takes no row lock here;
                                   the sweep's enumeration source; never purged by the sweep
 
 nexus.tuple_claim_log             append-only: claim | ack | nack | expire
@@ -605,8 +606,9 @@ in (subspace, keys_pattern, *, claimant, lease_s, timeout_s=0) -> (Tuple, claim_
 inp(subspace, keys_pattern, *, claimant, lease_s) -> (Tuple, claim_id) | None
 ack(claim_id, claimant) ; nack(claim_id, claimant)         # ownership checked
 subspaces() -> [TemplateSchema]                             # registered templates
-subspace_list(prefix) -> [{subspace, total, available, claimed, consumed,
-                           oldest_created_at, newest_created_at}]    # concrete subspaces that exist
+subspace_list(prefix) -> [{subspace, total, available, claimed, consumed, expired_unpurged,
+                           oldest_created_at, newest_created_at}]    # concrete subspaces that exist;
+                                                                     # total counts live rows only
 registry() -> {digest, templates: [TemplateSchema]}                  # subspaces() is the templates half
 subspace_stats(subspace) -> {total, available, claimed, consumed, expired_unpurged}
                                                             # total counts live rows only
@@ -912,8 +914,8 @@ the record; the RDR-184 failures are exactly what this produced.
 - Visible: `SchemaViolation` before any write, naming field and reason.
 - Visible: `in`/`inp` return `None`; the caller loops or reports no
   work.
-- Visible: the sweep logs scanned, released, purged and log-purged
-  counts every run. Zero expired is the healthy steady state; a sweep
+- Visible: the sweep logs tenants visited, scanned, released, purged
+  and log-purged counts every run. Zero expired is the healthy steady state; a sweep
   that did not run shows as a stale last-sweep age in the doctor row.
 - Silent, resolved: a claimant crashes after `in`; the lease lapses and
   the sweep releases the row with an `expire` log entry.
@@ -991,7 +993,9 @@ re-run timer; typed errors.
 A second scheduled task on `sweepScheduler` at the same cadence
 (`SWEEP_INTERVAL_HOURS`), separate from `runScheduledSweep` because that
 method builds its token-derived tenant set once before its arms. It
-enumerates `nexus.tuple_tenants` and, inside `withTenant` for each:
+enumerates `nexus.tuple_tenants` under the same statement bound the
+token loop applies to its own pre-arm enumeration
+(`NexusService.java:560-564`) and, inside `withTenant` for each:
 releases lapsed claims with an `expire`
 log row, purges expired and consumed-past-retention tuple rows, then log
 rows past the log's own TTL, in batches with a commit per batch; log the
@@ -1346,3 +1350,12 @@ token loop uses; `subspace_stats` counts live rows and reports
 `expired_unpurged` separately, the oldest-unclaimed doctor row reads
 live rows only, and the counted record and the Day 2 verify cell name
 tenants visited.
+
+### 2026-09-09 — Fix check on the fifth fix (FAIL, no ship-blocker), sixth fix
+
+T2 `nexus_rdr/205-fix-check-0e2b22e80`. `subspace_list` reports
+`expired_unpurged` and qualifies `total` as `subspace_stats` does; Phase
+1 Step 5 names the statement bound; Failure Modes enumerates the same
+five counted fields as the counted record; the tenant table's no-lock
+property is delivered by a read-before-upsert, not asserted of the
+upsert.
