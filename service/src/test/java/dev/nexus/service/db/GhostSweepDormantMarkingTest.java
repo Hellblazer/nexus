@@ -170,7 +170,7 @@ class GhostSweepDormantMarkingTest {
     @ParameterizedTest(name = "[{index}] {0}")
     @Order(10)
     @MethodSource("scopedTables")
-    void rowReferencedFromTable_survivesSweep(CatalogRepository.CollectionScopedTable t) throws Exception {
+    void rowReferencedFromTable_survivesSweepUnlessAuditOnly(CatalogRepository.CollectionScopedTable t) throws Exception {
         String coll = "knowledge__gs-param-" + t.countKey().replace('_', '-') + "__minilm-l6-v2-384__v1";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);

@@ -7617,11 +7617,11 @@ public final class CatalogRepository {
      *       {@code gc_expire_quarantine} or restored by {@code
      *       gc_restore_rereferenced}) is reclaimed exactly like any other ghost
      *       row (nexus-n060e). The four {@link #AUDIT_ONLY_TABLES} are excluded
-     *       from that question on purpose: {@code gc_quarantine_orphans} and
-     *       {@code gc_expire_quarantine} each write a {@code gc_audit} row
-     *       against the sibling's own name (catalog-033), so under the plain
-     *       {@link #collectionIsEmpty} a sibling that had ever held a chunk stayed
-     *       "non-empty" forever after it drained and never reached this branch
+     *       from that question on purpose: {@code gc_expire_quarantine} writes
+     *       its {@code gc_audit} row against the sibling's own name (catalog-033;
+     *       {@code gc_quarantine_orphans} keys its row to the origin), so under
+     *       the plain {@link #collectionIsEmpty} a sibling that had ever been
+     *       expired from stayed "non-empty" forever and never reached this branch
      *       (substantive critique of the n060e landing, 2026-09-09). An audit
      *       breadcrumb is history keyed by name, not content; it survives the
      *       delete (no FK) and keeps answering "what happened to this name". This
@@ -7707,9 +7707,9 @@ public final class CatalogRepository {
                     // branch below so a quarantine row never reaches that branch once it has
                     // fully drained; see this method's javadoc for why the delete is safe.
                     // Audit-only rows do not hold the row (see collectionHoldsContent):
-                    // gc_quarantine_orphans and gc_expire_quarantine both write a gc_audit
-                    // row against the SIBLING's name, so a sibling that ever received a
-                    // chunk would otherwise never read as empty again once it drained.
+                    // gc_expire_quarantine writes its gc_audit row against the SIBLING's
+                    // name (gc_quarantine_orphans keys its row to the origin), so a sibling
+                    // ever expired from would otherwise never read as empty again.
                     ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute();
                     out.add(new SweptRow(name, SweepDisposition.DELETED));
                 } else if ("quarantine".equals(lifecycleState)) {
