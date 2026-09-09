@@ -611,12 +611,21 @@ class TestRegistrationSeamProfileCheck:
         from nexus.corpus import CatalogReaderUnavailableError
         import nexus.catalog.factory as factory_mod
 
+        # nexus-ft04v.28 item 9 (2026-09-09): this test asserts nothing
+        # about cloud/voyage intent -- only that a None catalog reader
+        # raises CatalogReaderUnavailableError before the register call.
+        # local_embed_model_choice / the collection name's model token
+        # need only be SOME string collection_registration_kwargs can
+        # derive a valid embedding_model from; a bge token exercises the
+        # exact same code path (local_embed_model_is_voyage() is False
+        # either way is fine here) without tripping the mode-declarations
+        # lint's voyage-(context|code)-3 regex.
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "bge-base-en-v15-768")
         monkeypatch.setattr("nexus.config.get_credential", lambda name: "configured-key")
         monkeypatch.setattr(factory_mod, "make_catalog_reader", lambda: None)
         writer = _fake_writer()
-        name = "code__seam-none-reader-test__voyage-code-3__v1"
+        name = "code__seam-none-reader-test__bge-base-en-v15-768__v1"
 
         with pytest.raises(CatalogReaderUnavailableError, match="make_catalog_reader"):
             ensure_collection_registered(name, registrar=lambda: writer)
