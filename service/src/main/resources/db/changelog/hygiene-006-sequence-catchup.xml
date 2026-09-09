@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    hygiene-006 — catch every BIGSERIAL sequence in schema nexus up to its
+    column's max (bead nexus-zhxxd, GH #1489).
+
+    THE DEFECT. A store migrated through the conexus 6.18.1 guided upgrade
+    (Chroma/SQLite to PG, RDR-155) had its T2 tables copied with their
+    source ids verbatim, through the engine that client pinned
+    (engine-service-v0.1.52). The topics-sequence advance the fidelity
+    import performs today (TaxonomyRepository.advanceTopicsIdSequence,
+    taxonomy-005) landed one engine later, in v0.1.53, and only for
+    nexus.topics. On such a store the BIGSERIAL sequence sits behind the
+    imported ids, so every live serial INSERT collides on the primary key
+    (SQLSTATE 23505, HTTP 409) until nextval passes max(id): GH #1489's
+    `nx taxonomy discover` failing on every collection without topics
+    while existing topics read, project and audit fine. Every other
+    BIGSERIAL table that import copied (memory, plans, telemetry, aspects,
+    catalog_links) is exposed to the same shape.
+
+    THE FIX. One walk over every sequence owned by a column in schema
+    nexus (pg_depend, deptype 'a' for SERIAL and 'i' for IDENTITY): read
+    the column's max, and where the sequence's next value would not
+    exceed it, setval the sequence to that max so the next nextval is
+    max + 1. A sequence already ahead is never moved (setval only ever
+    moves forward here). RAISE NOTICE per sequence advanced and one
+    summary line, so a Liquibase walk log names exactly what changed.
+
+    RLS. Several of the walked tables carry FORCE ROW LEVEL SECURITY, under
+    which even the owner sees no rows and max() would read NULL; each such
+    table is toggled NO FORCE for the single max() read and restored FORCE
+    immediately after, inside the DO block (Approved Shape 1, toggle-
+    wrapped, tests/test_changelog_rls_lint.py), driven by the table's own
+    pg_class.relforcerowsecurity so a table that is not forced is never
+    touched. The block reads only; the one write is setval on the
+    sequence, which RLS does not govern.
+
+    NEVER WEDGES (2026-08-16 directive): no RAISE EXCEPTION path; an
+    install whose sequences are all ahead of their columns (every fresh
+    install, and the production store per the 2026-09-09 census) runs this
+    as a read-only pass that advances nothing.
+
+    IDEMPOTENCE: a second run finds every sequence already at or past its
+    column's max and advances nothing; independent of Liquibase's own
+    once-only guarantee.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.29.xsd">
+
+    <changeSet id="hygiene-006-1" author="nexus-zhxxd">
+        <comment>
+            nexus-zhxxd (GH #1489): advance every schema-nexus BIGSERIAL
+            sequence that sits behind its column's max (a 6.18.1-era
+            fidelity import wrote explicit ids on engine-service-v0.1.52,
+            one engine before the topics-sequence advance landed), so a live
+            serial INSERT no longer collides on the primary key. Read-only
+            except setval; toggle-wrapped NO FORCE / FORCE per forced table
+            around the one max() read; NOTICE per sequence advanced.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+DECLARE
+    r          record;
+    v_max      bigint;
+    v_last     bigint;
+    v_called   boolean;
+    v_forced   boolean;
+    v_scanned  integer := 0;
+    v_advanced integer := 0;
+BEGIN
+    FOR r IN
+        SELECT s.oid      AS seq_oid,
+               sn.nspname AS seq_schema,
+               s.relname  AS seq_name,
+               tn.nspname AS tbl_schema,
+               t.relname  AS tbl_name,
+               t.oid      AS tbl_oid,
+               a.attname  AS col_name
+          FROM pg_class s
+          JOIN pg_namespace sn ON sn.oid = s.relnamespace
+          JOIN pg_depend d     ON d.objid = s.oid
+                              AND d.classid = 'pg_class'::regclass
+                              AND d.refclassid = 'pg_class'::regclass
+                              AND d.deptype IN ('a', 'i')
+          JOIN pg_class t      ON t.oid = d.refobjid
+          JOIN pg_namespace tn ON tn.oid = t.relnamespace
+          JOIN pg_attribute a  ON a.attrelid = t.oid AND a.attnum = d.refobjsubid
+         WHERE s.relkind = 'S'
+           AND sn.nspname = 'nexus'
+         ORDER BY t.relname, a.attname
+    LOOP
+        v_scanned := v_scanned + 1;
+
+        SELECT relforcerowsecurity INTO v_forced FROM pg_class WHERE oid = r.tbl_oid;
+        IF v_forced THEN
+            EXECUTE format('ALTER TABLE %I.%I NO FORCE ROW LEVEL SECURITY', r.tbl_schema, r.tbl_name);
+        END IF;
+        EXECUTE format('SELECT max(%I) FROM %I.%I', r.col_name, r.tbl_schema, r.tbl_name) INTO v_max;
+        IF v_forced THEN
+            EXECUTE format('ALTER TABLE %I.%I FORCE ROW LEVEL SECURITY', r.tbl_schema, r.tbl_name);
+        END IF;
+
+        CONTINUE WHEN v_max IS NULL;
+
+        EXECUTE format('SELECT last_value, is_called FROM %I.%I', r.seq_schema, r.seq_name)
+           INTO v_last, v_called;
+        -- The next nextval() returns last_value + 1 once the sequence has been
+        -- called, and last_value itself before its first call.
+        IF (v_called AND v_max > v_last) OR (NOT v_called AND v_max >= v_last) THEN
+            PERFORM setval(r.seq_oid::regclass, v_max, true);
+            v_advanced := v_advanced + 1;
+            RAISE NOTICE 'hygiene-006-1: sequence %.% advanced to % (was last_value=% is_called=%) so the next %.%.% no longer collides',
+                r.seq_schema, r.seq_name, v_max, v_last, v_called, r.tbl_schema, r.tbl_name, r.col_name;
+        END IF;
+    END LOOP;
+    RAISE NOTICE 'hygiene-006-1: % sequence(s) scanned in schema nexus, % advanced past a lagging column max', v_scanned, v_advanced;
+END $$;
+        </sql>
+        <rollback>
+            <!-- Nothing to undo: a sequence is never moved backward (a rolled-back
+                 advance would re-create the collision this changeset removes, and
+                 ids handed out in between would be reused). -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
