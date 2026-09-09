@@ -91,6 +91,11 @@ altogether; a name you type by hand today is a name that has to be
 migrated tomorrow.
 
 Subject names are lowercase, hyphen-separated, two or three words, ASCII.
+The owner segment of the four-segment name (and of the grandfathered
+two-segment form) admits letters, digits, hyphens, and underscores —
+`[a-zA-Z0-9_-]+` — one grammar shared by the client's collection-name check
+(`src/nexus/corpus.py`), the engine's attribute-backfill walk, and the Java
+test helper that seeds fixtures against it (nexus-ztafa).
 
 ## Rule 4: a collection holds many documents
 
