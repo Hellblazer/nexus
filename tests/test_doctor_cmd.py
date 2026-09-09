@@ -1679,3 +1679,31 @@ class TestCheckCollectionShape:
         result = runner.invoke(main, ["doctor", "--check-collection-shape"])
         assert result.exit_code == 1
         assert "UNREADABLE" in result.output and "engine down" in result.output
+
+
+# ── RDR-204 Day 2 (nexus-ft04v.31): the profile row renders through doctor ──
+
+
+def test_doctor_renders_the_embedding_profile_row(runner, mock_reg):
+    """Non-vacuous: the row itself must be present on a run with no
+    findings, and the rendered detail carries no credential."""
+    class _Reader:
+        def embedding_profile(self):
+            return [{"content_type": ct, "embedding_model": "voyage-context-3" if ct != "code" else "voyage-code-3", "dimension": 1024}
+                    for ct in ("code", "docs", "rdr", "knowledge")]
+
+        def list_collections(self):
+            return []
+
+        def stats(self):
+            return {"doc_count": 0, "link_count": 0}
+
+    result = _invoke(runner, mock_reg, extra_patches=[
+        patch("nexus.catalog.factory.make_catalog_reader", return_value=_Reader()),
+    ])
+    assert "Embedding profile" in result.output
+    assert "code=voyage-code-3" in result.output
+    assert "Embedding profile vs client intent" in result.output
+    mine = [ln for ln in result.output.splitlines() if "Embedding profile" in ln or "Collections " in ln]
+    assert len(mine) >= 6, mine
+    assert not any("sk-key" in ln for ln in mine), mine
