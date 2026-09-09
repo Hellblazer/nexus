@@ -266,25 +266,85 @@ _ARXIV_FILENAME_RE = re.compile(
 )
 
 
-def extract_arxiv_id(text: str) -> str | None:
-    """Return the first arXiv ID in ``text`` (body or filename), or None.
+# nexus-g276c. The paper's own arXiv stamp is the margin banner
+# ``arXiv:2604.20598v1 [cs.IR] 22 Apr 2026`` — an id followed by a
+# bracketed category. A bibliography entry never carries the category.
+_ARXIV_BANNER_RE = re.compile(
+    r"\barxiv:\s*(\d{4}\.\d{4,5})(?:v\d+)?\s*\[[a-z\-]+(?:\.[a-z]{2})?\]",
+    re.IGNORECASE,
+)
 
-    Body-text matches require an explicit ``arXiv:`` prefix to avoid
-    false positives on year+page-number patterns. Filename matches
-    accept the bare ID form since arXiv distributes papers as
-    ``<id>.pdf`` and other publishers re-archive them with prefix
-    slugs (``deep-artmap-2503.07641.pdf``).
+# nexus-g276c. A citation's arXiv id sits in one of these contexts:
+# ``arXiv preprint arXiv:ID``, ``arXiv:ID, 2025.`` (the id then a year),
+# or an ``arxiv.org/abs|pdf|html/`` URL on the same line. Measured on a
+# reference entry whose first line had wrapped across a chunk boundary,
+# so ``_CITATION_LINE_RE`` (keyed on the ``[N]`` marker) could not see
+# it: "... Agentic Systems. arXiv:2510.24476, 2025. https://arxiv.org/
+# html/2510.24476v1".
+_ARXIV_CITATION_CONTEXT_RE = re.compile(
+    r"arxiv\s+preprint"
+    r"|cite\s+as:?"
+    r"|arxiv:\s*\d{4}\.\d{4,5}(?:v\d+)?\s*[,.]\s*(?:19|20)\d{2}\b"
+    r"|arxiv\.org/(?:abs|pdf|html)/",
+    re.IGNORECASE,
+)
+
+
+def _first_arxiv_id(region: str, pattern: re.Pattern[str]) -> str | None:
+    """First ``pattern`` match in ``region`` whose line is neither a
+    bibliography entry nor citation-shaped (``_ARXIV_CITATION_CONTEXT_RE``).
+    The banner and body patterns both go through this filter: a reference
+    entry pasted in arXiv's own "Cite as: arXiv:ID [cs.CL]" form carries
+    the bracketed category too (code review of 528681f01, Critical)."""
+    for match in pattern.finditer(region):
+        line = _line_containing(region, match.start())
+        if _CITATION_LINE_RE.search(line) or _ARXIV_CITATION_CONTEXT_RE.search(line):
+            continue
+        return match.group(1) or (match.group(2) if match.re.groups > 1 else None)
+    return None
+
+
+def _arxiv_id_in(region: str) -> str | None:
+    """Banner shape first, then any ``arXiv:`` mention, both line-filtered."""
+    return _first_arxiv_id(region, _ARXIV_BANNER_RE) or _first_arxiv_id(region, _ARXIV_BODY_RE)
+
+
+def extract_arxiv_id(text: str) -> str | None:
+    """Return the paper's own arXiv ID from ``text`` (body or filename), or None.
+
+    Filename matches accept the bare ID form since arXiv distributes papers
+    as ``<id>.pdf`` and other publishers re-archive them with prefix slugs
+    (``deep-artmap-2503.07641.pdf``). Body-text matches require an explicit
+    ``arXiv:`` prefix (or a ``vN`` suffix) to avoid false positives on
+    year+page-number patterns.
+
+    nexus-g276c: the two guards ``extract_doi`` applies — prefer the region
+    above the bibliography heading, skip a match that sits inside a
+    citation — apply here too. Before this, the FIRST arXiv id in the text
+    was returned, and on a preprint whose own margin banner the extractor
+    had dropped (MinerU does not read rotated margin text) that was
+    reference [3]: the by-id lookup was rejected on title mismatch and the
+    fallback title search stamped a stranger. Within each region the
+    banner shape (``arXiv:ID [cs.XX]``) is preferred over a bare mention,
+    but it passes through the same line filter: a bibliography entry in
+    arXiv's "Cite as: arXiv:ID [cs.CL]" form carries the bracket as well.
+    None is the correct answer for a text that carries nothing but
+    citations.
     """
     if not text:
         return None
     fn_match = _ARXIV_FILENAME_RE.search(text)
     if fn_match:
         return fn_match.group(1)
-    body_match = _ARXIV_BODY_RE.search(text)
-    if body_match:
-        # Two alternatives in the regex; whichever matched.
-        return body_match.group(1) or body_match.group(2)
-    return None
+    region = _text_above_references(text)
+    found = _arxiv_id_in(region)
+    if found:
+        return found
+    if region.strip():
+        # Normal document order and no own id above the bibliography.
+        return None
+    # Region empty => the heading opened the text (chunk reordering).
+    return _arxiv_id_in(text)
 
 
 class _Identifiers(TypedDict):

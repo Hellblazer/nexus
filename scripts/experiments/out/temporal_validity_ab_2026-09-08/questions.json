@@ -1,0 +1,450 @@
+[
+ {
+  "qid": "RDR-014-cur-1",
+  "kind": "current",
+  "rdr": "RDR-014",
+  "gold": "RDR-015",
+  "t": "2026-09-08",
+  "question": "What's the current fix for code search returning unrelated files based on shared variable names?"
+ },
+ {
+  "qid": "RDR-014-cur-2",
+  "kind": "current",
+  "rdr": "RDR-014",
+  "gold": "RDR-015",
+  "t": "2026-09-08",
+  "question": "How does the knowledge base now handle algorithm-level queries against domain-specific implementation files?"
+ },
+ {
+  "qid": "RDR-014-cur-3",
+  "kind": "current",
+  "rdr": "RDR-014",
+  "gold": "RDR-015",
+  "t": "2026-09-08",
+  "question": "Has the deduplication issue between code and docs collections for the ART project been resolved?"
+ },
+ {
+  "qid": "RDR-049-cur-1",
+  "kind": "current",
+  "rdr": "RDR-049",
+  "gold": "",
+  "t": "2026-09-08",
+  "question": "What is the current status of merging legacy per-paper collections into corpus-level ones?"
+ },
+ {
+  "qid": "RDR-049-cur-2",
+  "kind": "current",
+  "rdr": "RDR-049",
+  "gold": "",
+  "t": "2026-09-08",
+  "question": "Is there an approved migration plan for reducing the number of docs collections in the knowledge base?"
+ },
+ {
+  "qid": "RDR-049-cur-3",
+  "kind": "current",
+  "rdr": "RDR-049",
+  "gold": "",
+  "t": "2026-09-08",
+  "question": "How should individual paper collections be consolidated to avoid enumerating them explicitly during search?"
+ },
+ {
+  "qid": "RDR-079b-cur-1",
+  "kind": "current",
+  "rdr": "RDR-079b",
+  "gold": "",
+  "t": "2026-09-08",
+  "question": "Why was the long-lived worker pool approach for operator subprocesses abandoned in favor of a simpler design?"
+ },
+ {
+  "qid": "RDR-079b-cur-2",
+  "kind": "current",
+  "rdr": "RDR-079b",
+  "gold": "",
+  "t": "2026-09-08",
+  "question": "What is the current recommended way to invoke claude subprocess workers without blocking the async event loop?"
+ },
+ {
+  "qid": "RDR-079b-cur-3",
+  "kind": "current",
+  "rdr": "RDR-079b",
+  "gold": "",
+  "t": "2026-09-08",
+  "question": "How does the current implementation handle authentication for operator tool subprocess workers today?"
+ },
+ {
+  "qid": "RDR-106-cur-1",
+  "kind": "current",
+  "rdr": "RDR-106",
+  "gold": "RDR-156",
+  "t": "2026-09-08",
+  "question": "How does the catalog's tombstone soft-delete state work now that purge-trash is armed for reclaim?"
+ },
+ {
+  "qid": "RDR-106-cur-2",
+  "kind": "current",
+  "rdr": "RDR-106",
+  "gold": "RDR-156",
+  "t": "2026-09-08",
+  "question": "What is the current retention window before a soft-deleted catalog row is permanently purged from the projection?"
+ },
+ {
+  "qid": "RDR-106-cur-3",
+  "kind": "current",
+  "rdr": "RDR-106",
+  "gold": "RDR-156",
+  "t": "2026-09-08",
+  "question": "How can I recover or undelete a tombstoned catalog row before the purge job removes it?"
+ },
+ {
+  "qid": "RDR-107-cur-1",
+  "kind": "current",
+  "rdr": "RDR-107",
+  "gold": "RDR-108",
+  "t": "2026-09-08",
+  "question": "Has the tombstone metadata approach for soft-deleting stale T3 chunks been implemented and merged?"
+ },
+ {
+  "qid": "RDR-107-cur-2",
+  "kind": "current",
+  "rdr": "RDR-107",
+  "gold": "RDR-108",
+  "t": "2026-09-08",
+  "question": "What replaced ChromaDB as the embeddings store, and does chunk soft-delete still apply there?"
+ },
+ {
+  "qid": "RDR-107-cur-3",
+  "kind": "current",
+  "rdr": "RDR-107",
+  "gold": "RDR-108",
+  "t": "2026-09-08",
+  "question": "Is there now a shared prune step across the code and document indexing pipelines to remove stale duplicate chunks?"
+ },
+ {
+  "qid": "RDR-110-cur-1",
+  "kind": "current",
+  "rdr": "RDR-110",
+  "gold": "",
+  "t": "2026-09-08",
+  "question": "Does nexus have a unified tuple space primitive replacing plan_match, T1 scratch, and T2 memory yet?"
+ },
+ {
+  "qid": "RDR-110-cur-2",
+  "kind": "current",
+  "rdr": "RDR-110",
+  "gold": "",
+  "t": "2026-09-08",
+  "question": "Is there current design guidance on adding an atomic destructive read operation across nexus retrieval surfaces?"
+ },
+ {
+  "qid": "RDR-110-cur-3",
+  "kind": "current",
+  "rdr": "RDR-110",
+  "gold": "",
+  "t": "2026-09-08",
+  "question": "What is the latest status on consolidating nexus's separate semantic retrieval surfaces into one coordination primitive?"
+ },
+ {
+  "qid": "RDR-111-cur-1",
+  "kind": "current",
+  "rdr": "RDR-111",
+  "gold": "",
+  "t": "2026-09-08",
+  "question": "What is the current design for exposing agent hook events as queryable, subscribable state instead of fire-and-forget scripts?"
+ },
+ {
+  "qid": "RDR-111-cur-2",
+  "kind": "current",
+  "rdr": "RDR-111",
+  "gold": "",
+  "t": "2026-09-08",
+  "question": "Is there an approved plan for a coordination cockpit that surfaces which agent holds a resource or task in real time?"
+ },
+ {
+  "qid": "RDR-111-cur-3",
+  "kind": "current",
+  "rdr": "RDR-111",
+  "gold": "",
+  "t": "2026-09-08",
+  "question": "What is the latest status on turning the hook lifecycle bus into a shared observable backbone for multiple consumers?"
+ },
+ {
+  "qid": "RDR-112-cur-1",
+  "kind": "current",
+  "rdr": "RDR-112",
+  "gold": "RDR-120",
+  "t": "2026-09-08",
+  "question": "What is the current plan for running T2 and T3 storage behind a daemon instead of direct file access?"
+ },
+ {
+  "qid": "RDR-112-cur-2",
+  "kind": "current",
+  "rdr": "RDR-112",
+  "gold": "RDR-120",
+  "t": "2026-09-08",
+  "question": "How should a sandboxed container reach the shared sqlite and chroma tiers without getting its own isolated copy?"
+ },
+ {
+  "qid": "RDR-112-cur-3",
+  "kind": "current",
+  "rdr": "RDR-112",
+  "gold": "RDR-120",
+  "t": "2026-09-08",
+  "question": "Is per-session T1 storage still handled locally while T2 and T3 move to a shared service model?"
+ },
+ {
+  "qid": "RDR-113-cur-1",
+  "kind": "current",
+  "rdr": "RDR-113",
+  "gold": "",
+  "t": "2026-09-08",
+  "question": "What file permission mode should a daemon apply to its unix domain socket for single-user access?"
+ },
+ {
+  "qid": "RDR-113-cur-2",
+  "kind": "current",
+  "rdr": "RDR-113",
+  "gold": "",
+  "t": "2026-09-08",
+  "question": "Should local daemon TCP listeners bind only to loopback, and how is that enforced today?"
+ },
+ {
+  "qid": "RDR-113-cur-3",
+  "kind": "current",
+  "rdr": "RDR-113",
+  "gold": "",
+  "t": "2026-09-08",
+  "question": "What is the current policy for verifying peer credentials on daemon socket connections?"
+ },
+ {
+  "qid": "RDR-118-cur-1",
+  "kind": "current",
+  "rdr": "RDR-118",
+  "gold": "",
+  "t": "2026-09-08",
+  "question": "How does the broker wire surface cells to content-addressed spans for stable references across producers?"
+ },
+ {
+  "qid": "RDR-118-cur-2",
+  "kind": "current",
+  "rdr": "RDR-118",
+  "gold": "",
+  "t": "2026-09-08",
+  "question": "What is the current convention for recursive composition of sibling surfaces inside a cockpit panel?"
+ },
+ {
+  "qid": "RDR-118-cur-3",
+  "kind": "current",
+  "rdr": "RDR-118",
+  "gold": "",
+  "t": "2026-09-08",
+  "question": "How should a heterogeneous content producer negotiate capabilities and trust scope with the host daemon today?"
+ },
+ {
+  "qid": "RDR-119-cur-1",
+  "kind": "current",
+  "rdr": "RDR-119",
+  "gold": "",
+  "t": "2026-09-08",
+  "question": "What is the current status of the tmux pane fulfillment adapter that renders cockpit surfaces on terminal hosts?"
+ },
+ {
+  "qid": "RDR-119-cur-2",
+  "kind": "current",
+  "rdr": "RDR-119",
+  "gold": "",
+  "t": "2026-09-08",
+  "question": "How does the per-host catalog map surface descriptor components to native rendering primitives for web and tty?"
+ },
+ {
+  "qid": "RDR-119-cur-3",
+  "kind": "current",
+  "rdr": "RDR-119",
+  "gold": "",
+  "t": "2026-09-08",
+  "question": "What decisions exist today on focus, keyboard navigation, and modal stack behavior for the cockpit fabric?"
+ },
+ {
+  "qid": "RDR-123-cur-1",
+  "kind": "current",
+  "rdr": "RDR-123",
+  "gold": "RDR-127",
+  "t": "2026-09-08",
+  "question": "What is the current adopted wire format for rendering nx_answer output as structured surfaces instead of markdown?"
+ },
+ {
+  "qid": "RDR-123-cur-2",
+  "kind": "current",
+  "rdr": "RDR-123",
+  "gold": "RDR-127",
+  "t": "2026-09-08",
+  "question": "Which rendering hosts currently support structured citation cards and follow-up action lists from analytical answers?"
+ },
+ {
+  "qid": "RDR-123-cur-3",
+  "kind": "current",
+  "rdr": "RDR-123",
+  "gold": "RDR-127",
+  "t": "2026-09-08",
+  "question": "Has the plan to replace markdown blobs in nx_answer with structured cards and confidence signals been implemented yet?"
+ },
+ {
+  "qid": "RDR-124-cur-1",
+  "kind": "current",
+  "rdr": "RDR-124",
+  "gold": "RDR-127",
+  "t": "2026-09-08",
+  "question": "What is the current design for having subagents return structured UI cards instead of prose summaries?"
+ },
+ {
+  "qid": "RDR-124-cur-2",
+  "kind": "current",
+  "rdr": "RDR-124",
+  "gold": "RDR-127",
+  "t": "2026-09-08",
+  "question": "Is there existing guidance on mapping subagent findings like code review issues onto reusable UI card components?"
+ },
+ {
+  "qid": "RDR-124-cur-3",
+  "kind": "current",
+  "rdr": "RDR-124",
+  "gold": "RDR-127",
+  "t": "2026-09-08",
+  "question": "Has any decision been made about reducing orchestrator context usage by relaying structured subagent output directly?"
+ },
+ {
+  "qid": "RDR-159-cur-1",
+  "kind": "current",
+  "rdr": "RDR-159",
+  "gold": "RDR-185",
+  "t": "2026-09-08",
+  "question": "What is the current status of the guided Chroma to pgvector upgrade migration tool for existing users?"
+ },
+ {
+  "qid": "RDR-159-cur-2",
+  "kind": "current",
+  "rdr": "RDR-159",
+  "gold": "RDR-185",
+  "t": "2026-09-08",
+  "question": "Is there a single command yet that automates the Chroma to PG16 service stack cutover safely?"
+ },
+ {
+  "qid": "RDR-159-cur-3",
+  "kind": "current",
+  "rdr": "RDR-159",
+  "gold": "RDR-185",
+  "t": "2026-09-08",
+  "question": "What validation and rollback steps are planned for automating the Chroma-to-service data migration flow?"
+ },
+ {
+  "qid": "RDR-014-asof-1",
+  "kind": "asof",
+  "rdr": "RDR-014",
+  "gold": "RDR-014",
+  "t": "2026-06-02",
+  "question": "Why does semantic search over the code collection surface unrelated files for algorithm-specific queries instead of the canonical implementation?"
+ },
+ {
+  "qid": "RDR-014-asof-2",
+  "kind": "asof",
+  "rdr": "RDR-014",
+  "gold": "RDR-014",
+  "t": "2026-06-02",
+  "question": "What is causing variable and field name overlap to outrank the actual algorithm implementation in code search results?"
+ },
+ {
+  "qid": "RDR-106-asof-1",
+  "kind": "asof",
+  "rdr": "RDR-106",
+  "gold": "RDR-106",
+  "t": "2026-05-29",
+  "question": "What options exist for marking catalog rows as trashed instead of physically deleting them right away?"
+ },
+ {
+  "qid": "RDR-106-asof-2",
+  "kind": "asof",
+  "rdr": "RDR-106",
+  "gold": "RDR-106",
+  "t": "2026-05-29",
+  "question": "Since the backup snapshot only covers accidental deletes, how do we add a real undo state before purging chunks?"
+ },
+ {
+  "qid": "RDR-107-asof-1",
+  "kind": "asof",
+  "rdr": "RDR-107",
+  "gold": "RDR-107",
+  "t": "2026-05-08",
+  "question": "How should stale chunk embeddings from repeated code file re-indexing be identified and cleaned up in ChromaDB?"
+ },
+ {
+  "qid": "RDR-107-asof-2",
+  "kind": "asof",
+  "rdr": "RDR-107",
+  "gold": "RDR-107",
+  "t": "2026-05-08",
+  "question": "Is there a recommended way to reconcile pruning behavior between the code indexer and the doc indexer pipelines?"
+ },
+ {
+  "qid": "RDR-112-asof-1",
+  "kind": "asof",
+  "rdr": "RDR-112",
+  "gold": "RDR-112",
+  "t": "2026-07-07",
+  "question": "How should sqlite and chroma be exposed over a daemon instead of direct file paths for containerized clients?"
+ },
+ {
+  "qid": "RDR-112-asof-2",
+  "kind": "asof",
+  "rdr": "RDR-112",
+  "gold": "RDR-112",
+  "t": "2026-07-07",
+  "question": "What is the plan for keeping shared knowledge tiers consistent when work runs inside sandboxed agent containers?"
+ },
+ {
+  "qid": "RDR-123-asof-1",
+  "kind": "asof",
+  "rdr": "RDR-123",
+  "gold": "RDR-123",
+  "t": "2026-05-21",
+  "question": "What wire-level surface descriptor format should I use to render structured citations and synthesis instead of markdown?"
+ },
+ {
+  "qid": "RDR-123-asof-2",
+  "kind": "asof",
+  "rdr": "RDR-123",
+  "gold": "RDR-123",
+  "t": "2026-05-21",
+  "question": "Which rendering hosts already support structured cards and follow-up action lists for analytical query responses?"
+ },
+ {
+  "qid": "RDR-124-asof-1",
+  "kind": "asof",
+  "rdr": "RDR-124",
+  "gold": "RDR-124",
+  "t": "2026-05-21",
+  "question": "What is the current guidance on letting subagents return structured UI cards instead of plain markdown summaries?"
+ },
+ {
+  "qid": "RDR-124-asof-2",
+  "kind": "asof",
+  "rdr": "RDR-124",
+  "gold": "RDR-124",
+  "t": "2026-05-21",
+  "question": "Is there an approved way for orchestrators to relay subagent findings without rewriting them into a lossy prose summary?"
+ },
+ {
+  "qid": "RDR-159-asof-1",
+  "kind": "asof",
+  "rdr": "RDR-159",
+  "gold": "RDR-159",
+  "t": "2026-07-27",
+  "question": "What single guided command should walk an existing user through moving their Chroma data into the new PG16 service stack?"
+ },
+ {
+  "qid": "RDR-159-asof-2",
+  "kind": "asof",
+  "rdr": "RDR-159",
+  "gold": "RDR-159",
+  "t": "2026-07-27",
+  "question": "How should a PyPI release safely detect old Chroma data and sequence the ETL migration for both cloud and local-only installs?"
+ }
+]

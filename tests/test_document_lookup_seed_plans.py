@@ -348,3 +348,51 @@ class TestSingleQueryFastPathLiveThroughNxAnswer:
             f"(nexus-rl59s), got {query_calls[0].get('corpus')!r}"
         )
         assert "canned single-query result" in result
+
+    @pytest.mark.asyncio
+    async def test_nx_answer_single_query_reroute_passes_scope_as_subtree(
+        self, tmp_path: Path, seeded_library, real_plan_cache,
+    ) -> None:
+        """GH #1523 (nexus-hfflc): ``scope`` is a catalog subtree filter and
+        rode only the plan-run path (the ``_nx_scope`` binding); the
+        single-step fast path rerouted to ``query()`` without it and answered
+        from every collection. Both branches of the fast path now pass it as
+        ``query()``'s own ``subtree``, and an unscoped call passes the empty
+        string, never a stale value."""
+        import nexus.mcp_infra as _infra
+        import nexus.operators.dispatch as _dispatch_mod
+        import nexus.plans.runner as _runner
+        from nexus.plans.matcher import plan_match
+
+        question = "which documents discuss vector search"
+        top = plan_match(
+            intent=question, library=seeded_library, cache=real_plan_cache,
+            dimensions={"verb": "research"}, min_confidence=0.40, n=5,
+        )[0]
+        query_calls: list[dict] = []
+
+        def _fake_query(**kwargs):
+            query_calls.append(kwargs)
+            if kwargs.get("structured"):
+                return {"ids": [], "tumblers": [], "distances": [], "collections": []}
+            return "canned single-query result"
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[top]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch("nexus.mcp.core.query", side_effect=_fake_query),
+            patch.object(_runner, "plan_run", side_effect=AssertionError("no plan_run")),
+            patch.object(_dispatch_mod, "claude_dispatch", side_effect=AssertionError("no dispatch")),
+        ):
+            from nexus.mcp.core import nx_answer
+            await nx_answer(question, scope="1.61")
+            await nx_answer(question, scope="1.61", structured=True)
+            await nx_answer(question)
+
+        assert [c.get("subtree") for c in query_calls] == ["1.61", "1.61", ""], (
+            f"the fast path must pass the caller's scope as subtree on both its "
+            f"branches and nothing when unscoped; got {query_calls}"
+        )

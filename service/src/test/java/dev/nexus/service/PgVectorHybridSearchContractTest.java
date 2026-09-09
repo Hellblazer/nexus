@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.db.UnregisteredCollectionException;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.SQLDialect;
@@ -191,6 +192,14 @@ class PgVectorHybridSearchContractTest {
             for (String col : List.of(COL_HY, COL_MA, COL_MB, COL_WH, COL_384H)) {
                 PgContainerHelper.insertCollection(dsl, TENANT_A, col);
             }
+            // RDR-204 Phase 2 (bead nexus-ft04v.16): hybridSearch_mixedDimensions_failLoud
+            // names COL_MINI only to exercise requireHomogeneousDim's guard (never a
+            // chunk seeded under it) -- it must still be REGISTERED (at its real 384-dim
+            // model), or the per-collection CollectionRegistry lookup throws
+            // UnregisteredCollectionException before ever reaching the dim comparison
+            // the test actually means to exercise. COL_UNKNOWN deliberately stays
+            // unregistered — see hybridSearch_unknownModelSegment_failsLoud's own comment.
+            PgContainerHelper.insertCollection(dsl, TENANT_A, COL_MINI);
         }
         // Queries embed to (1, 0). Q_TYPO and Q_JUNK fall through to FakeEmbedder's
         // default (1, 0) — registered explicitly anyway for readability.
@@ -462,14 +471,18 @@ class PgVectorHybridSearchContractTest {
     }
 
     @Test
-    void hybridSearch_tenantIsolated_otherTenantGetsNothing() {
-        List<Map<String, Object>> rows =
-            repo1024.hybridSearch(TENANT_B, Q, List.of(COL_HY), 10, null);
-
-        assertThat(rows)
-            .as("RLS must scope the hybrid query exactly like search(): another tenant "
-                + "sees 0 of tenant-a's rows")
-            .isEmpty();
+    void hybridSearch_tenantIsolated_otherTenantGetsNothing_failsLoud() {
+        // RDR-204 Phase 2 (bead nexus-ft04v.16, coordinator ruling): COL_HY is
+        // registered only under TENANT_A -- dispatch now resolves the row through
+        // CollectionRegistry before the RLS-scoped query ever runs, so TENANT_B fails
+        // loud (UnregisteredCollectionException) rather than the old silent empty
+        // result. RLS still scopes the actual chunk rows exactly like search(); this
+        // is the registration boundary firing first, not a change to that guarantee.
+        assertThatThrownBy(() ->
+                repo1024.hybridSearch(TENANT_B, Q, List.of(COL_HY), 10, null))
+            .as("tenant-b has no catalog_collections row for COL_HY (RLS) -- fail loud")
+            .isInstanceOf(UnregisteredCollectionException.class)
+            .hasMessageContaining(COL_HY);
     }
 
     @Test
@@ -516,13 +529,24 @@ class PgVectorHybridSearchContractTest {
     }
 
     @Test
-    void hybridSearch_unknownModelSegment_failsLoud() {
+    void hybridSearch_unregisteredCollection_failsLoud() {
+        // RDR-204 Phase 2 (bead nexus-ft04v.16): COL_UNKNOWN is deliberately never
+        // registered -- dispatch is by the registered ROW now, so a mystery model
+        // TOKEN in the name no longer means anything on its own; what fails loud is
+        // the collection having no row at all, exactly the same contract every other
+        // read/write path enforces (RDR-204 Phase 1).
         assertThatThrownBy(() ->
                 repo1024.hybridSearch(TENANT_A, Q, List.of(COL_UNKNOWN), 10, null))
-            .as("unknown embedding-model segment must fail loud — never a fallback dim")
-            .isInstanceOf(IllegalArgumentException.class)
-            .isNotInstanceOf(UnsupportedOperationException.class);
+            .as("an unregistered collection must fail loud, never a fallback dim")
+            .isInstanceOf(UnregisteredCollectionException.class);
     }
+
+    // RDR-204 Phase 2 fix round 2 (nexus-ft04v.16 fix round 2, S1): the fan-out
+    // skip's caller-visibility contract is now tested at the HTTP level in
+    // VectorHybridHttpTest (which already has a full handler test for this
+    // route) per the coordinator's design change -- the caller-visible channel
+    // is the X-Nexus-Skipped-Collections response header, not a Tokened
+    // accessor a repository-level test can see the caller's own view of.
 
     @Test
     void hybridSearch_emptyCollectionsList_returnsEmpty() {

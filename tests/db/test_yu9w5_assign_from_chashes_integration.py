@@ -87,9 +87,22 @@ def test_assign_from_chashes_route_persists_real_assignment(t2_service_env) -> N
 
 @pytest.mark.scenario
 def test_assign_from_chashes_names_unmatched_chashes(t2_service_env) -> None:
-    """A chash never upserted into the collection is reported, not dropped."""
+    """A chash never upserted into the collection is reported, not dropped.
+
+    RDR-204 Phase 2 fallout (nexus-ft04v.16): unlike its two sibling tests
+    in this file, this one performs NO write against ``_COLL`` before
+    calling ``assign_from_chashes`` -- the other two get a real
+    ``catalog_collections`` row for free as a side effect of their own
+    ``upsert_chunks_with_embeddings`` call. Phase 2 made every vector op
+    (reads included) 422 "not registered" on a collection with no row,
+    so this test's own intent -- the COLLECTION exists, only THIS chash
+    was never upserted into it -- now needs that row declared explicitly
+    up front rather than left implicit.
+    """
+    from nexus.corpus import ensure_collection_registered
     from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 
+    ensure_collection_registered(_COLL)
     tax = HttpTaxonomyStore()
     bogus = _chash("never upserted anywhere in this test")
 

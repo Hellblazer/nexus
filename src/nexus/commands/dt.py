@@ -1245,6 +1245,11 @@ def index_cmd(
             touched_collections.add(resolved_collection)
         else:
             unchanged += 1
+            # nexus-g276c: an unchanged record still belongs to the run's
+            # --enrich pass — bib enrichment is idempotent per backend, and
+            # "index the same record again with --enrich" had otherwise
+            # enriched nothing.
+            touched_collections.add(resolved_collection)
             click.echo(f"  skipped: index fresh (use --force)  {uuid}\t{path}")
         # nexus-i0cwh: page coverage against DEVONthink's pageCount, on a
         # fresh PDF index only (markdown has no pages; an unchanged document
@@ -1287,8 +1292,9 @@ def index_cmd(
         if highlights and _ingest_highlights_record(uuid):
             highlighted += 1
 
-    # RDR-139 Layer C: gap-fill bibliographic metadata over the collections we
-    # just wrote to. Runs once per distinct collection (title-group oriented),
+    # RDR-139 Layer C: gap-fill bibliographic metadata over the collections
+    # this run touched, unchanged records included (nexus-g276c). Runs once
+    # per distinct collection (title-group oriented),
     # after all records land so a multi-record paper enriches as one group.
     if enrich and touched_collections:
         from nexus.commands.enrich import run_bib_enrichment  # noqa: PLC0415 — deferred to avoid circular import (commands.enrich)

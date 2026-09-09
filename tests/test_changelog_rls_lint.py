@@ -418,6 +418,18 @@ ALLOWLIST: tuple[tuple[str, str, str], ...] = (
         "(T2 nexus/rehearsal-v01109-rdr204-phase1-walk-and-ghost-sweep-"
         "2026-09-08) executed it with the predicted branch counts.",
     ),
+    (
+        "hygiene-004-1",
+        "nexus.catalog_collections",
+        "nexus-ztafa (RDR-204 engine): the owner-grammar re-file walk's branch "
+        "C UPDATE on nexus.catalog_collections (toggled) LEFT JOINs "
+        "nexus.embedding_profile (FORCE RLS) without toggling it — the same "
+        "shape and the same reason as hygiene-002-1's own allowlist entry "
+        "above: the engine writes that table only after Liquibase finishes, "
+        "at boot, so it holds zero rows for every tenant at this point in the "
+        "changelog too, and the LEFT JOIN yields the same zero rows toggled "
+        "or not.",
+    ),
 )
 
 

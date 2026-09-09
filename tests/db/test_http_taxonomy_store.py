@@ -1441,12 +1441,28 @@ class TestPersist:
         # empty specs -> []
         assert client.persist_discovered_topics("c2", []) == []
 
+    def test_prune_projection_below_posts_prefix_and_threshold(self, client, monkeypatch) -> None:
+        """GH #1528 (nexus-4tfxp): the recovery route takes a source-collection
+        prefix and the raw-cosine floor and answers the removed count."""
+        calls: list[tuple[str, dict]] = []
+
+        def _post(path, body, **kw):
+            calls.append((path, body))
+            return {"removed": 42}
+
+        monkeypatch.setattr(client, "_post", _post)
+        assert client.prune_projection_below("code__", 0.7) == 42
+        assert calls == [("/assignments/prune_projection",
+                          {"source_collection_prefix": "code__", "min_similarity": 0.7})]
+
     def test_persist_discovered_409_is_benign_skip(self, client, monkeypatch) -> None:
         """nexus-n2ls1: pre-advisory-lock engines map a concurrent guard-then-
         insert discovery race to SQLSTATE 23505 → HTTP 409. The topics were
         persisted by the concurrent winner, so the client treats 409 exactly
         like the guard firing (benign ``[]``) instead of surfacing an
-        HTTPStatusError with a misleading 'retry' hint."""
+        HTTPStatusError with a misleading 'retry' hint. The benign reading
+        holds only when the collection HAS topics afterwards (nexus-zhxxd);
+        the winner's rows are stubbed here."""
         import httpx
 
         req = httpx.Request("POST", "http://svc/v1/taxonomy/topics/persist_discovered")
@@ -1456,6 +1472,9 @@ class TestPersist:
             raise httpx.HTTPStatusError("409 Conflict", request=req, response=resp)
 
         monkeypatch.setattr(client, "_post", _post_409)
+        monkeypatch.setattr(
+            client, "get_topics_for_collection", lambda collection, **kw: [{"id": 7, "label": "won"}],
+        )
         out = client.persist_discovered_topics(
             "c-race",
             [{"label": "x", "doc_count": 0, "terms": "[]",
@@ -1478,11 +1497,49 @@ class TestPersist:
             raise httpx.HTTPStatusError("409 Conflict", request=req, response=resp)
 
         monkeypatch.setattr(client, "_post", _post_409)
+        monkeypatch.setattr(
+            client, "get_topics_for_collection", lambda collection, **kw: [{"id": 7, "label": "won"}],
+        )
         assert client.persist_discovered_topics(
             "c-race-23505",
             [{"label": "x", "doc_count": 0, "terms": "[]",
               "assigned_by": "hdbscan", "doc_ids": []}],
         ) == []
+
+    def test_persist_discovered_409_with_no_topics_raises_naming_the_constraint(
+        self, client, monkeypatch,
+    ) -> None:
+        """GH #1489 (nexus-zhxxd): a 409/23505 for a collection that has NO
+        topics is not a concurrent-discovery race, it is an INSERT colliding
+        on an existing row (a BIGSERIAL sequence behind imported ids on a
+        6.18.1-migrated store). The old benign-skip returned [] and the
+        discover verb printed "skipped" and exited 0 for every collection.
+        Now: a named error carrying the sqlstate and the engine's constraint
+        name, so the failure is visible and diagnosable."""
+        import httpx
+
+        from nexus.db.t2.http_taxonomy_store import TopicPersistConflictError
+
+        req = httpx.Request("POST", "http://svc/v1/taxonomy/topics/persist_discovered")
+        resp = httpx.Response(
+            409, request=req,
+            text='{"error":"integrity constraint violation","sqlstate":"23505",'
+                 '"constraint":"topics_pk"}',
+        )
+
+        def _post_409(path, body):
+            raise httpx.HTTPStatusError("409 Conflict", request=req, response=resp)
+
+        monkeypatch.setattr(client, "_post", _post_409)
+        monkeypatch.setattr(client, "get_topics_for_collection", lambda collection, **kw: [])
+        with pytest.raises(TopicPersistConflictError, match="constraint=topics_pk") as ei:
+            client.persist_discovered_topics(
+                "c-1489",
+                [{"label": "x", "doc_count": 0, "terms": "[]",
+                  "assigned_by": "hdbscan", "doc_ids": []}],
+            )
+        assert "sqlstate=23505" in str(ei.value)
+        assert "c-1489" in str(ei.value)
 
     def test_persist_discovered_409_with_non_unique_sqlstate_propagates(self, client, monkeypatch) -> None:
         """nexus-n2ls1 critique HIGH: the engine maps EVERY class-23 violation
@@ -2036,6 +2093,33 @@ class TestOrchestrators:
         matched = {m["topic_id"]: m for m in out["matched_topics"]}
         assert set(matched) == {7, 8}
         assert matched[7]["chunk_count"] == 1 and matched[7]["avg_similarity"] == pytest.approx(1.0)
+
+    def test_project_against_icf_never_admits_below_the_raw_threshold(self, client) -> None:
+        """GH #1528 (nexus-4tfxp): ICF weights (log2(N/DF), up to ~5.5) used
+        to multiply the raw cosine BEFORE the threshold, so a weak match to
+        a rare topic passed. The threshold now gates the raw cosine; ICF is
+        clamped to <= 1 and can only rank and suppress."""
+        store = self._store(client, [
+            {"collection": "tgt", "topic_id": 7, "embedding": [1.0, 0.0], "label": "rare", "doc_count": 1},
+            {"collection": "tgt", "topic_id": 8, "embedding": [0.0, 1.0], "label": "hub", "doc_count": 1},
+        ])
+        # s1: cosine 0.5 to the rare topic 7 (below 0.7) -- an ICF of 4.0 used
+        # to lift it to 2.0 and admit it. s2: 0.95 to the hub topic 8 -- a hub
+        # weight far below the rare one scales it under the threshold: suppressed.
+        # s3: 0.95 to the rare topic 7 -- admitted, stored at its RAW cosine.
+        src = _FakeChromaColl(embeddings={
+            "s1": [0.5, 0.8660254], "s2": [0.3122499, 0.95], "s3": [0.95, 0.3122499],
+        })
+        fake_client = _FakeChromaClient({"src": src})
+        out = store.project_against(
+            "src", ["tgt"], fake_client, threshold=0.7, top_k=3,
+            icf_map={7: 4.0, 8: 0.2},
+        )
+        assigns = {(d, t): round(s, 3) for d, t, s in out["chunk_assignments"]}
+        assert ("s1", 7) not in assigns, "a raw cosine below the threshold is never admitted by ICF"
+        assert ("s2", 8) not in assigns, "a hub match scaled under the threshold by ICF is suppressed"
+        assert assigns == {("s3", 7): 0.95}, assigns
+        assert sorted(out["novel_chunks"]) == ["s1", "s2"]
 
     def test_project_against_dim_mismatch_raises(self, client) -> None:
         store = self._store(client, [

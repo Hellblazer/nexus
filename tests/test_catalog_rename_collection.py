@@ -57,7 +57,7 @@ from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbed
 from click.testing import CliRunner
 
 from nexus.cli import main
-from nexus.corpus import effective_embedding_model_for_writes
+from nexus.corpus import _write_intent_embedding_model
 from nexus.db.t3 import T3Database
 from tests._catalog_fixture_ops import ActiveCatalog
 from tests.conftest import make_vector_test_client
@@ -72,7 +72,12 @@ from tests.conftest import make_vector_test_client
 # registers a knowledge__* collection for real, that hardcoded token
 # conflicts. Resolve the box's REAL write-time model instead (never a
 # mocked mode against a real substrate that cannot honor a foreign token).
-_KNOWLEDGE_MODEL = effective_embedding_model_for_writes("knowledge")
+#
+# RDR-204 Phase 3 item 3 (nexus-ft04v.26): _write_intent_embedding_model, not
+# effective_embedding_model_for_writes -- see test_catalog_backfill_collections.py's
+# identical comment for why (the latter now makes a real network call, unsafe
+# at module collection time).
+_KNOWLEDGE_MODEL = _write_intent_embedding_model("knowledge")
 
 
 @pytest.fixture()
@@ -446,4 +451,75 @@ def test_rename_does_not_claim_supersede_when_no_row_was_marked(monkeypatch, tmp
     assert "Emitted CollectionSuperseded" not in result.output, (
         "the CLI announced a supersede that affected zero rows — the exact "
         "false claim nexus-cecqy is about"
+    )
+
+
+def test_rename_registers_new_name_with_the_values_it_was_typed_from(monkeypatch):
+    """nexus-ft04v.27: the post-rename ``register_collection`` call for a
+    conformant ``new`` name must carry the SAME four fields it did before
+    the fix -- now read via the funnel-style helpers instead of the
+    retired ``parse_conformant_collection_name``.
+
+    Deliberately reuses ``stub-code-1024`` (this file's own non-canonical
+    test/fixture model token, per the sibling test above) rather than a
+    real voyage/bge model: ``is_conformant_collection_name`` accepts it
+    (the funnel helpers this fix routes through do too), but
+    ``CollectionName.parse`` -- an alternative fix considered and
+    rejected -- validates the model segment against the canonical/local
+    sets and would REJECT this exact name, which is real regression
+    surface this test guards against.
+    """
+    from unittest.mock import MagicMock
+
+    from click.testing import CliRunner
+
+    from nexus.commands import catalog as _cat_cmd
+    from nexus.cli import main
+
+    from nexus.db.collection_state import CollectionState
+
+    writer = MagicMock()
+    writer.supersede_collection.return_value = 1
+    writer.rename_collection_cascade.return_value = {"catalog_documents": 3}
+    writer.rename_collection.return_value = 3
+
+    reader = MagicMock()
+    reader.get_collection.return_value = {"name": "code__old__stub-code-1024__v1"}
+
+    monkeypatch.setattr(_cat_cmd, "_get_catalog_writer", lambda *a, **k: writer, raising=False)
+    monkeypatch.setattr(_cat_cmd, "_get_catalog", lambda *a, **k: reader, raising=False)
+    monkeypatch.setattr(
+        "nexus.commands.catalog_cmds.collections.make_t3",
+        lambda *a, **k: MagicMock(), raising=False,
+    )
+
+    def _state(_t3, name):
+        return (CollectionState.ABSENT
+                if name.endswith("new__stub-code-1024__v3")
+                else CollectionState.PRESENT)
+
+    for target in (
+        "nexus.db.collection_state.probe_collection_state",
+        "nexus.commands.catalog_cmds.collections.probe_collection_state",
+        "nexus.collection_rename.probe_collection_state",
+    ):
+        monkeypatch.setattr(target, _state, raising=False)
+    monkeypatch.setattr(
+        "nexus.collection_rename.rename_collection_everywhere",
+        lambda *a, **k: {"t3": 3}, raising=False,
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["catalog", "rename-collection",
+         "code__old__stub-code-1024__v1", "code__new__stub-code-1024__v3", "--yes"],
+    )
+
+    assert result.exit_code == 0, f"rename did not run: {result.output}"
+    writer.register_collection.assert_called_once_with(
+        "code__new__stub-code-1024__v3",
+        content_type="code",
+        owner_id="new",
+        embedding_model="stub-code-1024",
+        model_version="v3",
     )

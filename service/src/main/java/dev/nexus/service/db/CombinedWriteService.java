@@ -139,7 +139,7 @@ public final class CombinedWriteService {
         if (collection == null || collection.isBlank()) {
             throw new IllegalArgumentException("'collection' is required and must be non-blank");
         }
-        int dim = PgVectorRepository.dimForCollection(collection);
+        int dim = CollectionRegistry.lookup(tenantScope, tenant, collection).dimension();
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
 
         // RDR-204 Phase 1 (bead nexus-ft04v.7): require catalog_collections to
@@ -276,7 +276,7 @@ public final class CombinedWriteService {
         // transaction opens"). Same embedder PgVectorRepository uses.
         EmbedResult embedResult = textsToEmbed.isEmpty()
             ? new EmbedResult(List.of(), 0L)
-            : docRouter.embedForCollectionWithUsage(collection, textsToEmbed);
+            : docRouter.embedForCollectionWithUsage(tenantScope, tenant, collection, textsToEmbed);
         List<float[]> embeddings = embedResult.embeddings();
 
         // Fail loud BEFORE any per-doc transaction if a vector's dimension

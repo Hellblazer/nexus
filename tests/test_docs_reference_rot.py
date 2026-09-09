@@ -126,6 +126,7 @@ RDR_ALLOWLIST: dict[str, str] = {
     "003": "palinex's RDR-003, cited as such in rdr-127",
     "114": "scrapped 2026-05-19 with the RDR-110-119 arc (docs/rdr/README.md)",
     "115": "scrapped 2026-05-19 with the RDR-110-119 arc (docs/rdr/README.md)",
+    "116": "draft on archive/develop-2026-05-19 only, never merged; scrapped 2026-05-19 with the RDR-110-119 arc, cited as history by rdr-205",
     "117": "scrapped 2026-05-19 with the RDR-110-119 arc (docs/rdr/README.md)",
     "326": "arcaneum's RDR-326, cited as such in rdr-090",
     "651": "conexus's RDR-651, cited as such in rdr-170",

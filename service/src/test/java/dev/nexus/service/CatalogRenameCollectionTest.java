@@ -101,7 +101,8 @@ class CatalogRenameCollectionTest {
         // by NO-ACTION children; the coherent re-home must succeed and report every table.
         // nexus-h8rf6 wave review: the canonical branch deletes registry row X — the
         // CollectionRegistry cache must evict OLD and mark NEW known.
-        dev.nexus.service.db.CollectionRegistry.markKnown(TENANT_A, OLD);
+        dev.nexus.service.db.CollectionRegistry.markKnown(TENANT_A, OLD,
+            new dev.nexus.service.db.CollectionRow("code", TENANT_A, "voyage-code-3", 1024, "live"));
         Map<String, Integer> c = repo.renameCollection(TENANT_A, OLD, NEW);
         assertThat(dev.nexus.service.db.CollectionRegistry.isKnown(TENANT_A, OLD))
             .as("registry cache evicted for old name").isFalse();

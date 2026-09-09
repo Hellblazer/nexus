@@ -15,6 +15,21 @@ from nexus.config import (
 )
 
 
+#: RDR-204 P3.4 (nexus-ft04v.25): the two ``nx config set`` keys whose value
+#: the engine adopts only at process spawn. The engine is the only writer of
+#: ``nexus.embedding_profile`` and writes it at boot from these, so until a
+#: restart the engine's profile and this client's intent differ invisibly.
+#: The command itself writes NOTHING to the profile.
+RESTART_HINT_KEYS: frozenset[str] = frozenset({"local.embed_model", "voyage_api_key"})
+#: The restart recipe as docs/cli-reference.md "Local mode with Voyage" states
+#: it; tests/test_config_cmd.py pins the two to the same string.
+SERVICE_RESTART_COMMAND: str = "nx daemon service stop && nx daemon service start"
+SERVICE_RESTART_HINT: str = (
+    "A restart is required for the engine to adopt this (it reads the model "
+    f"and key only at spawn): {SERVICE_RESTART_COMMAND}"
+)
+
+
 def _get_config_value(dotted_key: str) -> str | None:
     """Look up a dotted key (e.g. ``pdf.mineru_server_url``) in the merged config.
 
@@ -73,6 +88,8 @@ def config_set(key_value: str, value: str | None) -> None:
     else:
         set_credential(key, value.strip())
     click.echo(f"Set {key}  →  {_global_config_path()}")
+    if key in RESTART_HINT_KEYS:
+        click.echo(SERVICE_RESTART_HINT)
 
 
 # ── get ───────────────────────────────────────────────────────────────────────

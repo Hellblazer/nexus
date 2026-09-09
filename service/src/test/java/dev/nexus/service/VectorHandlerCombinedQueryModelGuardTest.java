@@ -88,6 +88,29 @@ class VectorHandlerCombinedQueryModelGuardTest {
         service = new NexusService(0, TOKEN, svcDs, null, pgRepo);
         service.start();
         http = HttpClient.newHttpClient();
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.3): AuthFilter runs the per-tenant,
+        // once-per-process ghost sweep on whichever request is TENANT's first
+        // against this service instance, and DELETES any collection it finds
+        // registered-but-chunkless at that moment. The warmup MUST run before the
+        // collections are registered at all (measured, nexus-ft04v Phase 1 round 4).
+        // Burn the sweep here first, THEN register (RDR-204 Phase 2, bead
+        // nexus-ft04v.16): the model guard reads each collection's registered ROW
+        // now (requireHomogeneousModel), so both must be registered at their real,
+        // DIFFERENT 1024-dim models for the dim guard to pass and the model guard
+        // to catch it -- exactly this test's intent -- and both must survive the
+        // sweep to do so.
+        var warmup = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+            .header("Authorization", "Bearer " + TOKEN)
+            .GET().build();
+        http.send(warmup, HttpResponse.BodyHandlers.ofString());
+
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(dsl, TENANT, COLL_A);
+            PgContainerHelper.insertCollection(dsl, TENANT, COLL_B);
+        }
     }
 
     @AfterAll
@@ -138,6 +161,74 @@ class VectorHandlerCombinedQueryModelGuardTest {
             .as("teaching message must name both models found")
             .contains("voyage-context-3")
             .contains("voyage-code-3");
+    }
+
+    // ---------------------------------------------------------------------------
+    // RDR-204 Phase 2 fix round 2 (nexus-ft04v.16 fix round 2, S1, coordinator
+    // design change): a fan-out over a registered + a never-registered collection
+    // reports the dropped name via the X-Nexus-Skipped-Collections response
+    // header, never a body field. COLL_A alone (single model) avoids tripping
+    // the mixed-model guard these tests otherwise exercise.
+    // ---------------------------------------------------------------------------
+
+    @Test
+    void searchMetadataScoped_unregisteredInFanOut_headerNamesDropped() throws Exception {
+        String ghost = "knowledge__mg-ghost__voyage-context-3__v1";
+        var resp = post("/v1/vectors/search-metadata-scoped", Map.of(
+            "query",       "probe",
+            "collections", List.of(COLL_A, ghost),
+            "n_results",   5));
+
+        assertThat(resp.statusCode())
+            .as("a fan-out with one dropped name still succeeds: %s", resp.body())
+            .isEqualTo(200);
+        assertThat(resp.headers().firstValue(dev.nexus.service.http.VectorHandler.SKIPPED_COLLECTIONS_HEADER))
+            .as("the dropped name must be visible via the header")
+            .contains(ghost);
+    }
+
+    @Test
+    void searchMetadataScoped_fullyRegisteredFanOut_headerAbsent() throws Exception {
+        var resp = post("/v1/vectors/search-metadata-scoped", Map.of(
+            "query",       "probe",
+            "collections", List.of(COLL_A),
+            "n_results",   5));
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(resp.headers().firstValue(dev.nexus.service.http.VectorHandler.SKIPPED_COLLECTIONS_HEADER))
+            .as("nothing was dropped -- the header must be absent, not empty")
+            .isEmpty();
+    }
+
+    @Test
+    void searchGraphHop_unregisteredInFanOut_headerNamesDropped() throws Exception {
+        String ghost = "knowledge__mg-ghost-gh__voyage-context-3__v1";
+        var resp = post("/v1/vectors/search-graph-hop", Map.of(
+            "query",       "probe",
+            "seeds",       List.of("1.1"),
+            "collections", List.of(COLL_A, ghost),
+            "n_results",   5));
+
+        assertThat(resp.statusCode())
+            .as("a fan-out with one dropped name still succeeds: %s", resp.body())
+            .isEqualTo(200);
+        assertThat(resp.headers().firstValue(dev.nexus.service.http.VectorHandler.SKIPPED_COLLECTIONS_HEADER))
+            .as("the dropped name must be visible via the header")
+            .contains(ghost);
+    }
+
+    @Test
+    void searchGraphHop_fullyRegisteredFanOut_headerAbsent() throws Exception {
+        var resp = post("/v1/vectors/search-graph-hop", Map.of(
+            "query",       "probe",
+            "seeds",       List.of("1.1"),
+            "collections", List.of(COLL_A),
+            "n_results",   5));
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(resp.headers().firstValue(dev.nexus.service.http.VectorHandler.SKIPPED_COLLECTIONS_HEADER))
+            .as("nothing was dropped -- the header must be absent, not empty")
+            .isEmpty();
     }
 
     /** Minimal fixed-vector stub embedder — the model guard never reaches embed() here. */

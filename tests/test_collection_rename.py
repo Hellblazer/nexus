@@ -230,6 +230,69 @@ class TestRenameCLI:
         assert result.exit_code != 0
         assert "prefix mismatch" in result.output.lower()
 
+    @pytest.mark.parametrize(
+        ("old", "new", "force", "expect_reject"),
+        [
+            # Same-prefix conformant names: always accepted.
+            ("code__nexus-1-1__voyage-code-3__v1", "code__other-1-1__voyage-code-3__v1", False, False),
+            # Same-prefix legacy 2-segment names: accepted.
+            ("code__myrepo-abc12345", "code__myrepo-def67890", False, False),
+            # Cross-prefix without --force-prefix-change: rejected.
+            ("code__foo", "docs__foo", False, True),
+            # Same cross-prefix pair WITH --force-prefix-change: accepted.
+            ("code__foo", "docs__foo", True, False),
+            # Quarantine-prefixed: the raw first segment includes the
+            # "quarantine-" text verbatim (collection_shape.py's own
+            # quarantine STRIPPING is a different code path -- this gate
+            # never strips it), so two DIFFERENT quarantined base types
+            # still mismatch.
+            ("quarantine-code__foo", "quarantine-docs__foo", False, True),
+            # Same quarantined base type: match, accepted.
+            ("quarantine-code__foo", "quarantine-code__bar", False, False),
+            # Both legacy-bare (no "__" at all): both have "" as their
+            # prefix under the pre-funnel ternary's "" default -- equal,
+            # accepted, same as before the funnel.
+            ("bare-name-one", "bare-name-two", False, False),
+            # Bare (no "__") vs a real prefix: "" != "docs", rejected.
+            ("bare-name", "docs__foo", False, True),
+        ],
+    )
+    def test_rename_prefix_validity_table(
+        self, old: str, new: str, force: bool, expect_reject: bool, env_creds,
+    ) -> None:
+        """nexus-ft04v.23: the rename-validity gate (RENAME VALIDITY BY
+        PREFIX, behaviour-carrying) funnelled ``old.split("__", 1)[0] if
+        "__" in old else ""`` / same for *new* to
+        ``collection_content_type(old)`` / ``collection_content_type(new)``.
+        Same accept/reject decision for the same inputs, across
+        conformant, legacy-bare, quarantine-prefixed, and garbage names.
+
+        Isolated to the GATE decision: ``rename_collection_data_plane`` (the
+        real atomic service-side cascade, tested end-to-end elsewhere -- see
+        ``tests/test_collection_rename_service_mode.py``) is stubbed out so
+        this test proves whether the gate let the rename THROUGH, not
+        whether a real collection was renamed."""
+        from nexus.commands.collection import rename_cmd
+
+        fake_counts = {
+            "tax_topics": 0, "tax_assignments": 0, "tax_meta": 0,
+            "chash": 0, "catalog_docs": 0,
+        }
+        runner = CliRunner()
+        args = [old, new] + (["--force-prefix-change"] if force else [])
+        with patch(
+            "nexus.commands.collection.rename_collection_data_plane",
+            return_value=fake_counts,
+        ) as mock_cascade:
+            result = runner.invoke(rename_cmd, args)
+        if expect_reject:
+            assert result.exit_code != 0, result.output
+            assert "prefix mismatch" in result.output.lower()
+            mock_cascade.assert_not_called()
+        else:
+            assert result.exit_code == 0, result.output
+            mock_cascade.assert_called_once_with(old, new)
+
     # test_force_prefix_change_bypasses_gate retired (nexus-i711w terminal
     # deletion): same retired client-side fan-out pins as
     # test_rename_happy_path above. The prefix/model gates themselves stay

@@ -18,9 +18,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import click
-import structlog
-
-_log = structlog.get_logger(__name__)
 
 
 @click.command("backfill-collections")
@@ -105,37 +102,49 @@ def backfill_collections_cmd(dry_run: bool) -> None:
     if dry_run:
         return
 
-    # RDR-137 followup SIG-7 (nexus-43qgm.7): pass content_type +
-    # owner_id when the collection name is conformant so the OQ-5
-    # reader inference cannot silently shadow other owners' docs
-    # selections with anonymous knowledge__ rows. Legacy 2-segment
-    # names (e.g. ``knowledge__delos``) fall through to the bare
-    # register_collection call — their owner_id remains empty and
-    # the reader's owner_id JOIN excludes them from owner-scoped
-    # lookups, which is the desired behaviour.
+    # RDR-204 Phase 3 fix round (nexus-ft04v.28 item 4): routed through
+    # the registration seam (ensure_collection_registered) instead of a
+    # direct writer.register_collection call -- gets the seam's early
+    # EmbeddingProfileMismatchError diagnostic this backfill previously
+    # skipped, matching every write-path registration site.
+    #
+    # EXPLICIT kwargs for the conformant branch, never bare
+    # name-derivation: a `to_register` name may be a PHYSICALLY EXISTING
+    # T3 collection with real chunks under whatever model its own name
+    # segment encodes (backfill's whole job is adding the MISSING
+    # catalog projection row for collections T3 already has) --
+    # collection_registration_kwargs's generic derivation always
+    # recomputes embedding_model via the CURRENT write-intent
+    # (effective_embedding_model_for_writes), which can disagree with
+    # the model those chunks were actually embedded under if the
+    # install's local.embed_model changed since. parse_conformant_
+    # collection_name(name) preserves the name's own segments exactly
+    # like the code this replaces did. The non-conformant (legacy
+    # 2-segment) branch stays on bare name-derivation, matching
+    # register_collection's own pre-existing internal fallback for that
+    # shape. `writer`'s `.close()` (called once per name by the seam) is
+    # a documented no-op on the shared service-catalog handle this
+    # writer wraps -- safe to call from a loop.
     from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
+        ensure_collection_registered,
         is_conformant_collection_name,
         parse_conformant_collection_name,
     )
     for name in to_register:
         if is_conformant_collection_name(name):
-            try:
-                parsed = parse_conformant_collection_name(name)
-                writer.register_collection(
-                    name,
-                    content_type=parsed["content_type"],
-                    owner_id=parsed["owner_id"],
-                    embedding_model=parsed["embedding_model"],
-                    model_version=parsed["model_version"],
-                )
-                continue
-            except (KeyError, ValueError) as exc:
-                _log.warning(
-                    "backfill_collections_conformant_parse_failed",
-                    name=name, error=str(exc),
-                )
-        # Non-conformant fallback (legacy 2-segment names).
-        writer.register_collection(name)
+            parsed = parse_conformant_collection_name(name)
+            ensure_collection_registered(
+                name,
+                registrar=lambda: writer,
+                kwargs={
+                    "content_type": parsed["content_type"],
+                    "owner_id": parsed["owner_id"],
+                    "embedding_model": parsed["embedding_model"],
+                    "model_version": parsed["model_version"],
+                },
+            )
+        else:
+            ensure_collection_registered(name, registrar=lambda: writer)
 
     click.echo(
         f"\nDone: {len(to_register)} new, "
@@ -240,10 +249,7 @@ def rename_collection_cmd(
     from nexus.commands.collection import (  # noqa: PLC0415  — command-local import (nexus.commands.collection)
         rename_collection_data_plane,
     )
-    from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
-        is_conformant_collection_name,
-        parse_conformant_collection_name,
-    )
+    from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415  — command-local import (nexus.corpus)
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
@@ -329,24 +335,45 @@ def rename_collection_cmd(
     # rename is recoverable but only if the operator has the recovery
     # plan in front of them.
     try:
+        # RDR-204 Phase 3 fix round (nexus-ft04v.28 item 4): routed
+        # through the registration seam (ensure_collection_registered)
+        # instead of a direct writer.register_collection call -- gets
+        # the seam's early EmbeddingProfileMismatchError diagnostic this
+        # rename path previously skipped. `new` was just confirmed
+        # CollectionState.ABSENT above, so it has no catalog row yet by
+        # construction -- this call is what creates one.
+        #
+        # EXPLICIT kwargs for the conformant branch, never bare
+        # name-derivation: T3's chunks were just renamed in place
+        # (rename_collection_data_plane above) -- their embeddings are
+        # UNCHANGED, so the new row must record the model those chunks
+        # actually carry, which is what the OPERATOR TYPED into `new`'s
+        # own name segment, never a recomputed CURRENT write-intent
+        # (collection_registration_kwargs's generic derivation would
+        # substitute the latter). parse_conformant_collection_name(new)
+        # preserves the typed segments exactly like the code this
+        # replaces did. The non-conformant (--allow-legacy) branch stays
+        # on bare name-derivation (nexus-cecqy's legacy_grandfathered
+        # flag), matching register_collection's own pre-existing
+        # internal fallback for that shape.
+        from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
+            ensure_collection_registered,
+            parse_conformant_collection_name,
+        )
         if is_conformant_collection_name(new):
-            segments = parse_conformant_collection_name(new)
-            writer.register_collection(
+            parsed = parse_conformant_collection_name(new)
+            ensure_collection_registered(
                 new,
-                content_type=segments["content_type"],
-                owner_id=segments["owner_id"],
-                embedding_model=segments["embedding_model"],
-                model_version=segments["model_version"],
+                registrar=lambda: writer,
+                kwargs={
+                    "content_type": parsed["content_type"],
+                    "owner_id": parsed["owner_id"],
+                    "embedding_model": parsed["embedding_model"],
+                    "model_version": parsed["model_version"],
+                },
             )
         else:
-            # nexus-cecqy: --allow-legacy documents that a non-conformant name
-            # "still gets a row in the projection but is flagged
-            # legacy_grandfathered=True". That flag is now DERIVED inside
-            # HttpCatalogClient.register_collection, so this bare call flags the
-            # row correctly. Deriving it *here* instead was the too-narrow fix:
-            # two sibling bare-else sites (indexer.py:784, :138 below) have the
-            # same shape and would have stayed defective.
-            writer.register_collection(new)
+            ensure_collection_registered(new, registrar=lambda: writer)
         superseded_rows = writer.supersede_collection(old, new, reason="rename-collection")
     except Exception as exc:
         click.echo(

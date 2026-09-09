@@ -164,7 +164,18 @@ def test_collection_for_repo_mints_voyage_when_key_present(
 ) -> None:
     """Symmetric with the docs table: key PRESENT + a registered bge
     collection -> targets voyage (new sibling), does NOT grandfather —
-    round 3's gate applies here too, via the same chokepoint."""
+    round 3's gate applies here too, via the same chokepoint.
+
+    RDR-204 Phase 3 item 3 (nexus-ft04v.26): effective_embedding_model_for_writes
+    stays pure local computation (coordinator design correction
+    2026-09-09, after a first attempt at a profile read inside it broke
+    155 unit tests) -- no profile stub needed here; this test pins the
+    chokepoint's own local-intent dispatch, not the registration-seam
+    profile check (that lives in ensure_collection_registered now, and
+    this call site -- collection_for_repo -- does not go through it at
+    all, per that function's own docstring on which sites still rely on
+    the engine's own register-time 422 instead).
+    """
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
     monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
     monkeypatch.setattr("nexus.config.local_embed_model_is_voyage", lambda: True)

@@ -25,6 +25,7 @@ from click.testing import CliRunner
 from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.types import SearchResult
+from tests.conftest import catalog_row_for_collection_name, patched_mcp_infra_t3
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "nexus"
 
@@ -104,7 +105,11 @@ def _result(id: str, collection: str, distance: float, score: float | None = Non
 
 def _t3_mock(collections: list[str]) -> MagicMock:
     mock = MagicMock(spec=HttpVectorClient)
-    mock.list_collections.return_value = [{"name": n} for n in collections]
+    # RDR-204 Phase 3 fixture-seam fix (nexus-ft04v.26): resolve_corpus's
+    # bare-corpus fan-out reads a catalog-row shape per collection.
+    mock.list_collections.return_value = [
+        {"name": n, **catalog_row_for_collection_name(n)} for n in collections
+    ]
     mock.supports_server_rerank = True
     return mock
 
@@ -135,7 +140,7 @@ def test_search_reranks_with_voyageai_unimportable(cloud_env):
             return list(results)
 
         mock_t3 = _t3_mock(["knowledge__test", "rdr__nexus"])
-        with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+        with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
              patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
              patch("nexus.commands.search_cmd.load_config",
                    return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
@@ -188,7 +193,7 @@ def test_server_score_order_matches_retired_client_ordering(cloud_env):
         return list(results)
 
     mock_t3 = _t3_mock(["knowledge__x", "rdr__x", "docs__x"])
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
          patch("nexus.commands.search_cmd.load_config",
                return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):
@@ -219,7 +224,7 @@ def test_degrade_surface_invariant(cloud_env):
         return [_result("a", "knowledge__test", 0.1)]
 
     mock_t3 = _t3_mock(["knowledge__test", "rdr__nexus"])
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
          patch("nexus.commands.search_cmd.load_config",
                return_value={"embeddings": {"rerankerModel": "rerank-2.5"}}):

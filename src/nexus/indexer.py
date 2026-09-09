@@ -77,6 +77,13 @@ DEFAULT_IGNORE: list[str] = _DEFAULT_IGNORE
 FLUSH_CONCURRENCY: int = min(3, QUOTAS.MAX_CONCURRENT_WRITES)
 
 
+
+#: Basenames under a configured RDR directory that are process documents, never
+#: RDRs (GH #1524, nexus-20uv3): the RDR template's README and the agent
+#: guidance files kept beside the records. Skipped by the RDR pass; the docs
+#: pass owns them if the directory is not excluded from it.
+RDR_DIR_NON_RDR_BASENAMES: frozenset[str] = frozenset({"readme.md", "agents.md", "claude.md"})
+
 def _git_metadata(repo: Path) -> dict:
     """Collect git metadata for *repo*. Returns empty strings for missing values."""
     def run(args: list[str]) -> str:
@@ -670,7 +677,7 @@ def _migrate_legacy_collections(
         # is configured. Previously reached only because an outer
         # ``except Exception`` in the caller (nx index repo) happened to
         # swallow the raise, not by design.
-        conformant = cat_obj.collection_for(
+        conformant_name = cat_obj.collection_for(
             content_type=ct,
             owner=owner,
             embedding_model=resolve_write_embedding_model(
@@ -681,7 +688,8 @@ def _migrate_legacy_collections(
                     )
                 ),
             ),
-        ).render()
+        )
+        conformant = conformant_name.render()
 
         # nexus-7vuw: pick the first source candidate that exists in T3.
         # Two shapes can carry pre-migration data:
@@ -783,18 +791,17 @@ def _migrate_legacy_collections(
             # this point onward any failure is non-fatal for the caller's
             # write path: ``conformant`` is the right name to use.
             try:
-                from nexus.corpus import (  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
-                    is_conformant_collection_name,
-                    parse_conformant_collection_name,
-                )
+                from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
                 if is_conformant_collection_name(conformant):
-                    segments = parse_conformant_collection_name(conformant)
+                    # nexus-ft04v.27: reuse the CollectionName the render
+                    # above already built instead of parsing the very name
+                    # it just rendered back apart.
                     w.register_collection(
                         conformant,
-                        content_type=segments["content_type"],
-                        owner_id=segments["owner_id"],
-                        embedding_model=segments["embedding_model"],
-                        model_version=segments["model_version"],
+                        content_type=conformant_name.content_type,
+                        owner_id=conformant_name.owner_id,
+                        embedding_model=conformant_name.embedding_model,
+                        model_version=f"v{conformant_name.model_version}",
                     )
                 else:
                     w.register_collection(conformant)
@@ -2054,6 +2061,7 @@ def index_repository(
     since_head: bool = False,
     on_locked: str = "wait",
     on_start: Callable[[int], None] | None = None,
+    on_rdr_start: Callable[[int], None] | None = None,
     on_file: Callable[[Path, int, float], None] | None = None,
     on_phase: Callable[[str], None] | None = None,
     on_flush: "Callable[[int, int, str, float, str | None], None] | None" = None,
@@ -2165,7 +2173,7 @@ def index_repository(
                 _run_index_frecency_only(repo, registry)
                 stats: dict[str, int] = {}
             else:
-                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_re_embed=force_re_embed, since_head=since_head, on_locked=on_locked, on_start=on_start, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks, fence_run_state=_fence_run_state)
+                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_re_embed=force_re_embed, since_head=since_head, on_locked=on_locked, on_start=on_start, on_rdr_start=on_rdr_start, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks, fence_run_state=_fence_run_state)
                 _set_owner_head_hash(repo, _current_head(repo))
             return stats
         finally:
@@ -3499,6 +3507,18 @@ def _prune_collection_serverside(
         restore_rereferenced_serverside,
     )
 
+    # The quarantine sibling is never registered from here. Its only writes
+    # are server-side (the SQL anti-join move inside gc_quarantine_orphans),
+    # and that function registers the sibling itself, from the origin's own
+    # catalog row, only on a pass that actually moves a chunk (catalog-024
+    # register-on-insert, hygiene-005 copy-from-origin). The engine's three
+    # GC routes all resolve the sibling's dimension from the ORIGIN, so a
+    # first pass over a fresh collection (restore runs first, nothing was
+    # ever quarantined) answers 0 rather than 422. A client-side
+    # pre-registration here (nexus-ft04v.26/.28, never released) left an
+    # empty sibling projection row on every zero-orphan pass -- the
+    # nexus-syfes class `nx catalog doctor --collections-drift` flags and
+    # the shakeout's Phase E fails on.
     restored = restore_rereferenced_serverside(db, quarantine_name, collection_name)
     if restored is None:
         return False  # route unavailable — client-side path handles restore too
@@ -3718,6 +3738,10 @@ def _prune_deleted_files(
         from nexus.catalog.chunk_quarantine import (  # noqa: PLC0415 — deferred import
             now_stamp, quarantine_collection_name,
         )
+        # RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26): quarantine_collection_name
+        # now prefers collection_name's catalog row (authoritative) and
+        # falls to candidate-string derivation when there is none -- it
+        # never raises, so this call needs no new error handling here.
         qname = quarantine_collection_name(collection_name)
         # nexus-ou4tb contract (see the comment below): a degraded read must
         # skip THIS collection, not abort the sweep for every collection after
@@ -3730,6 +3754,16 @@ def _prune_deleted_files(
         try:
             if _prune_collection_serverside(db, collection_name, qname, now_stamp()):
                 continue
+        except ValueError:
+            # A ValueError here is a data/config defect (a malformed origin
+            # name or response shape), never a transient engine hiccup. The
+            # broad except below exists ONLY for the nexus-ou4tb
+            # transient-failure contract (ConnectionError/TimeoutError/HTTP
+            # errors); swallowing a ValueError is the class of
+            # data-correctness bug the no-silent-fallback hot rule forbids --
+            # propagate it loud instead of logging a warning and quietly
+            # leaving GC broken (nexus-ft04v.28 C1 was exactly that shape).
+            raise
         except Exception:  # noqa: BLE001 — best-effort; failure logged, sweep continues
             _log.warning("gc_serverside_prune_failed", collection=collection_name,
                          exc_info=True)
@@ -4094,6 +4128,7 @@ def _run_index(
     since_head: bool = False,
     on_locked: str = "wait",
     on_start: Callable[[int], None] | None = None,
+    on_rdr_start: Callable[[int], None] | None = None,
     on_file: Callable[[Path, int, float], None] | None = None,
     on_phase: Callable[[str], None] | None = None,
     on_flush: "Callable[[int, int, str, float, str | None], None] | None" = None,
@@ -4276,6 +4311,12 @@ def _run_index(
         if rdr_dir.is_dir():
             for md_file in sorted(rdr_dir.rglob("*.md")):
                 if md_file.is_file() and not md_file.is_symlink():
+                    if md_file.name.lower() in RDR_DIR_NON_RDR_BASENAMES:
+                        # GH #1524 (nexus-20uv3): the RDR process template's
+                        # README (and the agent guidance files beside it) are
+                        # not RDRs; indexed as one, the byte-identical README
+                        # outranked every real RDR in five collections at once.
+                        continue
                     if (delta_changed is not None
                             and str(md_file.relative_to(repo)) not in delta_changed):
                         continue  # nexus-fltb4: outside the delta
@@ -5486,6 +5527,12 @@ def _run_index(
     # casing RDR with broader containment would reintroduce the same
     # inconsistency this fix removes, just inverted.
     _log.debug("indexing RDR files", count=len(rdr_md_paths))
+    # GH #1525 (nexus-1m0cy): on_start counted only code/prose/pdf files, so
+    # the per-file counter ran past its total here ([811/717]) and the ETA
+    # ticker had already stopped. Announce the RDR pass's own total so the
+    # renderer can count and estimate this phase on its own.
+    if on_rdr_start:
+        on_rdr_start(len(rdr_md_paths))
     if on_phase is not None:
         on_phase("Discovering and indexing RDR markdown files…")
     _rdr_t0 = time.monotonic()

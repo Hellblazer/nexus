@@ -94,7 +94,8 @@ class CatalogDeleteCollectionCascadeTest {
         // nexus-h8rf6 wave review: a pre-delete CollectionRegistry entry must be
         // evicted by the delete — a stale entry would make later writers skip
         // re-registration if the collection name is reused.
-        dev.nexus.service.db.CollectionRegistry.markKnown(TENANT_A, COLL);
+        dev.nexus.service.db.CollectionRegistry.markKnown(TENANT_A, COLL,
+            new dev.nexus.service.db.CollectionRow("code", TENANT_A, "voyage-code-3", 1024, "live"));
         Map<String, Integer> counts = repo.deleteCollection(TENANT_A, COLL);
         assertThat(dev.nexus.service.db.CollectionRegistry.isKnown(TENANT_A, COLL))
             .as("registry cache evicted post-delete").isFalse();

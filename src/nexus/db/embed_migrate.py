@@ -31,7 +31,7 @@ from typing import Literal
 
 import structlog
 
-from nexus.corpus import _CONFORMANT_COLLECTION_RE
+from nexus.corpus import _CONFORMANT_COLLECTION_RE, split_candidate_collection_name
 from nexus.db.t3 import T3Database
 
 _log = structlog.get_logger(__name__)
@@ -91,7 +91,22 @@ def _target_name(old: str, active_token: str) -> str:
 
 
 def _classify(name: str, source_paths: frozenset[str], sourceless: int) -> StaleKind:
-    if name.startswith("code__"):
+    # RDR-204 Phase 3 (nexus-ft04v.26), class (d): this classifies a
+    # STALE (pre-migration) collection -- migration exists precisely to
+    # handle legacy installs that may predate catalog registration.
+    # Prefer the row (authoritative when it exists); a collection with no
+    # row is exactly the unregistered-legacy population this migration
+    # diagnostic must still classify, so it falls to candidate-string
+    # derivation rather than raising. `startswith("code__")` <=>
+    # `split_candidate_collection_name(name)[0] == "code"` with no edge
+    # divergence -- the "__" is baked into the compared literal, so a
+    # bare "code" (no separator at all) reads False under both the raw
+    # startswith and the helper (first segment is "" when there is no
+    # "__").
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+    row = get_collection_row(name)
+    is_code = row["content_type"] == "code" if row is not None else split_candidate_collection_name(name)[0] == "code"
+    if is_code:
         return "code"
     if not source_paths:
         return "sourceless"
@@ -259,7 +274,15 @@ def _default_reindex(
         return int(result or 0)
 
     indexed = 0
-    if target_name.startswith("rdr__"):
+    # RDR-204 Phase 3 (nexus-ft04v.26), class (a): `target_name` is the
+    # MIGRATION TARGET -- _target_name (above) built it by swapping the
+    # model segment of an already-conformant OLD name, so it structurally
+    # cannot have a catalog row yet (it may not even have been written).
+    # Its content_type is exactly the OLD name's ct group _target_name's
+    # own regex match already extracted; re-deriving it here via the
+    # candidate-string primitive is the mint-time-only reading, not a
+    # trust-the-name shortcut -- there is no row to prefer.
+    if split_candidate_collection_name(target_name)[0] == "rdr":
         rdr_files = [Path(sp) for sp in source_paths if Path(sp).exists()]
         if rdr_files:
             # batch returns {path: "indexed"|"skipped"|"failed"}; "skipped"
@@ -366,6 +389,17 @@ def migrate_collection_safe(
         )
 
     expected_sources = len(stale.source_paths)
+    # RDR-204 Phase 3 funnel (nexus-ft04v.22): LEFT RAW, deliberately, per
+    # the coordinator's ruling on this exact shape (matches commands/
+    # collection.py:748 byte-for-byte). For a conformant 4-segment name
+    # this keeps the OWNER **and** the MODEL/VERSION tail together
+    # ("proj__minilm-l6-v2-384__v1"), which none of the three funnel
+    # helpers can reproduce: `collection_owner()` returns only the parsed
+    # `owner_id` field for a conformant name, discarding the model/version
+    # segments this reindex corpus argument still needs. Funnelling this
+    # would NARROW what the site returns -- forbidden by the bead. Stays
+    # counted in the census until nexus-ft04v.26 (the repoint) reads the
+    # target corpus directly from the catalog row instead of parsing.
     corpus = stale.name.split("__", 1)[1] if "__" in stale.name else ""
 
     try:

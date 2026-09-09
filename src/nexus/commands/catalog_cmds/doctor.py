@@ -933,9 +933,16 @@ def _run_name_vs_embed_dim() -> dict:
     names, samples one chunk per remaining collection, and compares
     actual embedding dim to the dim implied by the name's
     ``__<model>__`` segment. Read-only against T3."""
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): deliberately NOT the
+    # row-based collection_model -- this diagnostic's whole point is
+    # comparing what the NAME CLAIMS against the actual embedding dim
+    # (a "4.28-era write-side bug" class), so it needs the name's own
+    # segment, not the (should-already-agree) catalog row.
+    # embedding_model_for_collection_name (regex, unaffected by the
+    # repoint) reads it directly.
     from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
+        embedding_model_for_collection_name,
         is_conformant_collection_name,
-        parse_conformant_collection_name,
     )
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
     from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
@@ -968,8 +975,9 @@ def _run_name_vs_embed_dim() -> dict:
         if not is_conformant_collection_name(name):
             skipped_non_conformant += 1
             continue
-        parsed = parse_conformant_collection_name(name)
-        token = parsed["embedding_model"]
+        # name is already confirmed conformant above -- the regex read
+        # never returns None here.
+        token = embedding_model_for_collection_name(name) or ""
         expected = _expected_dim_for_model_token(token)
         if expected is None:
             unknown_token.append({"collection": name, "token": token})

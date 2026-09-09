@@ -25,12 +25,16 @@ except ImportError:  # pragma: no cover — future SDK restructure
     _FastMCPSettings = None
 
 from nexus.corpus import (
+    CollectionNotRegisteredError,
     _refuse_placeholder_subject,
+    collection_content_type,
+    collection_model,
+    collection_owner,
     embedding_model_for_collection,
-    embedding_model_for_collection_name,
     index_model_for_collection,
     is_conformant_collection_name,
     resolve_corpus,
+    split_candidate_collection_name,
     t3_collection_name,
 )
 from nexus.db.t3 import verify_collection_deep
@@ -2079,7 +2083,13 @@ def _search_render(
                 ],
             }
 
-        lines: list[str] = []
+        # nexus-onn7s: the reader instruction leads every text render, and
+        # each result carries what is already stored about its age and
+        # expiry (context_annotations); the contradiction flag stays on the
+        # title line where it has always been.
+        from nexus.context_annotations import READER_INSTRUCTION, annotation_line  # noqa: PLC0415 — deferred; keeps core's import surface flat
+
+        lines: list[str] = [READER_INSTRUCTION]
         current_cluster: str | None = None
         for r in page:
             # Emit cluster header when group changes
@@ -2100,7 +2110,9 @@ def _search_render(
             label = title or source or r.id
             snippet = r.content[:200].replace("\n", " ")
             flag = " [CONTRADICTS ANOTHER RESULT]" if r.metadata.get("_contradiction_flag") else ""
-            lines.append(f"[{dist}] {label}{flag}\n  {snippet}")
+            note = annotation_line(r.metadata)
+            note_line = f"\n  {note}" if note else ""
+            lines.append(f"[{dist}] {label}{flag}{note_line}\n  {snippet}")
 
         # Pagination footer
         shown_end = offset + len(page)
@@ -2440,7 +2452,7 @@ def _resolve_corpus_target(
     if corpus == "all":
         seen: list[str] = []
         for n in all_names:
-            prefix = n.split("__", 1)[0]
+            prefix = _collection_family_prefix(n)
             if prefix and prefix not in seen:
                 seen.append(prefix)
         corpus = ",".join(seen) if seen else "knowledge,code,docs,rdr"
@@ -2449,7 +2461,17 @@ def _resolve_corpus_target(
         part = part.strip()
         if not part:
             continue
-        if "__" in part:
+        # RDR-204 Phase 3 (nexus-ft04v.26), class (a): *part* is a
+        # user-typed --corpus TOKEN, not necessarily an existing
+        # collection -- the row-based collection_owner would raise
+        # CollectionNotRegisteredError on a bare "code" or a legacy
+        # "docs__foo" that has no row under that exact string.
+        # split_candidate_collection_name(part)[1] != part is the
+        # STRING-SHAPE substitute for a raw "__" in part test (see its
+        # docstring) -- this is the same class of candidate-string site
+        # as nexus.corpus.t3_collection_name's own ct/rest split, which
+        # this delegates to on the next line.
+        if split_candidate_collection_name(part)[1] != part:
             target.append(t3_collection_name(part, t3=t3))
         else:
             fanned_out = resolve_corpus(part, all_names)
@@ -2471,6 +2493,30 @@ def _resolve_corpus_target(
     return list(dict.fromkeys(target))
 
 
+def _collection_family_prefix(name: str) -> str:
+    """Best-effort corpus-family label for *name*, for the two purely
+    informational groupings in this module (the ``corpus="all"`` prefix
+    expansion above, and the planner's collection-name hint sampler
+    below) -- never for a correctness-sensitive read.
+
+    RDR-204 Phase 3 repoint (nexus-ft04v.26): tries the row-based
+    ``collection_content_type``/``collection_owner`` (correct for the
+    overwhelming common case, since *name* comes from the SAME
+    row-cache-backed list :func:`nexus.mcp_infra.get_collection_names`
+    returns) but degrades to treating *name* as its OWN singleton family
+    when it has no catalog row -- a stats-listed collection with no row
+    is possible only in the pre-ghost-sweep window (RDR §Technical Design
+    step 3) or a genuinely orphaned entry; neither is worth failing an
+    "all" corpus expansion or a planner hint over. Mirrors
+    ``_group_collections_by_model``'s "no info -> own singleton group,
+    never guessed and never dropped" precedent for the model axis.
+    """
+    try:
+        return name if collection_owner(name) == name else collection_content_type(name)
+    except CollectionNotRegisteredError:
+        return name
+
+
 def _group_collections_by_model(target: list[str]) -> list[list[str]]:
     """Group a resolved collection list by embedding model (nexus-3l6gz).
 
@@ -2482,17 +2528,25 @@ def _group_collections_by_model(target: list[str]) -> list[list[str]]:
     silently embeds the query with only the first collection's model and
     mis-ranks/drops every other model's chunks (root cause: nexus-3l6gz).
 
-    Groups collections by :func:`embedding_model_for_collection_name` so
-    each combined-query call is model-homogeneous. A collection whose name
-    is not conformant (the parse returns ``None``) is kept in its OWN
-    singleton group keyed by its raw collection name — never guessed into
-    an inferred model group and never silently dropped.
+    RDR-204 Phase 3 repoint (nexus-ft04v.26): groups by the catalog row's
+    ``embedding_model`` COLUMN (:func:`nexus.corpus.collection_model`)
+    instead of a name parsed via :func:`embedding_model_for_collection_name`
+    -- a collection whose stored vectors' model disagrees with what its
+    name says (the exact drift GH #667 came from) is now grouped by what
+    it actually IS, closing the same authority gap as ``resolve_corpus``.
+    A collection with no catalog row is kept in its OWN singleton group
+    keyed by its raw collection name — never guessed into an inferred
+    model group and never silently dropped, exactly like the prior
+    not-conformant fallback.
 
     Preserves ``target``'s relative ordering both across and within groups.
     """
     groups: dict[str, list[str]] = {}
     for name in target:
-        key = embedding_model_for_collection_name(name) or name
+        try:
+            key = collection_model(name) or name
+        except CollectionNotRegisteredError:
+            key = name
         groups.setdefault(key, []).append(name)
     return list(groups.values())
 
@@ -2580,7 +2634,8 @@ def _grouped_combined_query(
 
 
 def _dedup_by_id(rows: list[dict]) -> list[dict]:
-    """Collapse *rows* to one row per ``id``, keeping the best (lowest) distance.
+    """Collapse *rows* to one row per ``id``, keeping the best (lowest) distance,
+    then one row per identical chunk across collections (GH #1524).
 
     Assumes *rows* is already globally distance-ascending (e.g. the output
     of :func:`_grouped_combined_query`) so the FIRST occurrence of an id is
@@ -2596,7 +2651,69 @@ def _dedup_by_id(rows: list[dict]) -> list[dict]:
             continue
         seen.add(rid)
         deduped.append(r)
-    return deduped
+    return _collapse_identical_chunk_rows(deduped)
+
+
+def _collapse_identical_chunk_rows(rows: list[dict]) -> list[dict]:
+    """GH #1524 (nexus-20uv3): a chunk is content-addressed, so the same text
+    indexed in five collections (the RDR template's README, byte-identical
+    in every repo that ships it) is ONE chash in five collections and ranked
+    first five times. Keep the best-ranked row per non-empty ``chash`` and
+    record the other collections on it as ``also_in`` (distinct, in rank
+    order). Rows with no chash are never collapsed."""
+    kept_by_chash: dict[str, dict] = {}
+    out: list[dict] = []
+    for r in rows:
+        chash = r.get("chash", "") or ""
+        if not chash:
+            out.append(r)
+            continue
+        kept = kept_by_chash.get(chash)
+        if kept is None:
+            kept_by_chash[chash] = r
+            out.append(r)
+            continue
+        other = r.get("collection", "")
+        if other and other != kept.get("collection", ""):
+            also = kept.setdefault("also_in", [])
+            if other not in also:
+                also.append(other)
+        # The dropped row is a DIFFERENT document (its own tumbler) holding
+        # the same chunk; name it, so a reader can tell "same text, other
+        # document" from "same document, other collection" (critique [25095]).
+        rid = r.get("id", "")
+        if rid and rid != kept.get("id", ""):
+            ids = kept.setdefault("also_in_ids", [])
+            if rid not in ids:
+                ids.append(rid)
+    return out
+
+
+def _collapse_identical_chunk_results(results: list) -> list:
+    """The :func:`_collapse_identical_chunk_rows` rule for ``SearchResult``
+    lists (the plain query path): keyed on ``metadata["chunk_text_hash"]``,
+    the other collections recorded as ``metadata["also_in"]``."""
+    kept_by_chash: dict = {}
+    out: list = []
+    for r in results:
+        chash = (r.metadata or {}).get("chunk_text_hash", "") or ""
+        if not chash:
+            out.append(r)
+            continue
+        kept = kept_by_chash.get(chash)
+        if kept is None:
+            kept_by_chash[chash] = r
+            out.append(r)
+            continue
+        if r.collection and r.collection != kept.collection:
+            also = kept.metadata.setdefault("also_in", [])
+            if r.collection not in also:
+                also.append(r.collection)
+        if r.id and r.id != kept.id:
+            ids = kept.metadata.setdefault("also_in_ids", [])
+            if r.id not in ids:
+                ids.append(r.id)
+    return out
 
 
 def _dedup_by_id_keep_best(rows: list[dict], limit: int) -> list[dict]:
@@ -3259,6 +3376,14 @@ def query(
             if cat is None:
                 return "Error: catalog not initialized — catalog params (author, content_type, follow_links, subtree) require 'nx catalog setup'"
 
+            # GH #1527 (nexus-qiah5): a registered owner NAME is accepted
+            # wherever a subtree tumbler is; the owner table maps it.
+            if subtree:
+                from nexus.catalog.owner_scope import OwnerScopeError, resolve_owner_scope  # noqa: PLC0415 — deferred, branch-local
+                try:
+                    subtree = resolve_owner_scope(cat, subtree)
+                except OwnerScopeError as exc:
+                    return f"Error: subtree {exc}"
             # Guard: document-level subtree address (3+ segments) cannot have descendants
             if subtree:
                 subtree_depth = len(subtree.split("."))
@@ -3446,6 +3571,9 @@ def query(
                     "collections": sorted({r.get("collection", "") for r in rows}),
                     # per-row aligned (RDR-086 / review #7)
                     "chunk_collections": [r.get("collection", "") for r in rows],
+                    # GH #1524: the other collections the same chunk was found in.
+                    "also_in": [list(r.get("also_in", [])) for r in rows],
+                    "also_in_ids": [list(r.get("also_in_ids", [])) for r in rows],
                     # HIGH-1: chash per matched chunk row, not a manifest guess
                     "chunk_text_hash": [r.get("chash", "") for r in rows],
                 }
@@ -3484,6 +3612,7 @@ def query(
                     f"queries.]"
                 )
             lines_svc.append(f"{routing_note_svc}\n{header_svc}")
+            lines_svc.append(_READER_INSTRUCTION_LINE())
             lines_svc.append("")
             for i, row in enumerate(rows, 1):
                 tumbler_str = row.get("id", "")
@@ -3519,9 +3648,16 @@ def query(
                     bib_svc.append(f"{bib_citation_count_svc} citations")
                 if bib_svc:
                     lines_svc.append(f"   {' · '.join(bib_svc)}")
+                _note_svc = _annotation_line_for_entry(entry_svc)
+                if _note_svc:
+                    lines_svc.append(f"   {_note_svc}")
                 if chunk_count_svc:
                     lines_svc.append(f"   [{chunk_count_svc} chunks]")
                 lines_svc.append(f"   {collection_svc}")
+                if row.get("also_in"):
+                    _ids_svc = row.get("also_in_ids") or []
+                    lines_svc.append(f"   also in: {', '.join(row['also_in'])}"
+                                     + (f" (documents {', '.join(_ids_svc)})" if _ids_svc else ""))
                 lines_svc.append(f"   {snippet_svc}")
                 lines_svc.append("")
 
@@ -3600,6 +3736,9 @@ def query(
                 )
             return _append_fanout_excluded_note(no_results_msg, fanout_excluded_q)
 
+        # GH #1524: one row per identical chunk across collections.
+        results = _collapse_identical_chunk_results(results)
+
         if structured:
             page = results[:limit]
             structured_result: dict = {
@@ -3612,6 +3751,10 @@ def query(
                 # Review #7: per-result aligned list for consumers
                 # that need per-chunk origin (e.g. nx_answer envelope).
                 "chunk_collections": [r.collection for r in page],
+                # GH #1524: per-result list of the OTHER collections the same
+                # chunk (by chash) was found in; empty for a unique chunk.
+                "also_in": [list((r.metadata or {}).get("also_in", [])) for r in page],
+                "also_in_ids": [list((r.metadata or {}).get("also_in_ids", [])) for r in page],
                 # RDR-086 Phase 3.2: chunk_text_hash forwarded for chash
                 # citation authoring at the document layer.
                 "chunk_text_hash": [
@@ -3699,6 +3842,9 @@ def query(
                     "bib_authors": meta.get("bib_authors", ""),
                     "bib_citation_count": meta.get("bib_citation_count", ""),
                     "bib_venue": meta.get("bib_venue", ""),
+                    # nexus-onn7s: what the annotation line reads.
+                    "indexed_at": meta.get("indexed_at", ""),
+                    "ttl_days": meta.get("ttl_days"),
                     # nexus-voy5: derive chunk_count from the catalog
                     # manifest (RDR-108 D2 authoritative source).
                     # Fall back to legacy metadata for chunks the
@@ -3724,6 +3870,8 @@ def query(
                         meta.get("_display_path")
                         or meta.get("source_path", "")
                     ),
+                    "also_in": list(meta.get("also_in", [])),
+                    "also_in_ids": list(meta.get("also_in_ids", [])),
                 }
             elif r.hybrid_score > docs[doc_key]["hybrid_score"]:
                 # Better matching chunk — update snippet
@@ -3751,6 +3899,7 @@ def query(
                 f"Narrow `subtree` or split into multiple queries.]"
             )
         lines.append(f"{routing_note}\n{header}" if routing_note else header)
+        lines.append(_READER_INSTRUCTION_LINE())
         lines.append("")
         for i, d in enumerate(sorted_docs, 1):
             dist = f"{d['distance']:.4f}"
@@ -3775,9 +3924,16 @@ def query(
             lines.append(f"{i}. {' | '.join(header_parts)}")
             if bib_parts:
                 lines.append(f"   {' · '.join(bib_parts)}")
+            _note = _annotation_line_for_doc(d)
+            if _note:
+                lines.append(f"   {_note}")
             if tech_parts:
                 lines.append(f"   [{' · '.join(tech_parts)}]")
             lines.append(f"   {d['collection']}")
+            if d.get("also_in"):
+                _ids = d.get("also_in_ids") or []
+                lines.append(f"   also in: {', '.join(d['also_in'])}"
+                             + (f" (documents {', '.join(_ids)})" if _ids else ""))
             lines.append(f"   {d['snippet']}")
             lines.append("")
 
@@ -3789,6 +3945,36 @@ def query(
         )
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("query", e)
+
+
+def _READER_INSTRUCTION_LINE() -> str:  # noqa: N802 — reads as the constant it wraps
+    """nexus-onn7s: the response-level reader instruction for ``query``."""
+    from nexus.context_annotations import READER_INSTRUCTION  # noqa: PLC0415 — deferred; keeps core's import surface flat
+
+    return READER_INSTRUCTION
+
+
+def _annotation_line_for_doc(d: dict) -> str:
+    """nexus-onn7s: the per-document annotation for ``query``'s grouped
+    path, from the chunk metadata the doc dict carries. ``bib_year`` is
+    already printed on the bib line, so it is not repeated here."""
+    from nexus.context_annotations import annotation_line  # noqa: PLC0415 — deferred; keeps core's import surface flat
+
+    return annotation_line({"indexed_at": d.get("indexed_at", ""), "ttl_days": d.get("ttl_days")})
+
+
+def _annotation_line_for_entry(entry) -> str:
+    """nexus-onn7s: the per-document annotation for ``query``'s catalog-
+    routed path, from the catalog row (``indexed_at``, ``index_state``).
+    The year is printed on the bib line already."""
+    if entry is None:
+        return ""
+    from nexus.context_annotations import annotation_line  # noqa: PLC0415 — deferred; keeps core's import surface flat
+
+    return annotation_line(
+        {"indexed_at": getattr(entry, "indexed_at", "")},
+        index_state=getattr(entry, "index_state", None),
+    )
 
 
 @mcp.tool(
@@ -4548,6 +4734,9 @@ def store_get_many(
         #   * result order and per-doc truncation are unchanged.
         per_id_routing = len(coll_list) == len(id_list)
         entries: list[dict | None] = [None] * len(id_list)
+        # nexus-onn7s: the collection each entry was found in, for the
+        # source note; aligned with ``entries``.
+        entry_collections: list[str] = [""] * len(id_list)
 
         if per_id_routing:
             idxs_by_collection: dict[str, list[int]] = {}
@@ -4560,6 +4749,8 @@ def store_get_many(
                 id_to_entry = _batched_get_by_ids(t3, col_name, batch_ids)
                 for idx in idxs:
                     entries[idx] = id_to_entry.get(id_list[idx])
+                    if entries[idx] is not None:
+                        entry_collections[idx] = col_name
         else:
             remaining_idxs = list(range(len(id_list)))
             for cand in coll_list:
@@ -4575,6 +4766,7 @@ def store_get_many(
                     found = id_to_entry.get(id_list[idx])
                     if found is not None:
                         entries[idx] = found
+                        entry_collections[idx] = col_name
                     else:
                         still_remaining.append(idx)
                 remaining_idxs = still_remaining
@@ -4589,11 +4781,19 @@ def store_get_many(
         # unconditionally (not gated on `structured`) so callers cannot
         # observe stale data by mixing modes.
         section_types: list[str] = []
-        for doc_id, entry in zip(id_list, entries):
+        # nexus-onn7s: ``source_notes`` rides the same fetch, same
+        # alignment, same "" for a missing id -- one line per chunk naming
+        # its document, collection and dates, which the plan runner
+        # prefixes onto the hydrated content an operator prompt sees.
+        from nexus.context_annotations import source_note  # noqa: PLC0415 — deferred; keeps core's import surface flat
+
+        source_notes: list[str] = []
+        for doc_id, entry, entry_collection in zip(id_list, entries, entry_collections):
             if entry is None:
                 missing.append(doc_id)
                 contents.append("")
                 section_types.append("")
+                source_notes.append("")
                 continue
 
             body = str(entry.get("content") or "")
@@ -4608,11 +4808,13 @@ def store_get_many(
                 )
             contents.append(body)
             section_types.append(str(entry.get("section_type") or ""))
+            source_notes.append(source_note(entry, collection=entry_collection))
 
         if structured:
             return {
                 "contents": contents, "missing": missing,
                 "section_types": section_types,
+                "source_notes": source_notes,
             }
 
         # nexus-z4j8d: the human-readable mode of a HYDRATION tool must
@@ -7554,7 +7756,8 @@ def _sample_collection_names_by_prefix(names: list[str], limit: int) -> list[str
     alphabetical truncation. Deterministic: families and names sorted."""
     by_prefix: dict[str, list[str]] = {}
     for n in sorted(set(names)):
-        by_prefix.setdefault(n.split("__", 1)[0], []).append(n)
+        family = _collection_family_prefix(n)
+        by_prefix.setdefault(family, []).append(n)
     out: list[str] = []
     queues = [by_prefix[k] for k in sorted(by_prefix)]
     i = 0
@@ -8025,6 +8228,8 @@ async def nx_answer(
     Args:
         question: Natural-language question to answer.
         scope: Catalog subtree or corpus filter (e.g. ``"1.2"`` or ``"knowledge"``).
+            Honoured on every path, the single-step ``query()`` fast path
+            included (it is passed as that call's ``subtree``, GH #1523).
         context: Supplementary caller-supplied context for the plan matcher.
         max_steps: Cap on plan DAG size (passed to inline planner on miss).
         budget_usd: Soft per-invocation cost GUIDANCE in USD, not a hard
@@ -8215,6 +8420,19 @@ async def nx_answer(
     import time  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
     import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
     from types import SimpleNamespace  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site (nexus-nyry9.2 pre-Step-2 budget stand-in)
+
+    # GH #1527 (nexus-qiah5): ``scope`` may name a registered owner; resolve
+    # it to the owner's tumbler once, here, so the plan-run binding and the
+    # single-step fast path see the same value. A corpus name (the other
+    # documented form) matches no owner and passes through unchanged.
+    if scope:
+        from nexus.catalog.owner_scope import OwnerScopeError, resolve_owner_scope  # noqa: PLC0415 — deferred, branch-local
+        _scope_cat = _get_catalog()
+        if _scope_cat is not None:
+            try:
+                scope = resolve_owner_scope(_scope_cat, scope, strict=False)
+            except OwnerScopeError as exc:
+                return f"Error: scope {exc}"
 
     from nexus.mcp_infra import get_t1_plan_cache  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
     from nexus.plans.budget_default import (  # noqa: PLC0415 — deferred for startup cost; call-time import so a test's monkeypatch on the module attribute is honored every call (RDR-196 .p3c, nexus-nyry9.21)
@@ -9296,7 +9514,13 @@ async def nx_answer(
             # the structured envelope already contains enough to
             # synthesize a result summary.
             if structured:
-                q_struct = query(question=q, corpus=corpus, limit=limit, structured=True)
+                # GH #1523 (nexus-hfflc): the caller's scope is a catalog
+                # subtree filter and rode only the plan-run path as the
+                # _nx_scope binding; this fast path dropped it and answered
+                # from every collection. Pass it through as query()'s own
+                # subtree so both paths honour the same filter.
+                q_struct = query(question=q, corpus=corpus, limit=limit, structured=True,
+                                 subtree=scope or "")
                 chunks: list[dict] = []
                 if isinstance(q_struct, dict):
                     ids = q_struct.get("ids", [])
@@ -9340,7 +9564,7 @@ async def nx_answer(
                 else:
                     result_text = "No results."
             else:
-                result_text = query(question=q, corpus=corpus, limit=limit)
+                result_text = query(question=q, corpus=corpus, limit=limit, subtree=scope or "")
                 chunks = []
 
             elapsed_ms = int((time.monotonic() - start) * 1000)

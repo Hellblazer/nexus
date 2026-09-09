@@ -463,6 +463,51 @@ def _keepalive_opener() -> Any:
     )
 
 
+#: RDR-204 Phase 3 item 5 (nexus-ft04v.26): last successful response's
+#: SELECT response headers, thread-local. Populated (never mutated by any
+#: caller) inside :func:`_request_once` on a 2xx response, read and
+#: cleared by :func:`_pop_response_headers` immediately after the
+#: fan-out read routes' own ``_post``/``_get`` call returns.
+#:
+#: Deliberately NOT a new parameter on ``_request_once``/``_request``/
+#: ``_post``/``_get``: :data:`_REQUEST_DEADLINE_MS_BY_PATH_SUFFIX`'s own
+#: comment already names why -- "the many test doubles that replace
+#: ``_post`` with a ``(path, body, *, tenant, timeout)`` callable keep
+#: their exact shape" -- and at least one existing test
+#: (``TestDataTokenResolutionSeamRequestOnce.
+#: test_401_retry_invalidates_the_data_token_cache_entry``) replaces
+#: ``_request_once`` with an explicit ``def fake_once(method, path, *,
+#: tenant, timeout, body):`` carrying NO ``**kwargs`` catch-all, which a
+#: new required-shaped kwarg passed by ``_request``'s own internal call
+#: would break outright. Thread-local, not a bare module global: this
+#: client is called from worker threads (index runs at ``-n 4``+), and a
+#: shared mutable dict would let one thread's capture leak into or race
+#: another's read.
+_response_header_capture = threading.local()
+
+
+def _stash_response_headers(headers: object) -> None:
+    """Best-effort: called from :func:`_request_once` right after a
+    successful response. Never raises -- header capture is a caller-
+    visibility nicety, not a correctness requirement, and must never be
+    the reason a real read fails."""
+    try:
+        value = headers.get("X-Nexus-Skipped-Collections")  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 — best-effort; see docstring
+        return
+    _response_header_capture.skipped_collections = value
+
+
+def _pop_response_headers() -> dict[str, str]:
+    """The current thread's captured headers from the MOST RECENT
+    :func:`_request_once` call, then clear them -- a pop, not a peek, so a
+    later unrelated call in the same thread (or a test that never sets
+    the thread-local at all) never observes a stale prior value."""
+    value = getattr(_response_header_capture, "skipped_collections", None)
+    _response_header_capture.skipped_collections = None
+    return {"X-Nexus-Skipped-Collections": value} if value else {}
+
+
 def _request_once(
     method: str, path: str, *, tenant: str, timeout: int, body: dict | None
 ) -> Any:
@@ -508,6 +553,11 @@ def _request_once(
     # hook, so a sleep-orphaned connection could never be detected. See the
     # transport-section comment above.
     with _keepalive_opener().open(req, timeout=timeout) as resp:
+        # RDR-204 Phase 3 item 5 (nexus-ft04v.26): stash X-Nexus-Skipped-
+        # Collections (when present) for the caller to read via
+        # _pop_response_headers() -- see that function's docstring for why
+        # this is a thread-local capture rather than a new parameter.
+        _stash_response_headers(resp.headers)
         return json.loads(resp.read())
 
 
@@ -833,18 +883,98 @@ def per_collection_chunk_cap(collection: str) -> int:
     it (nexus-fdn1c); the correct trade here is against an unusable install, and
     that argument does not need a throughput number to stand up.
     """
-    prefix = collection.split("__", 1)[0]
+    # RDR-204 Phase 3 (nexus-ft04v.26), class (b): CONTENT TYPE, never the
+    # embedding MODEL string, is the correct CCE-vs-code signal here.
+    # content_type is a structural fact (docs__/knowledge__/rdr__ vs
+    # code__) stable across any model rename or non-canonical token; a
+    # literal ``== "voyage-context-3"`` model-string comparison (the
+    # first cut of this repoint) is fragile to exactly that drift --
+    # found live via test_per_collection_chunk_cap_values's own
+    # fixture-only model tokens ("x", "onnx-x"), which are legitimate
+    # conformant names this dispatch must still classify correctly by
+    # PREFIX, the same way the pre-repoint code did. See
+    # :func:`_is_cce_collection`.
+    is_cce = _is_cce_collection(collection)
+    if is_cce is None:
+        # Genuinely unresolvable (no row AND a non-conformant/legacy
+        # name): conservative default is CCE's smaller cap, never a
+        # guessed 300 -- see that function's docstring.
+        is_cce = True
     # nexus-33hpq: onnx-local is a MEMORY-bound mode, not a timeout-bound one —
     # apply the memory-derived cap to every prefix (code included) before the
     # CCE-vs-code split below, which is Voyage-cloud-specific reasoning.
     if _serving_embedding_mode() == "onnx-local":
         return _ONNX_LOCAL_UPSERT_CHUNK_CAP
-    if prefix not in _CCE_COLLECTION_PREFIXES:
+    if not is_cce:
         return _CODE_UPSERT_CHUNK_CAP
     # Voyage CCE (or unknown mode, which stays on the conservative voyage
     # split — never widen a batch on a guess): slow server-side contextual
     # embedding behind the managed 30s gateway.
     return _CCE_UPSERT_CHUNK_CAP
+
+
+def _is_cce_collection(collection: str) -> bool | None:
+    """Whether *collection* belongs to the CCE content-type family
+    (``docs``/``knowledge``/``rdr``, voyage-context-3), or ``None`` when
+    it cannot be determined without a network round trip.
+
+    RDR-204 Phase 3 (nexus-ft04v.26), class (b): prefers the catalog
+    row's ``content_type`` when one exists (authoritative, Gap 1); falls
+    to the collection name's own first segment (candidate-string
+    derivation, the write authority's OWN decision at render time, read
+    back rather than re-derived) when no row exists -- the common case
+    for a collection about to receive its first-ever write, which
+    structurally cannot have a row yet. Fixed 2026-09-09 (fixture-seam
+    round): the original repoint compared the embedding MODEL string to
+    the literal ``"voyage-context-3"`` instead of checking content type
+    -- correct for TODAY's real models, but wrong in principle (any
+    future model rename, or a genuinely conformant name carrying a
+    non-canonical/test token, would misclassify a structurally-CCE
+    collection as code, and vice versa). content_type is the stable,
+    structural signal this decision has always meant to test.
+
+    RDR-204 Phase 3 fix round (nexus-ft04v.28 item 7): the row-preferred/
+    name-fallback shape itself is now :func:`nexus.corpus.resolve_row_preferred`
+    -- shared with three sibling diagnostic sites instead of a fourth
+    independent copy.
+    """
+    from nexus.corpus import resolve_row_preferred, split_candidate_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
+
+    def _name_fallback(n: str) -> str | None:
+        content_type_probe, owner_probe = split_candidate_collection_name(n)
+        return None if owner_probe == n else content_type_probe
+
+    content_type = resolve_row_preferred(collection, "content_type", _name_fallback)
+    if content_type is None:
+        return None
+    return content_type in _CCE_COLLECTION_PREFIXES
+
+
+def _write_model_for_collection(collection: str) -> str | None:
+    """The embedding model *collection* writes under, or ``None`` when it
+    cannot be determined without a network round trip.
+
+    RDR-204 Phase 3 (nexus-ft04v.26): the catalog row's embedding_model
+    when one exists (authoritative, Gap 1), else the model segment of an
+    already-conformant name (the write authority's OWN decision at
+    render time, read back rather than re-derived --
+    ``embedding_model_for_collection_name`` validates the full
+    4-segment shape via regex, not a raw prefix split). ``None`` only
+    for a genuinely unresolvable candidate (no row AND non-conformant).
+
+    NOT used for the CCE-vs-code cap/budget dispatch -- see
+    :func:`_is_cce_collection` for why content_type, not this model
+    string, is that decision's correct signal. Retained for callers
+    (and its own direct unit tests, tests/db/test_collection_parse_
+    funnel_slice2.py::TestWriteModelForCollection) that genuinely need
+    the model token itself.
+    """
+    from nexus.corpus import embedding_model_for_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+    row = get_collection_row(collection)
+    if row is not None:
+        return row.get("embedding_model")
+    return embedding_model_for_collection_name(collection)
 
 
 def _upsert_byte_budget(collection: str) -> int | None:
@@ -866,8 +996,18 @@ def _upsert_byte_budget(collection: str) -> int | None:
     """
     if _serving_embedding_mode() == "onnx-local":
         return None
-    prefix = collection.split("__", 1)[0]
-    if prefix in _CCE_COLLECTION_PREFIXES:
+    # RDR-204 Phase 3 (nexus-ft04v.26), class (b): see
+    # per_collection_chunk_cap's comment and :func:`_is_cce_collection`
+    # -- same resolution, same content-type-not-model-string reason.
+    # Unlike the chunk cap, the CONSERVATIVE default here is the
+    # OPPOSITE direction: applying the byte budget (treating a
+    # genuinely unresolvable candidate as code-shaped) bounds the
+    # request, where defaulting to "no budget" would risk exactly the
+    # Voyage 400 RDR-195 exists to prevent.
+    is_cce = _is_cce_collection(collection)
+    if is_cce is None:
+        is_cce = False
+    if is_cce:
         return None
     return _CODE_UPSERT_BYTE_BUDGET
 
@@ -1414,6 +1554,45 @@ def _get(path: str, *, tenant: str = "default") -> Any:
         if remedy is None:
             raise
         raise VectorServiceError(f"GET {path} failed: {e}\n{remedy}") from e
+
+
+def _warn_skipped_collections(route: str, requested: list[str]) -> None:
+    """RDR-204 Phase 3 item 5 (nexus-ft04v.26): log (never retry) when a
+    fan-out read's response carried ``X-Nexus-Skipped-Collections``
+    (engine half: bead nexus-ft04v.16 fix round 2, ``0c97fc06e``) — a
+    requested collection had no catalog row at read time and the engine
+    dropped it from the fan-out instead of 422ing the whole request
+    (``registeredSurvivors``, catalog-023). A structlog warning is the
+    entire remedy here: the caller already has its (partial) result, a
+    retry would just re-hit the same registration gap, and this is a
+    caller-VISIBILITY fix (the drop was previously a server-only log,
+    invisible to the client) — not a caller-behavior change.
+
+    Call this immediately after the ``_post``/``_get`` that produced the
+    result, before any other network call on the same thread — see
+    :func:`_pop_response_headers`'s docstring for why the capture is
+    thread-local and pop-not-peek.
+    """
+    raw = _pop_response_headers().get("X-Nexus-Skipped-Collections")
+    if not raw:
+        return
+    skipped = [name for name in raw.split(",") if name]
+    if not skipped:
+        return
+    _log.warning(
+        "vector_read_skipped_unregistered_collections",
+        route=route,
+        requested=requested,
+        skipped=skipped,
+        detail=(
+            "the engine dropped these collections from the fan-out "
+            "because they carry no catalog_collections row at read time "
+            "(RDR-204 Gap 1/registration); the read result reflects only "
+            "the surviving, registered collections. Re-register a "
+            "collection that should be searchable, or drop it from the "
+            "corpus if it is genuinely retired."
+        ),
+    )
 
 
 class VectorServiceError(RuntimeError):
@@ -2497,6 +2676,7 @@ class HttpVectorClient:
             get_brake().wait()
 
         results = _post("/v1/vectors/search", body, tenant=self._tenant)
+        _warn_skipped_collections("search", collection_names)
         # results is a list of {id, content, distance, collection, ...} — or,
         # when rerank was requested against a rerank-capable engine, the
         # RerankStage object envelope.
@@ -2639,7 +2819,9 @@ class HttpVectorClient:
             body["subtree"] = subtree
         if where:
             body["where"] = where
-        return _post("/v1/vectors/search-metadata-scoped", body, tenant=self._tenant)
+        result = _post("/v1/vectors/search-metadata-scoped", body, tenant=self._tenant)
+        _warn_skipped_collections("search_metadata_scoped", collection_names)
+        return result
 
     def search_topic_scoped(
         self,
@@ -2705,7 +2887,9 @@ class HttpVectorClient:
             body["link_type"] = link_type
         if where:
             body["where"] = where
-        return _post("/v1/vectors/search-graph-hop", body, tenant=self._tenant)
+        result = _post("/v1/vectors/search-graph-hop", body, tenant=self._tenant)
+        _warn_skipped_collections("search_graph_hop", collection_names)
+        return result
 
     #: Locked wire contract (RDR-156 Decision 5, bead nexus-ubnwk) — identical
     #: to ``PgVectorRepository.ASPECT_SCOPED_FIELD_ALLOWLIST`` (Java) and the
@@ -2803,7 +2987,9 @@ class HttpVectorClient:
             body["min_confidence"] = min_confidence
         if where:
             body["where"] = where
-        return _post("/v1/vectors/search-aspect-scoped", body, tenant=self._tenant)
+        result = _post("/v1/vectors/search-aspect-scoped", body, tenant=self._tenant)
+        _warn_skipped_collections("search_aspect_scoped", collection_names)
+        return result
 
     def get_by_id(self, collection: str, doc_id: str) -> dict | None:
         """Fetch a single chunk by ID.
@@ -2937,22 +3123,41 @@ class HttpVectorClient:
             tenant=self._tenant,
         )
 
+    #: Catalog attribute keys the RDR-204 Phase 2 engine joins into
+    #: ``/v1/vectors/stats`` rows (``PgVectorRepository`` joins
+    #: ``catalog_collections`` by name). Carried through by
+    #: :meth:`list_collections` instead of being discarded at the
+    #: name+count merge -- nexus-ft04v.26's collection-row cache
+    #: (``mcp_infra.get_collection_row``) reads exactly these fields off
+    #: the SAME round trip this method already makes. Omitted from a row
+    #: (not present as a key) when no catalog row backs that collection.
+    _STATS_CATALOG_ATTR_KEYS = ("content_type", "owner_id", "embedding_model", "lifecycle_state")
+
     def list_collections(self) -> list[dict]:
         """List the tenant's vector collections with live chunk counts.
 
-        T3Database parity: returns ``[{"name": ..., "count": N}, ...]`` —
-        ``nx collection list`` and friends index both keys (the missing
+        T3Database parity: returns ``[{"name": ..., "count": N, ...}, ...]``
+        — ``nx collection list`` and friends index both keys (the missing
         ``count`` was a live KeyError on every service-mode box, RDR-156 P3).
+        Since RDR-204 Phase 3 (nexus-ft04v.26) each row also carries
+        ``content_type``/``owner_id``/``embedding_model``/``lifecycle_state``
+        when the engine's stats route joined a catalog row for that
+        collection (:data:`_STATS_CATALOG_ATTR_KEYS`) -- these keys are
+        simply ABSENT, never null, when no row backs the collection.
 
         Primary path is ONE ``/v1/vectors/stats`` round-trip
         (tombstone-filtered live counts, replacing T3Database's N-way
         threadpooled ``col.count()`` fan-out). On a pre-catalog-005 service
         JAR the route 404s; fall back to ``/collections`` + per-collection
         ``/count`` so the surface keeps working across the deployment skew
-        (raw counts — tombstones do not exist on a pre-catalog-005 schema).
+        (raw counts — tombstones do not exist on a pre-catalog-005 schema;
+        no catalog attributes either, since that join is RDR-204 Phase 2).
 
         Multi-dim collections (same name in two ``chunks_<dim>`` tables —
-        cross-dim re-indexing residue) collapse to one entry, counts summed.
+        cross-dim re-indexing residue) collapse to one entry, counts summed;
+        the first row's catalog attributes win (a genuinely registered
+        collection has exactly one row, so this only matters for the
+        cross-dim residue case, which predates catalog attribution anyway).
         """
         try:
             stats = self.collection_stats()
@@ -2962,13 +3167,18 @@ class HttpVectorClient:
                 return []
             _log.info("http_vector_stats_unavailable_fallback", error=str(e))
             return self._list_collections_via_count()
-        merged: dict[str, int] = {}
+        merged: dict[str, dict] = {}
         for row in stats:
             name = row.get("name", "")
-            if name:
-                # `or 0` guards an explicit null count, not just an absent key
-                merged[name] = merged.get(name, 0) + int(row.get("count") or 0)
-        return [{"name": n, "count": c} for n, c in sorted(merged.items())]
+            if not name:
+                continue
+            entry = merged.setdefault(name, {"name": name, "count": 0})
+            # `or 0` guards an explicit null count, not just an absent key
+            entry["count"] += int(row.get("count") or 0)
+            for key in self._STATS_CATALOG_ATTR_KEYS:
+                if key in row and key not in entry:
+                    entry[key] = row[key]
+        return [merged[n] for n in sorted(merged)]
 
     def _list_collections_via_count(self) -> list[dict]:
         """Deployment-skew fallback: ``/collections`` names + N ``/count`` calls.
@@ -3677,7 +3887,15 @@ class HttpVectorClient:
         total = 0
         for entry in self.list_collections():
             name = entry.get("name", "")
-            if not name.startswith("knowledge__"):
+            # RDR-204 Phase 3 repoint (nexus-ft04v.26), class (c): `entry`
+            # already carries `content_type` when a catalog row backs this
+            # name (list_collections() joins it -- the SAME fetch this
+            # loop already made, never a second lookup, and never
+            # nexus.corpus's name-parsing primitives). A collection with
+            # no row is simply skipped this pass -- a background TTL
+            # sweep must not guess, matching T3Database.expire's
+            # identical filter.
+            if entry.get("content_type") != "knowledge":
                 continue
             expired_ids: list[str] = []
             offset = 0

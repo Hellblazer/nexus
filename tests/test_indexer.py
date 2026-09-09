@@ -10,7 +10,7 @@ import pytest
 from voyageai.object.embeddings import EmbeddingsObject
 
 from nexus.indexer import CredentialsMissingError, index_repository
-from tests.conftest import make_vector_test_client
+from tests.conftest import catalog_row_for_collection_name, make_vector_test_client
 
 # RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
 # (voyage-* embedder names, canonical-set defaults). The cloud_mode
@@ -619,6 +619,33 @@ def test_run_index_returns_rdr_stats(tmp_path):
     assert (stats["rdr_indexed"], stats["rdr_current"], stats["rdr_failed"]) == (1, 1, 0)
 
 
+def test_run_index_skips_process_documents_in_the_rdr_directory(tmp_path):
+    """GH #1524 (nexus-20uv3): docs/rdr/README.md (the RDR template's process
+    README, byte-identical across every repo that uses the template) and the
+    agent guidance files beside it are not RDRs and never enter the rdr pass."""
+    from nexus.indexer import RDR_DIR_NON_RDR_BASENAMES, _run_index
+    assert RDR_DIR_NON_RDR_BASENAMES == {"readme.md", "agents.md", "claude.md"}
+    repo = tmp_path / "repo"; repo.mkdir()
+    rdr = repo / "docs" / "rdr"; rdr.mkdir(parents=True)
+    (rdr / "001.md").write_text("# D\n")
+    (rdr / "README.md").write_text("# Recommendation Decisioning Records\n")
+    (rdr / "AGENTS.md").write_text("# guidance\n")
+    db, _, _ = _tracking_db()
+    seen: list[str] = []
+
+    def _prose_side_effect(file, _repo, collection_name, *_a, **_kw):
+        if collection_name.startswith("rdr__"):
+            seen.append(file.name)
+        return 1
+
+    with _patches(db, extra={
+        "nexus.indexer._index_prose_file": {"side_effect": _prose_side_effect},
+    }):
+        stats = _run_index(repo, _reg())
+    assert seen == ["001.md"], seen
+    assert stats["rdr_indexed"] == 1
+
+
 @pytest.mark.parametrize("rdr_indexed,expect", [(1, True), (0, False)])
 def test_index_repo_cmd_rdr_summary(tmp_path, rdr_indexed, expect):
     from click.testing import CliRunner; from nexus.cli import main
@@ -894,6 +921,67 @@ def test_prune_deleted_files_empty_manifest_skips_no_wipe(tmp_path):
     assert deleted == [], (
         f"empty-manifest case must skip, not wipe; got deleted={deleted!r}"
     )
+
+
+def test_prune_collection_serverside_never_registers_the_quarantine_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The client never registers the quarantine sibling: the engine's GC
+    function registers it from the origin's row only on a pass that moves
+    a chunk (catalog-024, hygiene-005), and all three GC routes resolve
+    the sibling's dimension from the ORIGIN. A client-side pre-registration
+    (nexus-ft04v.26/.28, never released) left an empty sibling projection
+    row on every zero-orphan pass -- the nexus-syfes class the shakeout's
+    Phase E failed on for engine-service-v0.1.111's first candidate."""
+    import nexus.catalog.chunk_quarantine as cq
+    import nexus.corpus as corpus
+    from nexus.indexer import _prune_collection_serverside
+
+    def _never(name, *, registrar=None, kwargs=None):
+        raise AssertionError(f"ensure_collection_registered called for {name!r}")
+
+    monkeypatch.setattr(corpus, "ensure_collection_registered", _never)
+    calls: list[str] = []
+    monkeypatch.setattr(cq, "restore_rereferenced_serverside", lambda *a, **k: calls.append("restore") or 0)
+    monkeypatch.setattr(cq, "quarantine_orphans_serverside", lambda *a, **k: calls.append("quarantine") or (0, []))
+    monkeypatch.setattr(cq, "expire_quarantine_serverside", lambda *a, **k: calls.append("expire") or (0, 0))
+
+    origin = "code__nexus-1-1__voyage-code-3__v1"
+    qname = "quarantine-code__nexus-1-1__voyage-code-3__v1"
+    result = _prune_collection_serverside(object(), origin, qname, "2026-01-01T00:00:00Z")
+
+    assert result is True
+    assert calls == ["restore", "quarantine", "expire"]
+
+
+def test_prune_deleted_files_propagates_valueerror_from_serverside_prune(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The broad ``except`` wrapping ``_prune_collection_serverside``
+    exists ONLY for the nexus-ou4tb transient-failure contract
+    (ConnectionError et al, proven by
+    ``test_serverside_failure_skips_only_that_collection``) -- a
+    ``ValueError`` (a data/config defect) must propagate, never be
+    logged-and-skipped. nexus-ft04v.28 C1 was exactly that silent-abort
+    shape: a swallowed ValueError and GC quietly stopped pruning forever."""
+    import nexus.indexer as indexer_mod
+    from nexus.indexer import _prune_deleted_files
+
+    def _boom(db, collection_name, qname, stamp):
+        raise ValueError("simulated data defect in the serverside prune")
+
+    monkeypatch.setattr(indexer_mod, "_prune_collection_serverside", _boom)
+    # RDR-204 Phase 3: the prune path reads the row cache; a MagicMock db never
+    # registered anything, so give the cache the rows the names imply.
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", catalog_row_for_collection_name)
+
+    col = _gc_col([("id-x", "x" * 64)])
+    db = MagicMock(); db.get_or_create_collection.return_value = col
+    db.get_collection.return_value = col
+    catalog = _gc_catalog({"code__repo": {"x" * 64}, "docs__repo-unused": set()})
+
+    with pytest.raises(ValueError, match="simulated data defect in the serverside prune"):
+        _prune_deleted_files("code__repo", "docs__repo-unused", db, catalog=catalog)
 
 
 # test_prune_deleted_files_manifest_read_failure_skips_collection DELETED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15) —
@@ -1310,11 +1398,13 @@ def test_prune_misclassified_falls_back_when_batch_raises(tmp_path):
 # tested the client-side fetch-diff-copy-delete prune/quarantine fallback,
 # retired: the manifest-chunk FK makes the completeness apparatus it proved
 # correct unreachable by construction.
-def test_prune_deleted_files_rdr_collection_none_is_safe(tmp_path):
+def test_prune_deleted_files_rdr_collection_none_is_safe(tmp_path, monkeypatch):
     """When there are no RDR files this run, rdr_collection defaults to
     None and must not be swept (no col to fetch, no-op — mirrors the
     existing code_col/docs_col is-None contract elsewhere)."""
     from nexus.indexer import _prune_deleted_files
+    # RDR-204 Phase 3: the prune path reads the row cache (see the test above).
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", catalog_row_for_collection_name)
     live_chash = "a" * 64
     col = _gc_col([("live-id", live_chash)])
     db = MagicMock(); db.get_or_create_collection.return_value = col

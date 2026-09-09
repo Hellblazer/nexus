@@ -32,9 +32,15 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Bead nexus-pebfx.2 — HTTP-boundary contract for the embedding-mode refusal.
  *
  * <p>{@code EmbeddingModeFailLoudTest} pins the router-level dispatch; this
- * suite pins the piece visible to Python clients: an unservable model segment
- * surfaces as <strong>HTTP 422</strong> (well-formed request, unservable in
- * this embedding mode), DISTINGUISHABLE from a malformed request's 400. The
+ * suite pins the piece visible to Python clients: an unservable model
+ * (RDR-204 Phase 2, bead nexus-ft04v.16 — the collection's REGISTERED ROW's
+ * model, never a name-segment parse) surfaces as <strong>HTTP 422</strong>
+ * (well-formed request, unservable in this embedding mode). An UNREGISTERED
+ * collection is ALSO a 422 now (naming the registration remedy) — the
+ * malformed-name-vs-unservable-model 400/422 contrast this class used to pin
+ * collapsed onto one code by construction once dispatch stopped reading a
+ * name-shape at all: see {@code
+ * unregisteredCollection_staysA422_distinguishableFrom400}'s own comment. The
  * service here is wired with the MiniLM {@link OnnxEmbedder} to pin the
  * 422-refusal + {@code /version} handshake MECHANISM, which is model-agnostic.
  * NOTE: production local mode now wires bge-768 (still {@code modeName
@@ -43,8 +49,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * this harness stays MiniLM-wired only to avoid loading the 416MB bge ONNX in
  * the PG container.
  *
- * <p>Hermetic: Testcontainers PG (auth needs the token table; the refusal
- * itself throws before any SQL), real ONNX embedder, port 0, PER_CLASS.
+ * <p>Hermetic: Testcontainers PG, real ONNX embedder, port 0, PER_CLASS. The
+ * refusal itself DOES touch SQL now (a CollectionRegistry row read, on a
+ * cache miss) — every fixture collection this class's tests dispatch to is
+ * registered in {@code @BeforeAll} for exactly that reason.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class VectorHandlerEmbeddingModeTest {
@@ -111,8 +119,14 @@ class VectorHandlerEmbeddingModeTest {
         // RDR-204 Phase 1 (bead nexus-ft04v.7): chunks_collection_fk is a REAL,
         // always-enforced FK now -- register the fixture collection.
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES),
-                TENANT, "knowledge__pebfx2__minilm-l6-v2-384__v1");
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(dsl, TENANT, "knowledge__pebfx2__minilm-l6-v2-384__v1");
+            // RDR-204 Phase 2 (bead nexus-ft04v.16): resolveEmbedderStrict now reads
+            // this collection's registered ROW (embedding_model=voyage-context-3),
+            // which onnx-local mode has no embedder for -- the 422 this test asserts.
+            // Must still be REGISTERED, or dispatch fails on the earlier "not
+            // registered" 422 instead of this test's intended "unservable model" 422.
+            PgContainerHelper.insertCollection(dsl, TENANT, "knowledge__nexus__voyage-context-3__v1");
         }
     }
 
@@ -260,16 +274,27 @@ class VectorHandlerEmbeddingModeTest {
     }
 
     @Test
-    void malformedCollection_staysA400_distinguishableFrom422() throws Exception {
-        // Non-conformant name → dimForCollection IllegalArgumentException → 400.
-        // The contrast pin: 422 means "configure the service", 400 means "fix
-        // the request" — collapsing them re-opens the silent-misconfig trap.
+    void unregisteredCollection_staysA422_distinguishableFrom400() throws Exception {
+        // RDR-204 Phase 2 (bead nexus-ft04v.16): dispatch is by the registered ROW
+        // now, never a name-segment parse -- a non-conformant, never-registered name
+        // is no longer distinguishable from any other unregistered collection at the
+        // dimForCollection/resolveEmbedderStrict boundary (both are
+        // UnregisteredCollectionException -> 422, the SAME code this class's
+        // "unservable model" tests already assert). The retired contrast this test
+        // used to pin (malformed name -> 400 IllegalArgumentException, vs unservable
+        // model -> 422) collapsed onto one code by construction: a name is either
+        // registered (routed by its row) or not (422, "register it first"); there is
+        // no more name-SHAPE check to produce a 400 from.
         var resp = post("/v1/vectors/upsert-chunks", Map.of(
             "collection", "not-a-conformant-name",
             "ids",        List.of(dev.nexus.service.db.Chash.ofText("x").toHex()),
             "documents",  List.of("y"),
             "metadatas",  List.of(Map.of())));
-        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.statusCode())
+            .as("an unregistered collection fails loud with a typed 422 naming the remedy: %s",
+                resp.body())
+            .isEqualTo(422);
+        assertThat(resp.body()).contains("register it first via POST /v1/catalog/collections/upsert");
     }
 
     @Test

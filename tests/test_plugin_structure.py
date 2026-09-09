@@ -1432,6 +1432,17 @@ class TestRdrGateLoopRemedies:
             assert not re.search(r"\bnexus-[0-9a-z]{5}\b", text), f"{path}: bead pointer in a skill"
             assert "RDR-204" not in text, f"{path}: incident narrative in a skill"
 
+    def test_t2_ttl_convention_in_the_write_back_skills(self) -> None:
+        """nexus-um2h1: every skill that prescribes memory_put states the
+        lifetime convention. A session that follows the skill and omits ttl
+        wrote a 30-day entry, and the skills said nothing about it."""
+        for name in ("using-nx-skills", "knowledge-tidying", "nexus"):
+            text = (SKILLS_DIR / name / "SKILL.md").read_text()
+            assert "ttl=None" in text, f"{name}: no ttl=None prescription"
+            assert "never means permanent" in text or "never make" in text, (
+                f"{name}: the omitted-ttl trap is not named"
+            )
+
     def test_fix_step_has_its_own_surface(self) -> None:
         """nexus-zbdm0: the fix step is a command and a skill, and the gate
         skill points at it instead of carrying the rules alone."""

@@ -67,6 +67,110 @@ def test_list_shows_names_and_counts(runner, env_creds, mock_db) -> None:
     assert "knowledge__topic" in result.output
 
 
+# RDR-204 Day 2 (nexus-ft04v.32): the listing prints the catalog COLUMNS,
+# never a parsed name. A row whose name disagrees with its columns is the
+# proof: the row's values show, the name's segments do not.
+
+
+class _FakeCatalogRows:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def list_collections(self):
+        return list(self._rows)
+
+
+def _row(name, ct, owner, model, dim, state="live"):
+    return {"name": name, "content_type": ct, "owner_id": owner, "embedding_model": model,
+            "dimension": dim, "lifecycle_state": state}
+
+
+def _invoke_list_with_rows(runner, mock_db, rows):
+    with patch("nexus.catalog.factory.make_catalog_reader", return_value=_FakeCatalogRows(rows)):
+        return _invoke(runner, mock_db, ["list"])
+
+
+def _line_for(output: str, name: str) -> str:
+    lines = [ln for ln in output.splitlines() if ln.startswith(name + " ")]
+    assert len(lines) == 1, output
+    return lines[0]
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_list_prints_the_five_catalog_columns(runner, env_creds, mock_db) -> None:
+    mock_db.list_collections.return_value = [{"name": "code__1-1__voyage-code-3__v1", "count": 42}]
+    result = _invoke_list_with_rows(runner, mock_db, [
+        _row("code__1-1__voyage-code-3__v1", "code", "1-1", "voyage-code-3", 1024),
+    ])
+    assert result.exit_code == 0, result.output
+    header = result.output.splitlines()[0]
+    for col in ("CONTENT_TYPE", "OWNER", "MODEL", "DIM", "STATE", "CHUNKS"):
+        assert col in header, header
+    line = _line_for(result.output, "code__1-1__voyage-code-3__v1")
+    for value in ("42", "code", "1-1", "voyage-code-3", "1024", "live"):
+        assert value in line, line
+
+
+def test_list_shows_the_row_values_when_the_name_disagrees(runner, env_creds, mock_db) -> None:
+    """The name says docs / owner nine / minilm-384; the catalog row says
+    knowledge / 1-1 / bge 768 and is disputed. The row wins, visibly."""
+    name = "docs__nine__minilm-l6-v2-384__v1"
+    mock_db.list_collections.return_value = [{"name": name, "count": 3}]
+    result = _invoke_list_with_rows(runner, mock_db, [
+        _row(name, "knowledge", "1-1", "bge-base-en-v15-768", 768, "disputed"),
+    ])
+    assert result.exit_code == 0, result.output
+    line = _line_for(result.output, name)
+    body = line[len(name):]
+    for value in ("knowledge", "1-1", "bge-base-en-v15-768", "768", "disputed"):
+        assert value in body, line
+    for parsed in ("docs", "nine", "minilm", "384"):
+        assert parsed not in body, f"a parsed segment leaked into the columns: {line}"
+
+
+@pytest.mark.usefixtures("cloud_mode")
+@pytest.mark.parametrize("state", ["live", "quarantine", "dormant", "disputed"])
+def test_list_renders_every_lifecycle_state(runner, env_creds, mock_db, state) -> None:
+    name = f"knowledge__1-1__voyage-context-3__v1"
+    mock_db.list_collections.return_value = [{"name": name, "count": 1}]
+    result = _invoke_list_with_rows(runner, mock_db, [
+        _row(name, "knowledge", "1-1", "voyage-context-3", 1024, state),
+    ])
+    assert state in _line_for(result.output, name)
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_list_unregistered_collection_shows_dashes_not_a_parse(runner, env_creds, mock_db) -> None:
+    name = "code__orphan__voyage-code-3__v1"
+    mock_db.list_collections.return_value = [{"name": name, "count": 5}]
+    result = _invoke_list_with_rows(runner, mock_db, [])
+    line = _line_for(result.output, name)
+    body = line[len(name):]
+    assert "5" in body and "-" in body
+    assert "orphan" not in body and "voyage" not in body, line
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_list_catalog_row_without_chunks_is_listed_with_zero(runner, env_creds, mock_db) -> None:
+    """A dormant row has no T3 entry; it is the row that makes it visible."""
+    name = "docs__1-1__voyage-context-3__v1"
+    mock_db.list_collections.return_value = []
+    result = _invoke_list_with_rows(runner, mock_db, [
+        _row(name, "docs", "1-1", "voyage-context-3", 1024, "dormant"),
+    ])
+    line = _line_for(result.output, name)
+    assert "dormant" in line and " 0 " in line + " "
+
+
+def test_list_reader_failure_keeps_counts_and_says_so(runner, env_creds, mock_db) -> None:
+    mock_db.list_collections.return_value = [{"name": "code__myrepo", "count": 42}]
+    with patch("nexus.catalog.factory.make_catalog_reader", side_effect=RuntimeError("engine down")):
+        result = _invoke(runner, mock_db, ["list"])
+    assert result.exit_code == 0, result.output
+    assert "code__myrepo" in result.output and "42" in result.output
+    assert "catalog columns" in result.output.lower() and "engine down" in result.output
+
+
 # ── info ────────────────────────────────────────────────────────────────────
 
 
@@ -151,6 +255,45 @@ def test_delete_surfaces_cascade_failures(runner, env_creds, mock_db) -> None:
 _ORPHAN = "knowledge__shakedown-scratch__minilm-l6-v2-384__v1"
 _MATCHING_VOYAGE = "knowledge__research__voyage-context-3__v1"
 _LEGACY_NAME = "docs__myproj-cafef00d"
+
+
+def test_find_dimension_mismatched_collections_reads_model_via_funnel_helper(
+    mock_db,
+) -> None:
+    """nexus-ft04v.27 follow-up: ``_find_dimension_mismatched_collections``
+    reads the ``__<model>__`` token via ``collection_model`` instead of a
+    direct ``parse_conformant_collection_name`` call. Direct, unmocked
+    call to the function itself (the other prune tests exercise it too,
+    but only through canonical/local model tokens the funnel helper and
+    the retired direct call would extract identically either way) --
+    this pins the exact (mismatches, skipped, active_label) tuple,
+    including a non-canonical fixture token (``stub-code-1024``,
+    unroutable to any known dim either way) to prove the funnel helper
+    is exactly as permissive as the retired direct call was."""
+    from nexus.commands.collection import _find_dimension_mismatched_collections
+
+    mock_db.embedding_mode.return_value = "voyage"
+    mock_db.list_collections.return_value = [
+        {"name": _ORPHAN, "count": 1},
+        {"name": _MATCHING_VOYAGE, "count": 50},
+        {"name": "code__stub__stub-code-1024__v1", "count": 3},
+        {"name": _LEGACY_NAME, "count": 2},
+    ]
+
+    mismatches, skipped, active_label = _find_dimension_mismatched_collections(mock_db)
+
+    assert active_label == "voyage"
+    assert mismatches == [{
+        "name": _ORPHAN,
+        "declared_model": "minilm-l6-v2-384",
+        "declared_dim": 384,
+        "active_dim": 1024,
+        "count": 1,
+    }]
+    # skipped: the legacy 2-segment name (not_conformant) + the
+    # non-canonical stub token (conformant, but _dim_for_model_token
+    # returns None for it) = 2.
+    assert skipped == 2
 
 
 def test_prune_dry_run_default_lists_and_does_not_delete(
@@ -380,6 +523,46 @@ def test_reindex_routes_delete_through_cascade_not_client_delete(
     assert result.exit_code == 0, result.output
     mock_purge.assert_called_once_with(mock_db, "knowledge__test")
     mock_db.delete_collection.assert_not_called()
+
+
+def test_reindex_reregisters_conformant_name_with_the_values_it_already_had(
+    runner, env_creds, mock_db, tmp_path,
+) -> None:
+    """nexus-ft04v.27: the post-cascade re-registration of a CONFORMANT
+    name must carry the SAME four fields it did before the fix -- now
+    read via the funnel-style helpers instead of the retired
+    ``parse_conformant_collection_name``.
+
+    Uses ``stub-code-1024`` (this suite's standing non-canonical test
+    model token) rather than a real voyage/bge model: the funnel helpers
+    accept it (same as ``is_conformant_collection_name``) where
+    ``CollectionName.parse`` -- an alternative fix considered and
+    rejected -- would raise, changing what this site accepts today.
+    """
+    doc_file = tmp_path / "doc.md"
+    doc_file.write_text("# Doc\ncontent")
+    vr = _setup_reindex_mock(
+        mock_db,
+        [{"source_path": str(doc_file)}],
+        [{"source_path": str(doc_file)}],
+    )
+    writer = MagicMock()
+    name = "docs__myrepo__stub-code-1024__v5"
+    with patch("nexus.commands.collection._t3", return_value=mock_db), \
+         patch("nexus.db.collection_purge.purge_collection_cascade"), \
+         patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
+         patch("nexus.doc_indexer.index_markdown", return_value=1), \
+         patch("nexus.db.t3.verify_collection_deep", return_value=vr):
+        result = runner.invoke(main, ["collection", "reindex", name])
+    assert result.exit_code == 0, result.output
+    writer.register_collection.assert_called_once_with(
+        name,
+        content_type="docs",
+        owner_id="myrepo",
+        embedding_model="stub-code-1024",
+        model_version="v5",
+    )
+    writer.close.assert_called_once()
 
 
 def _setup_reindex_mock(mock_db, metadatas_check, metadatas_batch, before_count=1, after_count=1):

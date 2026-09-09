@@ -181,6 +181,32 @@ class TestNameVsEmbedDim:
         assert payload["checked"] == 0
         assert payload["skipped_non_conformant"] == 1
 
+    def test_unknown_model_token_reported_not_crashed(
+        self, runner, chroma_client, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """nexus-ft04v.27 follow-up: the token read at this site now goes
+        through ``collection_model`` instead of a direct
+        ``parse_conformant_collection_name`` call. Same permissive regex
+        (no canonical/local-set check), so a conformant name carrying a
+        non-canonical/unrecognized model token (``stub-code-1024``) must
+        still extract that exact token and land it in the ``unknown_token``
+        bucket -- never crash, never get silently dropped."""
+        name = "code__myproj__stub-code-1024__v1"
+        _seed(chroma_client, name)
+        monkeypatch.setattr(
+            "nexus.db.make_t3", lambda: _fake_t3(chroma_client, [name]),
+        )
+        result = runner.invoke(
+            doctor_cmd, ["--name-vs-embed-dim", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)["name_vs_embed_dim"]
+        assert payload["pass"] is True
+        assert payload["checked"] == 0
+        assert payload["unknown_token"] == [
+            {"collection": name, "token": "stub-code-1024"},
+        ]
+
     def test_taxonomy_collection_skipped(
         self, runner, chroma_client, monkeypatch: pytest.MonkeyPatch,
     ):

@@ -159,7 +159,7 @@ def only_document() -> Any:
     return docs[0]
 
 
-def seed_manifest_chunks(collection: str, chashes: Iterable[str]) -> None:
+def seed_manifest_chunks(collection: str, chashes: Iterable[str], *, dim: int | None = None) -> None:
     """Write a stub ``nexus.chunks`` row for each of *chashes* in *collection*.
 
     RDR-191 Phase 5 (bead nexus-o8dil.29 / nexus-dbzxb): ``fk_catalog_chunks_chunk``
@@ -192,17 +192,34 @@ def seed_manifest_chunks(collection: str, chashes: Iterable[str]) -> None:
     inference per stub. The embedding VALUES are never asserted on by any
     caller of this helper — only the chash's presence/absence matters to
     the FK.
+
+    RDR-204 Phase 2 fallout (nexus-ft04v.16): the vector WIDTH used to be
+    guessed by parsing *collection*'s own model-token segment
+    (``dim_for_model_token(segments[2])``) — a pre-Phase-2 assumption that
+    the collection's NAME predicts what the engine will dispatch to.
+    Phase 2 made the engine resolve dispatch width from the
+    ``catalog_collections`` row set at first-touch registration, and on
+    THIS test substrate that row is always seeded from the engine's own
+    tier-1 embedder (``bge-base-en-v15-768``, 768-dim) regardless of what
+    model token the collection's name carries or what backend mode the
+    Python client is in — ``test_doc_indexer.py``'s ``_registered_token()``
+    root-caused this identically. A name-guessed width of 1024
+    (``voyage-*``) or 384 (``minilm-*``) then disagrees with the row's
+    real 768 and the passthrough upsert 400s. Default to the box's real
+    tier-1 width instead of the name guess; a caller that has arranged
+    for the collection to be registered under a genuinely different
+    model beforehand (e.g. an explicit ``register_collection`` override)
+    passes ``dim=`` to match it.
     """
     from nexus.db.http_vector_client import HttpVectorClient
+    from nexus.db.local_ef import _MODEL_TOKENS, _TIER1_MODEL
     from nexus.db.reconcile import dim_for_model_token
 
     ids = sorted({c for c in chashes if c})
     if not ids:
         return
-    segments = collection.split("__")
-    dim = dim_for_model_token(segments[2]) if len(segments) >= 3 else None
     if dim is None:
-        dim = 768
+        dim = dim_for_model_token(_MODEL_TOKENS[_TIER1_MODEL])
     HttpVectorClient().upsert_chunks(
         collection, ids, [f"fk-stub chunk for {c}" for c in ids],
         embeddings=[[0.0] * dim for _ in ids],

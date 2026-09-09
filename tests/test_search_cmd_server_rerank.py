@@ -20,6 +20,7 @@ from click.testing import CliRunner
 from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.types import SearchResult
+from tests.conftest import catalog_row_for_collection_name, patched_mcp_infra_t3
 
 _CLOUD_ENV = {
     "CHROMA_API_KEY": "k", "VOYAGE_API_KEY": "v",
@@ -52,14 +53,21 @@ def _result(id: str, collection: str, distance: float, score: float | None = Non
 
 def _t3_mock(collections: list[str]) -> MagicMock:
     mock = MagicMock(spec=HttpVectorClient)
-    mock.list_collections.return_value = [{"name": n} for n in collections]
+    mock.list_collections.return_value = [
+        {"name": n, **catalog_row_for_collection_name(n)} for n in collections
+    ]
     # Real HttpVectorClient carries the capability marker (class attr).
     mock.supports_server_rerank = True
     return mock
 
 
 def _invoke(runner, mock_t3, fake_cross_corpus, args, cfg=_CFG):
+    # RDR-204 Phase 3 fixture-seam fix (nexus-ft04v.26): resolve_corpus's
+    # bare-corpus fan-out reads nexus.mcp_infra.get_t3()'s OWN row cache,
+    # a separate singleton from search_cmd._t3 -- wire it to the same
+    # mock, see tests/conftest.py's patched_mcp_infra_t3 docstring.
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake_cross_corpus), \
          patch("nexus.commands.search_cmd.load_config", return_value=cfg):
         return runner.invoke(main, args)
@@ -137,7 +145,9 @@ def test_backend_without_capability_never_requests_rerank(runner, cloud_env):
     mock_t3 = MagicMock()
     del mock_t3.supports_server_rerank  # plain MagicMock would fabricate it
     mock_t3.list_collections.return_value = [
-        {"name": "knowledge__test"}, {"name": "rdr__nexus"}]
+        {"name": n, **catalog_row_for_collection_name(n)}
+        for n in ("knowledge__test", "rdr__nexus")
+    ]
 
     res = _invoke(runner, mock_t3,
                   _fake_retrieval([_result("a", "knowledge__test", 0.1)], captured=captured),

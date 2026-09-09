@@ -26,14 +26,23 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
-from nexus.corpus import effective_embedding_model_for_writes
+from nexus.corpus import _write_intent_embedding_model
 from tests._catalog_fixture_ops import ActiveCatalog
 
 # RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine pins an install-scoped
 # embedding profile per (tenant, content_type) on first write — the backfill
 # verb parses the model straight from a conformant T3 name, so a hardcoded
 # "voyage-code-3" literal here 422s against the box's real (bge) profile.
-_CODE_MODEL = effective_embedding_model_for_writes("code")
+#
+# RDR-204 Phase 3 item 3 (nexus-ft04v.26): computed via
+# _write_intent_embedding_model, not effective_embedding_model_for_writes --
+# the latter now makes a REAL network call (validates against the engine's
+# embedding_profile), unsafe at MODULE COLLECTION TIME with no engine
+# substrate guaranteed to be resolvable yet. The intent-only helper gives
+# the identical value in every correctly-configured environment (local
+# mode is "structurally incapable of disagreeing" with its own profile —
+# see effective_embedding_model_for_writes's own docstring).
+_CODE_MODEL = _write_intent_embedding_model("code")
 
 
 @pytest.fixture()
@@ -206,3 +215,25 @@ def test_backfill_aborts_on_t3_failure(catalog, runner):
     assert "Failed to list T3 collections" in result.output
     # No partial backfill happened.
     assert _projection_names(catalog) == before
+
+
+def test_backfill_registers_conformant_name_with_its_own_version_segment(catalog, runner):
+    """nexus-ft04v.27: a conformant name whose ``v<n>`` segment is NOT
+    ``v1`` must still register with that real version -- proves
+    model_version is read off the name (via the funnel-style
+    ``model_version_for_collection_name`` helper), not hardcoded, now
+    that the retired ``parse_conformant_collection_name`` no longer backs
+    this site."""
+    name = f"code__1-1__{_CODE_MODEL}__v2"
+    fake_t3 = _FakeT3(names=[name])
+
+    with patch("nexus.db.make_t3", return_value=fake_t3):
+        result = runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
+
+    assert result.exit_code == 0, result.output
+    row = catalog.get_collection(name)
+    assert row is not None, f"{name!r} was not registered: {_projection_names(catalog)}"
+    assert row["content_type"] == "code"
+    assert row["owner_id"] == "1-1"
+    assert row["embedding_model"] == _CODE_MODEL
+    assert row["model_version"] == "v2"

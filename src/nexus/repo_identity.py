@@ -420,17 +420,21 @@ def list_sibling_collections(
     Always excludes the input + ``taxonomy__*``.
     """
     from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
+        collection_owner,
         is_conformant_collection_name,
-        parse_conformant_collection_name,
     )
 
     matcher: Any = None
     if is_conformant_collection_name(collection_name):
         # Conformant path — share by owner_id segment.
-        try:
-            owner_id = parse_conformant_collection_name(collection_name)["owner_id"]
-        except (KeyError, ValueError):
-            return []
+        # RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26): collection_owner
+        # now reads *collection_name*'s catalog row and raises
+        # CollectionNotRegisteredError when it has none -- this function
+        # finds siblings of an EXISTING (presumably registered) collection,
+        # not a candidate being minted, so that is the correct behaviour
+        # here; a caller invoking this on an unregistered name should see
+        # the failure, not a silently wrong sibling set.
+        owner_id = collection_owner(collection_name)
         owner_segment = f"__{owner_id}__"
         matcher = lambda n: owner_segment in n  # noqa: E731
     else:

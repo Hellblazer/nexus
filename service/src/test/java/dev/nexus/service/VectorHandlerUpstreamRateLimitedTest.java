@@ -92,6 +92,24 @@ class VectorHandlerUpstreamRateLimitedTest {
         service = new NexusService(0, TOKEN, svcDs, null, pgRepo);
         service.start();
         http = HttpClient.newHttpClient();
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.3): AuthFilter runs the per-tenant,
+        // once-per-process ghost sweep on whichever request is TENANT's first
+        // against this service instance, and DELETES any collection it finds
+        // registered-but-chunkless at that moment. The warmup MUST run before the
+        // collection is registered at all (measured, nexus-ft04v Phase 1 round 4).
+        // Burn the sweep here first, THEN register (RDR-204 Phase 2, bead
+        // nexus-ft04v.16: dimForCollection now requires a real row before the
+        // stub embedder is ever reached).
+        var warmup = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+            .header("Authorization", "Bearer " + TOKEN)
+            .GET().build();
+        http.send(warmup, HttpResponse.BodyHandlers.ofString());
+
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION);
+        }
     }
 
     @AfterAll

@@ -17,6 +17,27 @@ from nexus.scoring import (
     round_robin_interleave,
 )
 from nexus.types import SearchResult
+from tests.conftest import catalog_row_for_collection_name
+
+
+def _code_row_stub(name: str) -> dict | None:
+    """RDR-204 Phase 3 class (c) repoint (nexus-ft04v.26, commit
+    2cdde2306): ``apply_hybrid_scoring``'s code-detection now reads
+    ``nexus.mcp_infra.get_collection_row`` directly, never the collection
+    NAME. Reproduces the exact "is_code_like" matrix
+    ``test_hybrid_scoring_code_detection_pinned`` pins under the new
+    mechanism: a row exists (content_type="code", lifecycle_state="live")
+    only for names that were genuinely code-registered in this fixture's
+    fiction -- ``quarantine-code__repo``'s row would carry
+    content_type="code" too (Gap 4: a quarantine sibling keeps its ORIGIN
+    content_type), so this excludes it by lifecycle_state, matching what
+    this test has always pinned (a quarantine/lookalike/unrecognized name
+    is never code-like for hybrid-scoring purposes) rather than changing
+    the test's intent to match a row-shape accident."""
+    row = catalog_row_for_collection_name(name)
+    if row["content_type"] == "code" and row["lifecycle_state"] == "live":
+        return row
+    return None
 
 
 def _r(coll: str = "code__repo", dist: float = 0.3, frecency: float = 0.5,
@@ -57,7 +78,8 @@ def test_hybrid_scoring_no_code_warns():
     assert len(results) == 1 and results[0].hybrid_score is not None
 
 
-def test_hybrid_scoring_code_uses_frecency():
+def test_hybrid_scoring_code_uses_frecency(monkeypatch):
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", _code_row_stub)
     r = _r(coll="code__repo", dist=0.2, frecency=0.8)
     results = apply_hybrid_scoring([r], hybrid=True)
     assert results[0].hybrid_score > 0
@@ -66,6 +88,38 @@ def test_hybrid_scoring_code_uses_frecency():
 def test_hybrid_score_weighted_sum():
     from nexus.scoring import hybrid_score
     assert hybrid_score(0.8, 0.5) == pytest.approx(0.71, abs=1e-6)
+
+
+# ── RDR-204 Phase 3 funnel (nexus-ft04v.21): the three `.collection
+# .startswith("code__")` sites now call `collection_content_type(...) ==
+# "code"` -- pin the has_code / frecency-eligibility decision across the
+# input classes the bead names, since a wrong verdict here silently
+# changes which results get the frecency-blended score. ──────────────────
+
+@pytest.mark.parametrize(
+    "coll, is_code_like",
+    [
+        ("code__repo", True),                            # legacy 2-segment
+        ("code__repo__voyage-code-3__v1", True),          # conformant
+        ("docs__papers", False),
+        ("knowledge__notes", False),
+        ("quarantine-code__repo", False),                 # NOT "code__"-prefixed
+        ("other__repo", False),                           # unrecognized prefix
+        ("codebase__repo", False),                        # startswith("code") but not "code__"
+    ],
+)
+def test_hybrid_scoring_code_detection_pinned(coll: str, is_code_like: bool, monkeypatch) -> None:
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", _code_row_stub)
+    r = _r(coll=coll, dist=0.2, frecency=0.8)
+    with patch("nexus.scoring._log") as mock_log:
+        results = apply_hybrid_scoring([r], hybrid=True)
+    warned = any(
+        call.kwargs.get("event") == "--hybrid has no effect — no code corpus in scope"
+        or (call.args and call.args[0] == "--hybrid has no effect — no code corpus in scope")
+        for call in mock_log.warning.call_args_list
+    )
+    assert warned == (not is_code_like)
+    assert results[0].hybrid_score is not None
 
 
 # ── round_robin_interleave ───────────────────────────────────────────────────
@@ -311,7 +365,7 @@ def test_calibration_thresholds_match_config_defaults(cloud_mode) -> None:  # RD
     assert _CALIBRATION_DEFAULT_THRESHOLD == cfg_thresholds["default"]
 
 
-def test_apply_hybrid_scoring_calibrates_before_pooling(cloud_mode) -> None:  # nexus-mc1l1: legacy names only split by model in cloud/service mode
+def test_apply_hybrid_scoring_calibrates_before_pooling(cloud_mode, monkeypatch) -> None:  # nexus-mc1l1: legacy names only split by model in cloud/service mode
     """A genuinely GOOD rdr__ match (well inside its own 0.65 threshold)
     must be able to win the merge against code__ results that are, in raw-
     distance terms, closer -- because raw distance alone is a model-scale
@@ -321,6 +375,9 @@ def test_apply_hybrid_scoring_calibrates_before_pooling(cloud_mode) -> None:  # 
     the top. Mirrors the measured live-probe shape (rdr-092 at raw
     distance 0.4827, calibrated ~0.334, beating code's own best surviving
     candidates at 0.38-0.39)."""
+    # RDR-204 Phase 3 (nexus-ft04v.26): code detection reads the row cache; CI's
+    # substrate jar is unstamped, so an unstubbed reach fails loud there.
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", _code_row_stub)
     code_results = [
         _r("code__repo", d, chunks=1) for d in (0.36, 0.38, 0.40, 0.42, 0.44)
     ]
@@ -334,7 +391,7 @@ def test_apply_hybrid_scoring_calibrates_before_pooling(cloud_mode) -> None:  # 
     )
 
 
-def test_calibration_does_not_mint_fake_winners(cloud_mode) -> None:  # nexus-mc1l1: legacy names only split by model in cloud/service mode
+def test_calibration_does_not_mint_fake_winners(cloud_mode, monkeypatch) -> None:  # nexus-mc1l1: legacy names only split by model in cloud/service mode
     """Code review Critical 2 counter-test: a corpus with NOTHING
     relevant -- every candidate sitting near its own threshold, i.e. a
     weak match -- must NOT beat a genuinely strong match from a
@@ -353,6 +410,9 @@ def test_calibration_does_not_mint_fake_winners(cloud_mode) -> None:  # nexus-mc
     best would land at the ceiling alongside the strong code__ best.
     Under the shipped single-pooled-window design it must sit well
     below it."""
+    # RDR-204 Phase 3 (nexus-ft04v.26): code detection reads the row cache; CI's
+    # substrate jar is unstamped, so an unstubbed reach fails loud there.
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", _code_row_stub)
     strong_code = _r("code__repo", 0.05, chunks=1)
     other_code = _r("code__repo", 0.20, chunks=1)
     weak_rdr = _r("rdr__proj", 0.64, chunks=1)

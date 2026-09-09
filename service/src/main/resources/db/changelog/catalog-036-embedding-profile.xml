@@ -20,9 +20,12 @@
 
     Token spellings are byte-for-byte the same four tokens both authorities
     already carry:
-      engine:  PgVectorRepository.MODEL_DIMS (voyage-code-3, voyage-context-3,
+      engine:  nexus.embedding_models (voyage-code-3, voyage-context-3,
                voyage-3, bge-base-en-v15-768, minilm-l6-v2-384 — dims 1024,
-               1024, 1024, 768, 384).
+               1024, 1024, 768, 384). RDR-204 Phase 2 fix round (bead
+               nexus-ft04v.16) retired the hand-typed PgVectorRepository
+               .MODEL_DIMS map this comment used to cite — this table is the
+               one place the model-to-dimension mapping lives now.
       client:  corpus.py CANONICAL_EMBEDDING_MODELS (voyage-context-3,
                voyage-code-3) plus LOCAL_EMBEDDING_MODELS (minilm-l6-v2-384,
                bge-base-en-v15-768).

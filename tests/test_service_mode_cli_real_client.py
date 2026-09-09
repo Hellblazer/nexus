@@ -77,12 +77,16 @@ def test_store_expire_service_mode_real_client(runner, real_client, monkeypatch)
             return {"deleted": len(body["ids"])}
         raise AssertionError(f"unexpected path {path}")
 
-    # list_collections goes through GET /v1/vectors/stats
+    # list_collections goes through GET /v1/vectors/stats. RDR-204 Phase 3
+    # class (c) repoint (nexus-ft04v.26): HttpVectorClient.expire() now
+    # filters via each entry's content_type field (joined from the
+    # engine's real catalog row in production) instead of a name prefix
+    # -- the fake stats response needs to carry it too.
     monkeypatch.setattr(
         "nexus.db.http_vector_client._get",
         lambda path, **kw: [
-            {"name": _KNOWLEDGE, "dim": 1024, "count": 2},
-            {"name": _CODE, "dim": 1024, "count": 5},
+            {"name": _KNOWLEDGE, "dim": 1024, "count": 2, "content_type": "knowledge"},
+            {"name": _CODE, "dim": 1024, "count": 5, "content_type": "code"},
         ],
     )
     monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)

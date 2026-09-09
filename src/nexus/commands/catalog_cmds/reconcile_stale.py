@@ -264,6 +264,8 @@ def _resolve_provenance(entry: object, owner_roots: dict[str, str]) -> tuple[Pat
     a relative file_path is anchored at ``owner_roots[owner_id]`` or,
     absent that, treated as unresolvable. Never falls back to cwd.
     """
+    from nexus.corpus import resolve_row_preferred, split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
     fp = entry.file_path or ""
     source_uri = getattr(entry, "source_uri", "") or ""
 
@@ -296,7 +298,20 @@ def _resolve_provenance(entry: object, owner_roots: dict[str, str]) -> tuple[Pat
         # there was never a resolvable path to confirm absent.
         return None, "source_uri_only"
 
-    if not entry.physical_collection.startswith("knowledge__"):
+    # RDR-204 Phase 3 (nexus-ft04v.26), class (d): reconciliation exists
+    # specifically to diagnose drifted/stale catalog entries, which can
+    # include a physical_collection with no catalog row -- candidate-string
+    # derivation, never the row-based collection_content_type, so one bad
+    # entry cannot abort the whole reconciliation report.
+    # RDR-204 Phase 3 fix round (nexus-ft04v.28 item 7): ROW-PREFERRED now
+    # (nexus.corpus.resolve_row_preferred, shared with the other three
+    # class-(d) diagnostic sites) -- a row that disagrees with the name
+    # must win for a reconciliation report whose whole job is finding
+    # exactly that disagreement.
+    if resolve_row_preferred(
+        entry.physical_collection, "content_type",
+        lambda n: split_candidate_collection_name(n)[0],
+    ) != "knowledge":
         # code__/docs__/rdr__ docs with NEITHER file_path NOR source_uri.
         # RDR-145's "legitimate by design" exemption is scoped to
         # knowledge__ store_put notes only (_classify_never_chunked,
@@ -352,6 +367,12 @@ def _store_put_signature_reason(entry: object) -> str | None:
     — this function returns ``None`` immediately when one is present, so a
     file-backed doc is never silently reclassified as store_put-origin.
     """
+    # RDR-204 Phase 3 fix round (nexus-ft04v.28 item 7): ROW-PREFERRED now
+    # (nexus.corpus.resolve_row_preferred), same reason as this module's
+    # other class-(d) site above -- a row that disagrees with the name
+    # must win here too.
+    from nexus.corpus import resolve_row_preferred, split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
     if entry.file_path:
         return None
     source_uri = getattr(entry, "source_uri", "") or ""
@@ -359,7 +380,10 @@ def _store_put_signature_reason(entry: object) -> str | None:
         return "chroma_uri"
     if (
         not source_uri
-        and entry.physical_collection.startswith("knowledge__")
+        and resolve_row_preferred(
+            entry.physical_collection, "content_type",
+            lambda n: split_candidate_collection_name(n)[0],
+        ) == "knowledge"
         and entry.chunk_count == 1
     ):
         return "knowledge_single_chunk_no_path"

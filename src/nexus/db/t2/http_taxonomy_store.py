@@ -78,6 +78,14 @@ from nexus.db.t2.taxonomy_compute import (
 
 _log = structlog.get_logger(__name__)
 
+
+class TopicPersistConflictError(RuntimeError):
+    """``persist_discovered`` answered 409 (unique violation) for a collection
+    that has NO topics, so the "concurrent discovery won" reading is false and
+    the conflict is a data defect on the store (GH #1489, nexus-zhxxd). Raised
+    instead of the benign-skip return so the discover verb reports a failure
+    and exits non-zero rather than printing ``skipped``."""
+
 #: Default tenant matching TenantConstants.DEFAULT_TENANT in the Java service.
 DEFAULT_TENANT: str = "default"
 
@@ -535,6 +543,19 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         rows = self._post("/assignments/details", {"doc_ids": doc_ids}, mutates=False)
         return list(rows or [])
 
+    def prune_projection_below(self, source_collection_prefix: str, min_similarity: float) -> int:
+        """POST /v1/taxonomy/assignments/prune_projection (GH #1528, nexus-4tfxp):
+        delete projection assignments under *source_collection_prefix* (a corpus
+        prefix like ``code__`` or one full collection name) whose stored raw
+        cosine is below *min_similarity*. Returns the removed count. The
+        recovery path for a pass that admitted weak matches: persist is a
+        prefer-higher upsert, so nothing else lowers or removes a row."""
+        r = self._post(
+            "/assignments/prune_projection",
+            {"source_collection_prefix": source_collection_prefix, "min_similarity": float(min_similarity)},
+        )
+        return int(r.get("removed", 0)) if isinstance(r, dict) else 0
+
     def purge_assignments_for_doc(self, project: str, title: str) -> int:
         """Remove assignments for a deleted doc."""
         r = self._post("/assignments/purge_doc", {"project": project, "title": title})
@@ -893,21 +914,42 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             except httpx.HTTPStatusError as exc:
                 if exc.response is not None and exc.response.status_code == 409:
                     try:
-                        sqlstate = exc.response.json().get("sqlstate")
+                        body = exc.response.json()
                     except Exception:  # noqa: BLE001 — body may be empty/non-JSON on older engines; absent sqlstate handled below
-                        sqlstate = None
+                        body = {}
+                    sqlstate = body.get("sqlstate")
                     if sqlstate in (None, "23505"):
-                        _log.info(
-                            "persist_discovered_conflict_benign_skip",
-                            collection=collection_name,
-                            sqlstate=sqlstate,
-                            hint=(
-                                "a concurrent discovery already persisted this "
-                                "collection's topics (pre-n2ls1 engine race shape); "
-                                "nothing to retry"
-                            ),
-                        )
-                        return []
+                        # The benign reading (a concurrent discovery won the
+                        # race and persisted this collection's topics) is
+                        # only true if the collection HAS topics now. GH
+                        # #1489 (nexus-zhxxd): a store whose BIGSERIAL
+                        # sequence sat behind imported ids 23505'd on
+                        # topics_pk for every collection, and this branch
+                        # logged "benign skip", printed "skipped" and exited
+                        # 0 for each of them -- a data defect hidden as a
+                        # race. Ask the data before calling it benign.
+                        if self.get_topics_for_collection(collection_name):
+                            _log.info(
+                                "persist_discovered_conflict_benign_skip",
+                                collection=collection_name,
+                                sqlstate=sqlstate,
+                                hint=(
+                                    "a concurrent discovery already persisted this "
+                                    "collection's topics (pre-n2ls1 engine race shape); "
+                                    "nothing to retry"
+                                ),
+                            )
+                            return []
+                        raise TopicPersistConflictError(
+                            f"persist_discovered for {collection_name!r}: the engine "
+                            f"answered HTTP 409 (sqlstate={sqlstate}, "
+                            f"constraint={body.get('constraint')}) and the collection "
+                            "has no topics, so no concurrent discovery persisted them: "
+                            "an INSERT into nexus.topics collides on an existing row. "
+                            "On a store migrated through conexus 6.18.1 this is the "
+                            "topics id sequence sitting behind imported ids (GH #1489); "
+                            "engine-service-v0.1.112's hygiene-006-1 advances it at boot."
+                        ) from exc
                 raise
             return r.get("topic_ids", [])
 
@@ -1685,11 +1727,33 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         # 4-5. Cosine similarity matrix (raw) + ICF-adjusted filter matrix.
         sim = _cosine_matrix(src_embs, ctr_embs)
         if icf_map:
-            icf_weights = np.array(
+            # GH #1528 (nexus-4tfxp): ICF = log2(N_effective / DF) runs up to
+            # ~5.5, and multiplying raw cosine by it before the threshold
+            # ADMITTED weak matches to rare topics (a 0.30 cosine passed
+            # 0.70; one pass wrote 67,638 rows below their corpus threshold
+            # and turned rare topics into hubs). ICF's job is to remove hub
+            # matches and order the rest, never to admit: the corpus
+            # threshold is applied to the RAW cosine first, and the weight
+            # is clamped to <= 1 (icf / icf_max, so the rarest topic keeps
+            # its raw score and a hub is scaled down, possibly below the
+            # threshold and out).
+            icf = np.array(
                 [icf_map.get(int(m["topic_id"]), 1.0) for m in ctr_metas],
                 dtype=np.float32,
             )
-            filter_sim = sim * icf_weights
+            # An ICF of 0 is a topic present in every collection; its weight
+            # is 0 and it never passes (test_projection_quality's pin, kept:
+            # ICF=0 fails the threshold regardless of raw cosine). When every
+            # target is such a hub, icf_max is 0 and every weight is 0.
+            # icf_max over the WHOLE map, not the targets of this one call:
+            # a --backfill sweep projects each source against a different
+            # target set, and a per-call maximum would make the same topic's
+            # weight differ across the sweep (critique [25095]).
+            icf_max = float(max(icf_map.values())) if icf_map else 0.0
+            icf_weights = (
+                np.minimum(icf / icf_max, 1.0) if icf_max > 0 else np.zeros_like(icf)
+            )
+            filter_sim = np.where(sim >= threshold, sim * icf_weights, 0.0)
         else:
             filter_sim = sim
 

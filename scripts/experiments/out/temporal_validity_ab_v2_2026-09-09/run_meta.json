@@ -1,0 +1,12 @@
+{
+ "collection": "rdr__1-1__voyage-context-3__v1",
+ "top_k_chunks": 60,
+ "min_docs": 5,
+ "ran_at": "2026-09-09T01:05:26.360862+00:00",
+ "queries": 66,
+ "soft": {
+  "sim": 0.75,
+  "valid": 0.25,
+  "floor": 0.05
+ }
+}

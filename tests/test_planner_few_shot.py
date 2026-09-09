@@ -283,9 +283,26 @@ def test_planner_tool_reference_shows_named_collection_and_default_corpus():
     assert "`corpus` must be \"all\"" not in ref
 
 
-def test_collection_hint_samples_every_prefix_family(cloud_mode) -> None:  # RDR-109: names voyage-* collections
+def test_collection_hint_samples_every_prefix_family(cloud_mode, monkeypatch) -> None:  # RDR-109: names voyage-* collections
     """nexus-rl59s (critique [24066] S1): alphabetical truncation starved
-    knowledge__/rdr__ out of the planner's hint on real installs."""
+    knowledge__/rdr__ out of the planner's hint on real installs.
+
+    RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26): the family key now
+    reads the catalog row -- fake one per name (content_type = first
+    segment, matching a real Phase-1-backfilled row for these names)
+    so the round-robin sampling groups by the SAME 4 families this test
+    is about, not one singleton family per name.
+    """
+    import nexus.mcp_infra as mi
+
+    monkeypatch.setattr(
+        mi, "get_collection_row",
+        lambda name: {
+            "content_type": name.partition("__")[0], "owner_id": "x",
+            "embedding_model": "x", "lifecycle_state": "live",
+        },
+    )
+
     from nexus.mcp.core import _sample_collection_names_by_prefix
     names = [f"code__{i}__voyage-code-3__v1" for i in range(18)] + \
             [f"docs__{i}__voyage-context-3__v1" for i in range(19)] + \
@@ -298,3 +315,16 @@ def test_collection_hint_samples_every_prefix_family(cloud_mode) -> None:  # RDR
     assert any(n.startswith("rdr__") for n in shown)
     assert len(set(shown)) == 24
     assert _sample_collection_names_by_prefix([], 24) == []
+
+
+def test_sample_collection_names_by_prefix_families_pinned() -> None:
+    """RDR-204 Phase 3 funnel (nexus-ft04v.21): the family key derivation
+    (``n.split("__", 1)[0]``) became a funnel-helper branch. Pin: a
+    dunder-free name is its own family (not an empty-string bucket), and
+    an unrecognized/quarantine-prefixed name families under its raw first
+    segment, unfiltered."""
+    from nexus.mcp.core import _sample_collection_names_by_prefix
+
+    names = ["rgcache", "quarantine-docs__x", "code__myrepo__voyage-code-3__v1"]
+    shown = _sample_collection_names_by_prefix(names, limit=10)
+    assert set(shown) == set(names)  # all three distinct families, nothing dropped

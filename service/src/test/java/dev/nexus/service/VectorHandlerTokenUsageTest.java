@@ -243,6 +243,47 @@ class VectorHandlerTokenUsageTest {
     }
 
     /**
+     * RDR-204 Phase 2 fix round 2 (nexus-ft04v.16 fix round 2, S1, coordinator
+     * design change): a fan-out over a registered + a never-registered
+     * collection reports the dropped name via the
+     * {@code X-Nexus-Skipped-Collections} response header, never a body field
+     * -- the response body stays the bare array shape either way.
+     */
+    @Test
+    void search_unregisteredInFanOut_headerNamesDropped_bodyStaysBareArray() throws Exception {
+        String ghost = "knowledge__usage-ghost__minilm-l6-v2-384__v1";
+        var resp = post("/v1/vectors/search", Map.of(
+            "query",       "hello world",
+            "collections", List.of(COL, ghost),
+            "n_results",   5));
+
+        assertThat(resp.statusCode())
+            .as("a fan-out with one dropped name still succeeds (got: %s)", resp.body())
+            .isEqualTo(200);
+        assertThat(resp.headers().firstValue(VectorHandler.SKIPPED_COLLECTIONS_HEADER))
+            .as("the dropped name must be visible via the header")
+            .contains(ghost);
+        List<?> rows = MAPPER.readValue(resp.body(), List.class);
+        assertThat(rows)
+            .as("the body stays a bare array -- no envelope wrapping")
+            .isNotEmpty();
+    }
+
+    /** Header ABSENT (not empty) when nothing was dropped from the fan-out. */
+    @Test
+    void search_fullyRegisteredFanOut_headerAbsent() throws Exception {
+        var resp = post("/v1/vectors/search", Map.of(
+            "query",       "hello world",
+            "collections", List.of(COL),
+            "n_results",   5));
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(resp.headers().firstValue(VectorHandler.SKIPPED_COLLECTIONS_HEADER))
+            .as("nothing was dropped -- the header must be absent, not empty")
+            .isEmpty();
+    }
+
+    /**
      * (d) Header ABSENT on error response.
      *
      * <p>A /store-list request missing 'collection' triggers IllegalArgumentException

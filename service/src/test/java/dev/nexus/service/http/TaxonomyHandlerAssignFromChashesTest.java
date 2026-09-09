@@ -137,14 +137,19 @@ class TaxonomyHandlerAssignFromChashesTest {
     }
 
     @Test
-    void assignFromChashes_nonConformantCollection_returns400NotServerError() throws Exception {
+    void assignFromChashes_unregisteredCollection_returns422NotServerError() throws Exception {
+        // RDR-204 Phase 2 (bead nexus-ft04v.16, coordinator ruling): dispatch is by the
+        // registered ROW now, never a name-segment parse -- "not-conformant" was never
+        // registered, so this is UnregisteredCollectionException, mapped to a typed 422
+        // (HttpUtil.sendTypedDbError, per that exception's own javadoc) naming the
+        // registration remedy, never a 400 (the retired "4-segment conformant name"
+        // IllegalArgumentException) and never a 500.
         CapturingExchange ex = post("/v1/taxonomy/assignments/assign_from_chashes",
             "{\"collection\":\"not-conformant\",\"chashes\":[\"x\"]}");
         handleWithTenant(ex);
         assertThat(ex.status)
-            .as("dimForCollection's IllegalArgumentException maps to 400 via the handler's"
-                + " generic IllegalArgumentException catch, not a 500")
-            .isEqualTo(400);
+            .as("UnregisteredCollectionException maps to a typed 422 naming the remedy, not a 500")
+            .isEqualTo(422);
     }
 
     @Test

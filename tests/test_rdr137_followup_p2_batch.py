@@ -106,12 +106,27 @@ class TestImp24RepoIdentityCacheReducesSubprocessCalls:
 
 
 class TestImp27ListSiblingCollectionsHandlesConformantNames:
-    def test_conformant_4_segment_finds_siblings_by_owner_id(self) -> None:
+    def test_conformant_4_segment_finds_siblings_by_owner_id(self, monkeypatch) -> None:
         """RDR-103 conformant names (code__owner-1-2__voyage-code-3__v1)
         should find siblings that share the same __owner_id__ segment.
         Pre-fix the function returned [] for all conformant names
         because the 8-char hash check failed on the trailing __v1."""
         from nexus.repo_identity import list_sibling_collections
+
+        # RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26): the conformant
+        # path now reads collection_owner(collection_name), which reads
+        # nexus.mcp_infra.get_collection_row -- deliberately raises for
+        # an unregistered name (this function's own bc0fa5841 design
+        # decision: siblings are found for an EXISTING, presumably
+        # registered collection). The fixture's `t3` param feeds
+        # list_collections()'s raw MagicMock objects, never mcp_infra's
+        # row cache, so the INPUT collection_name needs its own row stub.
+        from tests.conftest import catalog_row_for_collection_name
+
+        monkeypatch.setattr(
+            "nexus.mcp_infra.get_collection_row",
+            lambda name: catalog_row_for_collection_name(name),
+        )
 
         # Stub t3 client with conformant + legacy names.
         t3 = MagicMock()
@@ -175,3 +190,42 @@ class TestImp27ListSiblingCollectionsHandlesConformantNames:
 
         siblings = list_sibling_collections("docs__art-architecture-8c2e74c0", t3)
         assert siblings == ["code__art-8c2e74c0"]
+
+    def test_conformant_name_with_non_canonical_model_token_still_finds_siblings(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-ft04v.27 follow-up: the conformant branch now reads
+        owner_id via ``collection_owner`` instead of a direct
+        ``parse_conformant_collection_name`` call -- same permissive
+        regex (accepts fixture-only tokens like ``stub-code-1024``, same
+        as ``is_conformant_collection_name``), so this must keep matching
+        siblings byte-identically for a non-canonical model token."""
+        from nexus.repo_identity import list_sibling_collections
+
+        # RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26): see the sibling
+        # test above's comment -- collection_owner reads
+        # nexus.mcp_infra.get_collection_row, a cache the `t3` fixture
+        # param here never feeds.
+        from tests.conftest import catalog_row_for_collection_name
+
+        monkeypatch.setattr(
+            "nexus.mcp_infra.get_collection_row",
+            lambda name: catalog_row_for_collection_name(name),
+        )
+
+        colls = []
+        for n in (
+            "code__myrepo-1-1__stub-code-1024__v1",
+            "docs__myrepo-1-1__stub-code-1024__v1",
+            "code__otherrepo-5-1__stub-code-1024__v1",
+        ):
+            m = MagicMock()
+            m.name = n
+            colls.append(m)
+        t3 = MagicMock()
+        t3.list_collections.return_value = colls
+
+        siblings = list_sibling_collections(
+            "code__myrepo-1-1__stub-code-1024__v1", t3,
+        )
+        assert siblings == ["docs__myrepo-1-1__stub-code-1024__v1"]

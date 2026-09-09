@@ -26,7 +26,10 @@ import msgpack
 import numpy as np
 import structlog
 
-from nexus.corpus import embedding_model_for_collection_name, index_model_for_collection
+from nexus.corpus import (
+    embedding_model_for_collection_name,
+    index_model_for_collection,
+)
 from nexus.db.limits import QUOTAS
 from nexus.db.local_ef import _MODEL_DIMS as _LOCAL_RAW_MODEL_DIMS
 from nexus.db.local_ef import _MODEL_TOKENS as _LOCAL_MODEL_TOKENS
@@ -288,8 +291,15 @@ def export_collection(
         output=str(output_path),
     )
 
-    # Determine database_type from collection prefix.
-    prefix = collection_name.split("__")[0] if "__" in collection_name else "knowledge"
+    # Determine database_type from the collection's catalog row.
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26), class (c): `collection_name`
+    # may be a legacy/unregistered-but-live collection the operator named
+    # directly -- reads the row directly (never nexus.corpus's
+    # name-parsing primitives). No row -> "knowledge", the same safe
+    # default the prior no-separator branch already used.
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
+    _row = get_collection_row(collection_name)
+    prefix = _row["content_type"] if _row is not None else "knowledge"
 
     # Write header (record_count/embedding_dim filled after streaming).
     # The header is written first so the file is valid even during writing.

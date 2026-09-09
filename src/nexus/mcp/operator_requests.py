@@ -40,6 +40,8 @@ path only.
 """
 from __future__ import annotations
 
+from nexus.context_annotations import source_clause
+
 from typing import Any, Callable
 
 #: Shared evidence-item schema for ``operator_check`` and (via a deferred
@@ -67,7 +69,7 @@ def build_extract_request(inputs: str, fields: str) -> tuple[str, dict]:
     """Prompt/schema for ``operator_extract``. Verbatim from core.py."""
     prompt = (
         f"Extract the following fields from each item: {fields}\n\n"
-        f"Items:\n{inputs}"
+        f"Items:\n{inputs}{source_clause(inputs)}"
     )
     schema: dict = {
         "type": "object",
@@ -87,7 +89,7 @@ def build_rank_request(items: str, criterion: str) -> tuple[str, dict]:
     prompt = (
         f"Rank the following items by {criterion}.\n"
         f"Return them in ranked order, best first.\n\n"
-        f"Items:\n{items}"
+        f"Items:\n{items}{source_clause(items)}"
     )
     schema: dict = {
         "type": "object",
@@ -137,12 +139,13 @@ def build_compare_request(
             f"{label_b} but not both.\n"
             "  * **Philosophy difference**: one or two sentences on the "
             "underlying stance difference, if one emerges from the evidence."
+            f"{source_clause(a_text + b_text)}"
         )
     else:
         items_text = _fmt(items)
         prompt = (
             f"Compare the following items.{focus_clause}\n\n"
-            f"Items:\n{items_text}"
+            f"Items:\n{items_text}{source_clause(items_text)}"
         )
     schema: dict = {
         "type": "object",
@@ -157,7 +160,7 @@ def build_compare_request(
 def build_summarize_request(content: str, cited: bool = False) -> tuple[str, dict]:
     """Prompt/schema for ``operator_summarize``. Verbatim from core.py."""
     cite_clause = " Include citations as a list of source references." if cited else ""
-    prompt = f"Summarize the following content concisely.{cite_clause}\n\n{content}"
+    prompt = f"Summarize the following content concisely.{cite_clause}\n\n{content}{source_clause(content)}"
     schema: dict = {
         "type": "object",
         "required": ["summary"],
@@ -180,7 +183,7 @@ def build_generate_request(
     cite_clause = " Include citations as a list of source references." if cited else ""
     prompt = (
         f"Generate a {template}.{cite_clause}\n\n"
-        f"Context:\n{context}"
+        f"Context:\n{context}{source_clause(context)}"
     )
     schema: dict = {
         "type": "object",
@@ -204,7 +207,7 @@ def build_filter_request(items: str, criterion: str) -> tuple[str, dict]:
         f"keyed by the item's id, giving the reason each item was kept "
         f"or rejected. The output 'items' array must be a subset of the "
         f"input; never add synthetic items.\n\n"
-        f"Items:\n{items}"
+        f"Items:\n{items}{source_clause(items)}"
     )
     schema: dict = {
         "type": "object",
@@ -240,7 +243,7 @@ def build_check_request(items: str, check_instruction: str) -> tuple[str, dict]:
         f"record per item containing a short grounding 'quote' and a "
         f"'role' of 'supports', 'contradicts', or 'neutral'. Keep quotes "
         f"short enough to be verifiable against the source item.\n\n"
-        f"Items:\n{items}"
+        f"Items:\n{items}{source_clause(items)}"
     )
     schema: dict = {
         "type": "object",
@@ -268,6 +271,7 @@ def build_verify_request(claim: str, evidence: str) -> tuple[str, dict]:
         f"verdict. Populate 'citations' with locators (section, page, "
         f"table, or quoted span snippets) that pinpoint the supporting "
         f"or contradicting passages."
+        f"{source_clause(evidence)}"
     )
     schema: dict = {
         "type": "object",
@@ -300,7 +304,7 @@ def build_groupby_request(items: str, key: str) -> tuple[str, dict]:
         f"Do not reference items by id-only — carry the full item "
         f"dicts in each group's `items` array so downstream operators "
         f"see the content without a separate lookup.\n\n"
-        f"Items:\n{items}"
+        f"Items:\n{items}{source_clause(items)}"
     )
     schema: dict = {
         "type": "object",
@@ -338,7 +342,7 @@ def build_aggregate_request(groups: str, reducer: str) -> tuple[str, dict]:
         f"from items in other groups, even when vocabulary overlaps "
         f"across groups. The summary is a short paragraph answering "
         f"the reducer instruction USING ONLY this group's items.\n\n"
-        f"Groups:\n{groups}"
+        f"Groups:\n{groups}{source_clause(groups)}"
     )
     schema: dict = {
         "type": "object",

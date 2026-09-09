@@ -267,7 +267,11 @@ class TaxonomyAssignFromChashesRepositoryTest {
     }
 
     @Test
-    void maxChashesCap_atLimit_accepted() {
+    void maxChashesCap_atLimit_accepted() throws Exception {
+        // RDR-204 Phase 2 (bead nexus-ft04v.16): assignFromChashes now resolves the
+        // dispatch dim through CollectionRegistry before anything else, so COL_A must
+        // be registered here even though this test never seeds a chunk under it.
+        registerCollection(TENANT_A, COL_A);
         List<String> chashes = IntStream.range(0, TaxonomyRepository.MAX_ASSIGN_FROM_CHASHES)
             .mapToObj(i -> hexChash("afc-cap-at-limit-" + i))
             .toList();
@@ -403,26 +407,41 @@ class TaxonomyAssignFromChashesRepositoryTest {
     // ── RLS + dim resolution ─────────────────────────────────────────────────────
 
     @Test
-    void foreignTenant_seesNothing_chashReportedUnmatched() throws Exception {
+    void foreignTenant_seesNothing_ownPass_failsLoud_neverSilentRlsInvisible() throws Exception {
+        // RDR-204 Phase 2 (bead nexus-ft04v.16, coordinator ruling): assignFromChashes
+        // now resolves the dispatch dim through CollectionRegistry BEFORE the RLS-scoped
+        // query ever runs. catalog_collections registration is itself tenant-scoped, so
+        // TENANT_B genuinely has no row for `col` (only TENANT_A does, via seedChunk's
+        // own registerCollection) -- this is now an UnregisteredCollectionException
+        // (422 at the HTTP layer), not the old silent RLS-invisible result (assigned=0,
+        // unmatched=[c1]) this test used to assert. Symmetric with
+        // foreignTenant_crossPass_seesNothing_chashReportedUnmatched below.
         String col = "code__afc_rls__voyage-code-3__v1";  // dedicated, see above note
         String c1 = hexChash("afc-chash-rls");
         seedChunk(TENANT_A, col, c1, unit(1.0f, 0.0f));
         long t = seedTopic(TENANT_A, col, "rls-topic");
         seedCentroid(TENANT_A, col, t, unit(1.0f, 0.0f));
 
-        Map<String, Object> out = repo.assignFromChashes(TENANT_B, col, List.of(c1), false);
-        assertThat(out.get("assigned")).as("tenant B cannot see tenant A's chunk row").isEqualTo(0);
-        assertThat((List<String>) (List<?>) out.get("unmatched_chashes"))
-            .as("RLS-invisible chash reports as unmatched from tenant B's perspective")
-            .containsExactly(c1);
+        assertThatThrownBy(() -> repo.assignFromChashes(TENANT_B, col, List.of(c1), false))
+            .as("tenant B has no catalog_collections row for col (RLS) -- fail loud, "
+                + "never a silent RLS-invisible empty result")
+            .isInstanceOf(dev.nexus.service.db.UnregisteredCollectionException.class)
+            .hasMessageContaining(col)
+            .hasMessageContaining(TENANT_B)
+            .satisfies(e -> {
+                assertThat(e.getMessage()).as("must not leak that TENANT_A owns a row for col")
+                    .doesNotContain(TENANT_A);
+                assertThat(e.getMessage()).as("must not leak the chash value")
+                    .doesNotContain(c1);
+            });
     }
 
     @Test
     void foreignTenant_crossPass_seesNothing_chashReportedUnmatched() throws Exception {
-        // Symmetric to foreignTenant_seesNothing_chashReportedUnmatched (code-review-expert
-        // LOW): own-pass RLS isolation was pinned but the cross ("projection") pass — the
-        // branch that ALSO reads across every other collection FOR THE TENANT — had no
-        // isolation coverage of its own.
+        // Symmetric to foreignTenant_seesNothing_ownPass_failsLoud_neverSilentRlsInvisible
+        // (code-review-expert LOW): own-pass RLS isolation was pinned but the cross
+        // ("projection") pass — the branch that ALSO reads across every other collection
+        // FOR THE TENANT — had no isolation coverage of its own.
         //
         // RDR-204 Phase 1 (Sam's decision, hygiene-003): the cross pass used to stub-
         // register `col` for whichever tenant called it, so tenant B's call here silently
@@ -430,9 +449,13 @@ class TaxonomyAssignFromChashesRepositoryTest {
         // cross_assigned=0, unmatched=[c1]) -- the assertions this test originally made.
         // That stub-insert is retired: under RLS, TENANT_B genuinely has no
         // catalog_collections row for `col` (only TENANT_A does, via seedChunk's own
-        // registerCollection), so nexus.assign_from_chashes_1024's fail-loud guard now
-        // raises instead of silently minting one. That IS the correct outcome, not a
-        // regression -- the surviving contract this test asserts: a foreign tenant's
+        // registerCollection), so nexus.assign_from_chashes_1024's own SQL-level fail-loud
+        // guard used to be the first thing to raise (IntegrityConstraintViolationException).
+        // RDR-204 Phase 2 (bead nexus-ft04v.16, coordinator ruling): assignFromChashes now
+        // resolves the dispatch dim through CollectionRegistry BEFORE opening the
+        // transaction at all, so the SAME "not registered" fact now surfaces as
+        // UnregisteredCollectionException, firing EARLIER than the SQL function ever runs
+        // -- the surviving contract this test asserts is unchanged: a foreign tenant's
         // cross-pass call against a collection it never registered fails loud, naming
         // the remedy, and leaks NOTHING about the owning tenant (not TENANT_A's name,
         // not the chash value, not the row's existence beyond "not registered").
@@ -445,7 +468,7 @@ class TaxonomyAssignFromChashesRepositoryTest {
         assertThatThrownBy(() -> repo.assignFromChashes(TENANT_B, col, List.of(c1), true))
             .as("tenant B has no catalog_collections row for col (RLS) -- the fail-loud "
                 + "not-registered guard fires instead of a silent stub-registration")
-            .isInstanceOf(org.jooq.exception.IntegrityConstraintViolationException.class)
+            .isInstanceOf(dev.nexus.service.db.UnregisteredCollectionException.class)
             .hasMessageContaining(col)
             .hasMessageContaining(TENANT_B)
             .hasMessageContaining("register it first via POST /v1/catalog/collections/upsert")
@@ -534,10 +557,16 @@ class TaxonomyAssignFromChashesRepositoryTest {
     }
 
     @Test
-    void nonConformantCollectionName_failsLoud() {
+    void unregisteredCollectionName_failsLoud() {
+        // RDR-204 Phase 2 (bead nexus-ft04v.16): dispatch is by the registered ROW now,
+        // not a name-segment parse — "not-conformant" was never registered by any
+        // fixture, so this now fails the SAME way any other unregistered collection
+        // does (UnregisteredCollectionException), not the retired
+        // "4-segment conformant name required" IllegalArgumentException.
         assertThatThrownBy(() -> repo.assignFromChashes(TENANT_A, "not-conformant", List.of("x"), false))
-            .as("dimForCollection requires a 4-segment conformant name — fail loud, no silent dimension")
-            .isInstanceOf(IllegalArgumentException.class);
+            .as("an unregistered collection must fail loud, never a silent dimension")
+            .isInstanceOf(dev.nexus.service.db.UnregisteredCollectionException.class)
+            .hasMessageContaining("not-conformant");
     }
 
     @Test

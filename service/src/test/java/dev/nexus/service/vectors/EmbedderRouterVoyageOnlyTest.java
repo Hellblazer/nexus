@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.db.CollectionRegistry;
+import dev.nexus.service.db.CollectionRow;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -24,11 +26,28 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  * voyage-only constructor body references no {@code OnnxEmbedder}, and
  * {@code OnnxEmbedder} has no static initializer that could load a model on
  * class-load. Main's voyage branch likewise constructs only this router.
+ *
+ * <p>RDR-204 Phase 2 (bead nexus-ft04v.16): {@code resolveEmbedderStrict} now
+ * dispatches by the collection's REGISTERED ROW, read through {@link
+ * CollectionRegistry}, never a token parsed from the name. {@link #mark} seeds
+ * the (tenant, collection) → row mapping directly (pure in-process, no I/O) —
+ * every lookup below is a cache HIT, so the {@code TenantScope} argument
+ * (used only on a cache MISS) is never dereferenced; {@code null} is passed
+ * deliberately to prove that.
  */
 class EmbedderRouterVoyageOnlyTest {
 
+    private static final String TENANT = "embedder-router-voyage-only-tenant";
+
     private EmbedderRouter router() {
         return new EmbedderRouter("dummy-key", "document");  // voyage-only cloud
+    }
+
+    /** Seed {@code collection}'s {@link CollectionRow} directly in the in-process
+     *  cache — see the class javadoc. */
+    private static void mark(String collection, String embeddingModel, int dimension) {
+        CollectionRegistry.markKnown(TENANT, collection,
+            new CollectionRow("unknown", TENANT, embeddingModel, dimension, "live"));
     }
 
     @Test
@@ -42,30 +61,42 @@ class EmbedderRouterVoyageOnlyTest {
     }
 
     @Test
-    void conformantVoyageCollections_routeToTheirVoyageEmbedder() {
+    void voyageModelRows_routeToTheirVoyageEmbedder() {
+        String codeCollection = "code__nexus__voyage-code-3__v1";
+        String cceCollection  = "knowledge__nexus__voyage-context-3__v1";
+        mark(codeCollection, "voyage-code-3", 1024);
+        mark(cceCollection, "voyage-context-3", 1024);
         EmbedderRouter r = router();
-        assertThat(r.resolveEmbedderStrict("code__nexus__voyage-code-3__v1"))
+        assertThat(r.resolveEmbedderStrict(null, TENANT, codeCollection))
             .isInstanceOf(VoyageEmbedder.class);
-        assertThat(r.resolveEmbedderStrict("knowledge__nexus__voyage-context-3__v1"))
+        assertThat(r.resolveEmbedderStrict(null, TENANT, cceCollection))
             .isInstanceOf(CceEmbedder.class);
     }
 
     @Test
-    void minilmConformantCollection_isRefused_notLocallyEmbedded() {
+    void minilmModelRow_isRefused_notLocallyEmbedded() {
+        String collection = "code__nexus__minilm-l6-v2-384__v1";
+        mark(collection, "minilm-l6-v2-384", 384);
         EmbedderRouter r = router();
         assertThatThrownBy(() ->
-                r.resolveEmbedderStrict("code__nexus__minilm-l6-v2-384__v1"))
-            .as("a minilm collection must be REFUSED in voyage-only cloud, never "
+                r.resolveEmbedderStrict(null, TENANT, collection))
+            .as("a minilm-model row must be REFUSED in voyage-only cloud, never "
                 + "embedded with a local 384-dim model")
             .isInstanceOf(EmbeddingModelUnavailableException.class)
             .hasMessageContaining("minilm-l6-v2-384");
     }
 
     @Test
-    void nonConformantName_isRefused_noLocalFallback() {
+    void unknownModelToken_isRefused_noLocalFallback() {
+        // RDR-204 Phase 2 fix round (nexus-ft04v.16 fix round): resolveEmbedder(String)
+        // (prefix routing over a non-conformant NAME) is deleted outright -- no
+        // production caller ever invoked it with a real argument. The equivalent
+        // no-local-fallback proof for voyage-only cloud is now at the MODEL-TOKEN
+        // level: a token this mode has no embedder for is refused, never silently
+        // routed to a local embedder that does not exist in this mode.
         EmbedderRouter r = router();
-        assertThatThrownBy(() -> r.resolveEmbedder("legacy_unprefixed_collection"))
-            .as("non-conformant name has no local fallback in voyage-only cloud")
+        assertThatThrownBy(() -> r.resolveEmbedderByModel("legacy_unprefixed_collection"))
+            .as("an unrecognised model token has no local fallback in voyage-only cloud")
             .isInstanceOf(EmbeddingModelUnavailableException.class);
     }
 

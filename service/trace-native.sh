@@ -81,10 +81,13 @@ if [ "$UP" = "1" ]; then
   # the agent never observes those jniAccessible registrations, the native image
   # omits them, and the first embed SIGABRTs at lib.rs:475 (Result::unwrap on a
   # JavaException). This boots in onnx-local mode (no NX_VOYAGE_API_KEY), so the
-  # injected Bge768Embedder serves /v1/vectors/embed.
+  # injected Bge768Embedder serves /v1/vectors/embed. RDR-204 Phase 2 fix round
+  # (nexus-ft04v.16 fix round): posts "model" directly rather than a "collection"
+  # -- /v1/vectors/embed no longer serves an unregistered collection name (422),
+  # and this probe registers nothing.
   echo -n "embed(bge-768): "
   curl "${B[@]}" "${AUTH[@]}" "${J[@]}" -X POST \
-    -d '{"collection":"knowledge__x","texts":["native-image embed trace","second sentence for a multi-row batch"]}' \
+    -d '{"model":"bge-base-en-v15-768","texts":["native-image embed trace","second sentence for a multi-row batch"]}' \
     "$U/v1/vectors/embed"; echo
   echo "--- workload done ---"
 else

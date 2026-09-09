@@ -222,6 +222,9 @@ public final class CatalogHandler implements HttpHandler {
                 case "/collections/for_tuple" -> handleCollectionForTuple(exchange, tenant, method);
                 case "/collections/health"    -> handleCollectionHealth(exchange, tenant, method);
 
+                // ── Embedding profile (RDR-204 Phase 2, nexus-ft04v.33) ──────
+                case "/embedding_profile"     -> handleEmbeddingProfile(exchange, tenant, method);
+
                 // ── ETL imports ───────────────────────────────────────────────
                 case "/import/owner"          -> handleImportOwner(exchange, tenant, method);
                 case "/import/document"       -> handleImportDocument(exchange, tenant, method);
@@ -1642,10 +1645,36 @@ public final class CatalogHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, "{\"ok\":true}");
     }
 
+    /**
+     * GET /v1/catalog/collections/list — optional {@code content_type} and
+     * {@code lifecycle_state} query filters (RDR-204 Phase 2, bead nexus-ft04v.24).
+     * Absent/blank filters reproduce the pre-P2.4 unfiltered result exactly (a
+     * pre-Phase-2 client sending neither param is unaffected). Follows {@link
+     * #handleList}'s own blank-is-absent convention for optional query params.
+     */
     private void handleCollectionList(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        var colls = repo.listCollections(tenant);
+        String contentType    = queryParam(exchange, "content_type");
+        String lifecycleState = queryParam(exchange, "lifecycle_state");
+        var colls = repo.listCollections(tenant,
+            (contentType != null && !contentType.isBlank()) ? contentType : null,
+            (lifecycleState != null && !lifecycleState.isBlank()) ? lifecycleState : null);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("collections", colls)));
+    }
+
+    /**
+     * {@code GET /v1/catalog/embedding_profile} (RDR-204 Phase 2, bead
+     * nexus-ft04v.33, engine half): the calling tenant's install-scoped
+     * embedding profile, one row per content type, as {@code {"profile":
+     * [{content_type, embedding_model, dimension}, ...], "count": N}}.
+     * Read-only; an unprofiled tenant gets {@code count: 0} and an empty
+     * list, never a default (see {@link CatalogRepository#embeddingProfile}).
+     * The client accessor is Phase 3 work and is deliberately absent.
+     */
+    private void handleEmbeddingProfile(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        var rows = repo.embeddingProfile(tenant);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("profile", rows, "count", rows.size())));
     }
 
     private void handleCollectionGet(HttpExchange exchange, String tenant, String method) throws IOException {

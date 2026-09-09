@@ -4817,6 +4817,204 @@ def _check_dimension_orphans() -> list[HealthResult]:
     )]
 
 
+_PROFILE_LABEL = "Embedding profile"
+_PROFILE_INTENT_LABEL = "Embedding profile vs client intent"
+_OFF_PROFILE_LABEL = "Collections off-profile"
+_DISPUTED_LABEL = "Collections disputed"
+_DORMANT_LABEL = "Collections dormant"
+_QUARANTINED_LABEL = "Collections quarantined"
+_MAX_NAMED_COLLECTIONS = 10
+
+
+def _name_list(names: list[str]) -> str:
+    shown = ", ".join(names[:_MAX_NAMED_COLLECTIONS])
+    extra = len(names) - _MAX_NAMED_COLLECTIONS
+    return shown + (f" (+{extra} more)" if extra > 0 else "")
+
+
+def _check_embedding_profile() -> list[HealthResult]:
+    """RDR-204 Day 2 (nexus-ft04v.31): the engine's install-scoped
+    ``nexus.embedding_profile`` per content type, whether this client's
+    local intent agrees with it, and the collection population by
+    lifecycle state, all read from catalog rows (no name is parsed).
+
+    A disagreement between intent and profile means the service has not
+    been restarted since ``local.embed_model`` / ``voyage_api_key``
+    changed (the engine reads both only at spawn): the GH #1461 "did you
+    restart?" blind spot, reported in those words with the restart
+    command. Live collections under a model other than the profile's are
+    informational (reads route by the row's own model and are never
+    refused; RDR §Technical Design 1a); ``disputed`` and ``dormant`` rows
+    are red with their remedies; ``quarantine`` rows are reported with the
+    GC contract's remedy. ``nx collection shape`` stays the curation tool.
+
+    An engine below the Phase 2 route is red (no default is ever invented
+    for a data-correctness fact); a reader that cannot be built or read
+    is a soft "unread" so the storage-service check's red is not counted
+    twice. With the profile unread only the first row is returned.
+    """
+    from nexus.catalog.http_catalog_client import EmbeddingProfileRouteMissingError  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.corpus import CONTENT_TYPES, _SERVICE_RESTART_COMMAND, LocalVoyageCredentialMissingError  # noqa: PLC0415 — deferred to avoid circular import
+
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+        reader = make_catalog_reader()
+        if reader is None:
+            raise RuntimeError("no catalog reader")
+        profile = reader.embedding_profile()
+    except EmbeddingProfileRouteMissingError as exc:
+        return [HealthResult(
+            label=_PROFILE_LABEL, ok=False,
+            detail=f"engine does not serve GET /v1/catalog/embedding_profile ({exc})",
+            fix_suggestions=[
+                "The engine predates the RDR-204 Phase 2 route; upgrade it "
+                "(nx upgrade, then nx daemon service stop && nx daemon service start). "
+                "No write model is assumed in the meantime.",
+            ],
+        )]
+    except Exception as exc:  # noqa: BLE001 — best-effort: an unreachable engine is the storage-service check's red, not this row's
+        _log.debug("doctor_embedding_profile_unread", error=str(exc))
+        return [HealthResult(
+            label=_PROFILE_LABEL, ok=False, warn=True,
+            detail=f"unread ({type(exc).__name__}: {exc})",
+        )]
+
+    by_ct = {r["content_type"]: r for r in profile}
+    results: list[HealthResult] = []
+    if profile:
+        results.append(HealthResult(
+            label=_PROFILE_LABEL, ok=True,
+            detail=", ".join(
+                f"{ct}={by_ct[ct]['embedding_model']} ({by_ct[ct]['dimension']})"
+                for ct in sorted(by_ct)
+            ),
+        ))
+    else:
+        results.append(HealthResult(
+            label=_PROFILE_LABEL, ok=False, warn=True,
+            detail=(
+                "the engine has written no profile for this tenant yet; the first "
+                "collection registration seeds it (no model is assumed until then)"
+            ),
+        ))
+
+    # Row 2: local intent versus the engine's profile, per content type.
+    from nexus import corpus as _corpus  # noqa: PLC0415 — deferred: patched in tests at the module attribute
+    disagreements: list[str] = []
+    agreed: list[str] = []
+    credential_problem: str | None = None
+    for ct in CONTENT_TYPES:
+        try:
+            intent = _corpus.effective_embedding_model_for_writes(ct)
+        except LocalVoyageCredentialMissingError as exc:
+            credential_problem = str(exc)
+            break
+        row = by_ct.get(ct)
+        if row is None:
+            continue
+        if row["embedding_model"] == intent:
+            agreed.append(ct)
+        else:
+            disagreements.append(
+                f"{ct}: intent {intent}, engine profile {row['embedding_model']}"
+            )
+    if credential_problem is not None:
+        results.append(HealthResult(
+            label=_PROFILE_INTENT_LABEL, ok=False, detail=credential_problem,
+        ))
+    elif disagreements:
+        results.append(HealthResult(
+            label=_PROFILE_INTENT_LABEL, ok=False,
+            detail=(
+                "; ".join(disagreements)
+                + " -- the service has not been restarted since the config change, "
+                "so the engine's profile and this client's intent disagree"
+            ),
+            fix_suggestions=[
+                f"A restart is required for the engine to adopt local.embed_model / "
+                f"voyage_api_key: {_SERVICE_RESTART_COMMAND}",
+            ],
+        ))
+    elif not profile:
+        results.append(HealthResult(
+            label=_PROFILE_INTENT_LABEL, ok=True,
+            detail="no engine profile to compare against yet",
+        ))
+    else:
+        results.append(HealthResult(
+            label=_PROFILE_INTENT_LABEL, ok=True,
+            detail="agrees for " + ", ".join(agreed),
+        ))
+
+    # Rows 3-6: the collection population by lifecycle state, from the rows.
+    try:
+        rows = reader.list_collections()
+    except Exception as exc:  # noqa: BLE001 — best-effort: the population rows are informational when the list cannot be read
+        _log.debug("doctor_embedding_profile_collections_unread", error=str(exc))
+        results.append(HealthResult(
+            label=_OFF_PROFILE_LABEL, ok=False, warn=True,
+            detail=f"collection rows unread ({type(exc).__name__}: {exc})",
+        ))
+        return results
+
+    def _names(state: str) -> list[str]:
+        return sorted(str(r.get("name", "")) for r in rows if r.get("lifecycle_state") == state)
+
+    off_profile: list[str] = []
+    for r in rows:
+        if r.get("lifecycle_state") != "live":
+            continue
+        prow = by_ct.get(r.get("content_type"))
+        if prow is not None and r.get("embedding_model") != prow["embedding_model"]:
+            off_profile.append(
+                f"{r.get('name')} ({r.get('embedding_model')} vs profile {prow['embedding_model']})"
+            )
+    off_profile.sort()
+    if off_profile:
+        results.append(HealthResult(
+            label=_OFF_PROFILE_LABEL, ok=False, warn=True,
+            detail=(
+                f"{len(off_profile)} live collection(s) under a model other than the "
+                f"profile's (reads still route by the row's own model): {_name_list(off_profile)}"
+            ),
+            fix_suggestions=["re-embed under the current profile: nx collection reindex <name>"],
+        ))
+    else:
+        results.append(HealthResult(label=_OFF_PROFILE_LABEL, ok=True, detail="none"))
+
+    disputed = _names("disputed")
+    results.append(
+        HealthResult(
+            label=_DISPUTED_LABEL, ok=False,
+            detail=f"{len(disputed)} collection(s) whose bytes disagree with their row: {_name_list(disputed)}",
+            fix_suggestions=["re-index under the current profile: nx collection reindex <name>"],
+        ) if disputed else HealthResult(label=_DISPUTED_LABEL, ok=True, detail="none")
+    )
+    dormant = _names("dormant")
+    results.append(
+        HealthResult(
+            label=_DORMANT_LABEL, ok=False,
+            detail=f"{len(dormant)} collection(s) referenced but empty: {_name_list(dormant)}",
+            fix_suggestions=[
+                "referenced but empty: re-index it (nx collection reindex <name>) "
+                "or remove the references",
+            ],
+        ) if dormant else HealthResult(label=_DORMANT_LABEL, ok=True, detail="none")
+    )
+    quarantined = _names("quarantine")
+    results.append(
+        HealthResult(
+            label=_QUARANTINED_LABEL, ok=False, warn=True,
+            detail=f"{len(quarantined)} quarantined collection(s): {_name_list(quarantined)}",
+            fix_suggestions=[
+                "quarantined chunks are restored when a re-index references them again and "
+                "expire after NX_GC_QUARANTINE_DAYS; curate with nx collection shape",
+            ],
+        ) if quarantined else HealthResult(label=_QUARANTINED_LABEL, ok=True, detail="none")
+    )
+    return results
+
+
 # RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15: manifest_orphan_report,
 # _compact_position_ranges, _check_dangling_manifests, and their
 # constants (_DANGLING_MANIFEST_NAME_THRESHOLD, _MANIFEST_ORPHANS_SAMPLE_
@@ -5210,7 +5408,7 @@ def _check_chash_conformance_report() -> list[HealthResult]:
     # never crash this check or hide the primary (non_)conformant result.
     unroutable_collections: list[str] = []
     try:
-        from nexus.corpus import is_conformant_collection_name, parse_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle
+        from nexus.corpus import embedding_model_for_collection_name, is_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle
         from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid a heavy/optional import at module load
         from nexus.db.reconcile import dim_for_model_token  # noqa: PLC0415 — deferred to avoid import cycle; the canonical dim table (nexus-h1zu0)
 
@@ -5219,8 +5417,21 @@ def _check_chash_conformance_report() -> list[HealthResult]:
             name = str(c.get("name", ""))
             if not name or not is_conformant_collection_name(name):
                 continue
-            token = parse_conformant_collection_name(name)["embedding_model"]
-            if dim_for_model_token(token) is None:
+            # RDR-204 Phase 3 (nexus-ft04v.26): this is class (d), not (b)
+            # -- the whole POINT of this scan is to find a
+            # conformant-SHAPED collection /v1/vectors/stats lists that
+            # may have no catalog row at all (unregistered, or a legacy
+            # pre-Phase-1 collection). collection_model (class b) READS
+            # the row and RAISES CollectionNotRegisteredError when absent
+            # -- inside this method's blanket `except Exception`, that
+            # silently zeroed unroutable_collections for the WHOLE scan
+            # the instant any one conformant-but-unregistered collection
+            # existed, masking the exact false-clean-by-omission finding
+            # this probe exists to catch (nexus-4ijv4). The name's own
+            # embedded model token, never the row, is what a name-versus-
+            # row diagnostic reads.
+            token = embedding_model_for_collection_name(name)
+            if token is not None and dim_for_model_token(token) is None:
                 unroutable_collections.append(name)
         unroutable_collections = sorted(set(unroutable_collections))
     except Exception as exc:  # noqa: BLE001 — best-effort enrichment only; never hides the primary result
@@ -5695,6 +5906,10 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
     # real anchor is not known until the walk ends; filtered against it after.
     candidates: list[tuple[str, datetime]] = []
     candidates_truncated = 0
+    # GH #1512 (nexus-kt7f4): the owner prefix of each named candidate, so the
+    # remedy can be split by owner kind below -- `nx index <path> --force`
+    # applies to a repo file and to nothing else.
+    candidate_prefix: dict[str, str] = {}
     # nexus-oiu1t: the install's OWN evidence that it has run a fenced
     # producer — the earliest document carrying a real index_state. A fact
     # about THIS install, unlike a release-tag date, which assumes the user
@@ -5764,6 +5979,8 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
                             or "?"
                         )
                         candidates.append((ident, ia_dt))
+                        _tumbler = str(getattr(entry, "tumbler", "") or "")
+                        candidate_prefix[ident] = ".".join(_tumbler.split(".")[:2])
                     else:
                         candidates_truncated += 1
                 continue
@@ -5879,6 +6096,26 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
     anchor = proven_anchor if proven_anchor is not None else earliest_stamped_dt
     post_anchor = [c for c in candidates if anchor is not None and c[1] > anchor]
 
+    # GH #1512 (nexus-kt7f4): a candidate under a NON-repo owner (the curator
+    # owner of the knowledge store, 1.1.*) has no file path, so the repo
+    # remedy cannot apply; those get their own count and remedy. Owner kinds
+    # come from the owner table; a table that cannot be read leaves every
+    # candidate classified as a repo file, the pre-GH-1512 behaviour.
+    non_repo_count = 0
+    if post_anchor:
+        try:
+            owner_types = {
+                str(o.get("tumbler_prefix", "")): str(o.get("owner_type", ""))
+                for o in cat.list_owners(include_deactivated=True)
+            }
+        except Exception as exc:  # noqa: BLE001 — best-effort classification, must not crash `nx doctor`
+            _log.debug("doctor_fence_owner_kinds_unavailable", error=str(exc))
+            owner_types = {}
+        non_repo_count = sum(
+            1 for ident, _at in post_anchor
+            if owner_types.get(candidate_prefix.get(ident, ""), "repo") != "repo"
+        )
+
     if post_anchor:
         # A document landed AFTER this install demonstrably had a fully-fenced
         # client and still carries no stamp — a NEW producer regression. Never
@@ -5923,6 +6160,15 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
             "boundary — this check cannot attribute them."
             if undated_reported_null > 0 else ""
         )
+        non_repo_note = (
+            f" {non_repo_count} of the named document(s) belong to a non-repo "
+            "owner (the knowledge store's curator owner): they have no file "
+            "path, so `nx index --force` cannot apply to them; a store put or "
+            "a bulk import wrote them before that path was fenced, and "
+            "`nx catalog reconcile-fences` stamps the ones whose manifest is "
+            "whole (GH #1512)."
+            if non_repo_count else ""
+        )
         results.append(HealthResult(
             label=label, ok=False, warn=True,
             detail=(
@@ -5957,9 +6203,14 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
                     "— this reading is the cautious one.)"
                     if run_ids_dropped and proven_anchor is None else ""
                 )
-                + f"{legacy_note}{undated_note}"
+                + f"{legacy_note}{undated_note}{non_repo_note}"
             ),
             fix_suggestions=(
+                [
+                    "nx catalog reconcile-fences --dry-run   (the non-repo "
+                    "document(s): stamp the whole ones, then drop --dry-run)",
+                ] if non_repo_count else []
+            ) + (
                 [
                     "nx index <path> --force   (re-index ONLY the named "
                     "document(s) above — this clears the symptom, not the "
@@ -6291,6 +6542,10 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     # point at `nx collection prune`. Applies in both modes; degrades
     # internally.
     results.extend(_check_dimension_orphans())
+    # RDR-204 Day 2 (nexus-ft04v.31): the engine's embedding profile, the
+    # client's intent against it, and the collection population by
+    # lifecycle state. Both modes; degrades internally.
+    results.extend(_check_embedding_profile())
     # _check_dangling_manifests (nexus-5xn3k AC5) RETIRED here (RDR-191
     # Phase 6, nexus-o8dil.33) — the manifest-chunk FK makes the dangling
     # state it detected (a POPULATED manifest whose chashes no longer

@@ -184,9 +184,32 @@ def _patch_t2(t2_path, monkeypatch):
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _mock_t3(collections: list[dict]) -> MagicMock:
-    """Create a mock T3 with preset list_collections and inject it."""
+    """Create a mock T3 with preset list_collections and inject it.
+
+    RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26): mcp_infra's collection
+    cache (and therefore corpus.collection_content_type/collection_owner/
+    collection_model, which now read it instead of parsing) is fed by
+    exactly this ``list_collections()`` response. Every dict here that
+    does not already carry a catalog-row field gets one derived from its
+    name's first segment (the SAME convention the retired name parser
+    used) -- a real Phase-2 engine joins these onto the identical
+    ``/v1/vectors/stats`` response this mock replaces, so back-filling
+    them here is what makes the mock a faithful stand-in, not a
+    workaround. A caller that wants to test the NO-ROW case passes those
+    keys explicitly omitted-and-then-popped, or a dict with them already
+    set to something else -- this only fills gaps, never overwrites.
+    """
+    filled = []
+    for c in collections:
+        row = dict(c)
+        name = row.get("name", "")
+        row.setdefault("content_type", name.partition("__")[0] if "__" in name else "")
+        row.setdefault("owner_id", name.partition("__")[2] if "__" in name else name)
+        row.setdefault("embedding_model", "test-model")
+        row.setdefault("lifecycle_state", "live")
+        filled.append(row)
     mock = MagicMock()
-    mock.list_collections.return_value = collections
+    mock.list_collections.return_value = filled
     _inject_t3(mock)
     return mock
 
@@ -1330,8 +1353,8 @@ def test_collections_cache_ttl_expiry_refetches():
     # Force TTL expiry by rewinding the cached timestamp past the
     # TTL window, then update the mock to return a different set so
     # we can verify the re-fetch path returns fresh state.
-    names, counts, _ts = mi._collections_cache
-    mi._collections_cache = (names, counts, 0.0)  # 0.0 << time.monotonic() - TTL
+    names, counts, rows, _ts = mi._collections_cache
+    mi._collections_cache = (names, counts, rows, 0.0)  # 0.0 << time.monotonic() - TTL
     mock.list_collections.return_value = [{"name": "knowledge__after", "count": 1}]
 
     third = _get_collection_names()
@@ -1341,6 +1364,56 @@ def test_collections_cache_ttl_expiry_refetches():
     assert mock.list_collections.call_count == initial_calls + 1, (
         "TTL expiry must trigger exactly one re-query"
     )
+
+
+def test_prime_collections_cache_serves_get_collection_row_without_a_fetch():
+    """RDR-204 Phase 3 fix round (nexus-ft04v.28 S1): a caller that
+    already fetched ``list_collections()`` for its own reasons (e.g.
+    ``nx search``'s ``--corpus`` resolver) can prime this module's cache
+    with that SAME response -- a subsequent ``get_collection_row`` call
+    must be served from the primed cache, never trigger its own
+    ``list_collections()`` round trip."""
+    import nexus.mcp_infra as mi
+
+    mock = _mock_t3([{"name": "knowledge__unused", "count": 0}])
+    rows = [
+        {
+            "name": "code__nexus-1-1__bge-base-en-v15-768__v1", "count": 3,
+            "content_type": "code", "owner_id": "nexus-1-1",
+            "embedding_model": "bge-base-en-v15-768", "lifecycle_state": "live",
+        },
+    ]
+
+    mi.prime_collections_cache(rows)
+
+    row = mi.get_collection_row("code__nexus-1-1__bge-base-en-v15-768__v1")
+    assert row == {
+        "content_type": "code", "owner_id": "nexus-1-1",
+        "embedding_model": "bge-base-en-v15-768", "lifecycle_state": "live",
+    }
+    mock.list_collections.assert_not_called()
+
+
+def test_prime_collections_cache_overwrites_a_still_fresh_cache():
+    """A caller's own fetch is always FRESHER than whatever mcp_infra
+    already has cached -- prime_collections_cache overwrites even when
+    the existing entry has not gone stale yet, never "the first write
+    wins"."""
+    import nexus.mcp_infra as mi
+
+    mi.prime_collections_cache([
+        {"name": "knowledge__old", "count": 1, "content_type": "knowledge",
+         "owner_id": "old", "embedding_model": "minilm-l6-v2-384",
+         "lifecycle_state": "live"},
+    ])
+    mi.prime_collections_cache([
+        {"name": "knowledge__new", "count": 2, "content_type": "knowledge",
+         "owner_id": "new", "embedding_model": "minilm-l6-v2-384",
+         "lifecycle_state": "live"},
+    ])
+
+    assert mi.get_collection_row("knowledge__old") is None
+    assert mi.get_collection_row("knowledge__new") is not None
 
 
 # ── Pagination ───────────────────────────────────────────────────────────────
@@ -1436,10 +1509,17 @@ def test_page_beyond_lookahead_refetches_wider(monkeypatch):
     assert len(calls) == 2
     assert calls[1] >= 22  # refetched wide enough for the requested window
 
-def test_store_put_invalidates_page_cache(t3, monkeypatch):
+def test_store_put_invalidates_page_cache(t3, monkeypatch, local_mode_write):
     """Batch-f1655f55 critique fold: a write inside the TTL window must not
     leave a same-identity page burst serving pre-write results — store_put
-    clears the page cache so the next search refetches."""
+    clears the page cache so the next search refetches.
+
+    local_mode_write (coordinator ruling 2026-09-09): this test reaches
+    the REAL substrate write, which registers under the box's actual live
+    embedding profile (bge for this box) -- the module's cloud_mode
+    default would register with voyage-context-3 instead, 422ing against
+    that real profile. The test's own assumption to fix, not the engine's.
+    """
     from nexus.mcp import core as mcp_core
     _fresh_page_cache(monkeypatch)
     store_put(content="seed doc", collection="fixture-subject", title="cache-seed")
@@ -2409,3 +2489,42 @@ def test_store_put_refuses_a_placeholder_collection() -> None:
     result = store_put(content="a note", collection="knowledge", title="placeholder-probe")
     assert result.startswith("Error:"), result
     assert "placeholder" in result and "docs/collections.md" in result
+
+
+# ── nexus-onn7s: annotated context block on the text renders ────────────────
+
+
+def test_search_render_leads_with_the_reader_instruction_and_annotates_age(t3):
+    from nexus.context_annotations import READER_INSTRUCTION
+
+    coll = "knowledge__ctxblock__voyage-context-3__v1"
+    t3.put(collection=coll, content="a note about annotated retrieval context", title="ctxnote")
+    out = _search_render(query="annotated retrieval context", corpus=coll, limit=5, offset=0)
+    assert out.startswith(READER_INSTRUCTION), out[:120]
+    assert "indexed 20" in out and "d ago)" in out, out
+    # structured output is untouched by the annotation
+    structured = _search_render(query="annotated retrieval context", corpus=coll, limit=5, offset=0, structured=True)
+    assert set(structured) == {"ids", "tumblers", "distances", "collections", "chunk_collections", "chunk_text_hash"}
+
+
+# ── RDR-204 Phase 3 funnel (nexus-ft04v.21): _resolve_corpus_target ─────────
+
+def test_resolve_corpus_target_funnel_pinned(monkeypatch):
+    """The two raw sites in ``_resolve_corpus_target`` (the ``corpus ==
+    "all"`` prefix-collection loop's ``n.split("__", 1)[0]``, and the
+    per-part ``"__" in part`` dispatch) became funnel-helper calls. Pin:
+    a dunder-free collection name, a quarantine-prefixed non-conformant
+    name, and a conformant name all resolve exactly as the raw string ops
+    used to."""
+    from nexus.mcp import core as mcp_core
+
+    all_names = ["rgcache", "quarantine-docs__x", "code__myrepo__voyage-code-3__v1"]
+    monkeypatch.setattr(mcp_core, "_get_collection_names", lambda: all_names)
+    monkeypatch.setattr(
+        mcp_core, "_get_collection_counts", lambda: dict.fromkeys(all_names, 100),
+    )
+
+    target = mcp_core._resolve_corpus_target(
+        "rgcache,quarantine-docs__x,code__myrepo__voyage-code-3__v1", t3=None,
+    )
+    assert target == all_names

@@ -56,6 +56,22 @@ def _seed_topics(taxonomy: Any, rows: list[dict[str, Any]]) -> list[int]:
 class TestGenerateContextL1:
     """Core L1 cache generation from taxonomy topics."""
 
+    @pytest.fixture(autouse=True)
+    def _stub_collection_rows(self, monkeypatch):
+        # RDR-204 Phase 3 class (c) repoint (nexus-ft04v.26, commit
+        # 2cdde2306): generate_context_l1's prefix grouping now reads
+        # nexus.mcp_infra.get_collection_row directly (a no-row
+        # collection groups under its own FULL name, never a guess) --
+        # this class's fixture names are plain conformant-ish 2-segment
+        # names with no quarantine/lookalike traps, so the shared
+        # name-derived emitter is faithful here.
+        from tests.conftest import catalog_row_for_collection_name
+
+        monkeypatch.setattr(
+            "nexus.mcp_infra.get_collection_row",
+            lambda name: catalog_row_for_collection_name(name),
+        )
+
     def test_with_topics(self, db: T2Database, tmp_path: Path) -> None:
         """Generates grouped topic map from taxonomy."""
         from nexus.context import generate_context_l1
@@ -437,3 +453,37 @@ class TestServiceModeL1(object):
         text = out.read_text()
         assert "T7" in text  # highest doc_count survives the top-5 cut
         assert "T1" not in text and "T2" not in text  # lowest two cut
+
+    def test_prefix_grouping_pinned_for_dunder_free_and_quarantine_names(
+        self, tmp_path: Path,
+    ) -> None:
+        """RDR-204 Phase 3 funnel (nexus-ft04v.21), superseded for the
+        row-based path by the class-(c) repoint (nexus-ft04v.26, commit
+        2cdde2306): the prefix-grouping loop's original
+        ``collection.split("__")[0] if "__" in collection else
+        collection`` ternary went through an intermediate
+        candidate-string-derived form (bc0fa5841, first-segment fallback)
+        before landing on today's row-based read, which groups a
+        no-row collection under its OWN FULL NAME rather than a
+        name-parsed first segment (mirroring
+        ``_group_collections_by_model``'s "no info -> own group, never
+        guessed" precedent) -- no ``get_collection_row`` mock here means
+        both fixture names are genuinely row-less, so this pins that
+        current, reviewed behavior: a bare (no "__") name groups under
+        itself either way (coincides with both the old and new fallback),
+        and an unregistered "__"-having name -- quarantine-prefixed or
+        not -- now groups under its own FULL name, not a truncated first
+        segment."""
+        from nexus.context import generate_context_l1
+
+        fake = self._FakeHttpTaxonomy([
+            {"collection": "rgcache", "label": "Bare Name Topic", "doc_count": 30},
+            {"collection": "quarantine-docs__x", "label": "Quarantined Topic", "doc_count": 20},
+        ])
+        out = generate_context_l1(fake, output_path=tmp_path / "l1.md")
+        assert out is not None
+        text = out.read_text()
+        assert "rgcache:" in text
+        assert "quarantine-docs__x:" in text
+        assert "Bare Name Topic" in text
+        assert "Quarantined Topic" in text

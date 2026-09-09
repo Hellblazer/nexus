@@ -4761,3 +4761,97 @@ class TestHydrationCarriesDisplayTruncationMarker:
         self._stub(monkeypatch, ["a complete short note."])
         _, args = _hydrate_operator_args("summarize", {"ids": ["a"]})
         assert args["content"] == "a complete short note."
+
+
+class TestSourceNotesOnHydratedContent:
+    """nexus-onn7s, nx_answer half: the operator prompt sees the same
+    document, collection and dates a person sees on the search render.
+    ``store_get_many``'s ``source_notes`` ride the hydration call and
+    are prefixed as a ``[source: ...]`` line; a hydration shape without
+    the key (an older cache, a test double) leaves content untouched."""
+
+    def test_chash_path_prefixes_each_chunk_with_its_note(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        fake_catalog = SimpleNamespace(docs_for_chashes=lambda chashes: {}, resolve_many=lambda ids: {})
+        fake_hydrated = {
+            "contents": ["passage one", "passage two"],
+            "source_notes": ["Doc A · knowledge__k · indexed 2026-09-01 (7d ago)", ""],
+        }
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ):
+            _, args = _hydrate_operator_args(
+                "summarize", {"ids": ["a" * 64, "b" * 64]},
+            )
+        assert args["content"] == (
+            "[source: Doc A · knowledge__k · indexed 2026-09-01 (7d ago)]\npassage one\n\npassage two"
+        )
+
+    def test_hydration_without_source_notes_is_unchanged(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        fake_catalog = SimpleNamespace(docs_for_chashes=lambda chashes: {}, resolve_many=lambda ids: {})
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value={"contents": ["p1", "p2"]},
+        ):
+            _, args = _hydrate_operator_args("rank", {"ids": ["a" * 64, "b" * 64]})
+        assert json.loads(args["items"]) == ["p1", "p2"]
+
+    def test_summarize_and_generate_prompts_carry_the_source_instruction(self) -> None:
+        from nexus.context_annotations import SOURCE_INSTRUCTION
+        from nexus.mcp import operator_requests as req
+
+        prompt, _ = req.build_summarize_request("[source: Doc A]\nbody")
+        assert SOURCE_INSTRUCTION in prompt and "[source: Doc A]\nbody" in prompt
+        prompt, _ = req.build_generate_request("summary", "[source: Doc A]\nbody")
+        assert SOURCE_INSTRUCTION in prompt
+        # an unmarked payload pays nothing
+        prompt, _ = req.build_summarize_request("body")
+        assert SOURCE_INSTRUCTION not in prompt
+
+    def test_step_contents_reference_carries_the_prior_steps_source_notes(self) -> None:
+        """The pre-hydrated pipe: an explicit store_get_many step, then an
+        operator reading ``$step1.contents``. The notes ride the reference."""
+        from nexus.plans.runner import _resolve_value
+
+        prior = {
+            "contents": ["passage one", "passage two", ""],
+            "missing": [],
+            "source_notes": ["Doc A · knowledge__k · indexed 2026-09-01 (7d ago)", "", "x"],
+        }
+        out = _resolve_value("$step1.contents", bindings={}, step_outputs=[prior])
+        assert out == [
+            "[source: Doc A · knowledge__k · indexed 2026-09-01 (7d ago)]\npassage one",
+            "passage two",
+            "",
+        ]
+        # other fields, and a step without notes, resolve verbatim
+        assert _resolve_value("$step1.missing", bindings={}, step_outputs=[prior]) == []
+        bare = {"contents": ["p"]}
+        assert _resolve_value("$step1.contents", bindings={}, step_outputs=[bare]) == ["p"]
+
+    def test_bundle_header_carries_the_source_instruction(self) -> None:
+        from nexus.context_annotations import SOURCE_INSTRUCTION
+        from nexus.plans.bundle import OperatorBundle, OperatorBundleStep, compose_bundle_prompt
+
+        bundle = OperatorBundle(steps=(
+            OperatorBundleStep(plan_index=1, tool="operator_summarize", args={"content": "[source: Doc A]\nbody"}),
+        ))
+        prompt, _ = compose_bundle_prompt(bundle)
+        assert SOURCE_INSTRUCTION in prompt
+        plain = OperatorBundle(steps=(
+            OperatorBundleStep(plan_index=1, tool="operator_summarize", args={"content": "body"}),
+        ))
+        prompt, _ = compose_bundle_prompt(plain)
+        assert SOURCE_INSTRUCTION not in prompt

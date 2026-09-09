@@ -111,12 +111,18 @@ def migrate_fallback_cmd(
             f"fallback collection."
         )
 
-    if "__" not in source:
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): `src_row` (fetched above
+    # via the catalog-tier's own /collections/get) already carries
+    # content_type -- read it directly instead of a second, separately-
+    # cached lookup through collection_content_type (mcp_infra's
+    # /v1/vectors/stats-backed row cache), which would also raise
+    # CollectionNotRegisteredError for a registered-but-chunkless source.
+    content_type = src_row.get("content_type") or ""
+    if not content_type:
         raise click.ClickException(
             f"source {source!r} has no content-type prefix; cannot "
             f"derive a migration target."
         )
-    content_type = source.split("__", 1)[0]
 
     if not target_model:
         target_model = voyage_model_for_collection(source)
@@ -131,6 +137,10 @@ def migrate_fallback_cmd(
     from nexus.catalog.collection_name import owner_segment_for_tumbler  # noqa: PLC0415  — command-local import (nexus.catalog.collection_name)
 
     proposals: list[tuple[str, str]] = []
+    # nexus-ft04v.27: keep the owner segment each target was rendered from
+    # (keyed by target) so the registration loop below never has to parse
+    # a target name it just built back apart.
+    target_owners: dict[str, str] = {}
     for (tumbler,) in rows:
         owner = owner_segment_for_tumbler(tumbler)
         if not owner:
@@ -142,6 +152,7 @@ def migrate_fallback_cmd(
             continue
         target = f"{content_type}__{owner}__{target_model}__{target_version}"
         proposals.append((tumbler, target))
+        target_owners[target] = owner
 
     # nexus-qpet.3: aggregate by target so the operator can scan the
     # mapping at a glance. Per-doc lines below are kept for tests +
@@ -176,14 +187,12 @@ def migrate_fallback_cmd(
     for _, target in proposals:
         if target in targets_seen:
             continue
-        from nexus.corpus import parse_conformant_collection_name  # noqa: PLC0415  — command-local import (nexus.corpus)
-        segments = parse_conformant_collection_name(target)
         writer.register_collection(
             target,
-            content_type=segments["content_type"],
-            owner_id=segments["owner_id"],
-            embedding_model=segments["embedding_model"],
-            model_version=segments["model_version"],
+            content_type=content_type,
+            owner_id=target_owners[target],
+            embedding_model=target_model,
+            model_version=target_version,
         )
         targets_seen.add(target)
 

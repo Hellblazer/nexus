@@ -22,6 +22,7 @@ from nexus.corpus import (
     canonical_embedding_model,
     effective_embedding_model_for_writes,
     embedding_model_for_collection_name,
+    model_version_for_collection_name,
     t3_collection_name,
 )
 from nexus.db.local_ef import LOCAL_EMBEDDING_TOKENS, local_model_token
@@ -357,6 +358,37 @@ def test_parse_returns_none_for_legacy() -> None:
     assert embedding_model_for_collection_name("knowledge__papers") is None
 
 
+# ── model_version_for_collection_name (nexus-ft04v.27) ────────────────
+
+
+def test_model_version_reads_the_v_segment() -> None:
+    assert (
+        model_version_for_collection_name("docs__nexus-1-1__voyage-context-3__v1")
+        == "v1"
+    )
+    assert (
+        model_version_for_collection_name("code__nexus-1-1__voyage-code-3__v42")
+        == "v42"
+    )
+
+
+def test_model_version_accepts_non_canonical_test_model_tokens() -> None:
+    """Same permissive regex as ``is_conformant_collection_name`` and
+    ``embedding_model_for_collection_name`` -- no canonical/local-set
+    check, unlike ``CollectionName.parse``. This is what lets the
+    registration sites keep accepting fixture-only tokens like
+    ``stub-code-1024`` after nexus-ft04v.27's fix."""
+    assert (
+        model_version_for_collection_name("code__old__stub-code-1024__v3")
+        == "v3"
+    )
+
+
+def test_model_version_returns_none_for_legacy() -> None:
+    assert model_version_for_collection_name("docs__nexus-abc") is None
+    assert model_version_for_collection_name("knowledge__papers") is None
+
+
 # ── Bidirectional EF dispatch ────────────────────────────────────────
 
 
@@ -439,12 +471,27 @@ def test_dispatch_cloud_mode_voyage_conformant_name(t3_cloud) -> None:
         t3_cloud._build_embedding_fn("docs__owner-1__voyage-context-3__v1")
 
 
-def test_dispatch_cloud_mode_legacy_name(t3_cloud) -> None:
+def test_dispatch_cloud_mode_legacy_name(t3_cloud, monkeypatch) -> None:
     """nexus-sghyo: legacy two-segment names prefix-fallback to a
     Voyage model token (``knowledge__`` -> voyage-context-3), which now
     hits the same retired client-side-embed raise as the conformant-name
-    case above."""
+    case above.
+
+    RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26): the legacy-name fallback
+    goes through voyage_model_for_collection -> collection_content_type,
+    which now reads the catalog row instead of parsing "knowledge__papers"
+    -- fake a live "knowledge" row exactly like a real Phase-1-backfilled
+    legacy collection would carry.
+    """
     from nexus.db.t3 import IncompatibleCollectionError
+
+    monkeypatch.setattr(
+        "nexus.mcp_infra.get_collection_row",
+        lambda name: {
+            "content_type": "knowledge", "owner_id": "papers", "embedding_model": "voyage-context-3",
+            "lifecycle_state": "live",
+        } if name == "knowledge__papers" else None,
+    )
 
     with pytest.raises(IncompatibleCollectionError, match="voyage-context-3"):
         t3_cloud._build_embedding_fn("knowledge__papers")

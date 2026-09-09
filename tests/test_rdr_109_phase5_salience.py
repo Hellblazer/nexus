@@ -21,6 +21,28 @@ from nexus.salience import (
     token_overlap_boost,
 )
 from nexus.types import SearchResult
+from tests.conftest import catalog_row_for_collection_name
+
+
+@pytest.fixture(autouse=True)
+def _stub_collection_rows(monkeypatch):
+    """``_apply_salience_boost`` reads ``nexus.mcp_infra.get_collection_row``
+    directly (RDR-204 Phase 3 class (c) repoint, nexus-ft04v.26, commit
+    2cdde2306) instead of parsing the collection name -- stub it to derive
+    a row from the name via the shared test emitter, matching what a real
+    Phase-2 engine's ``/v1/vectors/stats`` join would report for these
+    fixture names. None of this file's tests are about registration state
+    (that is ``test_salience_boost_conformant_and_lookalike_prefixes``'s
+    lookalike-prefix case below, which the emitter still excludes
+    correctly since it derives content_type from the actual name syntax);
+    left unmocked, ``get_collection_row`` reaches
+    ``nexus.mcp_infra.get_t3()``'s real, process-wide singleton."""
+    import nexus.mcp_infra as mcp_infra
+
+    monkeypatch.setattr(
+        mcp_infra, "get_collection_row",
+        lambda name: catalog_row_for_collection_name(name),
+    )
 
 
 # ── salience module ──────────────────────────────────────────────────
@@ -169,6 +191,29 @@ def test_salience_boost_ignores_code_collections(monkeypatch) -> None:
     assert [r.id for r in out] == ["c1", "c2"]
     assert out[0].hybrid_score == pytest.approx(0.70)
     assert fake.requested == []  # aspects store never consulted
+
+
+def test_salience_boost_conformant_and_lookalike_prefixes(monkeypatch) -> None:
+    """RDR-204 Phase 3 funnel (nexus-ft04v.21): the collection-gating test
+    (``.startswith(("knowledge__", "docs__"))``) is now
+    ``collection_content_type(...) in ("knowledge", "docs")``. Pin both a
+    conformant 4-segment name (still targeted) and a near-miss prefix that
+    must stay excluded (``knowledgebase__`` starts with "knowledge" but its
+    first '__'-delimited segment is "knowledgebase", not "knowledge")."""
+    fake = _FakeAspectsStore({
+        "D": ["hybrid retrieval cross-encoder reranking"],
+        "E": ["hybrid retrieval cross-encoder reranking"],
+    })
+    monkeypatch.setattr(_ASPECTS_SEAM, lambda: fake)
+
+    from nexus.search_engine import _apply_salience_boost
+    results = [
+        _make_result("d", "docs__nexus__voyage-context-3__v1", "D", score=0.50),
+        _make_result("e", "knowledgebase__foo", "E", score=0.60),
+    ]
+    out = _apply_salience_boost(results, query="hybrid retrieval cross-encoder", weight=0.5)
+    assert fake.requested == ["D"]  # only the conformant docs__ result is targeted
+    assert [r.hybrid_score for r in out if r.id == "e"] == [0.60]  # lookalike untouched
 
 
 # TOMBSTONE (nexus-i711w Stage 2 A3): test_salience_boost_no_op_when_db_missing

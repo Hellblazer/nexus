@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.db.UnregisteredCollectionException;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.SQLDialect;
@@ -115,6 +116,16 @@ class PgVectorCombinedQueryContractTest {
             // tenant-B fixture (RLS)
             insertCollection(su, TENANT_B, COLL_B);
             seedMetaDoc(su, TENANT_B, 1024, COLL_B, "b1", "paper", 1.0, 0.0);
+
+            // RDR-204 Phase 2 (bead nexus-ft04v.16): the mixed-dim/mixed-model fail-loud
+            // tests below name COLL_MINI/COLL_CODE only to exercise
+            // requireHomogeneousDim/requireHomogeneousModel's guard -- neither ever had
+            // a chunk seeded under it, but both must still be REGISTERED now, or the
+            // per-collection CollectionRegistry lookup those guards run throws
+            // UnregisteredCollectionException before ever reaching the dim/model
+            // comparison the test actually means to exercise.
+            insertCollection(su, TENANT_A, COLL_MINI);
+            insertCollection(su, TENANT_A, COLL_CODE);
         }
     }
 
@@ -218,11 +229,27 @@ class PgVectorCombinedQueryContractTest {
     }
 
     @Test
-    void metadataScoped_rlsScoped_otherTenantSeesNothing() {
-        assertThat(repo.searchMetadataScoped(TENANT_A, Q, List.of(COLL_B), "paper", null, null, null, 10))
-            .as("tenant-A cannot see tenant-B's collection rows (RLS via SECURITY INVOKER)")
-            .isEmpty();
+    void metadataScoped_rlsScoped_otherTenantSeesNothing_failsLoud() {
+        // RDR-204 Phase 2 (bead nexus-ft04v.16, coordinator ruling): COLL_B is
+        // registered only under TENANT_B (RLS-scoped like every catalog_collections
+        // row) -- dispatch now resolves the row through CollectionRegistry before the
+        // RLS-scoped query ever runs, so TENANT_A calling with COLL_B fails loud
+        // (UnregisteredCollectionException) rather than the old silent empty result.
+        assertThatThrownBy(() ->
+            repo.searchMetadataScoped(TENANT_A, Q, List.of(COLL_B), "paper", null, null, null, 10))
+            .as("tenant-A has no catalog_collections row for COLL_B (RLS) -- fail loud")
+            .isInstanceOf(UnregisteredCollectionException.class)
+            .hasMessageContaining(COLL_B);
     }
+
+    // RDR-204 Phase 2 fix round 2 (nexus-ft04v.16 fix round 2, S1): the fan-out
+    // skip's caller-visibility contract for metadata-scoped and graph-hop is now
+    // tested at the HTTP level in VectorHandlerCombinedQueryModelGuardTest (which
+    // already has a full handler test for both routes), and for aspect-scoped in
+    // VectorHandlerAspectFieldGuardTest, per the coordinator's design change --
+    // the caller-visible channel is the X-Nexus-Skipped-Collections response
+    // header, not a Tokened accessor a repository-level test can see the
+    // caller's own view of.
 
     @Test
     void topicScoped_chunkLevel_rankedByDistance() {

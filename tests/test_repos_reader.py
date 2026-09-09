@@ -42,8 +42,13 @@ from nexus.repos import (
 # real (bge, in local mode) profile. Resolve the box's real write-time
 # model per content_type instead (both collapse to the SAME local token in
 # local mode, which these tests do not depend on being distinct).
-_CODE_MODEL = nexus_corpus.effective_embedding_model_for_writes("code")
-_DOCS_MODEL = nexus_corpus.effective_embedding_model_for_writes("docs")
+#
+# RDR-204 Phase 3 item 3 (nexus-ft04v.26): _write_intent_embedding_model, not
+# effective_embedding_model_for_writes -- see test_catalog_backfill_collections.py's
+# identical comment for why (the latter now makes a real network call, unsafe
+# at module collection time).
+_CODE_MODEL = nexus_corpus._write_intent_embedding_model("code")
+_DOCS_MODEL = nexus_corpus._write_intent_embedding_model("docs")
 
 
 @pytest.fixture(autouse=True)
@@ -130,7 +135,7 @@ def _seed_owner_with_collections(
             docs_coll,
             content_type=ct,
             owner_id=owner_id,
-            embedding_model=nexus_corpus.effective_embedding_model_for_writes(ct),
+            embedding_model=nexus_corpus._write_intent_embedding_model(ct),
             model_version="1",
         )
     return str(owner)

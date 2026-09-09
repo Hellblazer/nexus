@@ -244,6 +244,13 @@ _UPDATE_MANY_PAGE = 1000
 _DOCS_FOR_CHASHES_PAGE = 1000
 
 
+class EmbeddingProfileRouteMissingError(RuntimeError):
+    """``GET /v1/catalog/embedding_profile`` is not served by the engine the
+    client reached (RDR-204, nexus-ft04v.33): the engine predates the Phase 2
+    route. Raised instead of any default, since a guessed model is a
+    data-correctness failure, not a degraded mode."""
+
+
 def _engine_error_detail(exc: httpx.HTTPStatusError) -> str:
     """Best-effort human text from an engine error response.
 
@@ -2751,6 +2758,56 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     def is_legacy_collection(self, name: str) -> bool:
         coll = self.get_collection(name)
         return bool(coll.get("legacy_grandfathered", False)) if coll else False
+
+    def embedding_profile(self) -> list[dict[str, Any]]:
+        """The calling tenant's install-scoped embedding profile, one row per
+        content type: ``{content_type, embedding_model, dimension}``.
+
+        ``GET /v1/catalog/embedding_profile`` (RDR-204, nexus-ft04v.33). The
+        engine is the profile's only writer; this is a read, returned as the
+        engine sends it. An unprofiled tenant gets ``[]`` and NOT a default:
+        a client that fills in a model here reintroduces the GH #667 class.
+        An engine below the Phase 2 route (404, or 405 from an older switch)
+        raises :class:`EmbeddingProfileRouteMissingError`; a body whose
+        ``count`` disagrees with its rows, or a row missing a field, raises
+        ``ValueError``. The profile is small and per-tenant, so there is no
+        memo: every call reads the wire.
+        """
+        try:
+            result = self._get("/embedding_profile")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (404, 405):
+                raise EmbeddingProfileRouteMissingError(
+                    "GET /v1/catalog/embedding_profile is not served by this engine "
+                    f"(HTTP {exc.response.status_code}: {_engine_error_detail(exc)}). "
+                    "The route ships with the RDR-204 Phase 2 engine; upgrade the "
+                    "engine (nx upgrade / nx daemon service start) rather than "
+                    "assuming a model."
+                ) from exc
+            raise
+        if not isinstance(result, dict) or "profile" not in result:
+            raise ValueError(f"embedding_profile: malformed response {result!r}")
+        rows = result.get("profile")
+        if not isinstance(rows, list):
+            raise ValueError(f"embedding_profile: 'profile' is not a list: {rows!r}")
+        count = result.get("count")
+        if count != len(rows):
+            raise ValueError(
+                f"embedding_profile: count {count!r} disagrees with {len(rows)} row(s)"
+            )
+        for row in rows:
+            if (
+                not isinstance(row, dict)
+                or not row.get("content_type")
+                or not row.get("embedding_model")
+                or not isinstance(row.get("dimension"), int)
+                or isinstance(row.get("dimension"), bool)
+            ):
+                raise ValueError(f"embedding_profile: malformed row {row!r}")
+        return [
+            {"content_type": r["content_type"], "embedding_model": r["embedding_model"], "dimension": r["dimension"]}
+            for r in rows
+        ]
 
     def collection_for(
         self,

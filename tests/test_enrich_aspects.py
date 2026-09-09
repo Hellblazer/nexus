@@ -186,6 +186,19 @@ class TestRouting:
         assert "No extractor config" in result.output
         assert "knowledge__" in result.output
 
+    def test_unsupported_docs_collection_names_the_z70w_note(self, env) -> None:
+        """nexus-ft04v.23: ``collection.startswith("docs__")`` funnelled to
+        ``collection_content_type(collection) == "docs"`` -- the extra
+        docs__-specific note (nexus-z70w) must still fire for a docs__
+        collection, and only for one (code__nexus above gets the generic
+        message with no z70w note)."""
+        runner = CliRunner()
+        result = runner.invoke(enrich, ["aspects", "docs__manual"])
+        assert result.exit_code == 0
+        assert "No extractor config" in result.output
+        assert "nexus-z70w" in result.output
+        assert "not paper-shaped" in result.output
+
 
 # ── --dry-run ───────────────────────────────────────────────────────────────
 

@@ -642,3 +642,34 @@ def test_field_shape_checks_reference_real_routes() -> None:
         f"FakeCatalogHandler's do_GET/do_POST: {sorted(unknown)} — typo, or "
         f"the route was renamed/removed"
     )
+
+
+# ── lifecycle_state vocabulary (RDR-204, nexus-ft04v.33 follow-up) ───────────
+
+_HYGIENE_002 = (
+    _REPO_ROOT / "service/src/main/resources/db/changelog"
+    / "hygiene-002-collection-attributes-walk.xml"
+)
+
+
+def _lifecycle_state_vocabulary() -> set[str]:
+    """The CHECK constraint's literal set, read from the changeset that
+    declares it, so a vocabulary change on the wire fails this pin."""
+    text = _HYGIENE_002.read_text()
+    m = re.search(r"CHECK \(lifecycle_state IN \(([^)]*)\)\)", text)
+    assert m, f"no lifecycle_state CHECK in {_HYGIENE_002}"
+    values = set(re.findall(r"'([a-z]+)'", m.group(1)))
+    assert values, "empty lifecycle_state vocabulary (vacuous pin)"
+    return values
+
+
+def test_fake_collection_rows_speak_the_lifecycle_state_vocabulary() -> None:
+    """The field-shape parity test above compares KEYS only, so it went green
+    on a fake that said ``"active"`` (a821d6622) while the wire vocabulary
+    is ``live | quarantine | dormant | disputed``. Pin every literal the
+    fake's collection routes send to the CHECK constraint's set."""
+    vocab = _lifecycle_state_vocabulary()
+    fake_source = _read(_FAKE_HANDLER)
+    sent = set(re.findall(r'"lifecycle_state":\s*"([a-z]+)"', fake_source))
+    assert sent, "the fake sends no lifecycle_state literal (vacuous pin)"
+    assert sent <= vocab, f"fake lifecycle_state literal(s) outside the wire vocabulary: {sorted(sent - vocab)}"

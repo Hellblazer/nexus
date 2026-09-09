@@ -6,12 +6,12 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
+import dev.nexus.service.db.CollectionRegistry;
 import dev.nexus.service.db.StagingPromoteOps;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.jooq.binding.VectorBinding;
 import dev.nexus.service.vectors.EmbedderRouter;
-import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.Field;
 import org.jooq.JSONB;
 import org.jooq.Table;
@@ -340,7 +340,8 @@ public final class StagingHandler implements HttpHandler {
             if (batch.isEmpty()) break;
             List<String> texts = new ArrayList<>(batch.size());
             for (Map<String, Object> r : batch) texts.add((String) r.get("chunk_text"));
-            List<float[]> vectors = docEmbedderRouter.embedForCollection(collection, texts);
+            List<float[]> vectors = docEmbedderRouter.embedForCollection(
+                tenantScope, tenant, collection, texts);
             for (int i = 0; i < batch.size(); i++) {
                 String ref = (String) batch.get(i).get("legacy_ref");
                 Vector v = Vector.of(vectors.get(i));
@@ -371,8 +372,9 @@ public final class StagingHandler implements HttpHandler {
         if (collection == null || collection.isBlank()) {
             throw new IllegalArgumentException("collection is required");
         }
-        // H1: the name-implied dim from the SAME dispatch serving uses.
-        int impliedDim = PgVectorRepository.dimForCollection(collection);
+        // H1: the SAME row-authoritative dim serving uses (RDR-204 Phase 2, bead
+        // nexus-ft04v.16 — never a name-implied segment parse).
+        int impliedDim = CollectionRegistry.lookup(tenantScope, tenant, collection).dimension();
         Map<String, Object> counts = promoteOps.promoteCollection(tenant, collection, impliedDim);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(counts));
     }

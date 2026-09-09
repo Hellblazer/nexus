@@ -19,6 +19,7 @@ from nexus.commands._helpers import (
     t2_shared_client_from_context as _command_shared_t2_client,
 )
 from nexus.db.http_vector_client import VectorServiceError
+from nexus.db.t2.http_taxonomy_store import TopicPersistConflictError
 
 
 def _T2Database(path, *, client=None):
@@ -717,7 +718,9 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
         if is_local_mode() and any(fnmatch(collection, pat) for pat in exclude):
             click.echo(
                 f"Warning: {collection!r} matches taxonomy.local_exclude_collections "
-                f"({exclude}). Local MiniLM clusters poorly on code. Proceeding anyway."
+                f"({exclude}); locally embedded code clusters poorly. Discovering anyway; "
+                "a 'skipped' line below means discovery itself found nothing to persist, "
+                "not this exclusion."
             )
         targets = [collection]
 
@@ -726,13 +729,23 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
 
     total_topics = 0
     total_labeled = 0
+    failed: list[str] = []
     with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         for i, col_name in enumerate(targets, 1):
             if len(targets) > 1:
                 click.echo(f"[{i}/{len(targets)}] {col_name}")
-            count = discover_for_collection(
-                col_name, db.taxonomy, t3, force=force,
-            )
+            try:
+                count = discover_for_collection(
+                    col_name, db.taxonomy, t3, force=force,
+                )
+            except TopicPersistConflictError as exc:
+                # GH #1489 (nexus-zhxxd): a persist conflict on a collection
+                # with no topics is a store defect, not a race. Name it per
+                # collection, keep going, and fail the run at the end -- the
+                # old path logged it at INFO, printed "skipped" and exited 0.
+                click.echo(f"  {col_name}: FAILED: {exc}", err=True)
+                failed.append(col_name)
+                continue
             if count:
                 click.echo(f"  {col_name}: {count} topics")
                 total_topics += count
@@ -767,6 +780,10 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
                 _log.warning("taxonomy_context_l1_generation_failed", error=str(exc))
 
     click.echo(f"\nTotal: {total_topics} topics, {total_labeled} labeled.")
+    if failed:
+        raise click.ClickException(
+            f"topic persist failed for {len(failed)} collection(s): {', '.join(failed)}"
+        )
 
 
 @taxonomy.command("rebuild")
@@ -2395,6 +2412,15 @@ def label_cmd(collection: str, relabel_all: bool) -> None:
 @click.option("--persist", is_flag=True, help="Write projection assignments (assigned_by='projection')")
 @click.option("--backfill", is_flag=True, help="Project all collections against each other")
 @click.option(
+    "--prune-below-threshold", "prune_below_threshold", is_flag=True,
+    help=(
+        "Recovery: delete projection assignments whose stored raw cosine is "
+        "below the corpus threshold (explicit --threshold, else the per-prefix "
+        "default), for the source collection given or, with --backfill, for "
+        "every corpus prefix. Undoes a pass that admitted weak matches (GH #1528)."
+    ),
+)
+@click.option(
     "--use-icf", "use_icf", is_flag=True,
     help=(
         "Apply ICF (Inverse Collection Frequency) weighting — suppresses "
@@ -2406,6 +2432,7 @@ def project_cmd(
     source_collection: str,
     against: str,
     threshold: float | None,
+    prune_below_threshold: bool,
     top_k: int,
     persist: bool,
     backfill: bool,
@@ -2446,6 +2473,24 @@ def project_cmd(
         resolved_threshold = default_projection_threshold(source_collection)
 
     try:
+        if prune_below_threshold:
+            # GH #1528 (nexus-4tfxp): one engine-side DELETE per prefix, on the
+            # stored RAW cosine, so a pass that admitted weak matches can be
+            # undone without a rebuild.
+            if backfill or not source_collection:
+                targets = [
+                    (prefix, threshold if threshold is not None else default_projection_threshold(prefix + "x"))
+                    for prefix in ("code__", "knowledge__", "docs__", "rdr__")
+                ]
+            else:
+                targets = [(source_collection, resolved_threshold)]
+            total_removed = 0
+            for prefix, thr in targets:
+                removed = db.taxonomy.prune_projection_below(prefix, thr)
+                total_removed += removed
+                click.echo(f"  {prefix}: removed {removed} projection assignment(s) below {thr:.2f}")
+            click.echo(f"Pruned {total_removed} projection assignment(s).")
+            return
         if backfill:
             _run_backfill(
                 db.taxonomy, _proj_handle,

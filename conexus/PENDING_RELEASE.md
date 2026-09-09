@@ -29,6 +29,6 @@ mechanize, it matters enough to ship.
 ---
 
 
-## Awaiting the next release or plugin cut (pinned: v7.37.0)
+## Awaiting the next release or plugin cut (pinned: v7.38.0)
 
 (none)

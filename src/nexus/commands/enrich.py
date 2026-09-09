@@ -54,6 +54,34 @@ def _build_catalog_manifest_lookup() -> Callable[[str], list[Any]] | None:
     return _lookup
 
 
+def _catalog_titles_by_content_hash(collection: str) -> dict[str, str]:
+    """nexus-g276c: ``index_content_hash -> title`` for every catalog row in
+    *collection*. The chunk-side ``content_hash`` is the same digest, so a
+    title group's chunks map to their catalog row without a ``doc_id`` on
+    the chunk. Empty on any catalog failure; the lookup then falls back to
+    the chunk title, the pre-fix behaviour."""
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
+
+        reader = make_catalog_reader()
+        if reader is None:
+            return {}
+        try:
+            entries = reader.list_by_collection(collection)
+        finally:
+            close = getattr(reader, "close", None)
+            if close is not None:
+                close()
+    except Exception:  # noqa: BLE001 — best-effort catalog read; the chunk title is the fallback
+        _log.debug("enrich_catalog_titles_unavailable", collection=collection, exc_info=True)
+        return {}
+    return {
+        e.index_content_hash: e.title
+        for e in entries
+        if getattr(e, "index_content_hash", "") and getattr(e, "title", "")
+    }
+
+
 def _build_catalog_doc_id_lookup() -> Callable[[str, str], str] | None:
     """Build a ``doc_id_lookup(collection, source_id) -> doc_id``
     callable backed by the catalog's ``physical_collection`` +
@@ -183,6 +211,13 @@ def enrich_bib(
     rows that predate the ``_enrich_apply`` column-level write (or
     otherwise drifted stale). Idempotent; makes zero external calls.
     """
+    # nexus-g276c: accept the bare subject every other CLI verb accepts.
+    # Passed through unresolved, the engine's /v1/vectors/get refused
+    # ``knowledge__vector-search`` with a 400 ("not four-segment conformant").
+    from nexus.corpus import t3_collection_name  # noqa: PLC0415 — deferred command-local import
+    from nexus.db import make_t3  # noqa: PLC0415 — deferred command-local import
+
+    collection = t3_collection_name(collection, t3=make_t3())
     if backfill_catalog:
         _backfill_catalog_from_chunks(collection)
         return
@@ -318,6 +353,7 @@ def run_bib_enrichment(
     # through to fuzzy title search at the backend.
     title_to_ids: dict[str, list[str]] = {}
     title_to_source_paths: dict[str, set[str]] = {}
+    title_to_content_hashes: dict[str, set[str]] = {}
     already_enriched = 0
     total_chunks = 0
     offset = 0
@@ -339,6 +375,9 @@ def run_bib_enrichment(
             if not title:
                 continue
             title_to_ids.setdefault(title, []).append(chunk_id)
+            content_hash = meta.get("content_hash", "") or ""
+            if content_hash:
+                title_to_content_hashes.setdefault(title, set()).add(content_hash)
             sp = meta.get("source_path", "") or ""
             if sp:
                 title_to_source_paths.setdefault(title, set()).add(sp)
@@ -349,6 +388,16 @@ def run_bib_enrichment(
     if not total_chunks:
         click.echo(f"Collection '{collection}' is empty — nothing to enrich.")
         return
+
+    # nexus-g276c: the chunk-level ``title`` is the extractor's first line
+    # ("Self-Aware Vector Embeddings for Retrieval-Augmented Generation:"),
+    # while the catalog row carries the document's registered title (the
+    # DEVONthink record name there). OpenAlex found the paper only under
+    # the full title, so the fuzzy fallback ran on the fragment and matched
+    # a stranger. Grouping stays keyed on the chunk title (that is what the
+    # chunks carry); the LOOKUP uses the catalog title when the group's
+    # chunks map to exactly one catalog row whose title differs.
+    catalog_titles = _catalog_titles_by_content_hash(collection)
 
     titles_to_process = list(title_to_ids.items())
     if limit > 0:
@@ -372,6 +421,20 @@ def run_bib_enrichment(
             time.sleep(delay)
 
         title_source_paths = sorted(title_to_source_paths.get(title, set()))
+        lookup_title = title
+        catalog_title_set = {
+            catalog_titles[h]
+            for h in title_to_content_hashes.get(title, set())
+            if h in catalog_titles
+        }
+        if len(catalog_title_set) == 1:
+            (catalog_title,) = catalog_title_set
+            if catalog_title != title:
+                _log.info(
+                    "enrich_lookup_title_from_catalog",
+                    chunk_title=title, catalog_title=catalog_title,
+                )
+                lookup_title = catalog_title
         # Extract the record's DOI/arXiv identifiers once, up front, when
         # either the OpenAlex primary path or the DT-CrossRef gap-fill will
         # need them. Sharing the scan keeps the chunk read single-pass.
@@ -382,7 +445,7 @@ def run_bib_enrichment(
             )
 
         bib = _resolve_bib_for_title(
-            title=title,
+            title=lookup_title,
             chunk_ids=chunk_ids,
             source_paths=title_source_paths,
             col=col,
@@ -470,7 +533,7 @@ def run_bib_enrichment(
                 venue=bib.get("venue"),
             )
             _catalog_enrich_hook(
-                title=title, bib_meta=bib,
+                title=lookup_title, bib_meta=bib,
                 collection_name=collection, backend=backend,
                 source_paths=sorted(source_paths),
             )
@@ -1113,6 +1176,7 @@ def enrich_aspects(
     error out at the config-selection step.
     """
     from nexus.aspect_extractor import select_config  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
 
     config = select_config(collection)
     if config is None:
@@ -1121,7 +1185,13 @@ def enrich_aspects(
             f"'{collection}'. Supported prefixes: knowledge__*, "
             f"rdr__*. Aborting."
         )
-        if collection.startswith("docs__"):
+        # RDR-204 Phase 3 (nexus-ft04v.26), class (a): `collection` reaches
+        # here because select_config already rejected it as unsupported --
+        # it may be a genuinely mistyped --collection argument with no
+        # catalog row at all, so a row lookup could not help distinguish
+        # that from "docs__* is real but unsupported" anyway.
+        # Candidate-string derivation for the hint.
+        if split_candidate_collection_name(collection)[0] == "docs":
             click.echo(
                 "Note: docs__* collections are not paper-shaped (nexus-z70w "
                 "reverted the #377 routing). Index academic PDFs into "

@@ -272,11 +272,14 @@ fi
 # returns a real 768-dim vector. Requires the ~416MB bge ONNX model (provisioned by
 # `nx init --service`). If it is absent we WARN+skip loudly rather than silently
 # pass — a model-less CI run must not read as "embed covered".
+# RDR-204 Phase 2 fix round (nexus-ft04v.16 fix round): posts "model" directly
+# rather than a "collection" -- /v1/vectors/embed no longer serves an unregistered
+# collection name (422), and this probe registers nothing.
 BGE_MODEL="${NX_BGE_MODEL_PATH:-$HOME/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx/model.onnx}"
 if [ -f "$BGE_MODEL" ]; then
   echo "local bge-768 embed path:"
   ecode=$(curl -s -o /tmp/ns-embed.out -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
-    -d '{"collection":"knowledge__x","texts":["native embed smoke"]}' "$U/v1/vectors/embed")
+    -d '{"model":"bge-base-en-v15-768","texts":["native embed smoke"]}' "$U/v1/vectors/embed")
   if [ "$ecode" = "200" ] && grep -q '"embeddings"' /tmp/ns-embed.out \
      && [ "$(python3 -c "import json,sys;print(len(json.load(open('/tmp/ns-embed.out'))['embeddings'][0]))" 2>/dev/null)" = "768" ]; then
     echo "  ok   embed (DJL tokenizer JNI + onnx run) -> 200, 768-dim"

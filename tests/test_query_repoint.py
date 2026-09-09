@@ -255,7 +255,8 @@ class TestQueryRepointMetadataScoped:
 
     def test_structured_exact_key_set(self, monkeypatch):
         """Structured output must have EXACTLY: ids, tumblers, distances, collections,
-        chunk_collections, chunk_text_hash — matching the existing dance path."""
+        chunk_collections, chunk_text_hash, also_in, also_in_ids — matching the
+        plain path (both joined the envelopes together, GH #1524, nexus-20uv3)."""
         rows = _make_meta_rows(("1.2.3", "a" * 32))
         t3 = _FakeServiceT3(meta_rows=rows)
         cat = _FakeCatalog(entries=[_FakeCatalogEntry("1.2.3", "T",
@@ -266,7 +267,7 @@ class TestQueryRepointMetadataScoped:
 
         assert set(result.keys()) == {
             "ids", "tumblers", "distances", "collections",
-            "chunk_collections", "chunk_text_hash",
+            "chunk_collections", "chunk_text_hash", "also_in", "also_in_ids",
         }
 
     def test_structured_ids_are_tumblers(self, monkeypatch):
@@ -625,7 +626,21 @@ class TestQueryNoCatalogParamsCollectionsSorted:
 
     def test_no_catalog_params_collections_sorted(self, monkeypatch):
         """H1: structured['collections'] is sorted (not arbitrary set order)."""
+        import nexus.mcp_infra as mi
         import nexus.search_engine as se
+
+        # RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26): scoring.py's
+        # has_code check now reads the catalog row -- these are synthetic
+        # test collection names ("z_col"/"a_col") with no real row; fake
+        # one so the downstream scoring path this test does not otherwise
+        # care about doesn't raise CollectionNotRegisteredError.
+        monkeypatch.setattr(
+            mi, "get_collection_row",
+            lambda name: {
+                "content_type": "knowledge", "owner_id": name, "embedding_model": "x",
+                "lifecycle_state": "live",
+            },
+        )
 
         class _FakeResult:
             def __init__(self, coll, dist):

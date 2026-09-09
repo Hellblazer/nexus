@@ -68,8 +68,16 @@ def test_hybrid_no_code_corpus_warning(capsys):
     assert "no code corpus" in (captured.out + captured.err).lower()
 
 
-def test_hybrid_mixed_corpus_no_warning(capsys):
+def test_hybrid_mixed_corpus_no_warning(capsys, monkeypatch):
     """With both code__ and docs__ in scope, no warning is printed."""
+    # RDR-204 Phase 3 class (c) repoint (nexus-ft04v.26): apply_hybrid_scoring's
+    # code-detection now reads nexus.mcp_infra.get_collection_row directly.
+    from tests.conftest import catalog_row_for_collection_name
+
+    monkeypatch.setattr(
+        "nexus.mcp_infra.get_collection_row",
+        lambda name: catalog_row_for_collection_name(name),
+    )
     results = [
         SearchResult(id="1", content="code", distance=0.1,
                      collection="code__myrepo", metadata={"frecency_score": 1.5}),
@@ -1914,6 +1922,20 @@ class TestTransientFailureIsNotPoisoned:
 
 
 class TestApplyRankingBoosts:
+    @pytest.fixture(autouse=True)
+    def _stub_collection_rows(self, monkeypatch):
+        # RDR-204 Phase 3 class (c) repoint (nexus-ft04v.26):
+        # apply_hybrid_scoring's code-detection reads
+        # nexus.mcp_infra.get_collection_row directly; this class's
+        # fixture names carry no quarantine/lookalike traps, so the
+        # plain name-derived emitter is faithful here.
+        from tests.conftest import catalog_row_for_collection_name
+
+        monkeypatch.setattr(
+            "nexus.mcp_infra.get_collection_row",
+            lambda name: catalog_row_for_collection_name(name),
+        )
+
     def test_empty_results_returns_empty(self):
         assert apply_ranking_boosts([]) == []
 

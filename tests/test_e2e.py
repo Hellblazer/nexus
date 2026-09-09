@@ -84,6 +84,8 @@ def test_t3_expire_removes_expired_entries(local_t3: T3Database) -> None:
     """expire() removes entries with elapsed TTL; permanent entries survive."""
     from datetime import UTC, datetime, timedelta
 
+    from tests.conftest import patched_mcp_infra_t3
+
     uid = _uid()
     # Insert already-expired entry by manually setting expires_at in the past
     # RDR-103 Phase 5: ``expire`` predates the conformant-naming
@@ -103,7 +105,14 @@ def test_t3_expire_removes_expired_entries(local_t3: T3Database) -> None:
     # Insert permanent entry
     local_t3.put("knowledge__expire", content=f"permanent content {uid}", title="perm.md")
 
-    deleted = local_t3.expire()
+    # RDR-204 Phase 3 class (c) repoint (nexus-ft04v.26): T3Database.expire()
+    # now filters via nexus.mcp_infra.get_collection_row (that cache's own
+    # nexus.mcp_infra.get_t3() singleton, a SEPARATE object from local_t3
+    # unless wired) -- T3Database.list_collections() already synthesizes
+    # row fields from the name, so wiring the singleton to this fixture's
+    # own instance is enough.
+    with patched_mcp_infra_t3(local_t3):
+        deleted = local_t3.expire()
     assert deleted == 1
 
     # Permanent entry still searchable

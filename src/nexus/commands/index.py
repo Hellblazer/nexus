@@ -99,9 +99,18 @@ class _CatalogBackedRegistry:
         if "docs_collection" in fields and self._writer is not None:
             new_name = fields["docs_collection"]
             if new_name:
+                from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
+
                 owner = self._writer.ensure_owner_for_repo(repo)
                 owner_id = str(owner).replace(".", "-")
-                ct = new_name.split("__", 1)[0]
+                # RDR-204 Phase 3 (nexus-ft04v.26), class (a): `new_name` is
+                # about to be REGISTERED below (register_collection is
+                # what creates its row) -- the row-based
+                # collection_content_type would raise
+                # CollectionNotRegisteredError every time. Candidate-string
+                # derivation (the shared primitive t3_collection_name uses)
+                # instead.
+                ct = split_candidate_collection_name(new_name)[0]
                 try:
                     # RDR-204 P1.10 (nexus-ft04v.34): route through the
                     # client's write-time profile instead of hardcoding
@@ -117,18 +126,41 @@ class _CatalogBackedRegistry:
                     # messages already name the concrete remedy, and the
                     # existing log line's error=str(exc) carries it through
                     # to catalog_registry_adapter_register_failed unchanged.
-                    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415 — circular-dep avoidance (corpus)
-                    self._writer.register_collection(
+                    #
+                    # RDR-204 Phase 3 fix round (nexus-ft04v.28 item 4):
+                    # routed through the registration seam
+                    # (ensure_collection_registered) instead of a direct
+                    # register_collection call -- gets the seam's early
+                    # EmbeddingProfileMismatchError diagnostic this site
+                    # previously skipped. An EXPLICIT kwargs override is
+                    # required here (never bare name-derivation): owner_id
+                    # comes from ensure_owner_for_repo(repo), a real owner
+                    # lookup, not the string parsed out of new_name's own
+                    # segments the generic collection_registration_kwargs(
+                    # new_name) derivation would produce -- the two can
+                    # genuinely disagree. registrar=lambda: self._writer
+                    # reuses this adapter's own persistent writer instead
+                    # of minting a fresh one; its .close() (called once
+                    # per registration by the seam) is a documented no-op
+                    # on the shared service-catalog handle it wraps.
+                    from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (corpus)
+                        effective_embedding_model_for_writes,
+                        ensure_collection_registered,
+                    )
+                    ensure_collection_registered(
                         new_name,
-                        content_type=ct,
-                        owner_id=owner_id,
-                        embedding_model=effective_embedding_model_for_writes(ct),
-                        # RDR-137 followup CRITICAL-3 (nexus-43qgm.3):
-                        # 'v1' matches parse_conformant_collection_name's
-                        # f'v{ver}' contract; '1' would trip the
-                        # idempotency check + spawn duplicate
-                        # CollectionCreated events.
-                        model_version="v1",
+                        registrar=lambda: self._writer,
+                        kwargs={
+                            "content_type": ct,
+                            "owner_id": owner_id,
+                            "embedding_model": effective_embedding_model_for_writes(ct),
+                            # RDR-137 followup CRITICAL-3 (nexus-43qgm.3):
+                            # 'v1' matches parse_conformant_collection_name's
+                            # f'v{ver}' contract; '1' would trip the
+                            # idempotency check + spawn duplicate
+                            # CollectionCreated events.
+                            "model_version": "v1",
+                        },
                     )
                 except Exception as exc:  # noqa: BLE001 — boundary catch of undocumented catalog/daemon write exceptions; surfaced via log.warning and success=False
                     _log.warning(
@@ -645,7 +677,7 @@ def _discover_taxonomy(collection_name, taxonomy, t3, *, force=False, quiet=Fals
 # ── ETA ticker (nexus-vatx Gap 3) ────────────────────────────────────────────
 
 
-def _format_eta(n: int, total: int, chunks: int, elapsed_s: float) -> str:
+def _format_eta(n: int, total: int, chunks: int, elapsed_s: float, label: str = "") -> str:
     """Return the periodic `[eta] …` line for an in-progress indexing run.
 
     Pure for testability: given per-run counters and wall-clock elapsed,
@@ -672,8 +704,9 @@ def _format_eta(n: int, total: int, chunks: int, elapsed_s: float) -> str:
         eta_min = max(1, round(eta_seconds / 60))
         eta = f"~{eta_min} min remaining"
     avg_str = f"{avg:.1f}s/file avg" if n else "no samples yet"
+    phase = f"{label} " if label else ""
     return (
-        f"[eta] {n}/{total} files · {chunks:,} chunks · "
+        f"[eta] {phase}{n}/{total} files · {chunks:,} chunks · "
         f"{avg_str} · {eta}"
     )
 
@@ -705,6 +738,27 @@ class _ETATicker:
         self._total = 0
         self._chunks = 0
         self._start_mono = 0.0
+        self._label = ""
+
+    def restart_phase(self, label: str, total: int) -> None:
+        """Begin a new counted phase (GH #1525, nexus-1m0cy): the RDR pass
+        runs after the code/prose/pdf loop whose total :meth:`start` was
+        given, so its files pushed the counter past that total and the
+        stopped ticker said nothing about a pass that can run twenty
+        minutes. Counters and the clock restart so the estimate is this
+        phase's own; the thread is re-armed if :meth:`start`'s ended."""
+        with self._lock:
+            self._label = label
+            self._n = 0
+            self._chunks = 0
+            self._total = total
+            self._start_mono = time.monotonic()
+            self._done.clear()
+        if self._thread is None:
+            self._thread = threading.Thread(
+                target=self._loop, name="nx-eta-ticker", daemon=True,
+            )
+            self._thread.start()
 
     def start(self, total: int) -> None:
         # Review remediation (Reviewer A/S-4): refuse double-start. Two
@@ -745,7 +799,7 @@ class _ETATicker:
 
     def _tick(self) -> None:
         with self._lock:
-            n, total, chunks = self._n, self._total, self._chunks
+            n, total, chunks, label = self._n, self._total, self._chunks, self._label
             elapsed = time.monotonic() - self._start_mono
         if total <= 0 or n == 0:
             # Mutual exclusion with _PhaseHeartbeat (heartbeat double-fire
@@ -759,7 +813,7 @@ class _ETATicker:
             # confines this ticker's live window to exactly the per-file
             # loop, where _PhaseHeartbeat is disarmed (see on_file below).
             return
-        self._emit(_format_eta(n, total, chunks, elapsed))
+        self._emit(_format_eta(n, total, chunks, elapsed, label))
 
 
 # ── phase liveness heartbeat (index-output-ux-assessment-2026-08-10 §7.1) ───
@@ -1029,10 +1083,19 @@ def index_repo_cmd(
             # otherwise synthesize from the catalog-known docs collection
             # for this owner so the rewrite still fires on first-index
             # runs (where the docs__ default has not yet been registered).
+            # RDR-204 Phase 3 (nexus-ft04v.26), class (a): both `existing_docs`
+            # (a local registry field, not a catalog row) and `synth` (the
+            # docstring above says explicitly this branch fires "on
+            # first-index runs, where the docs__ default has not yet been
+            # registered") are candidate strings that may have no catalog
+            # row -- split_candidate_collection_name, not the row-based
+            # collection_content_type.
+            from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
             info = reg.get(path) or {}
             existing_docs = info.get("docs_collection", "")
             new_docs = ""
-            if existing_docs.startswith("docs__"):
+            if split_candidate_collection_name(existing_docs)[0] == "docs":
                 new_docs = "knowledge__" + existing_docs.removeprefix("docs__")
             else:
                 # Synthesize from the conformant docs-collection shape.
@@ -1041,7 +1104,7 @@ def index_repo_cmd(
                 synth = _resolve_repo_collection(
                     path, "docs", cat=cat_for_resolve,
                 )
-                if synth.startswith("docs__"):
+                if split_candidate_collection_name(synth)[0] == "docs":
                     new_docs = "knowledge__" + synth.removeprefix("docs__")
             if new_docs:
                 # RDR-137 followup SIG-10 (nexus-43qgm.10): gate the echo
@@ -1131,6 +1194,22 @@ def index_repo_cmd(
             # see pace even when tqdm suppresses itself.
             eta_ticker.start(count)
 
+        rdr_base = 0
+        rdr_total = 0
+
+        def on_rdr_start(count: int) -> None:
+            # GH #1525 (nexus-1m0cy): the RDR pass gets its own counter and
+            # ETA instead of running the file counter past its total.
+            nonlocal rdr_base, rdr_total, total
+            rdr_base = n
+            rdr_total = count
+            total = n + count
+            if bar is not None:
+                bar.total = total
+                bar.refresh()
+            if count:
+                eta_ticker.restart_phase("rdr", count)
+
         def on_file(fpath: Path, chunks: int, elapsed: float) -> None:
             nonlocal n, total_chunks, skipped_files
             n += 1
@@ -1176,7 +1255,8 @@ def index_repo_cmd(
                 bar.set_postfix(**postfix)
             if monitor or not sys.stdout.isatty():
                 lbl = f"{chunks} chunks" if chunks else "skipped"
-                line = f"  [{n}/{total}] {fpath.name} \u2014 {lbl}  ({elapsed:.1f}s)"
+                counter = f"rdr {n - rdr_base}/{rdr_total}" if rdr_total else f"{n}/{total}"
+                line = f"  [{counter}] {fpath.name} \u2014 {lbl}  ({elapsed:.1f}s)"
                 if bar is not None and sys.stdout.isatty():
                     tqdm.write(line)
                 else:
@@ -1343,7 +1423,7 @@ def index_repo_cmd(
             stats = index_repository(path, reg, frecency_only=frecency_only, force=force,
                                      force_re_embed=re_embed,
                                      since_head=since_head,
-                                     on_locked=on_locked, on_start=on_start, on_file=on_file,
+                                     on_locked=on_locked, on_start=on_start, on_rdr_start=on_rdr_start, on_file=on_file,
                                      on_phase=on_phase,
                                      on_flush=on_flush_progress if monitor else None,
                                      on_stage_timers=on_stage_timers,
@@ -1722,11 +1802,19 @@ def _discover_subset(
     pre-fetch probe in ``discover_for_collection`` still makes the kept
     call cheap when topics exist.
     """
+    # RDR-204 Phase 3 (nexus-ft04v.26), class (a): this function's own
+    # docstring defines "kind" as the NAME PREFIX before the first "__",
+    # not a catalog fact -- `collections` here can include one just
+    # indexed THIS run, whose row may not have propagated to the
+    # stats-backed row cache yet. split_candidate_collection_name, not
+    # the row-based collection_content_type.
+    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
     if not isinstance(files_changed_by_kind, dict):
         return list(collections)
     changed = {
         col for col in collections
-        if files_changed_by_kind.get(col.split("__", 1)[0], 1) > 0
+        if files_changed_by_kind.get(split_candidate_collection_name(col)[0], 1) > 0
     }
     unchanged = [col for col in collections if col not in changed]
     if not unchanged:
@@ -2880,7 +2968,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 )
 def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, monitor: bool, source_uri: str | None) -> None:
     """Extract and index a Markdown file into T3 docs__CORPUS (or --collection)."""
-    from nexus.corpus import t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+    from nexus.corpus import split_candidate_collection_name, t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
     from nexus.doc_indexer import index_markdown  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
     from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
         ChunkLandingUnverifiedError,
@@ -2906,7 +2994,12 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
         # For paper-shaped Markdown this is correct. For general prose / design
         # notes it will hallucinate paper fields. A general-prose extractor is
         # tracked as GH #981 fix #2 (deferred). Reverted attempt: nexus-z70w / #377.
-        if collection.startswith("knowledge__"):
+        # RDR-204 Phase 3 (nexus-ft04v.26), class (a): `collection` is the
+        # JUST-MINTED candidate name from t3_collection_name above -- it
+        # may be a brand-new collection with no catalog row yet.
+        # split_candidate_collection_name, not the row-based
+        # collection_content_type.
+        if split_candidate_collection_name(collection)[0] == "knowledge":
             click.echo(
                 "Note: 'nx enrich aspects' on knowledge__ collections applies the "
                 "scholarly-paper extractor (title, abstract, methods, venue). "

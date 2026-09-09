@@ -88,7 +88,9 @@ class Catalog036EmbeddingProfileSchemaLiquibaseTest {
                 r -> r.get(EMBEDDING_MODELS.EMBEDDING_MODEL), r -> r.get(EMBEDDING_MODELS.DIMENSION)));
             assertThat(dimensionByModel)
                 .as("the four seeded (model -> dimension) pairs must match both authorities "
-                    + "byte-for-byte (PgVectorRepository.MODEL_DIMS / corpus.py's "
+                    + "byte-for-byte (this table is now the SOLE engine-side authority, "
+                    + "RDR-204 Phase 2 bead nexus-ft04v.16 retired PgVectorRepository's "
+                    + "own MODEL_DIMS duplicate / corpus.py's "
                     + "CANONICAL_EMBEDDING_MODELS + LOCAL_EMBEDDING_MODELS)")
                 .isEqualTo(Map.of(
                     "voyage-code-3", 1024,
@@ -96,8 +98,8 @@ class Catalog036EmbeddingProfileSchemaLiquibaseTest {
                     "bge-base-en-v15-768", 768,
                     "minilm-l6-v2-384", 384));
             assertThat(dimensionByModel)
-                .as("voyage-3 is on the engine's MODEL_DIMS but has no client token and no live "
-                    + "row (RDR-204 Key Discoveries) -- must NOT be seeded")
+                .as("voyage-3 has no client token and no live row (RDR-204 Key Discoveries) "
+                    + "-- must NOT be seeded")
                 .doesNotContainKey("voyage-3");
 
             Map<String, String> providerByModel = rows.stream().collect(Collectors.toMap(

@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import os
 import unittest.mock
@@ -1990,7 +1991,20 @@ def _restore_t3_singleton(request: pytest.FixtureRequest):
     import nexus.mcp_infra as mcp_infra
 
     before = mcp_infra._t3_instance
+    # Bind the REAL invalidator now: a test may monkeypatch the module
+    # attribute (some assert it is never called on a cache hit), and this
+    # fixture's teardown can run before monkeypatch's undo.
+    invalidate_rows = mcp_infra.invalidate_collections_cache
     yield
+    # RDR-204 Phase 3 (nexus-ft04v.26 fix round): the collection-row cache
+    # (``_collections_cache``, 60s TTL) is process-wide too, and since the
+    # repoint every row-reading site (resolve_corpus, the class-(d)
+    # diagnostics via resolve_row_preferred) reads it. A cache warmed by one
+    # test in an xdist worker served stale rows to a later test in the same
+    # worker (tests/test_catalog_cli.py::TestVerifyCommand, five reds under
+    # -n 8, green alone). Drop it after every test, unconditionally: the
+    # next reader refetches, exactly as a fresh process would.
+    invalidate_rows()
     after = mcp_infra._t3_instance
     if after is before:
         return
@@ -2571,6 +2585,16 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # exist to exercise as True. Reason class "mode-self-test" (mirrors
     # ``test_local_mode.py`` above).
     "test_o5x2c_write_chokepoint_repros.py",
+    # RDR-204 Phase 3 fixture-seam round (nexus-ft04v.26, 2026-09-09):
+    # every test in this file exercises the funnel helpers'
+    # row-then-name resolution order (_write_model_for_collection,
+    # _upsert_byte_budget, _is_same_model_passthrough, _dim_for_
+    # collection, quarantine_collection_name, target_collection_for_
+    # split) against FAKE catalog rows / collection-NAME fixtures --
+    # voyage-code-3/voyage-context-3 tokens are fixture data the parse
+    # logic reads back, never a real embedder call or credential-gated
+    # path. Reason class "string-literal-as-name".
+    "test_collection_parse_funnel_slice2.py",
 })
 
 _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
@@ -2911,6 +2935,97 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # cloud call is ever made.
     "tests/daemon/test_storage_service_daemon.py::TestSpawnServiceVoyageKeyPlumbing::test_shared_predicate_true_drives_both_sites_to_voyage",
     "tests/daemon/test_storage_service_daemon.py::TestSpawnServiceVoyageKeyPlumbing::test_shared_predicate_false_drives_both_sites_to_local",
+    #
+    # RDR-204 Phase 3 fixture-seam round (nexus-ft04v.26, 2026-09-09):
+    # standing offenders surfaced by test_mode_declarations_are_explicit
+    # once its own census actually ran in a full-default-loop session
+    # (it is vacuous on a shrunk item list -- see that file's own
+    # docstring). None of these assert real cloud-mode BEHAVIOR: every
+    # voyage-context-3/voyage-code-3 token below is either a collection-
+    # NAME fixture fed to a fully-mocked/faked reader, or a
+    # parametrize-data label. Reason class "string-literal-as-name" /
+    # "parametrize-label" throughout.
+    #
+    # TestSkippedCollectionsHeaderLogging / TestSingleCollectionUnregistered422IsActionable
+    # (item 5, nexus-ft04v.26): the collection names in the fake
+    # _FakeHttpResponse/_FakeOpener fixtures are opaque data for the
+    # thread-local header-capture logging path -- no embedder runs, no
+    # credential is read.
+    "tests/db/test_http_vector_client.py::TestSkippedCollectionsHeaderLogging::test_search_logs_a_warning_when_the_header_is_present",
+    "tests/db/test_http_vector_client.py::TestSkippedCollectionsHeaderLogging::test_search_logs_nothing_when_the_header_is_absent",
+    "tests/db/test_http_vector_client.py::TestSkippedCollectionsHeaderLogging::test_search_metadata_scoped_logs_a_warning_when_the_header_is_present",
+    "tests/db/test_http_vector_client.py::TestSkippedCollectionsHeaderLogging::test_search_graph_hop_logs_a_warning_when_the_header_is_present",
+    "tests/db/test_http_vector_client.py::TestSkippedCollectionsHeaderLogging::test_search_aspect_scoped_logs_a_warning_when_the_header_is_present",
+    "tests/db/test_http_vector_client.py::TestSkippedCollectionsHeaderLogging::test_a_later_unrelated_call_does_not_see_a_stale_header",
+    "tests/db/test_http_vector_client.py::TestSingleCollectionUnregistered422IsActionable::test_single_collection_422_renders_the_engine_detail",
+    #
+    # TestRegistrationSeamProfileCheck (item 3, nexus-ft04v.26): the
+    # voyage-code-3 token is the "intent" model fed to a FAKE profile
+    # reader (_stub_profile_reader) asserting the registration-seam
+    # agree/disagree/empty/route-missing outcome table; the real profile
+    # reader is never constructed.
+    "tests/test_collection_registration.py::TestRegistrationSeamProfileCheck::test_profile_agrees_registration_proceeds",
+    "tests/test_collection_registration.py::TestRegistrationSeamProfileCheck::test_profile_disagrees_raises_mismatch_before_the_register_call",
+    "tests/test_collection_registration.py::TestRegistrationSeamProfileCheck::test_empty_profile_proceeds_with_intent_bootstrap_case",
+    "tests/test_collection_registration.py::TestRegistrationSeamProfileCheck::test_pre_phase_2_engine_route_missing_propagates_uncaught",
+    #
+    # TestEnsureCollectionRegisteredExplicitKwargsOverride (RDR-204 Phase 3
+    # fix round, nexus-ft04v.28 C1): the voyage-code-3 token is part of the
+    # QUARANTINE COLLECTION NAME string / the explicit kwargs override dict
+    # under test -- proving `kwargs=` bypasses name-derivation and that the
+    # profile check still runs against whatever it says. A FAKE writer and
+    # a FAKE profile reader (_fake_writer / _stub_profile_reader) are used
+    # throughout; no real embedder or credential path is exercised.
+    "tests/test_collection_registration.py::TestEnsureCollectionRegisteredExplicitKwargsOverride::test_explicit_kwargs_bypasses_name_derivation",
+    "tests/test_collection_registration.py::TestEnsureCollectionRegisteredExplicitKwargsOverride::test_explicit_kwargs_still_runs_the_profile_check",
+    #
+    # test_rename_prefix_validity_table: voyage tokens appear only inside
+    # the function's own @pytest.mark.parametrize data tuples (source/
+    # target collection-name pairs feeding the rename-prefix-validity
+    # predicate); no embedder or credential path is exercised.
+    "tests/test_collection_rename.py::TestRenameCLI::test_rename_prefix_validity_table",
+    #
+    # test_knowledge_collections_filters_by_content_type: the voyage
+    # token is a collection-NAME fixture in a hand-rolled _FakeT3.
+    # list_collections() list; _knowledge_collections filters by a
+    # stubbed nexus.mcp_infra.get_collection_row, never a real embedder.
+    "tests/test_command_context_command.py::test_knowledge_collections_filters_by_content_type",
+    #
+    # test_source_note_names_document_collection_and_dates: the voyage
+    # token is a collection-NAME string passed straight through to
+    # context_annotations.source_note's string-formatting logic; no
+    # embedder, no credential.
+    "tests/test_context_annotations.py::test_source_note_names_document_collection_and_dates",
+    #
+    # test_enrich_bare_subject_resolves_to_conformant_collection
+    # (nexus-g276c): the test's own comment says it outright -- "the
+    # model token is install-dependent (bge under the test config,
+    # voyage-context-3 on a cloud box); the shape is what the engine
+    # checks" -- asserting name SHAPE (3 "__" separators, "__v1" suffix),
+    # never the actual embedder that ran. HttpVectorClient is a MagicMock.
+    "tests/test_enrich_command.py::test_enrich_bare_subject_resolves_to_conformant_collection",
+    #
+    # test_sample_collection_names_by_prefix_families_pinned: the voyage
+    # token is one collection-NAME fixture in a plain string list fed to
+    # _sample_collection_names_by_prefix's family-key derivation; no
+    # embedder, no credential.
+    "tests/test_planner_few_shot.py::test_sample_collection_names_by_prefix_families_pinned",
+    #
+    # test_salience_boost_conformant_and_lookalike_prefixes (RDR-204
+    # Phase 3 funnel, nexus-ft04v.21/.26): the voyage token is a
+    # collection-NAME fixture in a fully-faked HttpDocumentAspectsStore
+    # seam, pinning the conformant-vs-lookalike-prefix targeting matrix;
+    # no embedder, no credential (this file's autouse
+    # _stub_collection_rows fixture also stubs nexus.mcp_infra.
+    # get_collection_row directly).
+    "tests/test_rdr_109_phase5_salience.py::test_salience_boost_conformant_and_lookalike_prefixes",
+    #
+    # test_hybrid_scoring_code_detection_pinned: voyage tokens appear
+    # only inside the function's own @pytest.mark.parametrize data
+    # (collection-name/is_code_like pairs) pinning apply_hybrid_scoring's
+    # content-type-based code detection; nexus.mcp_infra.get_collection_row
+    # is stubbed directly (_code_row_stub), no embedder or credential path.
+    "tests/test_scoring.py::test_hybrid_scoring_code_detection_pinned",
 })
 
 
@@ -2989,6 +3104,100 @@ def make_vector_test_client():
     return InMemoryVectorClient(
         default_embedding_function=MiniLMDirectEmbeddingFunction()
     )
+
+
+#: RDR-204 Phase 3 fixture-seam fix (nexus-ft04v.26, coordinator ruling
+#: 2026-09-09): ``resolve_corpus``/``collection_content_type``/``expire()``
+#: etc. all now read a catalog-row-shaped dict per collection (content_type/
+#: owner_id/embedding_model/lifecycle_state) instead of parsing the name.
+#: A collection-name fixture that carries no such row is, by the RDR,
+#: legitimately UNREGISTERED and dropped -- so any test fake standing in
+#: for the engine's ``/v1/vectors/stats`` catalog join (or for
+#: ``mcp_infra.get_t3()``'s own row cache) must emit these fields too, or
+#: every fixture collection silently reads as unregistered. tests/ may
+#: parse its own fixture names directly (the parse-name census scans only
+#: src/nexus); this is the ONE shared emitter every local fake/mock T3
+#: builder should call rather than re-deriving the mapping per file.
+_CONTENT_TYPE_DEFAULT_EMBEDDING_MODEL = {
+    "code": "voyage-code-3",
+    "docs": "voyage-context-3",
+    "rdr": "voyage-context-3",
+    "knowledge": "voyage-context-3",
+}
+
+
+def catalog_row_for_collection_name(name: str) -> dict[str, str]:
+    """Derive a catalog-row dict (content_type/owner_id/embedding_model/
+    lifecycle_state) from a collection NAME alone.
+
+    Handles both fully RDR-103-conformant names
+    (``content_type__owner__model__vN``) and the shortened forms this
+    suite's fixtures favor (``knowledge__test``, ``code__myrepo``, a bare
+    content-type word). A ``quarantine-`` physical prefix reports its
+    ORIGIN content_type with ``lifecycle_state="quarantine"`` (Gap 4)
+    rather than being treated as a content type of its own -- callers that
+    want a genuinely UNREGISTERED (no-row) fixture must omit that
+    collection from the fake's emitted rows entirely; this helper always
+    produces a row.
+    """
+    lifecycle_state = "live"
+    bare = name
+    if bare.startswith("quarantine-"):
+        bare = bare[len("quarantine-") :]
+        lifecycle_state = "quarantine"
+    parts = bare.split("__")
+    content_type = parts[0]
+    owner_id = parts[1] if len(parts) > 1 else "test-owner"
+    known_models = set(_CONTENT_TYPE_DEFAULT_EMBEDDING_MODEL.values())
+    if len(parts) >= 3 and parts[2] in known_models:
+        embedding_model = parts[2]
+    else:
+        embedding_model = _CONTENT_TYPE_DEFAULT_EMBEDDING_MODEL.get(
+            content_type, "voyage-context-3"
+        )
+    return {
+        "content_type": content_type,
+        "owner_id": owner_id,
+        "embedding_model": embedding_model,
+        "lifecycle_state": lifecycle_state,
+    }
+
+
+@contextlib.contextmanager
+def patched_mcp_infra_t3(mock):
+    """Wire ``nexus.mcp_infra.get_t3()`` to *mock* for the duration of a
+    test, symmetric with ``_restore_t3_singleton``'s own snapshot/restore
+    (RDR-204 Phase 3 fixture-seam fix, nexus-ft04v.26).
+
+    Patching a module's own ``_t3`` name (``search_cmd._t3``,
+    ``store._t3``) does NOT reach ``mcp_infra.get_t3()`` -- it is a
+    SEPARATE, lazily-memoised, process-wide singleton
+    (``mcp_infra._t3_instance``) that ``resolve_corpus``,
+    ``collection_content_type``/``_owner``/``_model`` and
+    ``get_collection_row`` all read through regardless of what the
+    caller's own T3 handle is. Left unpatched in service/cloud-env tests
+    it lazily constructs a REAL ``HttpVectorClient`` on first use --
+    confirmed by direct reproduction to reach the live managed service
+    from this box. ``patch.object`` here restores the prior value on
+    exit, same as ``patch(...)``, so ``_restore_t3_singleton``'s post-test
+    leak check never sees a mismatch.
+
+    ALSO invalidates ``mcp_infra._collections_cache`` on both enter and
+    exit -- a SEPARATE global with its own 60s TTL
+    (``_COLLECTIONS_CACHE_TTL``), not covered by ``_t3_instance``'s
+    restore, so a cache row populated by an earlier test in the same
+    xdist worker can otherwise silently survive under the TTL window and
+    answer a later test's ``get_collection_row`` call with stale content
+    from a DIFFERENT mock.
+    """
+    import nexus.mcp_infra as mcp_infra
+
+    with unittest.mock.patch.object(mcp_infra, "_t3_instance", mock):
+        mcp_infra.invalidate_collections_cache()
+        try:
+            yield mock
+        finally:
+            mcp_infra.invalidate_collections_cache()
 
 
 @pytest.fixture

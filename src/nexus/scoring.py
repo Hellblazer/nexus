@@ -254,7 +254,22 @@ def apply_hybrid_scoring(
     if not results:
         return results
 
-    has_code = any(r.collection.startswith("code__") for r in results)
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26), class (c): a search
+    # RESULT's collection has live chunks but is NOT guaranteed a catalog
+    # row -- /v1/vectors/stats lists any collection with data regardless
+    # of registration state, and a legacy pre-Phase-1 collection can be
+    # searchable with no row at all. This reads the row directly (never
+    # nexus.corpus's name-parsing primitives) and treats an ABSENT row as
+    # "not code" -- the same bucket an unrecognized/non-conformant prefix
+    # already fell into, never a guess from the string.
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
+
+    def _is_code_collection(name: str) -> bool:
+        row = get_collection_row(name)
+        return bool(row) and row.get("content_type") == "code"
+
+    is_code_by_collection = {c: _is_code_collection(c) for c in {r.collection for r in results}}
+    has_code = any(is_code_by_collection[r.collection] for r in results)
 
     if hybrid and not has_code:
         _log.warning("--hybrid has no effect — no code corpus in scope")
@@ -276,7 +291,7 @@ def apply_hybrid_scoring(
     frecencies = [
         r.metadata.get("frecency_score", 0.0)
         for r in results
-        if r.collection.startswith("code__")
+        if is_code_by_collection[r.collection]
     ]
 
     for r in results:
@@ -302,7 +317,7 @@ def apply_hybrid_scoring(
             # Non-code__ results have no frecency signal, so f_norm is
             # simply 0.0 for them; code__ keeps its existing frecency-
             # window blend.
-            if r.collection.startswith("code__"):
+            if is_code_by_collection[r.collection]:
                 f_score = r.metadata.get("frecency_score", 0.0)
                 f_norm = min_max_normalize(f_score, frecencies) if frecencies else 0.0
             else:

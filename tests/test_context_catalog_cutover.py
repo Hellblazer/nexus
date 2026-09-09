@@ -29,7 +29,7 @@ from tests._catalog_fixture_ops import ActiveCatalog
 import structlog
 
 from nexus.context import _repo_collections
-from nexus.corpus import effective_embedding_model_for_writes
+from nexus.corpus import _write_intent_embedding_model
 from nexus.registry import RepoRegistry
 
 # RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine's ``/collections/upsert``
@@ -37,7 +37,12 @@ from nexus.registry import RepoRegistry
 # request's content_type from the ENGINE's own configured embedder (bead
 # nexus-ft04v.6/.8) on the FIRST touch of that content_type — a hardcoded
 # "voyage-context-3" literal here 422s against the box's real (bge) profile.
-_DOCS_MODEL = effective_embedding_model_for_writes("docs")
+#
+# RDR-204 Phase 3 item 3 (nexus-ft04v.26): _write_intent_embedding_model, not
+# effective_embedding_model_for_writes -- see test_catalog_backfill_collections.py's
+# identical comment for why (the latter now makes a real network call, unsafe
+# at module collection time).
+_DOCS_MODEL = _write_intent_embedding_model("docs")
 
 
 @pytest.fixture(autouse=True)

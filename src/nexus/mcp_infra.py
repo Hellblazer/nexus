@@ -101,7 +101,13 @@ _t1_lock = threading.Lock()
 _t3_instance = None
 _t3_lock = threading.Lock()
 
-_collections_cache: tuple[list[str], dict[str, int], float] = ([], {}, 0.0)
+#: (names, counts, rows-by-name, refreshed-at). ``rows`` added RDR-204
+#: Phase 3 (nexus-ft04v.26): the catalog attributes
+#: (content_type/owner_id/embedding_model/lifecycle_state)
+#: ``HttpVectorClient.list_collections()`` now carries through from the
+#: SAME ``/v1/vectors/stats`` round trip this cache already makes -- see
+#: :func:`get_collection_row`.
+_collections_cache: tuple[list[str], dict[str, int], dict[str, dict], float] = ([], {}, {}, 0.0)
 _COLLECTIONS_CACHE_TTL = 60.0
 
 # nexus-53x7s: SERVICE-mode t2_index_write cache. Reuses one T2Database (and
@@ -416,13 +422,17 @@ def get_t3():
     return _t3_instance
 
 
-def _refresh_collections_cache_if_stale() -> None:
-    """Refresh ``_collections_cache`` when older than ``_COLLECTIONS_CACHE_TTL``.
+def _collections_cache_tuple_from_rows(
+    rows: list[dict],
+) -> tuple[list[str], dict[str, int], dict[str, dict], float]:
+    """Build the ``_collections_cache`` tuple shape from a raw
+    ``list_collections()`` response.
 
-    One ``list_collections()`` round trip populates both the name list and
-    the per-collection count map, so :func:`get_collection_names` and
-    :func:`get_collection_counts` share this single fetch instead of each
-    hitting T3 independently (nexus-rbhci).
+    Factored out of :func:`_refresh_collections_cache_if_stale` (RDR-204
+    Phase 3 fix round, nexus-ft04v.28 S1) so :func:`prime_collections_cache`
+    can populate the SAME cache from a caller's own already-fetched rows
+    without a second round trip, using byte-identical row-transformation
+    logic -- never a second, drifting copy.
 
     A row's ``count`` is stored ONLY when it is a genuine non-negative
     reading. ``HttpVectorClient._list_collections_via_count`` (the
@@ -443,22 +453,75 @@ def _refresh_collections_cache_if_stale() -> None:
     any other "never seen this collection's size" case, which every
     consumer already treats as unknown / fail-open.
     """
+    new_names = [row["name"] for row in rows]
+    new_counts: dict[str, int] = {}
+    new_rows: dict[str, dict] = {}
+    for row in rows:
+        raw = row.get("count")
+        if raw is not None:
+            count = int(raw)
+            if count >= 0:
+                new_counts[row["name"]] = count
+            # count < 0 is the failed-count sentinel (see docstring) --
+            # unknown, not a real size; dropped from new_counts only.
+        # RDR-204 Phase 3 (nexus-ft04v.26): carry the catalog attributes
+        # HttpVectorClient.list_collections() now joins through, keyed
+        # by name -- a field read on the SAME round trip, never a
+        # second cache. Absent when no catalog row backs this name.
+        new_rows[row["name"]] = {
+            key: row[key]
+            for key in ("content_type", "owner_id", "embedding_model", "lifecycle_state")
+            if key in row
+        }
+    return new_names, new_counts, new_rows, time.monotonic()
+
+
+def _refresh_collections_cache_if_stale() -> None:
+    """Refresh ``_collections_cache`` when older than ``_COLLECTIONS_CACHE_TTL``.
+
+    One ``list_collections()`` round trip populates both the name list and
+    the per-collection count map, so :func:`get_collection_names` and
+    :func:`get_collection_counts` share this single fetch instead of each
+    hitting T3 independently (nexus-rbhci). See
+    :func:`_collections_cache_tuple_from_rows` for the row-transformation
+    rules (count-sentinel handling, catalog-attribute carry-through).
+    """
     global _collections_cache
-    _names, _counts, ts = _collections_cache
+    _names, _counts, _rows, ts = _collections_cache
     now = time.monotonic()
     if now - ts > _COLLECTIONS_CACHE_TTL:
         rows = get_t3().list_collections()
-        new_names = [row["name"] for row in rows]
-        new_counts: dict[str, int] = {}
-        for row in rows:
-            raw = row.get("count")
-            if raw is None:
-                continue
-            count = int(raw)
-            if count < 0:
-                continue  # failed-count sentinel (see docstring) -- unknown, not a real size
-            new_counts[row["name"]] = count
-        _collections_cache = (new_names, new_counts, now)
+        _collections_cache = _collections_cache_tuple_from_rows(rows)
+
+
+def prime_collections_cache(rows: list[dict]) -> None:
+    """Populate ``_collections_cache`` from *rows* -- a ``list_collections()``
+    response a CALLER already fetched -- instead of paying a second,
+    redundant round trip the next time this module's cache is read.
+
+    RDR-204 Phase 3 fix round (nexus-ft04v.28 S1): ``resolve_corpus``'s
+    Stage 2 (bare-content-type fan-out) reads this module's cache via
+    :func:`get_collection_row` for every candidate collection in the
+    caller's own list. A caller that fetched the full collection list
+    itself moments earlier for a DIFFERENT reason (``nx search``'s
+    ``--corpus`` resolver, which needs the plain name list regardless of
+    whether any ``--corpus`` value is a bare content type) can prime this
+    cache with that SAME response so ``get_collection_row`` never
+    re-fetches -- restoring the RDR's own §Performance Expectations ("a
+    field read on a call already made, not a new hot-path query"), which
+    a separate, always-cold-per-process cache violated (measured: a bare
+    ``nx search --corpus code`` paid TWO ``/v1/vectors/stats`` round
+    trips before this fix, one via the caller's own fetch and one via
+    this cache's first read).
+
+    Always overwrites, even when the existing cache is not yet stale -- a
+    caller invoking this explicitly has a FRESHER read than whatever is
+    cached (the CLI is a cold process every invocation; there is no older
+    cache entry this could regress against a long-lived process's warm
+    cache).
+    """
+    global _collections_cache
+    _collections_cache = _collections_cache_tuple_from_rows(rows)
 
 
 def get_collection_names() -> list[str]:
@@ -497,6 +560,38 @@ def get_collection_counts() -> dict[str, int]:
     return _collections_cache[1]
 
 
+def get_collection_row(name: str) -> dict | None:
+    """Return the cached catalog attributes for T3 collection *name*, or
+    ``None`` when no catalog row backs it.
+
+    RDR-204 Phase 3 (nexus-ft04v.26): the row is ``{"content_type",
+    "owner_id", "embedding_model", "lifecycle_state"}``, sourced from the
+    SAME ``_COLLECTIONS_CACHE_TTL``-windowed ``list_collections()`` fetch
+    that already backs :func:`get_collection_names` and
+    :func:`get_collection_counts` -- a field read on a call already made,
+    never a second cache (RDR §Performance Expectations). ``nexus.corpus``'s
+    ``collection_content_type``/``collection_owner``/``collection_model``
+    deferred-import this to resolve a collection's identity from its
+    catalog row instead of parsing the name string.
+
+    ``None`` covers two cases the caller cannot tell apart from here alone
+    (and does not need to: both mean "this name is not a live, registered
+    collection with catalog attributes"): the name was never registered,
+    or it is registered but owns zero live chunks and so never appears in
+    the ``/v1/vectors/stats`` response at all (see
+    :func:`_refresh_collections_cache_if_stale`'s docstring on the
+    stats-route population). A caller reading an EXISTING collection's
+    attributes and getting ``None`` back should fail loud rather than
+    fall back to parsing the name -- the engine 422s a direct read of an
+    unregistered collection anyway.
+    """
+    _refresh_collections_cache_if_stale()
+    row = _collections_cache[2].get(name)
+    if not row or "content_type" not in row:
+        return None
+    return row
+
+
 def invalidate_collections_cache() -> None:
     """Force the next :func:`get_collection_names`/:func:`get_collection_counts`
     call to refetch from T3 rather than serving up to
@@ -512,7 +607,7 @@ def invalidate_collections_cache() -> None:
     write sites in ``nexus.mcp.core``.
     """
     global _collections_cache
-    _collections_cache = ([], {}, 0.0)
+    _collections_cache = ([], {}, {}, 0.0)
 
 
 #: nexus-m20mf P3 fold-in (critic finding 1/1b, hardened per round-2
@@ -2535,7 +2630,7 @@ def reset_singletons():
     _t1_instance = None
     _t1_isolated = False
     _t3_instance = None
-    _collections_cache = ([], {}, 0.0)
+    _collections_cache = ([], {}, {}, 0.0)
     with _service_t2_lock:
         if _service_t2_db is not None:
             _service_t2_db.close()

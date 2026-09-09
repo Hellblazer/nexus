@@ -428,6 +428,39 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # agreement/disagreement sub-arm is proven separately by
         # Hygiene002CollectionAttributesWalkTest's HEAD-schema fixture.
         ("hygiene-002-1", "nexus-ft04v.4"),
+        # nexus-ztafa (RDR-204 engine): hygiene-004-1 re-files exactly the
+        # catalog_collections rows hygiene-002-1 (above) misfiled into branch
+        # D because their owner segment carries an underscore, which that
+        # changeset's owner grammar rejects but the client's collection-name
+        # check and PgContainerHelper's own fixture grammar both admit —
+        # see the changeset's own header for the full derivation. Seeded as
+        # ONE dedicated 4-segment conformant row with an underscored owner
+        # (registerCollection(), same pre-lifecycle_state bare-insert shape
+        # as the four hygiene-002-1 fixtures above); effect-asserted 'live'
+        # with the name's own attributes, not branch D's 'unknown'/disputed.
+        # The misfile-then-refile TRANSITION itself is proven separately by
+        # Hygiene004OwnerGrammarUnderscoreTest's dedicated HEAD-schema fixtures.
+        ("hygiene-004-1", "nexus-ztafa"),
+        # nexus-uxd2a (RDR-204 engine, shipped-defect fix): hygiene-005-3's
+        # one-off data correction for catalog_collections rows a live buggy
+        # gc_quarantine_orphans self-registration already mislabelled (the
+        # shipped defect fixed by this same hop's hygiene-005-1), plus the
+        # dormant-quarantine-sibling promotion. Seeded as TWO dedicated
+        # suffix-shaped ("<name>__quarantine") rows -- the one reachable
+        # shape through a pure migration-only hop, since the real PREFIX
+        # production shape only ever arises from an application-runtime
+        # call to gc_quarantine_orphans, never from a Liquibase changeset
+        # (see hygiene-005's own changelog header) -- one with a registered
+        # origin sibling (corrected from it, lifecycle_state 'quarantine')
+        # and one without (content_type 'unknown' left unchanged, nothing
+        # to strip). Both are branch D ('unknown'/disputed) under
+        # hygiene-002-1 AND hygiene-004-1 -- neither's m4/mq/m2 regex
+        # matches a "__quarantine" suffix. The full branch-selection logic
+        # (both name shapes, origin-copy vs no-origin-strip, the dormant-
+        # promotion branch) is proven separately by
+        # Hygiene005GcRegistrationFromOriginRowDataCorrectionTest's
+        # dedicated HEAD-schema fixtures.
+        ("hygiene-005-3", "nexus-uxd2a"),
     }
 )
 

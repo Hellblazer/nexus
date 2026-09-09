@@ -105,6 +105,30 @@ class TestStaleChunkPaginatedPruning:
     this class originally tested (``_index_document``'s stale-chunk prune
     loop) is DELETED dead code — see the module docstring above."""
 
+    @pytest.fixture(autouse=True)
+    def _stub_catalog_reader(self, monkeypatch):
+        # nexus-ft04v.16 client half (register before the incremental-
+        # sync read on a first index) now reaches ensure_collection_
+        # registered's profile-agreement check (nexus-ft04v.26 item 3,
+        # RDR-204 Phase 3 THE REPOINT) unconditionally, even on these
+        # tests' mocked-T3 paths. That check always calls
+        # nexus.catalog.factory.make_catalog_reader(); unstubbed here it
+        # returned None (no real service configured for this unit test),
+        # which used to surface as a bare AttributeError two frames
+        # later -- now CatalogReaderUnavailableError, but the fixture
+        # collections in this class were never actually registered
+        # either way, so an EMPTY profile ({}: the bootstrap case,
+        # registration proceeds with intent) is the correct stub, same
+        # pattern as tests/db/test_http_vector_client.py::
+        # TestServiceModeIndexerRouting.
+        import nexus.catalog.factory as _catalog_factory_mod
+
+        class _EmptyProfileReader:
+            def embedding_profile(self) -> list[dict]:
+                return []
+
+        monkeypatch.setattr(_catalog_factory_mod, "make_catalog_reader", lambda: _EmptyProfileReader())
+
     def test_prune_stale_beyond_300_no_longer_queried_or_deleted(
         self, sample_file: Path, monkeypatch,
     ) -> None:

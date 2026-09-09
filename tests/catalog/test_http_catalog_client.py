@@ -141,6 +141,20 @@ class TestToEntryFenceFields:
         assert entry.index_started_at == "2026-08-02T00:00:00Z"
 
 
+#: RDR-204 (nexus-ft04v.33): the two mode shapes of ``nexus.embedding_profile``
+#: as the engine writes them at boot — one row per content type.
+VOYAGE_EMBEDDING_PROFILE_ROWS: list[dict[str, Any]] = [
+    {"content_type": "code", "embedding_model": "voyage-code-3", "dimension": 1024},
+    {"content_type": "docs", "embedding_model": "voyage-context-3", "dimension": 1024},
+    {"content_type": "rdr", "embedding_model": "voyage-context-3", "dimension": 1024},
+    {"content_type": "knowledge", "embedding_model": "voyage-context-3", "dimension": 1024},
+]
+BGE_EMBEDDING_PROFILE_ROWS: list[dict[str, Any]] = [
+    {"content_type": ct, "embedding_model": "bge-base-en-v15-768", "dimension": 768}
+    for ct in ("code", "docs", "rdr", "knowledge")
+]
+
+
 class FakeCatalogHandler(BaseHTTPRequestHandler):
     """Routes matching the real CatalogHandler.java switch cases exactly."""
 
@@ -198,11 +212,18 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
     last_owners_by_type_body: dict[str, Any] = {}
     #: nexus-dkymw: last body POSTed to /restore.
     last_restore_body: dict[str, Any] = {}
+    #: RDR-204 (nexus-ft04v.33): rows /embedding_profile serves (the Voyage
+    #: shape by default) and the status it answers with (200, or 404/405 to
+    #: play an engine below the Phase 2 route).
+    embedding_profile_rows: list[dict[str, Any]] = list(VOYAGE_EMBEDDING_PROFILE_ROWS)
+    embedding_profile_status: int = 200
 
     @classmethod
     def reset_log(cls) -> None:
         cls.get_ops = []
         cls.post_ops = []
+        cls.embedding_profile_rows = list(VOYAGE_EMBEDDING_PROFILE_ROWS)
+        cls.embedding_profile_status = 200
         cls.last_link_body = {}
         cls.list_content_type_count = 0
         cls.descendants_count = 2
@@ -446,6 +467,9 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                 "model_version": "1", "display_name": "code__test__voyage-code-3__v1",
                 "legacy_grandfathered": False, "superseded_by": "", "superseded_at": "",
                 "created_at": "2026-07-01T00:00:00+00:00",
+                # RDR-204 Phase 2 (nexus-ft04v.24/.16): collRow carries the
+                # registry row's dimension and lifecycle_state.
+                "dimension": 1024, "lifecycle_state": "live",
             }]})
         elif op == "/collections/get":
             # nexus-8y1tm: echo the requested name; full collRow shape.
@@ -467,7 +491,19 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                     "legacy_grandfathered": "__" not in name,
                     "superseded_by": "", "superseded_at": "",
                     "created_at": "2026-07-01T00:00:00+00:00",
+                    "dimension": 1024, "lifecycle_state": "live",
                 })
+        elif op == "/embedding_profile":
+            # RDR-204 (nexus-ft04v.33): mirror CatalogHandler.handleEmbeddingProfile
+            # — {"profile": [{content_type, embedding_model, dimension}...],
+            # "count": N}; an unprofiled tenant gets an empty list, never a
+            # default. embedding_profile_status lets a test play a pre-Phase-2
+            # engine (404) or a wrong method (405).
+            if FakeCatalogHandler.embedding_profile_status != 200:
+                self._send_json({"error": "not found"}, FakeCatalogHandler.embedding_profile_status)
+            else:
+                rows = FakeCatalogHandler.embedding_profile_rows
+                self._send_json({"profile": rows, "count": len(rows)})
         elif op == "/collections/for_tuple":
             self._send_json({"name": "code__test__voyage-code-3__v1"})
         elif op == "/collections/owner-root":
@@ -2690,3 +2726,85 @@ class TestManifestNullCollectionReport:
         c = self._client_get_returning(monkeypatch, None)
         report = c.manifest_null_collection_report()
         assert report == {"total": 0, "backfillable": 0, "unavailable": True}
+
+
+# ── RDR-204 (nexus-ft04v.33): embedding_profile accessor ─────────────────────
+
+
+class TestEmbeddingProfileAccessor:
+    """``HttpCatalogClient.embedding_profile()`` over the live fake server.
+
+    The engine is the only writer of ``nexus.embedding_profile``; the client
+    READS it and never invents a row. Empty stays empty (a hardcoded default
+    here is the GH #667 class), an engine below the Phase 2 route fails loud,
+    and there is no second cache: the profile is small and per-tenant.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset(self) -> None:
+        FakeCatalogHandler.reset_log()
+        yield
+        FakeCatalogHandler.reset_log()
+
+    def test_voyage_profile_round_trips_verbatim(self, client: HttpCatalogClient) -> None:
+        rows = client.embedding_profile()
+        assert rows == VOYAGE_EMBEDDING_PROFILE_ROWS
+        assert {r["content_type"] for r in rows} == {"code", "docs", "rdr", "knowledge"}
+        assert all(isinstance(r["dimension"], int) for r in rows)
+
+    def test_bge_profile_round_trips_verbatim(self, client: HttpCatalogClient) -> None:
+        FakeCatalogHandler.embedding_profile_rows = list(BGE_EMBEDDING_PROFILE_ROWS)
+        rows = client.embedding_profile()
+        assert rows == BGE_EMBEDDING_PROFILE_ROWS
+        assert {r["embedding_model"] for r in rows} == {"bge-base-en-v15-768"}
+        assert {r["dimension"] for r in rows} == {768}
+
+    def test_unprofiled_tenant_returns_empty_not_a_default(self, client: HttpCatalogClient) -> None:
+        FakeCatalogHandler.embedding_profile_rows = []
+        assert client.embedding_profile() == []
+
+    @pytest.mark.parametrize("status", [404, 405])
+    def test_engine_below_the_route_fails_loud(self, client: HttpCatalogClient, status: int) -> None:
+        from nexus.catalog.http_catalog_client import EmbeddingProfileRouteMissingError
+
+        FakeCatalogHandler.embedding_profile_status = status
+        with pytest.raises(EmbeddingProfileRouteMissingError, match="embedding_profile"):
+            client.embedding_profile()
+
+    def test_no_second_cache_every_call_hits_the_wire(self, client: HttpCatalogClient) -> None:
+        client.embedding_profile()
+        client.embedding_profile()
+        assert FakeCatalogHandler.get_ops.count("/embedding_profile") == 2
+        assert not [a for a in vars(client) if "profile" in a.lower()], (
+            "the accessor must not grow a memo attribute; the profile is read fresh"
+        )
+
+    def _client_get_returning(self, monkeypatch: pytest.MonkeyPatch, body: object) -> HttpCatalogClient:
+        c = object.__new__(HttpCatalogClient)
+        monkeypatch.setattr(c, "_get", lambda path, **params: body, raising=False)
+        return c
+
+    def test_count_disagreeing_with_rows_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        c = self._client_get_returning(monkeypatch, {"profile": list(VOYAGE_EMBEDDING_PROFILE_ROWS), "count": 99})
+        with pytest.raises(ValueError, match="count"):
+            c.embedding_profile()
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            {"content_type": "code", "embedding_model": "model-x"},
+            {"content_type": "code", "dimension": 1024},
+            {"embedding_model": "model-x", "dimension": 1024},
+            {"content_type": "code", "embedding_model": "model-x", "dimension": "1024"},
+        ],
+        ids=["no-dimension", "no-model", "no-content-type", "dimension-not-int"],
+    )
+    def test_malformed_row_raises(self, monkeypatch: pytest.MonkeyPatch, row: dict) -> None:
+        c = self._client_get_returning(monkeypatch, {"profile": [row], "count": 1})
+        with pytest.raises(ValueError, match="embedding_profile"):
+            c.embedding_profile()
+
+    def test_none_body_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        c = self._client_get_returning(monkeypatch, None)
+        with pytest.raises(ValueError, match="embedding_profile"):
+            c.embedding_profile()

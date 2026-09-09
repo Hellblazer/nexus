@@ -3898,3 +3898,76 @@ class TestCheckNextSeqDrift:
             ["1.12.1", "1.12.3.4"],
         )
         assert r.ok is True, f"deeper address counted as a child: {r.detail}"
+
+
+class TestDoctorFenceNonRepoOwners:
+    """GH #1512 (nexus-kt7f4): a post-baseline unstamped document that belongs
+    to a NON-repo owner (the knowledge store's curator owner) has no file
+    path, so the repo remedy cannot apply; the row says so, counts them, and
+    names `nx catalog reconcile-fences` first."""
+
+    def _entry(self, *, index_state, indexed_at, tumbler, source_uri="", index_run_id=""):
+        return type("E", (), {
+            "index_state": index_state, "index_started_at": "", "indexed_at": indexed_at,
+            "index_state_reported": True, "source_uri": source_uri, "tumbler": tumbler,
+            "index_run_id": index_run_id,
+        })()
+
+    def _cat(self, entries, owners):
+        class _Cat:
+            def all_documents(self, limit=0):
+                return list(entries)
+
+            def list_owners(self, *, include_deactivated=False):
+                return owners
+        return _Cat()
+
+    def _run(self, monkeypatch, entries, owners):
+        import nexus.health as h
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda *a, **k: self._cat(entries, owners), raising=False,
+        )
+        return h._check_stale_indexing_runs()[0]
+
+    def _entries(self):
+        return [
+            self._entry(index_state="complete", indexed_at="2026-08-07T17:00:00+00:00",
+                        tumbler="1.61.1", source_uri="chroma://code__nexus/baseline.py"),
+            self._entry(index_state=None, indexed_at="2026-08-29T15:15:27+00:00", tumbler="1.1.103"),
+            self._entry(index_state=None, indexed_at="2026-08-29T15:15:27+00:00", tumbler="1.1.104"),
+            self._entry(index_state=None, indexed_at="2026-08-29T15:16:00+00:00", tumbler="1.61.9",
+                        source_uri="chroma://code__nexus/late.py"),
+        ]
+
+    def test_curator_owned_candidates_get_the_reconcile_remedy(self, monkeypatch) -> None:
+        owners = [{"tumbler_prefix": "1.1", "owner_type": "curator"},
+                  {"tumbler_prefix": "1.61", "owner_type": "repo"}]
+        r = self._run(monkeypatch, self._entries(), owners)
+        assert r.ok is False and r.warn is True
+        assert "2 of the named document(s) belong to a non-repo owner" in r.detail
+        assert "nx catalog reconcile-fences" in r.detail
+        assert r.fix_suggestions[0].startswith("nx catalog reconcile-fences --dry-run")
+        assert any("nx index <path> --force" in f for f in r.fix_suggestions), (
+            "the repo document still gets the repo remedy")
+
+    def test_without_an_owner_table_every_candidate_keeps_the_repo_remedy(self, monkeypatch) -> None:
+        class _NoOwners(Exception):
+            pass
+
+        entries = self._entries()
+        import nexus.health as h
+
+        class _Cat:
+            def all_documents(self, limit=0):
+                return list(entries)
+
+            def list_owners(self, *, include_deactivated=False):
+                raise _NoOwners("owner table unavailable")
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader",
+                            lambda *a, **k: _Cat(), raising=False)
+        r = h._check_stale_indexing_runs()[0]
+        assert r.ok is False
+        assert "non-repo owner" not in r.detail
+        assert not r.fix_suggestions[0].startswith("nx catalog reconcile-fences")

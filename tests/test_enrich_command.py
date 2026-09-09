@@ -652,3 +652,77 @@ class TestBackfillCatalog:
             enrich, ["bib", "knowledge__nexus-1-1__bge-base-en-v15-768__v1", "--backfill-catalog"],
         )
         assert result.exit_code == 0, result.output
+
+
+@patch("nexus.db.make_t3")
+@patch("nexus.bib_enricher.enrich")
+def test_enrich_bare_subject_resolves_to_conformant_collection(
+    mock_bib: MagicMock, mock_t3_factory: MagicMock,
+) -> None:
+    """nexus-g276c: ``nx enrich bib knowledge__vector-search`` (the bare form
+    every other verb accepts) reached the engine unresolved and died with
+    HTTP 400 "not four-segment conformant"."""
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_db = MagicMock(spec=HttpVectorClient)
+    mock_db.get_or_create_collection.return_value = mock_col
+    mock_db.list_collections.return_value = []
+    mock_db.collection_exists.return_value = True
+    mock_t3_factory.return_value = mock_db
+
+    result = CliRunner().invoke(enrich, ["bib", "knowledge__vector-search", "--source", "s2"])
+    assert result.exit_code == 0, result.output
+    # The model token is install-dependent (bge under the test config,
+    # voyage-context-3 on a cloud box); the shape is what the engine checks.
+    resolved = mock_db.get_or_create_collection.call_args.args[0]
+    assert resolved.startswith("knowledge__vector-search__"), resolved
+    assert resolved.endswith("__v1") and resolved.count("__") == 3, resolved
+    assert resolved in result.output
+
+
+@patch("nexus.retry._vector_with_retry")
+@patch("nexus.db.make_t3")
+@patch("nexus.bib_enricher.enrich")
+def test_enrich_looks_up_by_catalog_title_when_chunk_title_is_a_fragment(
+    mock_bib: MagicMock, mock_t3_factory: MagicMock, mock_retry: MagicMock,
+) -> None:
+    """nexus-g276c: chunks carry the extractor's first line as ``title``
+    ("...Retrieval-Augmented Generation:"); the catalog row carries the
+    registered title. OpenAlex found the paper only under the full title,
+    so the lookup uses the catalog title when the group's chunks map to
+    exactly one catalog row. Grouping stays keyed on the chunk title."""
+    fragment = "Self-Aware Vector Embeddings for Retrieval-Augmented Generation:"
+    full = (
+        "Self-Aware Vector Embeddings for Retrieval-Augmented Generation: "
+        "A Neuroscience-Inspired Framework for Temporal, Confidence-Weighted, "
+        "and Relational Knowledge"
+    )
+    mock_bib.return_value = {
+        "year": 2026, "venue": "arXiv", "authors": "Naizhong Xu",
+        "citation_count": 0, "semantic_scholar_id": "s2id",
+    }
+    chunk_meta = [
+        {"title": fragment, "content_hash": "h1"},
+        {"title": fragment, "content_hash": "h1"},
+    ]
+    mock_retry.side_effect = [
+        {"ids": ["c1", "c2"], "metadatas": chunk_meta},   # paginated scan
+        {"ids": ["c1", "c2"], "metadatas": chunk_meta},   # re-fetch before update
+        None,                                             # col.update
+    ]
+    mock_col = MagicMock()
+    mock_db = MagicMock(spec=HttpVectorClient)
+    mock_db.get_or_create_collection.return_value = mock_col
+    mock_t3_factory.return_value = mock_db
+
+    with patch(
+        "nexus.commands.enrich._catalog_titles_by_content_hash",
+        return_value={"h1": full},
+    ), patch("nexus.commands.enrich._catalog_enrich_hook") as hook:
+        result = CliRunner().invoke(
+            enrich, ["bib", "knowledge__test", "--delay", "0", "--source", "s2"],
+        )
+    assert result.exit_code == 0, result.output
+    mock_bib.assert_called_once_with(full)
+    assert hook.call_args.kwargs["title"] == full
+    assert "enriched 2 chunks across 1 titles" in result.output

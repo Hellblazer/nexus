@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+
 if TYPE_CHECKING:
     from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 
@@ -147,11 +148,20 @@ def generate_context_l1(
     # duplication is tracked separately (nexus-slcn7); read-side re-masking is the
     # wrong layer to fix it.
     # Group by collection prefix, filtered by repo if specified.
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
+
     prefixes: dict[str, list[tuple[str, int]]] = {}
     for collection, label, doc_count in rows:
         if allowed is not None and collection not in allowed:
             continue
-        prefix = collection.split("__")[0] if "__" in collection else collection
+        # RDR-204 Phase 3 repoint (nexus-ft04v.26), class (c): `collection`
+        # may be a legacy/unregistered-but-live collection -- reads the
+        # row directly (never nexus.corpus's name-parsing primitives).
+        # No row -> its own singleton group keyed by the full name,
+        # mirroring _group_collections_by_model's "no info -> own group,
+        # never guessed" precedent for the same reason.
+        row = get_collection_row(collection)
+        prefix = row["content_type"] if row is not None else collection
         if prefix not in prefixes:
             prefixes[prefix] = []
         if len(prefixes[prefix]) < _TOPICS_PER_PREFIX:

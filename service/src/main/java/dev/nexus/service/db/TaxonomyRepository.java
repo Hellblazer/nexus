@@ -676,8 +676,9 @@ public final class TaxonomyRepository {
         // the SQL call working from the identical casing.
         List<String> chashes = rawChashes.stream().map(String::toLowerCase).toList();
         // Fail loud BEFORE opening a transaction — an unresolvable dim means no
-        // per-dim table exists to query at all (dimForCollection's own contract).
-        int dim = dev.nexus.service.vectors.PgVectorRepository.dimForCollection(collection);
+        // per-dim table exists to query at all (RDR-204 Phase 2, bead nexus-ft04v.16:
+        // the row's own dimension via CollectionRegistry, never a name-segment parse).
+        int dim = CollectionRegistry.lookup(tenantScope, tenant, collection).dimension();
         String[] chashArr = chashes.toArray(new String[0]);
 
         // nexus-0uuit: belt, mirroring assignMany's own DeadlockRetry wrap above.
@@ -924,6 +925,25 @@ public final class TaxonomyRepository {
                .execute();
             return removed;
         });
+    }
+
+    /**
+     * GH #1528 (nexus-4tfxp): delete projection assignments ({@code
+     * assigned_by = 'projection'}) whose stored RAW cosine is below
+     * {@code minSimilarity}, for source collections whose name starts with
+     * {@code sourceCollectionPrefix} (a corpus prefix such as {@code code__}, or
+     * one full collection name). The recovery path for a pass that admitted
+     * weak matches: the persist route is a prefer-higher upsert, so nothing
+     * else can lower or remove a row. Topics are never touched (a topic with
+     * no assignments left is still a discovered topic).
+     */
+    public int pruneProjectionBelow(String tenant, String sourceCollectionPrefix, double minSimilarity) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.deleteFrom(TOPIC_ASSIGNMENTS)
+               .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
+                   .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.startsWith(sourceCollectionPrefix))
+                   .and(TOPIC_ASSIGNMENTS.SIMILARITY.lt(minSimilarity)))
+               .execute());
     }
 
     /** Purge all taxonomy rows for a collection. */

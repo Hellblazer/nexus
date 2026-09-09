@@ -10,6 +10,7 @@ from click.testing import CliRunner
 
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.types import SearchResult
+from tests.conftest import catalog_row_for_collection_name, patched_mcp_infra_t3
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -71,7 +72,12 @@ def cli_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 def mock_t3():
     # cli_env sets cloud creds -> real _t3() would be HttpVectorClient.
     t3 = MagicMock(spec=HttpVectorClient)
-    t3.list_collections.return_value = [{"name": "code__repo-abcd1234"}]
+    # RDR-204 Phase 3 fixture-seam fix (nexus-ft04v.26): resolve_corpus's
+    # bare-corpus fan-out reads a catalog-row shape per collection.
+    t3.list_collections.return_value = [
+        {"name": n, **catalog_row_for_collection_name(n)}
+        for n in ("code__repo-abcd1234",)
+    ]
     return t3
 
 
@@ -88,6 +94,7 @@ def _run_hybrid_cli(cli_env, mock_t3, *, vectors=None, rg_hits=None,
     runner = CliRunner()
     with (
         patch("nexus.commands.search_cmd._t3", return_value=mock_t3),
+        patched_mcp_infra_t3(mock_t3),
         patch("nexus.commands.search_cmd.search_cross_corpus",
               return_value=vectors or []),
         patch("nexus.commands.search_cmd.search_ripgrep",
@@ -354,11 +361,14 @@ def test_hybrid_search_uses_corpus_filter(cli_env, mock_t3):
         rg_calls.append(cache_path)
         return []
 
-    mock_t3.list_collections.return_value = [{"name": "code__nexus-a1b2c3d4"}]
+    mock_t3.list_collections.return_value = [
+        {"name": "code__nexus-a1b2c3d4", **catalog_row_for_collection_name("code__nexus-a1b2c3d4")}
+    ]
 
     runner = CliRunner()
     with (
         patch("nexus.commands.search_cmd._t3", return_value=mock_t3),
+        patched_mcp_infra_t3(mock_t3),
         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]),
         patch("nexus.commands.search_cmd.search_ripgrep", side_effect=fake_rg),
         patch("nexus.commands.search_cmd.load_config",
@@ -410,6 +420,7 @@ def test_hybrid_default_config(cli_env, mock_t3, hybrid_default, expect_rg_calle
     runner = CliRunner()
     with (
         patch("nexus.commands.search_cmd._t3", return_value=mock_t3),
+        patched_mcp_infra_t3(mock_t3),
         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]),
         patch("nexus.commands.search_cmd.search_ripgrep", side_effect=fake_rg),
         patch("nexus.commands.search_cmd.load_config",

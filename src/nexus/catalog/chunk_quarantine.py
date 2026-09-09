@@ -55,10 +55,48 @@ def quarantine_collection_name(origin: str) -> str:
     These names are deliberately outside the strict conformance enum —
     creation passes ``strict=False`` (system-internal collections).
     """
-    parts = origin.split("__", 1)
-    if len(parts) == 2:
-        return f"{QUARANTINE_PREFIX}-{parts[0]}__{parts[1]}"
-    return f"{QUARANTINE_PREFIX}-x__{origin}"
+    # RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26, item 6), class (d):
+    # prefers *origin*'s catalog row (authoritative, Gap 1 -- a row that
+    # disagrees with the name wins), reading content_type/owner_id/
+    # embedding_model off it and the name's own v<n> segment via the
+    # regex-based model_version_for_collection_name (not carried by the
+    # row cache; safe to still read from the name because model_version
+    # is the value the CALLER chose when it rendered/found this name, not
+    # an independent catalog fact that can drift the way content_type/
+    # owner/model can).
+    #
+    # Live-tested against the real GC integration suite
+    # (tests/test_rdr191_gc_serverside_prune.py): `origin` frequently has
+    # NO row there (a fixture collection that exists in T3 with chunks
+    # but was never registered), so unlike the read helpers this
+    # deliberately does NOT fail loud on a missing row -- one
+    # unregistered collection must not abort the whole GC sweep, and "the
+    # RDR's backfill-and-doctor class... chunk_quarantine's sibling
+    # minting IF IT MUST" is the coordinator's own named exception (ruling
+    # 2026-09-08) for exactly this case. Falls to
+    # split_candidate_collection_name (the shared candidate-string
+    # primitive, still counted by the census, never a raw split) --
+    # preserving the historical "preserve the WHOLE tail unsplit" contract
+    # exactly (the docstring's C3 note: model/version must survive intact
+    # for a conformant name, which the whole-remainder convention already
+    # guarantees without decomposing further).
+    from nexus.corpus import (  # noqa: PLC0415 — deferred to avoid import cycle (nexus.corpus)
+        model_version_for_collection_name,
+        split_candidate_collection_name,
+    )
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — deferred to avoid import cycle (nexus.mcp_infra)
+
+    row = get_collection_row(origin)
+    if row is not None:
+        version = model_version_for_collection_name(origin) or "v1"
+        return (
+            f"{QUARANTINE_PREFIX}-{row['content_type']}__{row['owner_id']}"
+            f"__{row['embedding_model']}__{version}"
+        )
+    first, rest = split_candidate_collection_name(origin)
+    if not first:
+        return f"{QUARANTINE_PREFIX}-x__{origin}"
+    return f"{QUARANTINE_PREFIX}-{first}__{rest}"
 
 
 def quarantine_days() -> int:

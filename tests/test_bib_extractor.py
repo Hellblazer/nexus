@@ -460,3 +460,120 @@ class TestPreprintIdentifierFallback:
         )
         assert ids["doi"] is None
         assert ids["arxiv"] == "2603.28052"
+
+
+# ── arXiv id: the same guards as the DOI path (nexus-g276c) ──────────────────
+
+
+class TestArxivReferenceSectionBound:
+    """nexus-g276c: ``extract_arxiv_id`` had none of ``extract_doi``'s guards.
+    Measured 2026-09-08 on arXiv:2604.20598 (17 pages, MinerU): the paper's
+    own margin banner is rotated text the extractor never emits, so the
+    FIRST arXiv id in the text was reference [3] (arXiv:2510.24476). Its
+    by-id lookup was rejected on title mismatch, and the title fallback
+    then stamped a stranger's bib on 75 chunks and the catalog row."""
+
+    def test_cited_arxiv_id_in_references_is_not_returned(self) -> None:
+        from nexus.bib_extractor import extract_arxiv_id
+
+        text = (
+            "Self-Aware Vector Embeddings for Retrieval-Augmented Generation\n"
+            "Naizhong Xu\n"
+            "Abstract. Modern retrieval-augmented generation systems.\n"
+            "## References\n\n"
+            "[3] Mitigating Hallucination in Large Language Models (LLMs). "
+            "arXiv:2510.24476, 2025. https://arxiv.org/html/2510.24476v1\n"
+        )
+        assert extract_arxiv_id(text) is None
+
+    def test_wrapped_citation_line_without_marker_is_not_returned(self) -> None:
+        """The measured shape: a chunk boundary split the entry, so the line
+        carrying the id has no ``[N]`` marker. The ``, 2025.`` after the id
+        and the arxiv.org URL on the line identify it as a citation."""
+        from nexus.bib_extractor import extract_arxiv_id
+
+        text = (
+            "Some prose above.\n"
+            "arge Language Models (LLMs): An Application-Oriented Survey. "
+            "arXiv:2510.24476, 2025. https://arxiv.org/ html/2510.24476v1\n"
+        )
+        assert extract_arxiv_id(text) is None
+
+    def test_arxiv_preprint_citation_form_is_not_returned(self) -> None:
+        from nexus.bib_extractor import extract_arxiv_id
+
+        assert extract_arxiv_id("Guo et al. LightRAG. arXiv preprint arXiv:2410.05779") is None
+
+    def test_banner_wins_over_a_bare_mention_in_the_same_region(self) -> None:
+        from nexus.bib_extractor import extract_arxiv_id
+
+        text = (
+            "See also arXiv:2205.13147 for background.\n"
+            "arXiv:2604.20598v1 [cs.IR] 22 Apr 2026\n"
+        )
+        assert extract_arxiv_id(text) == "2604.20598"
+
+    def test_reordered_banner_below_a_heading_still_found_when_region_empty(self) -> None:
+        from nexus.bib_extractor import extract_arxiv_id
+
+        text = (
+            "## References\n"
+            "[1] Foo. arXiv:1111.11111, 2020.\n"
+            "arXiv:2604.20598v1 [cs.IR] 22 Apr 2026\n"
+        )
+        assert extract_arxiv_id(text) == "2604.20598"
+
+    def test_bracketed_category_inside_a_citation_is_not_a_banner(self) -> None:
+        """Code review of 528681f01 (Critical): the banner search ran over
+        the whole text before any guard, so a reference entry pasted in
+        arXiv's own "Cite as: arXiv:ID [cs.CL]" form was returned as the
+        paper's id — the exact defect the commit exists to fix."""
+        from nexus.bib_extractor import extract_arxiv_id
+
+        marked = (
+            "Self-Aware Vector Embeddings\nAbstract.\n## References\n"
+            "[5] Guo et al. LightRAG. Cite as: arXiv:2410.05779 [cs.CL]\n"
+        )
+        assert extract_arxiv_id(marked) is None
+        # the wrapped continuation line: no [N] marker, "Cite as" is the cue
+        wrapped = (
+            "Some prose.\n"
+            "LightRAG: Simple and Fast Retrieval-Augmented Generation. "
+            "Cite as: arXiv:2410.05779 [cs.CL]\n"
+        )
+        assert extract_arxiv_id(wrapped) is None
+        # bracket plus year, no marker, no "cite as"
+        assert extract_arxiv_id("Guo et al. arXiv:2410.05779 [cs.CL], 2024.") is None
+
+    def test_own_id_above_references_still_found(self) -> None:
+        from nexus.bib_extractor import extract_arxiv_id
+
+        text = (
+            "Paper Title\narXiv:2603.28052\nReferences\n"
+            "[8] Other. arXiv:1111.11111, 2019.\n"
+        )
+        assert extract_arxiv_id(text) == "2603.28052"
+
+    def test_reordered_text_falls_back_to_a_full_scan_skipping_citations(self) -> None:
+        from nexus.bib_extractor import extract_arxiv_id
+
+        text = (
+            "References\n[1] Other. arXiv:1111.11111, 2019.\n"
+            "Paper Title\nSubmitted as arXiv:2503.07641\n"
+        )
+        assert extract_arxiv_id(text) == "2503.07641"
+
+    def test_citations_only_yields_no_identifier_end_to_end(self) -> None:
+        """``extract_identifiers`` on a citations-only body: both None, so
+        the caller falls through to title search instead of a foreign id."""
+        from nexus.bib_extractor import extract_identifiers
+
+        ids = extract_identifiers(
+            filename="Self-Aware Vector Embeddings.pdf",
+            body_text=(
+                "Self-Aware Vector Embeddings\n## References\n"
+                "[3] Survey. arXiv:2510.24476, 2025.\n"
+                "[6] C. Xu, M. Nayyeri, et al. arXiv:2007.09543\n"
+            ),
+        )
+        assert ids == {"doi": None, "arxiv": None}

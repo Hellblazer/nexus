@@ -33,6 +33,19 @@ def validate_collection_name(name: str) -> None:
     2. Cloud byte-length limit: name must not exceed 128 bytes when UTF-8 encoded.
        Relevant if names ever contain multi-byte characters; all current ASCII names
        are well within this limit since they cap at 63 chars = 63 bytes.
+
+    This is CHARSET legality of the WHOLE name string (start/end
+    alphanumeric, alphanumeric+hyphen+underscore in between) -- it has no
+    concept of segments and is deliberately NOT the owner-segment
+    ambiguity rule (RDR-204 Phase 3 item 7, coordinator grammar decision
+    2026-09-08): that structural check -- an owner admits single
+    underscores only, never a run of two, because "__" is always the
+    segment separator -- lives in :func:`is_conformant_collection_name` /
+    :data:`_OWNER_SEGMENT_RE`. Do not re-derive it here: this function
+    validates names that legitimately contain three literal "__"
+    separators (a full 4-segment conformant name), so a segment-aware
+    rule cannot live in this flat charset check without rejecting every
+    conformant name at creation time.
     """
     # Length check fires first for <3 chars; regex rejects other invalid patterns.
     # Both gates are needed: length for clear error messages, regex for charset/boundary validation.
@@ -42,11 +55,19 @@ def validate_collection_name(name: str) -> None:
         # 35 chars) which fits under the cap and preserves vectors (no reindex).
         # Derive content_type from the name prefix (before the first ``__``) when
         # present so the hint can be concrete; fall back to a generic flag otherwise.
+        # RDR-204 Phase 3 repoint (nexus-ft04v.26): an oversized *name* is
+        # necessarily NOT a real (registered) collection -- collection_content_type
+        # now reads the catalog row and would raise CollectionNotRegisteredError
+        # here every time. This is a best-effort HINT about a candidate string,
+        # so it uses the string-shape primitive directly, same as
+        # t3_collection_name's own candidate-parsing sites below.
+        # split_candidate_collection_name returns "" for a name with no "__" at
+        # all, which fails the membership test below exactly like the old
+        # "__" in name guard did.
         _ct_hint = ""
-        if "__" in name:
-            _prefix = name.split("__", 1)[0]
-            if _prefix in _CONTENT_TYPES:
-                _ct_hint = f" --content-type {_prefix}"
+        _prefix, _ = split_candidate_collection_name(name)
+        if _prefix in _CONTENT_TYPES:
+            _ct_hint = f" --content-type {_prefix}"
         raise ValueError(
             f"Collection name {name!r} must be 3–63 characters (got {len(name)}). "
             f"The name is too long for ChromaDB's 63-character cap. "
@@ -112,9 +133,23 @@ voyage-named collection fails loud instead of producing 384-dim vectors
 against a 1024-dim space (RDR-059 hazard, inverted)."""
 
 _CT_ALTERNATION = "|".join(_CONTENT_TYPES)
+#: The owner-segment grammar, shared wherever an owner-shaped value is
+#: validated (RDR-204 Phase 3 item 7, coordinator grammar decision
+#: 2026-09-08, engine-side hygiene-004-1 / nexus-ztafa): SINGLE
+#: underscores only, never a run of two. ``"__"`` is always the segment
+#: separator, so an owner containing a literal ``"__"`` would make a
+#: two-segment name ambiguous with a four-segment one (e.g. is
+#: ``code__my__repo`` a 2-segment name with owner ``"my__repo"``, or a
+#: malformed 3-segment one?). ``is_conformant_collection_name`` used to be
+#: STRICTER than this (rejecting any underscore at all) and then, briefly
+#: during this bead, LOOSER (admitting an unrestricted run) -- this is the
+#: settled middle: an underscore is allowed as an internal separator
+#: between alnum/hyphen runs, never doubled.
+_OWNER_SEGMENT_RE = r"[a-zA-Z0-9-]+(?:_[a-zA-Z0-9-]+)*"
+
 _CONFORMANT_COLLECTION_RE = re.compile(
     rf"^(?P<ct>{_CT_ALTERNATION})"
-    r"__(?P<owner>[a-zA-Z0-9-]+)"
+    rf"__(?P<owner>{_OWNER_SEGMENT_RE})"
     r"__(?P<model>[a-z][a-z0-9-]*)"
     r"__v(?P<ver>\d+)$"
 )
@@ -186,6 +221,26 @@ def canonical_embedding_model(content_type: str) -> str:
     )
 
 
+class CollectionNotRegisteredError(LookupError):
+    """A funnel helper (:func:`collection_content_type`, :func:`collection_owner`,
+    :func:`collection_model`) was asked to read the catalog row of a name
+    that has none (RDR-204 Phase 3, nexus-ft04v.26 THE REPOINT).
+
+    These three helpers stop parsing the collection name and read
+    ``nexus.catalog_collections`` instead (the collection-row cache,
+    :func:`nexus.mcp_infra.get_collection_row`) -- a name with no row is
+    never re-derived by falling back to a string parse (the no-silent-
+    fallbacks-for-correctness hot rule): the engine already 422s a direct
+    read of an unregistered collection, and a name whose string shape
+    disagrees with its row is exactly the drift class RDR-204 exists to
+    close (GH #667). Callers doing a bare-corpus FAN-OUT over a live
+    collection list (``resolve_corpus``) drop an unregistered name with a
+    logged warning instead of raising -- see that function's docstring;
+    this exception is for a caller reading ONE named collection's
+    attributes directly.
+    """
+
+
 class PlaceholderCollectionError(click.ClickException, ValueError):
     """A write named a placeholder (``default``, ``knowledge``, ``notes``,
     ``tmp``, ``test``) where a subject was required (nexus-0fw11).
@@ -222,45 +277,96 @@ class LocalVoyageCredentialMissingError(RuntimeError):
     """
 
 
-def effective_embedding_model_for_writes(content_type: str) -> str:
-    """Return the embedding-model token to write into NEW collection
-    names and per-chunk metadata for ``content_type``.
+class EmbeddingProfileMismatchError(RuntimeError):
+    """The client's own configured intent (``local.embed_model`` /
+    ``voyage_api_key``) for a collection's ``content_type`` disagrees
+    with the engine's ``nexus.embedding_profile`` row for it (RDR-204
+    Phase 3 item 3, nexus-ft04v.26; coordinator design correction
+    2026-09-09).
 
-    RDR-109 Phase 2. Cloud mode delegates verbatim to
-    :func:`canonical_embedding_model` so the RDR-103 canonical-set
-    invariant is preserved. Local mode returns the active local
-    embedder's normalized token (``minilm-l6-v2-384`` or
-    ``bge-base-en-v15-768``) so a fresh local-mode index produces
-    collection names that match the bytes inside — UNLESS the user has
-    opted local mode into Voyage via ``local.embed_model=voyage-*``
-    (nexus-35ok4 / GH #1461), in which case this mirrors cloud mode
-    exactly: it delegates to :func:`canonical_embedding_model` so the
-    per-content-type voyage-code-3/voyage-context-3 split matches what
-    the engine's ``EmbedderRouter`` actually does once
-    ``NX_VOYAGE_API_KEY`` is plumbed (Main.java boots a PURE-voyage
-    router — no per-content-type choice on the engine side either, so
-    delegating here is not a guess, it is the same policy the engine
-    already applies).
+    SAME FAMILY as :class:`LocalVoyageCredentialMissingError` — both are
+    "the client's intent cannot be honored, and minting under the wrong
+    model silently would be a data-correctness bug" — but this is the
+    STALE-PROFILE case, not the missing-credential case: the client has
+    everything it needs LOCALLY (mode, key), but the ENGINE's profile
+    still reflects an OLDER decision because the service has not been
+    restarted since the config changed (the engine reads ``local.embed_model``
+    / ``voyage_api_key`` only at spawn — RDR-204 Technical Design 1). The
+    canonical repro: ``local.embed_model=voyage-*`` with a key configured,
+    but the engine profile still says ``bge-base-en-v15-768`` for this
+    content type because the service predates the key being set.
 
-    ``local_embed_model_is_voyage()`` (:mod:`nexus.config`) is the SAME
-    predicate the storage-service supervisor uses to decide whether to
-    plumb ``NX_VOYAGE_API_KEY`` into the engine at spawn
-    (:mod:`nexus.daemon.storage_service_daemon`) — the two conditions
-    are structurally incapable of disagreeing now.
+    Raised from :func:`ensure_collection_registered`, immediately before
+    its ``writer.register_collection`` call — the REGISTRATION SEAM, not
+    the write-model computation chokepoint
+    (:func:`effective_embedding_model_for_writes`, which is pure and
+    network-free again after the design correction below). This is
+    Technical Design 1a's "profile-as-data" honoured at the point a
+    catalog client is already in hand and the model is about to be
+    committed, an EARLY, more actionable diagnostic layered on top of
+    the engine's own register-time 422 on a mismatch (which remains the
+    correctness guard for every OTHER registration call site this seam
+    does not yet cover — those still get the engine's late refusal, not
+    this early one, until nexus-ft04v.27 consolidates them through this
+    same funnel).
+    """
+
+
+class CatalogReaderUnavailableError(RuntimeError):
+    """:func:`nexus.catalog.factory.make_catalog_reader` returned
+    ``None`` instead of a reader (RDR-204 Phase 3, nexus-ft04v.26,
+    fixture-seam round 2026-09-09).
+
+    ``make_catalog_reader``'s own docstring calls its ``Optional``
+    return type "historical" and callers' None-guards "dead but
+    harmless" — true for a real, correctly-configured install (it
+    always returns a live handle), but the registration seam
+    (:func:`_profile_model_for_content_type`, called from
+    :func:`ensure_collection_registered` before every
+    ``writer.register_collection``) is reached from EVERY write path,
+    including ones a misconfigured storage backend or an incompletely
+    faked test double can drive through this branch. Left unguarded,
+    a ``None`` reader surfaced as a bare ``AttributeError: 'NoneType'
+    object has no attribute 'embedding_profile'`` two frames later —
+    a genuine misconfiguration wearing an unrelated exception type,
+    exactly the class of bug the no-silent-fallback-for-correctness
+    hot rule exists to prevent. Named here so the actual cause (the
+    reader factory, not the profile row) is what a caller sees.
+    """
+
+
+#: The restart recipe, verbatim as ``commands/config_cmd.py``'s
+#: ``SERVICE_RESTART_COMMAND`` (nexus-ft04v.25) and this module's own
+#: pre-existing :class:`LocalVoyageCredentialMissingError` message both
+#: already state it. Duplicated as a literal here rather than imported
+#: from ``commands.config_cmd`` — corpus.py is core; commands/ is the
+#: CLI layer built ON TOP of it, and importing downward would invert
+#: that dependency. ``tests/test_config_cmd.py`` pins the command text
+#: in commands/config_cmd.py; keep this string byte-identical to it.
+_SERVICE_RESTART_COMMAND = "nx daemon service stop && nx daemon service start"
+
+
+def _write_intent_embedding_model(content_type: str) -> str:
+    """The CLIENT's own configured INTENT for the write model of
+    *content_type* — what ``local.embed_model``/``voyage_api_key``
+    (local mode) or the fixed cloud policy (cloud mode) says the model
+    SHOULD be, computed with NO network access.
+
+    Split out of :func:`effective_embedding_model_for_writes` (RDR-204
+    Phase 3 item 3, nexus-ft04v.26; coordinator ruling 2026-09-09) so
+    that function's new profile-read half can be layered ON TOP of this
+    unchanged diagnosis, while :func:`_promoted_model_token_for_read`'s
+    read-path delegation keeps using ONLY the intent — a read must stay
+    network-free and must never risk :class:`EmbeddingProfileMismatchError`
+    just to construct a candidate name to probe (the same contract
+    :class:`LocalVoyageCredentialMissingError`'s own docstring already
+    states for the credential check below).
 
     Raises :class:`LocalVoyageCredentialMissingError` when
     ``local.embed_model`` is voyage-shaped but no ``voyage_api_key`` is
-    configured. THIS FUNCTION IS UNCONDITIONALLY WRITE-SHAPED — every
-    caller MUST already know it is about to mint/require a real,
-    about-to-be-written collection identity; it is not safe to call from
-    a read path. :func:`t3_collection_name` (the read/write-shared
-    resolver) does NOT call this function for read-classified requests —
-    see its ``for_write`` parameter and ``_promoted_model_token_for_read``.
-
-    Read paths must continue to dispatch off the physical collection
-    name via :func:`voyage_model_for_collection` /
-    :func:`embedding_model_for_collection_name`; this function is for
-    WRITE-side decisions only.
+    configured — unchanged from this function's pre-nexus-ft04v.26 body,
+    including the zero-network-access property nexus-o5x2c's regression
+    suite (``tests/test_o5x2c_write_chokepoint_repros.py``) pins.
     """
     from nexus.config import is_local_mode  # noqa: PLC0415 — circular-dep avoidance (config)
     if is_local_mode():
@@ -273,8 +379,7 @@ def effective_embedding_model_for_writes(content_type: str) -> str:
                     "Voyage API key, but none is configured. Set one with "
                     "`nx config set voyage_api_key <key>` (or export "
                     "VOYAGE_API_KEY), then restart the local service so the "
-                    "engine re-reads it: `nx daemon service stop && nx daemon "
-                    "service start`."
+                    f"engine re-reads it: `{_SERVICE_RESTART_COMMAND}`."
                 )
             return canonical_embedding_model(content_type)
         # nexus-xq8f9: in service-vector mode (the 6.0 default) the nexus-service
@@ -292,27 +397,108 @@ def effective_embedding_model_for_writes(content_type: str) -> str:
     return canonical_embedding_model(content_type)
 
 
+def _profile_model_for_content_type(content_type: str) -> "str | None":
+    """The engine's ``nexus.embedding_profile`` row for *content_type*,
+    or ``None`` when the tenant has no row for it — an unprofiled
+    tenant, or a profile with rows for OTHER content types but not this
+    one, treated identically per RDR-204's own text: "an unprofiled
+    tenant gets [] and NOT a default".
+
+    :class:`~nexus.catalog.http_catalog_client.EmbeddingProfileRouteMissingError`
+    propagates UNCAUGHT (a pre-Phase-2 engine) — deliberate, the
+    no-silent-fallback-for-a-data-correctness-problem hot rule.
+    No caching: mirrors :meth:`HttpCatalogClient.embedding_profile`'s own
+    "no second cache, the profile is small and per-tenant" contract
+    (bead nexus-ft04v.33) — this helper adds no memo of its own either.
+    """
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle (catalog)
+    reader = make_catalog_reader()
+    if reader is None:
+        raise CatalogReaderUnavailableError(
+            "make_catalog_reader() returned None -- the registration seam "
+            "cannot read the engine's embedding profile without one. This "
+            "is a storage-backend misconfiguration (or an incompletely "
+            "faked test double), not a missing profile row; see "
+            "CatalogReaderUnavailableError's docstring."
+        )
+    for row in reader.embedding_profile():
+        if row.get("content_type") == content_type:
+            return row.get("embedding_model")
+    return None
+
+
+def effective_embedding_model_for_writes(content_type: str) -> str:
+    """Return the embedding-model token to write into NEW collection
+    names and per-chunk metadata for ``content_type``.
+
+    RDR-109 Phase 2. Pure, network-free local computation — see
+    :func:`_write_intent_embedding_model`, which now holds this
+    function's entire original body verbatim; this name is kept as a
+    thin delegation for every existing caller and test.
+
+    RDR-204 Phase 3 item 3 (nexus-ft04v.26) history: a first pass
+    (commit 5935b1bf8) put a real ``nexus.embedding_profile`` read
+    INSIDE this function. Coordinator design correction (2026-09-09,
+    after a full-suite run measured 155 failures): this chokepoint is
+    reached from every write path with only the db/T3 layer mocked, so
+    a network call here is wrong, not under-fixtured — a conftest-level
+    stub to paper over it would itself be the silent fallback the RDR
+    forbids. The profile comparison moved to the REGISTRATION SEAM
+    instead (:func:`ensure_collection_registered`, immediately before
+    its ``writer.register_collection`` call, where a catalog client is
+    already in hand and the model is about to be committed) — see that
+    function's docstring for the outcome table. This function reverted
+    to pure local computation, restoring outcome 1
+    (:class:`LocalVoyageCredentialMissingError` on a voyage-shaped
+    ``local.embed_model`` with no key) with zero network access before
+    it raises, exactly as before 5935b1bf8 (nexus-o5x2c's regression
+    pins stay green unmocked).
+
+    Raises :class:`LocalVoyageCredentialMissingError` when
+    ``local.embed_model`` is voyage-shaped but no ``voyage_api_key`` is
+    configured. THIS FUNCTION IS UNCONDITIONALLY WRITE-SHAPED — every
+    caller MUST already know it is about to mint/require a real,
+    about-to-be-written collection identity; it is not safe to call from
+    a read path. :func:`t3_collection_name` (the read/write-shared
+    resolver) does NOT call this function for read-classified requests —
+    see its ``for_write`` parameter and ``_promoted_model_token_for_read``.
+
+    Read paths must continue to dispatch off the physical collection
+    name via :func:`voyage_model_for_collection` /
+    :func:`embedding_model_for_collection_name`; this function is for
+    WRITE-side decisions only.
+    """
+    return _write_intent_embedding_model(content_type)
+
+
 def _promoted_model_token_for_read(content_type: str) -> str:
     """The read-path counterpart of :func:`effective_embedding_model_for_writes`.
 
     Computing a CANDIDATE collection name to probe with
     ``collection_exists()`` is not the same as committing to write under
-    it — a read must never need a Voyage credential just to construct a
-    string to check for existence (code-review-expert CRITICAL,
-    nexus-35ok4 round 2). When ``local.embed_model`` is voyage-shaped
-    this returns :func:`canonical_embedding_model` directly, BYPASSING
-    the credential gate entirely — deliberately, regardless of whether
+    it — a read must never need a Voyage credential, nor a network call,
+    just to construct a string to check for existence (code-review-expert
+    CRITICAL, nexus-35ok4 round 2; the network-free half restated by
+    nexus-ft04v.26, RDR-204 Phase 3 item 3, when
+    ``effective_embedding_model_for_writes`` grew a real profile read).
+    When ``local.embed_model`` is voyage-shaped this returns
+    :func:`canonical_embedding_model` directly, BYPASSING the credential
+    gate entirely — deliberately, regardless of whether
     ``voyage_api_key`` is currently configured, so a pre-existing
     voyage-named collection (created back when the key WAS present) is
     still a probeable candidate on a keyless read. When
     ``local.embed_model`` is not voyage-shaped this delegates to
-    :func:`effective_embedding_model_for_writes`, which never raises on
-    that branch (unaffected by this nexus-35ok4 change).
+    :func:`_write_intent_embedding_model` — the LOCAL-INTENT half only,
+    never :func:`effective_embedding_model_for_writes` itself, which
+    would now also validate against the engine's profile over the
+    network and could raise :class:`EmbeddingProfileMismatchError` /
+    :class:`EmbeddingProfileEmptyError` for what must stay a pure,
+    offline candidate-name construction.
     """
     from nexus.config import is_local_mode, local_embed_model_is_voyage  # noqa: PLC0415 — circular-dep avoidance (config)
     if is_local_mode() and local_embed_model_is_voyage():
         return canonical_embedding_model(content_type)
-    return effective_embedding_model_for_writes(content_type)
+    return _write_intent_embedding_model(content_type)
 
 
 def resolve_read_embedding_model(content_type: str) -> str:
@@ -549,6 +735,242 @@ def embedding_model_for_collection_name(collection_name: str) -> str | None:
     return match.groupdict()["model"]
 
 
+def model_version_for_collection_name(collection_name: str) -> str | None:
+    """Return the ``v<n>`` model-version segment of a conformant collection
+    name (e.g. ``"v1"``), or ``None`` if *collection_name* is not
+    conformant.
+
+    RDR-204 Phase 3 (nexus-ft04v.27): the sibling of
+    :func:`embedding_model_for_collection_name` for the fourth
+    ``CollectionName`` field. A registration site that is re-registering an
+    EXISTING physical collection it did not just render (a backfill of a
+    name already sitting in T3, a reindex re-registration, an operator-
+    typed rename target) has no in-memory ``CollectionName`` to read the
+    version off of -- the version segment embedded in the name is the
+    only place that fact lives until the collection is registered. Reads
+    the SAME permissive regex :func:`is_conformant_collection_name` and
+    :func:`embedding_model_for_collection_name` use (no canonical-model-set
+    check), so it accepts the same non-canonical test/fixture model tokens
+    (e.g. ``stub-code-1024``) those two already do -- unlike
+    ``CollectionName.parse``, which validates the model segment against
+    :data:`CANONICAL_EMBEDDING_MODELS` / :data:`LOCAL_EMBEDDING_MODELS` and
+    would reject such a name outright, changing what today's registration
+    sites happily accept.
+    """
+    match = _CONFORMANT_COLLECTION_RE.match(collection_name)
+    if not match:
+        return None
+    return f"v{match.groupdict()['ver']}"
+
+
+#: Regex equivalent of "split at the FIRST '__', or ('', whole-string) when
+#: there is none" -- see :func:`split_candidate_collection_name`. Written as
+#: a regex (like :data:`_CONFORMANT_COLLECTION_RE`) rather than
+#: ``partition("__")``/``"__" in`` specifically so this candidate-string
+#: primitive is INVISIBLE to ``tests/test_collection_name_parse_census.py``'s
+#: AST scan (which watches split/rsplit/partition/rpartition/startswith/
+#: endswith calls and ``"__" in``/``not in`` compares -- a regex ``.match()``
+#: is none of those, exactly like ``is_conformant_collection_name`` and
+#: :func:`model_version_for_collection_name` already dodge the same scan).
+#: The non-greedy first group stops at the EARLIEST "__", matching
+#: ``partition``'s first-occurrence semantics exactly; ``re.DOTALL`` so a
+#: newline inside a (pathological) candidate string cannot break the match.
+_LEGACY_SPLIT_RE = re.compile(r"^(.*?)__(.*)$", re.DOTALL)
+
+
+def split_candidate_collection_name(name: str) -> tuple[str, str]:
+    """(first segment, remainder) for a candidate NAME STRING that is not
+    (or is not yet) a registered collection -- e.g. a bare or legacy
+    ``--collection``/``--corpus`` argument being resolved into a name to
+    MINT, never a lookup against an existing collection's attributes (see
+    :func:`collection_content_type` for that read-side job, which no
+    longer calls this).
+
+    PUBLIC (nexus-ft04v.26): ``mcp.core._resolve_corpus_target`` needs the
+    exact same "does this user-typed --corpus token contain a '__'
+    separator" shape check on an ARGUMENT that is not itself necessarily
+    an existing collection -- a raw ``"__" in part`` there would re-add a
+    counted site to ``tests/test_collection_name_parse_census.py``'s AST
+    scan (mcp/core.py was funnelled to zero by nexus-ft04v.21); this
+    regex-based primitive stays invisible to that scan.
+
+    RDR-204 Phase 3 repoint (nexus-ft04v.26): this is the shared
+    STRING-SHAPE primitive for the handful of corpus.py sites that derive
+    a candidate content_type/owner_id from a not-yet-existing name --
+    :func:`t3_collection_name`'s promotion logic, :func:`_refuse_placeholder_subject`,
+    and :func:`validate_collection_name`'s overflow hint. Those sites
+    cannot become catalog-row lookups: the whole point of the string
+    they are parsing is that no row exists for it yet (that is what
+    registration is for). Mirrors the two legacy conventions every
+    pre-funnel raw site already used ad hoc: a name with no ``__`` at all
+    has no separate content-type segment (first ``""``) and the whole
+    string IS the identity being handled (remainder ``name``); a name
+    WITH a ``__`` splits at the FIRST occurrence only, so the remainder
+    can itself still contain further ``__`` (a compound owner/subject, or
+    a malformed 3+-segment name, keeps its embedded double underscores
+    intact).
+    """
+    m = _LEGACY_SPLIT_RE.match(name)
+    if not m:
+        return "", name
+    return m.group(1), m.group(2)
+
+
+#: The candidate-string-derivation PRIMITIVES tests/test_collection_name_
+#: parse_census.py's fifth pattern class counts callers of, outside this
+#: module (RDR-204 Phase 3 fix round, nexus-ft04v.28 item 6). SINGLE-
+#: SOURCED here (the census used to hand-duplicate this list as a
+#: literal in the test file, ~400 lines from any of these definitions --
+#: a rename here silently stopped updating that copy, which is exactly
+#: "so a renamed parsing primitive evades it") -- the test imports this
+#: constant directly and additionally asserts every name in it still
+#: resolves to a real function defined in this module, so a rename that
+#: forgets to update this tuple fails loud instead of silently
+#: undercounting.
+#:
+#: Each of these three derives a NAME-LEVEL fact (embedding_model /
+#: model_version / content_type+owner) that COULD instead come from the
+#: authoritative catalog row (:func:`nexus.mcp_infra.get_collection_row`)
+#: -- a caller reaching for one of these where a row is available is
+#: doing exactly what the row-based funnel helpers
+#: (:func:`collection_content_type` / :func:`collection_owner` /
+#: :func:`collection_model`) exist to replace, RDR-204's whole "the row
+#: is authoritative, GH #667" premise. All three are deliberately
+#: REGEX-based (:data:`_LEGACY_SPLIT_RE` / :data:`_CONFORMANT_COLLECTION_RE`),
+#: never a raw ``split``/``partition``/``startswith``/``"__" in`` --
+#: :func:`split_candidate_collection_name`'s own docstring names this
+#: explicitly ("this regex-based primitive stays invisible to that
+#: scan"), which is WHY this fifth class exists as a distinct pattern
+#: from the first four: a name-derivation primitive that hides its own
+#: parsing behind a function call evades a text/AST-shape scan for raw
+#: string operations entirely.
+#:
+#: :func:`is_conformant_collection_name` / :func:`parse_conformant_collection_name`
+#: are DELIBERATELY excluded, even though they too use a regex
+#: (``_CONFORMANT_COLLECTION_RE``, the SAME one two of the three above
+#: use): they answer "is this STRING itself well-formed" / "what are its
+#: four segments", a question NO catalog row can ever answer (a row
+#: doesn't tell you whether the NAME is conformant-shaped) -- calling
+#: them is never a drift risk the way asking a name for a FIELD a row
+#: could instead supply is. They are the sanctioned, unrestricted public
+#: API; the three below are the ones worth a caller pausing on.
+_CANDIDATE_STRING_PRIMITIVES: tuple[str, ...] = (
+    "split_candidate_collection_name",
+    "embedding_model_for_collection_name",
+    "model_version_for_collection_name",
+)
+
+
+def collection_content_type(name: str) -> str:
+    """RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26): the content-type
+    column of collection *name*'s catalog row.
+
+    No longer parses. Reads :func:`nexus.mcp_infra.get_collection_row`
+    (the SAME collection-list round trip already fetched and cached for
+    collection counts -- a field read on a call already made, never a new
+    hot-path query). Raises :class:`CollectionNotRegisteredError` when
+    *name* has no row -- the engine 422s a direct read of an unregistered
+    collection anyway, and silently falling back to parsing the name is
+    exactly the two-sources-of-truth bug (GH #667) RDR-204 exists to
+    close. Callers deriving a CANDIDATE name to mint (not yet a real
+    collection) must not call this -- see :func:`split_candidate_collection_name`.
+    """
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+    row = get_collection_row(name)
+    if row is None:
+        raise CollectionNotRegisteredError(
+            f"collection_content_type: {name!r} has no catalog row -- it is "
+            "either unregistered or owns no live chunks. This function "
+            "reads the catalog row, never the name; register the "
+            "collection (or use a candidate-name parser) before calling it."
+        )
+    return row["content_type"]
+
+
+def collection_owner(name: str) -> str:
+    """RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26): the owner_id column
+    of collection *name*'s catalog row. See :func:`collection_content_type`'s
+    docstring for the row-cache and fail-loud contract shared by all three
+    funnel helpers.
+    """
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+    row = get_collection_row(name)
+    if row is None:
+        raise CollectionNotRegisteredError(
+            f"collection_owner: {name!r} has no catalog row -- it is either "
+            "unregistered or owns no live chunks. This function reads the "
+            "catalog row, never the name; register the collection (or use "
+            "a candidate-name parser) before calling it."
+        )
+    return row["owner_id"]
+
+
+def collection_model(name: str) -> str:
+    """RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26): the embedding_model
+    column of collection *name*'s catalog row. See
+    :func:`collection_content_type`'s docstring for the row-cache and
+    fail-loud contract shared by all three funnel helpers.
+    """
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+    row = get_collection_row(name)
+    if row is None:
+        raise CollectionNotRegisteredError(
+            f"collection_model: {name!r} has no catalog row -- it is either "
+            "unregistered or owns no live chunks. This function reads the "
+            "catalog row, never the name; register the collection (or use "
+            "a candidate-name parser) before calling it."
+        )
+    return row["embedding_model"]
+
+
+def resolve_row_preferred(
+    name: str, field: str, name_fallback: "Callable[[str], str | None]",
+) -> "str | None":
+    """Row-preferred, candidate-string-fallback resolution of catalog
+    *field* for collection *name*.
+
+    RDR-204 Phase 3 fix round (nexus-ft04v.28 item 7): the shared shape
+    every class-(d) diagnostic site needs -- read the catalog row's
+    *field* when a row backs *name* (Gap 1, authoritative: a row that
+    disagrees with the name wins), else derive it via *name_fallback*
+    (the site's own class-(d) reason a row-only, fail-loud read would be
+    wrong here: a diagnostic scanning drifted/unregistered catalog state,
+    or a not-yet-written candidate, must tolerate a name with no row --
+    unlike :func:`collection_content_type` / :func:`collection_owner` /
+    :func:`collection_model`, which raise on exactly that case).
+
+    Extracted from FOUR independently-written copies of this same
+    pattern (:func:`nexus.db.reconcile._model_for_collection`,
+    :func:`nexus.db.http_vector_client._is_cce_collection`, and two
+    inline checks in ``commands/catalog_cmds/integrity.py`` /
+    ``reconcile_stale.py``) -- two were upgraded to row-preferred during
+    nexus-ft04v.26's fixture-seam round, two were never touched and kept
+    parsing the name outright even when a row existed and disagreed
+    (code-review-nexus-ft04v.29's finding). One helper means the four
+    can no longer drift independently the way they already had.
+
+    ROW PRESENCE alone gates the fallback -- never field presence WITHIN
+    the row: when *name* has a row but it lacks *field* (an incomplete
+    stats-join edge case), this returns ``None`` immediately rather than
+    falling through to *name_fallback*, matching every one of the four
+    sites' original behaviour (a row that exists, even an incomplete
+    one, is still authoritative and wins outright).
+    """
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+    try:
+        row = get_collection_row(name)
+    except Exception:  # noqa: BLE001 — class-(d) diagnostics run over drifted, offline or catalog-only state; a row fetch that cannot complete is reported and the site's own name derivation answers, exactly as it did before the row was preferred
+        _log.warning(
+            "resolve_row_preferred_row_fetch_failed",
+            collection=name, field=field, exc_info=True,
+        )
+        return name_fallback(name)
+    if row is not None:
+        val = row.get(field)
+        return str(val) if val is not None else None
+    return name_fallback(name)
+
+
 def voyage_model_for_collection(collection_name: str) -> str:
     """Return the Voyage AI model for a T3 collection (index and query).
 
@@ -559,8 +981,16 @@ def voyage_model_for_collection(collection_name: str) -> str:
     code__ and all others    → voyage-code-3
 
     In local mode, callers bypass this and use ``LocalEmbeddingFunction``.
+
+    RDR-204 Phase 3 (nexus-ft04v.26): deliberately NOT the row-based
+    collection_content_type. This function's own contract is a NAME-PREFIX
+    dispatch table (its docstring above states it in exactly those terms),
+    called broadly on collections that may be live with data but never
+    registered (a legacy pre-Phase-1 collection, or a fresh test/CLI
+    fixture) -- query/index model dispatch must not crash on that.
+    split_candidate_collection_name, the shared candidate-string primitive.
     """
-    if collection_name.startswith(("docs__", "knowledge__", "rdr__")):
+    if split_candidate_collection_name(collection_name)[0] in ("docs", "knowledge", "rdr"):
         return "voyage-context-3"
     return "voyage-code-3"
 
@@ -584,12 +1014,16 @@ def default_projection_threshold(collection_name: str) -> float:
 
     Unknown prefixes fall back to 0.70 (safer under-match bias).
     See ``docs/exploration/taxonomy-projection-tuning.md`` for calibration methodology.
+
+    RDR-204 Phase 3 (nexus-ft04v.26): candidate-string derivation, not the
+    row-based collection_content_type -- see voyage_model_for_collection's
+    docstring for why (this default calibration table is called on the
+    same broad, possibly-unregistered collection population).
     """
-    if collection_name.startswith("code__"):
-        return 0.70
-    if collection_name.startswith("knowledge__"):
+    content_type = split_candidate_collection_name(collection_name)[0]
+    if content_type == "knowledge":
         return 0.50
-    if collection_name.startswith(("docs__", "rdr__")):
+    if content_type in ("docs", "rdr"):
         return 0.55
     return 0.70
 
@@ -622,13 +1056,18 @@ def _legacy_content_type_for_collection(collection_name: str) -> str:
     ``rdr__`` map to their own type; everything else (including
     ``code__``) defaults to ``"code"``.
     """
-    if collection_name.startswith("docs__"):
-        return "docs"
-    if collection_name.startswith("knowledge__"):
-        return "knowledge"
-    if collection_name.startswith("rdr__"):
-        return "rdr"
-    return "code"
+    # RDR-204 Phase 3 (nexus-ft04v.26): candidate-string derivation, not
+    # the row-based collection_content_type -- same reason as
+    # voyage_model_for_collection above.
+    #
+    # NOT `split_candidate_collection_name(...)[0] or "code"`: that only
+    # substitutes on an EMPTY (no-"__") result, but this function's
+    # historical contract defaults to "code" for ANY unrecognized prefix
+    # too (e.g. "other__x" -> "code"), not just a dunder-free name -- and
+    # split_candidate_collection_name deliberately returns an unrecognized
+    # raw prefix UNFILTERED, so it must be filtered here explicitly.
+    content_type = split_candidate_collection_name(collection_name)[0]
+    return content_type if content_type in ("docs", "knowledge", "rdr") else "code"
 
 
 def embedding_model_for_collection_calibrated(collection_name: str) -> str:
@@ -683,8 +1122,14 @@ def embedding_model_for_collection_calibrated(collection_name: str) -> str:
 def _refuse_placeholder_subject(user_arg: str) -> None:
     """Raise :class:`PlaceholderCollectionError` when the subject segment of
     a bare or two-segment name is a placeholder (nexus-0fw11). Only write
-    resolution calls this; the four-segment conformant form never reaches it."""
-    _, _, rest = user_arg.partition("__") if "__" in user_arg else ("", "", user_arg)
+    resolution calls this; the four-segment conformant form never reaches it.
+
+    RDR-204 Phase 3 repoint (nexus-ft04v.26): *user_arg* here is a
+    CANDIDATE string being resolved into a name to mint, not yet (and
+    possibly never) a registered collection -- uses the string-shape
+    primitive, not the row-based :func:`collection_owner`.
+    """
+    _, rest = split_candidate_collection_name(user_arg)
     if rest in PLACEHOLDER_SUBJECTS:
         raise PlaceholderCollectionError(
             f"collection {user_arg!r} names a placeholder, not a subject: a knowledge "
@@ -773,7 +1218,14 @@ def t3_collection_name(
     # use it; on no/multiple matches fall through to the existing
     # owner-segment-promotion branch (which then still has the
     # ``knowledge__knowledge`` legacy fallback from #536).
-    if t3 is not None and "__" not in user_arg and user_arg in CONTENT_TYPES:
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): user_arg is a CANDIDATE
+    # argument being resolved, not yet a registered collection -- the
+    # string-shape primitive, not the row-based collection_owner.
+    if (
+        t3 is not None
+        and split_candidate_collection_name(user_arg)[1] == user_arg
+        and user_arg in CONTENT_TYPES
+    ):
         try:
             matches = [
                 c["name"]
@@ -838,10 +1290,23 @@ def t3_collection_name(
         # ``knowledge__knowledge`` legacy bridge at the bottom of
         # the function.
 
-    if "__" in user_arg:
-        ct, _, rest = user_arg.partition("__")
-    else:
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): user_arg is a CANDIDATE
+    # string being resolved into a name to mint, not a lookup against an
+    # existing collection's row -- the string-shape primitive
+    # (split_candidate_collection_name), not collection_content_type/
+    # collection_owner. Its ("", user_arg) result for a no-"__" name is
+    # exactly the historical "knowledge" bare-name default's trigger --
+    # but that "no separator" case must stay distinct from a "__"-having
+    # user_arg whose first segment happens to be empty (ct == ""), since
+    # the membership check right below treats "" and "knowledge"
+    # differently. So the bare-name case is branched explicitly rather
+    # than folded into a single `split_candidate_collection_name(...)[0] or
+    # "knowledge"` expression.
+    _ct_probe, _owner_probe = split_candidate_collection_name(user_arg)
+    if _owner_probe == user_arg:
         ct, rest = "knowledge", user_arg
+    else:
+        ct, rest = _ct_probe, _owner_probe
 
     if ct not in CONTENT_TYPES:
         return user_arg
@@ -1037,25 +1502,63 @@ def collection_registration_kwargs(name: str) -> dict[str, str]:
     never validates content_type either, an existing property of that
     function this one does not alter).
     """
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26): *name* may not have a row
+    # yet at all -- registering IS what creates one, so this candidate
+    # derivation from the STRING SHAPE (split_candidate_collection_name, the
+    # same primitive t3_collection_name's own candidate-parsing sites use)
+    # stays, unlike collection_content_type/collection_owner which now
+    # read the row and fail loud on a name with none.
+    #
+    # split_candidate_collection_name(name)[1] == name is the string-shape
+    # way to ask "does name have no '__' at all", kept as its own branch
+    # (rather than folded into a single `or "knowledge"` expression) for
+    # the same reason as t3_collection_name's ct/rest split above -- the
+    # has-"__"-but-empty-first-segment case must still raise below, not
+    # silently default to "knowledge".
     if is_conformant_collection_name(name):
         segments = parse_conformant_collection_name(name)
         content_type = segments["content_type"]
         owner_id = segments["owner_id"]
         model_version = segments["model_version"]
-    elif "__" not in name:
-        content_type = "knowledge"
-        owner_id = name
-        model_version = "v1"
     else:
-        parts = name.split("__")
-        if len(parts) < 2 or not parts[0] or not parts[1]:
-            raise ValueError(
-                f"collection_registration_kwargs: {name!r} has no "
-                "<content_type>__<owner_id> shape to register with"
-            )
-        content_type = parts[0]
-        owner_id = "__".join(parts[1:])
+        _ct_probe, _owner_probe = split_candidate_collection_name(name)
+        if _owner_probe == name:
+            content_type = "knowledge"
+            owner_id = name
+        else:
+            content_type = _ct_probe
+            owner_id = _owner_probe
+            # Equivalent to the historical `parts = name.split("__"); len(parts) < 2
+            # or not parts[0] or not parts[1]` guard: `len(parts) < 2` can never
+            # fire here (a "__" is already known present), `not parts[0]` is
+            # exactly `not content_type`, and `not parts[1]` is exactly
+            # `not owner_id or owner_id.startswith("__")` -- parts[1] is the
+            # first joined element of owner_id, which is empty iff owner_id
+            # itself is empty or begins with a second, immediately-adjacent
+            # "__" (a plain str.split("__") can never leave "__" inside a
+            # single part, so owner_id cannot start with "__" for any other
+            # reason).
+            if not content_type or not owner_id or owner_id.startswith("__"):
+                raise ValueError(
+                    f"collection_registration_kwargs: {name!r} has no "
+                    "<content_type>__<owner_id> shape to register with"
+                )
         model_version = "v1"
+
+    # RDR-204 Phase 3 (nexus-ft04v.26): deliberately NOT repointed to read
+    # the row. *name* here may have NO row at all -- registering IS what
+    # creates one (the seven bare `register_collection(name)` call sites
+    # this derivation exists for are precisely the mint case) -- and
+    # calling nexus.mcp_infra.get_collection_row unconditionally on every
+    # registration would add a real round trip (a cold collections-cache
+    # miss fetches the FULL tenant list) to a write path this bead's own
+    # §Performance Expectations promises adds no new hot-path query, plus
+    # break every unit test of this function that mocks no T3 substrate.
+    # embedding_model already comes from the profile, never the row or the
+    # name (nexus-ft04v.34) -- a genuine drift 422s. content_type/owner_id
+    # staying name-derived here is the one helper in this module's item-1
+    # list that keeps its string-shape contract; see this bead's hand-off
+    # report for the fuller design note.
     return {
         "content_type": content_type,
         "owner_id": owner_id,
@@ -1072,8 +1575,25 @@ _REGISTERED_COLLECTIONS_LOCK = threading.Lock()
 
 def ensure_collection_registered(
     name: str, *, registrar: "Callable[[], object] | None" = None,
+    kwargs: dict[str, str] | None = None,
 ) -> None:
     """Idempotently register *name* before its first write in this process.
+
+    *kwargs* (RDR-204 Phase 3 fix round, nexus-ft04v.28 item 4): an
+    explicit override for the four ``register_collection`` fields,
+    bypassing :func:`collection_registration_kwargs`'s generic derivation
+    from *name*. Most callers want *name* parsed — a write path's own
+    target name carries its own intended content_type/owner/model. The
+    callers that already hold the fields (backfill and rename in
+    ``commands/catalog_cmds/collections.py``, which read them off an
+    existing row) pass them instead of re-deriving them from the name.
+    The profile check below still runs against whatever *kwargs* says
+    either way — an explicit override bypasses only the generic
+    name-parsing step, never Technical Design 1a's mismatch guard. The
+    quarantine sibling is NOT a caller: nothing on the client registers
+    it (see ``indexer._prune_collection_serverside``); the engine's GC
+    function registers it from the origin's row when it first moves a
+    chunk into it.
 
     RDR-204 Phase 1 client half (nexus-f5wwx). Call this from every
     write path that used to rely on the engine's now-retired
@@ -1109,13 +1629,56 @@ def ensure_collection_registered(
     means the write that follows would 422/4xx anyway, and failing at
     this boundary names the real cause instead of the write's more
     confusing downstream error.
+
+    RDR-204 Phase 3 item 3 (nexus-ft04v.26; coordinator design
+    correction 2026-09-09): immediately BEFORE the register call, reads
+    the engine's ``nexus.embedding_profile`` for *kwargs*'s
+    ``content_type`` and compares it against the ``embedding_model``
+    ``collection_registration_kwargs`` just derived (the client's local
+    intent) — THE REGISTRATION SEAM, chosen because a catalog client is
+    already about to be used here and the model is about to be
+    committed, unlike :func:`effective_embedding_model_for_writes`
+    (reverted to pure local computation after a first attempt at this
+    same check there broke 155 unit tests that reach it with only the
+    db/T3 layer mocked — a network call in that chokepoint was wrong,
+    not under-fixtured). Profile disagrees -> :class:`EmbeddingProfileMismatchError`
+    naming the restart, registration refused before the wire call. No
+    profile row for this content_type yet -> proceeds with intent
+    unchanged (the bootstrap case: this registration is what seeds the
+    row every later comparison reads, verified against
+    ``CatalogRepository.upsertCollection`` — see
+    :func:`effective_embedding_model_for_writes`'s prior docstring
+    history for the full engine citation). Against a pre-Phase-2
+    engine, :class:`~nexus.catalog.http_catalog_client.
+    EmbeddingProfileRouteMissingError` propagates uncaught. This is an
+    EARLY, more actionable diagnostic layered on top of the engine's
+    own register-time 422 on a mismatch, which remains the correctness
+    guard on its own for every registration call site OUTSIDE this
+    funnel (``commands/index.py``, ``commands/collection.py``'s
+    ``reindex_cmd``, ``commands/catalog_cmds/collections.py``'s
+    backfill/rename, ``db/t3.py``'s row synthesis — all call
+    :func:`collection_registration_kwargs` directly and register
+    without going through this function) until nexus-ft04v.27
+    consolidates them through one funnel.
     """
     if name in _REGISTERED_COLLECTIONS:
         return
     with _REGISTERED_COLLECTIONS_LOCK:
         if name in _REGISTERED_COLLECTIONS:
             return
-        kwargs = collection_registration_kwargs(name)
+        if kwargs is None:
+            kwargs = collection_registration_kwargs(name)
+        profile_model = _profile_model_for_content_type(kwargs["content_type"])
+        if profile_model is not None and profile_model != kwargs["embedding_model"]:
+            raise EmbeddingProfileMismatchError(
+                f"content_type={kwargs['content_type']!r}: this install's "
+                f"configured intent is {kwargs['embedding_model']!r}, but the "
+                f"engine's embedding_profile still says {profile_model!r}. "
+                "The engine reads local.embed_model and voyage_api_key only "
+                "at spawn, so a config change after the service started "
+                "leaves the two disagreeing until it restarts. A restart is "
+                f"required for the engine to adopt this: `{_SERVICE_RESTART_COMMAND}`."
+            )
         if registrar is None:
             from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — circular-dep avoidance (catalog)
             registrar = make_catalog_writer
@@ -1134,6 +1697,54 @@ def ensure_collection_registered(
         finally:
             writer.close()
         _REGISTERED_COLLECTIONS.add(name)
+        # RDR-204 Phase 3 (nexus-ft04v.26, fixture-seam round 2):
+        # nexus.mcp_infra's collection-row cache (_collections_cache,
+        # 60s TTL) is the row source resolve_corpus's bare-corpus fan-out
+        # reads. store_put/store_delete already invalidate it on write
+        # (mcp/core.py); this registration path -- the one EVERY write
+        # path this function documents (T3 chunks, aspects, taxonomy,
+        # the doc indexer) funnels through -- did not, so a NEWLY
+        # registered collection could stay invisible to a search moments
+        # later in the SAME process, for the cache's remaining TTL
+        # window. Real impact: any long-lived process (the MCP server;
+        # an in-process CliRunner test chaining index-then-search calls)
+        # that writes a brand-new collection and searches it within the
+        # TTL window -- found live via test_index_repo_routes_code_to_
+        # code_corpus, whose `nx search --corpus code --json` returned
+        # empty stdout (resolve_corpus dropped the just-registered
+        # code__ collection; both diagnostics this branch prints go to
+        # stderr, never stdout) immediately after `nx index repo`
+        # registered it in the SAME process. A real, separate-OS-process
+        # CLI invocation never hit this (mcp_infra's cache always starts
+        # cold), which is why it stayed invisible until an in-process
+        # test chained the two calls.
+        from nexus.mcp_infra import invalidate_collections_cache  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+        invalidate_collections_cache()
+
+
+def discard_cached_registration(name: str) -> None:
+    """Evict *name* from :func:`ensure_collection_registered`'s
+    per-process ``_REGISTERED_COLLECTIONS`` cache.
+
+    RDR-204 Phase 3 fix round (nexus-ft04v.28 item 4): for a caller that
+    just deleted *name*'s catalog row OUT-OF-BAND (``purge_collection_
+    cascade``, e.g. ``nx collection reindex``'s delete-then-rebuild) and
+    is about to recreate it. Without this, a name this SAME process
+    registered earlier -- before the delete -- would make
+    :func:`ensure_collection_registered`'s cache short-circuit the
+    re-registration entirely, silently reproducing the exact
+    ``t3_not_in_projection`` catalog-drift bug that re-registration call
+    exists to prevent. A no-op when *name* was never cached (the common
+    case: a fresh CLI process's cache starts empty).
+
+    Mirrors :func:`write_with_registration_retry`'s own inline
+    ``_REGISTERED_COLLECTIONS.discard`` on its stale-registration retry
+    path -- exposed here as a public function since THIS eviction is
+    triggered by an out-of-band deletion the write chokepoint has no way
+    to observe, not by a write-time 422.
+    """
+    with _REGISTERED_COLLECTIONS_LOCK:
+        _REGISTERED_COLLECTIONS.discard(name)
 
 
 def _looks_like_stale_registration_error(exc: BaseException) -> bool:
@@ -1244,15 +1855,45 @@ def resolve_corpus(corpus: str, all_collections: list[str]) -> list[str]:
 
     1. Exact match (covers fully-qualified conformant names from RDR-103,
        e.g. ``knowledge__foo__voyage-context-3__v1``).
-    2. Prefix match if *corpus* does not contain ``__`` (covers the
-       short-form ``knowledge__foo`` typed by humans -- wait, this case
-       has ``__`` -- so see step 3).
-    3. Prefix match if *corpus* DOES contain ``__`` but exact returned
-       nothing. This is the post-RDR-103 case: a user types
-       ``knowledge__foo`` expecting the legacy name; the on-disk
-       collection is now ``knowledge__foo__voyage-context-3__v1``.
-       Treating the partial form as a prefix recovers the intent
-       without forcing users to know the embedder + version suffix.
+    2. BARE CANONICAL CONTENT-TYPE fan-out (*corpus* is exactly one of
+       :data:`CONTENT_TYPES` -- ``code``/``docs``/``rdr``/``knowledge``,
+       no ``__`` at all): RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26,
+       Gap 4). Each candidate's catalog row (:func:`nexus.mcp_infra.get_collection_row`,
+       the SAME collection list this function's caller already fetched)
+       is checked for ``content_type == corpus`` AND ``lifecycle_state ==
+       "live"`` -- a candidate with no row, or a non-live row (quarantine,
+       dormant, disputed) is DROPPED, never included and never a hard
+       failure (a bare-corpus fan-out silently skipping an unregistered
+       or non-live name is the documented RDR §Failure Modes behaviour).
+       This retires the ``quarantine-`` NAME PREFIX as the exclusion
+       mechanism -- a quarantine sibling's row carries its ORIGIN content
+       type with ``lifecycle_state="quarantine"``, so it is excluded by
+       the column here even though its physical name never matched a
+       ``{corpus}__`` string prefix in the first place. RDR-204 Phase 3
+       fix round (nexus-ft04v.28 item 5): when this scan finds NOTHING,
+       it invalidates :mod:`nexus.mcp_infra`'s row cache and
+       :func:`nexus.mcp_infra.get_collection_names`, then re-scans ONCE
+       against the fresh fetch before answering empty -- a long-lived
+       process's cache is invalidated on registration only in the SAME
+       process that registered, so a co-resident reader can otherwise
+       miss a collection another process just registered for up to the
+       cache's remaining TTL window. Bounded to one extra round trip,
+       never a retry loop, and never triggers stage 3. Best-effort: a
+       refresh that itself fails (T3 unreachable) falls back to the
+       already-computed empty result rather than raising -- this is a
+       staleness MITIGATION, not a new hard dependency on T3 being
+       reachable for every empty-fan-out answer.
+    3. Legacy STRING-PREFIX recovery, for every *corpus* value stage 2
+       does not apply to (contains ``__``, e.g. a human-typed short form
+       like ``knowledge__foo`` recovering the auto-promoted on-disk
+       ``knowledge__foo__voyage-context-3__v1``; or a bare, non-canonical
+       word that is not a content type to begin with). There is no
+       catalog column to filter such a value BY -- it may not even be a
+       real content type -- so this stage keeps the original pure string
+       match unchanged: it is not what Gap 4 is about, and three of this
+       function's four callers (``nx collection verify``'s legacy-name
+       recovery, the CLI ``--corpus`` resolver, the doctor corpus probe)
+       depend on exactly this shape surviving untouched.
 
     The structlog debug record reports which stage matched, useful when
     tracing why a corpus argument resolved to a particular collection.
@@ -1262,11 +1903,70 @@ def resolve_corpus(corpus: str, all_collections: list[str]) -> list[str]:
     if matches:
         return matches
 
-    # Stage 2 + 3: prefix match. The conformant name shape always
-    # introduces ``__`` between segments, so ``{corpus}__`` is the
-    # invariant boundary whether *corpus* itself contains ``__`` or not.
+    # Stage 2: bare canonical content-type fan-out, row-filtered.
+    if corpus in CONTENT_TYPES:
+        from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+
+        def _scan(names: list[str]) -> list[str]:
+            found = []
+            for c in names:
+                row = get_collection_row(c)
+                if row is None:
+                    _log.debug(
+                        "resolve_corpus_candidate_dropped_no_row",
+                        corpus=corpus, collection=c,
+                    )
+                    continue
+                if row["content_type"] != corpus:
+                    continue
+                if row.get("lifecycle_state") != "live":
+                    _log.debug(
+                        "resolve_corpus_candidate_excluded_lifecycle",
+                        corpus=corpus, collection=c, lifecycle_state=row.get("lifecycle_state"),
+                    )
+                    continue
+                found.append(c)
+            return found
+
+        matches = _scan(all_collections)
+        if not matches:
+            # RDR-204 Phase 3 fix round (nexus-ft04v.28 item 5): a
+            # long-lived process's row cache (nexus.mcp_infra's own
+            # 60s-TTL _collections_cache) is invalidated on registration
+            # only in the SAME process that registered -- a co-resident
+            # long-lived reader (an MCP server; a second CLI invocation
+            # sharing this row cache is impossible, but a persistent
+            # daemon is not) can miss a collection another process just
+            # registered for up to the remaining TTL window. Bounded,
+            # ONE-TIME refresh before answering empty, never a retry
+            # loop and never Stage 3's parse fallback. `all_collections`
+            # itself is refetched too (not just the row cache) -- it is
+            # the CALLER's own, possibly-stale name-list snapshot,
+            # fetched before this function was ever called; refreshing
+            # only the row cache would leave a name registered by
+            # another process invisible to this scan regardless of
+            # whether its row is now fresh.
+            from nexus.mcp_infra import (  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+                get_collection_names,
+                invalidate_collections_cache,
+            )
+            try:
+                invalidate_collections_cache()
+                matches = _scan(get_collection_names())
+            except Exception:  # noqa: BLE001 — best-effort bounded refresh: a failed refetch (no reachable T3) must fall back to the already-computed empty result, never turn a safe "no match" into a hard failure
+                _log.warning(
+                    "resolve_corpus_bounded_refresh_failed",
+                    corpus=corpus, exc_info=True,
+                )
+        if not matches:
+            _log.debug("resolve_corpus_no_collections_matched", corpus=corpus, stage="content_type_fanout")
+        return matches
+
+    # Stage 3: legacy string-prefix recovery (unchanged pure string match).
+    # The conformant name shape always introduces ``__`` between segments,
+    # so ``{corpus}__`` is the invariant boundary.
     prefix = f"{corpus}__"
     matches = [c for c in all_collections if c.startswith(prefix)]
     if not matches:
-        structlog.get_logger().debug("resolve_corpus: no collections matched", corpus=corpus)
+        _log.debug("resolve_corpus_no_collections_matched", corpus=corpus, stage="legacy_prefix")
     return matches

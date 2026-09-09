@@ -857,17 +857,17 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # regenerated from the detector itself (_early_exit_consumer_hits),
         # not arithmetic.
         "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:133",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:222",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:225",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:235",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:241",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:246",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:252",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:261",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:272",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:230",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:233",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:243",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:249",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:254",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:260",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:269",
         "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:280",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:284",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:366",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:288",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:292",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:374",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:142",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:193",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:238",
@@ -970,10 +970,13 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "service/native-smoke.sh:144",
         "service/native-smoke.sh:205",
         "service/native-smoke.sh:257",
-        "service/native-smoke.sh:361",
-        "service/native-smoke.sh:399",
-        "service/native-smoke.sh:405",
+        # Retargeted again (nexus-ft04v.16 fix round, c7f2ecda2): the
+        # /v1/vectors/embed probe grew three lines, shifting every site
+        # below it by +3.
+        "service/native-smoke.sh:364",
+        "service/native-smoke.sh:402",
         "service/native-smoke.sh:408",
+        "service/native-smoke.sh:411",
         # --- service/linux-native-verify.sh:43 (1 entry): a GENUINE
         # FALSE POSITIVE, not a "needs live infra" deferral -- the
         # matched pipe (`native-image --version | head -1`) sits inside a
@@ -1035,17 +1038,30 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # (a stale --chash-window cross-reference, deleted along with that
         # leg) shifting every site below by -5. Numbers regenerated from the
         # detector itself (_early_exit_consumer_hits), not arithmetic.
+        # Retargeted AGAIN (nexus-ft04v.10, RDR-204 P1.9): Stage 3e (a new
+        # ~56-line block seeding the code/docs corpus the Minimum Viable
+        # Validation asserts) was inserted before every site below,
+        # shifting each by +56 -- regenerated from the detector itself,
+        # not arithmetic. 3 NEW sites join the set (:624, :634, :637):
+        # the MVV's own two `printf | grep -q` marker/string checks
+        # gating an if/else (clauses 2/3 and 3/3), same established shape
+        # as every other site in this file, plus a diagnostic
+        # `printf | head -8 | sed` dump inside clause 3/3's failure
+        # branch, identical shape to the pre-existing :412/:542 sites.
         "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:105",
         "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:156",
         "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:303",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:353",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:356",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:447",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:483",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:486",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:502",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:413",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:416",
         "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:507",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:512",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:543",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:546",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:562",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:567",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:572",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:628",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:638",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:641",
     }
 )
 # 157: +1 for rehearse_package_upgrade.sh:173 -- the 898d41762 axis-naming
@@ -1066,7 +1082,12 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
 # `head -1` site, deleted with the leg) removed entries wholesale:
 # 169 - 21 - 15 - 1 = 132. The remaining 5 run.sh sites were retargeted in
 # place, not counted as a change.
-_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 132
+# 132: +3 for rehearse_candidate_migration.sh (nexus-ft04v.10, RDR-204
+# P1.9) -- the Minimum Viable Validation's two `printf | grep -q` clause
+# checks plus one diagnostic `printf | head -8 | sed` dump in a failure
+# branch; every pre-existing site in that file's set was retargeted in
+# place for the +56-line shift, not counted as a change. 132 + 3 = 135.
+_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 135
 
 
 def test_pipefail_early_exit_exempt_ratchet() -> None:
@@ -1187,7 +1208,7 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         #   this guarded site itself gates nothing.
         #   Retargeted AGAIN (nexus-l8xnz): +12 for the Phase F header
         #   addition described above -- :264 -> :276, :128 -> :140.
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:364",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:372",
         "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:186",
         # tests/e2e/release-sandbox.sh (3 entries): the already-commented
         # `|| true: head is an early-exit consumer...` idiom this file's

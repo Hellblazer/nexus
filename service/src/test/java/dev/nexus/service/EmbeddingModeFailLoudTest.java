@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionRegistry;
+import dev.nexus.service.db.CollectionRow;
+import dev.nexus.service.db.UnregisteredCollectionException;
 import dev.nexus.service.vectors.CceEmbedder;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.EmbeddingModelUnavailableException;
@@ -19,22 +22,45 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Bead nexus-pebfx.2 — embedding-mode fail-loud + model-identity dispatch.
+ * RDR-204 Phase 2 (bead nexus-ft04v.16) rewrite: the routing AUTHORITY moved
+ * from a collection-name model SEGMENT to the collection's {@code
+ * catalog_collections} ROW, read through {@link CollectionRegistry}.
  *
  * <p>Background (2026-06-10 production migration): the service silently fell
  * back to ONNX-384 without {@code NX_VOYAGE_API_KEY}, surfacing only as
  * per-collection dim-mismatch 400s — and ONLY because voyage models happen to
  * be 1024-dim. A same-dimension wrong-model would have contaminated silently.
  *
- * <p>Contract pinned here: for four-segment conformant names the RDR-103
- * model segment is the routing AUTHORITY. A conformant collection whose model
- * the current mode cannot embed is refused with
- * {@link EmbeddingModelUnavailableException} (→ HTTP 422), never silently
- * embedded with a different model. Legacy prefix routing
- * ({@link EmbedderRouter#resolveEmbedder}) survives only as the fallback for
- * non-conformant names; its behaviour stays pinned by {@code EmbedParityTest}.
+ * <p>Contract pinned here: {@link EmbedderRouter#resolveEmbedderStrict} reads
+ * {@code collection}'s registered row and dispatches by its {@code
+ * embedding_model} — never a token parsed from the name itself. A row whose
+ * model the current mode cannot embed is refused with {@link
+ * EmbeddingModelUnavailableException} (→ HTTP 422: "this install's profile
+ * names a model this mode cannot serve"), never silently embedded with a
+ * different model. An UNREGISTERED collection fails loud with {@link
+ * UnregisteredCollectionException} — there is no more name-shape escape hatch
+ * into prefix routing for a non-conformant NAME (RDR-204 Phase 2 fix round,
+ * nexus-ft04v.16 fix round: {@code resolveEmbedder(String)}'s legacy prefix
+ * routing is deleted outright — its "collection-less {@code
+ * /v1/vectors/embed} parity path" justification was false; no production
+ * caller ever invoked it with a non-null argument, and no caller passes a
+ * null collection to {@code resolveEmbedderStrict} either) — see {@code
+ * nonConformantName_stillRoutesByRegistryRow_neverByName} below.
+ *
+ * <p>Pure in-process mechanism test — no PG substrate. {@link
+ * CollectionRegistry#markKnown} seeds the (tenant, collection) → row mapping
+ * directly (a pure {@code ConcurrentHashMap} write, no I/O), so {@link
+ * EmbedderRouter#resolveEmbedderStrict}'s {@link CollectionRegistry#lookup}
+ * call is always a cache HIT here and the {@code TenantScope} argument it
+ * takes for the cache-miss fallback is never dereferenced — {@code null} is
+ * passed deliberately to prove that.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class EmbeddingModeFailLoudTest {
+
+    /** Distinct from any other test class's tenant — {@link CollectionRegistry}'s
+     *  cache is a process-static map shared across the whole test JVM. */
+    private static final String TENANT = "embedding-mode-fail-loud-tenant";
 
     private static OnnxEmbedder onnx;
 
@@ -46,6 +72,15 @@ class EmbeddingModeFailLoudTest {
     @AfterAll
     static void tearDown() {
         onnx.close();
+    }
+
+    /** Seed {@code collection}'s {@link CollectionRow} directly in the in-process
+     *  cache — no DB, no transaction. {@code dimension} is not load-bearing for
+     *  any assertion in this class (routing dispatches by {@code embeddingModel}
+     *  alone); passed for a realistic row shape only. */
+    private static void mark(String collection, String embeddingModel, int dimension) {
+        CollectionRegistry.markKnown(TENANT, collection,
+            new CollectionRow("unknown", TENANT, embeddingModel, dimension, "live"));
     }
 
     // ── Model-token identity (item 4 precondition) ───────────────────────────
@@ -61,98 +96,138 @@ class EmbeddingModeFailLoudTest {
                 .isEqualTo("voyage-context-3");
     }
 
-    // ── ONNX-local mode refuses voyage-token collections (item 3) ────────────
+    // ── ONNX-local mode refuses voyage-model collections (item 3) ────────────
 
     @Test
-    void localMode_refusesVoyageSegmentCollection_withExplicitMessage() {
+    void localMode_refusesVoyageModelCollection_withExplicitMessage() {
+        String collection = "knowledge__nexus__voyage-context-3__v1";
+        mark(collection, "voyage-context-3", 1024);
         EmbedderRouter router = new EmbedderRouter(onnx, "document");
         assertThatThrownBy(() -> router.embedForCollection(
-                "knowledge__nexus__voyage-context-3__v1", List.of("text")))
+                null, TENANT, collection, List.of("text")))
                 .isInstanceOf(EmbeddingModelUnavailableException.class)
+                .hasMessageContaining("this install's profile names a model this mode cannot serve")
                 .hasMessageContaining("onnx-local")
                 .hasMessageContaining("voyage-context-3")
-                .hasMessageContaining("knowledge__nexus__voyage-context-3__v1")
+                .hasMessageContaining(collection)
                 .hasMessageContaining("NX_VOYAGE_API_KEY");
     }
 
     @Test
-    void localMode_refusesVoyageCodeSegment() {
+    void localMode_refusesVoyageCodeModel() {
+        String collection = "code__nexus__voyage-code-3__v1";
+        mark(collection, "voyage-code-3", 1024);
         EmbedderRouter router = new EmbedderRouter(onnx, "query");
-        assertThatThrownBy(() -> router.resolveEmbedderStrict(
-                "code__nexus__voyage-code-3__v1"))
+        assertThatThrownBy(() -> router.resolveEmbedderStrict(null, TENANT, collection))
                 .isInstanceOf(EmbeddingModelUnavailableException.class)
                 .hasMessageContaining("voyage-code-3");
     }
 
     @Test
-    void localMode_stillServesMinilmSegment() {
+    void localMode_stillServesMinilmModel() {
+        String collection = "knowledge__dualrun__minilm-l6-v2-384__v1";
+        mark(collection, "minilm-l6-v2-384", 384);
         EmbedderRouter router = new EmbedderRouter(onnx, "document");
-        assertThat(router.resolveEmbedderStrict(
-                "knowledge__dualrun__minilm-l6-v2-384__v1"))
-                .isSameAs(onnx);
+        assertThat(router.resolveEmbedderStrict(null, TENANT, collection)).isSameAs(onnx);
     }
 
-    // ── Model segment is the authority, not the prefix (item 4) ──────────────
+    // ── The row is the authority, not the name (item 4) ──────────────────────
 
     @Test
-    void cloudMode_minilmSegment_routesToOnnx_notByPrefix() {
+    void cloudMode_minilmModelRow_routesToOnnx_evenThoughNameNamesNothingElse() {
         // The live nexus-pebfx.8 failure class: knowledge__seam-b-test__minilm…
         // was prefix-routed to CCE (1024) and 400'd on the chunks_384 table.
-        // Segment-authoritative dispatch makes it servable.
+        // Row-authoritative dispatch makes it servable regardless of the name.
+        String collection = "knowledge__seam-b-test__minilm-l6-v2-384__v1";
+        mark(collection, "minilm-l6-v2-384", 384);
         EmbedderRouter router = new EmbedderRouter(onnx, "dummy-key", "query");
-        assertThat(router.resolveEmbedderStrict(
-                "knowledge__seam-b-test__minilm-l6-v2-384__v1"))
-                .isSameAs(onnx);
+        assertThat(router.resolveEmbedderStrict(null, TENANT, collection)).isSameAs(onnx);
     }
 
     @Test
-    void cloudMode_voyage3Segment_routesToPlainVoyage_notCce() {
+    void cloudMode_voyage3Row_routesToPlainVoyage_notCce() {
         // Same-dim wrong-model hole: prefix routing sent knowledge__*__voyage-3
         // to CCE (voyage-context-3) — both 1024-dim, silent contamination.
+        String collection = "knowledge__x__voyage-3__v1";
+        mark(collection, "voyage-3", 1024);
         EmbedderRouter router = new EmbedderRouter(onnx, "dummy-key", "document");
-        assertThat(router.resolveEmbedderStrict("knowledge__x__voyage-3__v1")
-                .modelToken()).isEqualTo("voyage-3");
+        assertThat(router.resolveEmbedderStrict(null, TENANT, collection).modelToken())
+                .isEqualTo("voyage-3");
     }
 
     @Test
-    void cloudMode_cceAndCodeSegments_routeByModelToken() {
+    void cloudMode_cceAndCodeRows_routeByRowsModel() {
+        String cceCollection  = "docs__nexus__voyage-context-3__v1";
+        String codeCollection = "code__nexus__voyage-code-3__v1";
+        mark(cceCollection, "voyage-context-3", 1024);
+        mark(codeCollection, "voyage-code-3", 1024);
         EmbedderRouter router = new EmbedderRouter(onnx, "dummy-key", "document");
-        assertThat(router.resolveEmbedderStrict("docs__nexus__voyage-context-3__v1")
-                .modelToken()).isEqualTo("voyage-context-3");
-        assertThat(router.resolveEmbedderStrict("code__nexus__voyage-code-3__v1")
-                .modelToken()).isEqualTo("voyage-code-3");
+        assertThat(router.resolveEmbedderStrict(null, TENANT, cceCollection).modelToken())
+                .isEqualTo("voyage-context-3");
+        assertThat(router.resolveEmbedderStrict(null, TENANT, codeCollection).modelToken())
+                .isEqualTo("voyage-code-3");
     }
 
     @Test
-    void unknownModelSegment_refusedInBothModes() {
+    void unknownModelRow_refusedInBothModes() {
         // Mechanism test: the routers built here are MiniLM-wired (onnx), so a
-        // bge-base-en-v15-768 segment has no embedder and must REFUSE, not
+        // bge-base-en-v15-768 row has no embedder and must REFUSE, not
         // ONNX-embed into a 768-dim table. (Production local mode now wires bge
         // per RDR-160 P2 — see EmbedderRouterBge768Test for that path, where it
-        // is the minilm-l6-v2-384 segment that is refused.)
+        // is the minilm-l6-v2-384 row that is refused.)
+        String collection = "knowledge__x__bge-base-en-v15-768__v1";
+        mark(collection, "bge-base-en-v15-768", 768);
         EmbedderRouter local = new EmbedderRouter(onnx, "document");
         EmbedderRouter cloud = new EmbedderRouter(onnx, "dummy-key", "document");
-        assertThatThrownBy(() -> local.resolveEmbedderStrict(
-                "knowledge__x__bge-base-en-v15-768__v1"))
+        assertThatThrownBy(() -> local.resolveEmbedderStrict(null, TENANT, collection))
                 .isInstanceOf(EmbeddingModelUnavailableException.class);
-        assertThatThrownBy(() -> cloud.resolveEmbedderStrict(
-                "knowledge__x__bge-base-en-v15-768__v1"))
+        assertThatThrownBy(() -> cloud.resolveEmbedderStrict(null, TENANT, collection))
                 .isInstanceOf(EmbeddingModelUnavailableException.class)
                 .hasMessageContaining("bge-base-en-v15-768");
     }
 
-    // ── Non-conformant names keep legacy prefix routing ──────────────────────
+    // ── The row wins, whatever the name looks like ───────────────────────────
 
     @Test
-    void nonConformantName_fallsBackToPrefixRouting() {
+    void nonConformantName_stillRoutesByRegistryRow_neverByName() {
+        // RDR-204 Phase 1's universal-registration requirement: even an
+        // unparseable, non-conformant name goes through the registry now —
+        // there is no more name-shape escape hatch into prefix routing for a
+        // NON-NULL collection. The row wins regardless of what the name looks
+        // like (here, a name with no model segment at all).
+        String collection = "knowledge__test";
+        mark(collection, "minilm-l6-v2-384", 384);
         EmbedderRouter local = new EmbedderRouter(onnx, "document");
-        assertThat(local.resolveEmbedderStrict("knowledge__test")).isSameAs(onnx);
-
-        EmbedderRouter cloud = new EmbedderRouter(onnx, "dummy-key", "document");
-        assertThat(cloud.resolveEmbedderStrict("knowledge__test").modelToken())
-                .isEqualTo("voyage-context-3");
-        assertThat(cloud.resolveEmbedderStrict(null)).isSameAs(onnx);
+        assertThat(local.resolveEmbedderStrict(null, TENANT, collection)).isSameAs(onnx);
     }
+
+    @Test
+    void nameClaimsOneModel_rowSaysAnother_rowWins() {
+        // RDR-204 Phase 2 test-validation gap (nexus-ft04v.19 review, item 1):
+        // every prior fixture either matched the name's own model token or
+        // carried no token at all (absence, not disagreement). This is the
+        // literal case the bead's acceptance language names: "routing picks
+        // the right embedder for a collection whose NAME disagrees with its
+        // row." The name here claims voyage-code-3 (a model this ONNX-wired
+        // local router cannot serve at all); the row says minilm-l6-v2-384 (a
+        // grandfathered rename, or a name that predates a profile change).
+        // If dispatch ever reverted to reading the name's own segment, this
+        // would either throw (voyage-code-3 unservable in local mode) or
+        // dispatch wrongly — it does neither, because the row is read, never
+        // the name.
+        String collection = "code__grandfathered__voyage-code-3__v1";
+        mark(collection, "minilm-l6-v2-384", 384);
+        EmbedderRouter local = new EmbedderRouter(onnx, "document");
+        assertThat(local.resolveEmbedderStrict(null, TENANT, collection)).isSameAs(onnx);
+    }
+
+    // NOTE: a genuinely UNREGISTERED (tenant, collection) pair — no CollectionRegistry
+    // cache entry at all — cannot be exercised in THIS class: the cache-miss branch of
+    // CollectionRegistry#lookup needs a real TenantScope backed by a real DataSource to
+    // reach the SELECT that proves absence, and this class is deliberately DB-less (see
+    // the class javadoc). That contract — UnregisteredCollectionException, no row ever
+    // written — is already pinned against a real Testcontainers substrate by
+    // CollectionRegistryTest#require_throwsWithNoRowCached_whenCollectionNeverRegistered.
 
     // ── Banner surface ────────────────────────────────────────────────────────
 

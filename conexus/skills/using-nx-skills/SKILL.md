@@ -86,6 +86,12 @@ Conexus Storage Tiers: check before any work, and write your findings back. Read
 
 Write path: T1 (immediate, shared with siblings) → `--persist` flag to T2 (survives the session) → `/conexus:knowledge-tidy` to T3 (permanent, cross-project). Findings not stored are findings lost: call `store_put` (T3) or `memory_put` (T2) before returning a result you would want a future session to know.
 
+**T2 ttl convention (every `memory_put` names its lifetime; the default is 30 days and reads are the only thing that extend it):**
+
+- `ttl=None` for a record of record: a handoff, a decision, a directive, a ship record, a coordination brief, a research finding a future session must find. Omitting `ttl` does NOT make an entry permanent.
+- the default (omit `ttl`) for a session finding, an interim result, a review round, a probe; it should expire unless someone reads it again.
+- `tags` name the bead or RDR the entry serves, so the entry can be found by the work, not only by the title.
+
 ## Common Mistakes
 
 | Mistake | Correction |
@@ -95,6 +101,7 @@ Write path: T1 (immediate, shared with siblings) → `--persist` flag to T2 (sur
 | `nx_answer` for a file:line, single-fact, or already-in-T2 question | `search` / `query` (seconds; mean about 8s, tail to about 45s) or Serena. `nx_answer`'s p50 is 80s |
 | Researching from scratch without checking T3 | `nx search` first (seconds); prior sessions may have already answered |
 | Returning findings without storing them | `store_put` (T3) or `memory_put` (T2) before returning |
+| `memory_put` with no `ttl` for a decision, handoff or directive | `ttl=None`; the default is 30 days, and omitting `ttl` never means permanent |
 | `store_put(collection="knowledge")` or any placeholder (`default`, `test`, a session, a source app) | `collection="<subject>"`: a durable subject area a reader would browse (`distributed-systems`); reuse an existing one (`nx collection list`) before minting; rules in docs/collections.md |
 | Test fails → try a different fix | `/conexus:debug` |
 | Implement undesigned work without brainstorming-gate | `brainstorming-gate` first (unless a design of record exists) |

@@ -350,8 +350,8 @@ class HybridSearchFunctionParityIntegrationTest {
     // ── raw function-call plumbing (the function does not exist yet; every call
     //    below is expected to throw until P5.2 lands) ──────────────────────────
 
-    private float[] embedQuery(String collection, String text) {
-        return queryRouter.embedOneForCollection(collection, text);
+    private float[] embedQuery(String tenant, String collection, String text) {
+        return queryRouter.embedOneForCollection(tenantScope, tenant, collection, text);
     }
 
     /** pgvector cast-safe text literal: {@code [f1,f2,...]} (copy of
@@ -381,7 +381,7 @@ class HybridSearchFunctionParityIntegrationTest {
      */
     private List<Map<String, Object>> callHybridSearch(String tenant, int dim,
             String queryText, List<String> collections, double trgmThreshold, int n) {
-        float[] vec = embedQuery(collections.get(0), queryText);
+        float[] vec = embedQuery(tenant, collections.get(0), queryText);
         String sql = "SELECT id, content, collection, score FROM nexus.hybrid_search_" + dim
             + "(?::nexus.vector, ?, ARRAY[" + placeholders(collections.size()) + "]::text[], NULL::jsonb, ?)";
         List<Object> binds = new ArrayList<>();
@@ -540,7 +540,7 @@ class HybridSearchFunctionParityIntegrationTest {
         // scans (the GIN text-gate indexes) survive the call -- that half of the original
         // contract is unchanged.
         String q = queries.get(0);
-        float[] vec = embedQuery(COL_MAIN, q);
+        float[] vec = embedQuery(TENANT_A, COL_MAIN, q);
         Table<?> fn = HYBRID_SEARCH_384.call(
             Vector.of(vec), q, new String[] {COL_MAIN}, null, K);
         String plan = explain(fn);

@@ -21,6 +21,36 @@ from nexus.corpus import (
 pytestmark = pytest.mark.usefixtures("cloud_mode")
 
 
+@pytest.fixture(autouse=True)
+def _fake_collection_rows(monkeypatch):
+    """RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26): collection_content_type/
+    collection_owner/collection_model (and everything built on them --
+    voyage_model_for_collection, resolve_corpus's bare-content-type stage)
+    now read a collection's catalog row via
+    ``nexus.mcp_infra.get_collection_row`` instead of parsing the name.
+    This file's fixture collection names (``code__myrepo``, ``bare_name``,
+    ...) are bare test strings with no real row behind them -- this fake
+    derives a row from the SAME first-segment convention the retired
+    string-parse used, so the content-type-to-model DISPATCH logic these
+    tests exercise is unaffected by the row-vs-name authority change these
+    tests are not about. The fail-loud-on-no-row contract itself is
+    covered separately by test_collection_content_type_row_based_repoint
+    below.
+    """
+    import nexus.mcp_infra as mi
+
+    def _fake_get_collection_row(name: str) -> dict | None:
+        content_type = name.partition("__")[0] if "__" in name else ""
+        return {
+            "content_type": content_type,
+            "owner_id": "test-owner",
+            "embedding_model": "test-model",
+            "lifecycle_state": "live",
+        }
+
+    monkeypatch.setattr(mi, "get_collection_row", _fake_get_collection_row)
+
+
 # ── Embedding model selection ─────────────────────────────────────────────────
 
 @pytest.mark.parametrize(
@@ -197,6 +227,297 @@ def test_resolve_corpus_prefix_matching(
     query: str, all_cols: list[str], expected: list[str]
 ) -> None:
     assert resolve_corpus(query, all_cols) == expected
+
+
+# ── RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26) ──────────────────────────────
+
+def test_collection_content_type_row_based_repoint(monkeypatch) -> None:
+    """The funnel helpers read the catalog row, never the name -- and fail
+    loud rather than fall back to parsing when no row backs the name.
+
+    This is the test that proves the authority MOVED (RDR §Test Plan): a
+    collection whose NAME says one content type and whose ROW says
+    another resolves BY THE ROW.
+    """
+    import nexus.mcp_infra as mi
+    from nexus.corpus import (
+        CollectionNotRegisteredError,
+        collection_content_type,
+        collection_model,
+        collection_owner,
+    )
+
+    def _row(name: str) -> dict | None:
+        if name == "code__nexus__voyage-code-3__v1":
+            # The NAME says "code"; the ROW disagrees (the exact drift
+            # class GH #667 came from). The row must win.
+            return {
+                "content_type": "docs",
+                "owner_id": "nexus-row-owner",
+                "embedding_model": "voyage-context-3",
+                "lifecycle_state": "live",
+            }
+        return None
+
+    monkeypatch.setattr(mi, "get_collection_row", _row)
+
+    assert collection_content_type("code__nexus__voyage-code-3__v1") == "docs"
+    assert collection_owner("code__nexus__voyage-code-3__v1") == "nexus-row-owner"
+    assert collection_model("code__nexus__voyage-code-3__v1") == "voyage-context-3"
+
+    for fn in (collection_content_type, collection_owner, collection_model):
+        with pytest.raises(CollectionNotRegisteredError):
+            fn("docs__never-registered__voyage-context-3__v1")
+
+
+@pytest.mark.parametrize(
+    "lifecycle_state",
+    ["quarantine", "dormant", "disputed"],
+    ids=["quarantine_excluded", "dormant_excluded", "disputed_excluded"],
+)
+def test_resolve_corpus_excludes_non_live_lifecycle_states(
+    monkeypatch, lifecycle_state: str,
+) -> None:
+    """RDR-204 Gap 4: a bare-content-type corpus fan-out excludes every
+    non-``live`` row BY COLUMN -- quarantine, dormant and disputed each
+    asserted separately, never lumped into one case."""
+    import nexus.mcp_infra as mi
+
+    rows = {
+        "code__nexus__voyage-code-3__v1": {
+            "content_type": "code", "owner_id": "nexus", "embedding_model": "voyage-code-3",
+            "lifecycle_state": "live",
+        },
+        "quarantine-code__nexus__voyage-code-3__v1": {
+            "content_type": "code", "owner_id": "nexus", "embedding_model": "voyage-code-3",
+            "lifecycle_state": lifecycle_state,
+        },
+    }
+    monkeypatch.setattr(mi, "get_collection_row", lambda name: rows.get(name))
+
+    result = resolve_corpus("code", list(rows))
+    assert result == ["code__nexus__voyage-code-3__v1"], (
+        f"a {lifecycle_state} row must never join a bare 'code' fan-out"
+    )
+
+
+def test_resolve_corpus_drops_unregistered_name_from_fanout(monkeypatch) -> None:
+    """A candidate with no catalog row at all is dropped from a bare-corpus
+    fan-out (never raised loud -- RDR §Failure Modes: a fan-out skips an
+    unregistered name with a logged warning, only a direct single-collection
+    read is a hard 422)."""
+    import nexus.mcp_infra as mi
+
+    monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
+
+    assert resolve_corpus("code", ["code__ghost__voyage-code-3__v1"]) == []
+
+
+# ── RDR-204 Phase 3 fix round item 5: bounded staleness refresh ──────────────
+
+def test_resolve_corpus_bounded_refresh_finds_a_collection_registered_by_another_process(
+    monkeypatch,
+) -> None:
+    """RDR-204 Phase 3 fix round (nexus-ft04v.28 item 5): a bare-corpus
+    fan-out that finds NOTHING against the caller's own (possibly stale)
+    name list invalidates nexus.mcp_infra's row cache and re-fetches
+    get_collection_names() ONCE before answering empty -- a fake whose
+    SECOND list answer differs (simulating another process's
+    registration landing during the row cache's TTL window) must be
+    found on the second pass, not silently missed for up to 60s."""
+    import nexus.mcp_infra as mi
+
+    rows = {
+        "code__late__voyage-code-3__v1": {
+            "content_type": "code", "owner_id": "late",
+            "embedding_model": "voyage-code-3", "lifecycle_state": "live",
+        },
+    }
+    monkeypatch.setattr(mi, "get_collection_row", lambda name: rows.get(name))
+
+    invalidate_calls: list[int] = []
+    monkeypatch.setattr(mi, "invalidate_collections_cache", lambda: invalidate_calls.append(1))
+
+    get_names_calls: list[int] = []
+
+    def _fresh_names() -> list[str]:
+        get_names_calls.append(1)
+        return ["code__late__voyage-code-3__v1"]
+
+    monkeypatch.setattr(mi, "get_collection_names", _fresh_names)
+
+    # Caller's own list is STALE -- empty, as if fetched before the other
+    # process's registration landed.
+    result = resolve_corpus("code", [])
+
+    assert result == ["code__late__voyage-code-3__v1"]
+    assert len(invalidate_calls) == 1, "must invalidate exactly once, never a loop"
+    assert len(get_names_calls) == 1, "must refetch exactly once, never a loop"
+
+
+def test_resolve_corpus_bounded_refresh_still_returns_empty_when_genuinely_nothing_matches(
+    monkeypatch,
+) -> None:
+    """The bounded refresh is a real second attempt, not theatre -- when
+    even the fresh fetch has nothing, the result is still empty, and the
+    refresh fires exactly once, never a retry loop."""
+    import nexus.mcp_infra as mi
+
+    monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
+    invalidate_calls: list[int] = []
+    monkeypatch.setattr(mi, "invalidate_collections_cache", lambda: invalidate_calls.append(1))
+    get_names_calls: list[int] = []
+
+    def _still_nothing() -> list[str]:
+        get_names_calls.append(1)
+        return []
+
+    monkeypatch.setattr(mi, "get_collection_names", _still_nothing)
+
+    assert resolve_corpus("code", []) == []
+    assert len(invalidate_calls) == 1
+    assert len(get_names_calls) == 1
+
+
+def test_resolve_corpus_bounded_refresh_failure_falls_back_to_empty(monkeypatch) -> None:
+    """The bounded refresh is best-effort: a refetch failure (T3
+    unreachable) must fall back to the already-computed empty result,
+    never propagate and turn a previously-safe empty answer into a hard
+    failure."""
+    import nexus.mcp_infra as mi
+
+    monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
+    monkeypatch.setattr(mi, "invalidate_collections_cache", lambda: None)
+
+    def _unreachable() -> list[str]:
+        raise ConnectionError("simulated T3 unreachable")
+
+    monkeypatch.setattr(mi, "get_collection_names", _unreachable)
+
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        assert resolve_corpus("code", ["code__ghost__voyage-code-3__v1"]) == []
+    # A refetch failure is a real T3-reachability fault, not a debug detail:
+    # it is logged at WARNING (fix-round critic, T2 [25059]).
+    failed = [e for e in logs if e["event"] == "resolve_corpus_bounded_refresh_failed"]
+    assert failed, logs
+    assert failed[0]["log_level"] == "warning", failed
+
+
+def test_resolve_corpus_refresh_never_fires_when_the_first_pass_already_matched(
+    monkeypatch,
+) -> None:
+    """The bounded refresh is gated on an EMPTY first pass only -- a
+    real match must never pay the extra round trip."""
+    import nexus.mcp_infra as mi
+
+    rows = {
+        "code__nexus__voyage-code-3__v1": {
+            "content_type": "code", "owner_id": "nexus",
+            "embedding_model": "voyage-code-3", "lifecycle_state": "live",
+        },
+    }
+    monkeypatch.setattr(mi, "get_collection_row", lambda name: rows.get(name))
+
+    def _boom() -> None:
+        raise AssertionError("invalidate_collections_cache must not be called on a hit")
+
+    monkeypatch.setattr(mi, "invalidate_collections_cache", _boom)
+    monkeypatch.setattr(mi, "get_collection_names", _boom)
+
+    assert resolve_corpus("code", ["code__nexus__voyage-code-3__v1"]) == [
+        "code__nexus__voyage-code-3__v1",
+    ]
+
+
+# ── RDR-204 Phase 3 fix round item 7: resolve_row_preferred ──────────────────
+
+class TestResolveRowPreferred:
+    """Direct unit coverage of the shared helper four class-(d) diagnostic
+    sites now route through (nexus-ft04v.28 item 7): db/reconcile.py's
+    _model_for_collection, db/http_vector_client.py's _is_cce_collection,
+    and two inline checks in commands/catalog_cmds/integrity.py /
+    reconcile_stale.py."""
+
+    def test_row_present_wins_over_the_fallback(self, monkeypatch) -> None:
+        import nexus.mcp_infra as mi
+        from nexus.corpus import resolve_row_preferred
+
+        monkeypatch.setattr(
+            mi, "get_collection_row",
+            lambda name: {"content_type": "docs", "owner_id": "x", "embedding_model": "m"},
+        )
+
+        def _boom(n: str) -> str:
+            raise AssertionError("name_fallback must not run when a row exists")
+
+        assert resolve_row_preferred("anything", "content_type", _boom) == "docs"
+
+    def test_row_absent_falls_to_the_name_fallback(self, monkeypatch) -> None:
+        import nexus.mcp_infra as mi
+        from nexus.corpus import resolve_row_preferred
+
+        monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
+
+        assert resolve_row_preferred(
+            "knowledge__x", "content_type", lambda n: n.split("__")[0],
+        ) == "knowledge"
+
+    def test_row_present_but_field_absent_returns_none_without_falling_back(
+        self, monkeypatch,
+    ) -> None:
+        """Row PRESENCE alone gates the fallback -- a row missing the
+        requested field still wins outright (returns None), never falls
+        through to name_fallback. Matches every one of the four sites'
+        original pre-extraction behaviour."""
+        import nexus.mcp_infra as mi
+        from nexus.corpus import resolve_row_preferred
+
+        monkeypatch.setattr(mi, "get_collection_row", lambda name: {"owner_id": "x"})
+
+        def _boom(n: str) -> str:
+            raise AssertionError("name_fallback must not run when a row exists, even incomplete")
+
+        assert resolve_row_preferred("anything", "content_type", _boom) is None
+
+
+# ── RDR-204 Phase 3 item 7: owner grammar alignment ───────────────────────────
+
+def test_is_conformant_collection_name_admits_underscored_owner() -> None:
+    """is_conformant_collection_name used to be STRICTER than a physical
+    name allows, rejecting a single-underscored owner (e.g. "my_repo").
+    RDR-204 Phase 3 item 7 (coordinator grammar decision 2026-09-08,
+    aligned to the engine's tightened hygiene-004-1 walk grammar,
+    nexus-ztafa): SINGLE underscores only, never a run of two -- a double
+    underscore inside the owner makes a two-segment name ambiguous with a
+    four-segment one. An underscored owner renders and round-trips through
+    parse; a double-underscored owner renders (CollectionName does not
+    validate owner_id shape at construction) but does NOT round-trip --
+    is_conformant_collection_name rejects it and CollectionName.parse
+    raises on the malformed shape it produces."""
+    from nexus.catalog.collection_name import CollectionName
+    from nexus.corpus import is_conformant_collection_name, parse_conformant_collection_name
+
+    name = CollectionName(
+        content_type="code", owner_id="my_repo", embedding_model="voyage-code-3", model_version=1,
+    ).render()
+    assert name == "code__my_repo__voyage-code-3__v1"
+    assert is_conformant_collection_name(name)
+    parsed = parse_conformant_collection_name(name)
+    assert parsed["owner_id"] == "my_repo"
+    assert CollectionName.parse(name) == CollectionName(
+        content_type="code", owner_id="my_repo", embedding_model="voyage-code-3", model_version=1,
+    )
+
+    # my__repo (a run of two underscores) is rejected, not accepted.
+    double_underscore_name = CollectionName(
+        content_type="code", owner_id="my__repo", embedding_model="voyage-code-3", model_version=1,
+    ).render()
+    assert double_underscore_name == "code__my__repo__voyage-code-3__v1"
+    assert not is_conformant_collection_name(double_underscore_name)
+    with pytest.raises(ValueError):
+        CollectionName.parse(double_underscore_name)
 
 
 # ── validate_collection_name ──────────────────────────────────────────────────
@@ -598,3 +919,32 @@ def test_allow_placeholder_lifts_the_refusal_for_a_restore() -> None:
     assert t3_collection_name("knowledge__knowledge", for_write=True, allow_placeholder=True) == (
         "knowledge__knowledge__voyage-context-3__v1"
     )
+
+
+def test_resolve_row_preferred_falls_to_the_name_when_the_row_fetch_fails(monkeypatch) -> None:
+    """RDR-204 Phase 3 fix round: a class-(d) diagnostic (``nx catalog
+    verify``, reconcile-stale, integrity) must keep answering from the
+    site's own name derivation when the row fetch cannot complete (no
+    reachable service, a catalog-only run, a T3 double without
+    ``list_collections``). The failure is logged at WARNING, never raised
+    into the diagnostic: five ``TestVerifyCommand`` tests and the store-put
+    title probe went red under -n 8 when the fetch aborted them."""
+    import nexus.mcp_infra as mi
+
+    from nexus.corpus import resolve_row_preferred
+
+    def _boom(name: str):
+        raise ConnectionError("simulated unreachable service")
+
+    monkeypatch.setattr(mi, "get_collection_row", _boom)
+
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        got = resolve_row_preferred(
+            "code__nexus__voyage-code-3__v1", "embedding_model",
+            lambda n: "from-name",
+        )
+    assert got == "from-name"
+    failed = [e for e in logs if e["event"] == "resolve_row_preferred_row_fetch_failed"]
+    assert failed and failed[0]["log_level"] == "warning", logs

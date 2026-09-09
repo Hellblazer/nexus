@@ -99,6 +99,46 @@ def _registered_token(content_type: str = "docs") -> str:
     return _MODEL_TOKENS[_TIER1_MODEL]
 
 
+def _stub_agreeing_embedding_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RDR-204 Phase 3 item 3 (nexus-ft04v.26): effective_embedding_model_for_writes
+    now validates a catalog registration's model against the REAL engine's
+    embedding_profile. Every NX_STORAGE_BACKEND_VECTORS=chroma test in this
+    file (the deliberate local-ONNX-ingest opt-out _setup_phase_a_catalog
+    and its inline siblings use) is exactly the ``_registered_token``
+    scenario documented above: the client-side derivation
+    (``_write_intent_embedding_model``, via ``local_model_token()`` on
+    this box's real fastembed tier) can disagree with the REAL engine's
+    profile, which the engine seeds from its OWN tier-1 embedder
+    unconditionally, independent of this env var (that only steers this
+    Python client's T3/vector construction). WRAP (not replace)
+    make_catalog_reader()'s real result -- it is also used for owner
+    lookups and other catalog reads these registration flows need; a
+    bare replacement 500s on the first unrelated attribute access.
+    """
+    import nexus.catalog.factory as factory_mod
+    from nexus.corpus import _write_intent_embedding_model
+
+    real_make_catalog_reader = factory_mod.make_catalog_reader
+
+    class _AgreeingProfileReader:
+        def __init__(self, real: object) -> None:
+            self._real = real
+
+        def embedding_profile(self) -> list[dict]:
+            return [
+                {"content_type": ct, "embedding_model": _write_intent_embedding_model(ct), "dimension": 768}
+                for ct in ("code", "docs", "rdr", "knowledge")
+            ]
+
+        def __getattr__(self, name: str):
+            return getattr(self._real, name)
+
+    monkeypatch.setattr(
+        factory_mod, "make_catalog_reader",
+        lambda: _AgreeingProfileReader(real_make_catalog_reader()),
+    )
+
+
 def _add_cce_mock(mock_voyage_client: MagicMock) -> None:
     def _fake_cce(inputs, model, input_type):
         batch = inputs[0]
@@ -1193,6 +1233,10 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     )
     # is_local_mode() returns True when either key is absent; with
     # both keys cleared above it's True without an explicit NX_LOCAL.
+    # RDR-204 Phase 3 item 3 (nexus-ft04v.26): see _stub_agreeing_embedding_profile's
+    # own docstring -- this test's NX_STORAGE_BACKEND_VECTORS=chroma opt-out
+    # above is exactly the _registered_token scenario it documents.
+    _stub_agreeing_embedding_profile(monkeypatch)
 
     # Inject an EphemeralClient so the test doesn't hit a real
     # PersistentClient on disk.
@@ -2729,6 +2773,8 @@ def _setup_phase_a_catalog(tmp_path, monkeypatch):
     # Not the deleted non-service/non-local CLOUD credential path.
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
     client = make_vector_test_client()
+    _stub_agreeing_embedding_profile(monkeypatch)
+
     return cat_dir, T3Database(_client=client, local_mode=True)
 
 

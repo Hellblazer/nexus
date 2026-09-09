@@ -163,6 +163,9 @@ def _rg_hit_to_result(hit: dict) -> SearchResult:
               show_default=True,
               help="Corpus prefix or full collection name "
                    "(repeatable: --corpus a --corpus b; or comma-separated: --corpus a,b)")
+@click.option("--repo", "repos", multiple=True, metavar="NAME_OR_TUMBLER",
+              help="Scope to one registered owner's collections by name or tumbler "
+                   "(repeatable). Adds that owner's collections to --corpus (GH #1527).")
 @click.option("--n", "-m", "--max-results", "n", default=10, show_default=True,
               help="Max results to return")
 @click.option("--hybrid", is_flag=True, default=False,
@@ -212,6 +215,7 @@ def search_cmd(
     query: str,
     path: str | None,
     corpus: tuple[str, ...],
+    repos: tuple[str, ...],
     n: int,
     hybrid: bool,
     no_rerank: bool,
@@ -306,6 +310,34 @@ def search_cmd(
             if part:
                 expanded_corpus.append(part)
 
+    # GH #1527 (nexus-qiah5): --repo NAME resolves the registered owner (by
+    # name or dotted tumbler) and adds every collection under it; the
+    # default --corpus prefixes are dropped when --repo is the only scope
+    # asked for, so the search is that repository's, not everything's.
+    if repos:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred, branch-local
+        from nexus.catalog.owner_scope import OwnerScopeError, resolve_owner_scope  # noqa: PLC0415 — deferred, branch-local
+
+        reader = make_catalog_reader()
+        if reader is None:
+            raise click.ClickException("--repo needs the catalog (nx catalog setup)")
+        repo_collections: list[str] = []
+        for raw in repos:
+            try:
+                tumbler = resolve_owner_scope(reader, raw)
+            except OwnerScopeError as exc:
+                raise click.ClickException(f"--repo {exc}") from exc
+            for entry in reader.by_owner(tumbler):
+                pc = getattr(entry, "physical_collection", None)
+                if pc and pc not in repo_collections:
+                    repo_collections.append(pc)
+        if not repo_collections:
+            raise click.ClickException(
+                f"--repo {', '.join(repos)}: the owner has no indexed collections yet"
+            )
+        corpus_was_default = tuple(corpus) == ("knowledge", "code", "docs")
+        expanded_corpus = repo_collections if corpus_was_default else expanded_corpus + repo_collections
+
     # nexus-d9xt2: GET /v1/vectors/stats (db.list_collections()) costs
     # ~1.1s and, unlike the long-lived MCP process (which caches it —
     # see nexus.mcp_infra's _collections_cache), the CLI is a fresh
@@ -341,7 +373,17 @@ def search_cmd(
                 continue
             target_collections.append(c)
     else:
-        all_collections = [c["name"] for c in db.list_collections()]
+        collection_rows = db.list_collections()
+        all_collections = [c["name"] for c in collection_rows]
+        # RDR-204 Phase 3 fix round (nexus-ft04v.28 S1): resolve_corpus's
+        # Stage 2 (bare content-type fan-out) reads nexus.mcp_infra's
+        # SEPARATE, process-local row cache via get_collection_row for
+        # every candidate above -- cold on this fresh CLI process, so it
+        # used to pay a SECOND /v1/vectors/stats round trip for the exact
+        # same data this call just fetched. Prime it from the response
+        # already in hand instead.
+        from nexus.mcp_infra import prime_collections_cache  # noqa: PLC0415 — deferred import (mcp_infra)
+        prime_collections_cache(collection_rows)
         target_collections = []
         for c in expanded_corpus:
             matched = resolve_corpus(c, all_collections)

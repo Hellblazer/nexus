@@ -862,3 +862,203 @@ def test_the_old_failed_flag_still_means_fatal_only():
     _, failed = format_health_for_cli([HealthResult(label="b", ok=False)], local_mode=False)
     assert failed is False
     assert health_exit_code([HealthResult(label="b", ok=False)]) == EXIT_FAILURES
+
+
+# ── _check_embedding_profile (RDR-204 Day 2, nexus-ft04v.31) ─────────────────
+#
+# The engine's install-scoped profile per content type, whether the client's
+# local intent agrees with it (a disagreement means the service has not been
+# restarted since the config change, the GH #1461 blind spot), live
+# collections off-profile (informational), and the disputed / dormant /
+# quarantine lifecycle states with their remedies. Nothing here parses a
+# collection name: every fact comes from the catalog rows.
+
+_VOYAGE_PROFILE = [
+    {"content_type": "code", "embedding_model": "voyage-code-3", "dimension": 1024},
+    {"content_type": "docs", "embedding_model": "voyage-context-3", "dimension": 1024},
+    {"content_type": "rdr", "embedding_model": "voyage-context-3", "dimension": 1024},
+    {"content_type": "knowledge", "embedding_model": "voyage-context-3", "dimension": 1024},
+]
+_BGE_PROFILE = [
+    {"content_type": ct, "embedding_model": "bge-base-en-v15-768", "dimension": 768}
+    for ct in ("code", "docs", "rdr", "knowledge")
+]
+
+
+def _coll(name: str, ct: str, model: str, state: str = "live") -> dict:
+    return {"name": name, "content_type": ct, "owner_id": "1-1", "embedding_model": model,
+            "lifecycle_state": state, "dimension": 1024 if model.startswith("voyage") else 768}
+
+
+class _FakeReader:
+    def __init__(self, profile, collections=(), *, profile_exc: Exception | None = None):
+        self._profile = profile
+        self._collections = list(collections)
+        self._profile_exc = profile_exc
+
+    def embedding_profile(self):
+        if self._profile_exc is not None:
+            raise self._profile_exc
+        return list(self._profile)
+
+    def list_collections(self):
+        return list(self._collections)
+
+
+def _patch_profile_check(monkeypatch, reader, *, intent=None):
+    """Wire the check to *reader* and to a fixed per-content-type intent
+    (defaults to the Voyage split, cloud mode's canonical answer)."""
+    from nexus import health
+
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: reader)
+    if intent is None:
+        intent = {"code": "voyage-code-3", "docs": "voyage-context-3",
+                  "rdr": "voyage-context-3", "knowledge": "voyage-context-3"}
+    if isinstance(intent, Exception):
+        def _raise(ct: str) -> str:
+            raise intent
+        monkeypatch.setattr("nexus.corpus.effective_embedding_model_for_writes", _raise)
+    else:
+        monkeypatch.setattr("nexus.corpus.effective_embedding_model_for_writes", lambda ct: intent[ct])
+    return health
+
+
+def _by_label(results, label: str):
+    hits = [r for r in results if r.label == label]
+    assert len(hits) == 1, f"expected exactly one {label!r} row, got {[r.label for r in results]}"
+    return hits[0]
+
+
+def _is_red(r) -> bool:
+    return (not r.ok) and (not r.warn)
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_embedding_profile_agreement_reports_profile_and_nothing_red(monkeypatch) -> None:
+    """The clean install: the profile row is PRESENT (a non-vacuous pass),
+    intent agrees, and no finding is red."""
+    health = _patch_profile_check(monkeypatch, _FakeReader(_VOYAGE_PROFILE, [
+        _coll("code__1-1__voyage-code-3__v1", "code", "voyage-code-3"),
+    ]))
+    results = health._check_embedding_profile()
+    profile = _by_label(results, "Embedding profile")
+    assert profile.ok is True
+    assert "code=voyage-code-3" in profile.detail and "1024" in profile.detail
+    intent = _by_label(results, "Embedding profile vs client intent")
+    assert intent.ok is True and "agree" in intent.detail
+    assert not any(_is_red(r) for r in results), [r.label for r in results if _is_red(r)]
+    assert {r.label for r in results} >= {
+        "Embedding profile", "Embedding profile vs client intent",
+        "Collections off-profile", "Collections disputed", "Collections dormant",
+        "Collections quarantined",
+    }
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_embedding_profile_disagreement_names_the_restart(monkeypatch) -> None:
+    """local.embed_model switched to voyage with a key configured, engine still
+    profiled bge: the row says the service has not been restarted, in words,
+    and gives the restart command."""
+    from nexus.corpus import _SERVICE_RESTART_COMMAND
+
+    health = _patch_profile_check(monkeypatch, _FakeReader(_BGE_PROFILE))
+    r = _by_label(health._check_embedding_profile(), "Embedding profile vs client intent")
+    assert _is_red(r)
+    assert "code" in r.detail and "voyage-code-3" in r.detail and "bge-base-en-v15-768" in r.detail
+    assert "has not been restarted since the config change" in r.detail
+    assert any(_SERVICE_RESTART_COMMAND in s for s in r.fix_suggestions)
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_embedding_profile_disputed_is_red_with_remedy(monkeypatch) -> None:
+    name = "knowledge__1-1__voyage-context-3__v1"
+    health = _patch_profile_check(monkeypatch, _FakeReader(_VOYAGE_PROFILE, [
+        _coll(name, "knowledge", "voyage-context-3", "disputed"),
+    ]))
+    r = _by_label(health._check_embedding_profile(), "Collections disputed")
+    assert _is_red(r) and name in r.detail
+    assert any("re-index" in s and "current profile" in s for s in r.fix_suggestions)
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_embedding_profile_dormant_is_red_with_remedy(monkeypatch) -> None:
+    name = "docs__1-1__voyage-context-3__v1"
+    health = _patch_profile_check(monkeypatch, _FakeReader(_VOYAGE_PROFILE, [
+        _coll(name, "docs", "voyage-context-3", "dormant"),
+    ]))
+    r = _by_label(health._check_embedding_profile(), "Collections dormant")
+    assert _is_red(r) and name in r.detail
+    assert any("referenced but empty" in s for s in r.fix_suggestions)
+    assert any("remove the references" in s for s in r.fix_suggestions)
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_embedding_profile_off_profile_live_is_informational_not_red(monkeypatch) -> None:
+    """A live bge collection under a Voyage profile still serves reads (they
+    route by the row's own model), so the row is a soft warn naming the
+    re-embed remedy; assert the SEVERITY, not just the presence."""
+    name = "code__1-1__bge-base-en-v15-768__v1"
+    health = _patch_profile_check(monkeypatch, _FakeReader(_VOYAGE_PROFILE, [
+        _coll(name, "code", "bge-base-en-v15-768"),
+        _coll("code__1-1__voyage-code-3__v1", "code", "voyage-code-3"),
+    ]))
+    r = _by_label(health._check_embedding_profile(), "Collections off-profile")
+    assert r.ok is False and r.warn is True, "off-profile live collections are informational"
+    assert name in r.detail and "voyage-code-3__v1" not in r.detail
+    assert any("nx collection reindex" in s for s in r.fix_suggestions)
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_embedding_profile_quarantined_is_reported_not_red(monkeypatch) -> None:
+    name = "quarantine__1-1__voyage-code-3__v1"
+    health = _patch_profile_check(monkeypatch, _FakeReader(_VOYAGE_PROFILE, [
+        _coll(name, "code", "voyage-code-3", "quarantine"),
+    ]))
+    r = _by_label(health._check_embedding_profile(), "Collections quarantined")
+    assert r.ok is False and r.warn is True and name in r.detail
+    assert r.fix_suggestions, "quarantine is reported with its remedy"
+
+
+def test_embedding_profile_empty_profile_is_soft_and_compares_nothing(monkeypatch) -> None:
+    """An unprofiled tenant: no default is invented, the row says the first
+    registration seeds it, and there is nothing to disagree with."""
+    health = _patch_profile_check(monkeypatch, _FakeReader([]))
+    results = health._check_embedding_profile()
+    profile = _by_label(results, "Embedding profile")
+    assert profile.ok is False and profile.warn is True
+    assert "seed" in profile.detail
+    assert not any(_is_red(r) for r in results)
+
+
+def test_embedding_profile_route_missing_is_red_and_only_row(monkeypatch) -> None:
+    from nexus.catalog.http_catalog_client import EmbeddingProfileRouteMissingError
+
+    health = _patch_profile_check(monkeypatch, _FakeReader(
+        [], profile_exc=EmbeddingProfileRouteMissingError("GET /v1/catalog/embedding_profile is not served"),
+    ))
+    results = health._check_embedding_profile()
+    assert len(results) == 1 and _is_red(results[0])
+    assert "embedding_profile" in results[0].detail
+    assert results[0].fix_suggestions
+
+
+def test_embedding_profile_unreadable_reader_is_soft_and_only_row(monkeypatch) -> None:
+    """An engine that cannot be reached is the storage-service check's red;
+    this row must not double-count it, and must not guess."""
+    health = _patch_profile_check(monkeypatch, _FakeReader([], profile_exc=ConnectionError("refused")))
+    results = health._check_embedding_profile()
+    assert len(results) == 1
+    assert results[0].ok is False and results[0].warn is True
+    assert "unread" in results[0].detail
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_embedding_profile_missing_voyage_key_is_red_with_its_own_text(monkeypatch) -> None:
+    from nexus.corpus import LocalVoyageCredentialMissingError
+
+    health = _patch_profile_check(
+        monkeypatch, _FakeReader(_VOYAGE_PROFILE),
+        intent=LocalVoyageCredentialMissingError("local.embed_model='voyage-code-3' requires a Voyage API key"),
+    )
+    r = _by_label(health._check_embedding_profile(), "Embedding profile vs client intent")
+    assert _is_red(r) and "requires a Voyage API key" in r.detail

@@ -1236,6 +1236,26 @@ class TestServiceModeIndexerRouting:
         monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
         monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
 
+        # nexus-ft04v.16 client half (31cc9923a): _index_document now
+        # registers the target collection BEFORE the incremental-sync
+        # read, unconditionally -- so this test now reaches
+        # ensure_collection_registered's profile-agreement check
+        # (nexus-ft04v.26 item 3, RDR-204 Phase 3 THE REPOINT) even
+        # though it short-circuits on an empty chunk list. That check
+        # always calls nexus.catalog.factory.make_catalog_reader() --
+        # unstubbed, that reaches a REAL (401-rejecting, unauthenticated
+        # "tok") /v1/catalog/embedding_profile call. An empty profile
+        # ({}: this fixture collection was never actually registered)
+        # is the correct bootstrap-case stub -- registration proceeds
+        # with intent, no raise.
+        import nexus.catalog.factory as _catalog_factory_mod
+
+        class _EmptyProfileReader:
+            def embedding_profile(self) -> list[dict]:
+                return []
+
+        monkeypatch.setattr(_catalog_factory_mod, "make_catalog_reader", lambda: _EmptyProfileReader())
+
         explicit_col = MagicMock()
         explicit_col.get.return_value = {"metadatas": []}  # staleness check: not found
         explicit_t3 = MagicMock()
@@ -2121,7 +2141,15 @@ def test_per_collection_chunk_cap_values(monkeypatch):
     assert hvc.per_collection_chunk_cap("knowledge__x__x__v1") == 64
     assert hvc.per_collection_chunk_cap("rdr__x__x__v1") == 64
     assert hvc.per_collection_chunk_cap("code__x__x__v1") == 300
-    assert hvc.per_collection_chunk_cap("weird-no-prefix") == 300
+    # RDR-204 Phase 3 (nexus-ft04v.26): a genuinely unresolvable name (no
+    # row, no "__" at all) now falls to the CONSERVATIVE default -- CCE's
+    # smaller cap, never a guessed 300 -- per _is_cce_collection's own
+    # documented intent (a deliberate change from the pre-repoint
+    # default this test was pinning; the test was not updated to match
+    # at the time). "docs"/"knowledge"/"rdr"/"code" above are all
+    # RESOLVABLE by content-type prefix and are unaffected by this
+    # default -- only the truly-unparseable case changes.
+    assert hvc.per_collection_chunk_cap("weird-no-prefix") == 64
 
     # Voyage serving -> identical conservative split (non-vacuity, as above).
     monkeypatch.setattr(hvc, "_serving_embedding_mode", lambda: "voyage")
@@ -2270,6 +2298,37 @@ class TestOnnxLocalUpsertChunkCapValidation:
 class TestUpsertChunksPaging:
     """A single oversize upsert is paged into <=cap sub-POSTs so no request
     exceeds the control-plane requestTimeout (nexus-nf3n7)."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_collection_row(self, monkeypatch):
+        # RDR-204 Phase 3 (nexus-ft04v.26) fixture-seam fix: per_collection_
+        # chunk_cap/_upsert_byte_budget now call _is_cce_collection, which
+        # reads nexus.mcp_infra.get_collection_row(). None of this class's
+        # fixture collections (e.g. "code__o__onnx-x__v1") are registered,
+        # so the real answer is "no row" -- but leaving get_collection_row
+        # unmocked makes THAT the first-ever call to mcp_infra.get_t3() in
+        # the process, which lazily constructs a REAL HttpVectorClient and
+        # performs a real /version probe against this box's local test
+        # engine as a side effect, memoizing its answer into this module's
+        # OWN _vector_client_instance global -- poisoning the very next
+        # _serving_embedding_mode() check inside the SAME function call
+        # with this box's actual serving mode ("onnx-local"), diverting
+        # cap=300 to cap=16 for reasons having nothing to do with what
+        # this class is testing. Stubbing "no row" short-circuits that
+        # chain entirely; _is_cce_collection still falls to (correct)
+        # name-based content-type derivation.
+        monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name: None)
+        # ALSO pin _vector_client_instance to None: this file's OTHER
+        # tests legitimately construct real-ish clients earlier in the
+        # SAME process and nothing resets this module-level global
+        # between tests, so _serving_embedding_mode() can silently
+        # answer this box's actual local-engine serving mode
+        # ("onnx-local") instead of the "unprobed" None every test in
+        # this class assumes (CODE=300/CCE=64, the timeout-derived
+        # split, not the memory-derived onnx-local one) unless a test
+        # explicitly overrides it, as test_per_collection_chunk_cap_
+        # values does.
+        monkeypatch.setattr("nexus.db.http_vector_client._vector_client_instance", None)
 
     def _capture(self, monkeypatch):
         calls: list[dict] = []
@@ -2460,9 +2519,16 @@ class _StubDataTokenManager:
 
 
 class _FakeHttpResponse:
-    def __init__(self, body: dict) -> None:
+    def __init__(self, body: dict, headers: dict[str, str] | None = None) -> None:
         import json as _json
         self._raw = _json.dumps(body).encode()
+        # nexus-ft04v.26 item 5: real urllib responses carry an
+        # http.client.HTTPMessage with a .get(name) accessor;
+        # _request_once's unconditional _stash_response_headers(resp.headers)
+        # call needs SOMETHING with .get() here even when a test passes no
+        # headers at all (the common case) -- a bare dict already satisfies
+        # that contract.
+        self.headers: dict[str, str] = headers or {}
 
     def read(self) -> bytes:
         return self._raw
@@ -2477,13 +2543,14 @@ class _FakeHttpResponse:
 class _FakeOpener:
     """Records every ``urllib.request.Request`` handed to ``.open()``."""
 
-    def __init__(self, body: dict | None = None) -> None:
+    def __init__(self, body: dict | None = None, headers: dict[str, str] | None = None) -> None:
         self.requests: list = []
         self._body = body if body is not None else {"ok": True}
+        self._headers = headers
 
     def open(self, req, timeout=None):  # noqa: ANN001, ANN201, ARG002 — mirrors urllib.request.OpenerDirector.open
         self.requests.append(req)
-        return _FakeHttpResponse(self._body)
+        return _FakeHttpResponse(self._body, self._headers)
 
 
 class TestDataTokenResolutionSeamRequestOnce:
@@ -2548,3 +2615,166 @@ class TestDataTokenResolutionSeamRequestOnce:
         assert result == {"ok": True}
         assert len(calls) == 2
         assert stub.invalidate_calls == [("http://svc", "acme")]
+
+
+# ── nexus-ft04v.26 item 5: X-Nexus-Skipped-Collections client-side logging ──
+#
+# Engine half (bead nexus-ft04v.16 fix round 2, 0c97fc06e): a multi-
+# collection fan-out read drops an unregistered collection instead of
+# 422ing the whole request, and reports every dropped name back via the
+# X-Nexus-Skipped-Collections response header (comma-separated, set only
+# when non-empty). These tests pin the client-side half: the header is
+# read (never a body field — the engine deliberately never wraps the
+# bare-array response) and logged as a structlog warning, one per
+# fan-out read route, and a route with no header set logs nothing.
+
+
+def _wire_fake_opener(monkeypatch: pytest.MonkeyPatch, body, headers: dict[str, str] | None = None):
+    """Route a real client call all the way through _request_once's real
+    header-capture path (unlike this file's usual ``monkeypatch.setattr(
+    "nexus.db.http_vector_client._post", ...)`` shortcut, which bypasses
+    _request_once entirely and therefore never populates the thread-local
+    _response_header_capture that _warn_skipped_collections reads)."""
+    import nexus.db.http_vector_client as hv
+
+    monkeypatch.setattr(hv, "_resolve_endpoint", lambda: ("http://svc", "static-tok"))
+    stub = _StubDataTokenManager(None)
+    monkeypatch.setattr("nexus.db.data_token.get_data_token_manager", lambda: stub)
+    opener = _FakeOpener(body, headers)
+    monkeypatch.setattr(hv, "_keepalive_opener", lambda: opener)
+    return opener
+
+
+class TestSkippedCollectionsHeaderLogging:
+    def test_search_logs_a_warning_when_the_header_is_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from structlog.testing import capture_logs
+
+        _wire_fake_opener(
+            monkeypatch, [],
+            headers={"X-Nexus-Skipped-Collections": "docs__ghost__voyage-context-3__v1,code__gone__voyage-code-3__v1"},
+        )
+        client = HttpVectorClient()
+        with capture_logs() as logs:
+            client.search("q", ["docs__ghost__voyage-context-3__v1", "code__gone__voyage-code-3__v1", "docs__live__voyage-context-3__v1"])
+        events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
+        assert len(events) == 1
+        assert events[0]["route"] == "search"
+        assert events[0]["skipped"] == ["docs__ghost__voyage-context-3__v1", "code__gone__voyage-code-3__v1"]
+        assert events[0]["requested"] == [
+            "docs__ghost__voyage-context-3__v1", "code__gone__voyage-code-3__v1", "docs__live__voyage-context-3__v1",
+        ]
+
+    def test_search_logs_nothing_when_the_header_is_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from structlog.testing import capture_logs
+
+        _wire_fake_opener(monkeypatch, [])
+        client = HttpVectorClient()
+        with capture_logs() as logs:
+            client.search("q", ["docs__live__voyage-context-3__v1"])
+        events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
+        assert events == []
+
+    def test_search_metadata_scoped_logs_a_warning_when_the_header_is_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from structlog.testing import capture_logs
+
+        _wire_fake_opener(
+            monkeypatch, [],
+            headers={"X-Nexus-Skipped-Collections": "docs__ghost__voyage-context-3__v1"},
+        )
+        client = HttpVectorClient()
+        with capture_logs() as logs:
+            client.search_metadata_scoped("q", ["docs__ghost__voyage-context-3__v1", "docs__live__voyage-context-3__v1"])
+        events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
+        assert len(events) == 1
+        assert events[0]["route"] == "search_metadata_scoped"
+        assert events[0]["skipped"] == ["docs__ghost__voyage-context-3__v1"]
+
+    def test_search_graph_hop_logs_a_warning_when_the_header_is_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from structlog.testing import capture_logs
+
+        _wire_fake_opener(
+            monkeypatch, [],
+            headers={"X-Nexus-Skipped-Collections": "docs__ghost__voyage-context-3__v1"},
+        )
+        client = HttpVectorClient()
+        with capture_logs() as logs:
+            client.search_graph_hop("q", ["1.1"], ["docs__ghost__voyage-context-3__v1", "docs__live__voyage-context-3__v1"])
+        events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
+        assert len(events) == 1
+        assert events[0]["route"] == "search_graph_hop"
+        assert events[0]["skipped"] == ["docs__ghost__voyage-context-3__v1"]
+
+    def test_search_aspect_scoped_logs_a_warning_when_the_header_is_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from structlog.testing import capture_logs
+
+        _wire_fake_opener(
+            monkeypatch, [],
+            headers={"X-Nexus-Skipped-Collections": "docs__ghost__voyage-context-3__v1"},
+        )
+        client = HttpVectorClient()
+        with capture_logs() as logs:
+            client.search_aspect_scoped("q", ["docs__ghost__voyage-context-3__v1", "docs__live__voyage-context-3__v1"])
+        events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
+        assert len(events) == 1
+        assert events[0]["route"] == "search_aspect_scoped"
+        assert events[0]["skipped"] == ["docs__ghost__voyage-context-3__v1"]
+
+    def test_a_later_unrelated_call_does_not_see_a_stale_header(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Pop-not-peek: the thread-local clears itself after each read, so
+        a second call issued with no header present must not replay the
+        FIRST call's skip."""
+        from structlog.testing import capture_logs
+        import nexus.db.http_vector_client as hv
+
+        monkeypatch.setattr(hv, "_resolve_endpoint", lambda: ("http://svc", "static-tok"))
+        stub = _StubDataTokenManager(None)
+        monkeypatch.setattr("nexus.db.data_token.get_data_token_manager", lambda: stub)
+        opener = _FakeOpener([], {"X-Nexus-Skipped-Collections": "docs__ghost__voyage-context-3__v1"})
+        monkeypatch.setattr(hv, "_keepalive_opener", lambda: opener)
+        client = HttpVectorClient()
+        client.search("q", ["docs__ghost__voyage-context-3__v1"])  # primes the thread-local
+
+        opener._headers = None  # second call's real response carries no header
+        with capture_logs() as logs:
+            client.search("q", ["docs__live__voyage-context-3__v1"])
+        events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
+        assert events == []
+
+
+class TestSingleCollectionUnregistered422IsActionable:
+    """RDR-204 Phase 3 item 5's other half (wire-contract entry 0c97fc06e,
+    docs/wire-contract-pending.md): a read addressed at a SINGLE
+    unregistered collection (no fan-out to drop from) answers 422
+    (UnregisteredCollectionException) — already rendered as an actionable
+    VectorServiceError by _post's existing HTTPError handling (the
+    detail-field passthrough this module has carried since RDR-195,
+    nexus-kmtlp.11), unchanged by this bead. This test makes that claim
+    non-vacuous rather than asserted in prose only — no code change
+    accompanies it."""
+
+    def test_single_collection_422_renders_the_engine_detail(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import urllib.error
+        import io
+        import json as _json
+        import nexus.db.http_vector_client as hv
+
+        body = _json.dumps({
+            "error": "collection 'docs__ghost__voyage-context-3__v1' is not registered",
+            "detail": "register it first via POST /v1/catalog/collections/upsert",
+        }).encode()
+
+        def _raise(*a, **k):
+            raise urllib.error.HTTPError(
+                url="http://svc/v1/vectors/search", code=422, msg="Unprocessable",
+                hdrs={}, fp=io.BytesIO(body),
+            )
+        monkeypatch.setattr(hv, "_request", _raise)
+
+        client = HttpVectorClient()
+        with pytest.raises(VectorServiceError) as excinfo:
+            client.search("q", ["docs__ghost__voyage-context-3__v1"])
+        msg = str(excinfo.value)
+        assert "docs__ghost__voyage-context-3__v1" in msg
+        assert "is not registered" in msg
+        assert "register it first" in msg
+        assert excinfo.value.code == 422

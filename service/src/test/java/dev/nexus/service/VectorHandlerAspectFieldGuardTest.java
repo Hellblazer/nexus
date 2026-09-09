@@ -91,6 +91,26 @@ class VectorHandlerAspectFieldGuardTest {
         service = new NexusService(0, TOKEN, svcDs, null, pgRepo);
         service.start();
         http = HttpClient.newHttpClient();
+
+        // RDR-204 Phase 1 (bead nexus-ft04v.3): AuthFilter runs the per-tenant,
+        // once-per-process ghost sweep on whichever request is TENANT's first
+        // against this service instance, and DELETES any collection it finds
+        // registered-but-chunkless at that moment. The warmup MUST run before the
+        // collection is registered at all (measured, nexus-ft04v Phase 1 round 4).
+        // Burn the sweep here first, THEN register (RDR-204 Phase 2, bead
+        // nexus-ft04v.16: dispatch now requires a real row before the field guard
+        // is ever reached — COLL is deliberately empty of chunks, this test's own
+        // "empty collection returns an empty result" premise, so it still needs a
+        // REGISTERED row that survives the sweep).
+        var warmup = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+            .header("Authorization", "Bearer " + TOKEN)
+            .GET().build();
+        http.send(warmup, HttpResponse.BodyHandlers.ofString());
+
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL);
+        }
     }
 
     @AfterAll
@@ -161,6 +181,46 @@ class VectorHandlerAspectFieldGuardTest {
                 + "(200 — an empty collection returns an empty result, not an error): %s",
                 resp.body())
             .isEqualTo(200);
+    }
+
+    /**
+     * RDR-204 Phase 2 fix round 2 (nexus-ft04v.16 fix round 2, S1, coordinator
+     * design change): a fan-out over a registered + a never-registered
+     * collection reports the dropped name via the
+     * {@code X-Nexus-Skipped-Collections} response header, never a body field.
+     */
+    @Test
+    void searchAspectScoped_unregisteredInFanOut_headerNamesDropped() throws Exception {
+        String ghost = "knowledge__afg-ghost__voyage-context-3__v1";
+        var resp = post("/v1/vectors/search-aspect-scoped", Map.of(
+            "query",       "probe",
+            "collections", List.of(COLL, ghost),
+            "field",       "proposed_method",
+            "pattern",     "anything",
+            "n_results",   5));
+
+        assertThat(resp.statusCode())
+            .as("a fan-out with one dropped name still succeeds: %s", resp.body())
+            .isEqualTo(200);
+        assertThat(resp.headers().firstValue(dev.nexus.service.http.VectorHandler.SKIPPED_COLLECTIONS_HEADER))
+            .as("the dropped name must be visible via the header")
+            .contains(ghost);
+    }
+
+    /** Header ABSENT (not empty) when nothing was dropped from the fan-out. */
+    @Test
+    void searchAspectScoped_fullyRegisteredFanOut_headerAbsent() throws Exception {
+        var resp = post("/v1/vectors/search-aspect-scoped", Map.of(
+            "query",       "probe",
+            "collections", List.of(COLL),
+            "field",       "proposed_method",
+            "pattern",     "anything",
+            "n_results",   5));
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(resp.headers().firstValue(dev.nexus.service.http.VectorHandler.SKIPPED_COLLECTIONS_HEADER))
+            .as("nothing was dropped -- the header must be absent, not empty")
+            .isEmpty();
     }
 
     /** Minimal fixed-vector stub embedder — the field guard never reaches embed() here. */

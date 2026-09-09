@@ -35,7 +35,6 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.DimTables;
-import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.DeleteConditionStep;
@@ -634,6 +633,26 @@ public final class CatalogRepository {
             if (prefix == null || prefix.isBlank()) {
                 prefix = existing;
                 if (prefix == null || prefix.isBlank()) {
+                    // nexus-wtzzq (GH #1522): a fresh prefix is max + 1 over the
+                    // tenant's owners, and two first-time registrations in the
+                    // same instant computed the same number: the second INSERT
+                    // landed ON CONFLICT (tenant_id, tumbler_prefix) DO UPDATE on
+                    // the first's row and renamed it to its own repo, so the first
+                    // repo's name was gone when its client read the prefix back
+                    // ("server did not return prefix"; its retry then took the
+                    // next number). Serialise allocation per tenant with a
+                    // transaction-scoped advisory lock, taken BEFORE the max read
+                    // so the second allocator sees the first's committed row.
+                    // Same typed idiom as TaxonomyRepository's persist lock.
+                    // Bounded wait (review of e6c19f7b0, Significant 1): the
+                    // taxonomy persist lock and the sweep gate both cap their
+                    // in-transaction waits after nexus-n2ls1's indefinite hang.
+                    ctx.select(DSL.function("set_config", String.class,
+                               DSL.val("lock_timeout"), DSL.val("5000"), DSL.val(true)))
+                       .fetch();
+                    ctx.select(DSL.function("pg_advisory_xact_lock", Object.class,
+                               DSL.function("hashtext", Integer.class, DSL.val("catalog_owners/" + tenant))))
+                       .fetch();
                     // Next owner number: MAX(int after the first dot) + 1 over
                     // '1.%' owners. RLS scopes this to the tenant.
                     // nexus-zrcj7 (Sam's no-SQL-strings-in-Java directive, step 4
@@ -4465,7 +4484,10 @@ public final class CatalogRepository {
             if (resolved.containsKey(c)) toWrite.add(c); else mustAlreadyExist.add(c);
         }
 
-        int dim = PgVectorRepository.dimForCollection(collection);
+        // RDR-204 Phase 2 (bead nexus-ft04v.16): the row's dimension, read through
+        // the ALREADY-OPEN ctx (require, not lookup — a nested withTenant here
+        // would borrow a second pooled connection mid-transaction for no reason).
+        int dim = CollectionRegistry.require(ctx, tenant, collection).dimension();
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
 
         if (!mustAlreadyExist.isEmpty()) {
@@ -4650,6 +4672,21 @@ public final class CatalogRepository {
                                                   Map<String, String> complete, boolean sweep,
                                                   Map<String, ResolvedChunk> resolvedChunks) {
         requireNonBlank(collection, "collection");
+        // nexus-h6d89: write_manifest_many_timing — the manifest-write twin
+        // of register_many_timing (line ~1469). tMethodStart/tMethodEnd
+        // bracket the WHOLE call (identical convention to that event's
+        // total_ms); the three accumulators sum strict sub-intervals of
+        // that span across every doc in the batch, so total_ms is always
+        // >= before_read_ms + write_ms + sweep_ms by construction (floor
+        // arithmetic only ever loses precision downward on the sum of
+        // parts, never on the whole). Purely additive instrumentation —
+        // no existing statement is reordered, no transaction shape, lock
+        // order, timeout, or fail-open branch changes.
+        long tMethodStart = System.nanoTime();
+        int docsCount = docs == null ? 0 : docs.size();
+        long[] beforeReadNanosTotal = {0};
+        long[] writeNanosTotal = {0};
+        long[] sweepNanosTotal = {0};
         int okDocs = 0;
         int totalRows = 0;
         int totalSwept = 0;
@@ -4702,11 +4739,15 @@ public final class CatalogRepository {
                         // anywhere, not in sweep_skipped, not in sweep_detail — the
                         // exact "swallowed failure" class nexus-fhhwf already fixed
                         // once for the doc-level catch a few lines up.
+                        long tBeforeReadStart = System.nanoTime();
                         Set<String> beforeRead = sweep
                             ? withSavepointFailOpen(ctx, "write_manifest_many_sweep_before_read_failed",
                                   tenant, docId, () -> currentManifestChashes(ctx, tenant, docId), null)
                             : Set.of();
+                        long tBeforeReadEnd = System.nanoTime();
+                        beforeReadNanosTotal[0] += (tBeforeReadEnd - tBeforeReadStart);
                         boolean beforeReadFailed = sweep && beforeRead == null;
+                        long tWriteStart = tBeforeReadEnd;
                         writeManifestRows(ctx, tenant, docId, collection, rows,
                                 resolvedChunks, chunksWrittenHolder);
                         if (beforeReadFailed) {
@@ -4727,6 +4768,7 @@ public final class CatalogRepository {
                         if (completeHash != null) {
                             stampCompleteIfVerified(ctx, tenant, docId, completeHash, rows.size(), completeRefused);
                         }
+                        writeNanosTotal[0] += (System.nanoTime() - tWriteStart);
                         return null;
                     });
                     okDocs++;
@@ -4749,7 +4791,9 @@ public final class CatalogRepository {
                     if (sweep && beforeHolder[0] != null) {
                         List<String> dropped = computeDroppedChashes(beforeHolder[0], rows);
                         if (!dropped.isEmpty()) {
+                            long tSweepStart = System.nanoTime();
                             sweepOutcome[0] = runSweepTransaction(tenant, docId, collection, dropped);
+                            sweepNanosTotal[0] += (System.nanoTime() - tSweepStart);
                         }
                     }
                 } catch (Exception e) {
@@ -4775,6 +4819,42 @@ public final class CatalogRepository {
                 }
             }
         }
+        // nexus-h6d89: write_manifest_many_timing. sweep_reasons is a CLOSED-
+        // vocabulary tally derived ONLY for this log line — never written
+        // into `result` (sweep_detail, the wire-facing per-doc form, is
+        // unchanged) — counting each errored sweepDetail entry's `reason`
+        // (classifySweepFailureReason's gate_timeout/statement_timeout/
+        // sweep_failed, plus the separate before_read_failed stamp site).
+        // Key-sorted (TreeMap) for a deterministic line; empty when no
+        // sweep failed open this call.
+        java.util.Map<String, Integer> sweepReasonCounts = new java.util.TreeMap<>();
+        for (Map<String, Object> d : sweepDetail) {
+            if (Boolean.TRUE.equals(d.get("errored"))) {
+                String reason = String.valueOf(d.get("reason"));
+                sweepReasonCounts.merge(reason, 1, Integer::sum);
+            }
+        }
+        StringBuilder sweepReasonsSb = new StringBuilder();
+        for (var e : sweepReasonCounts.entrySet()) {
+            if (sweepReasonsSb.length() > 0) sweepReasonsSb.append(',');
+            sweepReasonsSb.append(e.getKey()).append('=').append(e.getValue());
+        }
+        long tMethodEnd = System.nanoTime();
+        // caller: the two production entry points into this overload -- the
+        // POST /v1/catalog/manifest/write_many route (resolvedChunks == null,
+        // via the sweep-flagged overload) and CombinedWriteService's combined
+        // write (resolvedChunks != null) -- share this one line, so a per-route
+        // p99 needs the field to split them (substantive critique, 2026-09-09).
+        String caller = resolvedChunks == null ? "write_many" : "combined_write";
+        log.info("event=write_manifest_many_timing tenant={} caller={} docs={} rows={} "
+                + "before_read_ms={} write_ms={} sweep_ms={} total_ms={} "
+                + "swept={} sweep_failed={} sweep_reasons={}",
+            tenant, caller, docsCount, totalRows,
+            beforeReadNanosTotal[0] / 1_000_000,
+            writeNanosTotal[0] / 1_000_000,
+            sweepNanosTotal[0] / 1_000_000,
+            (tMethodEnd - tMethodStart) / 1_000_000,
+            totalSwept, sweepSkipped, sweepReasonsSb);
         if (!failedDetail.isEmpty()) {
             // One aggregate WARN per request (review: a systemic failure
             // across a 1000-doc batch must not emit 1000 WARN lines); the
@@ -6427,12 +6507,15 @@ public final class CatalogRepository {
                .doUpdate()
                .set(CATALOG_COLLECTIONS.CONTENT_TYPE,         DSL.excluded(CATALOG_COLLECTIONS.CONTENT_TYPE))
                .set(CATALOG_COLLECTIONS.OWNER_ID,             DSL.excluded(CATALOG_COLLECTIONS.OWNER_ID))
-               // RDR-204 1a: embedding_model/dimension/lifecycle_state are deliberately
-               // ABSENT from this SET list — an existing row is never re-pointed by the
-               // profile (or by a same-name re-registration naming its own model). The
-               // VALUES bound above for those three columns are used only on a genuine
-               // INSERT; a conflict discards them entirely.
-               .set(CATALOG_COLLECTIONS.MODEL_VERSION,        DSL.excluded(CATALOG_COLLECTIONS.MODEL_VERSION))
+               // RDR-204 1a: embedding_model/model_version/dimension/lifecycle_state are
+               // deliberately ABSENT from this SET list — an existing row is never
+               // re-pointed by the profile (or by a same-name re-registration naming its
+               // own model or version). The VALUES bound above for those four columns
+               // are used only on a genuine INSERT; a conflict discards them entirely.
+               // model_version joined the pinned set on 2026-09-09 (substantive critique
+               // of the nexus-uxd2a landing): hygiene-005's GC functions copy a
+               // quarantine sibling's model_version from the origin's row, and that copy
+               // is only ever right if the origin's own value cannot move underneath it.
                .set(CATALOG_COLLECTIONS.DISPLAY_NAME,         DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME))
                .set(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, DSL.excluded(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED))
                // nexus-cecqy: an explicit registration REVIVES a tombstone. Since a rename
@@ -6462,15 +6545,85 @@ public final class CatalogRepository {
         });
     }
 
-    /** List all collections. */
-    public List<Map<String, Object>> listCollections(String tenant) {
+    /**
+     * RDR-204 Phase 2 (bead nexus-ft04v.33, engine half): the calling tenant's
+     * {@code nexus.embedding_profile} rows — one per content type the engine
+     * has profiled for it — as the read surface the Phase 3 client accessor
+     * and the {@code nx doctor} profile row consume. READ-ONLY: the engine is
+     * the only writer of the profile (Technical Design 1a); this method never
+     * seeds, so an unprofiled tenant gets an EMPTY list, never a default —
+     * a reader that invents a model reintroduces the GH #667 class.
+     *
+     * <p>RLS scopes the read to {@code tenant} through the {@code
+     * nexus.tenant} GUC that {@link TenantScope#withTenant} stamps; the
+     * explicit {@code TENANT_ID} predicate is belt-and-braces, not the
+     * isolation mechanism. Ordered by content type so the wire shape is
+     * deterministic.
+     *
+     * @return rows of {@code content_type}, {@code embedding_model},
+     *         {@code dimension}; empty when the tenant has no profile yet
+     */
+    public List<Map<String, Object>> embeddingProfile(String tenant) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
-                       CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, CATALOG_COLLECTIONS.SUPERSEDED_BY, F_COL_SUPAT, F_COL_CRTAT)
-               .from(CATALOG_COLLECTIONS).orderBy(CATALOG_COLLECTIONS.NAME).fetch()
-               .map(r -> collRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
-                                  r.value6(), r.value7(), r.value8(), r.value9(), r.value10()))
+            ctx.select(EMBEDDING_PROFILE.CONTENT_TYPE, EMBEDDING_PROFILE.EMBEDDING_MODEL,
+                       EMBEDDING_PROFILE.DIMENSION)
+               .from(EMBEDDING_PROFILE)
+               .where(EMBEDDING_PROFILE.TENANT_ID.eq(tenant))
+               .orderBy(EMBEDDING_PROFILE.CONTENT_TYPE)
+               .fetch()
+               .map(r -> {
+                   Map<String, Object> row = new LinkedHashMap<>();
+                   row.put("content_type", r.value1());
+                   row.put("embedding_model", r.value2());
+                   row.put("dimension", r.value3());
+                   return row;
+               })
         );
+    }
+
+    /** List all collections. Delegates to {@link #listCollections(String, String, String)}
+     *  with no filters — byte-for-byte the pre-P2.4 unfiltered result. */
+    public List<Map<String, Object>> listCollections(String tenant) {
+        return listCollections(tenant, null, null);
+    }
+
+    /**
+     * List collections, optionally filtered by {@code content_type} and/or
+     * {@code lifecycle_state} (RDR-204 Phase 2, bead nexus-ft04v.24). A {@code null}
+     * or blank filter argument is a no-op; calling with both {@code null} reproduces
+     * {@link #listCollections(String)}'s unfiltered result exactly — same rows, same
+     * order, same shape (ADDITIVE overload: {@link #listCollections(String)} keeps its
+     * signature unchanged for {@code VectorHandler}'s and every other existing caller).
+     *
+     * <p>Each row also now carries {@code dimension} and {@code lifecycle_state} —
+     * columns that did not exist when {@link #collRow} was first written — via
+     * {@link #collRowWithLifecycle}. {@link #getCollection} and {@link
+     * #collectionForTuple} are NOT touched by this bead and keep {@link #collRow}'s
+     * original 10-key shape.
+     *
+     * @param contentType    exact-match filter on {@code catalog_collections.content_type},
+     *                       or {@code null}/blank for no filter
+     * @param lifecycleState exact-match filter on {@code catalog_collections.lifecycle_state}
+     *                       (one of {@code live}/{@code quarantine}/{@code dormant}/
+     *                       {@code disputed}), or {@code null}/blank for no filter
+     */
+    public List<Map<String, Object>> listCollections(String tenant, String contentType, String lifecycleState) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            Condition cond = DSL.noCondition();
+            if (contentType != null && !contentType.isBlank()) {
+                cond = cond.and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(contentType));
+            }
+            if (lifecycleState != null && !lifecycleState.isBlank()) {
+                cond = cond.and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq(lifecycleState));
+            }
+            return ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
+                           CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, CATALOG_COLLECTIONS.SUPERSEDED_BY, F_COL_SUPAT, F_COL_CRTAT,
+                           CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+                       .from(CATALOG_COLLECTIONS).where(cond).orderBy(CATALOG_COLLECTIONS.NAME).fetch()
+                       .map(r -> collRowWithLifecycle(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
+                                                       r.value6(), r.value7(), r.value8(), r.value9(), r.value10(),
+                                                       r.value11(), r.value12()));
+        });
     }
 
     /**
@@ -6842,7 +6995,12 @@ public final class CatalogRepository {
         // circuited by a stale KNOWN entry.
         if (counts.containsKey("catalog_collections_superseded")) {
             CollectionRegistry.evict(tenant, oldName);
-            CollectionRegistry.markKnown(tenant, newName);
+            // RDR-204 nexus-ft04v.14: markKnown now caches the row, not presence — read
+            // the row step 1 of the transaction just wrote (copied from oldName's
+            // metadata) so newName's cache entry carries its real attributes instead of
+            // forcing the next reader to pay a redundant SELECT.
+            CollectionRegistry.markKnown(tenant, newName,
+                CollectionRegistry.lookup(tenantScope, tenant, newName));
         }
         return counts;
     }
@@ -6960,7 +7118,7 @@ public final class CatalogRepository {
      * grant needs). See {@link #NEXUS_DIAG_READABLE_TABLES} for the latter, deliberately kept
      * as a separate, independently-verified set rather than a filtered view of this one.
      */
-    private static final java.util.Set<String> AUDIT_ONLY_TABLES =
+    static final java.util.Set<String> AUDIT_ONLY_TABLES =
         java.util.Set.of("relevance_log", "search_telemetry", "hook_failures", "gc_audit");
 
     /**
@@ -7066,6 +7224,29 @@ public final class CatalogRepository {
      */
     private boolean collectionIsEmpty(DSLContext ctx, String name) {
         return blockingTable(ctx, name).isEmpty();
+    }
+
+    /**
+     * True when a NON-audit table in {@link #COLLECTION_SCOPED_TABLES} holds a row
+     * for {@code name} — {@link #collectionIsEmpty} with the {@link #AUDIT_ONLY_TABLES}
+     * left out of the question. The ghost sweep's predicate
+     * ({@link #sweepGhostsAndMarkDormant}): a registry row nothing but an audit
+     * breadcrumb names holds no content, so there is nothing to keep the row for,
+     * and the breadcrumb itself carries no FK and outlives the row by design. The
+     * rename and delete refusals keep the strict form on purpose — there the
+     * caller is told WHICH table blocked and decides ({@link BlockingTable}).
+     * Same RLS scope and same READ COMMITTED window as {@link #collectionIsEmpty}.
+     */
+    private boolean collectionHoldsContent(DSLContext ctx, String name) {
+        for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
+            if (AUDIT_ONLY_TABLES.contains(t.countKey())) {
+                continue;
+            }
+            if (ctx.fetchExists(ctx.selectOne().from(t.table()).where(t.collection().eq(name)))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName,
@@ -7423,29 +7604,71 @@ public final class CatalogRepository {
             }
             GhostSweepResult result = sweepGhostsAndMarkDormant(tenant);
             setMeta(tenant, GHOST_SWEEP_META_KEY, "done");
-            log.info("event=rdr204_ghost_sweep tenant={} scanned={} deleted={} dormant={}",
-                      tenant, result.scanned(), result.ghostsDeleted(), result.markedDormant());
+            log.info("event=rdr204_ghost_sweep tenant={} scanned={} deleted={} dormant={} held={}",
+                      tenant, result.scanned(), result.ghostsDeleted(), result.markedDormant(),
+                      result.quarantineHeld());
         } catch (RuntimeException e) {
             ghostSweepCheckedTenants.remove(tenant);
             log.warn("event=rdr204_ghost_sweep_failed tenant={} error={}", tenant, e.toString(), e);
         }
     }
 
-    /** Per-tenant ghost-sweep + dormant-marking counts (RDR-204 bead nexus-ft04v.3). */
-    public record GhostSweepResult(int scanned, int ghostsDeleted, int markedDormant) {}
+    /**
+     * Per-tenant ghost-sweep + dormant-marking counts (RDR-204 bead
+     * nexus-ft04v.3; {@code quarantineHeld} added by nexus-snm4y).
+     */
+    public record GhostSweepResult(int scanned, int ghostsDeleted, int markedDormant, int quarantineHeld) {}
 
     /** Per-row disposition {@link #sweepGhostsAndMarkDormant} assigns during its walk. */
-    private enum SweepDisposition { DELETED, MARKED_DORMANT, UNCHANGED }
+    private enum SweepDisposition { DELETED, MARKED_DORMANT, HELD_QUARANTINE, UNCHANGED }
 
     private record SweptRow(String name, SweepDisposition disposition) {}
 
     /**
      * THE SWEEP ITSELF (RDR-204 Technical Design step 3, bead nexus-ft04v.3's
-     * DECISIONS: "this job does two things only"). Walks every {@code
+     * DECISIONS: "this job does two things only" — now four dispositions,
+     * nexus-snm4y, refined by nexus-n060e). Walks every {@code
      * catalog_collections} row for {@code tenant} and, for each:
      * <ul>
-     *   <li>DELETEs it when {@link #collectionIsEmpty} is true — a ghost: no row
-     *       in ANY {@link #COLLECTION_SCOPED_TABLES} entry names it;</li>
+     *   <li>DELETEs it when {@link #collectionHoldsContent} is false — a ghost:
+     *       no row in any NON-audit {@link #COLLECTION_SCOPED_TABLES} entry names
+     *       it — REGARDLESS of {@code lifecycle_state}, quarantine included. A
+     *       quarantine sibling that has fully drained (every chunk expired by
+     *       {@code gc_expire_quarantine} or restored by {@code
+     *       gc_restore_rereferenced}) is reclaimed exactly like any other ghost
+     *       row (nexus-n060e). The four {@link #AUDIT_ONLY_TABLES} are excluded
+     *       from that question on purpose: {@code gc_expire_quarantine} writes
+     *       its {@code gc_audit} row against the sibling's own name (catalog-033;
+     *       {@code gc_quarantine_orphans} keys its row to the origin), so under
+     *       the plain {@link #collectionIsEmpty} a sibling that had ever been
+     *       expired from stayed "non-empty" forever and never reached this branch
+     *       (substantive critique of the n060e landing, 2026-09-09). An audit
+     *       breadcrumb is history keyed by name, not content; it survives the
+     *       delete (no FK) and keeps answering "what happened to this name". This
+     *       is safe because none of the SQL GC functions delete a {@code
+     *       catalog_collections} row themselves — {@code gc_quarantine_orphans}
+     *       re-creates the sibling row from the origin's row ({@code ON CONFLICT
+     *       DO UPDATE}, hygiene-005-1) the next time it needs one (RDR-191), so
+     *       deleting a drained sibling here loses no data and costs nothing but
+     *       a future re-registration;</li>
+     *   <li>else HOLDS it, untouched, when {@code lifecycle_state} is already
+     *       {@code 'quarantine'} — hygiene-002 Branch B
+     *       ({@code hygiene-002-collection-attributes-walk.xml}) assigns that
+     *       STATE UNCONDITIONALLY, regardless of chunk count or dimension
+     *       agreement, but that is a statement about which state a
+     *       quarantine-prefixed row gets, not a promise that the ROW itself is
+     *       immortal. A quarantine row something still references is held
+     *       (neither deleted nor marked dormant, never relitigated); a quarantine
+     *       row nothing references any more was already caught by the DELETE
+     *       branch above and never reaches this one. Fork rehearsal of
+     *       engine-service-v0.1.109 on a PITR fork of production (nexus-snm4y)
+     *       found an EARLIER version of this method re-marking one quarantine
+     *       row dormant and deleting another as a ghost with no reclaim
+     *       counterpart; the fix (nexus-snm4y) held every quarantine row
+     *       unconditionally, which the substantive critique of that landing
+     *       then found left a fully-drained quarantine row with no automated
+     *       reclaim path at all (nexus-n060e) — this ordering (empty check
+     *       first, quarantine-hold second) is the fix for that gap;</li>
      *   <li>else, when it has no row in {@code nexus.collection_vector_stats}
      *       (referenced elsewhere but no live chunks to embed or read), sets
      *       {@code lifecycle_state = 'dormant'};</li>
@@ -7479,20 +7702,42 @@ public final class CatalogRepository {
      * residual {@link #renameCollectionTxn} already accepts.
      *
      * <p>Post-commit (mirrors {@link #deleteCollection}'s discipline): every
-     * ghost this method deletes is evicted from {@link CollectionRegistry} so a
-     * later write against the same, now-reusable name always re-verifies against
-     * the database instead of trusting a stale cache entry.
+     * ghost this method deletes OR marks dormant is evicted from {@link
+     * CollectionRegistry} so a later read or write against the same name always
+     * re-verifies against the database instead of trusting a stale cache entry
+     * (RDR-204 Phase 2 fix round, nexus-ft04v.18 substantive-critique C2: the
+     * DELETED branch always evicted; the MARKED_DORMANT branch wrote {@code
+     * lifecycle_state} with no eviction, an asymmetry the RDR's own Critical
+     * Assumption 5 and Risks section both omitted as an invalidation point).
+     * A HELD_QUARANTINE row gets no eviction — nothing about it changed, so a
+     * cached entry (if any) is still correct.
      */
     public GhostSweepResult sweepGhostsAndMarkDormant(String tenant) {
         List<SweptRow> rows = tenantScope.withTenant(tenant, ctx -> {
-            List<String> names = ctx.select(CATALOG_COLLECTIONS.NAME)
+            var nameAndState = ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
                 .from(CATALOG_COLLECTIONS)
-                .fetch(CATALOG_COLLECTIONS.NAME);
-            List<SweptRow> out = new ArrayList<>(names.size());
-            for (String name : names) {
-                if (collectionIsEmpty(ctx, name)) {
+                .fetch();
+            List<SweptRow> out = new ArrayList<>(nameAndState.size());
+            for (var r : nameAndState) {
+                String name = r.value1();
+                String lifecycleState = r.value2();
+                if (!collectionHoldsContent(ctx, name)) {
+                    // nexus-n060e: a true ghost is reclaimed regardless of lifecycle_state --
+                    // a drained quarantine sibling included. Checked BEFORE the quarantine
+                    // branch below so a quarantine row never reaches that branch once it has
+                    // fully drained; see this method's javadoc for why the delete is safe.
+                    // Audit-only rows do not hold the row (see collectionHoldsContent):
+                    // gc_expire_quarantine writes its gc_audit row against the SIBLING's
+                    // name (gc_quarantine_orphans keys its row to the origin), so a sibling
+                    // ever expired from would otherwise never read as empty again.
                     ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute();
                     out.add(new SweptRow(name, SweepDisposition.DELETED));
+                } else if ("quarantine".equals(lifecycleState)) {
+                    // nexus-n060e (refining nexus-snm4y): hygiene-002 Branch B's assignment
+                    // is unconditional on STATE, not on the row's immortality -- a quarantine
+                    // row still referenced somewhere (the collectionIsEmpty check above was
+                    // false) is held here, never relitigated into 'dormant'.
+                    out.add(new SweptRow(name, SweepDisposition.HELD_QUARANTINE));
                 } else if (!ctx.fetchExists(ctx.selectOne().from(COLLECTION_VECTOR_STATS)
                         .where(COLLECTION_VECTOR_STATS.COLLECTION.eq(name)))) {
                     ctx.update(CATALOG_COLLECTIONS)
@@ -7508,17 +7753,24 @@ public final class CatalogRepository {
         });
         int deleted = 0;
         int dormant = 0;
+        int held = 0;
         for (SweptRow r : rows) {
             switch (r.disposition()) {
                 case DELETED -> {
                     deleted++;
                     CollectionRegistry.evict(tenant, r.name());
                 }
-                case MARKED_DORMANT -> dormant++;
+                case MARKED_DORMANT -> {
+                    dormant++;
+                    // nexus-ft04v.18 C2: a cached row's lifecycleState is now stale the
+                    // instant this UPDATE commits — evict so the next reader re-verifies.
+                    CollectionRegistry.evict(tenant, r.name());
+                }
+                case HELD_QUARANTINE -> held++; // nothing changed; no eviction needed
                 case UNCHANGED -> { }
             }
         }
-        return new GhostSweepResult(rows.size(), deleted, dormant);
+        return new GhostSweepResult(rows.size(), deleted, dormant, held);
     }
 
     /** Return ACTIVE owners filtered by owner_type. Used by repos.py:list_repos_dual (nexus-qnp5s). */
@@ -8908,6 +9160,32 @@ public final class CatalogRepository {
         m.put("superseded_by",        nne(supBy));
         m.put("superseded_at",        nne(supAt));
         m.put("created_at",           nne(crAt));
+        return m;
+    }
+
+    /**
+     * {@link #collRow} plus {@code dimension} and {@code lifecycle_state} (RDR-204
+     * Phase 2, bead nexus-ft04v.24) — used ONLY by {@link #listCollections(String,
+     * String, String)}. {@link #getCollection} and {@link #collectionForTuple} are
+     * out of this bead's scope and keep {@link #collRow}'s original 10-key shape;
+     * every key {@link #collRow} already sets is untouched here, this only appends
+     * two new keys at the end.
+     *
+     * @param dimension      {@code catalog_collections.dimension} — nullable (a
+     *                       collection can be registered before its stats dimension
+     *                       is known; see hygiene-002's own walk comments), passed
+     *                       through as-is (JSON {@code null}, not coerced to 0)
+     * @param lifecycleState {@code catalog_collections.lifecycle_state} — NOT NULL
+     *                       on any real row since hygiene-002, but {@code nne()}'d
+     *                       for defensive consistency with every other string field here
+     */
+    private static Map<String, Object> collRowWithLifecycle(String name, String ctype, String owner,
+                                                 String embd, String mver, String dname,
+                                                 Boolean legcy, String supBy, String supAt, String crAt,
+                                                 Integer dimension, String lifecycleState) {
+        Map<String, Object> m = collRow(name, ctype, owner, embd, mver, dname, legcy, supBy, supAt, crAt);
+        m.put("dimension",       dimension);
+        m.put("lifecycle_state", nne(lifecycleState));
         return m;
     }
 
