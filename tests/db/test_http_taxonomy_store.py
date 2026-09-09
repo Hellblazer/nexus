@@ -1446,7 +1446,9 @@ class TestPersist:
         insert discovery race to SQLSTATE 23505 → HTTP 409. The topics were
         persisted by the concurrent winner, so the client treats 409 exactly
         like the guard firing (benign ``[]``) instead of surfacing an
-        HTTPStatusError with a misleading 'retry' hint."""
+        HTTPStatusError with a misleading 'retry' hint. The benign reading
+        holds only when the collection HAS topics afterwards (nexus-zhxxd);
+        the winner's rows are stubbed here."""
         import httpx
 
         req = httpx.Request("POST", "http://svc/v1/taxonomy/topics/persist_discovered")
@@ -1456,6 +1458,9 @@ class TestPersist:
             raise httpx.HTTPStatusError("409 Conflict", request=req, response=resp)
 
         monkeypatch.setattr(client, "_post", _post_409)
+        monkeypatch.setattr(
+            client, "get_topics_for_collection", lambda collection, **kw: [{"id": 7, "label": "won"}],
+        )
         out = client.persist_discovered_topics(
             "c-race",
             [{"label": "x", "doc_count": 0, "terms": "[]",
@@ -1478,11 +1483,49 @@ class TestPersist:
             raise httpx.HTTPStatusError("409 Conflict", request=req, response=resp)
 
         monkeypatch.setattr(client, "_post", _post_409)
+        monkeypatch.setattr(
+            client, "get_topics_for_collection", lambda collection, **kw: [{"id": 7, "label": "won"}],
+        )
         assert client.persist_discovered_topics(
             "c-race-23505",
             [{"label": "x", "doc_count": 0, "terms": "[]",
               "assigned_by": "hdbscan", "doc_ids": []}],
         ) == []
+
+    def test_persist_discovered_409_with_no_topics_raises_naming_the_constraint(
+        self, client, monkeypatch,
+    ) -> None:
+        """GH #1489 (nexus-zhxxd): a 409/23505 for a collection that has NO
+        topics is not a concurrent-discovery race, it is an INSERT colliding
+        on an existing row (a BIGSERIAL sequence behind imported ids on a
+        6.18.1-migrated store). The old benign-skip returned [] and the
+        discover verb printed "skipped" and exited 0 for every collection.
+        Now: a named error carrying the sqlstate and the engine's constraint
+        name, so the failure is visible and diagnosable."""
+        import httpx
+
+        from nexus.db.t2.http_taxonomy_store import TopicPersistConflictError
+
+        req = httpx.Request("POST", "http://svc/v1/taxonomy/topics/persist_discovered")
+        resp = httpx.Response(
+            409, request=req,
+            text='{"error":"integrity constraint violation","sqlstate":"23505",'
+                 '"constraint":"topics_pk"}',
+        )
+
+        def _post_409(path, body):
+            raise httpx.HTTPStatusError("409 Conflict", request=req, response=resp)
+
+        monkeypatch.setattr(client, "_post", _post_409)
+        monkeypatch.setattr(client, "get_topics_for_collection", lambda collection, **kw: [])
+        with pytest.raises(TopicPersistConflictError, match="constraint=topics_pk") as ei:
+            client.persist_discovered_topics(
+                "c-1489",
+                [{"label": "x", "doc_count": 0, "terms": "[]",
+                  "assigned_by": "hdbscan", "doc_ids": []}],
+            )
+        assert "sqlstate=23505" in str(ei.value)
+        assert "c-1489" in str(ei.value)
 
     def test_persist_discovered_409_with_non_unique_sqlstate_propagates(self, client, monkeypatch) -> None:
         """nexus-n2ls1 critique HIGH: the engine maps EVERY class-23 violation

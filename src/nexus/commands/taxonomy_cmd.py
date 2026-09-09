@@ -19,6 +19,7 @@ from nexus.commands._helpers import (
     t2_shared_client_from_context as _command_shared_t2_client,
 )
 from nexus.db.http_vector_client import VectorServiceError
+from nexus.db.t2.http_taxonomy_store import TopicPersistConflictError
 
 
 def _T2Database(path, *, client=None):
@@ -717,7 +718,9 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
         if is_local_mode() and any(fnmatch(collection, pat) for pat in exclude):
             click.echo(
                 f"Warning: {collection!r} matches taxonomy.local_exclude_collections "
-                f"({exclude}). Local MiniLM clusters poorly on code. Proceeding anyway."
+                f"({exclude}); locally embedded code clusters poorly. Discovering anyway; "
+                "a 'skipped' line below means discovery itself found nothing to persist, "
+                "not this exclusion."
             )
         targets = [collection]
 
@@ -726,13 +729,23 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
 
     total_topics = 0
     total_labeled = 0
+    failed: list[str] = []
     with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         for i, col_name in enumerate(targets, 1):
             if len(targets) > 1:
                 click.echo(f"[{i}/{len(targets)}] {col_name}")
-            count = discover_for_collection(
-                col_name, db.taxonomy, t3, force=force,
-            )
+            try:
+                count = discover_for_collection(
+                    col_name, db.taxonomy, t3, force=force,
+                )
+            except TopicPersistConflictError as exc:
+                # GH #1489 (nexus-zhxxd): a persist conflict on a collection
+                # with no topics is a store defect, not a race. Name it per
+                # collection, keep going, and fail the run at the end -- the
+                # old path logged it at INFO, printed "skipped" and exited 0.
+                click.echo(f"  {col_name}: FAILED: {exc}", err=True)
+                failed.append(col_name)
+                continue
             if count:
                 click.echo(f"  {col_name}: {count} topics")
                 total_topics += count
@@ -767,6 +780,10 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
                 _log.warning("taxonomy_context_l1_generation_failed", error=str(exc))
 
     click.echo(f"\nTotal: {total_topics} topics, {total_labeled} labeled.")
+    if failed:
+        raise click.ClickException(
+            f"topic persist failed for {len(failed)} collection(s): {', '.join(failed)}"
+        )
 
 
 @taxonomy.command("rebuild")

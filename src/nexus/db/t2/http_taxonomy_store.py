@@ -78,6 +78,14 @@ from nexus.db.t2.taxonomy_compute import (
 
 _log = structlog.get_logger(__name__)
 
+
+class TopicPersistConflictError(RuntimeError):
+    """``persist_discovered`` answered 409 (unique violation) for a collection
+    that has NO topics, so the "concurrent discovery won" reading is false and
+    the conflict is a data defect on the store (GH #1489, nexus-zhxxd). Raised
+    instead of the benign-skip return so the discover verb reports a failure
+    and exits non-zero rather than printing ``skipped``."""
+
 #: Default tenant matching TenantConstants.DEFAULT_TENANT in the Java service.
 DEFAULT_TENANT: str = "default"
 
@@ -893,21 +901,42 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             except httpx.HTTPStatusError as exc:
                 if exc.response is not None and exc.response.status_code == 409:
                     try:
-                        sqlstate = exc.response.json().get("sqlstate")
+                        body = exc.response.json()
                     except Exception:  # noqa: BLE001 — body may be empty/non-JSON on older engines; absent sqlstate handled below
-                        sqlstate = None
+                        body = {}
+                    sqlstate = body.get("sqlstate")
                     if sqlstate in (None, "23505"):
-                        _log.info(
-                            "persist_discovered_conflict_benign_skip",
-                            collection=collection_name,
-                            sqlstate=sqlstate,
-                            hint=(
-                                "a concurrent discovery already persisted this "
-                                "collection's topics (pre-n2ls1 engine race shape); "
-                                "nothing to retry"
-                            ),
-                        )
-                        return []
+                        # The benign reading (a concurrent discovery won the
+                        # race and persisted this collection's topics) is
+                        # only true if the collection HAS topics now. GH
+                        # #1489 (nexus-zhxxd): a store whose BIGSERIAL
+                        # sequence sat behind imported ids 23505'd on
+                        # topics_pk for every collection, and this branch
+                        # logged "benign skip", printed "skipped" and exited
+                        # 0 for each of them -- a data defect hidden as a
+                        # race. Ask the data before calling it benign.
+                        if self.get_topics_for_collection(collection_name):
+                            _log.info(
+                                "persist_discovered_conflict_benign_skip",
+                                collection=collection_name,
+                                sqlstate=sqlstate,
+                                hint=(
+                                    "a concurrent discovery already persisted this "
+                                    "collection's topics (pre-n2ls1 engine race shape); "
+                                    "nothing to retry"
+                                ),
+                            )
+                            return []
+                        raise TopicPersistConflictError(
+                            f"persist_discovered for {collection_name!r}: the engine "
+                            f"answered HTTP 409 (sqlstate={sqlstate}, "
+                            f"constraint={body.get('constraint')}) and the collection "
+                            "has no topics, so no concurrent discovery persisted them: "
+                            "an INSERT into nexus.topics collides on an existing row. "
+                            "On a store migrated through conexus 6.18.1 this is the "
+                            "topics id sequence sitting behind imported ids (GH #1489); "
+                            "engine-service-v0.1.112's hygiene-006-1 advances it at boot."
+                        ) from exc
                 raise
             return r.get("topic_ids", [])
 
