@@ -3496,6 +3496,7 @@ def _prune_collection_serverside(
         expire_quarantine_serverside,
         quarantine_days,
         quarantine_orphans_serverside,
+        quarantine_registration_kwargs,
         restore_rereferenced_serverside,
     )
     from nexus.corpus import ensure_collection_registered  # noqa: PLC0415 — deferred to avoid import cycle (nexus.corpus)
@@ -3513,7 +3514,23 @@ def _prune_collection_serverside(
     # (ruling 2026-09-08). Idempotent (ensure_collection_registered's own
     # per-process cache) and safe even when quarantine_name already has a
     # row (a later pass on the same collection).
-    ensure_collection_registered(quarantine_name)
+    #
+    # RDR-204 Phase 3 fix round (nexus-ft04v.28 C1): registered with
+    # collection_name's (the ORIGIN's) own content_type/owner_id/
+    # embedding_model, explicitly -- never derived from quarantine_name
+    # itself. quarantine_name's content_type segment is the synthetic
+    # "quarantine-<content_type>" string; feeding that to the generic
+    # name-derivation seam raised ValueError in cloud mode (and
+    # local+voyage) once effective_embedding_model_for_writes reached
+    # canonical_embedding_model on a content_type outside the four
+    # canonical types -- silently aborting server-side GC for every
+    # collection, forever, via the broad except this function's ONE
+    # caller wraps it in. See quarantine_registration_kwargs's docstring
+    # for the full derivation (row-preferred, origin's own name as
+    # fallback).
+    ensure_collection_registered(
+        quarantine_name, kwargs=quarantine_registration_kwargs(collection_name),
+    )
 
     restored = restore_rereferenced_serverside(db, quarantine_name, collection_name)
     if restored is None:
@@ -3750,6 +3767,20 @@ def _prune_deleted_files(
         try:
             if _prune_collection_serverside(db, collection_name, qname, now_stamp()):
                 continue
+        except ValueError:
+            # RDR-204 Phase 3 fix round (nexus-ft04v.28 C1): a ValueError
+            # here means the quarantine sibling's registration kwargs
+            # could not be derived (a malformed/non-conformant origin
+            # name with no catalog row and no recognisable
+            # <content_type>__<owner_id> shape) -- a data/config defect,
+            # never a transient engine hiccup. The broad except below
+            # exists ONLY for the nexus-ou4tb transient-failure contract
+            # (ConnectionError/TimeoutError/HTTP errors); silently
+            # swallowing a ValueError here is exactly the class of
+            # data-correctness bug the no-silent-fallback hot rule
+            # forbids -- propagate it loud instead of logging a
+            # warning and quietly leaving GC permanently broken.
+            raise
         except Exception:  # noqa: BLE001 — best-effort; failure logged, sweep continues
             _log.warning("gc_serverside_prune_failed", collection=collection_name,
                          exc_info=True)

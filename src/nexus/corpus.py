@@ -1482,8 +1482,26 @@ _REGISTERED_COLLECTIONS_LOCK = threading.Lock()
 
 def ensure_collection_registered(
     name: str, *, registrar: "Callable[[], object] | None" = None,
+    kwargs: dict[str, str] | None = None,
 ) -> None:
     """Idempotently register *name* before its first write in this process.
+
+    *kwargs* (RDR-204 Phase 3 fix round, nexus-ft04v.28 C1): an explicit
+    override for the four ``register_collection`` fields, bypassing
+    :func:`collection_registration_kwargs`'s generic derivation from
+    *name*. Most callers want *name* parsed — a write path's own target
+    name carries its own intended content_type/owner/model. But *name* is
+    sometimes a SIBLING whose registered identity must be borrowed from
+    something ELSE — the quarantine sibling
+    (:func:`nexus.catalog.chunk_quarantine.quarantine_registration_kwargs`)
+    is the concrete case: *name*'s content_type segment is the synthetic
+    ``"quarantine-<content_type>"`` string, not one of the four canonical
+    types, and deriving ``embedding_model`` from THAT via
+    :func:`effective_embedding_model_for_writes` raised ``ValueError`` on
+    every cloud-mode (and local+voyage) install. The profile check below
+    still runs against whatever *kwargs* says either way — an explicit
+    override bypasses only the generic name-parsing step that used to
+    feed it, never Technical Design 1a's mismatch guard.
 
     RDR-204 Phase 1 client half (nexus-f5wwx). Call this from every
     write path that used to rely on the engine's now-retired
@@ -1556,7 +1574,8 @@ def ensure_collection_registered(
     with _REGISTERED_COLLECTIONS_LOCK:
         if name in _REGISTERED_COLLECTIONS:
             return
-        kwargs = collection_registration_kwargs(name)
+        if kwargs is None:
+            kwargs = collection_registration_kwargs(name)
         profile_model = _profile_model_for_content_type(kwargs["content_type"])
         if profile_model is not None and profile_model != kwargs["embedding_model"]:
             raise EmbeddingProfileMismatchError(

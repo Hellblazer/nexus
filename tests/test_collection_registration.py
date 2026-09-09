@@ -624,6 +624,71 @@ class TestRegistrationSeamProfileCheck:
         writer.register_collection.assert_not_called()
 
 
+class TestEnsureCollectionRegisteredExplicitKwargsOverride:
+    """RDR-204 Phase 3 fix round (nexus-ft04v.28 C1): ``kwargs`` bypasses
+    ``collection_registration_kwargs``'s generic name-derivation for
+    *name*, for a caller (the quarantine sibling) whose registered
+    identity is borrowed from something else entirely -- see
+    ``nexus.catalog.chunk_quarantine.quarantine_registration_kwargs``."""
+
+    def test_explicit_kwargs_bypasses_name_derivation(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client.is_vector_service_mode", lambda: True,
+        )
+        writer = _fake_writer()
+        # A name whose OWN shape would derive completely different kwargs
+        # (content_type="quarantine-code", owner_id="myrepo__voyage-
+        # code-3__v1") if collection_registration_kwargs(name) ran --
+        # proving the override, not the name, drove the register call.
+        name = "quarantine-code__myrepo__voyage-code-3__v1"
+        override = {
+            "content_type": "code", "owner_id": "myrepo",
+            "embedding_model": "voyage-code-3", "model_version": "v1",
+        }
+
+        ensure_collection_registered(name, registrar=lambda: writer, kwargs=override)
+
+        writer.register_collection.assert_called_once_with(name, **override)
+
+    def test_explicit_kwargs_still_runs_the_profile_check(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An explicit override does not bypass Technical Design 1a's
+        mismatch guard -- only the generic name-parsing step that used
+        to feed it."""
+        from nexus.corpus import EmbeddingProfileMismatchError
+
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
+        monkeypatch.setattr("nexus.config.get_credential", lambda name: "configured-key")
+        _stub_profile_reader(monkeypatch, {"code": "bge-base-en-v15-768"})
+        writer = _fake_writer()
+        name = "quarantine-code__myrepo__voyage-code-3__v1"
+        override = {
+            "content_type": "code", "owner_id": "myrepo",
+            "embedding_model": "voyage-code-3", "model_version": "v1",
+        }
+
+        with pytest.raises(EmbeddingProfileMismatchError, match="restart"):
+            ensure_collection_registered(name, registrar=lambda: writer, kwargs=override)
+
+        writer.register_collection.assert_not_called()
+
+    def test_the_old_bug_without_override_raises_under_cloud_mode(
+        self, cloud_mode: None,
+    ) -> None:
+        """Regression pin for C1 itself: registering the quarantine
+        sibling's NAME with NO explicit override (the old, broken call
+        shape) still raises ValueError under cloud mode -- proving why
+        the override exists, and pinning the old failure mode so a
+        revert is caught."""
+        with pytest.raises(ValueError, match="unknown content_type"):
+            ensure_collection_registered("quarantine-code__myrepo__voyage-code-3__v1")
+
+
 class TestEnsureCollectionRegisteredInvalidatesCollectionsCache:
     """RDR-204 Phase 3 (nexus-ft04v.26, fixture-seam round 2, coordinator
     diagnosis 2026-09-09): ensure_collection_registered must invalidate

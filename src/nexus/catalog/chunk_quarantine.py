@@ -99,6 +99,64 @@ def quarantine_collection_name(origin: str) -> str:
     return f"{QUARANTINE_PREFIX}-{first}__{rest}"
 
 
+def quarantine_registration_kwargs(origin: str) -> dict[str, str]:
+    """Explicit ``register_collection`` kwargs for *origin*'s quarantine
+    sibling, carrying *origin*'s OWN content_type/owner_id/embedding_model
+    -- never a write-intent-derived model, and never the synthetic
+    ``"quarantine-<content_type>"`` string :func:`quarantine_collection_name`
+    embeds in the sibling's NAME.
+
+    RDR-204 Phase 3 fix round (nexus-ft04v.28 C1): the sibling used to be
+    registered via ``ensure_collection_registered(quarantine_name)`` alone,
+    which derives kwargs from *quarantine_name* itself
+    (``collection_registration_kwargs``) -- content_type comes out as the
+    literal ``"quarantine-code"`` (or ``"quarantine-docs"`` etc.), not one
+    of the four canonical types. That derivation then computes
+    ``embedding_model`` via ``effective_embedding_model_for_writes(
+    "quarantine-code")``, which raises ``ValueError`` on every cloud-mode
+    (and local+voyage) install once it reaches ``canonical_embedding_model``
+    -- silently aborting server-side GC for every collection, forever,
+    once the broad ``except`` at ``indexer._prune_deleted_files``'s call
+    site swallowed it. The sibling's chunks are moved from *origin* WITH
+    their embeddings (no re-embed, this module's own docstring) -- its
+    catalog row must therefore carry *origin*'s PRESERVED model, never the
+    current write-intent, and a real, canonical content_type the
+    profile-check machinery (``ensure_collection_registered``'s
+    ``_profile_model_for_content_type`` seam) already understands. The
+    sibling stays distinguished from *origin* by its NAME's
+    ``"quarantine-"`` prefix, which is what keeps it out of every search
+    corpus -- not by a synthetic catalog content_type.
+
+    Row-preferred: when *origin* has a catalog row (the common case --
+    every write path registers before writing since RDR-204 Phase 1), its
+    content_type/owner_id/embedding_model are authoritative (Gap 1: a row
+    that disagrees with the name wins), matching
+    :func:`quarantine_collection_name`'s own precedence. When *origin* has
+    no row (a fixture collection with chunks but never registered -- the
+    coordinator's own named exception for "chunk_quarantine's sibling
+    minting IF IT MUST", ruling 2026-09-08), falls to
+    :func:`nexus.corpus.collection_registration_kwargs` -- the SAME
+    MINT-time seam every other bare ``register_collection`` call site
+    reuses, so a name-only origin is derived once, not re-implemented
+    here with a second, drifting copy.
+    """
+    from nexus.corpus import (  # noqa: PLC0415 — deferred to avoid import cycle (nexus.corpus)
+        collection_registration_kwargs,
+        model_version_for_collection_name,
+    )
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — deferred to avoid import cycle (nexus.mcp_infra)
+
+    row = get_collection_row(origin)
+    if row is None:
+        return collection_registration_kwargs(origin)
+    return {
+        "content_type": row["content_type"],
+        "owner_id": row["owner_id"],
+        "embedding_model": row["embedding_model"],
+        "model_version": model_version_for_collection_name(origin) or "v1",
+    }
+
+
 def quarantine_days() -> int:
     raw = os.environ.get("NX_GC_QUARANTINE_DAYS", "")
     if not raw:

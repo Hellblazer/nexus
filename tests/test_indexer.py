@@ -896,6 +896,77 @@ def test_prune_deleted_files_empty_manifest_skips_no_wipe(tmp_path):
     )
 
 
+def test_prune_collection_serverside_registers_quarantine_sibling_with_origin_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RDR-204 Phase 3 fix round (nexus-ft04v.28 C1): the quarantine
+    sibling is registered with EXPLICIT kwargs derived from the ORIGIN's
+    own attributes (``quarantine_registration_kwargs``), never via the
+    generic name-derivation seam applied to the sibling's own NAME --
+    whose content_type segment is the synthetic ``"quarantine-<ct>"``
+    string that raised ValueError under cloud mode (and local+voyage)
+    once fed through ``effective_embedding_model_for_writes`` ->
+    ``canonical_embedding_model``."""
+    import nexus.catalog.chunk_quarantine as cq
+    import nexus.corpus as corpus
+    from nexus.indexer import _prune_collection_serverside
+
+    captured: dict = {}
+
+    def _fake_ensure(name, *, registrar=None, kwargs=None):
+        captured["name"] = name
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(corpus, "ensure_collection_registered", _fake_ensure)
+    monkeypatch.setattr(cq, "restore_rereferenced_serverside", lambda *a, **k: 0)
+    monkeypatch.setattr(cq, "quarantine_orphans_serverside", lambda *a, **k: (0, []))
+    monkeypatch.setattr(cq, "expire_quarantine_serverside", lambda *a, **k: 0)
+
+    expected_kwargs = {
+        "content_type": "code", "owner_id": "nexus-1-1",
+        "embedding_model": "voyage-code-3", "model_version": "v1",
+    }
+    monkeypatch.setattr(cq, "quarantine_registration_kwargs", lambda origin: expected_kwargs)
+
+    origin = "code__nexus-1-1__voyage-code-3__v1"
+    qname = "quarantine-code__nexus-1-1__voyage-code-3__v1"
+    result = _prune_collection_serverside(object(), origin, qname, "2026-01-01T00:00:00Z")
+
+    assert result is True
+    assert captured["name"] == qname
+    assert captured["kwargs"] == expected_kwargs
+
+
+def test_prune_deleted_files_propagates_valueerror_from_serverside_prune(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RDR-204 Phase 3 fix round (nexus-ft04v.28 C1): the broad ``except``
+    wrapping ``_prune_collection_serverside`` exists ONLY for the
+    nexus-ou4tb transient-failure contract (ConnectionError et al,
+    proven by ``test_serverside_failure_skips_only_that_collection``) --
+    a ``ValueError`` (a data/config defect, e.g. an undecodable
+    quarantine-registration kwargs derivation) must propagate, never be
+    logged-and-skipped. Reproduces the exact silent-abort shape the C1
+    finding described: without this narrowing, the fix in
+    ``quarantine_registration_kwargs`` could regress and GC would just
+    log a warning and quietly stop pruning forever."""
+    import nexus.indexer as indexer_mod
+    from nexus.indexer import _prune_deleted_files
+
+    def _boom(db, collection_name, qname, stamp):
+        raise ValueError("simulated quarantine registration kwargs failure")
+
+    monkeypatch.setattr(indexer_mod, "_prune_collection_serverside", _boom)
+
+    col = _gc_col([("id-x", "x" * 64)])
+    db = MagicMock(); db.get_or_create_collection.return_value = col
+    db.get_collection.return_value = col
+    catalog = _gc_catalog({"code__repo": {"x" * 64}, "docs__repo-unused": set()})
+
+    with pytest.raises(ValueError, match="simulated quarantine registration kwargs failure"):
+        _prune_deleted_files("code__repo", "docs__repo-unused", db, catalog=catalog)
+
+
 # test_prune_deleted_files_manifest_read_failure_skips_collection DELETED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15) —
 # tested the client-side fetch-diff-copy-delete prune/quarantine fallback,
 # retired: the manifest-chunk FK makes the completeness apparatus it proved
