@@ -4652,6 +4652,21 @@ public final class CatalogRepository {
                                                   Map<String, String> complete, boolean sweep,
                                                   Map<String, ResolvedChunk> resolvedChunks) {
         requireNonBlank(collection, "collection");
+        // nexus-h6d89: write_manifest_many_timing — the manifest-write twin
+        // of register_many_timing (line ~1469). tMethodStart/tMethodEnd
+        // bracket the WHOLE call (identical convention to that event's
+        // total_ms); the three accumulators sum strict sub-intervals of
+        // that span across every doc in the batch, so total_ms is always
+        // >= before_read_ms + write_ms + sweep_ms by construction (floor
+        // arithmetic only ever loses precision downward on the sum of
+        // parts, never on the whole). Purely additive instrumentation —
+        // no existing statement is reordered, no transaction shape, lock
+        // order, timeout, or fail-open branch changes.
+        long tMethodStart = System.nanoTime();
+        int docsCount = docs == null ? 0 : docs.size();
+        long[] beforeReadNanosTotal = {0};
+        long[] writeNanosTotal = {0};
+        long[] sweepNanosTotal = {0};
         int okDocs = 0;
         int totalRows = 0;
         int totalSwept = 0;
@@ -4704,11 +4719,15 @@ public final class CatalogRepository {
                         // anywhere, not in sweep_skipped, not in sweep_detail — the
                         // exact "swallowed failure" class nexus-fhhwf already fixed
                         // once for the doc-level catch a few lines up.
+                        long tBeforeReadStart = System.nanoTime();
                         Set<String> beforeRead = sweep
                             ? withSavepointFailOpen(ctx, "write_manifest_many_sweep_before_read_failed",
                                   tenant, docId, () -> currentManifestChashes(ctx, tenant, docId), null)
                             : Set.of();
+                        long tBeforeReadEnd = System.nanoTime();
+                        beforeReadNanosTotal[0] += (tBeforeReadEnd - tBeforeReadStart);
                         boolean beforeReadFailed = sweep && beforeRead == null;
+                        long tWriteStart = tBeforeReadEnd;
                         writeManifestRows(ctx, tenant, docId, collection, rows,
                                 resolvedChunks, chunksWrittenHolder);
                         if (beforeReadFailed) {
@@ -4729,6 +4748,7 @@ public final class CatalogRepository {
                         if (completeHash != null) {
                             stampCompleteIfVerified(ctx, tenant, docId, completeHash, rows.size(), completeRefused);
                         }
+                        writeNanosTotal[0] += (System.nanoTime() - tWriteStart);
                         return null;
                     });
                     okDocs++;
@@ -4751,7 +4771,9 @@ public final class CatalogRepository {
                     if (sweep && beforeHolder[0] != null) {
                         List<String> dropped = computeDroppedChashes(beforeHolder[0], rows);
                         if (!dropped.isEmpty()) {
+                            long tSweepStart = System.nanoTime();
                             sweepOutcome[0] = runSweepTransaction(tenant, docId, collection, dropped);
+                            sweepNanosTotal[0] += (System.nanoTime() - tSweepStart);
                         }
                     }
                 } catch (Exception e) {
@@ -4777,6 +4799,36 @@ public final class CatalogRepository {
                 }
             }
         }
+        // nexus-h6d89: write_manifest_many_timing. sweep_reasons is a CLOSED-
+        // vocabulary tally derived ONLY for this log line — never written
+        // into `result` (sweep_detail, the wire-facing per-doc form, is
+        // unchanged) — counting each errored sweepDetail entry's `reason`
+        // (classifySweepFailureReason's gate_timeout/statement_timeout/
+        // sweep_failed, plus the separate before_read_failed stamp site).
+        // Key-sorted (TreeMap) for a deterministic line; empty when no
+        // sweep failed open this call.
+        java.util.Map<String, Integer> sweepReasonCounts = new java.util.TreeMap<>();
+        for (Map<String, Object> d : sweepDetail) {
+            if (Boolean.TRUE.equals(d.get("errored"))) {
+                String reason = String.valueOf(d.get("reason"));
+                sweepReasonCounts.merge(reason, 1, Integer::sum);
+            }
+        }
+        StringBuilder sweepReasonsSb = new StringBuilder();
+        for (var e : sweepReasonCounts.entrySet()) {
+            if (sweepReasonsSb.length() > 0) sweepReasonsSb.append(',');
+            sweepReasonsSb.append(e.getKey()).append('=').append(e.getValue());
+        }
+        long tMethodEnd = System.nanoTime();
+        log.info("event=write_manifest_many_timing tenant={} docs={} rows={} "
+                + "before_read_ms={} write_ms={} sweep_ms={} total_ms={} "
+                + "swept={} sweep_failed={} sweep_reasons={}",
+            tenant, docsCount, totalRows,
+            beforeReadNanosTotal[0] / 1_000_000,
+            writeNanosTotal[0] / 1_000_000,
+            sweepNanosTotal[0] / 1_000_000,
+            (tMethodEnd - tMethodStart) / 1_000_000,
+            totalSwept, sweepSkipped, sweepReasonsSb);
         if (!failedDetail.isEmpty()) {
             // One aggregate WARN per request (review: a systemic failure
             // across a 1000-doc batch must not emit 1000 WARN lines); the

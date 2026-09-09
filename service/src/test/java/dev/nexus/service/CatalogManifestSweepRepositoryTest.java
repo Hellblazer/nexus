@@ -1279,4 +1279,142 @@ class CatalogManifestSweepRepositoryTest {
     private Connection dsConnection() throws java.sql.SQLException {
         return svcDs.getConnection();
     }
+
+    // ── nexus-h6d89: write_manifest_many_timing (the manifest-write twin of
+    //    register_many_timing) — per-call phase breakdown + sweep-outcome
+    //    counts, observability only (no behaviour change). ──
+
+    /**
+     * Attaches a {@link ch.qos.logback.core.read.ListAppender} to the ROOT
+     * logger for the duration of {@code body} (mirrors {@code
+     * GhostSweepDormantMarkingTest#countsLoggedPerTenant}'s attach/detach
+     * pattern) and returns every {@code event=write_manifest_many_timing}
+     * line it observed, in emission order.
+     */
+    private List<String> captureTimingLogLines(Runnable body) {
+        ch.qos.logback.classic.Logger root =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+            new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            body.run();
+            return logs.list.stream()
+                .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                .filter(m -> m.startsWith("event=write_manifest_many_timing "))
+                .toList();
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+    }
+
+    /** Extracts {@code key=<value>}'s value (up to the next whitespace, or end
+     *  of line) from a structured-logging line; fails loud if {@code key}
+     *  never appears — a missing field is a defect in the event, not an
+     *  absent-value case a test should silently tolerate. */
+    private static String fieldValue(String line, String key) {
+        var m = java.util.regex.Pattern.compile(java.util.regex.Pattern.quote(key) + "=(\\S*)").matcher(line);
+        assertThat(m.find()).as("line must contain " + key + "=: " + line).isTrue();
+        return m.group(1);
+    }
+
+    private static long fieldLong(String line, String key) {
+        return Long.parseLong(fieldValue(line, key));
+    }
+
+    @Test @Order(40)
+    void writeManifestMany_timingEvent_successfulSweep_reportsSweptAndPositiveSweepMs() throws Exception {
+        String col = "code__swp40__minilm-l6-v2-384__v1";
+        String x = ch("swp40-x");
+        seedChunk384(TENANT_A, col, x);
+        registerDoc(TENANT_A, "swp.40", col);
+        writeManifestManySeeded(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.40", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", x, "chunk_index", 0)))), col);
+
+        // Uncontended: drop x from swp.40's manifest with sweep=true — the
+        // gate is free, so the DELETE runs to completion in this same call.
+        var lines = captureTimingLogLines(() ->
+            writeManifestManySeeded(TENANT_A, List.of(
+                Map.<String, Object>of("doc_id", "swp.40", "rows", List.<Map<String, Object>>of())), col,
+                null, true));
+
+        assertThat(lines).as("exactly one timing line per writeManifestMany call").hasSize(1);
+        String line = lines.getFirst();
+        assertThat(fieldValue(line, "tenant")).isEqualTo(TENANT_A);
+        assertThat(fieldValue(line, "docs")).isEqualTo("1");
+        assertThat(fieldValue(line, "swept")).isEqualTo("1");
+        assertThat(fieldValue(line, "sweep_failed")).isEqualTo("0");
+        assertThat(fieldValue(line, "sweep_reasons")).as("no failures this call").isEmpty();
+        long beforeReadMs = fieldLong(line, "before_read_ms");
+        long writeMs = fieldLong(line, "write_ms");
+        long sweepMs = fieldLong(line, "sweep_ms");
+        long totalMs = fieldLong(line, "total_ms");
+        assertThat(sweepMs).as("a real sweep DELETE ran against the test container").isGreaterThan(0);
+        assertThat(totalMs)
+            .as("total_ms must cover every measured sub-phase, by construction")
+            .isGreaterThanOrEqualTo(beforeReadMs + writeMs + sweepMs);
+        assertThat(chunk384Exists(TENANT_A, col, x)).as("the sweep this event reports actually ran").isFalse();
+    }
+
+    @Test @Order(41)
+    void writeManifestMany_timingEvent_gateTimeout_reportsSweepFailedWithReason() throws Exception {
+        String col = "code__swp41__minilm-l6-v2-384__v1";
+        String x = ch("swp41-x");
+        seedChunk384(TENANT_A, col, x);
+        registerDoc(TENANT_A, "swp.41", col);
+        writeManifestManySeeded(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.41", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", x, "chunk_index", 0)))), col);
+
+        try (Connection external = dsConnection()) {
+            external.setAutoCommit(false);
+            PgContainerHelper.setTenant(external, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
+            acquireGateShared(external, TENANT_A, col);
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object>[] resultHolder = new Map[1];
+            var lines = captureTimingLogLines(() -> resultHolder[0] = writeManifestManySeeded(TENANT_A, List.of(
+                Map.<String, Object>of("doc_id", "swp.41", "rows", List.<Map<String, Object>>of(
+                    Map.<String, Object>of("position", 0, "chash", ch("swp41-y"), "chunk_index", 0)))), col,
+                null, true));
+
+            var result = resultHolder[0];
+            assertThat(result.get("docs"))
+                .as("the manifest write must still succeed — fail-open preserved").isEqualTo(1);
+            assertThat((List<?>) result.get("failed_doc_ids")).isEmpty();
+
+            assertThat(lines).hasSize(1);
+            String line = lines.getFirst();
+            assertThat(fieldValue(line, "sweep_failed")).isEqualTo("1");
+            assertThat(fieldValue(line, "sweep_reasons"))
+                .as("the EXCLUSIVE acquire timed out against the externally-held SHARED gate")
+                .isEqualTo("gate_timeout=1");
+            assertThat(fieldValue(line, "swept")).isEqualTo("0");
+
+            external.rollback();
+        }
+        assertThat(chunk384Exists(TENANT_A, col, x))
+            .as("the chunk survives while the gate is externally held").isTrue();
+    }
+
+    @Test @Order(42)
+    void writeManifestMany_timingEvent_nothingToSweep_reportsZeroSweepMs() {
+        String col = "code__swp42__minilm-l6-v2-384__v1";
+        registerDoc(TENANT_A, "swp.42", col);
+
+        var lines = captureTimingLogLines(() ->
+            writeManifestManySeeded(TENANT_A, List.of(
+                Map.<String, Object>of("doc_id", "swp.42", "rows", List.<Map<String, Object>>of(
+                    Map.<String, Object>of("position", 0, "chash", ch("swp42-a"), "chunk_index", 0)))), col,
+                null, true));
+
+        assertThat(lines).hasSize(1);
+        String line = lines.getFirst();
+        assertThat(fieldValue(line, "swept")).isEqualTo("0");
+        assertThat(fieldLong(line, "sweep_ms")).as("no sweep DELETE ever ran").isEqualTo(0L);
+        assertThat(fieldValue(line, "sweep_reasons")).isEmpty();
+    }
 }
