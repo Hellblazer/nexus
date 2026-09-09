@@ -10,6 +10,7 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
+from tests.conftest import catalog_row_for_collection_name, patched_mcp_infra_t3
 
 
 def _seed_for_store_put(content: str, collection: str = "fixture-subject") -> None:
@@ -104,8 +105,21 @@ def mock_collection(env_creds):
 @pytest.fixture
 def mock_search(env_creds):
     db = MagicMock(spec=HttpVectorClient)
-    with patch("nexus.commands.search_cmd._t3", return_value=db):
+    # RDR-204 Phase 3 fixture-seam fix (nexus-ft04v.26): resolve_corpus's
+    # bare-corpus fan-out reads nexus.mcp_infra.get_t3()'s OWN row cache, a
+    # separate singleton from search_cmd._t3 -- wire it to the same mock
+    # (tests/conftest.py's patched_mcp_infra_t3 docstring has the detail).
+    with patch("nexus.commands.search_cmd._t3", return_value=db), patched_mcp_infra_t3(db):
         yield db
+
+
+def _stats(name: str, count: int) -> dict:
+    """A ``list_collections()`` entry carrying the catalog-row fields
+    (content_type/owner_id/embedding_model/lifecycle_state) resolve_corpus's
+    Stage 2 bare-corpus fan-out now requires (RDR-204 Phase 3,
+    nexus-ft04v.26) -- a fixture collection with none of these silently
+    reads as unregistered and is dropped."""
+    return {"name": name, "count": count, **catalog_row_for_collection_name(name)}
 
 
 def _search_result(content="chunk", **overrides):
@@ -417,7 +431,7 @@ def test_search_no_matching_corpus(runner, mock_search):
 
 
 def test_search_no_results(runner, mock_search):
-    mock_search.list_collections.return_value = [{"name": "knowledge__sec", "count": 5}]
+    mock_search.list_collections.return_value = [_stats("knowledge__sec", 5)]
     mock_search.search.return_value = []
     result = runner.invoke(main, ["search", "my query", "--corpus", "knowledge"])
     assert result.exit_code == 0
@@ -425,7 +439,7 @@ def test_search_no_results(runner, mock_search):
 
 
 def test_search_displays_results(runner, mock_search):
-    mock_search.list_collections.return_value = [{"name": "knowledge__sec", "count": 2}]
+    mock_search.list_collections.return_value = [_stats("knowledge__sec", 2)]
     mock_search.search.return_value = [
         _search_result(content="security finding here", id="abc12345-0000",
                        distance=0.123, title="sec.md", tags="security")]
@@ -439,7 +453,7 @@ def test_search_displays_results(runner, mock_search):
     (False, "Unique chunk text that only appears when content flag is set.", False),
 ])
 def test_search_content_flag_presence(runner, mock_search, content_flag, content_text, expect_indented):
-    mock_search.list_collections.return_value = [{"name": "knowledge__sec", "count": 1}]
+    mock_search.list_collections.return_value = [_stats("knowledge__sec", 1)]
     mock_search.search.return_value = [_search_result(content=content_text)]
     args = ["search", "security", "--corpus", "knowledge"]
     if content_flag:
@@ -453,7 +467,7 @@ def test_search_content_flag_presence(runner, mock_search, content_flag, content
 @pytest.mark.parametrize("text,expect_ellipsis,max_len", [
     ("A" * 300, True, 210), ("Short enough.", False, None)])
 def test_search_content_flag_truncation(runner, mock_search, text, expect_ellipsis, max_len):
-    mock_search.list_collections.return_value = [{"name": "knowledge__sec", "count": 1}]
+    mock_search.list_collections.return_value = [_stats("knowledge__sec", 1)]
     mock_search.search.return_value = [_search_result(content=text)]
     result = runner.invoke(main, ["search", "query", "--corpus", "knowledge", "--content"])
     assert result.exit_code == 0
@@ -469,7 +483,7 @@ def test_search_content_flag_truncation(runner, mock_search, text, expect_ellips
 # ── [path] positional argument ───────────────────────────────────────────────
 
 def test_search_path_scopes_where_filter(runner, mock_search, tmp_path):
-    mock_search.list_collections.return_value = [{"name": "knowledge__sec", "count": 2}]
+    mock_search.list_collections.return_value = [_stats("knowledge__sec", 2)]
     mock_search.search.return_value = []
     src_dir = tmp_path / "src"
     src_dir.mkdir()
@@ -480,7 +494,7 @@ def test_search_path_scopes_where_filter(runner, mock_search, tmp_path):
 
 
 def test_search_path_filters_results_by_file_path(runner, mock_search, tmp_path):
-    mock_search.list_collections.return_value = [{"name": "knowledge__sec", "count": 2}]
+    mock_search.list_collections.return_value = [_stats("knowledge__sec", 2)]
     src_dir = tmp_path / "src"
     src_dir.mkdir()
     other_dir = tmp_path / "other"
@@ -502,7 +516,7 @@ def test_search_path_filters_results_by_file_path(runner, mock_search, tmp_path)
 
 
 def test_search_no_path_returns_all(runner, mock_search):
-    mock_search.list_collections.return_value = [{"name": "knowledge__sec", "count": 2}]
+    mock_search.list_collections.return_value = [_stats("knowledge__sec", 2)]
     mock_search.search.return_value = [_search_result(content="result one")]
     result = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
     assert result.exit_code == 0

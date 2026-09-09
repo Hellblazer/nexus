@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import os
 import unittest.mock
@@ -2989,6 +2990,100 @@ def make_vector_test_client():
     return InMemoryVectorClient(
         default_embedding_function=MiniLMDirectEmbeddingFunction()
     )
+
+
+#: RDR-204 Phase 3 fixture-seam fix (nexus-ft04v.26, coordinator ruling
+#: 2026-09-09): ``resolve_corpus``/``collection_content_type``/``expire()``
+#: etc. all now read a catalog-row-shaped dict per collection (content_type/
+#: owner_id/embedding_model/lifecycle_state) instead of parsing the name.
+#: A collection-name fixture that carries no such row is, by the RDR,
+#: legitimately UNREGISTERED and dropped -- so any test fake standing in
+#: for the engine's ``/v1/vectors/stats`` catalog join (or for
+#: ``mcp_infra.get_t3()``'s own row cache) must emit these fields too, or
+#: every fixture collection silently reads as unregistered. tests/ may
+#: parse its own fixture names directly (the parse-name census scans only
+#: src/nexus); this is the ONE shared emitter every local fake/mock T3
+#: builder should call rather than re-deriving the mapping per file.
+_CONTENT_TYPE_DEFAULT_EMBEDDING_MODEL = {
+    "code": "voyage-code-3",
+    "docs": "voyage-context-3",
+    "rdr": "voyage-context-3",
+    "knowledge": "voyage-context-3",
+}
+
+
+def catalog_row_for_collection_name(name: str) -> dict[str, str]:
+    """Derive a catalog-row dict (content_type/owner_id/embedding_model/
+    lifecycle_state) from a collection NAME alone.
+
+    Handles both fully RDR-103-conformant names
+    (``content_type__owner__model__vN``) and the shortened forms this
+    suite's fixtures favor (``knowledge__test``, ``code__myrepo``, a bare
+    content-type word). A ``quarantine-`` physical prefix reports its
+    ORIGIN content_type with ``lifecycle_state="quarantine"`` (Gap 4)
+    rather than being treated as a content type of its own -- callers that
+    want a genuinely UNREGISTERED (no-row) fixture must omit that
+    collection from the fake's emitted rows entirely; this helper always
+    produces a row.
+    """
+    lifecycle_state = "live"
+    bare = name
+    if bare.startswith("quarantine-"):
+        bare = bare[len("quarantine-") :]
+        lifecycle_state = "quarantine"
+    parts = bare.split("__")
+    content_type = parts[0]
+    owner_id = parts[1] if len(parts) > 1 else "test-owner"
+    known_models = set(_CONTENT_TYPE_DEFAULT_EMBEDDING_MODEL.values())
+    if len(parts) >= 3 and parts[2] in known_models:
+        embedding_model = parts[2]
+    else:
+        embedding_model = _CONTENT_TYPE_DEFAULT_EMBEDDING_MODEL.get(
+            content_type, "voyage-context-3"
+        )
+    return {
+        "content_type": content_type,
+        "owner_id": owner_id,
+        "embedding_model": embedding_model,
+        "lifecycle_state": lifecycle_state,
+    }
+
+
+@contextlib.contextmanager
+def patched_mcp_infra_t3(mock):
+    """Wire ``nexus.mcp_infra.get_t3()`` to *mock* for the duration of a
+    test, symmetric with ``_restore_t3_singleton``'s own snapshot/restore
+    (RDR-204 Phase 3 fixture-seam fix, nexus-ft04v.26).
+
+    Patching a module's own ``_t3`` name (``search_cmd._t3``,
+    ``store._t3``) does NOT reach ``mcp_infra.get_t3()`` -- it is a
+    SEPARATE, lazily-memoised, process-wide singleton
+    (``mcp_infra._t3_instance``) that ``resolve_corpus``,
+    ``collection_content_type``/``_owner``/``_model`` and
+    ``get_collection_row`` all read through regardless of what the
+    caller's own T3 handle is. Left unpatched in service/cloud-env tests
+    it lazily constructs a REAL ``HttpVectorClient`` on first use --
+    confirmed by direct reproduction to reach the live managed service
+    from this box. ``patch.object`` here restores the prior value on
+    exit, same as ``patch(...)``, so ``_restore_t3_singleton``'s post-test
+    leak check never sees a mismatch.
+
+    ALSO invalidates ``mcp_infra._collections_cache`` on both enter and
+    exit -- a SEPARATE global with its own 60s TTL
+    (``_COLLECTIONS_CACHE_TTL``), not covered by ``_t3_instance``'s
+    restore, so a cache row populated by an earlier test in the same
+    xdist worker can otherwise silently survive under the TTL window and
+    answer a later test's ``get_collection_row`` call with stale content
+    from a DIFFERENT mock.
+    """
+    import nexus.mcp_infra as mcp_infra
+
+    with unittest.mock.patch.object(mcp_infra, "_t3_instance", mock):
+        mcp_infra.invalidate_collections_cache()
+        try:
+            yield mock
+        finally:
+            mcp_infra.invalidate_collections_cache()
 
 
 @pytest.fixture

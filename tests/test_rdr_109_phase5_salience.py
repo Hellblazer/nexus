@@ -21,6 +21,28 @@ from nexus.salience import (
     token_overlap_boost,
 )
 from nexus.types import SearchResult
+from tests.conftest import catalog_row_for_collection_name
+
+
+@pytest.fixture(autouse=True)
+def _stub_collection_rows(monkeypatch):
+    """``_apply_salience_boost`` reads ``nexus.mcp_infra.get_collection_row``
+    directly (RDR-204 Phase 3 class (c) repoint, nexus-ft04v.26, commit
+    2cdde2306) instead of parsing the collection name -- stub it to derive
+    a row from the name via the shared test emitter, matching what a real
+    Phase-2 engine's ``/v1/vectors/stats`` join would report for these
+    fixture names. None of this file's tests are about registration state
+    (that is ``test_salience_boost_conformant_and_lookalike_prefixes``'s
+    lookalike-prefix case below, which the emitter still excludes
+    correctly since it derives content_type from the actual name syntax);
+    left unmocked, ``get_collection_row`` reaches
+    ``nexus.mcp_infra.get_t3()``'s real, process-wide singleton."""
+    import nexus.mcp_infra as mcp_infra
+
+    monkeypatch.setattr(
+        mcp_infra, "get_collection_row",
+        lambda name: catalog_row_for_collection_name(name),
+    )
 
 
 # ── salience module ──────────────────────────────────────────────────

@@ -16,7 +16,11 @@ from nexus.db.t3 import T3Database
 from nexus.scoring import apply_hybrid_scoring
 from nexus.search_engine import search_cross_corpus
 from nexus.types import SearchResult
-from tests.conftest import make_vector_test_client
+from tests.conftest import (
+    catalog_row_for_collection_name,
+    make_vector_test_client,
+    patched_mcp_infra_t3,
+)
 
 # ── Helpers & fixtures ──────────────────────────────────────────────────────
 
@@ -41,9 +45,16 @@ def _mock_t3(collections: list[str] | None = None) -> MagicMock:
     # doesn't implement fails the mocked test too. Explicit attribute
     # assignment (e.g. ``mock_t3._voyage_client = None``) still works
     # under spec= (only get-access is restricted, not set-access).
+    #
+    # list_collections() entries carry a catalog-row shape (RDR-204 Phase 3
+    # fixture-seam fix, nexus-ft04v.26): resolve_corpus's bare-corpus
+    # fan-out (Stage 2) now drops any candidate with no row, so a fixture
+    # collection with none of these fields silently reads as unregistered.
     mock = MagicMock(spec=HttpVectorClient)
     col_names = collections or ["knowledge__test"]
-    mock.list_collections.return_value = [{"name": n} for n in col_names]
+    mock.list_collections.return_value = [
+        {"name": n, **catalog_row_for_collection_name(n)} for n in col_names
+    ]
     return mock
 
 
@@ -79,7 +90,7 @@ def _capture_ctx(collections: list[str] | None = None):
 @pytest.fixture
 def search_ctx(cloud_env):
     mock, captured, fake = _capture_ctx()
-    with patch("nexus.commands.search_cmd._t3", return_value=mock), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock), patched_mcp_infra_t3(mock), \
          patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
         yield mock, captured
@@ -88,7 +99,7 @@ def search_ctx(cloud_env):
 @pytest.fixture
 def code_search_ctx(cloud_env):
     mock, captured, fake = _capture_ctx(["code__myrepo"])
-    with patch("nexus.commands.search_cmd._t3", return_value=mock), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock), patched_mcp_infra_t3(mock), \
          patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
         yield mock, captured
@@ -100,7 +111,7 @@ def code_search_ctx(cloud_env):
 def test_corpus_short_form_C_is_removed(runner: CliRunner, cloud_env) -> None:
     mock_t3 = _mock_t3()
     mock_t3.search.return_value = []
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3):
         result = runner.invoke(main, ["search", "query", "-C", "knowledge"])
     assert result.exit_code != 0
 
@@ -108,7 +119,7 @@ def test_corpus_short_form_C_is_removed(runner: CliRunner, cloud_env) -> None:
 def test_corpus_long_form_still_works(runner: CliRunner, cloud_env) -> None:
     mock_t3 = _mock_t3(["knowledge__test"])
     mock_t3.search.return_value = []
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
         result = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
     assert "Error" not in result.output or result.exit_code == 0
@@ -123,7 +134,7 @@ def test_corpus_csv_form_matches_repeat_form(
     the search returned no results.
     """
     mock_t3 = _mock_t3(["knowledge__test", "rdr__nexus"])
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]) as ms:
         result = runner.invoke(
             main, ["search", "query", "--corpus", "knowledge,rdr"],
@@ -152,7 +163,7 @@ def test_explicit_conformant_collection_name_skips_list_collections(
     every invocation and cannot amortize it via nexus.mcp_infra's cache."""
     mock_t3 = _mock_t3(["knowledge__test__voyage-context-3__v1"])
     mock_t3.collection_exists_raw.return_value = True
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]) as ms:
         result = runner.invoke(
             main,
@@ -182,7 +193,7 @@ def test_nonexistent_conformant_collection_name_surfaces_named_warning(
     stats-based preflight gave, without paying the expensive stats call."""
     mock_t3 = _mock_t3([])
     mock_t3.collection_exists_raw.return_value = False
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus") as ms:
         result = runner.invoke(
             main,
@@ -203,15 +214,29 @@ def test_prefix_corpus_still_pays_list_collections_once(
 ) -> None:
     """A wildcard/prefix/legacy-short-form --corpus value still needs the
     tenant's collection list to resolve against, and pays for it exactly
-    once (not once per --corpus token)."""
+    once PER FETCH SITE (not once per --corpus token).
+
+    Two fetch sites, not one, since RDR-204 Phase 3's fixture-seam fix
+    (nexus-ft04v.26) wired this test's mock into BOTH ``search_cmd``'s own
+    ``_t3()`` (the ``all_collections`` fetch) AND
+    ``nexus.mcp_infra.get_t3()`` (the SEPARATE, process-local row cache
+    ``resolve_corpus``'s Stage 2 reads via ``get_collection_row`` --
+    architecturally distinct from ``search_cmd``'s own fetch, cold on
+    every CLI invocation since the CLI is a fresh process each time). Two
+    content-type tokens ("knowledge", "rdr") still cost only ONE
+    mcp_infra row-cache refresh (its own 60s-TTL cache warms on the
+    first ``get_collection_row`` call and serves the second from cache),
+    so 2 total -- not 3 -- proves the "not once per token" invariant this
+    test is actually about.
+    """
     mock_t3 = _mock_t3(["knowledge__test__voyage-context-3__v1", "rdr__nexus"])
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
         result = runner.invoke(
             main, ["search", "query", "--corpus", "knowledge,rdr"],
         )
     assert result.exit_code == 0, result.output
-    mock_t3.list_collections.assert_called_once()
+    assert mock_t3.list_collections.call_count == 2
 
 
 @pytest.mark.usefixtures("cloud_mode")
@@ -219,9 +244,16 @@ def test_mixed_explicit_and_prefix_corpus_pays_list_collections(
     runner: CliRunner, cloud_env,
 ) -> None:
     """One non-conformant token in --corpus is enough to require the
-    fallback resolution path for the WHOLE call (never a partial skip)."""
+    fallback resolution path for the WHOLE call (never a partial skip).
+
+    Two fetch sites, not one -- see
+    test_prefix_corpus_still_pays_list_collections_once's docstring for
+    why (RDR-204 Phase 3 fixture-seam fix, nexus-ft04v.26): search_cmd's
+    own ``all_collections`` fetch, plus mcp_infra's separate row-cache
+    warm for the "rdr" bare-corpus token's Stage 2 resolution.
+    """
     mock_t3 = _mock_t3(["knowledge__test__voyage-context-3__v1", "rdr__nexus"])
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
         result = runner.invoke(
             main,
@@ -229,7 +261,7 @@ def test_mixed_explicit_and_prefix_corpus_pays_list_collections(
              "knowledge__test__voyage-context-3__v1,rdr"],
         )
     assert result.exit_code == 0, result.output
-    mock_t3.list_collections.assert_called_once()
+    assert mock_t3.list_collections.call_count == 2
 
 
 def test_corpus_csv_and_repeat_forms_can_mix(
@@ -237,7 +269,7 @@ def test_corpus_csv_and_repeat_forms_can_mix(
 ) -> None:
     """Combined: --corpus a,b --corpus c expands to three corpora."""
     mock_t3 = _mock_t3(["knowledge__test", "rdr__nexus", "code__one"])
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]) as ms:
         result = runner.invoke(
             main, ["search", "query",
@@ -260,7 +292,7 @@ def test_corpus_csv_handles_whitespace(
     components are dropped (`'a,,b '` → `['a', 'b']`).
     """
     mock_t3 = _mock_t3(["knowledge__test", "rdr__nexus"])
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]) as ms:
         result = runner.invoke(
             main, ["search", "query", "--corpus", " knowledge , , rdr "],
@@ -279,7 +311,7 @@ def test_m_flag_limits_results(runner: CliRunner, cloud_env) -> None:
         for i in range(10)
     ]
     mock_t3 = _mock_t3()
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=results_pool), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
         result = runner.invoke(
@@ -300,7 +332,7 @@ def test_reverse_flag_reverses_output_order(runner: CliRunner, cloud_env) -> Non
                      metadata={"source_path": "beta.py", "line_start": 1}),
     ]
     mock_t3 = _mock_t3()
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=results_pool), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
         normal = runner.invoke(
@@ -373,7 +405,7 @@ def test_context_A_accepted(runner: CliRunner, cloud_env) -> None:
     content = "line1\nline2\nline3\nline4\nline5"
     results_pool = [_make_result("r1", content, metadata={"source_path": "foo.py", "line_start": 10})]
     mock_t3 = _mock_t3()
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=results_pool), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
         result = runner.invoke(
@@ -384,7 +416,7 @@ def test_context_A_accepted(runner: CliRunner, cloud_env) -> None:
 
 def test_context_C_integer_accepted(runner: CliRunner, cloud_env) -> None:
     mock_t3 = _mock_t3()
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
         result = runner.invoke(main, ["search", "query", "--corpus", "knowledge", "-C", "5"])
@@ -393,7 +425,7 @@ def test_context_C_integer_accepted(runner: CliRunner, cloud_env) -> None:
 
 def test_context_C_requires_integer(runner: CliRunner, cloud_env) -> None:
     mock_t3 = _mock_t3()
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3):
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3):
         result = runner.invoke(main, ["search", "query", "--corpus", "knowledge", "-C", "notanumber"])
     assert result.exit_code != 0
 
@@ -432,7 +464,7 @@ def test_hybrid_flag_triggers_ripgrep(runner: CliRunner, cloud_env, tmp_path) ->
         rg_calls.append(1)
         return []
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd._CONFIG_DIR", tmp_path), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG), \
@@ -450,7 +482,7 @@ def test_hybrid_results_include_rg_hits(runner: CliRunner, cloud_env, tmp_path) 
         "file_path": "/repo/main.py", "line_number": 1,
         "line_content": "hello world", "frecency_score": 0.5,
     }
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd._CONFIG_DIR", tmp_path), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG), \
@@ -466,7 +498,7 @@ def test_hybrid_without_cache_files_still_works(runner: CliRunner, cloud_env, tm
         metadata={"source_path": "file.py", "line_start": 1},
     )
     mock_t3 = _mock_t3(["code__myrepo"])
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd._CONFIG_DIR", tmp_path), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[semantic_result]), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
@@ -502,7 +534,7 @@ def test_search_service_mode_never_calls_client_voyage(
     import nexus.db as _db
     assert not hasattr(_db, "get_voyage_client")
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[r0, r1]), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG), \
          patch("nexus.config.is_local_mode", return_value=False):
@@ -528,7 +560,7 @@ def test_search_service_mode_no_credential_skips_with_warning(
     mock_t3 = _mock_t3(["knowledge__test", "rdr__nexus"])
     mock_t3._voyage_client = None
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[r0, r1]), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG), \
          patch("nexus.config.is_local_mode", return_value=False):
@@ -553,7 +585,7 @@ def test_search_local_mode_never_touches_voyage_client(
     import nexus.db as _db
     assert not hasattr(_db, "get_voyage_client")  # deleted (nexus-9o6y2.9)
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[r0, r1]), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG), \
          patch("nexus.config.is_local_mode", return_value=True):
@@ -686,7 +718,7 @@ def test_max_file_chunks_does_not_pollute_where_when_combined(
 def test_search_warns_when_corpus_term_unmatched(runner: CliRunner) -> None:
     mock_t3 = _mock_t3(["knowledge__test"])
     mock_t3.search.return_value = []
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]):
         result = runner.invoke(main, [
             "search", "foo", "--corpus", "knowledge", "--corpus", "badcorpus",
@@ -805,7 +837,7 @@ def _capture_ctx_full(collections: list[str] | None = None):
 
 def test_threshold_flag_passes_override_to_engine(runner: CliRunner, cloud_env) -> None:
     mock, captured, fake = _capture_ctx_full(["knowledge__test"])
-    with patch("nexus.commands.search_cmd._t3", return_value=mock), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock), patched_mcp_infra_t3(mock), \
          patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
         result = runner.invoke(
@@ -818,7 +850,7 @@ def test_threshold_flag_passes_override_to_engine(runner: CliRunner, cloud_env) 
 def test_no_threshold_flag_disables_filtering(runner: CliRunner, cloud_env) -> None:
     import math
     mock, captured, fake = _capture_ctx_full(["knowledge__test"])
-    with patch("nexus.commands.search_cmd._t3", return_value=mock), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock), patched_mcp_infra_t3(mock), \
          patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
         result = runner.invoke(
@@ -831,7 +863,7 @@ def test_no_threshold_flag_disables_filtering(runner: CliRunner, cloud_env) -> N
 
 def test_default_passes_none_override(runner: CliRunner, cloud_env) -> None:
     mock, captured, fake = _capture_ctx_full(["knowledge__test"])
-    with patch("nexus.commands.search_cmd._t3", return_value=mock), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock), patched_mcp_infra_t3(mock), \
          patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
         result = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
@@ -843,7 +875,7 @@ def test_threshold_and_no_threshold_mutually_exclusive(
     runner: CliRunner, cloud_env,
 ) -> None:
     mock_t3 = _mock_t3(["knowledge__test"])
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
         result = runner.invoke(main, [
@@ -880,7 +912,7 @@ def test_silent_zero_emits_single_stderr_line_when_raw_gt_zero(
             ))
         return []
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
         result = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
@@ -910,7 +942,7 @@ def test_silent_zero_omitted_when_raw_is_zero(
             ))
         return []
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
         result = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
@@ -936,7 +968,7 @@ def test_silent_zero_suppressed_by_quiet_flag(
             ))
         return []
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
         result = runner.invoke(
@@ -1013,7 +1045,7 @@ def test_silent_zero_end_to_end_real_engine(
         lambda: sandbox_db,
     )
 
-    with patch("nexus.commands.search_cmd._t3", return_value=real_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=real_t3), patched_mcp_infra_t3(real_t3), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
         invoke = lambda: runner.invoke(
             main,
@@ -1063,7 +1095,7 @@ def test_silent_zero_suppressed_by_config(runner: CliRunner, cloud_env) -> None:
         **_LOAD_CFG,
         "telemetry": {"stderr_silent_zero": False},
     }
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
          patch("nexus.commands.search_cmd.load_config", return_value=cfg_with_opt_out):
         result = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
@@ -1092,7 +1124,7 @@ def test_silent_zero_picks_worst_offender_across_collections(
             ))
         return []
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
         result = runner.invoke(
@@ -1119,7 +1151,7 @@ def test_vector_service_error_renders_clean_message(runner: CliRunner, cloud_env
         "→ HTTP 400: query embedder produced a 1024-dim vector but the "
         "collections dispatch to the embedding_384 column",
     )
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=err), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
         res = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
@@ -1152,7 +1184,7 @@ def test_silent_zero_notes_failed_collections(
             ))
         return []
 
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
         result = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
@@ -1179,7 +1211,7 @@ def test_search_cmd_passes_catalog_to_search_cross_corpus(
 ) -> None:
     mock_t3 = _mock_t3(["code__myrepo"])
     sentinel_catalog = object()
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]) as ms, \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=sentinel_catalog) as mk, \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
@@ -1205,7 +1237,7 @@ def test_search_cmd_catalog_failure_degrades_to_none(
     """A catalog factory failure must not break search — catalog=None is the
     documented no-op degrade path in _attach_doc_ids_from_catalog."""
     mock_t3 = _mock_t3(["code__myrepo"])
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]) as ms, \
          patch("nexus.catalog.factory.make_catalog_reader", side_effect=RuntimeError("no catalog")), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
@@ -1226,7 +1258,7 @@ def test_max_file_chunks_warns_when_catalog_unavailable(
         id="c1", content="x", distance=0.1, collection="code__myrepo",
         metadata={},
     )]
-    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=fake_results), \
          patch("nexus.catalog.factory.make_catalog_reader", side_effect=RuntimeError("no catalog")), \
          patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):

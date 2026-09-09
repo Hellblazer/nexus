@@ -2888,7 +2888,12 @@ class TestWhh61MigrationCarve:
         # nexus-i711w: spec'd against HttpCatalogClient — the only catalog
         # _get_catalog() can return now that the local Catalog is deleted.
         cat = MagicMock(spec=HttpCatalogClient)
-        cat.get_collection.return_value = {"name": "docs__default"}  # non-None
+        # RDR-204 Phase 3 repoint (nexus-ft04v.26): migrate_fallback reads
+        # content_type from src_row (the catalog's own /collections/get
+        # response) directly, never a second row-cache lookup -- the fake
+        # must carry it, matching what a real registered "docs__default"
+        # collection's catalog row would report.
+        cat.get_collection.return_value = {"name": "docs__default", "content_type": "docs"}
         cat.list_by_collection.return_value = [entry]
         with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
                 patch(
@@ -2943,7 +2948,9 @@ class TestWhh61MigrationCarve:
         entry = MagicMock()
         entry.tumbler = "1.1.1"
         cat = MagicMock(spec=HttpCatalogClient)
-        cat.get_collection.return_value = {"name": "docs__default"}
+        # RDR-204 Phase 3 repoint (nexus-ft04v.26): see the dry-run test
+        # above's comment -- content_type comes from src_row directly.
+        cat.get_collection.return_value = {"name": "docs__default", "content_type": "docs"}
         cat.list_by_collection.return_value = [entry]
         writer = MagicMock(spec=list(CATALOG_WRITE_OPS))
         with patch("nexus.commands.catalog._get_catalog", return_value=cat), \

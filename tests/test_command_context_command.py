@@ -1992,6 +1992,17 @@ def test_knowledge_collections_filters_by_content_type(monkeypatch) -> None:
     stay excluded, byte-identical to the pre-funnel filter."""
     import nexus.commands.command_context as cc
     import nexus.db as _db
+    from tests.conftest import catalog_row_for_collection_name
+
+    # RDR-204 Phase 3 class (c) repoint (nexus-ft04v.26): _knowledge_collections
+    # reads nexus.mcp_infra.get_collection_row -- a SEPARATE singleton from
+    # whatever make_t3() this test patches -- so it needs its own stub. The
+    # fixture names below carry no quarantine/lookalike traps the plain
+    # name-derived emitter would misclassify.
+    monkeypatch.setattr(
+        "nexus.mcp_infra.get_collection_row",
+        lambda name: catalog_row_for_collection_name(name),
+    )
 
     class _FakeT3:
         def list_collections(self):

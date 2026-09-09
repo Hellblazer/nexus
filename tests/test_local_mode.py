@@ -633,7 +633,14 @@ class TestLocalCollectionLifecycle:
             content="permanent data",
             title="perm",
         )
-        assert local_db.expire() == 1
+        # RDR-204 Phase 3 class (c) repoint (nexus-ft04v.26): T3Database.expire()
+        # now filters via nexus.mcp_infra.get_collection_row (a SEPARATE
+        # singleton from local_db unless wired) -- T3Database.list_collections()
+        # already synthesizes row fields from the name.
+        from tests.conftest import patched_mcp_infra_t3
+
+        with patched_mcp_infra_t3(local_db):
+            assert local_db.expire() == 1
         assert len(local_db.search("permanent", collection_names=["knowledge__expire_test"])) == 1
 
 

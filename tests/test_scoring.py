@@ -17,6 +17,27 @@ from nexus.scoring import (
     round_robin_interleave,
 )
 from nexus.types import SearchResult
+from tests.conftest import catalog_row_for_collection_name
+
+
+def _code_row_stub(name: str) -> dict | None:
+    """RDR-204 Phase 3 class (c) repoint (nexus-ft04v.26, commit
+    2cdde2306): ``apply_hybrid_scoring``'s code-detection now reads
+    ``nexus.mcp_infra.get_collection_row`` directly, never the collection
+    NAME. Reproduces the exact "is_code_like" matrix
+    ``test_hybrid_scoring_code_detection_pinned`` pins under the new
+    mechanism: a row exists (content_type="code", lifecycle_state="live")
+    only for names that were genuinely code-registered in this fixture's
+    fiction -- ``quarantine-code__repo``'s row would carry
+    content_type="code" too (Gap 4: a quarantine sibling keeps its ORIGIN
+    content_type), so this excludes it by lifecycle_state, matching what
+    this test has always pinned (a quarantine/lookalike/unrecognized name
+    is never code-like for hybrid-scoring purposes) rather than changing
+    the test's intent to match a row-shape accident."""
+    row = catalog_row_for_collection_name(name)
+    if row["content_type"] == "code" and row["lifecycle_state"] == "live":
+        return row
+    return None
 
 
 def _r(coll: str = "code__repo", dist: float = 0.3, frecency: float = 0.5,
@@ -57,7 +78,8 @@ def test_hybrid_scoring_no_code_warns():
     assert len(results) == 1 and results[0].hybrid_score is not None
 
 
-def test_hybrid_scoring_code_uses_frecency():
+def test_hybrid_scoring_code_uses_frecency(monkeypatch):
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", _code_row_stub)
     r = _r(coll="code__repo", dist=0.2, frecency=0.8)
     results = apply_hybrid_scoring([r], hybrid=True)
     assert results[0].hybrid_score > 0
@@ -86,7 +108,8 @@ def test_hybrid_score_weighted_sum():
         ("codebase__repo", False),                        # startswith("code") but not "code__"
     ],
 )
-def test_hybrid_scoring_code_detection_pinned(coll: str, is_code_like: bool) -> None:
+def test_hybrid_scoring_code_detection_pinned(coll: str, is_code_like: bool, monkeypatch) -> None:
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", _code_row_stub)
     r = _r(coll=coll, dist=0.2, frecency=0.8)
     with patch("nexus.scoring._log") as mock_log:
         results = apply_hybrid_scoring([r], hybrid=True)

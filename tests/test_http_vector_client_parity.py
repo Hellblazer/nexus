@@ -1160,9 +1160,19 @@ class TestExpire:
         return {"ttl_days": ttl_days, "indexed_at": indexed_at}
 
     def _patch(self, monkeypatch, collections, fake_post):
+        # RDR-204 Phase 3 fixture-seam fix (nexus-ft04v.26): expire() now
+        # filters list_collections() entries by their row's content_type
+        # (class (c) repoint) instead of a name prefix -- a fixture entry
+        # with none of the row fields silently reads as unregistered and
+        # is skipped every pass.
+        from tests.conftest import catalog_row_for_collection_name
+
         monkeypatch.setattr(
             HttpVectorClient, "list_collections",
-            lambda self: [{"name": n, "count": 1} for n in collections],
+            lambda self: [
+                {"name": n, "count": 1, **catalog_row_for_collection_name(n)}
+                for n in collections
+            ],
         )
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
 

@@ -5210,7 +5210,7 @@ def _check_chash_conformance_report() -> list[HealthResult]:
     # never crash this check or hide the primary (non_)conformant result.
     unroutable_collections: list[str] = []
     try:
-        from nexus.corpus import collection_model, is_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle
+        from nexus.corpus import embedding_model_for_collection_name, is_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle
         from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid a heavy/optional import at module load
         from nexus.db.reconcile import dim_for_model_token  # noqa: PLC0415 — deferred to avoid import cycle; the canonical dim table (nexus-h1zu0)
 
@@ -5219,10 +5219,21 @@ def _check_chash_conformance_report() -> list[HealthResult]:
             name = str(c.get("name", ""))
             if not name or not is_conformant_collection_name(name):
                 continue
-            # nexus-ft04v.27 follow-up: collection_model replaces the
-            # retired parse_conformant_collection_name direct call.
-            token = collection_model(name)
-            if dim_for_model_token(token) is None:
+            # RDR-204 Phase 3 (nexus-ft04v.26): this is class (d), not (b)
+            # -- the whole POINT of this scan is to find a
+            # conformant-SHAPED collection /v1/vectors/stats lists that
+            # may have no catalog row at all (unregistered, or a legacy
+            # pre-Phase-1 collection). collection_model (class b) READS
+            # the row and RAISES CollectionNotRegisteredError when absent
+            # -- inside this method's blanket `except Exception`, that
+            # silently zeroed unroutable_collections for the WHOLE scan
+            # the instant any one conformant-but-unregistered collection
+            # existed, masking the exact false-clean-by-omission finding
+            # this probe exists to catch (nexus-4ijv4). The name's own
+            # embedded model token, never the row, is what a name-versus-
+            # row diagnostic reads.
+            token = embedding_model_for_collection_name(name)
+            if token is not None and dim_for_model_token(token) is None:
                 unroutable_collections.append(name)
         unroutable_collections = sorted(set(unroutable_collections))
     except Exception as exc:  # noqa: BLE001 — best-effort enrichment only; never hides the primary result

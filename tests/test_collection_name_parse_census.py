@@ -142,6 +142,20 @@ holdouts the row-read treatment, lowering the pin from 50 to 49:
   re-parsing the name itself, closing it entirely. Site count: 3 -> 2
   (see that file's census-entry comment for the full design note).
 
+The fixture-seam fix round (same bead, same day) then raised the pin
+from 49 to 50: ``health.py``'s ``check_chash_conformance_report``
+unroutable-collection probe was calling ``collection_model`` (class b,
+strict row-read, raises ``CollectionNotRegisteredError`` when a
+collection has no row) for a scan whose whole POINT is to find
+conformant-SHAPED collections that may have no row at all -- the raise
+landed inside this method's blanket ``except Exception`` and silently
+zeroed the entire probe the instant one such collection existed,
+masking the nexus-4ijv4 false-clean-by-omission finding it exists to
+catch. Fixed by reading ``embedding_model_for_collection_name`` (class
+d, the name-parser this diagnostic's purpose actually calls for)
+instead -- a genuinely NEW tracked site, not a reclassification of an
+existing one, so the pin rises rather than holds.
+
 The remaining THREE holdouts (collection_shape.py's 3,
 commands/collection.py's reindex_cmd, db/embed_migrate.py's
 migrate_collection_safe) were NOT closed by this bead -- they remain
@@ -387,6 +401,18 @@ COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {
     # rejected it as unsupported -- may be a mistyped --collection
     # argument with no row at all.
     "src/nexus/commands/enrich.py": 1,
+    # class (d) (nexus-ft04v.26, fixture-seam fix round): check_chash_
+    # conformance_report's unroutable-collection probe reads
+    # embedding_model_for_collection_name(name) directly -- the whole
+    # POINT of this scan is to report on a conformant-SHAPED collection
+    # /v1/vectors/stats lists that may carry no catalog row at all
+    # (unregistered, or a legacy pre-Phase-1 collection); the strict
+    # row-reading collection_model (class b) it previously called raised
+    # CollectionNotRegisteredError for exactly that case, silently
+    # zeroing the whole scan inside this method's blanket `except
+    # Exception` and masking the false-clean-by-omission finding this
+    # probe exists to catch (nexus-4ijv4).
+    "src/nexus/health.py": 1,
     # :113 class (a), registering `new_name`; :1053/:1062 class (a),
     # first-index synthesis explicitly for the not-yet-registered case;
     # :1755 class (a), the function's OWN docstring defines "kind" as the
@@ -765,10 +791,16 @@ def test_census_has_no_stale_entries() -> None:
 def test_pin_matches_documented_total() -> None:
     """The PARSE_SITE_PIN docstring claim (49 -- 50 after nexus-ft04v.26
     added the fifth pattern class, then -1 when that SAME bead's item 6
-    gave db/reconcile.py's three sites the row-read treatment, closing
-    one of them -- see COLLECTION_NAME_PARSE_CENSUS's own docstring) is
-    derived from the same dict the guards above check against -- this
-    catches a hand-edited docstring number drifting from the dict it
-    claims to summarize."""
+    gave db/reconcile.py's three sites the row-read treatment closing one
+    of them, then +1 for health.py's check_chash_conformance_report
+    unroutable-collection probe (fixture-seam fix round: collection_model
+    raising for an unregistered-but-conformant name was silently zeroing
+    the whole probe inside a blanket except, masking the nexus-4ijv4
+    false-clean-by-omission finding -- fixed by reading the class-(d)
+    name-parser instead, a new tracked site) -- see
+    COLLECTION_NAME_PARSE_CENSUS's own docstring) is derived from the
+    same dict the guards above check against -- this catches a
+    hand-edited docstring number drifting from the dict it claims to
+    summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 49
+    assert PARSE_SITE_PIN == 50
