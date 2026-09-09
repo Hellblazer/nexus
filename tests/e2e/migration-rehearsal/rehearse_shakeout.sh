@@ -196,10 +196,18 @@ assert_build_ref "candidate identity" || exit 1
 # ── Phase B: CLI verb matrix ─────────────────────────────────────────────────
 say "Phase B — CLI verb matrix (every verb against the served candidate)"
 
-# T2 memory roundtrip
-nx memory put -p shakeout -t probe-1 "verb matrix probe" --ttl 1d >/dev/null 2>&1 \
-  && [ "$(nx memory get -p shakeout -t probe-1 2>/dev/null)" = "verb matrix probe" ] \
-  && ok "memory put/get" || bad "memory put/get"
+# T2 memory roundtrip. Both outputs are kept and printed on a miss: the
+# 2026-09-09 v0.1.111 battery red this check once under three concurrent
+# container gates, passed on the clean rerun, and left nothing to diagnose
+# because both commands' output went to /dev/null (same lesson as run_check).
+MEM_PUT_OUT="$(nx memory put -p shakeout -t probe-1 "verb matrix probe" --ttl 1d 2>&1)" || true
+MEM_GET_OUT="$(nx memory get -p shakeout -t probe-1 2>&1)" || true
+if [ "$MEM_GET_OUT" = "verb matrix probe" ]; then
+  ok "memory put/get"
+else
+  bad "memory put/get"
+  printf 'put: %s\nget: %s\n' "$MEM_PUT_OUT" "$MEM_GET_OUT" | sed 's/^/       | /' | tail -12
+fi
 # gap-15: `yes |` into an early-closing reader is the sanctioned
 # early-exit-consumer SIGPIPE hazard (nexus-6zxfb/i66g4 class) -- under
 # pipefail (already set) the pipeline's rc can be yes's own SIGPIPE exit,
