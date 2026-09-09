@@ -380,3 +380,35 @@ class TestBuildersArePure:
         import here would be a cycle."""
         names = self._module_import_names()
         assert not any("nexus.mcp.core" in n for n in names), names
+
+
+
+class TestSourceClauseOnEveryBuilder:
+    """nexus-onn7s: a payload that carries a [source: ...] line gets the
+    instruction that explains it, on every builder, and only then -- an
+    unmarked payload reads exactly as the goldens above pin."""
+
+    def test_every_builder_appends_the_clause_only_for_marked_input(self) -> None:
+        from nexus.context_annotations import SOURCE_INSTRUCTION
+        from nexus.mcp import operator_requests as req
+
+        marked = "[source: Doc A · knowledge__k · indexed 2026-09-01 (7d ago)]\nbody"
+        plain = "body"
+        cases = [
+            lambda x: req.build_extract_request(x, "a,b"),
+            lambda x: req.build_rank_request(x, "recency"),
+            lambda x: req.build_compare_request(items=x),
+            lambda x: req.build_compare_request(items_a=x, items_b="other", label_a="A", label_b="B"),
+            lambda x: req.build_summarize_request(x),
+            lambda x: req.build_generate_request("summary", x),
+            lambda x: req.build_filter_request(x, "keep all"),
+            lambda x: req.build_check_request(x, "consistent?"),
+            lambda x: req.build_verify_request("claim", x),
+            lambda x: req.build_groupby_request(x, "topic"),
+            lambda x: req.build_aggregate_request(x, "count"),
+        ]
+        for build in cases:
+            with_marker, _ = build(marked)
+            without, _ = build(plain)
+            assert with_marker.endswith(SOURCE_INSTRUCTION), with_marker[-200:]
+            assert SOURCE_INSTRUCTION not in without

@@ -4597,6 +4597,9 @@ def store_get_many(
         #   * result order and per-doc truncation are unchanged.
         per_id_routing = len(coll_list) == len(id_list)
         entries: list[dict | None] = [None] * len(id_list)
+        # nexus-onn7s: the collection each entry was found in, for the
+        # source note; aligned with ``entries``.
+        entry_collections: list[str] = [""] * len(id_list)
 
         if per_id_routing:
             idxs_by_collection: dict[str, list[int]] = {}
@@ -4609,6 +4612,8 @@ def store_get_many(
                 id_to_entry = _batched_get_by_ids(t3, col_name, batch_ids)
                 for idx in idxs:
                     entries[idx] = id_to_entry.get(id_list[idx])
+                    if entries[idx] is not None:
+                        entry_collections[idx] = col_name
         else:
             remaining_idxs = list(range(len(id_list)))
             for cand in coll_list:
@@ -4624,6 +4629,7 @@ def store_get_many(
                     found = id_to_entry.get(id_list[idx])
                     if found is not None:
                         entries[idx] = found
+                        entry_collections[idx] = col_name
                     else:
                         still_remaining.append(idx)
                 remaining_idxs = still_remaining
@@ -4638,11 +4644,19 @@ def store_get_many(
         # unconditionally (not gated on `structured`) so callers cannot
         # observe stale data by mixing modes.
         section_types: list[str] = []
-        for doc_id, entry in zip(id_list, entries):
+        # nexus-onn7s: ``source_notes`` rides the same fetch, same
+        # alignment, same "" for a missing id -- one line per chunk naming
+        # its document, collection and dates, which the plan runner
+        # prefixes onto the hydrated content an operator prompt sees.
+        from nexus.context_annotations import source_note  # noqa: PLC0415 — deferred; keeps core's import surface flat
+
+        source_notes: list[str] = []
+        for doc_id, entry, entry_collection in zip(id_list, entries, entry_collections):
             if entry is None:
                 missing.append(doc_id)
                 contents.append("")
                 section_types.append("")
+                source_notes.append("")
                 continue
 
             body = str(entry.get("content") or "")
@@ -4657,11 +4671,13 @@ def store_get_many(
                 )
             contents.append(body)
             section_types.append(str(entry.get("section_type") or ""))
+            source_notes.append(source_note(entry, collection=entry_collection))
 
         if structured:
             return {
                 "contents": contents, "missing": missing,
                 "section_types": section_types,
+                "source_notes": source_notes,
             }
 
         # nexus-z4j8d: the human-readable mode of a HYDRATION tool must

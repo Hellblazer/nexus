@@ -30,6 +30,8 @@ Contract with the runner:
 """
 from __future__ import annotations
 
+from nexus.context_annotations import source_clause
+
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -786,7 +788,9 @@ def compose_bundle_prompt(bundle: OperatorBundle) -> tuple[str, dict[str, Any]]:
         "\n\nFinal step's output schema:\n"
         + json.dumps(_terminal_schema(bundle.steps[-1].tool), indent=2)
     )
-    prompt = f"{header}\n\n{body}{footer}"
+    # nexus-onn7s: the source-line instruction rides only a bundle whose
+    # inlined inputs carry the marker, as the standalone builders do.
+    prompt = f"{header}\n\n{body}{source_clause(body)}{footer}"
     return prompt, _terminal_schema(bundle.steps[-1].tool)
 
 

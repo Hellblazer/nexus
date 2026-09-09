@@ -773,6 +773,21 @@ def _resolve_value(
                     f"{field_name!r} (have: {sorted(prior.keys())})"
                 ),
             )
+        # nexus-onn7s: a ``$stepN.contents`` reference into an explicit
+        # store_get_many step gets that step's source notes prefixed, the
+        # same way auto-hydration prefixes them, so the pre-hydrated pipe
+        # (plan 57 find-by-author's shape) reaches the operator annotated.
+        # Any other field, or a step without notes, resolves verbatim.
+        if field_name == "contents":
+            notes = prior.get("source_notes")
+            contents = prior[field_name]
+            if isinstance(notes, list) and notes and isinstance(contents, list):
+                from nexus.context_annotations import with_source_note  # noqa: PLC0415 — deferred; runner imports stay lazy
+
+                return [
+                    with_source_note(c, str(notes[i])) if i < len(notes) and isinstance(c, str) else c
+                    for i, c in enumerate(contents)
+                ]
         return prior[field_name]
 
     m = _VAR_RE.match(value)
@@ -1496,8 +1511,17 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
     chunk_section_types = (
         hydrated.get("section_types", []) if isinstance(hydrated, dict) else []
     )
+    # nexus-onn7s: ``source_notes`` rides the same call; a document's note
+    # is its first kept chunk's note, prefixed once on the reassembled
+    # text. Absent or short list degrades to no note, never to a drop.
+    chunk_source_notes = (
+        hydrated.get("source_notes", []) if isinstance(hydrated, dict) else []
+    )
+    if not isinstance(chunk_source_notes, list):
+        chunk_source_notes = []
 
     per_doc: dict[str, list[str]] = {doc_id: [] for doc_id in tumbler_ids}
+    doc_note: dict[str, str] = {}
     for i, (doc_id, content) in enumerate(zip(owner, chunk_contents)):
         if not content:
             continue
@@ -1505,8 +1529,15 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
         if section_type == "imports":
             continue
         per_doc[doc_id].append(content)
+        if doc_id not in doc_note and i < len(chunk_source_notes) and chunk_source_notes[i]:
+            doc_note[doc_id] = str(chunk_source_notes[i])
 
-    contents = ["\n\n".join(per_doc[doc_id]) for doc_id in tumbler_ids]
+    from nexus.context_annotations import with_source_note  # noqa: PLC0415 — deferred; runner imports stay lazy
+
+    contents = [
+        with_source_note("\n\n".join(per_doc[doc_id]), doc_note.get(doc_id, ""))
+        for doc_id in tumbler_ids
+    ]
     missing = [doc_id for doc_id in tumbler_ids if not per_doc[doc_id]]
     return {"contents": contents, "missing": missing}
 
@@ -1773,7 +1804,22 @@ def _hydrate_operator_args(
                 for cid, c in zip(id_list_raw, contents_raw)
             ]
         else:
-            contents = contents_raw
+            contents = list(contents_raw)
+        # nexus-onn7s: prefix each kept chunk with its source note so the
+        # operator prompt sees what the search render shows a person:
+        # document, collection, indexed date, publication year, expiry.
+        # The tumbler path above already prefixed per document. A missing
+        # or short ``source_notes`` list leaves the content untouched.
+        notes = hydrated.get("source_notes", []) if isinstance(hydrated, dict) else []
+        if isinstance(notes, list) and notes and not (
+            id_list_raw and all(_is_tumbler_shaped(str(i)) for i in id_list_raw)
+        ):
+            from nexus.context_annotations import with_source_note  # noqa: PLC0415 — deferred; runner imports stay lazy
+
+            contents = [
+                with_source_note(c, str(notes[i])) if i < len(notes) else c
+                for i, c in enumerate(contents)
+            ]
         non_empty = [c for c in contents if c]
         original_count = len(non_empty)
         truncation_metadata: dict[str, Any] | None = None

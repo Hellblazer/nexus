@@ -850,3 +850,31 @@ class TestStoreGetManySectionTypes:
         assert "alpha body" in result
         assert "section_type" not in result
         assert "result capped at" not in result
+
+
+class TestStoreGetManySourceNotes:
+    """nexus-onn7s: ``structured=True`` also returns ``source_notes``,
+    aligned 1:1 with ``contents``, from the same fetch that resolves
+    content -- one line per chunk naming its document, collection and
+    dates; "" for a missing id. The plan runner prefixes it onto the
+    content an operator prompt sees."""
+
+    def test_source_notes_aligned_and_empty_for_missing(self):
+        from unittest.mock import patch
+
+        from nexus.mcp.core import store_get_many
+
+        found = {
+            "doc-1": {"content": "body one", "title": "Doc One",
+                      "indexed_at": "2026-09-01T00:00:00+00:00", "bib_year": 2024},
+        }
+        mock_t3, _ = _make_stub_t3({"*": found})
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            out = store_get_many(ids=["doc-1", "doc-missing"], collections="knowledge", structured=True)
+
+        assert out["contents"] == ["body one", ""]
+        assert len(out["source_notes"]) == 2
+        note = out["source_notes"][0]
+        assert note.startswith("Doc One · knowledge")
+        assert "indexed 2026-09-01" in note and "published 2024" in note
+        assert out["source_notes"][1] == ""

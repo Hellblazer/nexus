@@ -29,6 +29,24 @@ READER_INSTRUCTION: str = (
     "indexed the source, not when it was written."
 )
 
+#: The instruction an operator prompt carries when its inputs may open
+#: with a ``[source: ...]`` line (see :func:`with_source_note`). Same rule
+#: as :data:`READER_INSTRUCTION`, phrased for the model that reads the
+#: hydrated chunks rather than the person reading a render.
+SOURCE_INSTRUCTION: str = (
+    "Some inputs open with a [source: ...] line naming the document, its "
+    "collection and its dates. That line is provenance, not evidence: never "
+    "quote it as support. Indexed dates are when nexus last indexed the "
+    "source, not when it was written; a published year is the document's "
+    "own date. When sources disagree, prefer the more recently published "
+    "one, and cite the source and its date."
+)
+
+#: The marker :func:`with_source_note` writes; :func:`source_clause` keys
+#: on it so a prompt carries :data:`SOURCE_INSTRUCTION` only when some
+#: input actually opens with a source line.
+SOURCE_MARKER: str = "[source: "
+
 #: Index states worth naming; ``complete`` (and the pre-fence NULL) is the
 #: normal case and stays silent.
 _QUIET_INDEX_STATES: frozenset[str] = frozenset({"", "complete"})
@@ -113,3 +131,44 @@ def annotation_line(
         metadata, now=now or datetime.now(UTC), index_state=index_state, year=year,
     )
     return " · ".join(tokens)
+
+
+def source_note(
+    metadata: Mapping[str, Any],
+    *,
+    collection: str = "",
+    now: datetime | None = None,
+) -> str:
+    """One line naming a hydrated chunk's document, collection and dates.
+
+    ``<title or display path or source path> · <collection> · <annotate()
+    tokens>``, with every absent part dropped. Empty when nothing is
+    known, so a caller can test truthiness before prefixing.
+    """
+    label = (
+        str(metadata.get("title") or "").strip()
+        or str(metadata.get("_display_path") or metadata.get("source_path") or "").strip()
+    )
+    parts = [x for x in (label, collection.strip()) if x]
+    parts.extend(annotate(metadata, now=now or datetime.now(UTC)))
+    return " · ".join(parts)
+
+
+def with_source_note(content: str, note: str) -> str:
+    """Prefix ``content`` with ``[source: <note>]`` on its own line.
+
+    Empty content or an empty note returns ``content`` unchanged, so a
+    chunk this cannot describe is never altered.
+    """
+    if not content or not note:
+        return content
+    return f"[source: {note}]\n{content}"
+
+
+def source_clause(payload: str) -> str:
+    """The instruction to append to an operator prompt whose *payload*
+    carries at least one source line, else ``""``. A dispatch with no
+    marked input pays nothing and reads exactly as before."""
+    if SOURCE_MARKER in (payload or ""):
+        return f"\n\n{SOURCE_INSTRUCTION}"
+    return ""

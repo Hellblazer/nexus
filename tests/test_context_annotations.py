@@ -56,3 +56,54 @@ def test_reader_instruction_names_the_rule():
     # it must not claim a ranking signal the default configuration does not apply
     assert "boost" not in READER_INSTRUCTION.lower() and "ranked" not in READER_INSTRUCTION.lower()
     assert "not when it was written" in READER_INSTRUCTION
+
+
+# ── nexus-onn7s, nx_answer half: source notes on hydrated chunks ────────────
+
+
+def test_source_note_names_document_collection_and_dates():
+    from nexus.context_annotations import source_note
+
+    note = source_note(
+        {"title": "ctxnote", "indexed_at": "2026-08-27T17:49:07+00:00", "bib_year": 2026},
+        collection="knowledge__vector-search__voyage-context-3__v1", now=NOW,
+    )
+    assert note == (
+        "ctxnote · knowledge__vector-search__voyage-context-3__v1 · "
+        "indexed 2026-08-27 (11d ago) · published 2026"
+    )
+
+
+def test_source_note_falls_back_to_path_and_is_empty_when_nothing_is_known():
+    from nexus.context_annotations import source_note
+
+    assert source_note({"_display_path": "docs/a.md"}, now=NOW) == "docs/a.md"
+    assert source_note({"source_path": "src/x.py"}, collection="code__x", now=NOW) == "src/x.py · code__x"
+    assert source_note({}, now=NOW) == ""
+
+
+def test_with_source_note_prefixes_only_when_both_are_present():
+    from nexus.context_annotations import with_source_note
+
+    assert with_source_note("body", "n") == "[source: n]\nbody"
+    assert with_source_note("body", "") == "body"
+    assert with_source_note("", "n") == ""
+
+
+def test_source_instruction_names_the_marker_and_the_rule():
+    from nexus.context_annotations import SOURCE_INSTRUCTION
+
+    assert "[source: ...]" in SOURCE_INSTRUCTION
+    assert "never quote it as support" in SOURCE_INSTRUCTION
+    assert "not when it was written" in SOURCE_INSTRUCTION
+    assert "more recently published" in SOURCE_INSTRUCTION and "cite" in SOURCE_INSTRUCTION
+    # no authority claim the line cannot back, no ranking claim
+    assert "record of record" not in SOURCE_INSTRUCTION and "boost" not in SOURCE_INSTRUCTION.lower()
+
+
+def test_source_clause_is_empty_without_the_marker():
+    from nexus.context_annotations import SOURCE_INSTRUCTION, source_clause
+
+    assert source_clause("plain body") == ""
+    assert source_clause("") == ""
+    assert source_clause("[source: Doc A]\nbody") == f"\n\n{SOURCE_INSTRUCTION}"
