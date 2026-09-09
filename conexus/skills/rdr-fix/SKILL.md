@@ -37,6 +37,7 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 - Every clause a fix adds carries a tool-produced quote from its source or the marker "inferred, not read".
 - A count or a universal (never / always / only / nothing / every / the one / all) needs a census of the whole surface, captured in the research entry as an enumeration; two sites that agree are not a source.
 - The research entry is written before the edit; its `commits:` field is filled after the commit exists.
+- From round 3, the fix closes only findings marked `Ship-blocker: yes`; every other Critical and Significant is a residual, recorded and dispositioned at accept — never re-gated for this change.
 - A Criterion 6 readability WARN is never closed inside a fix commit.
 
 ## Relay Template (Use This Format)

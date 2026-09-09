@@ -97,6 +97,9 @@ Fixes go through `/conexus:rdr-fix <id>` (the rdr-fix skill); its preamble print
   derived from it.
 - A universal claim (never / always / only / nothing / every / the one / all)
   or a count needs a census of the surface, not a spot read of two sites.
+- From round 3, fix only findings marked `Ship-blocker: yes`; every other
+  Critical and Significant is a residual — record it, do not fix it in this
+  change; it is dispositioned at accept, never re-gated.
 - A Criterion 6 readability WARN is never closed inside a fix commit.
 
 ### Layer 1 — Structural Validation (no AI)

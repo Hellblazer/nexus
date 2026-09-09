@@ -1937,6 +1937,18 @@ class TestRdrGateRoundAndFixCheck:
         assert "only a ship-blocker blocks" in result.output
         early = self._gate(rdr_env, monkeypatch, outcome="BLOCKED", commit=sha, prior=None)
         assert "only a ship-blocker blocks" not in early.output
+        # nexus-yjf5l.2: the fix preamble reads the same gate record through
+        # the same _gate_round_lines call as the gate preamble, so its own
+        # copy of the round-3+ rule must be the identical text, not a second
+        # copy that can drift from this one.
+        import nexus.commands.rdr as rdr_mod
+
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": f"outcome: \"BLOCKED\"\ncommit: {sha}\nprior: [1] (BLOCKED 1C)\n",
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        fix_out = _runner().invoke(rdr, ["preamble", "rdr-fix", "--", "204"]).output
+        assert "Gate round 3" in fix_out and "only a ship-blocker blocks" in fix_out
 
     def test_fix_check_names_the_diff_range_when_the_file_changed(self, rdr_env, monkeypatch):
         gated = self._commit(rdr_env, self._BODY, "gated")
@@ -2151,6 +2163,43 @@ class TestRdrFixPreamble:
         result = _runner().invoke(rdr, ["preamble", "rdr-fix", "--", "204"])
         assert result.exit_code == 0
         assert "T2 unreachable" in result.output and "engine down" in result.output
+
+    def test_round_three_splits_ship_blockers_from_residuals(self, rdr_env, monkeypatch):
+        """nexus-yjf5l.2: from round 3 the fix preamble separates the
+        findings that block (marked `Ship-blocker: yes`) from the residuals
+        the round already recorded in `residuals:` — two lists, not one."""
+        import nexus.commands.rdr as rdr_mod
+
+        gated = self._commit(rdr_env, self._BODY, "gated")
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                f"outcome: \"BLOCKED\"\ndate: \"2026-09-09\"\ncommit: {gated}\n"
+                "critique: nexus_rdr/204-gate-critique-2026-09-09z\n"
+                "prior: [1] (BLOCKED 1C), [2] (BLOCKED 1C)\n"
+                "residuals:\n  - unused variable in the fallback branch\n"
+            ),
+            "204-gate-critique-2026-09-09z": (
+                "## Critical Issues\n\n### Issue: query timeout doubles under load\n"
+                "- **Location**: L100\n- **Ship-blocker**: yes\n\n"
+                "## Significant Issues\n\n### Issue: unused variable in the fallback branch\n"
+                "- **Location**: L200\n- **Ship-blocker**: no\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        out = _runner().invoke(rdr, ["preamble", "rdr-fix", "--", "204"]).output
+        assert "Gate round 4" in out, out
+        assert "Ship-blockers (fix these)" in out, out
+        assert "Residuals (record; do not fix in this change)" in out, out
+        assert "query timeout doubles under load" in out
+        assert "unused variable in the fallback branch" in out
+        ship_idx = out.index("Ship-blockers (fix these)")
+        res_idx = out.index("Residuals (record; do not fix in this change)")
+        assert ship_idx < out.index("query timeout doubles under load") < res_idx, (
+            "the ship-blocker finding is listed under the fix-these heading"
+        )
+        assert res_idx < out.index("unused variable in the fallback branch"), (
+            "the residual finding is listed under the record-only heading"
+        )
 
 
 class TestRdrAuditGateLoopHealth:

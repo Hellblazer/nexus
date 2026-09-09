@@ -1416,6 +1416,13 @@ class TestRdrGateLoopRemedies:
             assert "before the edit" in text.lower(), f"{path}: research entry precedes the edit"
             assert "inferred, not read" in text, f"{path}: unquoted clauses are marked"
             assert "census" in text, f"{path}: universals need a census"
+        # nexus-yjf5l.2: the round-3 rule (from round 3 the fix closes only
+        # ship-blockers) is rdr-gate/SKILL.md's own copy, in "Fixing
+        # findings" — not the research skill's territory, so it is pinned
+        # here on GATE_SKILL alone rather than added to the loop above.
+        assert "Ship-blocker: yes" in self.GATE_SKILL.read_text(), (
+            "rdr-gate/SKILL.md: round-3 fix rule missing from Fixing findings"
+        )
 
     def test_remedy_skills_carry_no_incident_narrative(self) -> None:
         """Skills are instructions; the why lives in the RDR and T2
@@ -1452,7 +1459,7 @@ class TestRdrGateLoopRemedies:
         assert fix_skill.exists() and fix_cmd.exists()
         assert "nx rdr preamble rdr-fix" in fix_cmd.read_text()
         skill = fix_skill.read_text()
-        for phrase in ("nothing else", "inferred, not read", "census", "before the edit", "fix-check-"):
+        for phrase in ("nothing else", "inferred, not read", "census", "before the edit", "fix-check-", "Ship-blocker: yes"):
             assert phrase in skill, f"rdr-fix/SKILL.md lacks '{phrase}'"
         assert "/conexus:rdr-fix" in self.GATE_SKILL.read_text()
         lifecycle = (SKILLS_DIR / "using-nx-skills" / "SKILL.md").read_text()

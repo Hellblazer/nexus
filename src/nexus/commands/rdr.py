@@ -1763,6 +1763,27 @@ def _critique_findings(text: str) -> list[str]:
     return out
 
 
+def _finding_title_key(text: str) -> str:
+    """Normalise a finding or residual title for cross-surface matching.
+
+    ``_critique_findings`` prefixes a canonical title with ``Issue: ``; a
+    gate record's ``residuals:`` bullet carries the bare title with
+    neither that prefix nor list decoration. One normalisation — strip the
+    ``Issue:`` prefix, strip leading/trailing list and markdown
+    decoration, collapse whitespace, casefold — so a residual's stored
+    title and a finding's title match the same way everywhere a surface
+    needs to tell them apart: the fix preamble's ship-blocker/residual
+    split (nexus-yjf5l.2) and the Layer 0 survivor sweep's residual
+    exemption (nexus-yjf5l.3) both call this one function, not their own
+    copy.
+    """
+    t = text.strip()
+    t = re.sub(r"^(?:issue\s*:\s*)", "", t, flags=re.IGNORECASE)
+    t = t.lstrip("-*# ").rstrip("*").strip()
+    t = re.sub(r"\s+", " ", t)
+    return t.casefold()
+
+
 def _preamble_regate_block(
     *, repo_root: str, repo_name: str, t2_key: str, rdr_file: Path, status: str = "",
 ) -> list[str]:
@@ -2786,6 +2807,9 @@ _FIX_RULES: tuple[str, ...] = (
     "needs a census of the whole surface, captured in the research entry as an enumeration.",
     "Sweep every site in the finding's Sites: list; a fact lives in Problem Statement, "
     "Research Findings, Technical Design and the Implementation Plan at once.",
+    "From round 3, the fix closes only findings marked `Ship-blocker: yes`; every other "
+    "Critical and Significant is a residual, recorded and dispositioned at accept — never "
+    "re-gated for this change.",
     "A Criterion 6 readability WARN is never closed inside a fix commit.",
 )
 
@@ -2876,9 +2900,40 @@ def preamble_rdr_fix(args: tuple[str, ...]) -> None:
         print(line)
 
     findings = _critique_findings(str(critique.get("content", ""))) if isinstance(critique, dict) else []
+    own_round = _gate_round_number(content, critique_count) - 1
     print("#### Findings to fix (each at every site named)")
     print()
-    if findings:
+    if findings and own_round > GATE_MAX_ANY_CRITICAL_ROUNDS:
+        residual_keys = {_finding_title_key(t) for t in _residual_titles(content)}
+        ship_blockers: list[str] = []
+        residuals_out: list[str] = []
+        is_residual = False
+        for f in findings:
+            if not f.startswith("  "):
+                is_residual = _finding_title_key(f) in residual_keys
+            (residuals_out if is_residual else ship_blockers).append(f)
+        print(
+            f"From round {GATE_MAX_ANY_CRITICAL_ROUNDS + 1}, fix only the ship-blockers below; "
+            "every other Critical and Significant is a residual — record it, do not fix it in "
+            "this change; it is dispositioned at accept, never re-gated."
+        )
+        print()
+        print("**Ship-blockers (fix these):**")
+        print()
+        if ship_blockers:
+            for f in ship_blockers:
+                print(f"- {f}")
+        else:
+            print("(none — every finding this round matched the gate record's `residuals:` field)")
+        print()
+        print("**Residuals (record; do not fix in this change):**")
+        print()
+        if residuals_out:
+            for f in residuals_out:
+                print(f"- {f}")
+        else:
+            print("(none)")
+    elif findings:
         for f in findings:
             print(f"- {f}")
     elif critique_title:
@@ -2949,6 +3004,31 @@ def _residual_count(content: str) -> int:
         if active and stripped.startswith("-"):
             count += 1
     return count + inline
+
+
+def _residual_titles(content: str) -> list[str]:
+    """The titles recorded in a gate record's ``residuals:`` block: one
+    per ``- <title>`` bullet, or the inline text on the ``residuals:``
+    line itself. Mirrors ``_residual_count``'s parse but returns the text
+    for matching against a finding's title via ``_finding_title_key``
+    (the fix preamble's round-3+ ship-blocker/residual split, nexus-yjf5l.2;
+    reused by the Layer 0 survivor sweep's residual exemption, nexus-yjf5l.3)."""
+    out: list[str] = []
+    active = False
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("residuals:"):
+            active = True
+            inline = stripped.split(":", 1)[1].strip()
+            if inline:
+                out.append(inline)
+            continue
+        if active and re.match(r"^[A-Za-z_][A-Za-z0-9_]*:", stripped):
+            active = False
+            continue
+        if active and stripped.startswith("-"):
+            out.append(stripped.lstrip("-").strip())
+    return out
 
 
 #: The day the round cap shipped (nexus-g7zgw.2). Gate records dated before

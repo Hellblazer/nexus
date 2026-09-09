@@ -38,3 +38,13 @@ mechanize, it matters enough to ship.
 - `conexus/commands/rdr-accept.md`: nexus-yjf5l.1 — Step 2b mirrors the
   skill: the residual disposition rule and the fix check a sha
   disposition carries.
+- `conexus/skills/rdr-fix/SKILL.md`: nexus-yjf5l.2 — Rules gains the
+  round-3 rule: the fix closes only findings marked `Ship-blocker: yes`;
+  every other Critical and Significant is a residual, dispositioned at
+  accept, never re-gated.
+- `conexus/skills/rdr-gate/SKILL.md`: nexus-yjf5l.2 — the same rule added
+  to Fixing findings, so the gate side and the fix side agree.
+- `conexus/commands/rdr-fix.md`: nexus-yjf5l.2 — mirrors the skill's
+  round-3 rule and the fix preamble's two-list split.
+- `conexus/commands/rdr-gate.md`: nexus-yjf5l.2 — a Fixing findings
+  bullet mirroring the same rule.
