@@ -927,6 +927,25 @@ public final class TaxonomyRepository {
         });
     }
 
+    /**
+     * GH #1528 (nexus-4tfxp): delete projection assignments ({@code
+     * assigned_by = 'projection'}) whose stored RAW cosine is below
+     * {@code minSimilarity}, for source collections whose name starts with
+     * {@code sourceCollectionPrefix} (a corpus prefix such as {@code code__}, or
+     * one full collection name). The recovery path for a pass that admitted
+     * weak matches: the persist route is a prefer-higher upsert, so nothing
+     * else can lower or remove a row. Topics are never touched (a topic with
+     * no assignments left is still a discovered topic).
+     */
+    public int pruneProjectionBelow(String tenant, String sourceCollectionPrefix, double minSimilarity) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.deleteFrom(TOPIC_ASSIGNMENTS)
+               .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
+                   .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.startsWith(sourceCollectionPrefix))
+                   .and(TOPIC_ASSIGNMENTS.SIMILARITY.lt(minSimilarity)))
+               .execute());
+    }
+
     /** Purge all taxonomy rows for a collection. */
     public Map<String, Integer> purgeCollection(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {

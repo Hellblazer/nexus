@@ -1723,4 +1723,34 @@ class TaxonomyRepositoryTest {
         return new com.zaxxer.hikari.HikariDataSource(config);
     }
 
+
+    // ── GH #1528 (nexus-4tfxp): prune projection rows below a raw-cosine floor ──
+
+    @Test @Order(70)
+    void pruneProjectionBelow_deletesOnlyProjectionRowsUnderThePrefixAndFloor() {
+        long topicId = repo.insertTopic(TENANT_A, "prune-topic", null, COL_A, 0, null, null);
+        String weakCode = hexChash("prune-weak-code");
+        String strongCode = hexChash("prune-strong-code");
+        String weakDocs = hexChash("prune-weak-docs");
+        String weakManual = hexChash("prune-weak-manual");
+        for (String c : java.util.List.of(weakCode, strongCode, weakDocs, weakManual)) {
+            seedChunk(TENANT_A, COL_A, c);
+        }
+        // Projection rows: two under a code__ source (one weak, one strong), one
+        // weak under a docs__ source; and one weak MANUAL row, which is never
+        // a prune target (only assigned_by='projection' rows are).
+        repo.assignTopic(TENANT_A, weakCode,   topicId, "projection", 0.31, "code__prune-src__bge-base-en-v15-768__v1", null);
+        repo.assignTopic(TENANT_A, strongCode, topicId, "projection", 0.91, "code__prune-src__bge-base-en-v15-768__v1", null);
+        repo.assignTopic(TENANT_A, weakDocs,   topicId, "projection", 0.31, "docs__prune-src__bge-base-en-v15-768__v1", null);
+        repo.assignTopic(TENANT_A, weakManual, topicId, "manual",     0.31, "code__prune-src__bge-base-en-v15-768__v1", null);
+
+        int removed = repo.pruneProjectionBelow(TENANT_A, "code__", 0.70);
+
+        assertThat(removed).as("exactly the weak projection row under code__").isEqualTo(1);
+        var remaining = repo.getTopicDocIds(TENANT_A, topicId, 0);
+        assertThat(remaining)
+            .as("the strong code row, the docs row (other prefix) and the manual row survive")
+            .containsExactlyInAnyOrder(strongCode, weakDocs, weakManual);
+        assertThat(repo.getTopicById(TENANT_A, topicId)).as("topics are never touched").isPresent();
+    }
 }

@@ -145,6 +145,7 @@ public final class TaxonomyHandler implements HttpHandler {
                 case "/assignments/details"       -> handleGetAssignmentDetails(exchange, tenant, method);
                 case "/assignments/by_label"      -> handleGetDocsByLabel(exchange, tenant, method);
                 case "/assignments/purge_doc"     -> handlePurgeDoc(exchange, tenant, method);
+                case "/assignments/prune_projection" -> handlePruneProjection(exchange, tenant, method); // GH #1528
                 // Collection ops
                 case "/purge_collection"          -> handlePurgeCollection(exchange, tenant, method);
                 case "/rename_collection"         -> handleRenameCollection(exchange, tenant, method);
@@ -590,6 +591,26 @@ public final class TaxonomyHandler implements HttpHandler {
         String project = requireString(body, "project");
         String title   = requireString(body, "title");
         int removed = repo.purgeAssignmentsForDoc(tenant, project, title);
+        HttpUtil.send(ex, 200, json(Map.of("removed", removed)));
+    }
+
+    /**
+     * POST /v1/taxonomy/assignments/prune_projection — GH #1528 (nexus-4tfxp).
+     * Body: {@code source_collection_prefix} (a corpus prefix like {@code code__}
+     * or a full collection name), {@code min_similarity} (0..1). Deletes
+     * projection assignments under that prefix whose stored raw cosine is
+     * below the threshold; answers {@code {"removed": N}}.
+     */
+    private void handlePruneProjection(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        Map<String, Object> body = readBody(ex);
+        String prefix = requireString(body, "source_collection_prefix");
+        Object raw = body.get("min_similarity");
+        if (!(raw instanceof Number n) || n.doubleValue() < 0.0 || n.doubleValue() > 1.0) {
+            HttpUtil.send(ex, 400, json(Map.of("error", "min_similarity must be a number in [0, 1]")));
+            return;
+        }
+        int removed = repo.pruneProjectionBelow(tenant, prefix, n.doubleValue());
         HttpUtil.send(ex, 200, json(Map.of("removed", removed)));
     }
 
