@@ -313,6 +313,116 @@ def test_resolve_corpus_drops_unregistered_name_from_fanout(monkeypatch) -> None
     assert resolve_corpus("code", ["code__ghost__voyage-code-3__v1"]) == []
 
 
+# ── RDR-204 Phase 3 fix round item 5: bounded staleness refresh ──────────────
+
+def test_resolve_corpus_bounded_refresh_finds_a_collection_registered_by_another_process(
+    monkeypatch,
+) -> None:
+    """RDR-204 Phase 3 fix round (nexus-ft04v.28 item 5): a bare-corpus
+    fan-out that finds NOTHING against the caller's own (possibly stale)
+    name list invalidates nexus.mcp_infra's row cache and re-fetches
+    get_collection_names() ONCE before answering empty -- a fake whose
+    SECOND list answer differs (simulating another process's
+    registration landing during the row cache's TTL window) must be
+    found on the second pass, not silently missed for up to 60s."""
+    import nexus.mcp_infra as mi
+
+    rows = {
+        "code__late__voyage-code-3__v1": {
+            "content_type": "code", "owner_id": "late",
+            "embedding_model": "voyage-code-3", "lifecycle_state": "live",
+        },
+    }
+    monkeypatch.setattr(mi, "get_collection_row", lambda name: rows.get(name))
+
+    invalidate_calls: list[int] = []
+    monkeypatch.setattr(mi, "invalidate_collections_cache", lambda: invalidate_calls.append(1))
+
+    get_names_calls: list[int] = []
+
+    def _fresh_names() -> list[str]:
+        get_names_calls.append(1)
+        return ["code__late__voyage-code-3__v1"]
+
+    monkeypatch.setattr(mi, "get_collection_names", _fresh_names)
+
+    # Caller's own list is STALE -- empty, as if fetched before the other
+    # process's registration landed.
+    result = resolve_corpus("code", [])
+
+    assert result == ["code__late__voyage-code-3__v1"]
+    assert len(invalidate_calls) == 1, "must invalidate exactly once, never a loop"
+    assert len(get_names_calls) == 1, "must refetch exactly once, never a loop"
+
+
+def test_resolve_corpus_bounded_refresh_still_returns_empty_when_genuinely_nothing_matches(
+    monkeypatch,
+) -> None:
+    """The bounded refresh is a real second attempt, not theatre -- when
+    even the fresh fetch has nothing, the result is still empty, and the
+    refresh fires exactly once, never a retry loop."""
+    import nexus.mcp_infra as mi
+
+    monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
+    invalidate_calls: list[int] = []
+    monkeypatch.setattr(mi, "invalidate_collections_cache", lambda: invalidate_calls.append(1))
+    get_names_calls: list[int] = []
+
+    def _still_nothing() -> list[str]:
+        get_names_calls.append(1)
+        return []
+
+    monkeypatch.setattr(mi, "get_collection_names", _still_nothing)
+
+    assert resolve_corpus("code", []) == []
+    assert len(invalidate_calls) == 1
+    assert len(get_names_calls) == 1
+
+
+def test_resolve_corpus_bounded_refresh_failure_falls_back_to_empty(monkeypatch) -> None:
+    """The bounded refresh is best-effort: a refetch failure (T3
+    unreachable) must fall back to the already-computed empty result,
+    never propagate and turn a previously-safe empty answer into a hard
+    failure."""
+    import nexus.mcp_infra as mi
+
+    monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
+    monkeypatch.setattr(mi, "invalidate_collections_cache", lambda: None)
+
+    def _unreachable() -> list[str]:
+        raise ConnectionError("simulated T3 unreachable")
+
+    monkeypatch.setattr(mi, "get_collection_names", _unreachable)
+
+    assert resolve_corpus("code", ["code__ghost__voyage-code-3__v1"]) == []
+
+
+def test_resolve_corpus_refresh_never_fires_when_the_first_pass_already_matched(
+    monkeypatch,
+) -> None:
+    """The bounded refresh is gated on an EMPTY first pass only -- a
+    real match must never pay the extra round trip."""
+    import nexus.mcp_infra as mi
+
+    rows = {
+        "code__nexus__voyage-code-3__v1": {
+            "content_type": "code", "owner_id": "nexus",
+            "embedding_model": "voyage-code-3", "lifecycle_state": "live",
+        },
+    }
+    monkeypatch.setattr(mi, "get_collection_row", lambda name: rows.get(name))
+
+    def _boom() -> None:
+        raise AssertionError("invalidate_collections_cache must not be called on a hit")
+
+    monkeypatch.setattr(mi, "invalidate_collections_cache", _boom)
+    monkeypatch.setattr(mi, "get_collection_names", _boom)
+
+    assert resolve_corpus("code", ["code__nexus__voyage-code-3__v1"]) == [
+        "code__nexus__voyage-code-3__v1",
+    ]
+
+
 # ── RDR-204 Phase 3 item 7: owner grammar alignment ───────────────────────────
 
 def test_is_conformant_collection_name_admits_underscored_owner() -> None:

@@ -1777,7 +1777,20 @@ def resolve_corpus(corpus: str, all_collections: list[str]) -> list[str]:
        mechanism -- a quarantine sibling's row carries its ORIGIN content
        type with ``lifecycle_state="quarantine"``, so it is excluded by
        the column here even though its physical name never matched a
-       ``{corpus}__`` string prefix in the first place.
+       ``{corpus}__`` string prefix in the first place. RDR-204 Phase 3
+       fix round (nexus-ft04v.28 item 5): when this scan finds NOTHING,
+       it invalidates :mod:`nexus.mcp_infra`'s row cache and
+       :func:`nexus.mcp_infra.get_collection_names`, then re-scans ONCE
+       against the fresh fetch before answering empty -- a long-lived
+       process's cache is invalidated on registration only in the SAME
+       process that registered, so a co-resident reader can otherwise
+       miss a collection another process just registered for up to the
+       cache's remaining TTL window. Bounded to one extra round trip,
+       never a retry loop, and never triggers stage 3. Best-effort: a
+       refresh that itself fails (T3 unreachable) falls back to the
+       already-computed empty result rather than raising -- this is a
+       staleness MITIGATION, not a new hard dependency on T3 being
+       reachable for every empty-fan-out answer.
     3. Legacy STRING-PREFIX recovery, for every *corpus* value stage 2
        does not apply to (contains ``__``, e.g. a human-typed short form
        like ``knowledge__foo`` recovering the auto-promoted on-disk
@@ -1801,24 +1814,58 @@ def resolve_corpus(corpus: str, all_collections: list[str]) -> list[str]:
     # Stage 2: bare canonical content-type fan-out, row-filtered.
     if corpus in CONTENT_TYPES:
         from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
-        matches = []
-        for c in all_collections:
-            row = get_collection_row(c)
-            if row is None:
+
+        def _scan(names: list[str]) -> list[str]:
+            found = []
+            for c in names:
+                row = get_collection_row(c)
+                if row is None:
+                    _log.debug(
+                        "resolve_corpus_candidate_dropped_no_row",
+                        corpus=corpus, collection=c,
+                    )
+                    continue
+                if row["content_type"] != corpus:
+                    continue
+                if row.get("lifecycle_state") != "live":
+                    _log.debug(
+                        "resolve_corpus_candidate_excluded_lifecycle",
+                        corpus=corpus, collection=c, lifecycle_state=row.get("lifecycle_state"),
+                    )
+                    continue
+                found.append(c)
+            return found
+
+        matches = _scan(all_collections)
+        if not matches:
+            # RDR-204 Phase 3 fix round (nexus-ft04v.28 item 5): a
+            # long-lived process's row cache (nexus.mcp_infra's own
+            # 60s-TTL _collections_cache) is invalidated on registration
+            # only in the SAME process that registered -- a co-resident
+            # long-lived reader (an MCP server; a second CLI invocation
+            # sharing this row cache is impossible, but a persistent
+            # daemon is not) can miss a collection another process just
+            # registered for up to the remaining TTL window. Bounded,
+            # ONE-TIME refresh before answering empty, never a retry
+            # loop and never Stage 3's parse fallback. `all_collections`
+            # itself is refetched too (not just the row cache) -- it is
+            # the CALLER's own, possibly-stale name-list snapshot,
+            # fetched before this function was ever called; refreshing
+            # only the row cache would leave a name registered by
+            # another process invisible to this scan regardless of
+            # whether its row is now fresh.
+            from nexus.mcp_infra import (  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+                get_collection_names,
+                invalidate_collections_cache,
+            )
+            try:
+                invalidate_collections_cache()
+                matches = _scan(get_collection_names())
+            except Exception:  # noqa: BLE001 — best-effort bounded refresh: a failed refetch (no reachable T3) must fall back to the already-computed empty result, never turn a safe "no match" into a hard failure
                 _log.debug(
-                    "resolve_corpus_candidate_dropped_no_row",
-                    corpus=corpus, collection=c,
+                    "resolve_corpus_bounded_refresh_failed",
+                    corpus=corpus, exc_info=True,
                 )
-                continue
-            if row["content_type"] != corpus:
-                continue
-            if row.get("lifecycle_state") != "live":
-                _log.debug(
-                    "resolve_corpus_candidate_excluded_lifecycle",
-                    corpus=corpus, collection=c, lifecycle_state=row.get("lifecycle_state"),
-                )
-                continue
-            matches.append(c)
         if not matches:
             _log.debug("resolve_corpus_no_collections_matched", corpus=corpus, stage="content_type_fanout")
         return matches
