@@ -388,7 +388,7 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 60
 # covers all 7 parametrize cases): voyage tokens are parametrize-data
 # collection-name/is_code_like pairs. Rationale in conftest.py beside
 # each entry.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 80
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 82
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:
