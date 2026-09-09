@@ -1459,10 +1459,17 @@ def test_page_beyond_lookahead_refetches_wider(monkeypatch):
     assert len(calls) == 2
     assert calls[1] >= 22  # refetched wide enough for the requested window
 
-def test_store_put_invalidates_page_cache(t3, monkeypatch):
+def test_store_put_invalidates_page_cache(t3, monkeypatch, local_mode_write):
     """Batch-f1655f55 critique fold: a write inside the TTL window must not
     leave a same-identity page burst serving pre-write results — store_put
-    clears the page cache so the next search refetches."""
+    clears the page cache so the next search refetches.
+
+    local_mode_write (coordinator ruling 2026-09-09): this test reaches
+    the REAL substrate write, which registers under the box's actual live
+    embedding profile (bge for this box) -- the module's cloud_mode
+    default would register with voyage-context-3 instead, 422ing against
+    that real profile. The test's own assumption to fix, not the engine's.
+    """
     from nexus.mcp import core as mcp_core
     _fresh_page_cache(monkeypatch)
     store_put(content="seed doc", collection="fixture-subject", title="cache-seed")

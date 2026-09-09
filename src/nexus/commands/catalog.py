@@ -1052,7 +1052,7 @@ def _backfill_repos(
 
 def _backfill_knowledge(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: object = None) -> int:
     """Register knowledge__* collections in catalog."""
-    # RDR-204 Phase 3 repoint (nexus-ft04v.26): this command's entire
+    # RDR-204 Phase 3 (nexus-ft04v.26), class (d): this command's entire
     # purpose is to find and register T3 collections NOT YET in the
     # catalog -- the row-based collection_content_type would raise
     # CollectionNotRegisteredError for exactly the unregistered
@@ -1091,7 +1091,7 @@ def _backfill_knowledge(cat: "CatalogReader", t3: object, dry_run: bool, *, writ
 
 def _backfill_rdrs(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: object = None) -> int:
     """Register rdr__* collections in catalog with per-document titles from T3 metadata."""
-    # RDR-204 Phase 3 repoint (nexus-ft04v.26): see _backfill_knowledge's
+    # RDR-204 Phase 3 (nexus-ft04v.26), class (d): see _backfill_knowledge's
     # comment -- same reason, same fix.
     from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
@@ -1233,7 +1233,7 @@ def _backfill_papers(
     *, writer: object = None,
 ) -> int:
     """Register docs__* paper collections, excluding repo-owned collections."""
-    # RDR-204 Phase 3 repoint (nexus-ft04v.26): see _backfill_knowledge's
+    # RDR-204 Phase 3 (nexus-ft04v.26), class (d): see _backfill_knowledge's
     # comment -- same reason, same fix.
     from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
@@ -1405,7 +1405,7 @@ def _backfill_per_file_from_t3(
     # Splitting on `__` first removes the prefix, then `-` splits name
     # vs hash.
     #
-    # RDR-204 Phase 3 repoint (nexus-ft04v.26): this is RECOVERY -- the
+    # RDR-204 Phase 3 (nexus-ft04v.26), class (d): this is RECOVERY -- the
     # collection may be in a partial/broken state (that is the reason
     # this command exists), so its shape is read from the STRING, not a
     # catalog row it may not have. split_candidate_collection_name, not
@@ -1597,7 +1597,7 @@ def backfill_cmd(
                 "--from-t3 requires either --collection <NAME> or "
                 "--all-repo-collections."
             )
-        # RDR-204 Phase 3 repoint (nexus-ft04v.26): this discovers T3
+        # RDR-204 Phase 3 (nexus-ft04v.26), class (d): this discovers T3
         # collections to REGISTER -- the row-based collection_content_type/
         # collection_owner would raise CollectionNotRegisteredError for
         # exactly the unregistered ones this scan exists to find.

@@ -103,7 +103,7 @@ class _CatalogBackedRegistry:
 
                 owner = self._writer.ensure_owner_for_repo(repo)
                 owner_id = str(owner).replace(".", "-")
-                # RDR-204 Phase 3 repoint (nexus-ft04v.26): `new_name` is
+                # RDR-204 Phase 3 (nexus-ft04v.26), class (a): `new_name` is
                 # about to be REGISTERED below (register_collection is
                 # what creates its row) -- the row-based
                 # collection_content_type would raise
@@ -1038,7 +1038,7 @@ def index_repo_cmd(
             # otherwise synthesize from the catalog-known docs collection
             # for this owner so the rewrite still fires on first-index
             # runs (where the docs__ default has not yet been registered).
-            # RDR-204 Phase 3 repoint (nexus-ft04v.26): both `existing_docs`
+            # RDR-204 Phase 3 (nexus-ft04v.26), class (a): both `existing_docs`
             # (a local registry field, not a catalog row) and `synth` (the
             # docstring above says explicitly this branch fires "on
             # first-index runs, where the docs__ default has not yet been
@@ -1740,7 +1740,7 @@ def _discover_subset(
     pre-fetch probe in ``discover_for_collection`` still makes the kept
     call cheap when topics exist.
     """
-    # RDR-204 Phase 3 repoint (nexus-ft04v.26): this function's own
+    # RDR-204 Phase 3 (nexus-ft04v.26), class (a): this function's own
     # docstring defines "kind" as the NAME PREFIX before the first "__",
     # not a catalog fact -- `collections` here can include one just
     # indexed THIS run, whose row may not have propagated to the
@@ -2932,7 +2932,7 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
         # For paper-shaped Markdown this is correct. For general prose / design
         # notes it will hallucinate paper fields. A general-prose extractor is
         # tracked as GH #981 fix #2 (deferred). Reverted attempt: nexus-z70w / #377.
-        # RDR-204 Phase 3 repoint (nexus-ft04v.26): `collection` is the
+        # RDR-204 Phase 3 (nexus-ft04v.26), class (a): `collection` is the
         # JUST-MINTED candidate name from t3_collection_name above -- it
         # may be a brand-new collection with no catalog row yet.
         # split_candidate_collection_name, not the row-based

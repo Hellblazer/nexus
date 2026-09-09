@@ -625,7 +625,7 @@ def _classify_never_chunked(e: object, owner_roots: dict[str, str] | None = None
     anomalous and worth investigating, not something to wave through as
     "legitimate by design".
     """
-    # RDR-204 Phase 3 repoint (nexus-ft04v.26): this classifies a catalog
+    # RDR-204 Phase 3 (nexus-ft04v.26), class (d): this classifies a catalog
     # document whose collection may itself be drifted/unregistered --
     # candidate-string derivation, never the row-based
     # collection_content_type, so one bad entry cannot abort the report.

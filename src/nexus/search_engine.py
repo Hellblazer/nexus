@@ -11,7 +11,7 @@ from typing import Any
 import structlog
 
 from nexus.config import TuningConfig, get_telemetry_config, load_config
-from nexus.corpus import embedding_model_for_collection_name, split_candidate_collection_name
+from nexus.corpus import embedding_model_for_collection_name
 from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
 from nexus.types import SearchResult
 
@@ -1486,18 +1486,22 @@ def _apply_salience_boost(
     Results without ``doc_id`` or whose document has no salient
     sentences fall through unchanged.
     """
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
     from nexus.salience import token_overlap_boost  # noqa: PLC0415 — circular-dep avoidance (nexus.salience)
 
-    # RDR-204 Phase 3 repoint (nexus-ft04v.26): a search RESULT's
-    # collection has live chunks (that is why it matched) but is NOT
-    # guaranteed to have a catalog row -- /v1/vectors/stats lists any
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26), class (c): a search
+    # RESULT's collection has live chunks (that is why it matched) but is
+    # NOT guaranteed to have a catalog row -- /v1/vectors/stats lists any
     # collection with live data regardless of registration state, and a
     # legacy pre-Phase-1 collection can be searchable with no row at all.
-    # Search post-processing must never crash on that; candidate-string
-    # derivation, not the row-based collection_content_type.
+    # Reads the row directly (never nexus.corpus's name-parsing
+    # primitives); a result whose collection has no row is simply
+    # excluded from the salience-boost-eligible set, the same bucket an
+    # unrecognized content_type already fell into.
     targeted = [
         r for r in results
-        if split_candidate_collection_name(r.collection)[0] in ("knowledge", "docs")
+        if (row := get_collection_row(r.collection)) is not None
+        and row.get("content_type") in ("knowledge", "docs")
     ]
     if not targeted:
         return results

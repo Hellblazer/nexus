@@ -29,7 +29,6 @@ import structlog
 from nexus.corpus import (
     embedding_model_for_collection_name,
     index_model_for_collection,
-    split_candidate_collection_name,
 )
 from nexus.db.limits import QUOTAS
 from nexus.db.local_ef import _MODEL_DIMS as _LOCAL_RAW_MODEL_DIMS
@@ -292,20 +291,15 @@ def export_collection(
         output=str(output_path),
     )
 
-    # Determine database_type from collection prefix.
-    # RDR-204 Phase 3 repoint (nexus-ft04v.26): `collection_name` may be a
-    # legacy/unregistered-but-live collection the operator named directly
-    # -- candidate-string derivation, not the row-based
-    # collection_content_type/collection_owner. split_candidate_collection_name(x)[1]
-    # == x iff x has no "__" at all (see its docstring) -- kept as an
-    # explicit branch rather than `split_candidate_collection_name(...)[0]
-    # or "knowledge"`, which would wrongly default to "knowledge" for a
-    # "__"-having name whose first segment happens to be empty too.
-    _ct_probe, _owner_probe = split_candidate_collection_name(collection_name)
-    if _owner_probe == collection_name:
-        prefix = "knowledge"
-    else:
-        prefix = _ct_probe
+    # Determine database_type from the collection's catalog row.
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26), class (c): `collection_name`
+    # may be a legacy/unregistered-but-live collection the operator named
+    # directly -- reads the row directly (never nexus.corpus's
+    # name-parsing primitives). No row -> "knowledge", the same safe
+    # default the prior no-separator branch already used.
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
+    _row = get_collection_row(collection_name)
+    prefix = _row["content_type"] if _row is not None else "knowledge"
 
     # Write header (record_count/embedding_dim filled after streaming).
     # The header is written first so the file is valid even during writing.

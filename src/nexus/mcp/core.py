@@ -2461,14 +2461,16 @@ def _resolve_corpus_target(
         part = part.strip()
         if not part:
             continue
-        # RDR-204 Phase 3 repoint (nexus-ft04v.26): *part* is a user-typed
-        # --corpus TOKEN, not necessarily an existing collection -- the
-        # row-based collection_owner would raise CollectionNotRegisteredError
-        # on a bare "code" or a legacy "docs__foo" that has no row under
-        # that exact string. split_candidate_collection_name(part)[1] !=
-        # part is the STRING-SHAPE substitute for a raw "__" in part test
-        # (see its docstring) -- this is the same class of candidate-string
-        # site as nexus.corpus.t3_collection_name's own ct/rest split.
+        # RDR-204 Phase 3 (nexus-ft04v.26), class (a): *part* is a
+        # user-typed --corpus TOKEN, not necessarily an existing
+        # collection -- the row-based collection_owner would raise
+        # CollectionNotRegisteredError on a bare "code" or a legacy
+        # "docs__foo" that has no row under that exact string.
+        # split_candidate_collection_name(part)[1] != part is the
+        # STRING-SHAPE substitute for a raw "__" in part test (see its
+        # docstring) -- this is the same class of candidate-string site
+        # as nexus.corpus.t3_collection_name's own ct/rest split, which
+        # this delegates to on the next line.
         if split_candidate_collection_name(part)[1] != part:
             target.append(t3_collection_name(part, t3=t3))
         else:

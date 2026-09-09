@@ -320,7 +320,7 @@ def _content_type_for_collection(collection: str) -> str:
     docs, not pdf). Falls back to ``"knowledge"`` for a non-conformant name
     with no prefix.
     """
-    # RDR-204 Phase 3 repoint (nexus-ft04v.26): this derives content_type
+    # RDR-204 Phase 3 (nexus-ft04v.26), class (d): this derives content_type
     # for a SYNTHESIZED (registering) catalog row -- the collection this
     # backfill is registering has, by definition, no row yet. Candidate-
     # string derivation (split_candidate_collection_name), not the

@@ -14,14 +14,25 @@ through .23) do that, each lowering the pin here. This gate exists FIRST,
 pinned at the count measured BEFORE any of those slices land, so every
 later slice's acceptance is "the pin fell", not a claim nobody can check.
 
-FOUR PATTERN CLASSES, per RDR-204 Phase 3 item 1 (docs/rdr/
-rdr-204-embedding-profile-and-collection-authority.md, sections
+FIVE PATTERN CLASSES. The original four, per RDR-204 Phase 3 item 1
+(docs/rdr/rdr-204-embedding-profile-and-collection-authority.md, sections
 "Implementation Plan / Phase 3" and "Validation / Testing Strategy"):
 ``split("__")`` / ``rsplit("__")``, ``partition("__")`` / ``rpartition("__")``,
 ``startswith(<type>__ or "quarantine-")`` / ``endswith(...)`` (bare or in a
-tuple), and ``"__" in x`` / ``"__" not in x``. All four are AST-matched
-(``ast.Call`` / ``ast.Compare`` nodes), not grepped — a comment or docstring
-containing the string ``"__"`` must never count.
+tuple), and ``"__" in x`` / ``"__" not in x``. A FIFTH, added by
+nexus-ft04v.26 (THE REPOINT, coordinator ruling 2026-09-09): a bare call
+to ``split_candidate_collection_name`` or ``embedding_model_for_collection_name``
+OUTSIDE ``corpus.py``'s own helper bodies -- once the funnel helpers
+stopped parsing the name and started reading the catalog row, "parsing
+that moves into one helper with N callers while the gate reads zero" is
+the exact failure this class exists to close: those two functions are
+STILL parsing (deliberately, for the callers that genuinely cannot use a
+row -- see ``COLLECTION_NAME_PARSE_CENSUS``'s own docstring for the
+classification), so a caller of either is doing what the first four
+classes already caught, just relocated behind a function call. All five
+are AST-matched (``ast.Call`` / ``ast.Compare`` nodes), not grepped — a
+comment or docstring containing the string ``"__"`` or either function
+name must never count.
 
 WHY AST, NOT GREP. The originating bead's own prior grep measured 63 sites
 under the first three classes and needed correcting twice: once because it
@@ -51,8 +62,10 @@ collection_shape.py's 3 sites (188, 191, 195) were LEFT UNFUNNELLED, not
 overlooked, per the coordinator's ruling on nexus-ft04v.21's hand-off:
 ``collection_attributes``'s positional 4-field decode of a malformed name
 cannot be reproduced byte-for-byte by the funnel helpers' "owner = whole
-remainder" convention. These stay raw and counted until nexus-ft04v.26
-(the repoint), where the decode reads the catalog row directly.
+remainder" convention. These stay raw and counted -- nexus-ft04v.26 (THE
+REPOINT) landed the row-based helpers and the fifth pattern class but did
+NOT close this holdout; it remains open (see COLLECTION_NAME_PARSE_CENSUS's
+per-site comment and the bead's hand-off report).
 
 nexus-ft04v.23 (Phase 3 funnel slice 3, the commands/ CLI surface)
 funnelled 32 of the 54-site nexus-ft04v.21 baseline to the three
@@ -63,8 +76,9 @@ label), was deliberately left raw rather than funnelled through
 ``collection_owner()`` -- confirmed by the coordinator's ruling on this
 bead's hand-off report -- see the comment on that file's census entry
 below for why the two are not equivalent for a genuinely conformant
-4-segment name; nexus-ft04v.26 (the repoint) resolves it against the
-row's owner/model instead of the name tail.
+4-segment name -- nexus-ft04v.26 (THE REPOINT) did NOT close this
+holdout either; it remains open at its shifted line (see
+COLLECTION_NAME_PARSE_CENSUS's per-site comment).
 
 nexus-ft04v.22 (Phase 3 funnel slice 2, db/ and catalog/) funnelled 9 of
 the 15 sites in its slice (embed_migrate.py:94/:262, http_vector_client.
@@ -94,8 +108,26 @@ this bead's hand-off report):
   exact-model/version-matching quarantine sibling name); none of the
   three helpers exposes a combined owner+model+version read.
 
-All three stay counted until nexus-ft04v.26 (the repoint) resolves them
-against the catalog row's columns directly instead of parsing.
+All three stay counted -- nexus-ft04v.26 (THE REPOINT) did NOT resolve
+them against the catalog row's columns; they remain open (see
+COLLECTION_NAME_PARSE_CENSUS's per-site comments).
+
+nexus-ft04v.26 (THE REPOINT) landed 2026-09-09: the three funnel helpers
+(collection_content_type/collection_owner/collection_model) now read the
+catalog row and fail loud on a name with none; resolve_corpus/
+_resolve_corpus_target/_group_collections_by_model repointed to the row
++ lifecycle_state; corpus.py's own 4-class floor dropped from 2 to 0 (its
+shared string-shape primitive, renamed split_candidate_collection_name,
+is now regex-based); and the fifth pattern class (above) was ADDED per
+the coordinator's ruling, raising the pin from 13 to 50 -- an increase
+that reflects the gate becoming HONEST about a parsing surface it
+previously could not see (the two primitives' external callers), not a
+regression. The FIVE holdout sites named above (collection_shape.py's 3,
+commands/collection.py's reindex_cmd, db/embed_migrate.py's
+migrate_collection_safe, db/reconcile.py's 3, catalog/chunk_quarantine.py's
+quarantine_collection_name) were NOT closed by this bead -- they remain
+exactly as nexus-ft04v.21/.22/.23 left them, tracked as open work in the
+bead's hand-off report.
 
 RDR-204'S OTHER NAMED EXCLUSION -- ``rdr-`` document ids -- MATCHES ZERO
 SITES HERE. The one ``rdr-`` id parse in the tree,
@@ -140,10 +172,10 @@ _TYPE_PREFIXES = frozenset({"code__", "docs__", "rdr__", "knowledge__", "quarant
 #: ``test_excluded_sites_are_real_matches_not_omissions`` — an exclusion
 #: that no longer matches anything is a stale entry, not a quieter gate.
 _EXCLUDED_SITES: dict[tuple[str, int], str] = {
-    # Line moved 7887 -> 7900 when nexus-ft04v.21 funnelled this file's
-    # other three sites (2451, 2460, 7622) and the new imports/comments
-    # shifted everything below them.
-    ("src/nexus/mcp/core.py", 7900): (
+    # Line moved 7887 -> 7900 (nexus-ft04v.21's funnel of this file's other
+    # three sites) -> 7934 (nexus-ft04v.26's THE REPOINT: _resolve_corpus_target/
+    # _group_collections_by_model rewritten, _collection_family_prefix added).
+    ("src/nexus/mcp/core.py", 7934): (
         "mcp__ tool name: `raw_tool.rsplit(\"__\", 1)[-1] if "
         'raw_tool.startswith("mcp__")` strips an MCP tool-name prefix for '
         "planner-step normalization, not a collection name."
@@ -191,6 +223,42 @@ _EXCLUDED_SITES: dict[tuple[str, int], str] = {
 #: bead forbids behaviour change. These stay raw and counted until
 #: nexus-ft04v.26 (the repoint), where the decode reads the catalog row
 #: directly instead of parsing.
+#:
+#: nexus-ft04v.26 (THE REPOINT) landed 2026-09-09 and added the FIFTH
+#: pattern class (coordinator ruling: a caller of split_candidate_collection_name/
+#: embedding_model_for_collection_name outside corpus.py's own helper
+#: bodies re-derives the same fact the four original classes did, just
+#: behind a function call -- "parsing that moves into one helper with N
+#: callers while the gate reads zero" is exactly the failure this closes).
+#: corpus.py's own floor (2, the two funnel helpers' shared internal
+#: parse) dropped to 0: `split_candidate_collection_name` (renamed from
+#: `_split_legacy_collection_name`) is now REGEX-based
+#: (`_LEGACY_SPLIT_RE.match`), which is invisible to the ORIGINAL four
+#: classes by construction (a regex `.match()` call is none of split/
+#: rsplit/partition/rpartition/startswith/endswith/"__" in) -- the
+#: mechanism moved, so the site the four original classes tracked
+#: genuinely no longer exists there. The 38 primitive_call sites below are
+#: every caller of those two functions outside corpus.py, each classified
+#: per the coordinator's four dispositions (see the per-site comments in
+#: source for the reason; a-d recorded here for the census reader):
+#:   a) mint/candidate-time (no row can exist yet -- registering, minting,
+#:      renaming, or dispatching on a --collection/--corpus argument that
+#:      may not name a real collection at all)
+#:   b) write-model resolution the write authority (effective_embedding_model_for_writes/
+#:      resolve_write_embedding_model) cannot serve without a content_type
+#:      already in hand (batch-sizing dispatch); reads the row first,
+#:      falls to the conformant name's own embedded model token (the
+#:      write authority's decision at render time, read back rather than
+#:      re-derived) only when no row exists
+#:   c) filtering/best-effort dispatch over a list where a row-absent
+#:      result is simply excluded, not parsed -- converted to a direct
+#:      nexus.mcp_infra.get_collection_row read wherever that was possible
+#:      without losing coverage; the residual primitive_call sites below
+#:      are the ones where a plain string comparison remained necessary
+#:      (e.g. matching against the STRING VALUE of a --corpus token)
+#:   d) backfill/reconcile/doctor diagnostics whose purpose IS to report a
+#:      name-versus-row disagreement or discover an unregistered
+#:      collection -- the RDR's own named exception
 COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {
     # nexus-ft04v.22: :69 `quarantine_collection_name`'s `parts =
     # origin.split("__", 1)` is deliberately left raw -- same excluded
@@ -202,30 +270,100 @@ COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {
     # discarding model/version. Confirmed by the coordinator's ruling on
     # this bead's hand-off report.
     "src/nexus/catalog/chunk_quarantine.py": 1,
+    # class (d): _content_type_for_collection synthesizes a row for the
+    # orphan GC backfill -- the collection being registered has no row by
+    # construction.
+    "src/nexus/catalog/orphan_backfill.py": 1,
     "src/nexus/collection_shape.py": 3,
-    # nexus-ft04v.23: :748 `corpus = name.split("__", 1)[1] if "__" in
-    # name else ""` in `reindex_cmd` is deliberately left raw. It derives
-    # a re-index provenance label from EVERYTHING after the first "__",
-    # not just the owner segment -- for a genuinely conformant 4-segment
-    # name (`<type>__<owner>__<model>__v<n>`) that differs from
+    # class (d): _backfill_knowledge/_backfill_rdrs/_backfill_papers (3
+    # sites) find and register T3 collections NOT YET in the catalog;
+    # :1421/:1427/:1455 recover-per-file reads a possibly-broken
+    # collection's shape from the string, not a row it may not have;
+    # :1613/:1614 `register --from-t3` discovers unregistered collections
+    # to register. All 8 are the RDR's named backfill-and-doctor
+    # exception.
+    "src/nexus/commands/catalog.py": 8,
+    # class (d): _run_name_vs_embed_dim compares what the NAME claims
+    # against the actual embedding dim (a name-vs-reality diagnostic; a
+    # row read would make it vacuous by construction under Phase 1).
+    "src/nexus/commands/catalog_cmds/doctor.py": 1,
+    # class (d): reports a catalog document whose physical_collection may
+    # itself be drifted/unregistered.
+    "src/nexus/commands/catalog_cmds/integrity.py": 1,
+    # class (d): reconcile-stale's whole purpose is diagnosing drifted
+    # catalog entries, which can reference a physical_collection with no
+    # row (2 sites: the no-provenance classifier and the single-chunk
+    # heuristic).
+    "src/nexus/commands/catalog_cmds/reconcile_stale.py": 2,
+    # :525/:526 rename_cmd, class (a): `new` is the rename TARGET, no row
+    # yet; `old` may be a never-registered legacy collection this rename
+    # is meant to fix. :371, class (d): _find_dimension_mismatched_collections
+    # compares the NAME's declared dim against the active embedder (same
+    # shape as catalog_cmds/doctor.py:980 above). :713/:787/:816
+    # reindex_cmd, class (a): the row was just deleted by
+    # purge_collection_cascade and only best-effort re-registered, so
+    # every content-type dispatch in that function must not assume a row.
+    # :780 (2 hits, "in"+"split") is nexus-ft04v.23's ORIGINAL raw
+    # holdout -- see its own comment below.
+    "src/nexus/commands/collection.py": 8,
+    # nexus-ft04v.23: `corpus = name.split("__", 1)[1] if "__" in name
+    # else ""` in `reindex_cmd` is deliberately left raw. It derives a
+    # re-index provenance label from EVERYTHING after the first "__", not
+    # just the owner segment -- for a genuinely conformant 4-segment name
+    # (`<type>__<owner>__<model>__v<n>`) that differs from
     # `collection_owner()` (which returns only the second segment), so
     # funnelling it would silently truncate the label instead of leaving
-    # behaviour byte-identical. Every other collection.py site in this
-    # slice funnelled cleanly; confirmed by the coordinator's ruling on
-    # this bead's hand-off report -- nexus-ft04v.26 (the repoint)
-    # resolves it against the row's owner/model instead of the name tail.
-    "src/nexus/commands/collection.py": 2,
-    "src/nexus/corpus.py": 2,
-    # nexus-ft04v.22: :387 `migrate_collection_safe`'s `corpus =
-    # stale.name.split("__", 1)[1] if "__" in stale.name else ""` (two
-    # hits: the split and the "__" in check) is deliberately left raw --
-    # byte-for-byte the SAME shape as commands/collection.py's
-    # reindex_cmd site above, same reason: needs owner+model/version
-    # together, which `collection_owner()` cannot reproduce for a
-    # conformant name. The file's other two sites (:99 `_classify`, :269
-    # `_default_reindex`) funnelled cleanly to
-    # `collection_content_type(...) == "..."`.
-    "src/nexus/db/embed_migrate.py": 2,
+    # behaviour byte-identical. Confirmed by the coordinator's ruling on
+    # nexus-ft04v.23's hand-off report; nexus-ft04v.26 (THE REPOINT) did
+    # not touch this ONE site (item 6 in the bead's own list) -- open
+    # work, tracked in the hand-off report.
+    # class (d): the census census, prefers the row (already fetched for
+    # this same fan-out-floor scan) and falls to candidate-string
+    # derivation only for a genuinely unregistered collection this
+    # diagnostic must still report on.
+    "src/nexus/commands/doctor.py": 1,
+    # class (a): `collection` reaches here because select_config already
+    # rejected it as unsupported -- may be a mistyped --collection
+    # argument with no row at all.
+    "src/nexus/commands/enrich.py": 1,
+    # :113 class (a), registering `new_name`; :1053/:1062 class (a),
+    # first-index synthesis explicitly for the not-yet-registered case;
+    # :1755 class (a), the function's OWN docstring defines "kind" as the
+    # name prefix, not a catalog fact; :2940 class (a), `collection` is
+    # the just-minted candidate from t3_collection_name on the line above.
+    "src/nexus/commands/index.py": 5,
+    # class (a): `collection` is the raw --collection CLI argument for
+    # `nx store export`, not necessarily an existing registered name.
+    "src/nexus/commands/store.py": 1,
+    "src/nexus/corpus.py": 0,
+    # class (d)/(a): _classify (:108, prefers the row, falls to
+    # candidate-string for the unregistered-legacy population migration
+    # exists to handle) and _default_reindex's target_name check (:285,
+    # class (a) -- the migration TARGET, model-swapped from an
+    # already-conformant old name, has no row by construction). :403 (2
+    # hits) is nexus-ft04v.22's ORIGINAL raw holdout -- see its own
+    # comment below.
+    # nexus-ft04v.22: :387 (now :403 after nexus-ft04v.26's edits)
+    # `migrate_collection_safe`'s `corpus = stale.name.split("__", 1)[1]
+    # if "__" in stale.name else ""` (two hits: the split and the "__" in
+    # check) is deliberately left raw -- byte-for-byte the SAME shape as
+    # commands/collection.py's reindex_cmd site above, same reason: needs
+    # owner+model/version together, which `collection_owner()` cannot
+    # reproduce for a conformant name. Confirmed by the coordinator's
+    # ruling on nexus-ft04v.22's hand-off report; nexus-ft04v.26 did not
+    # touch this ONE site (item 6) -- open work, tracked in the hand-off
+    # report.
+    "src/nexus/db/embed_migrate.py": 4,
+    # class (b): per_collection_chunk_cap/_upsert_byte_budget size the
+    # write that will create a collection's FIRST-EVER chunks, so they
+    # structurally cannot rely on a row in the common first-write case.
+    # _write_model_for_collection prefers the row (the re-write case,
+    # authoritative) and falls to embedding_model_for_collection_name
+    # (reading the model the write authority already embedded in an
+    # already-rendered conformant name at mint time, not re-deriving it)
+    # only when no row exists; :2364 is an existing, pre-nexus-ft04v.26
+    # call unrelated to this bead's own additions.
+    "src/nexus/db/http_vector_client.py": 3,
     # nexus-ft04v.22: :267 `_is_same_model_passthrough`, :362
     # `_dim_for_collection`, and :610's passthrough `declared_model` read
     # are ALL deliberately left raw. Each uses a LAXER
@@ -237,8 +375,38 @@ COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {
     # (`[a-zA-Z0-9-]+`, no underscore) -- funnelling would NARROW these
     # functions from accepting such a name to rejecting it, forbidden by
     # the bead. Confirmed by the coordinator's ruling on this bead's
-    # hand-off report.
+    # hand-off report; nexus-ft04v.26 did not touch these three sites
+    # (item 6) -- open work, tracked in the hand-off report.
     "src/nexus/db/reconcile.py": 3,
+    # _infer_content_type (write-path metadata normalization, prefers the
+    # row, falls to its own documented "anything but code -> prose"
+    # default) and the two TTL-expire sweeps (class (c), a collection
+    # with no row is simply skipped this pass) all read
+    # nexus.mcp_infra.get_collection_row directly and do NOT call either
+    # primitive. 3 of this file's 4 counted sites are PRE-EXISTING
+    # embedding_model_for_collection_name calls (RDR-109 nexus-6e6u1/
+    # nexus-a4h7b's conformant-name fast paths, unrelated to
+    # nexus-ft04v.26's own additions) the fifth class now also tracks.
+    # The 4th, class (d): T3Database.list_collections() (the retired
+    # Chroma-era, TEST-ONLY substrate -- RDR-155 P4a.2 made
+    # HttpVectorClient the only production path) synthesizes a row from
+    # the name since it has no catalog to join against; without this,
+    # nexus.mcp_infra's row cache reports "no row" for every
+    # T3Database-backed test, silently emptying resolve_corpus's
+    # bare-content-type fan-out for the test suite's primary substrate
+    # (found live: test_store_put_invalidates_page_cache /
+    # test_store_delete_invalidates_page_cache in tests/test_mcp_server.py).
+    "src/nexus/db/t3.py": 4,
+    # class (b)/pre-existing: embedding_model_for_collection's conformant-
+    # name fast path (RDR-109 nexus-6e6u1), unrelated to nexus-ft04v.26's
+    # own additions -- the fifth class now also tracks it.
+    "src/nexus/exporter.py": 1,
+    # class (a): *part* is a user-typed --corpus TOKEN, not necessarily an
+    # existing collection.
+    "src/nexus/mcp/core.py": 1,
+    # class (b)/pre-existing: embedding_model_for_collection's conformant-
+    # name fast path, same as exporter.py above.
+    "src/nexus/search_engine.py": 1,
 }
 
 PARSE_SITE_PIN: int = sum(COLLECTION_NAME_PARSE_CENSUS.values())
@@ -250,15 +418,34 @@ def _get_str_const(node: ast.expr) -> str | None:
     return None
 
 
+#: The two candidate-string PRIMITIVES the funnel helpers themselves are
+#: allowed to use (RDR-204 Phase 3 repoint, nexus-ft04v.26 THE REPOINT --
+#: coordinator ruling 2026-09-09). A caller reaching for either OUTSIDE
+#: corpus.py's own helper bodies is doing the same name-derives-a-fact
+#: parsing the original four classes exist to catch, just relocated behind
+#: a function call instead of a raw split/partition -- "parsing that moves
+#: into one helper with N callers while the gate reads zero" is the exact
+#: failure this fifth class exists to close. corpus.py's OWN internal use
+#: (split_candidate_collection_name's definition, and the other funnel
+#: helpers' calls into it) is excluded -- see ``_raw_collection_name_parse_sites``.
+_PRIMITIVE_CALL_NAMES = frozenset({
+    "split_candidate_collection_name", "embedding_model_for_collection_name",
+})
+
+_CORPUS_PY_REL = "src/nexus/corpus.py"
+
+
 def _scan_tree(path: pathlib.Path) -> list[tuple[int, str]]:
     """(lineno, pattern_class) for every raw collection-name-parse-shaped
     site in one file -- BEFORE the ``_EXCLUDED_SITES`` filter is applied.
 
     AST-based by construction: a match requires an actual ``ast.Call`` to
     ``split``/``rsplit``/``partition``/``rpartition``/``startswith``/
-    ``endswith`` with a literal argument, or an actual ``ast.Compare`` with
-    ``In``/``NotIn`` against the literal ``"__"`` -- never a text match, so
-    a comment or docstring mentioning ``"__"`` cannot contribute a hit.
+    ``endswith`` with a literal argument, an actual ``ast.Compare`` with
+    ``In``/``NotIn`` against the literal ``"__"``, or an actual ``ast.Call``
+    to one of the two :data:`_PRIMITIVE_CALL_NAMES` functions (pattern class
+    ``"primitive_call"``) -- never a text match, so a comment or docstring
+    mentioning ``"__"`` or either function name cannot contribute a hit.
     """
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -283,6 +470,9 @@ def _scan_tree(path: pathlib.Path) -> list[tuple[int, str]]:
                                 matched = True
                 if matched:
                     hits.append((node.lineno, attr))
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id in _PRIMITIVE_CALL_NAMES:
+                hits.append((node.lineno, "primitive_call"))
         elif isinstance(node, ast.Compare):
             for op, comparator in zip(node.ops, node.comparators):
                 if not isinstance(op, (ast.In, ast.NotIn)):
@@ -294,14 +484,25 @@ def _scan_tree(path: pathlib.Path) -> list[tuple[int, str]]:
 
 def _raw_collection_name_parse_sites() -> dict[str, list[tuple[int, str]]]:
     """Every raw match under SRC, keyed by path relative to REPO_ROOT,
-    with NO exclusion filter applied. Used to prove exclusions are real."""
+    with NO exclusion filter applied. Used to prove exclusions are real.
+
+    ``primitive_call`` hits inside ``corpus.py`` itself are dropped here,
+    not via ``_EXCLUDED_SITES``: the coordinator's ruling scopes the fifth
+    class to callers OUTSIDE corpus.py's own helper bodies (the funnel
+    helpers necessarily call their own shared string-shape primitive), a
+    file-level exclusion distinct in kind from the per-line judgement
+    calls ``_EXCLUDED_SITES`` records for the original four classes.
+    """
     found: dict[str, list[tuple[int, str]]] = {}
     for path in SRC.rglob("*.py"):
         if "__pycache__" in path.parts:
             continue
+        rel = path.relative_to(REPO_ROOT).as_posix()
         hits = _scan_tree(path)
+        if rel == _CORPUS_PY_REL:
+            hits = [(ln, cls) for ln, cls in hits if cls != "primitive_call"]
         if hits:
-            found[path.relative_to(REPO_ROOT).as_posix()] = hits
+            found[rel] = hits
     return found
 
 
@@ -333,9 +534,10 @@ def _shrunk(live: dict[str, int], census: dict[str, int]) -> list[str]:
 
 
 def test_scanner_is_not_vacuous(tmp_path: pathlib.Path) -> None:
-    """Prove the AST walk actually matches all four classes, and that the
-    TYPE_PREFIXES filter is not accidentally permissive, on a sample with a
-    known answer -- independent of how large the live debt happens to be."""
+    """Prove the AST walk actually matches all five classes, and that the
+    TYPE_PREFIXES filter and the primitive-name match are not accidentally
+    permissive, on a sample with a known answer -- independent of how
+    large the live debt happens to be."""
     sample = tmp_path / "sample.py"
     sample.write_text(
         "def f(name, other):\n"
@@ -349,7 +551,11 @@ def test_scanner_is_not_vacuous(tmp_path: pathlib.Path) -> None:
         '    i = "__" not in name\n'             # not in: MUST match
         '    j = name.startswith("mcp__")\n'     # not a type prefix: must NOT match
         '    k = name.split("-", 1)\n'           # wrong literal: must NOT match
-        "    return a, b, c, d, e, g, h, i, j, k\n",
+        '    m = split_candidate_collection_name(name)\n'      # primitive_call: MUST match
+        '    n = embedding_model_for_collection_name(name)\n'  # primitive_call: MUST match
+        '    o = other.split_candidate_collection_name(name)\n'  # attribute access, not a bare call: must NOT match
+        '    p = some_other_function(name)\n'    # unrelated call: must NOT match
+        "    return a, b, c, d, e, g, h, i, j, k, m, n, o, p\n",
         encoding="utf-8",
     )
     hits = _scan_tree(sample)
@@ -357,11 +563,14 @@ def test_scanner_is_not_vacuous(tmp_path: pathlib.Path) -> None:
     assert classes == [
         "split", "rsplit", "partition", "rpartition",
         "startswith", "endswith", "in", "not_in",
+        "primitive_call", "primitive_call",
     ], (
-        f"scanner drifted from the four RDR-204 Phase 3 item 1 pattern "
-        f"classes: {hits}. Either a real class stopped matching, or the "
-        f"mcp__/wrong-literal negative cases started matching -- both make "
-        f"every guard below pass by doing nothing or by over-counting."
+        f"scanner drifted from the five RDR-204 pattern classes (four from "
+        f"Phase 3 item 1, plus nexus-ft04v.26's primitive_call): {hits}. "
+        f"Either a real class stopped matching, or a negative case (mcp__/"
+        f"wrong-literal/attribute-access/unrelated-call) started matching "
+        f"-- both make every guard below pass by doing nothing or by "
+        f"over-counting."
     )
 
 
@@ -484,10 +693,10 @@ def test_census_has_no_stale_entries() -> None:
 
 
 def test_pin_matches_documented_total() -> None:
-    """The PARSE_SITE_PIN docstring claim (13, after nexus-ft04v.21's
-    funnel slice 1, nexus-ft04v.23's funnel slice 3, and nexus-ft04v.22's
-    funnel slice 2) is derived from the same dict the guards above check
+    """The PARSE_SITE_PIN docstring claim (50, after nexus-ft04v.26 added
+    the fifth pattern class -- see COLLECTION_NAME_PARSE_CENSUS's own
+    docstring) is derived from the same dict the guards above check
     against -- this catches a hand-edited docstring number drifting from
     the dict it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 13
+    assert PARSE_SITE_PIN == 50

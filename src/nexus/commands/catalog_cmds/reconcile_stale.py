@@ -298,7 +298,7 @@ def _resolve_provenance(entry: object, owner_roots: dict[str, str]) -> tuple[Pat
         # there was never a resolvable path to confirm absent.
         return None, "source_uri_only"
 
-    # RDR-204 Phase 3 repoint (nexus-ft04v.26): reconciliation exists
+    # RDR-204 Phase 3 (nexus-ft04v.26), class (d): reconciliation exists
     # specifically to diagnose drifted/stale catalog entries, which can
     # include a physical_collection with no catalog row -- candidate-string
     # derivation, never the row-based collection_content_type, so one bad

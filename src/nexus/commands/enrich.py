@@ -1185,11 +1185,12 @@ def enrich_aspects(
             f"'{collection}'. Supported prefixes: knowledge__*, "
             f"rdr__*. Aborting."
         )
-        # RDR-204 Phase 3 repoint (nexus-ft04v.26): best-effort UX hint,
-        # not a correctness read -- candidate-string derivation so a
-        # collection with no catalog row (or a genuinely bad --collection
-        # typo) still gets the plain "no extractor config" message instead
-        # of crashing the command.
+        # RDR-204 Phase 3 (nexus-ft04v.26), class (a): `collection` reaches
+        # here because select_config already rejected it as unsupported --
+        # it may be a genuinely mistyped --collection argument with no
+        # catalog row at all, so a row lookup could not help distinguish
+        # that from "docs__* is real but unsupported" anyway.
+        # Candidate-string derivation for the hint.
         if split_candidate_collection_name(collection)[0] == "docs":
             click.echo(
                 "Note: docs__* collections are not paper-shaped (nexus-z70w "

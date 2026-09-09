@@ -833,36 +833,59 @@ def per_collection_chunk_cap(collection: str) -> int:
     it (nexus-fdn1c); the correct trade here is against an unusable install, and
     that argument does not need a throughput number to stand up.
     """
-    # RDR-204 Phase 3 repoint (nexus-ft04v.26): deliberately NOT the
-    # row-based collection_owner/collection_content_type -- *collection*
-    # is about to receive its FIRST-EVER chunks (this function sizes the
-    # very upsert that will create them), so it structurally cannot have
-    # a row yet in the collection-row cache (sourced from
-    # /v1/vectors/stats, which only lists collections with >=1 LIVE
-    # chunk). A wrong guess here only picks a slightly-conservative safe
-    # cap, never a correctness bug -- unlike resolve_corpus/collection_*,
-    # this is pure batch-SIZING dispatch, not identity. Uses
-    # split_candidate_collection_name (the shared candidate-string
-    # primitive), reproducing `collection.split("__", 1)[0]` byte-
-    # identically including the no-"__"-at-all edge -- see
-    # nexus.corpus.t3_collection_name's identical ct/rest split for why
-    # the naive `split_candidate_collection_name(x)[0] or x` would be
-    # WRONG: it conflates "no '__' at all" with "'__' present but the
-    # first segment is empty" (e.g. "__foo"), which this ternary does not.
-    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
-    _ct_probe, _owner_probe = split_candidate_collection_name(collection)
-    prefix = collection if _owner_probe == collection else _ct_probe
+    # RDR-204 Phase 3 (nexus-ft04v.26), class (b): the WRITE AUTHORITY
+    # decides the embedding model, never a name parse. *collection* is
+    # about to receive its FIRST-EVER chunks in the common case (this
+    # function sizes the very upsert that will create them), so it
+    # structurally cannot have a row yet in most cases -- but a
+    # freshly-rendered write target IS a full 4-segment conformant name
+    # (t3_collection_name/docs_leaf_fallback_collection_name always
+    # render one for a for_write=True mint), and its embedding_model
+    # segment is exactly the token effective_embedding_model_for_writes
+    # chose when the name was rendered -- reading it back
+    # (embedding_model_for_collection_name, regex, validates the full
+    # conformant shape) is reading that decision, not re-deriving it from
+    # a raw prefix. Prefer the catalog row when one exists (a re-write to
+    # an EXISTING collection, the common non-first-write case, where the
+    # row is authoritative over the name by Gap 1). Only a genuinely
+    # unresolvable case (no row AND a non-conformant/legacy name) falls to
+    # a conservative default -- CCE's smaller cap, never a guessed 300.
+    _model = _write_model_for_collection(collection)
+    is_cce = _model == "voyage-context-3" if _model is not None else True
     # nexus-33hpq: onnx-local is a MEMORY-bound mode, not a timeout-bound one —
     # apply the memory-derived cap to every prefix (code included) before the
     # CCE-vs-code split below, which is Voyage-cloud-specific reasoning.
     if _serving_embedding_mode() == "onnx-local":
         return _ONNX_LOCAL_UPSERT_CHUNK_CAP
-    if prefix not in _CCE_COLLECTION_PREFIXES:
+    if not is_cce:
         return _CODE_UPSERT_CHUNK_CAP
     # Voyage CCE (or unknown mode, which stays on the conservative voyage
     # split — never widen a batch on a guess): slow server-side contextual
     # embedding behind the managed 30s gateway.
     return _CCE_UPSERT_CHUNK_CAP
+
+
+def _write_model_for_collection(collection: str) -> str | None:
+    """The embedding model *collection* writes under, or ``None`` when it
+    cannot be determined without a network round trip.
+
+    RDR-204 Phase 3 (nexus-ft04v.26): the shared resolution
+    :func:`per_collection_chunk_cap` and :func:`_upsert_byte_budget` both
+    need -- the catalog row when one exists (authoritative, Gap 1), else
+    the model segment of an already-conformant name (the write
+    authority's OWN decision at render time, read back rather than
+    re-derived -- ``embedding_model_for_collection_name`` validates the
+    full 4-segment shape via regex, not a raw prefix split). ``None`` only
+    for a genuinely unresolvable candidate (no row AND non-conformant),
+    which the two callers each default conservatively for their own
+    ceiling.
+    """
+    from nexus.corpus import embedding_model_for_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+    row = get_collection_row(collection)
+    if row is not None:
+        return row.get("embedding_model")
+    return embedding_model_for_collection_name(collection)
 
 
 def _upsert_byte_budget(collection: str) -> int | None:
@@ -884,13 +907,16 @@ def _upsert_byte_budget(collection: str) -> int | None:
     """
     if _serving_embedding_mode() == "onnx-local":
         return None
-    # RDR-204 Phase 3 repoint (nexus-ft04v.26): deliberately NOT the
-    # row-based helpers -- see per_collection_chunk_cap's comment above
-    # (same function, same reason, same shared primitive).
-    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
-    _ct_probe, _owner_probe = split_candidate_collection_name(collection)
-    prefix = collection if _owner_probe == collection else _ct_probe
-    if prefix in _CCE_COLLECTION_PREFIXES:
+    # RDR-204 Phase 3 (nexus-ft04v.26), class (b): see
+    # per_collection_chunk_cap's comment -- same resolution
+    # (_write_model_for_collection), same reason. Unlike the chunk cap,
+    # the CONSERVATIVE default here is the OPPOSITE direction: applying
+    # the byte budget (treating a genuinely unresolvable candidate as
+    # code-shaped) bounds the request, where defaulting to "no budget"
+    # would risk exactly the Voyage 400 RDR-195 exists to prevent.
+    _model = _write_model_for_collection(collection)
+    is_cce = _model == "voyage-context-3" if _model is not None else False
+    if is_cce:
         return None
     return _CODE_UPSERT_BYTE_BUDGET
 
@@ -3711,7 +3737,6 @@ class HttpVectorClient:
         genuinely shares content with another still-live document).
         """
         from nexus.catalog.store_hook import reap_catalog_manifest_for_chashes  # noqa: PLC0415 — deferred to avoid import cycle
-        from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
         from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
         from nexus.metadata_schema import is_expired  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
 
@@ -3725,22 +3750,15 @@ class HttpVectorClient:
         total = 0
         for entry in self.list_collections():
             name = entry.get("name", "")
-            # RDR-204 Phase 3 repoint (nexus-ft04v.26): `entry` already
-            # carries `content_type` when a catalog row backs this name
-            # (list_collections() joins it -- the SAME fetch this loop
-            # already made, never a second lookup); fall back to
-            # candidate-string derivation for a genuinely unregistered
-            # legacy collection rather than aborting the whole TTL sweep
-            # over it. `startswith("knowledge__")` <=>
-            # `split_candidate_collection_name(name)[0] == "knowledge"`,
-            # no edge divergence -- T3Database.expire's identical filter
-            # takes the same substitution.
-            row_content_type = entry.get("content_type")
-            content_type = (
-                row_content_type if row_content_type is not None
-                else split_candidate_collection_name(name)[0]
-            )
-            if content_type != "knowledge":
+            # RDR-204 Phase 3 repoint (nexus-ft04v.26), class (c): `entry`
+            # already carries `content_type` when a catalog row backs this
+            # name (list_collections() joins it -- the SAME fetch this
+            # loop already made, never a second lookup, and never
+            # nexus.corpus's name-parsing primitives). A collection with
+            # no row is simply skipped this pass -- a background TTL
+            # sweep must not guess, matching T3Database.expire's
+            # identical filter.
+            if entry.get("content_type") != "knowledge":
                 continue
             expired_ids: list[str] = []
             offset = 0

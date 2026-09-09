@@ -1446,7 +1446,7 @@ def _report_fanout_floor_census() -> None:
 
     groups: dict[str, list[str]] = {}
     for name in names:
-        # RDR-204 Phase 3 repoint (nexus-ft04v.26): prefer the catalog
+        # RDR-204 Phase 3 (nexus-ft04v.26), class (d): prefer the catalog
         # row's content_type -- already carried on `rows` (the SAME fetch
         # this census already made, never a second round trip). Fall back
         # to candidate-string derivation, never the row-based

@@ -36,7 +36,6 @@ from nexus.corpus import (
     embedding_model_for_collection,
     embedding_model_for_collection_name,
     index_model_for_collection,
-    split_candidate_collection_name,
 )
 from nexus.db.limits import QUOTAS
 from nexus.metadata_schema import CONTENT_TYPES, normalize, validate
@@ -75,14 +74,17 @@ def _infer_content_type(metadata: dict, collection_name: str) -> str:
     if store_type in _STORE_TYPE_TO_CONTENT_TYPE:
         return _STORE_TYPE_TO_CONTENT_TYPE[store_type]
 
-    # RDR-204 Phase 3 repoint (nexus-ft04v.26): this runs on EVERY write
-    # (_normalize_for_write) -- including a collection's FIRST-EVER
-    # chunk, which structurally has no catalog row yet. Candidate-string
-    # derivation, not the row-based collection_content_type.
-    # `startswith("code__")` <=> `split_candidate_collection_name(name)[0]
-    # == "code"`, no edge divergence -- the "__" is baked into the
-    # compared literal.
-    if split_candidate_collection_name(collection_name)[0] == "code":
+    # RDR-204 Phase 3 repoint (nexus-ft04v.26), class (c): this runs on
+    # EVERY write (_normalize_for_write) -- including a collection's
+    # FIRST-EVER chunk, which structurally has no catalog row yet. Reads
+    # the row directly (never nexus.corpus's name-parsing primitives);
+    # this function's own documented contract is already "anything but a
+    # definite code match -> prose" (see docstring), so a missing row
+    # falls through to the SAME "prose" default every other non-code case
+    # already used, not a guess.
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
+    row = get_collection_row(collection_name)
+    if row is not None and row.get("content_type") == "code":
         return "code"
     return "prose"
 
@@ -1207,16 +1209,19 @@ class T3Database:
         except _NotFoundErrors:
             _log.warning("expire_skipped_knowledge_store_not_found")
             return 0
+        from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
+
         for col_or_name in collections:
             name = col_or_name if isinstance(col_or_name, str) else col_or_name.name
-            # RDR-204 Phase 3 repoint (nexus-ft04v.26): a background TTL
-            # sweep must not abort over ONE unregistered legacy
-            # collection -- candidate-string derivation, not the
-            # row-based collection_content_type. `startswith(
-            # "knowledge__")` <=> `split_candidate_collection_name(name)[0]
-            # == "knowledge"`, no edge divergence -- HttpVectorClient.expire's
-            # identical filter takes the same substitution.
-            if split_candidate_collection_name(name)[0] != "knowledge":
+            # RDR-204 Phase 3 repoint (nexus-ft04v.26), class (c): reads
+            # the row directly (never nexus.corpus's name-parsing
+            # primitives). A collection with no row (or a non-"knowledge"
+            # row) is simply skipped this pass -- a background TTL sweep
+            # must not guess, and missing one pass on an unregistered
+            # legacy collection is not a correctness bug (it is picked up
+            # once registered, or was never TTL-tagged content at all).
+            row = get_collection_row(name)
+            if row is None or row.get("content_type") != "knowledge":
                 continue
             col = kc.get_collection(name)
             # Paginated accumulation: gather all expired IDs before deleting.
@@ -1280,8 +1285,29 @@ class T3Database:
 
         Queries the single ChromaDB client and parallelizes count queries
         up to 8 concurrent requests.
+
+        RDR-204 Phase 3 (nexus-ft04v.26): each row also carries
+        content_type/owner_id/embedding_model/lifecycle_state, mirroring
+        what HttpVectorClient.list_collections() joins from the real
+        engine's catalog row -- this class has no catalog to join
+        against (T3Database is the retired Chroma-era, TEST-ONLY
+        substrate; RDR-155 P4a.2 made HttpVectorClient the only
+        production path), so these are derived from the name itself,
+        exactly what a real Phase-1 backfill would have written for a
+        genuinely-conformant test fixture name. Without this,
+        nexus.mcp_infra's collection-row cache (built from whichever
+        list_collections() the injected client provides) always reports
+        "no row" for every T3Database-backed test, silently emptying
+        resolve_corpus's bare-content-type fan-out for the entire test
+        suite's primary substrate.
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: PLC0415 — stdlib import kept branch-local
+
+        from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (corpus)
+            is_conformant_collection_name,
+            parse_conformant_collection_name,
+            split_candidate_collection_name,
+        )
 
         try:
             raw = self._client.list_collections()
@@ -1292,9 +1318,33 @@ class T3Database:
         if not names:
             return []
 
+        # class (d): synthesizes a row for a substrate with no catalog to
+        # join against -- the same shape as orphan_backfill.py's
+        # _content_type_for_collection, exactly what a real Phase-1
+        # backfill would have written for a genuinely-conformant name.
+        def _derived_row_fields(name: str) -> dict:
+            if is_conformant_collection_name(name):
+                parsed = parse_conformant_collection_name(name)
+                return {
+                    "content_type": parsed["content_type"],
+                    "owner_id": parsed["owner_id"],
+                    "embedding_model": parsed["embedding_model"],
+                    "lifecycle_state": "live",
+                }
+            content_type, owner_id = split_candidate_collection_name(name)
+            return {
+                "content_type": content_type,
+                "owner_id": owner_id or name,
+                "embedding_model": "",
+                "lifecycle_state": "live",
+            }
+
         def _count(name: str) -> dict:
             col = self._client.get_collection(name)
-            return {"name": name, "count": _vector_with_retry(col.count)}
+            return {
+                "name": name, "count": _vector_with_retry(col.count),
+                **_derived_row_fields(name),
+            }
 
         result: list[dict] = []
         with ThreadPoolExecutor(max_workers=min(8, len(names))) as pool:

@@ -73,10 +73,18 @@ def _fake_collection_rows(monkeypatch: pytest.MonkeyPatch):
 
     def _fake_get_collection_row(name: str) -> dict | None:
         content_type = name.partition("__")[0] if "__" in name else ""
+        # RDR-204 Phase 3 (nexus-ft04v.26) class (b): per_collection_chunk_cap/
+        # _upsert_byte_budget now resolve the write model via the row
+        # first (_write_model_for_collection) -- a realistic embedding_model
+        # (the canonical CCE/code split any real Voyage-mode row would
+        # carry for this content_type), not a placeholder, so those
+        # tests' CCE-vs-code dispatch is exercised through the row path
+        # exactly like the other tables in this file are through content_type.
+        embedding_model = "voyage-context-3" if content_type in ("docs", "knowledge", "rdr") else "voyage-code-3"
         return {
             "content_type": content_type,
             "owner_id": name.partition("__")[2] if "__" in name else name,
-            "embedding_model": "test-model",
+            "embedding_model": embedding_model,
             "lifecycle_state": "live",
         }
 
@@ -154,14 +162,18 @@ class TestHttpVectorClientExpireCollectionFilter:
     ) -> None:
         from nexus.db import http_vector_client as hvc
 
+        # RDR-204 Phase 3 (nexus-ft04v.26) class (c): expire() now reads
+        # each entry's `content_type` field directly (list_collections()
+        # joins it from the catalog row on a real engine) instead of
+        # parsing the name -- the mock must carry it too.
         client = hvc.HttpVectorClient()
         monkeypatch.setattr(
             client,
             "list_collections",
             lambda: [
-                {"name": "code__myrepo", "count": 3},
-                {"name": "docs__papers", "count": 5},
-                {"name": "knowledge__sec", "count": 2},
+                {"name": "code__myrepo", "count": 3, "content_type": "code"},
+                {"name": "docs__papers", "count": 5, "content_type": "docs"},
+                {"name": "knowledge__sec", "count": 2, "content_type": "knowledge"},
             ],
         )
         queried_collections: list[str] = []

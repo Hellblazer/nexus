@@ -1234,19 +1234,18 @@ def _dt_reachable() -> tuple[bool, str]:
 
 def _knowledge_collections() -> list[str]:
     try:
-        # RDR-204 Phase 3 repoint (nexus-ft04v.26): candidate-string
-        # derivation, not the row-based collection_content_type -- one
-        # unregistered/chunkless collection in the list must not blank
-        # the whole preamble hint (the row-based helper would raise
-        # CollectionNotRegisteredError partway through the generator,
-        # which the try/except below would swallow into an EMPTY list,
-        # silently hiding every OTHER real match too).
-        from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — command-local import (nexus.corpus)
+        # RDR-204 Phase 3 (nexus-ft04v.26), class (c): reads the row
+        # directly (never nexus.corpus's name-parsing primitives) -- one
+        # unregistered/chunkless collection in the list is simply
+        # excluded, matching how a non-"knowledge" row is already
+        # excluded, never a guess from the string.
         from nexus.db import make_t3  # noqa: PLC0415 — command-local import (db)
+        from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — command-local import (mcp_infra)
 
         return sorted(
             c for c in make_t3().list_collections()
-            if split_candidate_collection_name(str(c))[0] == "knowledge"
+            if (row := get_collection_row(str(c))) is not None
+            and row.get("content_type") == "knowledge"
         )
     except Exception:  # noqa: BLE001 — a preamble probe never aborts the command
         return []

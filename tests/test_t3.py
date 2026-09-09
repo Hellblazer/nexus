@@ -106,12 +106,24 @@ def mock_db(mock_chromadb):
 
 
 @pytest.fixture
-def expire_db(mock_chromadb):
-    """T3Database wired for expire() tests with a single knowledge__ collection."""
+def expire_db(mock_chromadb, monkeypatch):
+    """T3Database wired for expire() tests with a single knowledge__ collection.
+
+    RDR-204 Phase 3 (nexus-ft04v.26) class (c): T3Database.expire() now
+    reads each collection's catalog row (nexus.mcp_infra.get_collection_row)
+    instead of parsing the name -- fake a "knowledge" row for the one
+    fixture collection so the filter keeps passing it through.
+    """
+    import nexus.mcp_infra as mi
+
     _, mock_client = mock_chromadb
     mock_col = MagicMock()
     mock_client.list_collections.return_value = ["knowledge__sec"]
     mock_client.get_collection.return_value = mock_col
+    monkeypatch.setattr(
+        mi, "get_collection_row",
+        lambda name: {"content_type": "knowledge"} if name == "knowledge__sec" else None,
+    )
     db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
     return db, mock_col
 
@@ -335,7 +347,21 @@ def test_expire_deletes_expired_entries(expire_db):
     mock_col.delete.assert_called_once_with(ids=["id-1", "id-2"])
 
 
-def test_expire_skips_non_knowledge_collections(mock_chromadb):
+def test_expire_skips_non_knowledge_collections(mock_chromadb, monkeypatch):
+    # RDR-204 Phase 3 (nexus-ft04v.26) class (c): expire() now reads each
+    # collection's catalog row instead of parsing the name -- fake rows
+    # for all three fixture collections so the filter is exercised on
+    # the row's content_type, matching what each name's own row would
+    # carry.
+    import nexus.mcp_infra as mi
+
+    rows = {
+        "code__myrepo": {"content_type": "code"},
+        "docs__papers": {"content_type": "docs"},
+        "knowledge__sec": {"content_type": "knowledge"},
+    }
+    monkeypatch.setattr(mi, "get_collection_row", lambda name: rows.get(name))
+
     _, mock_client = mock_chromadb
     mock_col = MagicMock()
     mock_col.get.return_value = {
@@ -869,7 +895,15 @@ def test_make_t3_client_injection(mock_chromadb):
 # ── upsert_chunks ───────────────────────────────────────────────────────────
 
 
-def test_upsert_chunks_calls_col_upsert(mock_db):
+def test_upsert_chunks_calls_col_upsert(mock_db, monkeypatch):
+    # RDR-204 Phase 3 (nexus-ft04v.26) class (c): _infer_content_type now
+    # prefers the catalog row over the "code__" name prefix -- fake one
+    # so the metadata normalize still injects content_type="code" here.
+    import nexus.mcp_infra as mi
+    monkeypatch.setattr(
+        mi, "get_collection_row",
+        lambda name: {"content_type": "code"} if name == "code__myrepo" else None,
+    )
     db, mock_col, _ = mock_db
     db.upsert_chunks(
         collection="code__myrepo", ids=["id-1", "id-2"],
@@ -887,9 +921,14 @@ def test_upsert_chunks_calls_col_upsert(mock_db):
     )
 
 
-def test_upsert_chunks_force_re_embed_is_local_noop(mock_db):
+def test_upsert_chunks_force_re_embed_is_local_noop(mock_db, monkeypatch):
     """RDR-181 §Approach step 3: same signature-parity no-op as
     upsert_chunks_with_embeddings — see that test's docstring."""
+    import nexus.mcp_infra as mi
+    monkeypatch.setattr(
+        mi, "get_collection_row",
+        lambda name: {"content_type": "code"} if name == "code__myrepo" else None,
+    )
     db, mock_col, _ = mock_db
     db.upsert_chunks(
         collection="code__myrepo", ids=["id-1"],
@@ -903,12 +942,17 @@ def test_upsert_chunks_force_re_embed_is_local_noop(mock_db):
     )
 
 
-def test_upsert_chunks_passes_all_metadata_fields(mock_db):
+def test_upsert_chunks_passes_all_metadata_fields(mock_db, monkeypatch):
     """Canonical schema fields (nexus-40t) survive the normalize pass;
     ``indexed_at`` is now in ALLOWED_TOP_LEVEL (replaces dropped
     ``expires_at``); ``content_type`` is injected from the collection
     prefix. RDR-102 Phase B drops ``source_path`` — it is normalized
     out and must not appear in the written record."""
+    import nexus.mcp_infra as mi
+    monkeypatch.setattr(
+        mi, "get_collection_row",
+        lambda name: {"content_type": "code"} if name == "code__myrepo" else None,
+    )
     db, mock_col, _ = mock_db
     rich_meta = {
         "title": "f.py:1-5", "tags": "py", "category": "code", "session_id": "",
@@ -1283,7 +1327,12 @@ def test_upsert_chunks_with_embeddings_uses_get_or_create(mock_db):
 # ── update_chunks ───────────────────────────────────────────────────────────
 
 
-def test_update_chunks_calls_col_update_without_documents(mock_db):
+def test_update_chunks_calls_col_update_without_documents(mock_db, monkeypatch):
+    import nexus.mcp_infra as mi
+    monkeypatch.setattr(
+        mi, "get_collection_row",
+        lambda name: {"content_type": "code"} if name == "code__myrepo" else None,
+    )
     db, mock_col, _ = mock_db
     # RDR-102 Phase B: source_path is dropped by normalize. frecency_score
     # is schema-stable and round-trips through the canonical pass.

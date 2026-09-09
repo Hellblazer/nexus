@@ -342,7 +342,7 @@ def _find_dimension_mismatched_collections(
     skipped, not flagged — there is no name-derived dim to compare against
     for those, and guessing would risk a false-positive delete.
     """
-    # RDR-204 Phase 3 repoint (nexus-ft04v.26): deliberately NOT the
+    # RDR-204 Phase 3 (nexus-ft04v.26), class (d): deliberately NOT the
     # row-based collection_model. This diagnostic's whole point is
     # comparing what the NAME CLAIMS against the active embedder -- a
     # mismatch between the row (authoritative) and reality should not
@@ -514,7 +514,7 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
     embedding-model space and are rejected unless ``--force-prefix-change``
     is set; otherwise search hits would be garbage.
     """
-    # RDR-204 Phase 3 repoint (nexus-ft04v.26): `new` is the RENAME
+    # RDR-204 Phase 3 (nexus-ft04v.26), class (a): `new` is the RENAME
     # TARGET -- it does not exist yet (rename is what creates it), so it
     # structurally has no catalog row. `old` might ALSO be a legacy,
     # never-registered collection this very rename is meant to fix.
@@ -578,7 +578,7 @@ def reindex_cmd(name: str, force: bool) -> None:
     """Delete and re-index a collection from its source files."""
     from pathlib import Path  # noqa: PLC0415 — stdlib import kept branch-local
 
-    # RDR-204 Phase 3 repoint (nexus-ft04v.26): this command deletes
+    # RDR-204 Phase 3 (nexus-ft04v.26), class (a): this command deletes
     # `name`'s catalog row partway through (purge_collection_cascade
     # below) and only best-effort re-registers it ("the re-index below
     # must proceed" even on a failed re-register) -- every

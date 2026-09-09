@@ -673,7 +673,7 @@ def export_cmd(
                 click.echo(f"ERROR exporting {col_name}: {exc}", err=True)
         click.echo(f"\nTotal: {total_exported} records across {len(collections_info)} collections.")
     else:
-        # RDR-204 Phase 3 repoint (nexus-ft04v.26): `collection` is the
+        # RDR-204 Phase 3 (nexus-ft04v.26), class (a): `collection` is the
         # raw --collection CLI argument, not necessarily an existing
         # registered name (a bare/legacy arg falls through to _t3col's
         # promotion) -- candidate-string shape check, not a row lookup.
