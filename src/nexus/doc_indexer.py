@@ -29,7 +29,7 @@ from nexus.checkpoint import (
     read_checkpoint,
     write_checkpoint,
 )
-from nexus.corpus import index_model_for_collection
+from nexus.corpus import ensure_collection_registered, index_model_for_collection
 from nexus.db import make_t3
 from nexus.retry import _vector_with_retry
 from nexus.md_chunker import SemanticMarkdownChunker, parse_frontmatter
@@ -1517,6 +1517,29 @@ def _resolve_write_db(t3: Any) -> Any:
     return make_t3()
 
 
+_NO_REGISTRAR = object()
+
+
+def _register_before_read(db: Any, collection_name: str) -> None:
+    """Register *collection_name* exactly when *db*'s own write path would.
+
+    RDR-204 Phase 2 client half (nexus-ft04v.16). ``HttpVectorClient``
+    carries an injectable ``_collection_registrar`` and registers on
+    ``put``/``upsert_chunks``; the incremental-sync pre-check READ runs
+    before that first write, and the Phase 2 engine answers a read of an
+    unregistered collection with 422. So register first, through the
+    same registrar the write would use (``None`` means the default
+    catalog writer, as on the write path). A vector client with no
+    registrar attribute at all (the in-memory test substrate) never
+    registers on write either, and is left alone: this mirrors the write
+    path, it does not add a second registration policy.
+    """
+    registrar = getattr(db, "_collection_registrar", _NO_REGISTRAR)
+    if registrar is _NO_REGISTRAR:
+        return
+    ensure_collection_registered(collection_name, registrar=registrar)
+
+
 def _index_document(
     file_path: Path,
     corpus: str,
@@ -1643,6 +1666,16 @@ def _index_document(
             corpus, collection_exists=lambda name: db.collection_exists(name),
         )
     col = db.get_or_create_collection(collection_name)
+    # RDR-204 Phase 2 client half (nexus-ft04v.16): the engine answers any
+    # read of a collection with no catalog_collections row with 422, and
+    # the incremental-sync pre-check below is a READ that runs before this
+    # document's first write. A brand-new collection's first `nx index md`
+    # therefore has to register BEFORE that read, with the same call the
+    # write path uses (HttpVectorClient.put/upsert_chunks), so the row is
+    # byte-identical to the one a write would have created. Never treat
+    # the 422 as "nothing indexed yet": that is the silent fallback RDR-204
+    # forbids.
+    _register_before_read(db, collection_name)
 
     target_model = index_model_for_collection(collection_name)
     if local_target_model is not None:
@@ -2497,6 +2530,10 @@ def index_pdf(
             corpus, collection_exists=lambda name: db.collection_exists(name),
         )
     col = db.get_or_create_collection(col_name)
+    # RDR-204 Phase 2 client half (nexus-ft04v.16): register before the
+    # incremental-sync READ below; see the matching comment in
+    # _index_document. Same registrar the write path uses.
+    _register_before_read(db, col_name)
     target_model = index_model_for_collection(col_name)
     if local_target_model is not None:
         # See _index_document for rationale: keep the staleness check
