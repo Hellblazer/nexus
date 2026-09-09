@@ -1236,6 +1236,26 @@ class TestServiceModeIndexerRouting:
         monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
         monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
 
+        # nexus-ft04v.16 client half (31cc9923a): _index_document now
+        # registers the target collection BEFORE the incremental-sync
+        # read, unconditionally -- so this test now reaches
+        # ensure_collection_registered's profile-agreement check
+        # (nexus-ft04v.26 item 3, RDR-204 Phase 3 THE REPOINT) even
+        # though it short-circuits on an empty chunk list. That check
+        # always calls nexus.catalog.factory.make_catalog_reader() --
+        # unstubbed, that reaches a REAL (401-rejecting, unauthenticated
+        # "tok") /v1/catalog/embedding_profile call. An empty profile
+        # ({}: this fixture collection was never actually registered)
+        # is the correct bootstrap-case stub -- registration proceeds
+        # with intent, no raise.
+        import nexus.catalog.factory as _catalog_factory_mod
+
+        class _EmptyProfileReader:
+            def embedding_profile(self) -> list[dict]:
+                return []
+
+        monkeypatch.setattr(_catalog_factory_mod, "make_catalog_reader", lambda: _EmptyProfileReader())
+
         explicit_col = MagicMock()
         explicit_col.get.return_value = {"metadatas": []}  # staleness check: not found
         explicit_t3 = MagicMock()
