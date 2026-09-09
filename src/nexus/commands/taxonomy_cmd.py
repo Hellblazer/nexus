@@ -2412,6 +2412,15 @@ def label_cmd(collection: str, relabel_all: bool) -> None:
 @click.option("--persist", is_flag=True, help="Write projection assignments (assigned_by='projection')")
 @click.option("--backfill", is_flag=True, help="Project all collections against each other")
 @click.option(
+    "--prune-below-threshold", "prune_below_threshold", is_flag=True,
+    help=(
+        "Recovery: delete projection assignments whose stored raw cosine is "
+        "below the corpus threshold (explicit --threshold, else the per-prefix "
+        "default), for the source collection given or, with --backfill, for "
+        "every corpus prefix. Undoes a pass that admitted weak matches (GH #1528)."
+    ),
+)
+@click.option(
     "--use-icf", "use_icf", is_flag=True,
     help=(
         "Apply ICF (Inverse Collection Frequency) weighting — suppresses "
@@ -2423,6 +2432,7 @@ def project_cmd(
     source_collection: str,
     against: str,
     threshold: float | None,
+    prune_below_threshold: bool,
     top_k: int,
     persist: bool,
     backfill: bool,
@@ -2463,6 +2473,24 @@ def project_cmd(
         resolved_threshold = default_projection_threshold(source_collection)
 
     try:
+        if prune_below_threshold:
+            # GH #1528 (nexus-4tfxp): one engine-side DELETE per prefix, on the
+            # stored RAW cosine, so a pass that admitted weak matches can be
+            # undone without a rebuild.
+            if backfill or not source_collection:
+                targets = [
+                    (prefix, threshold if threshold is not None else default_projection_threshold(prefix + "x"))
+                    for prefix in ("code__", "knowledge__", "docs__", "rdr__")
+                ]
+            else:
+                targets = [(source_collection, resolved_threshold)]
+            total_removed = 0
+            for prefix, thr in targets:
+                removed = db.taxonomy.prune_projection_below(prefix, thr)
+                total_removed += removed
+                click.echo(f"  {prefix}: removed {removed} projection assignment(s) below {thr:.2f}")
+            click.echo(f"Pruned {total_removed} projection assignment(s).")
+            return
         if backfill:
             _run_backfill(
                 db.taxonomy, _proj_handle,

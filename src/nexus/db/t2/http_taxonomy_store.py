@@ -543,6 +543,19 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         rows = self._post("/assignments/details", {"doc_ids": doc_ids}, mutates=False)
         return list(rows or [])
 
+    def prune_projection_below(self, source_collection_prefix: str, min_similarity: float) -> int:
+        """POST /v1/taxonomy/assignments/prune_projection (GH #1528, nexus-4tfxp):
+        delete projection assignments under *source_collection_prefix* (a corpus
+        prefix like ``code__`` or one full collection name) whose stored raw
+        cosine is below *min_similarity*. Returns the removed count. The
+        recovery path for a pass that admitted weak matches: persist is a
+        prefer-higher upsert, so nothing else lowers or removes a row."""
+        r = self._post(
+            "/assignments/prune_projection",
+            {"source_collection_prefix": source_collection_prefix, "min_similarity": float(min_similarity)},
+        )
+        return int(r.get("removed", 0)) if isinstance(r, dict) else 0
+
     def purge_assignments_for_doc(self, project: str, title: str) -> int:
         """Remove assignments for a deleted doc."""
         r = self._post("/assignments/purge_doc", {"project": project, "title": title})
@@ -1714,11 +1727,25 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         # 4-5. Cosine similarity matrix (raw) + ICF-adjusted filter matrix.
         sim = _cosine_matrix(src_embs, ctr_embs)
         if icf_map:
-            icf_weights = np.array(
+            # GH #1528 (nexus-4tfxp): ICF = log2(N_effective / DF) runs up to
+            # ~5.5, and multiplying raw cosine by it before the threshold
+            # ADMITTED weak matches to rare topics (a 0.30 cosine passed
+            # 0.70; one pass wrote 67,638 rows below their corpus threshold
+            # and turned rare topics into hubs). ICF's job is to remove hub
+            # matches and order the rest, never to admit: the corpus
+            # threshold is applied to the RAW cosine first, and the weight
+            # is clamped to <= 1 (icf / icf_max, so the rarest topic keeps
+            # its raw score and a hub is scaled down, possibly below the
+            # threshold and out).
+            icf = np.array(
                 [icf_map.get(int(m["topic_id"]), 1.0) for m in ctr_metas],
                 dtype=np.float32,
             )
-            filter_sim = sim * icf_weights
+            icf_max = float(icf.max()) if icf.size else 0.0
+            icf_weights = (
+                np.minimum(icf / icf_max, 1.0) if icf_max > 0 else np.ones_like(icf)
+            )
+            filter_sim = np.where(sim >= threshold, sim * icf_weights, 0.0)
         else:
             filter_sim = sim
 
