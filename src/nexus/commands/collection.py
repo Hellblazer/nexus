@@ -45,16 +45,68 @@ def collection() -> None:
     """Manage T3 vector collections (list, info, verify, delete)."""
 
 
+_LIST_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("CONTENT_TYPE", "content_type"),
+    ("OWNER", "owner_id"),
+    ("MODEL", "embedding_model"),
+    ("DIM", "dimension"),
+    ("STATE", "lifecycle_state"),
+)
+
+
+def _catalog_collection_rows() -> tuple[dict[str, dict], str]:
+    """The catalog's collection rows keyed by name, and an error text
+    ("" on success). The rows are the columns of record (RDR-204); the
+    vectors stats join carries four of the five but not ``dimension``."""
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+        cat = make_catalog_reader()
+        if cat is None:
+            return {}, "catalog reader unavailable"
+        return {str(r.get("name", "")): r for r in cat.list_collections()}, ""
+    except Exception as exc:  # noqa: BLE001 — boundary: the listing still prints names and counts; the columns are reported as unread, never parsed from the name
+        return {}, f"{type(exc).__name__}: {exc}"
+
+
 @collection.command("list")
 def list_cmd() -> None:
-    """List all T3 collections with chunk counts."""
-    cols = _t3().list_collections()
-    if not cols:
+    """List T3 collections: live chunk counts, and the catalog's columns
+    (content type, owner, embedding model, dimension, lifecycle state).
+
+    RDR-204 Day 2 (nexus-ft04v.32): every column is read from the
+    collection's catalog row, never derived from its name, so a row whose
+    name disagrees with its columns is visible rather than hidden behind a
+    consistent-looking name. A collection with no catalog row prints ``-``
+    in every column; a catalog row with no chunks prints 0.
+    """
+    counts = {c["name"]: c.get("count", 0) for c in _t3().list_collections()}
+    rows, rows_error = _catalog_collection_rows()
+    names = sorted(set(counts) | set(rows))
+    if not names:
         click.echo("No collections found.")
         return
-    width = max(len(c["name"]) for c in cols)
-    for c in sorted(cols, key=lambda x: x["name"]):
-        click.echo(f"{c['name']:<{width}}  {c['count']:>6} chunks")
+    if rows_error:
+        click.echo(f"catalog columns could not be read ({rows_error}); names and counts only")
+    width = max(len(n) for n in names)
+    def _cell(name: str, key: str) -> str:
+        val = rows.get(name, {}).get(key)
+        return "-" if val is None or val == "" else str(val)
+
+    cells = {n: [_cell(n, key) for _, key in _LIST_COLUMNS] for n in names}
+    col_widths = [
+        max(len(label), *(len(cells[n][i]) for n in names))
+        for i, (label, _) in enumerate(_LIST_COLUMNS)
+    ]
+    header = f"{'NAME':<{width}}  {'CHUNKS':>6}  " + "  ".join(
+        f"{label:<{w}}" for (label, _), w in zip(_LIST_COLUMNS, col_widths)
+    )
+    click.echo(header.rstrip())
+    for n in names:
+        line = f"{n:<{width}}  {counts.get(n, 0):>6}  " + "  ".join(
+            f"{cell:<{w}}" for cell, w in zip(cells[n], col_widths)
+        )
+        click.echo(line.rstrip())
 
 
 def _shape_catalog() -> Any:

@@ -67,6 +67,110 @@ def test_list_shows_names_and_counts(runner, env_creds, mock_db) -> None:
     assert "knowledge__topic" in result.output
 
 
+# RDR-204 Day 2 (nexus-ft04v.32): the listing prints the catalog COLUMNS,
+# never a parsed name. A row whose name disagrees with its columns is the
+# proof: the row's values show, the name's segments do not.
+
+
+class _FakeCatalogRows:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def list_collections(self):
+        return list(self._rows)
+
+
+def _row(name, ct, owner, model, dim, state="live"):
+    return {"name": name, "content_type": ct, "owner_id": owner, "embedding_model": model,
+            "dimension": dim, "lifecycle_state": state}
+
+
+def _invoke_list_with_rows(runner, mock_db, rows):
+    with patch("nexus.catalog.factory.make_catalog_reader", return_value=_FakeCatalogRows(rows)):
+        return _invoke(runner, mock_db, ["list"])
+
+
+def _line_for(output: str, name: str) -> str:
+    lines = [ln for ln in output.splitlines() if ln.startswith(name + " ")]
+    assert len(lines) == 1, output
+    return lines[0]
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_list_prints_the_five_catalog_columns(runner, env_creds, mock_db) -> None:
+    mock_db.list_collections.return_value = [{"name": "code__1-1__voyage-code-3__v1", "count": 42}]
+    result = _invoke_list_with_rows(runner, mock_db, [
+        _row("code__1-1__voyage-code-3__v1", "code", "1-1", "voyage-code-3", 1024),
+    ])
+    assert result.exit_code == 0, result.output
+    header = result.output.splitlines()[0]
+    for col in ("CONTENT_TYPE", "OWNER", "MODEL", "DIM", "STATE", "CHUNKS"):
+        assert col in header, header
+    line = _line_for(result.output, "code__1-1__voyage-code-3__v1")
+    for value in ("42", "code", "1-1", "voyage-code-3", "1024", "live"):
+        assert value in line, line
+
+
+def test_list_shows_the_row_values_when_the_name_disagrees(runner, env_creds, mock_db) -> None:
+    """The name says docs / owner nine / minilm-384; the catalog row says
+    knowledge / 1-1 / bge 768 and is disputed. The row wins, visibly."""
+    name = "docs__nine__minilm-l6-v2-384__v1"
+    mock_db.list_collections.return_value = [{"name": name, "count": 3}]
+    result = _invoke_list_with_rows(runner, mock_db, [
+        _row(name, "knowledge", "1-1", "bge-base-en-v15-768", 768, "disputed"),
+    ])
+    assert result.exit_code == 0, result.output
+    line = _line_for(result.output, name)
+    body = line[len(name):]
+    for value in ("knowledge", "1-1", "bge-base-en-v15-768", "768", "disputed"):
+        assert value in body, line
+    for parsed in ("docs", "nine", "minilm", "384"):
+        assert parsed not in body, f"a parsed segment leaked into the columns: {line}"
+
+
+@pytest.mark.usefixtures("cloud_mode")
+@pytest.mark.parametrize("state", ["live", "quarantine", "dormant", "disputed"])
+def test_list_renders_every_lifecycle_state(runner, env_creds, mock_db, state) -> None:
+    name = f"knowledge__1-1__voyage-context-3__v1"
+    mock_db.list_collections.return_value = [{"name": name, "count": 1}]
+    result = _invoke_list_with_rows(runner, mock_db, [
+        _row(name, "knowledge", "1-1", "voyage-context-3", 1024, state),
+    ])
+    assert state in _line_for(result.output, name)
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_list_unregistered_collection_shows_dashes_not_a_parse(runner, env_creds, mock_db) -> None:
+    name = "code__orphan__voyage-code-3__v1"
+    mock_db.list_collections.return_value = [{"name": name, "count": 5}]
+    result = _invoke_list_with_rows(runner, mock_db, [])
+    line = _line_for(result.output, name)
+    body = line[len(name):]
+    assert "5" in body and "-" in body
+    assert "orphan" not in body and "voyage" not in body, line
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_list_catalog_row_without_chunks_is_listed_with_zero(runner, env_creds, mock_db) -> None:
+    """A dormant row has no T3 entry; it is the row that makes it visible."""
+    name = "docs__1-1__voyage-context-3__v1"
+    mock_db.list_collections.return_value = []
+    result = _invoke_list_with_rows(runner, mock_db, [
+        _row(name, "docs", "1-1", "voyage-context-3", 1024, "dormant"),
+    ])
+    line = _line_for(result.output, name)
+    assert "dormant" in line and " 0 " in line + " "
+
+
+def test_list_reader_failure_keeps_counts_and_says_so(runner, env_creds, mock_db) -> None:
+    mock_db.list_collections.return_value = [{"name": "code__myrepo", "count": 42}]
+    with patch("nexus.catalog.factory.make_catalog_reader", side_effect=RuntimeError("engine down")):
+        result = _invoke(runner, mock_db, ["list"])
+    assert result.exit_code == 0, result.output
+    assert "code__myrepo" in result.output and "42" in result.output
+    assert "catalog columns" in result.output.lower() and "engine down" in result.output
+
+
 # ── info ────────────────────────────────────────────────────────────────────
 
 

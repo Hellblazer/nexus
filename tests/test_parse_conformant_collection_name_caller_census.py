@@ -102,7 +102,7 @@ ALLOWED_CALLERS: dict[tuple[str, int], str] = {
         "Pre-existing single caller (http_catalog_client.py's "
         "collection_for) unaffected by this bead."
     ),
-    ("src/nexus/commands/collection.py", 777): (  # line shifted (nexus-ft04v.28 item 4: routed through ensure_collection_registered; discard_cached_registration + the seam call added above it)
+    ("src/nexus/commands/collection.py", 829): (  # line shifted again (nexus-ft04v.32: list_cmd grew the catalog-column rendering above it); before that nexus-ft04v.28 item 4 routed it through ensure_collection_registered
         "reindex_cmd: `name`'s catalog row was JUST DELETED by "
         "purge_collection_cascade a few lines above -- this call is what "
         "RECREATES it, so the row-based funnel helpers would raise "

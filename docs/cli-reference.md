@@ -2009,7 +2009,7 @@ nx collection list
 
 | Subcommand | Description |
 |------------|-------------|
-| `list` | All T3 collections with document counts |
+| `list` | All T3 collections with live chunk counts and the catalog's columns: `CONTENT_TYPE`, `OWNER`, `MODEL`, `DIM`, `STATE` (`live`, `quarantine`, `dormant`, `disputed`). Every column is read from the collection's catalog row, never parsed from its name (RDR-204 Day 2, nexus-ft04v.32), so a row whose name disagrees with its columns shows the columns. A collection with no catalog row prints `-` in each column; a registered row with no chunks (dormant) prints `0`. If the catalog cannot be read the listing says so and prints names and counts only |
 | `info NAME` | Details for one collection |
 | `verify NAME` | Existence check + document count |
 | `reindex NAME` | Delete and re-index a collection from its source documents |
