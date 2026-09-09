@@ -435,7 +435,7 @@ waiter, deploy-gap retry and the deferred `LISTEN` path.
       hook is killed
       without trace at session end; the census's newest-row-age
       comparison is the detector. What research 5 did not run, and Phase
-      3 must: the real projection script's timing with the engine up,
+      2 Step 3 must: the real projection script's timing with the engine up,
       down, and rate limiting. — **Method**: Spike plus Docs plus Source
       Search.
 - [x] **CA 5: One engine JVM at any time.** — **Status**: Verified
@@ -610,6 +610,7 @@ row = select(...).from(TUPLES)
                CLAIM_STATE.isNull().or(LEASE_UNTIL.lt(now())))
         .orderBy(CREATED_AT).limit(1)
         .forNoKeyUpdate().skipLocked().fetchOne();
+// if row.leaseLapsed and row.attempts + 1 == maxAttempts: mark dead, log, re-run select
 update(TUPLES).set(CLAIM_STATE, "claimed").set(CLAIMANT, c)
         .set(CLAIM_ID, id).set(LEASE_UNTIL, now + lease)
         .where(ID.eq(row.id)).execute();
@@ -635,7 +636,12 @@ row whose previous lease has lapsed, the same transaction writes the
 `expire` row for the previous claim and increments `attempts`; if that
 brings `attempts` to the template's `max_attempts` the row is
 dead-lettered there and then (`claim_state = 'dead'`, a `dead` row) and
-the claim moves to the next candidate, otherwise the row is claimed. So
+the claim re-runs its select, otherwise the row is claimed. That re-run
+is bounded: each pass either claims or dead-letters one row, and the
+call gives up after `NX_TUPLE_READ_MAX` passes and returns the probe
+result. The `dead` log row is the per-claim record; the sweep's
+`dead_lettered` count covers only the rows the sweep itself
+dead-letters. So
 a consumer that crashes on a message counts against `max_attempts`
 exactly as a `nack` does. The sweep's release arm does the same for
 lapsed claims nobody re-took: `expire`, increment, and dead-letter at
@@ -685,7 +691,9 @@ see what a claimant is holding and what has failed. The cap on `n` is
 the paging convention the client already carries as
 `MAX_QUERY_RESULTS` in `limits.py` (300; the engine has no constant of
 that name today and cites the client's), enforced engine-side by a new
-setting this RDR adds, `NX_TUPLE_READ_MAX`, default 300. Results are ordered by `(created_at, id)`, resuming strictly
+setting this RDR adds, `NX_TUPLE_READ_MAX`, default 300 (Phase 1 Step
+4 owns it; an `n` above the cap is clamped, as paging is elsewhere, not
+refused). Results are ordered by `(created_at, id)`, resuming strictly
 after `since`, a `(created_at, id)` cursor the caller keeps, so rows
 sharing a timestamp are neither skipped nor repeated. Acked rows are
 never returned; no v1 consumer reads them (the ledger is never claimed
@@ -784,8 +792,9 @@ not move the tuple to the back of the claim order.
 Templates are resource files: they change with an engine release, not
 with a data changeset. The loader also reads the claim log's TTL (the
 engine setting `NX_TUPLE_CLAIM_LOG_TTL_DAYS`, default 180) and refuses
-to boot unless it exceeds every template's `retention_seconds` by at
-least one sweep interval (`SWEEP_INTERVAL_HOURS`), equality included;
+to boot unless it exceeds every template's `retention_seconds` by
+strictly more than one sweep interval (`SWEEP_INTERVAL_HOURS`), so
+equality fails;
 with `TtlTooLong` capping every row at its template's retention, the
 purge order in §Indexes and hygiene is checked for every row, not
 assumed. Schema evolution is additive in v1. Two v1 templates, and only
@@ -838,9 +847,12 @@ otherwise starve it: the token loop's statement bound
 of three leaves the cycle unbounded) on every statement, and a budget on
 the task itself, a cap on batches per tenant per run and a wall-clock
 budget per run, both engine settings. Tenants are visited
-least-recently-swept first (`tuple_tenants.last_swept_at` ascending,
-`tenant_id` as the tie-break) and each is stamped when its sweep
-finishes, so when the budget runs out the task stops at a tenant
+least-recently-swept first (`tuple_tenants.last_swept_at` ascending
+with nulls first, so a never-swept tenant is visited before any swept
+one, `tenant_id` as the tie-break) and each is stamped only when its
+sweep finishes cleanly; a tenant cut short by the budget or a statement
+timeout keeps its old stamp and is therefore first next run, so when
+the budget runs out the task stops at a tenant
 boundary and the next run starts with the tenants it did not reach;
 the order lives in the table and survives a restart, no cursor is held
 in the JVM, and every tenant is reached within a bounded number of runs.
@@ -1162,8 +1174,9 @@ expired and consumed-past-retention tuple rows, then log rows past the
 log's own TTL, in batches with a commit per batch, under the token
 loop's statement bound on every statement including the enumeration
 (`NexusService.java:539-542`) and under the task's own budget (batches
-per tenant per run, wall clock per run, stopping at a tenant boundary
-and resuming after the last finished tenant next run); log the counted
+per tenant per run, wall clock per run, stopping at a tenant boundary;
+`last_swept_at` ascending nulls first is the order, and an unfinished
+tenant keeps its old stamp); log the counted
 outcome record every run. The sweep test seeds expired rows and
 asserts the counts; production runs that find nothing are normal.
 
@@ -1213,15 +1226,20 @@ Phases 1 and 2 are testable end to end on develop against a
 #### Step 1: Engine cut and deploy
 
 The engine-release skill's battery on the tagged commit: the full
-engine suite, the migration-rehearsal shakeout, and, because
-`tuples-001-baseline.xml` is a changeset, the Liquibase walk rehearsal
-against a point-in-time fork of production. Sam cuts the
-`engine-service-vX.Y.Z` tag; the deploy is a relay to conexus, paired
-with the client release that bumps `REQUIRED_ENGINE_VERSION` to that
-tag so local installs receive the same engine (the paired-release
-choreography in AGENTS.md). The wire change is additive (a new route
-family, no existing contract touched), so the engine deploys before the
-client tag.
+engine suite and the migration-rehearsal shakeout. Sam cuts the
+`engine-service-vX.Y.Z` tag. Because `tuples-001-baseline.xml` is a
+changeset, the deploy relay to conexus asks for their pre-deploy
+Liquibase walk rehearsal against a point-in-time fork of production (a
+conexus-owned gate, AGENTS.md § Engine-service release), then the
+deploy, then the post-publish `--acquire` gate against the published
+bytes. The deploy is paired with the client release that bumps
+`REQUIRED_ENGINE_VERSION` to that tag so local installs receive the same
+engine (the paired-release choreography in AGENTS.md). The wire change
+is additive (a new route family, no existing contract touched): Phase 1
+Step 4 writes the `[additive]` `## Unshipped` entry for `/v1/tuples` in
+`docs/wire-contract-pending.md`, which is what the release gates and the
+lint read, and that entry is why the engine deploys before the client
+tag.
 
 #### Step 2: CA 3 through the public edge
 
@@ -1315,8 +1333,8 @@ None. Postgres, pgvector, jOOQ and Liquibase are in place.
   `last_swept_at`, with no cursor to lose.
 - **Scenario**: a claim takes a row whose lapse brings `attempts` to
   `max_attempts` — **Verify**: the row is dead-lettered in that
-  transaction, the claim moves to the next candidate, `dead_lettered`
-  is counted.
+  transaction with a `dead` log row, and the claim re-runs its select
+  and returns the next candidate or the probe result.
 - **Scenario**: a `ttl_seconds` above the template's retention, and a
   `lease_s` above `max_lease_seconds` — **Verify**: `TtlTooLong` and
   `LeaseTooLong`, no row or claim written; a `lease_s` within the cap on
@@ -1326,10 +1344,10 @@ None. Postgres, pgvector, jOOQ and Liquibase are in place.
   previous claim's `expire` row is written in the same transaction.
 - **Scenario**: the sweep budget is exhausted on a seeded million rows
   across several tenants — **Verify**: the run stops at a tenant
-  boundary, reports exhaustion and its resume point, the next run
-  resumes after the last finished tenant and every tenant is reached
-  within a bounded number of runs; the T1 sweep still runs in the same
-  interval.
+  boundary, reports exhaustion and the oldest `last_swept_at`, the next
+  run visits the unstamped and least-recently-stamped tenants first, and
+  every tenant is reached within a bounded number of runs; the T1 sweep
+  still runs in the same interval.
 - **Scenario**: ten concurrent `inp` on one available row — **Verify**:
   exactly one `(Tuple, claim_id)`, nine `None`; one `claim` log entry.
 - **Scenario**: `in` then crash before `ack` — **Verify**: after the
@@ -1532,7 +1550,7 @@ sized to the change.
 - `docs/rdr/rdr-110-semantic-tuple-space.md` (tombstone) and its close
   post-mortem at commit 9808ff85b on `archive/develop-2026-05-19`.
 - `docs/rdr/rdr-120-storage-substrate-split.md` §Scope Boundaries,
-  lines 195-199 and 250-251.
+  bullets at lines 201 and 206, the lift clause at 248-249.
 - `docs/rdr/rdr-184-orchestration-protocol-hardening.md`;
   `tests/e2e/lib/expectations.sh`;
   `conexus/hooks/scripts/agent-dispatch-expect.sh`.
@@ -1768,3 +1786,20 @@ projection scenario carries the window; the keys-required reason is
 the Decision Rationale's; the second revived RDR-120 bullet is named;
 the RDR-120 prerequisite is ticked; the Contradiction Check and
 Proportionality sections are written.
+
+### 2026-09-09 — Gate round 5, PASSED (1 critical, 7 significant, 0 ship-blockers); residuals fixed in place
+
+Critique: T2 `nexus_rdr/205-gate-critique-2026-09-09e`; gate record
+`nexus_rdr/205-gate-latest`. The eight residuals are dispositioned as
+fixes in this entry's commit, with no further gate round (Sam,
+2026-09-09): the boot check is strictly greater and the prose says so;
+Phase 1 Step 4 owns the `[additive]` wire-ledger entry and the
+`NX_TUPLE_READ_MAX` setting, and an over-cap `n` is clamped;
+`last_swept_at` orders nulls first and an unfinished tenant keeps its
+stamp; the claim's dead-letter branch re-runs its select under a
+bounded number of passes, the sketch carries the branch, and the `dead`
+log row is the per-claim record; CA 4's remaining work is Phase 2 Step
+3; the point-in-time fork rehearsal is conexus's pre-deploy gate with
+the post-publish `--acquire` gate after it; the budget scenario uses
+the `last_swept_at` vocabulary; the RDR-120 reference names lines 201,
+206 and 248-249.
