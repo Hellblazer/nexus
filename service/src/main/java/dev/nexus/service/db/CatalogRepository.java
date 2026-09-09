@@ -644,6 +644,12 @@ public final class CatalogRepository {
                     // transaction-scoped advisory lock, taken BEFORE the max read
                     // so the second allocator sees the first's committed row.
                     // Same typed idiom as TaxonomyRepository's persist lock.
+                    // Bounded wait (review of e6c19f7b0, Significant 1): the
+                    // taxonomy persist lock and the sweep gate both cap their
+                    // in-transaction waits after nexus-n2ls1's indefinite hang.
+                    ctx.select(DSL.function("set_config", String.class,
+                               DSL.val("lock_timeout"), DSL.val("5000"), DSL.val(true)))
+                       .fetch();
                     ctx.select(DSL.function("pg_advisory_xact_lock", Object.class,
                                DSL.function("hashtext", Integer.class, DSL.val("catalog_owners/" + tenant))))
                        .fetch();
