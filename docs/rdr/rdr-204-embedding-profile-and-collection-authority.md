@@ -738,7 +738,16 @@ Phases 1 and 2 ride one engine cut.
 
 Client-only release.
 
-### Phase 4 (deferred, not accepted here): opaque names for new collections.
+### Phase 4 (rejected 2026-09-09): opaque names for new collections.
+
+Held out of the accepted scope at acceptance, rejected after the 7.38.0
+shakeout on Sam's ruling. The FK and the catalog row already make the
+name an opaque handle everywhere that matters; the residual client parse
+sites are mint-time input handling and the diagnostics that report a
+name-versus-row disagreement, not authority; a second name population
+would outlive everyone for no closed defect class. Reopen trigger: a
+field report of a mint-time name whose segments disagree with the row it
+registered.
 
 ### Day 2 Operations
 
@@ -847,4 +856,5 @@ shrinking gate rather than a site-by-site rewrite. Phase 4 is held out of
 scope on purpose.
 
 ## Revision History
+- 2026-09-09: Phase 4 (opaque names) rejected on Sam's ruling after the 7.38.0 shakeout; the section records the grounds and the reopen trigger.
 - 2026-09-07: Gate round 9 (T2 `204-gate-critique-2026-09-07i`) PASSED with one residual, the stale critique count in the Finalization Gate; fixed in `a7efb15df`. Accepted.
