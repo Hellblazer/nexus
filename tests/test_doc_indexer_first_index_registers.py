@@ -67,7 +67,7 @@ def test_index_document_registers_before_the_incremental_read(tmp_path: Path):
     db = _ordered_db(events)
     md = tmp_path / "a.md"
     md.write_text("# t\n\nbody\n")
-    name = "docs__ft04v16-first-index__voyage-context-3__v1"
+    name = "docs__ft04v16-first-index__bge-base-en-v15-768__v1"
     # An empty chunk_fn keeps the tail (embed/upsert) trivial; the point
     # under test is the ordering of registration and the pre-check read.
     with patch.object(doc_indexer, "_vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
@@ -90,7 +90,7 @@ def test_registration_uses_the_db_registrar_the_write_path_honours(tmp_path: Pat
     db = _ordered_db(events)
     md = tmp_path / "b.md"
     md.write_text("# t\n\nbody\n")
-    name = "docs__ft04v16-registrar__voyage-context-3__v1"
+    name = "docs__ft04v16-registrar__bge-base-en-v15-768__v1"
     with patch.object(doc_indexer, "_vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
          patch.object(doc_indexer, "_identity_where", return_value={"x": "y"}), \
          patch("nexus.catalog.factory.make_catalog_writer", side_effect=AssertionError("default registrar must not be used when the db carries one")):
