@@ -2343,3 +2343,38 @@ def test_pdf_dir_heartbeat_disarmed_after_batch_completes(runner, home, monkeypa
     assert result.exit_code == 0, result.output
     time.sleep(0.05)
     assert not any(t.name == "nx-phase-heartbeat" for t in threading.enumerate())
+
+
+# ── GH #1525 (nexus-1m0cy): the RDR pass counts and estimates on its own ──
+
+
+def test_format_eta_carries_a_phase_label():
+    from nexus.commands.index import _format_eta
+
+    line = _format_eta(3, 16, 120, 30.0, "rdr")
+    assert line.startswith("[eta] rdr 3/16 files"), line
+    assert _format_eta(3, 16, 120, 30.0).startswith("[eta] 3/16 files")
+
+
+def test_eta_ticker_restart_phase_resets_counters_and_rearms_a_stopped_ticker():
+    """After the file loop ends the ticker is stopped; the RDR pass restarts
+    it with its own total and a fresh clock, so the line reads
+    `[eta] rdr N/M` from zero rather than running past the old total."""
+    import time as _time
+
+    from nexus.commands.index import _ETATicker
+
+    emitted: list[str] = []
+    t = _ETATicker(interval=0.02, emit=emitted.append)
+    t.start(total=2)
+    t.record(chunks=10)
+    t.record(chunks=10)
+    t.stop()
+    emitted.clear()
+
+    t.restart_phase("rdr", 5)
+    t.record(chunks=7)
+    _time.sleep(0.1)
+    t.stop()
+    assert emitted, "restarted ticker never emitted"
+    assert all(ln.startswith("[eta] rdr 1/5 files · 7 chunks") for ln in emitted), emitted

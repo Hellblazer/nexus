@@ -677,7 +677,7 @@ def _discover_taxonomy(collection_name, taxonomy, t3, *, force=False, quiet=Fals
 # ── ETA ticker (nexus-vatx Gap 3) ────────────────────────────────────────────
 
 
-def _format_eta(n: int, total: int, chunks: int, elapsed_s: float) -> str:
+def _format_eta(n: int, total: int, chunks: int, elapsed_s: float, label: str = "") -> str:
     """Return the periodic `[eta] …` line for an in-progress indexing run.
 
     Pure for testability: given per-run counters and wall-clock elapsed,
@@ -704,8 +704,9 @@ def _format_eta(n: int, total: int, chunks: int, elapsed_s: float) -> str:
         eta_min = max(1, round(eta_seconds / 60))
         eta = f"~{eta_min} min remaining"
     avg_str = f"{avg:.1f}s/file avg" if n else "no samples yet"
+    phase = f"{label} " if label else ""
     return (
-        f"[eta] {n}/{total} files · {chunks:,} chunks · "
+        f"[eta] {phase}{n}/{total} files · {chunks:,} chunks · "
         f"{avg_str} · {eta}"
     )
 
@@ -737,6 +738,27 @@ class _ETATicker:
         self._total = 0
         self._chunks = 0
         self._start_mono = 0.0
+        self._label = ""
+
+    def restart_phase(self, label: str, total: int) -> None:
+        """Begin a new counted phase (GH #1525, nexus-1m0cy): the RDR pass
+        runs after the code/prose/pdf loop whose total :meth:`start` was
+        given, so its files pushed the counter past that total and the
+        stopped ticker said nothing about a pass that can run twenty
+        minutes. Counters and the clock restart so the estimate is this
+        phase's own; the thread is re-armed if :meth:`start`'s ended."""
+        with self._lock:
+            self._label = label
+            self._n = 0
+            self._chunks = 0
+            self._total = total
+            self._start_mono = time.monotonic()
+            self._done.clear()
+        if self._thread is None:
+            self._thread = threading.Thread(
+                target=self._loop, name="nx-eta-ticker", daemon=True,
+            )
+            self._thread.start()
 
     def start(self, total: int) -> None:
         # Review remediation (Reviewer A/S-4): refuse double-start. Two
@@ -777,7 +799,7 @@ class _ETATicker:
 
     def _tick(self) -> None:
         with self._lock:
-            n, total, chunks = self._n, self._total, self._chunks
+            n, total, chunks, label = self._n, self._total, self._chunks, self._label
             elapsed = time.monotonic() - self._start_mono
         if total <= 0 or n == 0:
             # Mutual exclusion with _PhaseHeartbeat (heartbeat double-fire
@@ -791,7 +813,7 @@ class _ETATicker:
             # confines this ticker's live window to exactly the per-file
             # loop, where _PhaseHeartbeat is disarmed (see on_file below).
             return
-        self._emit(_format_eta(n, total, chunks, elapsed))
+        self._emit(_format_eta(n, total, chunks, elapsed, label))
 
 
 # ── phase liveness heartbeat (index-output-ux-assessment-2026-08-10 §7.1) ───
@@ -1172,6 +1194,22 @@ def index_repo_cmd(
             # see pace even when tqdm suppresses itself.
             eta_ticker.start(count)
 
+        rdr_base = 0
+        rdr_total = 0
+
+        def on_rdr_start(count: int) -> None:
+            # GH #1525 (nexus-1m0cy): the RDR pass gets its own counter and
+            # ETA instead of running the file counter past its total.
+            nonlocal rdr_base, rdr_total, total
+            rdr_base = n
+            rdr_total = count
+            total = n + count
+            if bar is not None:
+                bar.total = total
+                bar.refresh()
+            if count:
+                eta_ticker.restart_phase("rdr", count)
+
         def on_file(fpath: Path, chunks: int, elapsed: float) -> None:
             nonlocal n, total_chunks, skipped_files
             n += 1
@@ -1217,7 +1255,8 @@ def index_repo_cmd(
                 bar.set_postfix(**postfix)
             if monitor or not sys.stdout.isatty():
                 lbl = f"{chunks} chunks" if chunks else "skipped"
-                line = f"  [{n}/{total}] {fpath.name} \u2014 {lbl}  ({elapsed:.1f}s)"
+                counter = f"rdr {n - rdr_base}/{rdr_total}" if rdr_total else f"{n}/{total}"
+                line = f"  [{counter}] {fpath.name} \u2014 {lbl}  ({elapsed:.1f}s)"
                 if bar is not None and sys.stdout.isatty():
                     tqdm.write(line)
                 else:
@@ -1384,7 +1423,7 @@ def index_repo_cmd(
             stats = index_repository(path, reg, frecency_only=frecency_only, force=force,
                                      force_re_embed=re_embed,
                                      since_head=since_head,
-                                     on_locked=on_locked, on_start=on_start, on_file=on_file,
+                                     on_locked=on_locked, on_start=on_start, on_rdr_start=on_rdr_start, on_file=on_file,
                                      on_phase=on_phase,
                                      on_flush=on_flush_progress if monitor else None,
                                      on_stage_timers=on_stage_timers,

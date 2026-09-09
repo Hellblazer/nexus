@@ -2054,6 +2054,7 @@ def index_repository(
     since_head: bool = False,
     on_locked: str = "wait",
     on_start: Callable[[int], None] | None = None,
+    on_rdr_start: Callable[[int], None] | None = None,
     on_file: Callable[[Path, int, float], None] | None = None,
     on_phase: Callable[[str], None] | None = None,
     on_flush: "Callable[[int, int, str, float, str | None], None] | None" = None,
@@ -2165,7 +2166,7 @@ def index_repository(
                 _run_index_frecency_only(repo, registry)
                 stats: dict[str, int] = {}
             else:
-                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_re_embed=force_re_embed, since_head=since_head, on_locked=on_locked, on_start=on_start, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks, fence_run_state=_fence_run_state)
+                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_re_embed=force_re_embed, since_head=since_head, on_locked=on_locked, on_start=on_start, on_rdr_start=on_rdr_start, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks, fence_run_state=_fence_run_state)
                 _set_owner_head_hash(repo, _current_head(repo))
             return stats
         finally:
@@ -4120,6 +4121,7 @@ def _run_index(
     since_head: bool = False,
     on_locked: str = "wait",
     on_start: Callable[[int], None] | None = None,
+    on_rdr_start: Callable[[int], None] | None = None,
     on_file: Callable[[Path, int, float], None] | None = None,
     on_phase: Callable[[str], None] | None = None,
     on_flush: "Callable[[int, int, str, float, str | None], None] | None" = None,
@@ -5512,6 +5514,12 @@ def _run_index(
     # casing RDR with broader containment would reintroduce the same
     # inconsistency this fix removes, just inverted.
     _log.debug("indexing RDR files", count=len(rdr_md_paths))
+    # GH #1525 (nexus-1m0cy): on_start counted only code/prose/pdf files, so
+    # the per-file counter ran past its total here ([811/717]) and the ETA
+    # ticker had already stopped. Announce the RDR pass's own total so the
+    # renderer can count and estimate this phase on its own.
+    if on_rdr_start:
+        on_rdr_start(len(rdr_md_paths))
     if on_phase is not None:
         on_phase("Discovering and indexing RDR markdown files…")
     _rdr_t0 = time.monotonic()
