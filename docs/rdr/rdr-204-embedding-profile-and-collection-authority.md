@@ -618,6 +618,12 @@ the fact and lets the constraint refuse the lie.
   `RAISE NOTICE` and by `nx doctor`, excluded from fan-out, and the
   engine boots. The walk never fails on data (2026-08-16 directive);
   "loud" is the notice plus the doctor red, not a refused upgrade.
+- Read against an unregistered collection: addressed directly (single
+  collection), 422. Named inside a multi-collection fan-out (search,
+  hybrid search, the combined-query family), the name is dropped with a
+  logged warning and the request proceeds over the survivors; 422 only
+  when NONE of the requested collections are registered (nexus-ft04v.16
+  fix round).
 
 ## Implementation Plan
 
@@ -681,7 +687,12 @@ walks the tree's own changeset over a populated store.
 ### Phase 2: Engine reads the row
 
 1. `CollectionRegistry` caches the row; evict on profile write.
-2. Replace the eight parse sites; `dimForCollection` and
+2. Replace the three `split("__")` sites CollectionParseGateTest actually
+   measured at Phase 2's start (`EmbedderRouter.resolveEmbedderStrict`,
+   `PgVectorRepository.dimForCollection`, `PgVectorRepository
+   .modelSegment`) -- five of the eight sites this item originally
+   scoped at planning time were already retired by Phase 1 (bead
+   nexus-ft04v.7) before Phase 2 began; `dimForCollection` and
    `resolveEmbedderStrict` read the registry.
 3. `CollectionParseGateTest` in the RawSqlGateTest style: pins the count
    of `split("__")` on collection names; only shrinks.
@@ -810,7 +821,9 @@ is not deferred.
 ### Proportionality
 
 Right-sized for the engine (one new table pair, columns on an existing
-one, eight parse sites, one gate). The client half is larger than the
+one, three measured `split("__")` parse sites at Phase 2's start (five
+of the originally-scoped eight were already retired by Phase 1), one
+gate). The client half is larger than the
 first draft admitted, about sixty raw sites plus thirty-four helper
 callers, which is why Phase 3 is a funnel then a single repoint under a
 shrinking gate rather than a site-by-site rewrite. Phase 4 is held out of
