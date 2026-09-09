@@ -312,8 +312,10 @@ waiter, deploy-gap retry and the deferred `LISTEN` path.
   today). The scheduler builds one tenant set before its arms, the
   default tenant plus every row in `service_tokens`
   (`NexusService.java:558-580`), which works only because that table has
-  no row-level security; every engine role is `NOBYPASSRLS`
-  (`role-001-nexus-svc.xml:42`), so nothing can enumerate tenants across
+  no row-level security; the engine's service role `nexus_svc` is
+  `NOBYPASSRLS` (`role-001-nexus-svc.xml:36-42`; the diagnostics role
+  `nexus_diag` bypasses RLS for integrity checks only, RDR-182, and the
+  engine never runs on it), so the engine cannot enumerate tenants across
   a forced-RLS table such as `nexus.tuples`, and the same cycle deletes
   expired token rows, so that set is not the tuple table's either. The
   tuple sweep therefore enumerates from its own small table with no
@@ -526,7 +528,9 @@ nexus.tuples
 
 nexus.tuple_tenants               tenant_id PK, first_seen, last_seen
                                   no RLS (it names tenants and holds no tenant data, the
-                                  service_tokens / embedding_models posture); upserted by out;
+                                  service_tokens / embedding_models posture); upserted by out
+                                  with last_seen refreshed at most once a minute per tenant,
+                                  so an ordinary out touches no row here and takes no lock;
                                   the sweep's enumeration source; never purged by the sweep
 
 nexus.tuple_claim_log             append-only: claim | ack | nack | expire
@@ -604,7 +608,8 @@ subspaces() -> [TemplateSchema]                             # registered templat
 subspace_list(prefix) -> [{subspace, total, available, claimed, consumed,
                            oldest_created_at, newest_created_at}]    # concrete subspaces that exist
 registry() -> {digest, templates: [TemplateSchema]}                  # subspaces() is the templates half
-subspace_stats(subspace) -> {total, available, claimed, consumed}
+subspace_stats(subspace) -> {total, available, claimed, consumed, expired_unpurged}
+                                                            # total counts live rows only
 ```
 
 `rd` and `rdp` return up to `n` tuples (capped at the paging limit in
@@ -700,20 +705,24 @@ claim scan; a GIN index on `keys` only if a consumer's pattern needs it.
 Claims and acks write predicate columns and are therefore not HOT
 updates (measured 0 % HOT with the index, research 3); at the measured
 load the index churn is affordable and the sweep budget assumes it.
-`autovacuum_vacuum_scale_factor = 0.01` on both tables, the first
+`autovacuum_vacuum_scale_factor = 0.01` on `nexus.tuples` and
+`nexus.tuple_claim_log`, the first
 per-table storage parameter in the changelog; its measured benefit is
 reclaim during sustained churn, since the default already self-heals
 once churn stops. TTL on every row; the `sweepScheduler` in
 `NexusService`, every `SWEEP_INTERVAL_HOURS` (six hours today,
 `NexusService.java:78`), gains a second scheduled task that enumerates
-its tenants from `nexus.tuple_tenants` (the token loop's set is built
-once before its arms and is not this table's) and, per tenant, releases
+its tenants from `nexus.tuple_tenants` under the same statement bound
+the token loop applies to its own pre-arm enumeration
+(`NexusService.java:560-564`; an unbounded enumeration would stall the
+cycle where no per-tenant bound can reach it) and, per tenant, releases
 lapsed claims with an `expire` log row, purges expired and
 consumed-past-retention tuple rows (which sets the log's `tuple_id` to
 null), then purges log rows past the log's own longer TTL, in batches of
 a few hundred, committing per batch (one long transaction would defeat
 autovacuum). Every run logs a counted outcome record in the RDR-204
-ghost sweep's convention: scanned, released, purged, log rows purged. A
+ghost sweep's convention: tenants visited, scanned, released, purged,
+log rows purged. A
 run that finds nothing expired is the normal state of a healthy table
 and is logged as such; the failure the counts detect is a run that
 scanned nothing at all, or a run that did not happen, which the doctor
@@ -727,7 +736,7 @@ injected like the other stores; MCP tools `tuple_out`, `tuple_rd`,
 digest), `tuple_list` (concrete subspaces), `tuple_stats` (probes are
 `rd` and `in` with `timeout_s` zero); `nx tuple
 {out,rd,in,ack,nack,templates,list,stats}`; three `nx doctor` rows (oldest
-unclaimed age per subspace; dead-tuple ratio and last autovacuum on the
+unclaimed age per subspace over live rows only; dead-tuple ratio and last autovacuum on the
 table; age of the last tuple sweep).
 
 **Identity and scope.** No hook mints anything. `subagent-start.sh`,
@@ -1055,7 +1064,7 @@ requests from the space. A scenario test with two sessions on one box.
 | --- | --- | --- | --- | --- | --- |
 | Templates (resource files) | `nx tuple templates` | `nx tuple stats <subspace>` | Removed in an engine release; a removal with live rows needs a data changeset | Boot validation | git |
 | `nexus.tuples` | `nx tuple list` | `nx tuple stats <subspace>`, doctor rows | TTL sweep; purge by tenant via admin SQL | `nx doctor` | PG bundle / managed backups |
-| `nexus.tuple_tenants` | admin SQL | `last_seen` per tenant | never by the sweep; a tenant row is removed only with the tenant | `nx doctor` (sweep enumerated at least the tenants with live rows) | same |
+| `nexus.tuple_tenants` | admin SQL | `last_seen` per tenant | never by the sweep; a tenant row is removed only with the tenant | the sweep's counted record (tenants visited) | same |
 | `nexus.tuple_claim_log` | via stats | per-claim history | retention sweep | `nx doctor` | same |
 
 ### New Dependencies
@@ -1323,3 +1332,17 @@ whose tenant set is built once. The availability predicate gains
 `expires_at > now()`, so sweep latency is hygiene only. Day 2's tuples
 row lists with `nx tuple list`; the round-2 revision entry cites
 8ec08d5af now that it is published.
+
+### 2026-09-09 — Fix check on the fourth fix (FAIL, no ship-blocker), fifth fix
+
+T2 `nexus_rdr/205-fix-check-390e3c41b`. The redesign stood; the clause
+justifying it said "every engine role is NOBYPASSRLS", and
+`nexus_diag` bypasses RLS for integrity checks (RDR-182), so the claim
+is now about the service role the engine runs on. The autovacuum
+setting names its two tables; the tenant table's `last_seen` is
+refreshed at most once a minute so an ordinary `out` takes no lock on
+it; the second sweep task enumerates under the same statement bound the
+token loop uses; `subspace_stats` counts live rows and reports
+`expired_unpurged` separately, the oldest-unclaimed doctor row reads
+live rows only, and the counted record and the Day 2 verify cell name
+tenants visited.
