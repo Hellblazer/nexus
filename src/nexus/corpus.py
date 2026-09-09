@@ -1948,7 +1948,7 @@ def resolve_corpus(corpus: str, all_collections: list[str]) -> list[str]:
                 invalidate_collections_cache()
                 matches = _scan(get_collection_names())
             except Exception:  # noqa: BLE001 — best-effort bounded refresh: a failed refetch (no reachable T3) must fall back to the already-computed empty result, never turn a safe "no match" into a hard failure
-                _log.debug(
+                _log.warning(
                     "resolve_corpus_bounded_refresh_failed",
                     corpus=corpus, exc_info=True,
                 )

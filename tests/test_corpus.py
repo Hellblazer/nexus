@@ -394,7 +394,15 @@ def test_resolve_corpus_bounded_refresh_failure_falls_back_to_empty(monkeypatch)
 
     monkeypatch.setattr(mi, "get_collection_names", _unreachable)
 
-    assert resolve_corpus("code", ["code__ghost__voyage-code-3__v1"]) == []
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        assert resolve_corpus("code", ["code__ghost__voyage-code-3__v1"]) == []
+    # A refetch failure is a real T3-reachability fault, not a debug detail:
+    # it is logged at WARNING (fix-round critic, T2 [25059]).
+    failed = [e for e in logs if e["event"] == "resolve_corpus_bounded_refresh_failed"]
+    assert failed, logs
+    assert failed[0]["log_level"] == "warning", failed
 
 
 def test_resolve_corpus_refresh_never_fires_when_the_first_pass_already_matched(
