@@ -29,38 +29,6 @@ from nexus.db.local_ef import LOCAL_EMBEDDING_TOKENS, local_model_token
 from tests.conftest import make_vector_test_client
 
 
-@pytest.fixture(autouse=True)
-def _stub_agreeing_embedding_profile(monkeypatch: pytest.MonkeyPatch):
-    """RDR-204 Phase 3 item 3 (nexus-ft04v.26): effective_embedding_model_for_writes
-    now validates the local intent (this file's own subject) against a
-    REAL profile read (nexus.catalog.factory.make_catalog_reader()
-    .embedding_profile()). This file's tests are about the local-intent
-    DISPATCH, not profile validation, so stub the profile to always
-    AGREE with whatever nexus.corpus._write_intent_embedding_model
-    computes for the SAME content_type under the test's own active
-    config mocks (outcome 3: agree -> the profile's model, which by
-    construction equals the intent this fixture just asked for) --
-    transparent to every test unless it overrides the stub locally to
-    pin outcome 2 or 4 instead. Lazy: embedding_profile() only executes
-    when a code path actually calls it, so a test whose config makes
-    _write_intent_embedding_model raise (the keyless-voyage credential
-    check, content-type-independent) never reaches this fixture's body
-    at all -- effective_embedding_model_for_writes raises there first,
-    exactly as before this bead.
-    """
-    import nexus.catalog.factory as factory_mod
-    from nexus.corpus import _write_intent_embedding_model
-
-    class _AgreeingReader:
-        def embedding_profile(self) -> list[dict]:
-            return [
-                {"content_type": ct, "embedding_model": _write_intent_embedding_model(ct), "dimension": 1024}
-                for ct in ("code", "docs", "rdr", "knowledge")
-            ]
-
-    monkeypatch.setattr(factory_mod, "make_catalog_reader", lambda: _AgreeingReader())
-
-
 # ── Foundations ──────────────────────────────────────────────────────
 
 
@@ -163,96 +131,6 @@ def test_local_embed_model_is_voyage_shared_predicate(monkeypatch) -> None:
     assert local_embed_model_is_voyage() is False
     monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: None)
     assert local_embed_model_is_voyage() is False
-
-
-# ── RDR-204 Phase 3 item 3 (nexus-ft04v.26): effective_embedding_model_for_writes's
-# own profile-validation outcomes 2/3/4 (outcome 1, LocalVoyageCredentialMissingError,
-# is unchanged and already covered by test_effective_local_voyage_without_key_fails_loud
-# above and tests/test_o5x2c_write_chokepoint_repros.py). Each test here overrides
-# THIS file's own autouse _stub_agreeing_embedding_profile fixture locally to pin a
-# specific (dis)agreement instead of the default "always agree" stub.
-
-
-def _stub_profile(monkeypatch, rows: dict[str, str]) -> None:
-    """Override this file's autouse agreeing-profile stub with an explicit,
-    fixed set of {content_type: embedding_model} rows -- for pinning
-    outcome 2 (mismatch) and outcome 4 (empty) precisely, rather than the
-    autouse fixture's "always agree with intent" default."""
-    import nexus.catalog.factory as factory_mod
-
-    class _FixedReader:
-        def embedding_profile(self) -> list[dict]:
-            return [
-                {"content_type": ct, "embedding_model": model, "dimension": 1024}
-                for ct, model in rows.items()
-            ]
-
-    monkeypatch.setattr(factory_mod, "make_catalog_reader", lambda: _FixedReader())
-
-
-class TestEffectiveEmbeddingModelForWritesProfileOutcomes:
-    def test_outcome_3_intent_and_profile_agree_returns_profile_value(self, monkeypatch) -> None:
-        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
-        monkeypatch.setattr("nexus.config.get_credential", lambda name: "configured-key")
-        _stub_profile(monkeypatch, {"code": "voyage-code-3"})
-        assert effective_embedding_model_for_writes("code") == "voyage-code-3"
-
-    def test_outcome_2_intent_voyage_key_present_profile_says_bge_raises_mismatch(
-        self, monkeypatch,
-    ) -> None:
-        """The canonical repro named in the coordinator's ruling: local
-        intent is voyage (key present), but the engine's profile still
-        says bge -- the service has not been restarted since the key was
-        configured. Must raise EmbeddingProfileMismatchError naming the
-        restart, never silently write under either model."""
-        from nexus.corpus import EmbeddingProfileMismatchError
-
-        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
-        monkeypatch.setattr("nexus.config.get_credential", lambda name: "configured-key")
-        _stub_profile(monkeypatch, {"code": "bge-base-en-v15-768"})
-        with pytest.raises(EmbeddingProfileMismatchError, match="restart"):
-            effective_embedding_model_for_writes("code")
-
-    def test_outcome_4_empty_profile_returns_intent_bootstrap_case(self, monkeypatch) -> None:
-        """Engine-verified correction (hand-off report, CatalogRepository
-        .upsertCollection): NO profile row for content_type is the
-        bootstrap case, not a stale-config case -- returns intent (never
-        raises), since intent is exactly what the engine's own
-        registration handler would accept and use to seed the row."""
-        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
-        monkeypatch.setattr("nexus.config.get_credential", lambda name: "configured-key")
-        _stub_profile(monkeypatch, {})  # no row for "code" at all
-        assert effective_embedding_model_for_writes("code") == "voyage-code-3"
-
-    def test_outcome_4_empty_profile_local_bge_bootstrap(self, monkeypatch) -> None:
-        """Same bootstrap case, plain local mode (no voyage opt-in) --
-        intent comes from the service-vector-mode bge branch."""
-        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-        monkeypatch.setattr("nexus.config.local_embed_model_is_voyage", lambda: False)
-        monkeypatch.setattr("nexus.db.http_vector_client.is_vector_service_mode", lambda: True)
-        _stub_profile(monkeypatch, {})
-        assert effective_embedding_model_for_writes("code") == "bge-base-en-v15-768"
-
-    def test_pre_phase_2_engine_route_missing_propagates_uncaught(self, monkeypatch) -> None:
-        """Against a pre-Phase-2 engine, EmbeddingProfileRouteMissingError
-        propagates uncaught -- never wrapped, never a silent fallback."""
-        from nexus.catalog.http_catalog_client import EmbeddingProfileRouteMissingError
-        import nexus.catalog.factory as factory_mod
-
-        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
-        monkeypatch.setattr("nexus.config.get_credential", lambda name: "configured-key")
-
-        class _PrePhase2Reader:
-            def embedding_profile(self) -> list[dict]:
-                raise EmbeddingProfileRouteMissingError("GET /v1/catalog/embedding_profile is not served")
-
-        monkeypatch.setattr(factory_mod, "make_catalog_reader", lambda: _PrePhase2Reader())
-        with pytest.raises(EmbeddingProfileRouteMissingError):
-            effective_embedding_model_for_writes("code")
 
 
 # ── nexus-35ok4 round 2 (code-review-expert CRITICAL): t3_collection_name

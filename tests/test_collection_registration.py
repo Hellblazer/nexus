@@ -480,3 +480,117 @@ def test_vector_service_error_shaped_non_422_is_never_retried(
         write_with_registration_retry(name, write_fn, registrar=lambda: writer)
 
     write_fn.assert_called_once()
+
+
+# ── RDR-204 Phase 3 item 3 (nexus-ft04v.26): the registration-seam profile
+# check, coordinator design correction 2026-09-09. A first attempt put this
+# check INSIDE effective_embedding_model_for_writes (commit 5935b1bf8) and a
+# full-suite run measured 155 failures: that chokepoint is reached from every
+# write path with only the db/T3 layer mocked, so a real network call there
+# broke tests that never anticipated one. The check moved HERE instead --
+# ensure_collection_registered, immediately before its writer.register_collection
+# call, where a catalog client is already about to be used for real I/O.
+
+
+def _stub_profile_reader(monkeypatch: pytest.MonkeyPatch, rows: dict[str, str]) -> None:
+    """Stub nexus.catalog.factory.make_catalog_reader() with a fixed
+    {content_type: embedding_model} profile -- for pinning the seam's
+    agree/mismatch/empty outcomes precisely."""
+    import nexus.catalog.factory as factory_mod
+
+    class _FixedReader:
+        def embedding_profile(self) -> list[dict]:
+            return [
+                {"content_type": ct, "embedding_model": model, "dimension": 1024}
+                for ct, model in rows.items()
+            ]
+
+    monkeypatch.setattr(factory_mod, "make_catalog_reader", lambda: _FixedReader())
+
+
+class TestRegistrationSeamProfileCheck:
+    def test_profile_agrees_registration_proceeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
+        monkeypatch.setattr("nexus.config.get_credential", lambda name: "configured-key")
+        _stub_profile_reader(monkeypatch, {"code": "voyage-code-3"})
+        writer = _fake_writer()
+        name = "code__seam-agree-test__voyage-code-3__v1"
+
+        ensure_collection_registered(name, registrar=lambda: writer)
+
+        writer.register_collection.assert_called_once_with(
+            name, content_type="code", owner_id="seam-agree-test",
+            embedding_model="voyage-code-3", model_version="v1",
+        )
+
+    def test_profile_disagrees_raises_mismatch_before_the_register_call(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The canonical repro: local intent is voyage (key present), but
+        the engine's profile still says bge -- the service has not been
+        restarted since the key was configured. Must raise
+        EmbeddingProfileMismatchError naming the restart, and the wire
+        call must NEVER happen."""
+        from nexus.corpus import EmbeddingProfileMismatchError
+
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
+        monkeypatch.setattr("nexus.config.get_credential", lambda name: "configured-key")
+        _stub_profile_reader(monkeypatch, {"code": "bge-base-en-v15-768"})
+        writer = _fake_writer()
+        name = "code__seam-mismatch-test__voyage-code-3__v1"
+
+        with pytest.raises(EmbeddingProfileMismatchError, match="restart"):
+            ensure_collection_registered(name, registrar=lambda: writer)
+
+        writer.register_collection.assert_not_called()
+        assert name not in corpus._REGISTERED_COLLECTIONS
+
+    def test_empty_profile_proceeds_with_intent_bootstrap_case(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Engine-verified correction (CatalogRepository.upsertCollection):
+        NO profile row for content_type is the bootstrap case, not a
+        stale-config case -- registration proceeds with the derived
+        intent, since that is exactly what the engine's own handler would
+        accept and use to seed the row."""
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
+        monkeypatch.setattr("nexus.config.get_credential", lambda name: "configured-key")
+        _stub_profile_reader(monkeypatch, {})  # no row for "code" at all
+        writer = _fake_writer()
+        name = "code__seam-empty-profile-test__voyage-code-3__v1"
+
+        ensure_collection_registered(name, registrar=lambda: writer)
+
+        writer.register_collection.assert_called_once_with(
+            name, content_type="code", owner_id="seam-empty-profile-test",
+            embedding_model="voyage-code-3", model_version="v1",
+        )
+
+    def test_pre_phase_2_engine_route_missing_propagates_uncaught(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Against a pre-Phase-2 engine, EmbeddingProfileRouteMissingError
+        propagates uncaught -- never wrapped, never a silent fallback,
+        and the register call never happens."""
+        from nexus.catalog.http_catalog_client import EmbeddingProfileRouteMissingError
+        import nexus.catalog.factory as factory_mod
+
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
+        monkeypatch.setattr("nexus.config.get_credential", lambda name: "configured-key")
+
+        class _PrePhase2Reader:
+            def embedding_profile(self) -> list[dict]:
+                raise EmbeddingProfileRouteMissingError("GET /v1/catalog/embedding_profile is not served")
+
+        monkeypatch.setattr(factory_mod, "make_catalog_reader", lambda: _PrePhase2Reader())
+        writer = _fake_writer()
+        name = "code__seam-pre-phase2-test__voyage-code-3__v1"
+
+        with pytest.raises(EmbeddingProfileRouteMissingError):
+            ensure_collection_registered(name, registrar=lambda: writer)
+
+        writer.register_collection.assert_not_called()

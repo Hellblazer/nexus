@@ -279,9 +279,10 @@ class LocalVoyageCredentialMissingError(RuntimeError):
 
 class EmbeddingProfileMismatchError(RuntimeError):
     """The client's own configured intent (``local.embed_model`` /
-    ``voyage_api_key``) for ``content_type`` disagrees with the engine's
-    ``nexus.embedding_profile`` row for it (RDR-204 Phase 3 item 3,
-    nexus-ft04v.26; coordinator ruling 2026-09-09, outcome 2).
+    ``voyage_api_key``) for a collection's ``content_type`` disagrees
+    with the engine's ``nexus.embedding_profile`` row for it (RDR-204
+    Phase 3 item 3, nexus-ft04v.26; coordinator design correction
+    2026-09-09).
 
     SAME FAMILY as :class:`LocalVoyageCredentialMissingError` — both are
     "the client's intent cannot be honored, and minting under the wrong
@@ -295,9 +296,19 @@ class EmbeddingProfileMismatchError(RuntimeError):
     but the engine profile still says ``bge-base-en-v15-768`` for this
     content type because the service predates the key being set.
 
-    Raised ONLY from :func:`effective_embedding_model_for_writes` — same
-    write-only contract as :class:`LocalVoyageCredentialMissingError`,
-    never from a read path.
+    Raised from :func:`ensure_collection_registered`, immediately before
+    its ``writer.register_collection`` call — the REGISTRATION SEAM, not
+    the write-model computation chokepoint
+    (:func:`effective_embedding_model_for_writes`, which is pure and
+    network-free again after the design correction below). This is
+    Technical Design 1a's "profile-as-data" honoured at the point a
+    catalog client is already in hand and the model is about to be
+    committed, an EARLY, more actionable diagnostic layered on top of
+    the engine's own register-time 422 on a mismatch (which remains the
+    correctness guard for every OTHER registration call site this seam
+    does not yet cover — those still get the engine's late refusal, not
+    this early one, until nexus-ft04v.27 consolidates them through this
+    same funnel).
     """
 
 
@@ -389,87 +400,44 @@ def effective_embedding_model_for_writes(content_type: str) -> str:
     """Return the embedding-model token to write into NEW collection
     names and per-chunk metadata for ``content_type``.
 
-    RDR-109 Phase 2 introduced this as the client's PROFILE-AS-CODE: a
-    local computation mirroring what the engine would decide. RDR-204
-    Phase 3 item 3 (nexus-ft04v.26; coordinator ruling 2026-09-09) turns
-    that into a read of the profile-as-DATA, with the ORIGINAL
-    computation kept in front as a diagnosis layer — Technical Design 1a
-    of the RDR keeps the write-time truth table verbatim; only what it
-    is checked AGAINST changes, from "does this match what I compute
-    locally" to "does this match what the engine's own boot-time
-    decision (``nexus.embedding_profile``) says".
+    RDR-109 Phase 2. Pure, network-free local computation — see
+    :func:`_write_intent_embedding_model`, which now holds this
+    function's entire original body verbatim; this name is kept as a
+    thin delegation for every existing caller and test.
 
-    1. Local intent is Voyage (``local.embed_model=voyage-*``) and no
-       ``voyage_api_key`` is configured: raises
-       :class:`LocalVoyageCredentialMissingError`, exactly as before —
-       no network access happens before this check (nexus-o5x2c's
-       regression pins stay green unmocked).
-    2. Local intent and key are both present, but the engine's profile
-       for ``content_type`` disagrees (the service has not been
-       restarted since the config changed — RDR-204 Technical Design 1,
-       "the engine reads the model and key only at spawn"): raises
-       :class:`EmbeddingProfileMismatchError` naming the restart, never
-       a silent write under whichever model happened to win.
-    3. Local intent and the profile agree: returns the profile's own
-       model token for ``content_type`` — the AUTHORITATIVE value,
-       never re-derived from local config once confirmed to agree (this
-       is what closes the GH #667 drift class for the write path).
-    4. The engine has NO profile row for ``content_type`` at all — a
-       tenant, or a content_type on this tenant, with nothing registered
-       for it yet. Returns ``intent`` (never raises): this is the
-       bootstrap case, not a stale-config case, and the coordinator's
-       2026-09-09 ruling's literal "empty profile -> fail loud" would
-       deadlock it. Verified against the engine
-       (``CatalogRepository.upsertCollection``, the ``/collections/upsert``
-       handler this value feeds): when NO profile row exists for a NEW
-       registration's ``content_type``, the engine does not refuse —
-       it takes ``effectiveModel = requestedModel`` (whatever the
-       CLIENT sent) verbatim, exactly ``intent`` here, and THAT registration
-       is what seeds the profile row every later call reads. Failing
-       loud instead would make it impossible to ever write the FIRST
-       collection of any content type on any tenant, since there would
-       be no way to produce the very value the engine needs to create
-       the row that read would require. This is a corrected reading of
-       the ruling, not a silent deviation — flagged in the hand-off
-       report with the engine source citation.
-       Against a pre-Phase-2 engine (the route itself is missing),
-       :class:`~nexus.catalog.http_catalog_client.
-       EmbeddingProfileRouteMissingError` propagates uncaught instead —
-       that failure mode is unaffected by this correction.
+    RDR-204 Phase 3 item 3 (nexus-ft04v.26) history: a first pass
+    (commit 5935b1bf8) put a real ``nexus.embedding_profile`` read
+    INSIDE this function. Coordinator design correction (2026-09-09,
+    after a full-suite run measured 155 failures): this chokepoint is
+    reached from every write path with only the db/T3 layer mocked, so
+    a network call here is wrong, not under-fixtured — a conftest-level
+    stub to paper over it would itself be the silent fallback the RDR
+    forbids. The profile comparison moved to the REGISTRATION SEAM
+    instead (:func:`ensure_collection_registered`, immediately before
+    its ``writer.register_collection`` call, where a catalog client is
+    already in hand and the model is about to be committed) — see that
+    function's docstring for the outcome table. This function reverted
+    to pure local computation, restoring outcome 1
+    (:class:`LocalVoyageCredentialMissingError` on a voyage-shaped
+    ``local.embed_model`` with no key) with zero network access before
+    it raises, exactly as before 5935b1bf8 (nexus-o5x2c's regression
+    pins stay green unmocked).
 
-    THIS FUNCTION IS UNCONDITIONALLY WRITE-SHAPED — every caller MUST
-    already know it is about to mint/require a real, about-to-be-written
-    collection identity; it is not safe to call from a read path (now
-    doubly so: it makes a real network call). :func:`t3_collection_name`
-    (the read/write-shared resolver) does NOT call this function for
-    read-classified requests, and :func:`_promoted_model_token_for_read`
-    calls :func:`_write_intent_embedding_model` directly instead of this
-    function, precisely to stay network-free — see both functions' own
-    docstrings.
+    Raises :class:`LocalVoyageCredentialMissingError` when
+    ``local.embed_model`` is voyage-shaped but no ``voyage_api_key`` is
+    configured. THIS FUNCTION IS UNCONDITIONALLY WRITE-SHAPED — every
+    caller MUST already know it is about to mint/require a real,
+    about-to-be-written collection identity; it is not safe to call from
+    a read path. :func:`t3_collection_name` (the read/write-shared
+    resolver) does NOT call this function for read-classified requests —
+    see its ``for_write`` parameter and ``_promoted_model_token_for_read``.
 
     Read paths must continue to dispatch off the physical collection
     name via :func:`voyage_model_for_collection` /
     :func:`embedding_model_for_collection_name`; this function is for
     WRITE-side decisions only.
     """
-    intent = _write_intent_embedding_model(content_type)
-    profile_model = _profile_model_for_content_type(content_type)
-    if profile_model is None:
-        # Outcome 4 (bootstrap case) — see the docstring's engine-verified
-        # correction. `intent` is exactly what CatalogRepository.upsertCollection
-        # would accept and use to seed this row.
-        return intent
-    if profile_model != intent:
-        raise EmbeddingProfileMismatchError(
-            f"content_type={content_type!r}: this install's configured intent "
-            f"is {intent!r}, but the engine's embedding_profile still says "
-            f"{profile_model!r}. The engine reads local.embed_model and "
-            "voyage_api_key only at spawn, so a config change after the "
-            "service started leaves the two disagreeing until it restarts. "
-            f"A restart is required for the engine to adopt this: "
-            f"`{_SERVICE_RESTART_COMMAND}`."
-        )
-    return profile_model
+    return _write_intent_embedding_model(content_type)
 
 
 def _promoted_model_token_for_read(content_type: str) -> str:
@@ -1520,6 +1488,37 @@ def ensure_collection_registered(
     means the write that follows would 422/4xx anyway, and failing at
     this boundary names the real cause instead of the write's more
     confusing downstream error.
+
+    RDR-204 Phase 3 item 3 (nexus-ft04v.26; coordinator design
+    correction 2026-09-09): immediately BEFORE the register call, reads
+    the engine's ``nexus.embedding_profile`` for *kwargs*'s
+    ``content_type`` and compares it against the ``embedding_model``
+    ``collection_registration_kwargs`` just derived (the client's local
+    intent) — THE REGISTRATION SEAM, chosen because a catalog client is
+    already about to be used here and the model is about to be
+    committed, unlike :func:`effective_embedding_model_for_writes`
+    (reverted to pure local computation after a first attempt at this
+    same check there broke 155 unit tests that reach it with only the
+    db/T3 layer mocked — a network call in that chokepoint was wrong,
+    not under-fixtured). Profile disagrees -> :class:`EmbeddingProfileMismatchError`
+    naming the restart, registration refused before the wire call. No
+    profile row for this content_type yet -> proceeds with intent
+    unchanged (the bootstrap case: this registration is what seeds the
+    row every later comparison reads, verified against
+    ``CatalogRepository.upsertCollection`` — see
+    :func:`effective_embedding_model_for_writes`'s prior docstring
+    history for the full engine citation). Against a pre-Phase-2
+    engine, :class:`~nexus.catalog.http_catalog_client.
+    EmbeddingProfileRouteMissingError` propagates uncaught. This is an
+    EARLY, more actionable diagnostic layered on top of the engine's
+    own register-time 422 on a mismatch, which remains the correctness
+    guard on its own for every registration call site OUTSIDE this
+    funnel (``commands/index.py``, ``commands/collection.py``'s
+    ``reindex_cmd``, ``commands/catalog_cmds/collections.py``'s
+    backfill/rename, ``db/t3.py``'s row synthesis — all call
+    :func:`collection_registration_kwargs` directly and register
+    without going through this function) until nexus-ft04v.27
+    consolidates them through one funnel.
     """
     if name in _REGISTERED_COLLECTIONS:
         return
@@ -1527,6 +1526,17 @@ def ensure_collection_registered(
         if name in _REGISTERED_COLLECTIONS:
             return
         kwargs = collection_registration_kwargs(name)
+        profile_model = _profile_model_for_content_type(kwargs["content_type"])
+        if profile_model is not None and profile_model != kwargs["embedding_model"]:
+            raise EmbeddingProfileMismatchError(
+                f"content_type={kwargs['content_type']!r}: this install's "
+                f"configured intent is {kwargs['embedding_model']!r}, but the "
+                f"engine's embedding_profile still says {profile_model!r}. "
+                "The engine reads local.embed_model and voyage_api_key only "
+                "at spawn, so a config change after the service started "
+                "leaves the two disagreeing until it restarts. A restart is "
+                f"required for the engine to adopt this: `{_SERVICE_RESTART_COMMAND}`."
+            )
         if registrar is None:
             from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — circular-dep avoidance (catalog)
             registrar = make_catalog_writer

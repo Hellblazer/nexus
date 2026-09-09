@@ -148,6 +148,34 @@ migrate_collection_safe) were NOT closed by this bead -- they remain
 exactly as nexus-ft04v.21/.22/.23 left them, tracked as open work in
 the bead's hand-off report.
 
+Item 3 of this SAME bead (RDR Technical Design 1a's "profile-as-data")
+is UNRELATED to this file's own parse-site count (it never touches a
+collection NAME) but its design history is recorded here since the
+Phase 3 critique cross-walks the whole bead against Technical Design
+1a: a first pass (commit 5935b1bf8) read the engine's
+``nexus.embedding_profile`` directly inside
+``corpus.effective_embedding_model_for_writes`` -- the client's
+write-model CHOKEPOINT, reached from every write path. A full-suite
+run measured 155 failures across unrelated test files (test_indexer.py,
+test_search_cmd.py, test_store_cmd.py and ~15 more) that mock only the
+db/T3 layer and never anticipated that chokepoint making a real network
+call. Coordinator design correction (2026-09-09): the reds were the
+design saying the chokepoint must stay pure, not evidence of
+under-fixtured tests -- a conftest-level stub to paper over 155 tests
+would itself be the silent fallback RDR-204 forbids. The profile
+comparison moved to the REGISTRATION SEAM instead
+(``corpus.ensure_collection_registered``, immediately before its
+``writer.register_collection`` call, where a catalog client is already
+about to be used for real I/O and the model is about to be committed);
+``effective_embedding_model_for_writes`` reverted to pure local
+computation (``_write_intent_embedding_model``, delegated to
+unconditionally). The engine's own register-time 422 on a mismatch
+remains the correctness guard for every registration call site OUTSIDE
+this one funnel, until nexus-ft04v.27 consolidates them. Tests:
+``tests/test_collection_registration.py``'s
+``TestRegistrationSeamProfileCheck`` (agree / mismatch / empty-profile
+bootstrap / pre-Phase-2 route-missing propagation).
+
 RDR-204'S OTHER NAMED EXCLUSION -- ``rdr-`` document ids -- MATCHES ZERO
 SITES HERE. The one ``rdr-`` id parse in the tree,
 ``catalog/rdr_canonical.py:124``'s ``name.lower().startswith("rdr-")``,

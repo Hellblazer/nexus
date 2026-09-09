@@ -31,24 +31,6 @@ from nexus.corpus import (
 )
 
 
-def _stub_agreeing_profile(monkeypatch, models_by_content_type: dict[str, str]) -> None:
-    """RDR-204 Phase 3 item 3 (nexus-ft04v.26): stub
-    nexus.catalog.factory.make_catalog_reader() so
-    effective_embedding_model_for_writes's profile read (outcome 3: local
-    intent and the engine's profile agree) returns exactly the given
-    per-content-type model, without a real engine or HTTP mock."""
-    import nexus.catalog.factory as factory_mod
-
-    class _Reader:
-        def embedding_profile(self) -> list[dict]:
-            return [
-                {"content_type": ct, "embedding_model": model, "dimension": 1024}
-                for ct, model in models_by_content_type.items()
-            ]
-
-    monkeypatch.setattr(factory_mod, "make_catalog_reader", lambda: _Reader())
-
-
 def _voyage_keyless_local(monkeypatch) -> None:
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
     monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
@@ -184,16 +166,15 @@ def test_collection_for_repo_mints_voyage_when_key_present(
     collection -> targets voyage (new sibling), does NOT grandfather —
     round 3's gate applies here too, via the same chokepoint.
 
-    RDR-204 Phase 3 item 3 (nexus-ft04v.26): the key-present path now
-    falls through resolve_write_embedding_model into
-    effective_embedding_model_for_writes, which validates the local
-    intent against the engine's embedding_profile (outcome 3: intent and
-    profile agree -> the profile's own model). That profile read goes
-    through nexus.catalog.factory.make_catalog_reader() -- a SEPARATE
-    client construction from the `client`/MockTransport this test builds
-    for collection_for_repo's own for_tuple probe -- so it needs its own
-    stub agreeing on voyage-code-3 for content_type=code, or this test
-    would 500/ValueError on an unmocked /embedding_profile call.
+    RDR-204 Phase 3 item 3 (nexus-ft04v.26): effective_embedding_model_for_writes
+    stays pure local computation (coordinator design correction
+    2026-09-09, after a first attempt at a profile read inside it broke
+    155 unit tests) -- no profile stub needed here; this test pins the
+    chokepoint's own local-intent dispatch, not the registration-seam
+    profile check (that lives in ensure_collection_registered now, and
+    this call site -- collection_for_repo -- does not go through it at
+    all, per that function's own docstring on which sites still rely on
+    the engine's own register-time 422 instead).
     """
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
     monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
@@ -207,7 +188,6 @@ def test_collection_for_repo_mints_voyage_when_key_present(
     client, _ = _mock_catalog_client(
         monkeypatch, registered_model="bge-base-en-v15-768",
     )
-    _stub_agreeing_profile(monkeypatch, {"code": "voyage-code-3"})
 
     result = client.collection_for_repo(tmp_path, "code")
 
