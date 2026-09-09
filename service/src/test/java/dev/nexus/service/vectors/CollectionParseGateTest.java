@@ -142,11 +142,37 @@ class CollectionParseGateTest {
         return new String(out);
     }
 
-    /** Every double-quoted string literal in (comment-blanked) source. */
-    private static final Pattern STRING_LITERAL = Pattern.compile("\"(?:[^\"\\\\]|\\\\.)*\"");
+    /**
+     * Every double-quoted string literal in (comment-blanked) source, found by a
+     * hand-rolled scan rather than a regex. The first cut used
+     * {@code "(?:[^"\\]|\\.)*"}, whose alternation-inside-a-loop recurses once
+     * per character in {@code java.util.regex}; a long literal overflowed the
+     * Linux CI runner's thread stack ({@code StackOverflowError} on every
+     * develop push from aaf585006 to f754d2eda, 2026-09-08/09) while the larger
+     * default stack on macOS hid it locally. A linear scan cannot overflow.
+     */
+    static List<String> stringLiterals(String blanked) {
+        List<String> out = new ArrayList<>();
+        int i = 0;
+        int n = blanked.length();
+        while (i < n) {
+            if (blanked.charAt(i) != '"') { i++; continue; }
+            int start = i;
+            i++;
+            while (i < n) {
+                char c = blanked.charAt(i);
+                if (c == '\\' && i + 1 < n) { i += 2; continue; }
+                if (c == '"') { i++; break; }
+                if (c == '\n') { break; }  // unterminated: a char literal or text block edge; stop at the line
+                i++;
+            }
+            out.add(blanked.substring(start, Math.min(i, n)));
+        }
+        return out;
+    }
 
     /** {@code .split(\"__\")} specifically — a strict subset of {@link
-     * #STRING_LITERAL} matches, pinned separately so nexus-ft04v.16's
+     * #stringLiterals} matches, pinned separately so nexus-ft04v.16's
      * acceptance ("the split pin falls to zero") is a visible number. */
     private static final Pattern SPLIT_DUNDER = Pattern.compile("\\.split\\s*\\(\\s*\"__\"\\s*\\)");
 
@@ -162,9 +188,8 @@ class CollectionParseGateTest {
     static int countDunderLiterals(String rawSource) {
         String blanked = blankComments(rawSource);
         int count = 0;
-        Matcher m = STRING_LITERAL.matcher(blanked);
-        while (m.find()) {
-            if (m.group().contains("__")) count++;
+        for (String literal : stringLiterals(blanked)) {
+            if (literal.contains("__")) count++;
         }
         return count;
     }
@@ -416,6 +441,31 @@ class CollectionParseGateTest {
             .as("a declared pin the tree no longer supports must fail as a stale fingerprint, "
                 + "never silently pass")
             .anyMatch(v -> v.contains("STALE FINGERPRINT"));
+    }
+
+    /**
+     * Regression for the CI-only StackOverflowError (develop aaf585006..f754d2eda):
+     * a single very long string literal must scan in constant stack. Run with
+     * a deliberately small stack so the failure mode is reproducible on any
+     * platform rather than only on a Linux runner's default thread stack.
+     */
+    @Test
+    void veryLongLiteral_scansWithoutStackOverflow() throws InterruptedException {
+        String longLiteral = "\"" + "x".repeat(200_000) + "__" + "y".repeat(200_000) + "\"";
+        String synthetic = "class W { static final String S = " + longLiteral + "; }";
+        int[] found = new int[1];
+        Throwable[] failure = new Throwable[1];
+        Thread t = new Thread(null, () -> {
+            try {
+                found[0] = countDunderLiterals(synthetic);
+            } catch (Throwable e) {
+                failure[0] = e;
+            }
+        }, "small-stack-scan", 256 * 1024);
+        t.start();
+        t.join();
+        assertThat(failure[0]).as("the literal scan must not recurse per character").isNull();
+        assertThat(found[0]).isEqualTo(1);
     }
 
     /** Commented-out literals must not count -- {@link #blankComments} strips
