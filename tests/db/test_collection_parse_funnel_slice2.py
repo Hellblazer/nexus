@@ -91,6 +91,47 @@ def _fake_collection_rows(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(mi, "get_collection_row", _fake_get_collection_row)
 
 
+# ── db/http_vector_client.py: _write_model_for_collection ──────────────────
+
+
+class TestWriteModelForCollection:
+    """RDR-204 Phase 3 (nexus-ft04v.26) class (b): pins
+    _write_model_for_collection's row-then-name resolution order --
+    per_collection_chunk_cap/_upsert_byte_budget's shared write-model
+    lookup. The catalog row (when present, the re-write case) is
+    AUTHORITATIVE over the name; only when no row exists does it fall to
+    the already-conformant name's own embedded model token (the write
+    authority's decision at render time, read back, never re-derived
+    from a raw prefix); a non-conformant name with no row resolves to
+    ``None`` so both callers apply their own conservative default."""
+
+    def test_row_wins_over_a_disagreeing_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import nexus.mcp_infra as mi
+        from nexus.db import http_vector_client as hvc
+
+        # The NAME says voyage-code-3; the ROW (the exact drift class
+        # GH #667 came from) disagrees and must win.
+        monkeypatch.setattr(
+            mi, "get_collection_row",
+            lambda name: {"embedding_model": "voyage-context-3"},
+        )
+        assert hvc._write_model_for_collection("code__nexus__voyage-code-3__v1") == "voyage-context-3"
+
+    def test_falls_to_the_conformant_name_when_no_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import nexus.mcp_infra as mi
+        from nexus.db import http_vector_client as hvc
+
+        monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
+        assert hvc._write_model_for_collection("code__nexus__voyage-code-3__v1") == "voyage-code-3"
+
+    def test_none_when_no_row_and_not_conformant(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import nexus.mcp_infra as mi
+        from nexus.db import http_vector_client as hvc
+
+        monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
+        assert hvc._write_model_for_collection("docs__legacy-two-segment") is None
+
+
 # ── db/http_vector_client.py:869 — _upsert_byte_budget ─────────────────────
 
 
