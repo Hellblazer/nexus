@@ -65,7 +65,7 @@ both see it, and neither can claim it.
 
 #### Gap 2: Dispatched agents owe reports, and the ledger cannot name them
 
-RDR-184 Gap 1 recorded ten occurrences of an agent finishing without
+RDR-184 recorded ten occurrences (its §Context, "by final count") of an agent finishing without
 reporting, one of them a failed validation-run result that sat unreported
 until the orchestrator read the agent's raw output file. The remedy that
 shipped, the expectations ledger, is a per-session TSV (a tab-separated
@@ -471,22 +471,28 @@ by someone else and not documentation.
 ### Approach
 
 Ship one engine-owned table, `nexus.tuples`, with its append-only claim
-log, a registry of subspace schemas checked at engine boot, eleven HTTP
-operations (`out`, `rd`, `rdp`, `in`, `inp`, `ack`, `nack`, `subspaces`,
-`registry`, `subspace_list`, `subspace_stats`), a Python HTTP store shaped like the aspect-queue client, a
+log, a registry of subspace schemas checked at engine boot, ten HTTP
+operations (`out`, `rd`, `rdp`, `in`, `inp`, `ack`, `nack`, `registry`,
+`subspace_list`, `subspace_stats`), a Python HTTP store shaped like the aspect-queue client, a
 small MCP tool set and an `nx tuple` verb over it. The destructive read
 matches on equality over a pinned key set per subspace; the
 non-destructive read may additionally rank by pgvector similarity in a
 later phase, gated on a calibration result this RDR does not claim.
 Blocking reads park on an in-engine waiter woken at commit, with a
-one-second poll as the fallback that carries deploys.
+one-second re-run timer as defence against a missed signal. Two v1
+callers park: an orchestrator waiting for one agent's report (`rd` on
+the ledger with a timeout) and the instance that sent a request waiting
+for its ack (`in` on its own mailbox with a timeout). `out` is
+idempotent everywhere: a tuple's id is derived from caller-supplied
+fields only, so a retried `out` is the same tuple.
 
 Two consumers land with it and no more: the RDR-184 dispatch ledger, as
 start and report tuples keyed on the hook-injected `agent_id` with the
 TSV kept as the write-ahead on the hook path, and a mailbox read on
-demand, addressed to an agent id or to an instance. The cross-instance
-request and ack of Gap 5 is the mailbox with `scope = instance`, not a
-third consumer, because both instances mint against one tenant. Nothing
+demand, addressed to an agent id or to an instance name. The
+cross-instance request and ack of Gap 5 is the same mailbox with an
+instance name as the address, not a third consumer, because both
+instances mint against one tenant. Nothing
 else: not the build lease, not the T1 identity files, not the push
 vouching, not any wrapping of scratch, memory or plans, not surfaces.
 This is RDR-120's rule restated for this RDR: a consumer not named here
@@ -501,19 +507,20 @@ a *subspace* is a concrete instance. The *keys* of a tuple are the
 registered dimensions the destructive read matches on; *dims* are the
 rest. A *claim* is the state between `in` and `ack`/`nack`, held under a
 *lease* (a deadline after which the claim is released by a sweep). A
-*claimant* is the id doing the taking. A *nonce* is a per-instance
-value mixed into a tuple's id so two otherwise identical tuples stay
-distinct.
+*claimant* is the id doing the taking. A *nonce* is a value the caller
+supplies with `out` (a message id it minted) that is mixed into the
+tuple's id, so two otherwise identical messages stay distinct while a
+retry of the same message is the same tuple.
 
 **Table (illustrative; the changeset is the authority):**
 
 ```text
 nexus.tuples
-  id             bytea PK      sha256(canonical(tenant, subspace, keys, nonce))
+  id             bytea PK      sha256(canonical(tenant, subspace, keys [, nonce | body]))
+                               per the template's id_from; every input is caller-supplied
   tenant_id      text          forced RLS, same discipline as every tenant table
   subspace       text
   template       text          registered template name
-  scope          text          session | agent | instance | host | tenant
   keys           jsonb         pinned per template; equality match for in/inp
   dims           jsonb         validated against the template's schema
   body           text
@@ -521,25 +528,29 @@ nexus.tuples
   claimant       text
   claim_id       text
   lease_until    timestamptz
-  consumed_at    timestamptz   NULL = available
-  consumed_by    text
-  expires_at     timestamptz   TTL, never NULL
+  attempts       int           nacks so far; at the template's max_attempts the row is dead-lettered
+  consumed_at    timestamptz   NULL = available; set by ack and by dead-lettering
+  consumed_by    text          the acking claimant, or 'dead-letter'
+  expires_at     timestamptz   TTL, never NULL; defaults to the template's retention_seconds
   created_at     timestamptz
 
 nexus.tuple_tenants               tenant_id PK, first_seen, last_seen
                                   no RLS (it names tenants and holds no tenant data, the
-                                  service_tokens / embedding_models posture); upserted by out
-                                  out reads the tenant's row first (a plain select, no lock) and
-                                  issues the upsert only when the row is missing or last_seen is
-                                  older than a minute, so an ordinary out takes no row lock here;
-                                  the sweep's enumeration source; never purged by the sweep
+                                  service_tokens / embedding_models posture); maintained by out
+                                  in the same transaction as the tuple insert, so a live tuple
+                                  can never lack its tenant row: out reads the tenant's row first
+                                  (a plain select, no lock) and issues the upsert only when the
+                                  row is missing or last_seen is older than a minute, so an
+                                  ordinary out takes no row lock here; the sweep's enumeration
+                                  source; never purged by the sweep; exposed by no client operation
 
-nexus.tuple_claim_log             append-only: claim | ack | nack | expire
+nexus.tuple_claim_log             append-only: claim | ack | nack | expire | dead
   log_id, tenant_id (own RLS policy, like every audit table here),
   subspace, template          denormalised so a row reads standalone (May's nexus-pce1.4 fix)
-  tuple_id REFERENCES nexus.tuples(id) ON DELETE SET NULL
+  tuple_id REFERENCES nexus.tuples(id) ON DELETE SET NULL, indexed (the purge deletes through it)
   claim_id, claimant, transition, at
-  expires_at                  the log's own TTL, longer than any tuple retention
+  expires_at                  the log's own TTL; the registry loader refuses to boot unless it
+                              exceeds every template's retention_seconds by the purge interval
 ```
 
 No v1 template embeds. A later semantic column lands as an additive
@@ -547,16 +558,19 @@ changeset following the per-dimension nullable pattern `nexus.chunks`
 already uses, keyed on the tenant's embedding profile (RDR-204); the
 row above carries nothing for it.
 
-The id formula is a per-template decision. Coordination templates (both
-v1 templates) mix in a nonce, the claimant or instance id plus the
-creation time, so two byte-identical messages from two agents are two
-tuples. A template that declares `idempotent_out` hashes `(tenant,
-subspace, keys, body)` instead, as the May implementation hashed content
-and dimensions: a refire with the same keys and body is the same tuple
-and refreshes `expires_at` only, never the body, the claim state or the
-consumed state; a refire with a different body is a new tuple. RDR-110's
-gate finding C3 (a hash that omitted a distinguishing field collapsed
-distinct tuples) is why the formula names every field it covers.
+The id is derived from caller-supplied fields only, so `out` is
+idempotent by construction and a retry across the deploy gap is the same
+tuple. Which fields is the template's `id_from`: `keys` (the ledger:
+`agent_id` and `kind` identify a dispatch, so a second start for the
+same agent is the same tuple, which is what Gap 2 wants); `keys+nonce`
+(the mailbox: the sender mints a message id and passes it as the nonce,
+so two messages to one address are two tuples and a resent message is
+one); or `keys+body` (content-addressed, the May formula, no v1
+template). A refire with the same id refreshes `expires_at` only, never
+the body, the claim state or the consumed state. The insert time is
+never part of an id. RDR-110's gate finding C3 (a hash that omitted a
+distinguishing field collapsed distinct tuples) is why each template
+names every field its id covers.
 
 **Claim (illustrative jOOQ shape; the repository method is the
 authority):**
@@ -586,8 +600,11 @@ Two rules from the May implementation travel with the statement. The
 availability predicate is `consumed_at IS NULL AND expires_at > now()
 AND (claim_state IS NULL OR lease_until < now())`, so a lapsed lease is
 claimable the moment it lapses and an expired row is invisible the
-moment it expires; the sweep's `expire` row and purge are bookkeeping,
-never the release. And a
+moment it expires. When a claim takes a row whose previous lease has
+lapsed, the same transaction writes the `expire` row for the previous
+claim, so every claim reaches a terminal transition (ack, nack, expire
+or dead) whether or not the sweep saw it first; the sweep writes
+`expire` only for lapsed claims nobody re-took. And a
 same-claimant retake is idempotent: before the claim statement, `in`
 reads for a live claim held by this claimant on a matching tuple and, if
 one exists, returns its claim id with no new update and no log row.
@@ -598,38 +615,44 @@ claim.
 handler is the implementation):**
 
 ```text
-out(subspace, keys, dims, body, *, scope, ttl_seconds) -> tuple_id
-rd (subspace, keys_pattern, *, where=None, n=1, since=None, include_consumed=False,
-    timeout_s=0) -> [Tuple]                                # non-destructive; blocks up to timeout_s
-rdp(subspace, keys_pattern, *, where=None, n=1, since=None, include_consumed=False) -> [Tuple]
+out(subspace, keys, dims, body, *, nonce=None, ttl_seconds=None) -> tuple_id
+                                                            # nonce required where id_from is keys+nonce;
+                                                            # ttl_seconds defaults to the template's retention
+rd (subspace, keys_pattern, *, n=1, since=None, timeout_s=0) -> [Tuple]   # non-destructive; blocks up to timeout_s
+rdp(subspace, keys_pattern, *, n=1, since=None) -> [Tuple]                # probe
 in (subspace, keys_pattern, *, claimant, lease_s, timeout_s=0) -> (Tuple, claim_id) | None
 inp(subspace, keys_pattern, *, claimant, lease_s) -> (Tuple, claim_id) | None
-ack(claim_id, claimant) ; nack(claim_id, claimant)         # ownership checked
-subspaces() -> [TemplateSchema]                             # registered templates
+ack(claim_id, claimant) ; nack(claim_id, claimant)         # ownership checked; nack counts an attempt
 subspace_list(prefix) -> [{subspace, total, available, claimed, consumed, expired_unpurged,
                            oldest_created_at, newest_created_at}]    # concrete subspaces that exist;
                                                                      # the two timestamps span all rows,
                                                                      # expired included (the census needs
                                                                      # the newest write, not the newest live row);
                                                                      # total counts live rows only
-registry() -> {digest, templates: [TemplateSchema]}                  # subspaces() is the templates half
+registry() -> {digest, templates: [TemplateSchema]}
 subspace_stats(subspace) -> {total, available, claimed, consumed, expired_unpurged}
                                                             # total counts live rows only
 ```
 
-`rd` and `rdp` return up to `n` tuples (capped at the paging limit in
-`limits.py`) ordered by `created_at`, resuming from `since`, a
-`created_at` watermark the caller keeps; `include_consumed` lets a
-reader see acked rows, which is what a census needs and what a claimant
-never does. `subspace_list` carries each subspace's newest and oldest
+`rd` and `rdp` return up to `n` live tuples (capped at the paging limit
+in `limits.py`) ordered by `(created_at, id)`, resuming strictly after
+`since`, a `(created_at, id)` cursor the caller keeps, so rows sharing a
+timestamp are neither skipped nor repeated. Consumed rows are never
+returned; no v1 consumer reads them (the ledger is never consumed and
+nothing takes a census of a mailbox). `nack` releases the claim and
+increments `attempts`; at the template's `max_attempts` the row is
+dead-lettered instead: `consumed_at` set, `consumed_by = 'dead-letter'`,
+a `dead` log row, and the row leaves every claimant's view until its
+TTL. `subspace_list` carries each subspace's newest and oldest
 `created_at`, so "the last five sessions" is a sort over the list, not
 a scan of every ledger. `timeout_s` is capped at 25 seconds by default (CA 3: the
 edge times out a response that has not started within 30 s), settable
 on the engine; a call at the cap returns the probe result and the
 caller loops. The client's own HTTP timeout is set above `timeout_s` so the
-server's cap fires first. A body over the edge is bounded by the WAF's
-8 KB request limit; the client enforces that before sending, and that
-guard is new code (nothing pre-checks a body size today). Errors are
+server's cap fires first. A request over the edge is bounded by the
+WAF's 8 KB body limit; the client measures the serialised request it is
+about to send, not the tuple body alone, and refuses before sending;
+that guard is new code (nothing pre-checks a request size today). Errors are
 typed: `UnknownSubspace`, `SchemaViolation` (field and reason, before any
 write), `TakeDisabled` (the template's `take.enabled` is false),
 `TimeoutTooLong`, `ClaimNotFound` (no live claim with that id),
@@ -637,9 +660,10 @@ write), `TakeDisabled` (the template's `take.enabled` is false),
 (the per-claimant or global park cap is reached; the caller gets the
 probe result and backs off); a `ttl_seconds` or `lease_s` at or below
 zero and a negative `timeout_s` are refused. Retry across the deploy gap: `rd` and `rdp` are freely
-retryable on a 502 or 504; a retried `in` shares the ambiguity of a crash
-after `in`, which the lease and sweep already cover. The client reuses
-the retry classification in `nexus.retry` rather than a new one.
+retryable on a 502 or 504; a retried `out` is the same tuple, by the id
+formula; a retried `in` shares the ambiguity of a crash after `in`,
+which the lease and sweep already cover. The client reuses the retry
+classification in `nexus.retry` rather than a new one.
 
 **Wake.** There is one engine JVM (CA 5) and every `out` passes through
 it. The waiter is a per-subspace `Condition` (one lock and condition per
@@ -683,9 +707,10 @@ and gated third-party additions by reserved prefix, research 4; one copy
 in the engine removes the class.)
 The document shape is the May format with the substrate keys dropped:
 `name`, `dimensions` (name to type, values, required), `keys` (the pinned
-key set, May's `take.match_keys`), `take` (`enabled`,
-`default_lease_seconds`; a template with `take.enabled` declares at least
-one key), `retention_seconds`, `idempotent_out`. Dropped: `tier`,
+key set, May's `take.match_keys`), `id_from` (`keys`, `keys+nonce` or
+`keys+body`), `take` (`enabled`, `default_lease_seconds`,
+`max_attempts`; a template with `take.enabled` declares at least one
+key), `retention_seconds` (required; `out`'s default TTL). Dropped: `tier`,
 `tiers`, `content_type`, `embed_from`, `floor`, `margin`, the read
 defaults, `match_text`, and retention zero meaning never; `embed_from`
 returns with the semantic column, not before. Load rules verbatim from May: a literal
@@ -694,19 +719,29 @@ segment; a duplicate name or an empty parameter fails the load. A refire
 on an idempotent template refreshes `expires_at` and leaves `created_at`
 alone, so it does not move the tuple to the back of the claim order.
 Templates are resource files: they change with an engine release, not
-with a data changeset. Schema evolution is additive in v1. Two v1 templates, and only two: `ledger/<session_id>` (keys:
-`agent_id`, `kind` in {start, report}; dims: `agent_type`; scope
-`session`; take disabled, since ledger rows are read and never claimed;
-nonce: agent_id plus kind), and `mailbox/<address>` (keys: `to`; dims:
-`from`, `kind`, `correlation_id`; scope `agent` or `instance`; take
-enabled; nonce: from plus created). The ten-worker harness registers its
-own test-only template in the test, not in the shipped resources. An instance address
-is the session name `ListAgents` shows (for example `nexus-23`), so the
-Gap 5 request is `out` to `mailbox/conexus-ed` and its ack is `out` back.
+with a data changeset. The loader also refuses to boot unless the claim
+log's TTL exceeds every template's `retention_seconds` by at least one
+sweep interval, so the purge order in §Indexes and hygiene is checked,
+not assumed. Schema evolution is additive in v1. Two v1 templates, and
+only two: `ledger/<session_id>` (keys: `agent_id`, `kind` in {start,
+report}; dims: `agent_type`; `id_from: keys`; take disabled, since
+ledger rows are read and never claimed; retention 90 days, the window
+the census compares within), and `mailbox/<address>` (keys: `to`; dims:
+`from`, `kind`, `correlation_id`, `address_kind` in {agent, instance};
+`id_from: keys+nonce`, the nonce a sender-minted message id; take
+enabled, `max_attempts` 3; retention 7 days). The ten-worker harness
+registers its own test-only template in the test, not in the shipped
+resources. An instance address is the session name the harness's
+`ListAgents` tool shows (for example `nexus-23`), so the Gap 5 request
+is `out` to `mailbox/conexus-ed` and its ack is `out` back to the
+requester's own mailbox, which the requester waits on with `in`.
 
 **Indexes and hygiene.** Partial index on `(tenant_id, subspace,
 created_at) WHERE consumed_at IS NULL AND claim_state IS NULL` for the
-claim scan; a GIN index on `keys` only if a consumer's pattern needs it.
+claim scan; an index on `tuple_claim_log(tuple_id)`, since the purge
+deletes through that reference and an unindexed child would turn every
+batch into a scan of the log; a GIN index on `keys` only if a consumer's
+pattern needs it.
 Claims and acks write predicate columns and are therefore not HOT
 updates (measured 0 % HOT with the index, research 3); at the measured
 load the index churn is affordable and the sweep budget assumes it.
@@ -718,18 +753,22 @@ once churn stops. TTL on every row; the `sweepScheduler` in
 `NexusService`, every `SWEEP_INTERVAL_HOURS` (six hours today,
 `NexusService.java:78`), gains a second scheduled task that enumerates
 its tenants from `nexus.tuple_tenants` and, per tenant, releases
-lapsed claims with an `expire` log row, purges expired and
-consumed-past-retention tuple rows (which sets the log's `tuple_id` to
-null), then purges log rows past the log's own longer TTL, in batches of
-a few hundred, committing per batch (one long transaction would defeat
-autovacuum). The token loop's statement bound
+lapsed claims nobody re-took with an `expire` log row, purges expired
+and consumed-past-retention tuple rows (which sets the log's `tuple_id`
+to null), then purges log rows past the log's own longer TTL, in batches
+of a few hundred, committing per batch (one long transaction would
+defeat autovacuum). Two bounds, because the task shares one
+single-thread scheduler with the T1 crash-safety sweep and would
+otherwise starve it: the token loop's statement bound
 (`NexusService.java:539-542`: passed to every arm, because bounding one
-of three leaves the cycle unbounded) applies to every statement this
-task issues, the tenant enumeration and each per-tenant batch alike,
-since both tasks share one single-thread scheduler and an unbounded
-purge would stall the T1 sweep for every tenant. Every run logs a counted outcome record in the RDR-204
-ghost sweep's convention: tenants visited, scanned, released, purged,
-log rows purged. A
+of three leaves the cycle unbounded) on every statement, and a budget on
+the task itself, a cap on batches per tenant per run and a wall-clock
+budget per run, both engine settings, with the remainder carried to the
+next interval (the sweep is idempotent and cumulative, so carrying is
+safe, as `NexusService.java:544-547` says of the token loop). Every run
+logs a counted outcome record in the RDR-204 ghost sweep's convention:
+tenants visited, scanned, released, purged, log rows purged, and whether
+the budget was exhausted. A
 run that finds nothing expired is the normal state of a healthy table
 and is logged as such; the failure the counts detect is a run that
 scanned nothing at all, or a run that did not happen, which the doctor
@@ -742,9 +781,10 @@ injected like the other stores; MCP tools `tuple_out`, `tuple_rd`,
 `tuple_in`, `tuple_ack`, `tuple_nack`, `tuple_registry` (templates and
 digest), `tuple_list` (concrete subspaces), `tuple_stats` (probes are
 `rd` and `in` with `timeout_s` zero); `nx tuple
-{out,rd,in,ack,nack,templates,list,stats}`; three `nx doctor` rows (oldest
-unclaimed age per subspace over live rows only; dead-tuple ratio and last autovacuum on the
-table; age of the last tuple sweep).
+{out,rd,in,ack,nack,templates,list,stats}`; three `nx doctor` rows:
+oldest unclaimed age per subspace over live rows only; dead-tuple ratio
+and last autovacuum on the table; age of the last tuple sweep and
+whether its budget was exhausted.
 
 **Identity and scope.** No hook mints anything. `subagent-start.sh`,
 the one script on `SubagentStart` that may write to stdout, parses
@@ -755,9 +795,9 @@ address. It does no network I/O. The start and report tuples are keyed
 on the same harness id and written by the async entries described under
 Hook path, so the report needs no cooperation from the agent. The
 `PreToolUse` expectation row keeps covering a dispatch that never
-starts. Every tuple's `scope` value comes from that injected id or from
-the existing session lease, never from resolving the session at write
-time.
+starts. Every address a tuple carries, the agent id in the ledger's keys
+and the mailbox's `to`, comes from that injected id or from the existing
+session lease, never from resolving the session at write time.
 
 **Hook path.** The three blocking hooks that write the TSV today
 (`agent-dispatch-expect.sh` on `PreToolUse`, `subagent-start-stamp.sh`
@@ -776,10 +816,14 @@ hook's stdout, stderr and exit code are never read; a failure is never
 propagated. The census
 (`expectations_census`, the scripted count the orchestration skill
 requires) gains a space-backed path that reads `ledger/<session_id>`
-with `rd` and `include_consumed`, enumerating sessions with
+with `rd` (ledger rows are never consumed), enumerating sessions with
 `subspace_list("ledger/")`, and falls back to the TSV with a named reason
-when the engine is unreachable; it reports the space's newest-row age
-against the TSV's so a stalled projection is a finding.
+when the engine is unreachable. It compares only within the ledger
+template's retention window, since the TSV is a durable file and the
+space is not; it reports the space's newest-row age against the TSV's so
+a stalled projection is a finding, and reports a session present in the
+TSV directory and absent from `subspace_list` as a projection that never
+ran.
 
 ### Existing Infrastructure Audit
 
@@ -788,7 +832,7 @@ against the TSV's so a stalled projection is a finding.
 | Atomic claim | `AspectRepository.claimNext` / `reclaimStale` | Reuse the statement shape and the tenant-scoped transaction; new repository, since the queue's columns are aspect-specific. |
 | Batch claim | `AspectRepository.claimBatch` (a loop) | Do not reuse; a real `LIMIT n` claim is new work and lands only when a consumer asks. |
 | Sweep | `NexusService.sweepScheduler` (every `SWEEP_INTERVAL_HOURS`; its tenant set comes from the non-RLS `service_tokens`); RDR-204 ghost sweep (`AuthFilter`, once per tenant per JVM) | Add a second scheduled task on the same scheduler that enumerates from the non-RLS `nexus.tuple_tenants`; borrow the ghost sweep's counted outcome record, not its trigger. |
-| Pre-send body cap | none (`edge_refusal.py` is post-rejection; `limits.py` holds store quotas) | New: an 8 KB guard in `HttpTupleStore.out`. |
+| Pre-send request cap | none (`edge_refusal.py` is post-rejection; `limits.py` holds store quotas) | New: an 8 KB guard on the serialised request in `HttpTupleStore.out`. |
 | Retry across the deploy gap | `nexus.retry` (502, 503, 504, 429 retryable) | Reuse unchanged. |
 | Tenant scoping | `TenantScope`, forced RLS changesets | Reuse unchanged. |
 | HTTP store client | `http_aspect_queue.py` | Reuse the shape (constructor injection, typed errors, data-token handling). |
@@ -877,12 +921,13 @@ the record; the RDR-184 failures are exactly what this produced.
 
 ### Consequences
 
-- One new table pair, one handler, one client store, eight MCP tools,
+- Three new tables, one handler, one client store, eight MCP tools,
   one CLI verb. The engine's public surface grows by one route family.
 - The ledger and the mailbox get a real per-instance key and a store that
   can be queried across sessions and processes.
-- A new operational surface: lease expiries, oldest-unclaimed age and
-  dead-tuple ratio become doctor rows.
+- A new operational surface: oldest-unclaimed age, dead-tuple ratio
+  with last autovacuum, and last-sweep age become doctor rows; lease
+  expiries per hour is an MVV metric.
 - Agents learn one more tool family. The skills that teach it are two
   files.
 - A hook now does a network write after its append, in the background.
@@ -907,8 +952,17 @@ the record; the RDR-184 failures are exactly what this produced.
   TTL on every row, a sweep that commits per batch, doctor row; the
   Solid Queue shape as the named next step.
 - **Risk**: Two same-type dispatches collapse into one ledger tuple.
-  **Mitigation**: The nonce in the id for coordination templates,
-  pinned by a test that writes two identical starts and reads two rows.
+  **Mitigation**: The harness's per-instance `agent_id` is in the
+  ledger's keys (CA 2), pinned by a test that writes two starts with
+  different ids and reads two rows, and one start twice and reads one.
+- **Risk**: The tuple sweep starves the T1 crash-safety sweep on the
+  shared single-thread scheduler.
+  **Mitigation**: A budget on the task (batches per tenant, wall clock
+  per run) and the statement bound on every statement; the doctor row
+  reports budget exhaustion.
+- **Risk**: A message nobody can process is redelivered until its TTL.
+  **Mitigation**: `attempts` and the template's `max_attempts`; the row
+  is dead-lettered with a `dead` log row.
 - **Risk**: The hook projection blocks or fails a dispatch.
   **Mitigation**: The projection is a separate async hook entry, never a
   child of the blocking hook; Phase 2 Step 3 measures it with the engine
@@ -922,13 +976,21 @@ the record; the RDR-184 failures are exactly what this produced.
 - Visible: the sweep logs tenants visited, scanned, released, purged
   and log-purged counts every run. Zero expired is the healthy steady state; a sweep
   that did not run shows as a stale last-sweep age in the doctor row.
-- Silent, resolved: a claimant crashes after `in`; the lease lapses and
-  the sweep releases the row with an `expire` log entry.
+- Silent, resolved: a claimant crashes after `in`; the lease lapses,
+  the next claim takes the row and writes the `expire` row for the old
+  claim, or the sweep does if nobody re-took it.
+- Visible: a claim nacked `max_attempts` times is dead-lettered with a
+  `dead` log row and leaves every claimant's view.
+- Visible: the sweep reports budget exhaustion in its counted record and
+  the doctor row; the remainder is swept next interval.
+- Silent, resolved: a live tuple can never lack its tenant row, because
+  `out` maintains `tuple_tenants` in the same transaction.
 - Silent, resolved: two claimants race; `SKIP LOCKED` gives each a
   distinct row or `None`.
 - Silent, recorded: an async projection hook is killed without trace at
   session end, so the space can be behind the TSV. The census reports
-  the space's newest-row age against the TSV's, and a gap is a finding.
+  the space's newest-row age against the TSV's, and a session in the TSV
+  directory with no ledger subspace at all, and either is a finding.
 
 ## Implementation Plan
 
@@ -937,22 +999,23 @@ the record; the RDR-184 failures are exactly what this produced.
 - [x] CA 1, CA 2 and CA 4 verified by the research 3 and research 5
       spikes; CA 5 to CA 7 recorded from conexus's measurements of
       2026-09-09.
-- [ ] CA 3 confirmed through the cloud client-path gate (Phase 1 Step
-      6); nexus-bwulw is why that gate, and not an engine-direct check,
-      is the proof.
 - [ ] The RDR-120 lift statement in §Relationship to Prior RDRs stands
       unchallenged at the gate.
-- [ ] `PgBouncerTenantIsolationTest`'s comment corrected to say it
-      exercises a topology that is not deployed (Phase 1 Step 1).
+
+CA 3's confirmation through the cloud client-path gate and the
+`PgBouncerTenantIsolationTest` comment are Phase 1 deliverables (Steps
+6 and 1), not prerequisites; nexus-bwulw is why that gate, and not an
+engine-direct check, is the proof for CA 3.
 
 ### Minimum Viable Validation
 
 Two runs, both in scope (this is the minimum viable validation, the
 one end-to-end proof). First, a real session dispatches ten sub-agents
 of two types; the space holds ten start tuples and ten report tuples
-with ten distinct ids, and the space-backed census, reading
-`ledger/<session_id>` with `rd` and `include_consumed`, agrees with the
-TSV census row for row. Second, the ten-worker work-stealing harness
+with ten distinct ids, the orchestrator's parked `rd` for one named
+agent's report returns when that report lands, and the space-backed
+census, reading `ledger/<session_id>` with `rd`, agrees with the TSV
+census row for row within the ledger's retention window. Second, the ten-worker work-stealing harness
 from RDR-110 runs against the engine on a test-registered template with
 six metrics recorded (wake latency through the public edge,
 oldest-unclaimed age, empty claims after wake, dead-tuple ratio and last
@@ -971,21 +1034,22 @@ statement stands.
 #### Step 2: Changesets
 
 `tuples-001-baseline.xml`: `nexus.tuples` and `nexus.tuple_claim_log`
-each with `tenant_id` and a separate RLS changeset in the catalog-036
-shape; `nexus.tuple_tenants` with no RLS and a comment giving the reason
+each with `tenant_id`, created and given forced RLS in one changeset
+with one rollback block, the catalog-036 shape; `nexus.tuple_tenants` with no RLS and a comment giving the reason
 (it names tenants and holds no tenant data, like `service_tokens` and
 `embedding_models`); the partial index, the
 per-table autovacuum factor with a comment naming this RDR as the first
-use, the claim log's `ON DELETE SET NULL` reference and its own TTL, and
-complete rollback blocks
+use, the claim log's indexed `ON DELETE SET NULL` reference and its own
+TTL, the `attempts` column, and complete rollback blocks
 (the rollback round-trip test replays the whole chain). No per-changeset
 grants: the `runAlways` grant changesets cover every relation. One
 include line in the master changelog before the grant includes.
 
 #### Step 3: Registry
 
-YAML templates in engine resources; loader and validator at boot; the
-two v1 templates named in §Technical Design and no third.
+YAML templates in engine resources; loader and validator at boot,
+including the log-TTL-exceeds-every-retention check; the two v1
+templates named in §Technical Design and no third.
 
 #### Step 4: Repository and handler
 
@@ -999,11 +1063,12 @@ A second scheduled task on `sweepScheduler` at the same cadence
 (`SWEEP_INTERVAL_HOURS`), separate from `runScheduledSweep` because that
 method builds its token-derived tenant set once before its arms. It
 enumerates `nexus.tuple_tenants` and, inside `withTenant` for each:
-releases lapsed claims with an `expire`
-log row, purges expired and consumed-past-retention tuple rows, then log
-rows past the log's own TTL, in batches with a commit per batch, the
-token loop's statement bound on every statement including the
-enumeration (`NexusService.java:539-542`); log the
+releases lapsed claims nobody re-took with an `expire` log row, purges
+expired and consumed-past-retention tuple rows, then log rows past the
+log's own TTL, in batches with a commit per batch, under the token
+loop's statement bound on every statement including the enumeration
+(`NexusService.java:539-542`) and under the task's own budget (batches
+per tenant per run, wall clock per run, remainder carried); log the
 counted outcome record every run. The sweep test seeds expired rows and
 asserts the counts; production runs that find nothing are normal.
 
@@ -1049,23 +1114,27 @@ blocking hooks still run in their 30 to 40 ms.
 `subagent-start.sh` injects the id; the async `SubagentStart` entry
 writes the start tuple and the async `SubagentStop` entry writes the
 report tuple, neither needing the agent; `expectations_census` gains the
-space-backed read path (`rd` with `include_consumed` over
-`ledger/<session_id>`, sessions enumerated with `subspace_list`) with the
-TSV fallback and the age comparison. The MVV's first run closes this
-phase.
+space-backed read path (`rd` over `ledger/<session_id>`, sessions
+enumerated with `subspace_list`) with the TSV fallback, the retention
+window, the age comparison and the absent-projection report; the
+orchestration skill gains "wait for this agent's report" as a parked
+`rd` with a timeout. The MVV's first run closes this phase.
 
 ### Phase 4: Consumer two, the mailbox
 
 A `mailbox` skill and one paragraph in the orchestration skill: send by
-`tuple_out` to the agent's id, drain by `tuple_in` before composing any
-hand-back. A scenario test with a mid-turn directive.
+`tuple_out` to the agent's id with a sender-minted message id as the
+nonce, drain by `tuple_in` before composing any hand-back. A scenario
+test with a mid-turn directive, and one with a resent message that
+lands once.
 
 ### Phase 5: Cross-instance request and ack
 
-The mailbox with `scope = instance`: the relay convention in the
-cross-instance memory becomes `tuple_out` to the peer's address with an
-ack expected under a lease, and the nexus-w374z sweep reads unacked
-requests from the space. A scenario test with two sessions on one box.
+The mailbox with an instance name as the address: the relay convention
+in the cross-instance memory becomes `tuple_out` to the peer's address
+and a parked `in` on the requester's own mailbox for the ack, and the
+nexus-w374z sweep reads unacked requests from the space. A scenario test
+with two sessions on one box.
 
 ### Day 2 Operations
 
@@ -1084,8 +1153,19 @@ None. Postgres, pgvector, jOOQ and Liquibase are in place.
 
 - **Scenario**: `out` with a schema breach — **Verify**: `SchemaViolation`
   names field and reason; no row written.
-- **Scenario**: two identical `out` calls on a coordination template —
-  **Verify**: two rows (nonce); on an idempotent template, one row.
+- **Scenario**: two ledger starts with different `agent_id` — **Verify**:
+  two rows; the same start twice — **Verify**: one row.
+- **Scenario**: two mailbox messages to one address with different
+  nonces — **Verify**: two rows; the same message resent with its nonce
+  — **Verify**: one row, `expires_at` refreshed.
+- **Scenario**: `nack` `max_attempts` times by different claimants —
+  **Verify**: the row is dead-lettered, a `dead` log row, no further
+  `in` returns it, `rd` still does not (consumed).
+- **Scenario**: a claim takes a row whose lease lapsed — **Verify**: the
+  previous claim's `expire` row is written in the same transaction.
+- **Scenario**: the sweep budget is exhausted on a seeded million rows
+  — **Verify**: the run stops at its budget, reports exhaustion, and the
+  next run continues; the T1 sweep still runs in the same interval.
 - **Scenario**: ten concurrent `inp` on one available row — **Verify**:
   exactly one `(Tuple, claim_id)`, nine `None`; one `claim` log entry.
 - **Scenario**: `in` then crash before `ack` — **Verify**: after the
@@ -1129,8 +1209,8 @@ None. Postgres, pgvector, jOOQ and Liquibase are in place.
   claims and old log rows — **Verify**: counts match the seed, `expire`
   rows exist, purged tuples' log rows survive with `tuple_id` null, and
   an idle run logs zeros without failing.
-- **Scenario**: a body over 8 KB — **Verify**: refused by the client
-  before any request is sent.
+- **Scenario**: a serialised request over 8 KB with a body under it —
+  **Verify**: refused by the client before any request is sent.
 - **Scenario**: an unknown subspace, a `timeout_s` above the cap, a
   `ttl_seconds` or `lease_s` at or below zero, a negative `timeout_s` —
   **Verify**: the named typed error, no row written.
@@ -1141,8 +1221,11 @@ None. Postgres, pgvector, jOOQ and Liquibase are in place.
 - **Scenario**: the seventeenth parked reader, or a claimant's fifth —
   **Verify**: `ParkCapExceeded` with the probe result.
 - **Scenario**: the census over `ledger/<session_id>` after the MVV's
-  first run — **Verify**: equals the TSV census row for row, including
-  acked report rows.
+  first run — **Verify**: equals the TSV census row for row within the
+  retention window; a session directory with no ledger subspace is
+  reported as a projection that never ran.
+- **Scenario**: a template whose `retention_seconds` exceeds the log
+  TTL — **Verify**: the engine refuses to boot naming the template.
 
 ## Validation
 
@@ -1373,6 +1456,33 @@ every statement the tuple sweep issues, not only its enumeration
 leaves the cycle unbounded), stated in Technical Design and Phase 1 Step
 5. `subspace_list`'s timestamps span all rows, expired included, which
 is what the census's stalled-projection detector needs. Round 2 of the
-gate is run on this text: the sixth check found no ship-blocker, and the
-previous three checks had each found only one-clause drifts adjacent to
-the previous fix.
+gate is run on this text: the sixth check found no ship-blocker
+(the three before it found one critical each on the third and fourth
+fixes and none on the fifth).
+
+### 2026-09-09 — Gate round 2, BLOCKED (3 critical, 11 significant), fixes applied
+
+Critique: T2 `nexus_rdr/205-gate-critique-2026-09-09b`. Layer 0 was
+clean. Decisions taken with Sam: ledger rows are read-only and the
+census reads with plain `rd`, so `include_consumed` leaves v1; `out` is
+idempotent everywhere, the id derived from caller-supplied fields per the
+template's `id_from` (keys; keys plus a sender-minted nonce; keys plus
+body), never the insert time; blocking reads stay in v1 with their two
+parking callers named (an orchestrator waiting for one agent's report,
+a requester waiting for its ack); `nack` counts attempts and the
+template's `max_attempts` dead-letters the row with a `dead` log row.
+The tuple sweep gains a budget on the task itself (batches per tenant,
+wall clock per run, remainder carried), beside the statement bound. The
+claim statement writes the `expire` row when it takes a lapsed row; the
+log's `tuple_id` is indexed; the log TTL is checked against every
+template's retention at boot; both templates declare a retention and
+`out` defaults to it; the census compares within the ledger's window
+and reports absent projections; the 8 KB guard measures the serialised
+request; `where` leaves the read signatures; the tenant table is
+maintained in the tuple insert's transaction; the `scope` column goes
+(addressing is the subspace, and the mailbox carries `address_kind`);
+`subspaces()` goes, `registry()` covers it, ten operations; three
+tables and the three doctor rows named consistently; `since` is a
+`(created_at, id)` cursor; Prerequisites keep only what precedes Phase
+1; Gap 2 cites RDR-184 §Context for its count. Cross-walked: every fix
+above was checked against the others before this commit.
