@@ -311,3 +311,76 @@ def test_get_credential_falls_back_to_file(fake_home) -> None:
 def test_get_credential_returns_empty_when_unset(fake_home) -> None:
     from nexus.config import get_credential
     assert get_credential("chroma_api_key") == ""
+
+
+# ── nx config set restart hint (RDR-204 P3.4, nexus-ft04v.25) ───────────────
+#
+# The GH #1461 switch recipe is ``nx config set local.embed_model ...``,
+# ``nx config set voyage_api_key ...``, then a service restart, and the
+# restart IS the profile write: the engine is the only writer of
+# ``nexus.embedding_profile`` and reads the model and key only at spawn.
+# Until the restart the engine's profile and the client's intent differ
+# invisibly, so ``nx config set`` prints a one-line hint for exactly those
+# two keys and no other. The hint and docs/cli-reference.md "Local mode with
+# Voyage" must say the same thing; ``test_restart_hint_matches_the_documented_recipe``
+# pins that.
+
+from nexus.commands.config_cmd import (  # noqa: E402
+    RESTART_HINT_KEYS,
+    SERVICE_RESTART_COMMAND,
+    SERVICE_RESTART_HINT,
+)
+
+_CLI_REFERENCE = Path(__file__).resolve().parents[1] / "docs" / "cli-reference.md"
+
+
+def _set(runner: CliRunner, *args: str) -> str:
+    result = runner.invoke(main, ["config", "set", *args])
+    assert result.exit_code == 0, result.output
+    return result.output
+
+
+def test_restart_hint_keys_are_exactly_the_two_profile_inputs() -> None:
+    assert RESTART_HINT_KEYS == frozenset({"local.embed_model", "voyage_api_key"})
+
+
+def test_restart_hint_names_the_restart_and_the_command() -> None:
+    assert "restart" in SERVICE_RESTART_HINT.lower()
+    assert SERVICE_RESTART_COMMAND in SERVICE_RESTART_HINT
+    assert "\n" not in SERVICE_RESTART_HINT, "one line"
+
+
+def test_set_local_embed_model_prints_the_restart_hint(runner, fake_home) -> None:
+    out = _set(runner, "local.embed_model", "voyage-3")
+    assert "Set local.embed_model" in out
+    assert SERVICE_RESTART_HINT in out
+
+
+def test_set_local_embed_model_key_equals_value_form_prints_the_restart_hint(runner, fake_home) -> None:
+    assert SERVICE_RESTART_HINT in _set(runner, "local.embed_model=voyage-3")
+
+
+def test_set_voyage_api_key_prints_the_restart_hint(runner, fake_home) -> None:
+    out = _set(runner, "voyage_api_key", "pa-test-key")
+    assert "Set voyage_api_key" in out
+    assert SERVICE_RESTART_HINT in out
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("pdf.extractor", "mineru"), ("service_url", "https://example.invalid"), ("search.hnsw_ef", "128")],
+)
+def test_other_keys_print_no_restart_hint(runner, fake_home, key: str, value: str) -> None:
+    out = _set(runner, key, value)
+    assert f"Set {key}" in out
+    assert "restart" not in out.lower()
+
+
+def test_restart_hint_matches_the_documented_recipe() -> None:
+    """docs/cli-reference.md 'Local mode with Voyage' and the hint carry the
+    same restart command, so neither can drift without the other."""
+    text = _CLI_REFERENCE.read_text()
+    start = text.index("**Local mode with Voyage")
+    section = text[start : text.index("**What happens to a corpus", start)]
+    assert SERVICE_RESTART_COMMAND in section
+    assert "a restart is required" in section
