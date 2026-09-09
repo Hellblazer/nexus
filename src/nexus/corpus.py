@@ -957,7 +957,14 @@ def resolve_row_preferred(
     one, is still authoritative and wins outright).
     """
     from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
-    row = get_collection_row(name)
+    try:
+        row = get_collection_row(name)
+    except Exception:  # noqa: BLE001 — class-(d) diagnostics run over drifted, offline or catalog-only state; a row fetch that cannot complete is reported and the site's own name derivation answers, exactly as it did before the row was preferred
+        _log.warning(
+            "resolve_row_preferred_row_fetch_failed",
+            collection=name, field=field, exc_info=True,
+        )
+        return name_fallback(name)
     if row is not None:
         val = row.get(field)
         return str(val) if val is not None else None

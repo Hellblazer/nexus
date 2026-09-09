@@ -919,3 +919,32 @@ def test_allow_placeholder_lifts_the_refusal_for_a_restore() -> None:
     assert t3_collection_name("knowledge__knowledge", for_write=True, allow_placeholder=True) == (
         "knowledge__knowledge__voyage-context-3__v1"
     )
+
+
+def test_resolve_row_preferred_falls_to_the_name_when_the_row_fetch_fails(monkeypatch) -> None:
+    """RDR-204 Phase 3 fix round: a class-(d) diagnostic (``nx catalog
+    verify``, reconcile-stale, integrity) must keep answering from the
+    site's own name derivation when the row fetch cannot complete (no
+    reachable service, a catalog-only run, a T3 double without
+    ``list_collections``). The failure is logged at WARNING, never raised
+    into the diagnostic: five ``TestVerifyCommand`` tests and the store-put
+    title probe went red under -n 8 when the fetch aborted them."""
+    import nexus.mcp_infra as mi
+
+    from nexus.corpus import resolve_row_preferred
+
+    def _boom(name: str):
+        raise ConnectionError("simulated unreachable service")
+
+    monkeypatch.setattr(mi, "get_collection_row", _boom)
+
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        got = resolve_row_preferred(
+            "code__nexus__voyage-code-3__v1", "embedding_model",
+            lambda n: "from-name",
+        )
+    assert got == "from-name"
+    failed = [e for e in logs if e["event"] == "resolve_row_preferred_row_fetch_failed"]
+    assert failed and failed[0]["log_level"] == "warning", logs
