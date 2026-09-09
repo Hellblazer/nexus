@@ -1366,6 +1366,56 @@ def test_collections_cache_ttl_expiry_refetches():
     )
 
 
+def test_prime_collections_cache_serves_get_collection_row_without_a_fetch():
+    """RDR-204 Phase 3 fix round (nexus-ft04v.28 S1): a caller that
+    already fetched ``list_collections()`` for its own reasons (e.g.
+    ``nx search``'s ``--corpus`` resolver) can prime this module's cache
+    with that SAME response -- a subsequent ``get_collection_row`` call
+    must be served from the primed cache, never trigger its own
+    ``list_collections()`` round trip."""
+    import nexus.mcp_infra as mi
+
+    mock = _mock_t3([{"name": "knowledge__unused", "count": 0}])
+    rows = [
+        {
+            "name": "code__nexus-1-1__bge-base-en-v15-768__v1", "count": 3,
+            "content_type": "code", "owner_id": "nexus-1-1",
+            "embedding_model": "bge-base-en-v15-768", "lifecycle_state": "live",
+        },
+    ]
+
+    mi.prime_collections_cache(rows)
+
+    row = mi.get_collection_row("code__nexus-1-1__bge-base-en-v15-768__v1")
+    assert row == {
+        "content_type": "code", "owner_id": "nexus-1-1",
+        "embedding_model": "bge-base-en-v15-768", "lifecycle_state": "live",
+    }
+    mock.list_collections.assert_not_called()
+
+
+def test_prime_collections_cache_overwrites_a_still_fresh_cache():
+    """A caller's own fetch is always FRESHER than whatever mcp_infra
+    already has cached -- prime_collections_cache overwrites even when
+    the existing entry has not gone stale yet, never "the first write
+    wins"."""
+    import nexus.mcp_infra as mi
+
+    mi.prime_collections_cache([
+        {"name": "knowledge__old", "count": 1, "content_type": "knowledge",
+         "owner_id": "old", "embedding_model": "minilm-l6-v2-384",
+         "lifecycle_state": "live"},
+    ])
+    mi.prime_collections_cache([
+        {"name": "knowledge__new", "count": 2, "content_type": "knowledge",
+         "owner_id": "new", "embedding_model": "minilm-l6-v2-384",
+         "lifecycle_state": "live"},
+    ])
+
+    assert mi.get_collection_row("knowledge__old") is None
+    assert mi.get_collection_row("knowledge__new") is not None
+
+
 # ── Pagination ───────────────────────────────────────────────────────────────
 
 

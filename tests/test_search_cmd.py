@@ -214,20 +214,19 @@ def test_prefix_corpus_still_pays_list_collections_once(
 ) -> None:
     """A wildcard/prefix/legacy-short-form --corpus value still needs the
     tenant's collection list to resolve against, and pays for it exactly
-    once PER FETCH SITE (not once per --corpus token).
+    ONCE (not once per --corpus token, and not once per fetch site).
 
-    Two fetch sites, not one, since RDR-204 Phase 3's fixture-seam fix
-    (nexus-ft04v.26) wired this test's mock into BOTH ``search_cmd``'s own
-    ``_t3()`` (the ``all_collections`` fetch) AND
-    ``nexus.mcp_infra.get_t3()`` (the SEPARATE, process-local row cache
-    ``resolve_corpus``'s Stage 2 reads via ``get_collection_row`` --
-    architecturally distinct from ``search_cmd``'s own fetch, cold on
-    every CLI invocation since the CLI is a fresh process each time). Two
-    content-type tokens ("knowledge", "rdr") still cost only ONE
-    mcp_infra row-cache refresh (its own 60s-TTL cache warms on the
-    first ``get_collection_row`` call and serves the second from cache),
-    so 2 total -- not 3 -- proves the "not once per token" invariant this
-    test is actually about.
+    RDR-204 Phase 3 fix round (nexus-ft04v.28 S1): ``search_cmd`` primes
+    ``nexus.mcp_infra``'s SEPARATE, process-local row cache
+    (``prime_collections_cache``) from its own already-fetched
+    ``all_collections`` response, right after fetching it -- so
+    ``resolve_corpus``'s Stage 2 (bare content-type fan-out) finds a warm
+    cache via ``get_collection_row`` and never re-fetches. Two
+    content-type tokens ("knowledge", "rdr") share the SAME primed
+    cache, restoring the RDR's own §Performance Expectations ("a field
+    read on a call already made"). Before this fix this cost 2 -- one
+    per fetch site, since the CLI is a cold process every invocation and
+    mcp_infra's cache started cold regardless of search_cmd's own fetch.
     """
     mock_t3 = _mock_t3(["knowledge__test__voyage-context-3__v1", "rdr__nexus"])
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
@@ -236,7 +235,7 @@ def test_prefix_corpus_still_pays_list_collections_once(
             main, ["search", "query", "--corpus", "knowledge,rdr"],
         )
     assert result.exit_code == 0, result.output
-    assert mock_t3.list_collections.call_count == 2
+    assert mock_t3.list_collections.call_count == 1
 
 
 @pytest.mark.usefixtures("cloud_mode")
@@ -246,11 +245,11 @@ def test_mixed_explicit_and_prefix_corpus_pays_list_collections(
     """One non-conformant token in --corpus is enough to require the
     fallback resolution path for the WHOLE call (never a partial skip).
 
-    Two fetch sites, not one -- see
+    ONE fetch, not two -- see
     test_prefix_corpus_still_pays_list_collections_once's docstring for
-    why (RDR-204 Phase 3 fixture-seam fix, nexus-ft04v.26): search_cmd's
-    own ``all_collections`` fetch, plus mcp_infra's separate row-cache
-    warm for the "rdr" bare-corpus token's Stage 2 resolution.
+    why (RDR-204 Phase 3 fix round, nexus-ft04v.28 S1): search_cmd's own
+    ``all_collections`` fetch primes mcp_infra's row cache, so the "rdr"
+    bare-corpus token's Stage 2 resolution reads it warm.
     """
     mock_t3 = _mock_t3(["knowledge__test__voyage-context-3__v1", "rdr__nexus"])
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
@@ -261,7 +260,7 @@ def test_mixed_explicit_and_prefix_corpus_pays_list_collections(
              "knowledge__test__voyage-context-3__v1,rdr"],
         )
     assert result.exit_code == 0, result.output
-    assert mock_t3.list_collections.call_count == 2
+    assert mock_t3.list_collections.call_count == 1
 
 
 def test_corpus_csv_and_repeat_forms_can_mix(

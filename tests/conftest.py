@@ -2956,6 +2956,16 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/test_collection_registration.py::TestRegistrationSeamProfileCheck::test_empty_profile_proceeds_with_intent_bootstrap_case",
     "tests/test_collection_registration.py::TestRegistrationSeamProfileCheck::test_pre_phase_2_engine_route_missing_propagates_uncaught",
     #
+    # TestEnsureCollectionRegisteredExplicitKwargsOverride (RDR-204 Phase 3
+    # fix round, nexus-ft04v.28 C1): the voyage-code-3 token is part of the
+    # QUARANTINE COLLECTION NAME string / the explicit kwargs override dict
+    # under test -- proving `kwargs=` bypasses name-derivation and that the
+    # profile check still runs against whatever it says. A FAKE writer and
+    # a FAKE profile reader (_fake_writer / _stub_profile_reader) are used
+    # throughout; no real embedder or credential path is exercised.
+    "tests/test_collection_registration.py::TestEnsureCollectionRegisteredExplicitKwargsOverride::test_explicit_kwargs_bypasses_name_derivation",
+    "tests/test_collection_registration.py::TestEnsureCollectionRegisteredExplicitKwargsOverride::test_explicit_kwargs_still_runs_the_profile_check",
+    #
     # test_rename_prefix_validity_table: voyage tokens appear only inside
     # the function's own @pytest.mark.parametrize data tuples (source/
     # target collection-name pairs feeding the rename-prefix-validity

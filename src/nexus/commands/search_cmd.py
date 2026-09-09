@@ -341,7 +341,17 @@ def search_cmd(
                 continue
             target_collections.append(c)
     else:
-        all_collections = [c["name"] for c in db.list_collections()]
+        collection_rows = db.list_collections()
+        all_collections = [c["name"] for c in collection_rows]
+        # RDR-204 Phase 3 fix round (nexus-ft04v.28 S1): resolve_corpus's
+        # Stage 2 (bare content-type fan-out) reads nexus.mcp_infra's
+        # SEPARATE, process-local row cache via get_collection_row for
+        # every candidate above -- cold on this fresh CLI process, so it
+        # used to pay a SECOND /v1/vectors/stats round trip for the exact
+        # same data this call just fetched. Prime it from the response
+        # already in hand instead.
+        from nexus.mcp_infra import prime_collections_cache  # noqa: PLC0415 — deferred import (mcp_infra)
+        prime_collections_cache(collection_rows)
         target_collections = []
         for c in expanded_corpus:
             matched = resolve_corpus(c, all_collections)
