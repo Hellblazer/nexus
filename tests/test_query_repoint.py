@@ -255,8 +255,8 @@ class TestQueryRepointMetadataScoped:
 
     def test_structured_exact_key_set(self, monkeypatch):
         """Structured output must have EXACTLY: ids, tumblers, distances, collections,
-        chunk_collections, chunk_text_hash, also_in — matching the plain path
-        (also_in joined both envelopes together, GH #1524, nexus-20uv3)."""
+        chunk_collections, chunk_text_hash, also_in, also_in_ids — matching the
+        plain path (both joined the envelopes together, GH #1524, nexus-20uv3)."""
         rows = _make_meta_rows(("1.2.3", "a" * 32))
         t3 = _FakeServiceT3(meta_rows=rows)
         cat = _FakeCatalog(entries=[_FakeCatalogEntry("1.2.3", "T",
@@ -267,7 +267,7 @@ class TestQueryRepointMetadataScoped:
 
         assert set(result.keys()) == {
             "ids", "tumblers", "distances", "collections",
-            "chunk_collections", "chunk_text_hash", "also_in",
+            "chunk_collections", "chunk_text_hash", "also_in", "also_in_ids",
         }
 
     def test_structured_ids_are_tumblers(self, monkeypatch):

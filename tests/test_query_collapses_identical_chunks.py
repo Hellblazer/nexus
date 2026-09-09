@@ -27,7 +27,8 @@ def test_rows_with_one_chash_across_collections_collapse_to_the_best_ranked() ->
     out = _collapse_identical_chunk_rows(rows)
     assert [r["id"] for r in out] == ["1.53.4", "1.61.2"]
     assert out[0]["also_in"] == ["rdr__1-46", "rdr__1-63", "rdr__1-2"]
-    assert "also_in" not in out[1]
+    assert out[0]["also_in_ids"] == ["1.46.9", "1.63.1", "1.2.7"], "the dropped documents are named"
+    assert "also_in" not in out[1] and "also_in_ids" not in out[1]
 
 
 def test_rows_without_a_chash_are_never_collapsed() -> None:
@@ -60,4 +61,5 @@ def test_search_results_collapse_by_chunk_text_hash_and_record_the_other_collect
     out = _collapse_identical_chunk_results(results)
     assert [r.id for r in out] == ["c1", "c3"]
     assert out[0].metadata["also_in"] == ["rdr__1-46__bge-base-en-v15-768__v1"]
+    assert out[0].metadata["also_in_ids"] == ["c2", "c4"]
     assert "also_in" not in out[1].metadata

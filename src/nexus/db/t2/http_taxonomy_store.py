@@ -1745,7 +1745,11 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             # is 0 and it never passes (test_projection_quality's pin, kept:
             # ICF=0 fails the threshold regardless of raw cosine). When every
             # target is such a hub, icf_max is 0 and every weight is 0.
-            icf_max = float(icf.max()) if icf.size else 0.0
+            # icf_max over the WHOLE map, not the targets of this one call:
+            # a --backfill sweep projects each source against a different
+            # target set, and a per-call maximum would make the same topic's
+            # weight differ across the sweep (critique [25095]).
+            icf_max = float(max(icf_map.values())) if icf_map else 0.0
             icf_weights = (
                 np.minimum(icf / icf_max, 1.0) if icf_max > 0 else np.zeros_like(icf)
             )

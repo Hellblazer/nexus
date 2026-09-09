@@ -106,8 +106,11 @@ _PAYLOAD_SHAPES: tuple[tuple[frozenset[str], AnswerShape], ...] = (
     # a key missing here misclassifies every query()-terminal plan as
     # ANSWERED (review of that landing, Critical) -- test_answer_shape_
     # matches_the_real_query_envelope pins the two against each other.
+    # seed_scope / graph_scope are the envelope's OPTIONAL keys (follow_links
+    # capping, core.py); also_in_ids pairs with also_in (critique [25095]).
     (frozenset({"ids", "tumblers", "distances", "collections",
-                "chunk_collections", "chunk_text_hash", "also_in"}), AnswerShape.RETRIEVAL_ONLY),
+                "chunk_collections", "chunk_text_hash", "also_in", "also_in_ids",
+                "seed_scope", "graph_scope"}), AnswerShape.RETRIEVAL_ONLY),
     (frozenset({"contents", "missing", "section_types"}), AnswerShape.HYDRATION_DUMP),
     (frozenset({"extractions"}), AnswerShape.EXTRACTIONS_ONLY),
     (frozenset({"ranked"}), AnswerShape.RANKING_ONLY),

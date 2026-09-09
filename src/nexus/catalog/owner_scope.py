@@ -19,7 +19,7 @@ class OwnerScopeError(ValueError):
     """The scope names no owner, or more than one."""
 
 
-_CORPUS_PREFIXES: frozenset[str] = frozenset({"knowledge", "code", "docs", "rdr"})
+_CORPUS_PREFIXES: frozenset[str] = frozenset({"knowledge", "code", "docs", "rdr", "all"})
 
 
 def _is_corpus_scope(text: str) -> bool:

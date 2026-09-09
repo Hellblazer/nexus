@@ -69,3 +69,11 @@ def test_lenient_mode_never_lets_an_owner_capture_a_corpus_scope() -> None:
     assert cat.asked == []
     # A subtree is strict: the same word IS looked up there.
     assert resolve_owner_scope(cat, "knowledge") == "1.4"
+
+
+def test_all_is_a_corpus_scope_too() -> None:
+    """Critique [25095]: "all" is the fifth reserved corpus keyword; an owner
+    named "all" must not capture nx_answer(scope="all")."""
+    cat = _Cat({"all": ["1.7"]})
+    assert resolve_owner_scope(cat, "all", strict=False) == "all"
+    assert cat.asked == []

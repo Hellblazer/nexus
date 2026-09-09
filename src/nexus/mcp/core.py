@@ -2678,6 +2678,14 @@ def _collapse_identical_chunk_rows(rows: list[dict]) -> list[dict]:
             also = kept.setdefault("also_in", [])
             if other not in also:
                 also.append(other)
+        # The dropped row is a DIFFERENT document (its own tumbler) holding
+        # the same chunk; name it, so a reader can tell "same text, other
+        # document" from "same document, other collection" (critique [25095]).
+        rid = r.get("id", "")
+        if rid and rid != kept.get("id", ""):
+            ids = kept.setdefault("also_in_ids", [])
+            if rid not in ids:
+                ids.append(rid)
     return out
 
 
@@ -2701,6 +2709,10 @@ def _collapse_identical_chunk_results(results: list) -> list:
             also = kept.metadata.setdefault("also_in", [])
             if r.collection not in also:
                 also.append(r.collection)
+        if r.id and r.id != kept.id:
+            ids = kept.metadata.setdefault("also_in_ids", [])
+            if r.id not in ids:
+                ids.append(r.id)
     return out
 
 
@@ -3561,6 +3573,7 @@ def query(
                     "chunk_collections": [r.get("collection", "") for r in rows],
                     # GH #1524: the other collections the same chunk was found in.
                     "also_in": [list(r.get("also_in", [])) for r in rows],
+                    "also_in_ids": [list(r.get("also_in_ids", [])) for r in rows],
                     # HIGH-1: chash per matched chunk row, not a manifest guess
                     "chunk_text_hash": [r.get("chash", "") for r in rows],
                 }
@@ -3642,7 +3655,9 @@ def query(
                     lines_svc.append(f"   [{chunk_count_svc} chunks]")
                 lines_svc.append(f"   {collection_svc}")
                 if row.get("also_in"):
-                    lines_svc.append(f"   also in: {', '.join(row['also_in'])}")
+                    _ids_svc = row.get("also_in_ids") or []
+                    lines_svc.append(f"   also in: {', '.join(row['also_in'])}"
+                                     + (f" (documents {', '.join(_ids_svc)})" if _ids_svc else ""))
                 lines_svc.append(f"   {snippet_svc}")
                 lines_svc.append("")
 
@@ -3739,6 +3754,7 @@ def query(
                 # GH #1524: per-result list of the OTHER collections the same
                 # chunk (by chash) was found in; empty for a unique chunk.
                 "also_in": [list((r.metadata or {}).get("also_in", [])) for r in page],
+                "also_in_ids": [list((r.metadata or {}).get("also_in_ids", [])) for r in page],
                 # RDR-086 Phase 3.2: chunk_text_hash forwarded for chash
                 # citation authoring at the document layer.
                 "chunk_text_hash": [
@@ -3855,6 +3871,7 @@ def query(
                         or meta.get("source_path", "")
                     ),
                     "also_in": list(meta.get("also_in", [])),
+                    "also_in_ids": list(meta.get("also_in_ids", [])),
                 }
             elif r.hybrid_score > docs[doc_key]["hybrid_score"]:
                 # Better matching chunk — update snippet
@@ -3914,7 +3931,9 @@ def query(
                 lines.append(f"   [{' · '.join(tech_parts)}]")
             lines.append(f"   {d['collection']}")
             if d.get("also_in"):
-                lines.append(f"   also in: {', '.join(d['also_in'])}")
+                _ids = d.get("also_in_ids") or []
+                lines.append(f"   also in: {', '.join(d['also_in'])}"
+                             + (f" (documents {', '.join(_ids)})" if _ids else ""))
             lines.append(f"   {d['snippet']}")
             lines.append("")
 
