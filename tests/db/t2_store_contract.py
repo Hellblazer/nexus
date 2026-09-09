@@ -334,6 +334,12 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         # embeddings and centroids, so no SQLite twin can exist; replaces the
         # hook's client-side compute leg (deleted in the same change).
         'assign_from_chashes': ['collection', 'chashes', 'cross_collection'],
+        # GH #1528 (nexus-4tfxp): the recovery DELETE for a projection pass
+        # that admitted weak matches. Service-only by construction — one
+        # engine-side statement on the stored raw cosine (the persist route
+        # is a prefer-higher upsert, so nothing else can lower or remove a
+        # row); no SQLite twin ever had it.
+        'prune_projection_below': ['source_collection_prefix', 'min_similarity'],
     },
     'telemetry': {
         # nexus-onjvy: hook_failures was WRITE-ONLY over HTTP (/record + /trim,

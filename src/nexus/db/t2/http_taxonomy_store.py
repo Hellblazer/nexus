@@ -1741,9 +1741,13 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 [icf_map.get(int(m["topic_id"]), 1.0) for m in ctr_metas],
                 dtype=np.float32,
             )
+            # An ICF of 0 is a topic present in every collection; its weight
+            # is 0 and it never passes (test_projection_quality's pin, kept:
+            # ICF=0 fails the threshold regardless of raw cosine). When every
+            # target is such a hub, icf_max is 0 and every weight is 0.
             icf_max = float(icf.max()) if icf.size else 0.0
             icf_weights = (
-                np.minimum(icf / icf_max, 1.0) if icf_max > 0 else np.ones_like(icf)
+                np.minimum(icf / icf_max, 1.0) if icf_max > 0 else np.zeros_like(icf)
             )
             filter_sim = np.where(sim >= threshold, sim * icf_weights, 0.0)
         else:
