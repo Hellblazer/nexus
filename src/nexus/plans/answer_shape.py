@@ -102,8 +102,12 @@ _LISTING_HEADER_RE = re.compile(r"^Found \d+ documents \(from ")
 _PAYLOAD_SHAPES: tuple[tuple[frozenset[str], AnswerShape], ...] = (
     # ``search``/``query`` structured result and ``traverse``'s result:
     # every key a retrieval step can emit (core.py's structured branches).
+    # ``also_in`` joined both query() envelopes at GH #1524 (nexus-20uv3);
+    # a key missing here misclassifies every query()-terminal plan as
+    # ANSWERED (review of that landing, Critical) -- test_answer_shape_
+    # matches_the_real_query_envelope pins the two against each other.
     (frozenset({"ids", "tumblers", "distances", "collections",
-                "chunk_collections", "chunk_text_hash"}), AnswerShape.RETRIEVAL_ONLY),
+                "chunk_collections", "chunk_text_hash", "also_in"}), AnswerShape.RETRIEVAL_ONLY),
     (frozenset({"contents", "missing", "section_types"}), AnswerShape.HYDRATION_DUMP),
     (frozenset({"extractions"}), AnswerShape.EXTRACTIONS_ONLY),
     (frozenset({"ranked"}), AnswerShape.RANKING_ONLY),

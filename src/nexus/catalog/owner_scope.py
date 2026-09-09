@@ -19,6 +19,17 @@ class OwnerScopeError(ValueError):
     """The scope names no owner, or more than one."""
 
 
+_CORPUS_PREFIXES: frozenset[str] = frozenset({"knowledge", "code", "docs", "rdr"})
+
+
+def _is_corpus_scope(text: str) -> bool:
+    """A bare corpus prefix, a ``prefix__`` form, or a full collection name."""
+    from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415 — deferred: heavy import, branch-local
+
+    head = text.split("__", 1)[0]
+    return head in _CORPUS_PREFIXES or is_conformant_collection_name(text)
+
+
 def resolve_owner_scope(cat: Any, raw: str, *, strict: bool = True) -> str:
     """Return *raw* itself when it is a dotted tumbler, else the tumbler of
     the registered owner named *raw*.
@@ -41,6 +52,11 @@ def resolve_owner_scope(cat: Any, raw: str, *, strict: bool = True) -> str:
         return text
     except (ValueError, TypeError):
         pass
+    if not strict and _is_corpus_scope(text):
+        # A corpus prefix or a full collection name is a corpus scope by
+        # construction; an owner that happens to share the word (an owner
+        # named "knowledge") must not capture it (review Significant).
+        return text
     matches = cat.owner_tumblers_by_name(text)
     if not matches:
         if not strict:

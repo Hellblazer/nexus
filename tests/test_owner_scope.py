@@ -54,3 +54,18 @@ def test_ambiguous_name_lists_candidates() -> None:
     cat = _Cat({"shared": ["1.3", "1.9"]})
     with pytest.raises(OwnerScopeError, match=r"ambiguous.*1\.3, 1\.9"):
         resolve_owner_scope(cat, "shared")
+
+
+def test_lenient_mode_never_lets_an_owner_capture_a_corpus_scope() -> None:
+    """Review of the GH #1527 landing (Significant): an owner named
+    "knowledge" must not turn nx_answer(scope="knowledge") into a tumbler
+    scope; corpus prefixes and full collection names are corpus scopes by
+    construction and skip the owner lookup entirely."""
+    cat = _Cat({"knowledge": ["1.4"], "code": ["1.5"]})
+    assert resolve_owner_scope(cat, "knowledge", strict=False) == "knowledge"
+    assert resolve_owner_scope(cat, "code__", strict=False) == "code__"
+    assert resolve_owner_scope(cat, "code__1-61__bge-base-en-v15-768__v1", strict=False) == \
+        "code__1-61__bge-base-en-v15-768__v1"
+    assert cat.asked == []
+    # A subtree is strict: the same word IS looked up there.
+    assert resolve_owner_scope(cat, "knowledge") == "1.4"
