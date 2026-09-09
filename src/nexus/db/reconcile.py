@@ -250,6 +250,20 @@ def _is_same_model_passthrough(name: str, target: str) -> bool:
     """
     if name != target:
         return False
+    # RDR-204 Phase 3 funnel (nexus-ft04v.22): LEFT RAW, deliberately, per
+    # the coordinator's ruling -- same excluded shape as collection_shape.
+    # py's positional decode (nexus-ft04v.21's hand-off report). This
+    # `len(segments) == 4` count-based check is LAXER than
+    # `is_conformant_collection_name` (which :func:`collection_model` and
+    # :func:`collection_content_type` require internally): an owner
+    # segment containing a single underscore (e.g. "my_repo") still
+    # produces exactly 4 segments here, since `split("__")` only breaks on
+    # the literal DOUBLE underscore, but fails the conformant regex
+    # (`[a-zA-Z0-9-]+`, no underscore allowed) -- `collection_model()`
+    # would return "" for such a name and silently NARROW this function
+    # from True to False. Funnelling would change behaviour; forbidden by
+    # the bead. Stays counted until nexus-ft04v.26 reads the model
+    # directly from the catalog row.
     segments = name.split("__")
     return len(segments) == 4 and segments[2] in _PASSTHROUGH_MODELS
 
@@ -340,6 +354,11 @@ class MigrationReport:
 def _dim_for_collection(name: str) -> tuple[int | None, str]:
     """Resolve the pgvector dim for *name*, or (None, reason) when the name
     cannot dim-dispatch (the server would 400 it — classify, don't send)."""
+    # RDR-204 Phase 3 funnel (nexus-ft04v.22): LEFT RAW, deliberately --
+    # same excluded shape as :func:`_is_same_model_passthrough` above (see
+    # its comment for the full underscored-owner divergence this laxer
+    # `len(segments) == 4` count-check preserves that the conformant-gated
+    # funnel helpers cannot).
     segments = name.split("__")
     if len(segments) != 4:
         return None, (
@@ -582,6 +601,12 @@ def _verify_fill_one(
         return CollectionResult(name, 0, 0, "failed", reason, target_collection=target if is_cross_model else None)
 
     passthrough = _is_same_model_passthrough(name, target)
+    # RDR-204 Phase 3 funnel (nexus-ft04v.22): LEFT RAW, deliberately --
+    # same excluded shape and reason as _is_same_model_passthrough's own
+    # `segments[2]` read above (the laxer 4-segment count check this
+    # `passthrough` guard already passed can accept an underscored-owner
+    # name `collection_model()` would reject, so swapping this line alone
+    # would disagree with the guard that gated it).
     declared_model = name.split("__")[2] if passthrough else None
 
     def _provenance_ok(c: dict) -> bool:

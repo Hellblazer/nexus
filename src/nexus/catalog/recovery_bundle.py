@@ -372,12 +372,22 @@ def target_collection_for(recorded: str, t3: Any) -> str:
     grandfathers an existing legacy collection or promotes to the TARGET's
     active model. A non-conformant recorded name passes through to the
     resolver unchanged, exactly as an operator-typed --collection would."""
-    from nexus.corpus import is_conformant_collection_name, t3_collection_name  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.corpus import (  # noqa: PLC0415 — deferred to avoid circular import
+        collection_content_type,
+        collection_owner,
+        is_conformant_collection_name,
+        t3_collection_name,
+    )
 
     base = recorded
     if is_conformant_collection_name(recorded):
-        parts = recorded.split("__")
-        base = f"{parts[0]}__{parts[1]}"
+        # RDR-204 Phase 3 funnel (nexus-ft04v.22): safe here (unlike the
+        # sites left raw elsewhere in this slice) because `recorded` is
+        # ALREADY confirmed conformant by the `if` above -- for a
+        # conformant name both helpers return exactly the parsed
+        # `content_type`/`owner_id` fields, byte-identical to
+        # `parts[0]`/`parts[1]` of the same regex match.
+        base = f"{collection_content_type(recorded)}__{collection_owner(recorded)}"
     # nexus-0fw11: the recorded collection already exists on the source
     # install, placeholder-named or not (docs__default and
     # knowledge__knowledge are live on the production tenant); restoring it

@@ -55,6 +55,17 @@ def quarantine_collection_name(origin: str) -> str:
     These names are deliberately outside the strict conformance enum —
     creation passes ``strict=False`` (system-internal collections).
     """
+    # RDR-204 Phase 3 funnel (nexus-ft04v.22): LEFT RAW, deliberately, per
+    # the coordinator's ruling -- same excluded shape as commands/
+    # collection.py:748 / embed_migrate.py's corpus derivation. This
+    # function must preserve the ENTIRE tail after the content-type
+    # segment (owner + model + version for a conformant name) so the
+    # quarantine sibling keeps exactly the source's model/version;
+    # `collection_owner()` returns only the parsed `owner_id` field for a
+    # conformant name, discarding model/version -- funnelling would
+    # NARROW what this reconstruction preserves. Stays counted until
+    # nexus-ft04v.26 reads owner/model directly from the catalog row and
+    # re-renders the sibling name via `CollectionName.render`.
     parts = origin.split("__", 1)
     if len(parts) == 2:
         return f"{QUARANTINE_PREFIX}-{parts[0]}__{parts[1]}"

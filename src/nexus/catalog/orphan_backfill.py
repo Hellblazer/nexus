@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from nexus.corpus import collection_content_type, collection_owner
 from nexus.db.limits import QUOTAS
 
 if TYPE_CHECKING:
@@ -319,7 +320,14 @@ def _content_type_for_collection(collection: str) -> str:
     docs, not pdf). Falls back to ``"knowledge"`` for a non-conformant name
     with no prefix.
     """
-    prefix = collection.split("__", 1)[0].strip()
+    # RDR-204 Phase 3 funnel (nexus-ft04v.22): reproduces
+    # `collection.split("__", 1)[0]` byte-identically via the two funnel
+    # helpers -- see http_vector_client.per_collection_chunk_cap's comment
+    # for why the naive `collection_content_type(x) or x` would diverge
+    # (it conflates "no '__' at all" with "'__' present but the first
+    # segment is empty", e.g. "__weird").
+    raw_prefix = collection if collection_owner(collection) == collection else collection_content_type(collection)
+    prefix = raw_prefix.strip()
     return prefix or "knowledge"
 
 

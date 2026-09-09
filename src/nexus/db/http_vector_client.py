@@ -833,7 +833,17 @@ def per_collection_chunk_cap(collection: str) -> int:
     it (nexus-fdn1c); the correct trade here is against an unusable install, and
     that argument does not need a throughput number to stand up.
     """
-    prefix = collection.split("__", 1)[0]
+    # RDR-204 Phase 3 funnel (nexus-ft04v.22): reproduces
+    # `collection.split("__", 1)[0]` byte-identically via the two funnel
+    # helpers, including the no-"__"-at-all edge (the site's own default-
+    # membership-check outcome is unaffected either way, but the exact
+    # idiom below is what nexus-ft04v.21 already established at
+    # nexus/context.py's identical prefix-derivation site — see that
+    # docstring for why the naive `collection_content_type(x) or x` is
+    # WRONG: it conflates "no '__' at all" with "'__' present but the
+    # first segment is empty" (e.g. "__foo"), which this ternary does not).
+    from nexus.corpus import collection_content_type, collection_owner  # noqa: PLC0415 — circular-dep avoidance (corpus)
+    prefix = collection if collection_owner(collection) == collection else collection_content_type(collection)
     # nexus-33hpq: onnx-local is a MEMORY-bound mode, not a timeout-bound one —
     # apply the memory-derived cap to every prefix (code included) before the
     # CCE-vs-code split below, which is Voyage-cloud-specific reasoning.
@@ -866,7 +876,12 @@ def _upsert_byte_budget(collection: str) -> int | None:
     """
     if _serving_embedding_mode() == "onnx-local":
         return None
-    prefix = collection.split("__", 1)[0]
+    # RDR-204 Phase 3 funnel (nexus-ft04v.22): same byte-identical
+    # reconstruction of `collection.split("__", 1)[0]` as
+    # :func:`per_collection_chunk_cap` above -- see its comment for why
+    # the naive `collection_content_type(x) or x` would diverge.
+    from nexus.corpus import collection_content_type, collection_owner  # noqa: PLC0415 — circular-dep avoidance (corpus)
+    prefix = collection if collection_owner(collection) == collection else collection_content_type(collection)
     if prefix in _CCE_COLLECTION_PREFIXES:
         return None
     return _CODE_UPSERT_BYTE_BUDGET
@@ -3664,6 +3679,7 @@ class HttpVectorClient:
         genuinely shares content with another still-live document).
         """
         from nexus.catalog.store_hook import reap_catalog_manifest_for_chashes  # noqa: PLC0415 — deferred to avoid import cycle
+        from nexus.corpus import collection_content_type  # noqa: PLC0415 — circular-dep avoidance (corpus)
         from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
         from nexus.metadata_schema import is_expired  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
 
@@ -3677,7 +3693,11 @@ class HttpVectorClient:
         total = 0
         for entry in self.list_collections():
             name = entry.get("name", "")
-            if not name.startswith("knowledge__"):
+            # RDR-204 Phase 3 funnel (nexus-ft04v.22): `startswith(
+            # "knowledge__")` <=> `collection_content_type(name) ==
+            # "knowledge"`, no edge divergence -- T3Database.expire's
+            # identical filter takes the same substitution.
+            if collection_content_type(name) != "knowledge":
                 continue
             expired_ids: list[str] = []
             offset = 0

@@ -33,6 +33,7 @@ _InvalidArgumentErrors = vector_argument_errors()
 
 from nexus.corpus import (
     LOCAL_EMBEDDING_MODELS,
+    collection_content_type,
     embedding_model_for_collection,
     embedding_model_for_collection_name,
     index_model_for_collection,
@@ -74,7 +75,10 @@ def _infer_content_type(metadata: dict, collection_name: str) -> str:
     if store_type in _STORE_TYPE_TO_CONTENT_TYPE:
         return _STORE_TYPE_TO_CONTENT_TYPE[store_type]
 
-    if collection_name.startswith("code__"):
+    # RDR-204 Phase 3 funnel (nexus-ft04v.22): `startswith("code__")` <=>
+    # `collection_content_type(name) == "code"`, no edge divergence -- the
+    # "__" is baked into the compared literal.
+    if collection_content_type(collection_name) == "code":
         return "code"
     return "prose"
 
@@ -1201,7 +1205,11 @@ class T3Database:
             return 0
         for col_or_name in collections:
             name = col_or_name if isinstance(col_or_name, str) else col_or_name.name
-            if not name.startswith("knowledge__"):
+            # RDR-204 Phase 3 funnel (nexus-ft04v.22): `startswith(
+            # "knowledge__")` <=> `collection_content_type(name) ==
+            # "knowledge"`, no edge divergence -- HttpVectorClient.expire's
+            # identical filter takes the same substitution.
+            if collection_content_type(name) != "knowledge":
                 continue
             col = kc.get_collection(name)
             # Paginated accumulation: gather all expired IDs before deleting.

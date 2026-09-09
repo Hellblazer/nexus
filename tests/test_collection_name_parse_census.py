@@ -64,8 +64,38 @@ label), was deliberately left raw rather than funnelled through
 bead's hand-off report -- see the comment on that file's census entry
 below for why the two are not equivalent for a genuinely conformant
 4-segment name; nexus-ft04v.26 (the repoint) resolves it against the
-row's owner/model instead of the name tail. Slice 2 (nexus-ft04v.22)
-lowers the remaining files independently.
+row's owner/model instead of the name tail.
+
+nexus-ft04v.22 (Phase 3 funnel slice 2, db/ and catalog/) funnelled 9 of
+the 15 sites in its slice (embed_migrate.py:94/:262, http_vector_client.
+py:836/:869/:3680, t3.py:77/:1204, orphan_backfill.py:322, recovery_
+bundle.py:379), lowering the pin from 22 to 13. Three files' sites were
+LEFT RAW, matching the SAME excluded shape as commands/collection.py's
+``reindex_cmd`` site above (confirmed by the coordinator's ruling on
+this bead's hand-off report):
+
+- ``db/reconcile.py``'s ``_is_same_model_passthrough`` (:267),
+  ``_dim_for_collection`` (:362), and the passthrough ``declared_model``
+  read (:610) all use a LAXER `len(name.split("__")) == 4` count-based
+  check than `is_conformant_collection_name` (which
+  `collection_model()`/`collection_content_type()` require internally):
+  an owner segment with a single underscore (e.g. ``"my_repo"``) still
+  produces 4 segments under a literal ``"__"`` split but FAILS the
+  conformant regex (``[a-zA-Z0-9-]+``, no underscore) -- funnelling would
+  NARROW these functions from accepting such a name to rejecting it,
+  forbidden by the bead.
+- ``db/embed_migrate.py``'s ``migrate_collection_safe`` corpus derivation
+  (:387, two hits: the ``split`` and the ``"__" in`` check on the same
+  line) needs the OWNER **and** MODEL/VERSION tail together for a
+  conformant name -- byte-identical to commands/collection.py's
+  ``reindex_cmd`` site, right down to the source line's shape.
+- ``catalog/chunk_quarantine.py``'s ``quarantine_collection_name`` (:69)
+  needs the same full post-content-type tail preserved (to build an
+  exact-model/version-matching quarantine sibling name); none of the
+  three helpers exposes a combined owner+model+version read.
+
+All three stay counted until nexus-ft04v.26 (the repoint) resolves them
+against the catalog row's columns directly instead of parsing.
 
 RDR-204'S OTHER NAMED EXCLUSION -- ``rdr-`` document ids -- MATCHES ZERO
 SITES HERE. The one ``rdr-`` id parse in the tree,
@@ -134,14 +164,15 @@ _EXCLUDED_SITES: dict[tuple[str, int], str] = {
 }
 
 #: 2026-09-09 census of collection-name parse sites, per file, AFTER the
-#: `_EXCLUDED_SITES` filter. Pin sum: 22 (nexus-ft04v.21 lowered the
+#: `_EXCLUDED_SITES` filter. Pin sum: 13 (nexus-ft04v.21 lowered the
 #: 79-site 2026-09-09 baseline to 54; nexus-ft04v.23 funnelled a further
 #: 32 of those 54 -- the commands/ CLI surface -- lowering the pin to
-#: 22). This may only shrink — each of nexus-ft04v.21/.22/.23 (the funnel
-#: slices) lowers the entries for its files as raw sites move to the
-#: three CollectionName helpers; when a file reaches zero, drop its entry
-#: (a dropped key and an absent file both read as zero to the guards
-#: below).
+#: 22; nexus-ft04v.22 funnelled 9 more -- the db/ and catalog/ surface --
+#: lowering the pin to 13). This may only shrink — each of
+#: nexus-ft04v.21/.22/.23 (the funnel slices) lowers the entries for its
+#: files as raw sites move to the three CollectionName helpers; when a
+#: file reaches zero, drop its entry (a dropped key and an absent file
+#: both read as zero to the guards below).
 #:
 #: nexus-ft04v.21 (funnel slice 1, corpus.py/scoring.py/collection_shape.py/
 #: context.py/search_engine.py/exporter.py/mcp/core.py) landed 2026-09-09:
@@ -161,9 +192,16 @@ _EXCLUDED_SITES: dict[tuple[str, int], str] = {
 #: nexus-ft04v.26 (the repoint), where the decode reads the catalog row
 #: directly instead of parsing.
 COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {
+    # nexus-ft04v.22: :69 `quarantine_collection_name`'s `parts =
+    # origin.split("__", 1)` is deliberately left raw -- same excluded
+    # shape as commands/collection.py's reindex_cmd site below. It must
+    # preserve the ENTIRE tail after the content-type segment (owner +
+    # model + version for a conformant name) so the quarantine sibling
+    # keeps exactly the source's model/version; `collection_owner()`
+    # returns only the parsed `owner_id` field for a conformant name,
+    # discarding model/version. Confirmed by the coordinator's ruling on
+    # this bead's hand-off report.
     "src/nexus/catalog/chunk_quarantine.py": 1,
-    "src/nexus/catalog/orphan_backfill.py": 1,
-    "src/nexus/catalog/recovery_bundle.py": 1,
     "src/nexus/collection_shape.py": 3,
     # nexus-ft04v.23: :748 `corpus = name.split("__", 1)[1] if "__" in
     # name else ""` in `reindex_cmd` is deliberately left raw. It derives
@@ -178,10 +216,29 @@ COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {
     # resolves it against the row's owner/model instead of the name tail.
     "src/nexus/commands/collection.py": 2,
     "src/nexus/corpus.py": 2,
-    "src/nexus/db/embed_migrate.py": 4,
-    "src/nexus/db/http_vector_client.py": 3,
+    # nexus-ft04v.22: :387 `migrate_collection_safe`'s `corpus =
+    # stale.name.split("__", 1)[1] if "__" in stale.name else ""` (two
+    # hits: the split and the "__" in check) is deliberately left raw --
+    # byte-for-byte the SAME shape as commands/collection.py's
+    # reindex_cmd site above, same reason: needs owner+model/version
+    # together, which `collection_owner()` cannot reproduce for a
+    # conformant name. The file's other two sites (:99 `_classify`, :269
+    # `_default_reindex`) funnelled cleanly to
+    # `collection_content_type(...) == "..."`.
+    "src/nexus/db/embed_migrate.py": 2,
+    # nexus-ft04v.22: :267 `_is_same_model_passthrough`, :362
+    # `_dim_for_collection`, and :610's passthrough `declared_model` read
+    # are ALL deliberately left raw. Each uses a LAXER
+    # `len(name.split("__")) == 4` count-based check than
+    # `is_conformant_collection_name` (which `collection_model()` /
+    # `collection_content_type()` require internally): an owner segment
+    # with a single underscore (e.g. "my_repo") still produces 4 segments
+    # under a literal "__" split but FAILS the conformant regex
+    # (`[a-zA-Z0-9-]+`, no underscore) -- funnelling would NARROW these
+    # functions from accepting such a name to rejecting it, forbidden by
+    # the bead. Confirmed by the coordinator's ruling on this bead's
+    # hand-off report.
     "src/nexus/db/reconcile.py": 3,
-    "src/nexus/db/t3.py": 2,
 }
 
 PARSE_SITE_PIN: int = sum(COLLECTION_NAME_PARSE_CENSUS.values())
@@ -427,10 +484,10 @@ def test_census_has_no_stale_entries() -> None:
 
 
 def test_pin_matches_documented_total() -> None:
-    """The PARSE_SITE_PIN docstring claim (22, after nexus-ft04v.21's
-    funnel slice 1 and nexus-ft04v.23's funnel slice 3) is derived from
-    the same dict the guards above check against -- this catches a
-    hand-edited docstring number drifting from the dict it claims to
-    summarize."""
+    """The PARSE_SITE_PIN docstring claim (13, after nexus-ft04v.21's
+    funnel slice 1, nexus-ft04v.23's funnel slice 3, and nexus-ft04v.22's
+    funnel slice 2) is derived from the same dict the guards above check
+    against -- this catches a hand-edited docstring number drifting from
+    the dict it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 22
+    assert PARSE_SITE_PIN == 13

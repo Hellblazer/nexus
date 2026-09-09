@@ -31,7 +31,7 @@ from typing import Literal
 
 import structlog
 
-from nexus.corpus import _CONFORMANT_COLLECTION_RE
+from nexus.corpus import _CONFORMANT_COLLECTION_RE, collection_content_type
 from nexus.db.t3 import T3Database
 
 _log = structlog.get_logger(__name__)
@@ -91,7 +91,12 @@ def _target_name(old: str, active_token: str) -> str:
 
 
 def _classify(name: str, source_paths: frozenset[str], sourceless: int) -> StaleKind:
-    if name.startswith("code__"):
+    # RDR-204 Phase 3 funnel (nexus-ft04v.22): `startswith("code__")` <=>
+    # `collection_content_type(name) == "code"` with no edge divergence --
+    # the "__" is baked into the compared literal, so a bare "code" (no
+    # separator at all) reads False under both the raw startswith and the
+    # helper (content_type is "" when there is no "__").
+    if collection_content_type(name) == "code":
         return "code"
     if not source_paths:
         return "sourceless"
@@ -259,7 +264,9 @@ def _default_reindex(
         return int(result or 0)
 
     indexed = 0
-    if target_name.startswith("rdr__"):
+    # RDR-204 Phase 3 funnel (nexus-ft04v.22): same reasoning as _classify's
+    # collection_content_type substitution above -- no edge divergence.
+    if collection_content_type(target_name) == "rdr":
         rdr_files = [Path(sp) for sp in source_paths if Path(sp).exists()]
         if rdr_files:
             # batch returns {path: "indexed"|"skipped"|"failed"}; "skipped"
@@ -366,6 +373,17 @@ def migrate_collection_safe(
         )
 
     expected_sources = len(stale.source_paths)
+    # RDR-204 Phase 3 funnel (nexus-ft04v.22): LEFT RAW, deliberately, per
+    # the coordinator's ruling on this exact shape (matches commands/
+    # collection.py:748 byte-for-byte). For a conformant 4-segment name
+    # this keeps the OWNER **and** the MODEL/VERSION tail together
+    # ("proj__minilm-l6-v2-384__v1"), which none of the three funnel
+    # helpers can reproduce: `collection_owner()` returns only the parsed
+    # `owner_id` field for a conformant name, discarding the model/version
+    # segments this reindex corpus argument still needs. Funnelling this
+    # would NARROW what the site returns -- forbidden by the bead. Stays
+    # counted in the census until nexus-ft04v.26 (the repoint) reads the
+    # target corpus directly from the catalog row instead of parsing.
     corpus = stale.name.split("__", 1)[1] if "__" in stale.name else ""
 
     try:
