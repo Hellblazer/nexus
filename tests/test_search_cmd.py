@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -9,6 +10,7 @@ from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbed
 from click import BadParameter
 from click.testing import CliRunner
 
+from nexus.catalog.tumbler import Tumbler
 from nexus.cli import main
 from nexus.commands.search_cmd import _parse_where
 from nexus.db.http_vector_client import HttpVectorClient
@@ -1275,10 +1277,6 @@ def test_max_file_chunks_warns_when_catalog_unavailable(
 def test_repo_flag_resolves_an_owner_name_to_its_collections(
     runner: CliRunner, cloud_env,
 ) -> None:
-    from types import SimpleNamespace
-
-    from nexus.catalog.tumbler import Tumbler
-
     reader = MagicMock()
     reader.owner_tumblers_by_name.return_value = [Tumbler.parse("1.61")]
     reader.by_owner.return_value = [
