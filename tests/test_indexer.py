@@ -10,7 +10,7 @@ import pytest
 from voyageai.object.embeddings import EmbeddingsObject
 
 from nexus.indexer import CredentialsMissingError, index_repository
-from tests.conftest import make_vector_test_client
+from tests.conftest import catalog_row_for_collection_name, make_vector_test_client
 
 # RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
 # (voyage-* embedder names, canonical-set defaults). The cloud_mode
@@ -971,6 +971,9 @@ def test_prune_deleted_files_propagates_valueerror_from_serverside_prune(
         raise ValueError("simulated data defect in the serverside prune")
 
     monkeypatch.setattr(indexer_mod, "_prune_collection_serverside", _boom)
+    # RDR-204 Phase 3: the prune path reads the row cache; a MagicMock db never
+    # registered anything, so give the cache the rows the names imply.
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", catalog_row_for_collection_name)
 
     col = _gc_col([("id-x", "x" * 64)])
     db = MagicMock(); db.get_or_create_collection.return_value = col
@@ -1395,11 +1398,13 @@ def test_prune_misclassified_falls_back_when_batch_raises(tmp_path):
 # tested the client-side fetch-diff-copy-delete prune/quarantine fallback,
 # retired: the manifest-chunk FK makes the completeness apparatus it proved
 # correct unreachable by construction.
-def test_prune_deleted_files_rdr_collection_none_is_safe(tmp_path):
+def test_prune_deleted_files_rdr_collection_none_is_safe(tmp_path, monkeypatch):
     """When there are no RDR files this run, rdr_collection defaults to
     None and must not be swept (no col to fetch, no-op — mirrors the
     existing code_col/docs_col is-None contract elsewhere)."""
     from nexus.indexer import _prune_deleted_files
+    # RDR-204 Phase 3: the prune path reads the row cache (see the test above).
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", catalog_row_for_collection_name)
     live_chash = "a" * 64
     col = _gc_col([("live-id", live_chash)])
     db = MagicMock(); db.get_or_create_collection.return_value = col

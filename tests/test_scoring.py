@@ -365,7 +365,7 @@ def test_calibration_thresholds_match_config_defaults(cloud_mode) -> None:  # RD
     assert _CALIBRATION_DEFAULT_THRESHOLD == cfg_thresholds["default"]
 
 
-def test_apply_hybrid_scoring_calibrates_before_pooling(cloud_mode) -> None:  # nexus-mc1l1: legacy names only split by model in cloud/service mode
+def test_apply_hybrid_scoring_calibrates_before_pooling(cloud_mode, monkeypatch) -> None:  # nexus-mc1l1: legacy names only split by model in cloud/service mode
     """A genuinely GOOD rdr__ match (well inside its own 0.65 threshold)
     must be able to win the merge against code__ results that are, in raw-
     distance terms, closer -- because raw distance alone is a model-scale
@@ -375,6 +375,9 @@ def test_apply_hybrid_scoring_calibrates_before_pooling(cloud_mode) -> None:  # 
     the top. Mirrors the measured live-probe shape (rdr-092 at raw
     distance 0.4827, calibrated ~0.334, beating code's own best surviving
     candidates at 0.38-0.39)."""
+    # RDR-204 Phase 3 (nexus-ft04v.26): code detection reads the row cache; CI's
+    # substrate jar is unstamped, so an unstubbed reach fails loud there.
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", _code_row_stub)
     code_results = [
         _r("code__repo", d, chunks=1) for d in (0.36, 0.38, 0.40, 0.42, 0.44)
     ]
@@ -388,7 +391,7 @@ def test_apply_hybrid_scoring_calibrates_before_pooling(cloud_mode) -> None:  # 
     )
 
 
-def test_calibration_does_not_mint_fake_winners(cloud_mode) -> None:  # nexus-mc1l1: legacy names only split by model in cloud/service mode
+def test_calibration_does_not_mint_fake_winners(cloud_mode, monkeypatch) -> None:  # nexus-mc1l1: legacy names only split by model in cloud/service mode
     """Code review Critical 2 counter-test: a corpus with NOTHING
     relevant -- every candidate sitting near its own threshold, i.e. a
     weak match -- must NOT beat a genuinely strong match from a
@@ -407,6 +410,9 @@ def test_calibration_does_not_mint_fake_winners(cloud_mode) -> None:  # nexus-mc
     best would land at the ceiling alongside the strong code__ best.
     Under the shipped single-pooled-window design it must sit well
     below it."""
+    # RDR-204 Phase 3 (nexus-ft04v.26): code detection reads the row cache; CI's
+    # substrate jar is unstamped, so an unstubbed reach fails loud there.
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", _code_row_stub)
     strong_code = _r("code__repo", 0.05, chunks=1)
     other_code = _r("code__repo", 0.20, chunks=1)
     weak_rdr = _r("rdr__proj", 0.64, chunks=1)
