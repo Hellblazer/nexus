@@ -312,6 +312,29 @@ class EmbeddingProfileMismatchError(RuntimeError):
     """
 
 
+class CatalogReaderUnavailableError(RuntimeError):
+    """:func:`nexus.catalog.factory.make_catalog_reader` returned
+    ``None`` instead of a reader (RDR-204 Phase 3, nexus-ft04v.26,
+    fixture-seam round 2026-09-09).
+
+    ``make_catalog_reader``'s own docstring calls its ``Optional``
+    return type "historical" and callers' None-guards "dead but
+    harmless" — true for a real, correctly-configured install (it
+    always returns a live handle), but the registration seam
+    (:func:`_profile_model_for_content_type`, called from
+    :func:`ensure_collection_registered` before every
+    ``writer.register_collection``) is reached from EVERY write path,
+    including ones a misconfigured storage backend or an incompletely
+    faked test double can drive through this branch. Left unguarded,
+    a ``None`` reader surfaced as a bare ``AttributeError: 'NoneType'
+    object has no attribute 'embedding_profile'`` two frames later —
+    a genuine misconfiguration wearing an unrelated exception type,
+    exactly the class of bug the no-silent-fallback-for-correctness
+    hot rule exists to prevent. Named here so the actual cause (the
+    reader factory, not the profile row) is what a caller sees.
+    """
+
+
 #: The restart recipe, verbatim as ``commands/config_cmd.py``'s
 #: ``SERVICE_RESTART_COMMAND`` (nexus-ft04v.25) and this module's own
 #: pre-existing :class:`LocalVoyageCredentialMissingError` message both
@@ -390,6 +413,14 @@ def _profile_model_for_content_type(content_type: str) -> "str | None":
     """
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle (catalog)
     reader = make_catalog_reader()
+    if reader is None:
+        raise CatalogReaderUnavailableError(
+            "make_catalog_reader() returned None -- the registration seam "
+            "cannot read the engine's embedding profile without one. This "
+            "is a storage-backend misconfiguration (or an incompletely "
+            "faked test double), not a missing profile row; see "
+            "CatalogReaderUnavailableError's docstring."
+        )
     for row in reader.embedding_profile():
         if row.get("content_type") == content_type:
             return row.get("embedding_model")
@@ -1555,6 +1586,29 @@ def ensure_collection_registered(
         finally:
             writer.close()
         _REGISTERED_COLLECTIONS.add(name)
+        # RDR-204 Phase 3 (nexus-ft04v.26, fixture-seam round 2):
+        # nexus.mcp_infra's collection-row cache (_collections_cache,
+        # 60s TTL) is the row source resolve_corpus's bare-corpus fan-out
+        # reads. store_put/store_delete already invalidate it on write
+        # (mcp/core.py); this registration path -- the one EVERY write
+        # path this function documents (T3 chunks, aspects, taxonomy,
+        # the doc indexer) funnels through -- did not, so a NEWLY
+        # registered collection could stay invisible to a search moments
+        # later in the SAME process, for the cache's remaining TTL
+        # window. Real impact: any long-lived process (the MCP server;
+        # an in-process CliRunner test chaining index-then-search calls)
+        # that writes a brand-new collection and searches it within the
+        # TTL window -- found live via test_index_repo_routes_code_to_
+        # code_corpus, whose `nx search --corpus code --json` returned
+        # empty stdout (resolve_corpus dropped the just-registered
+        # code__ collection; both diagnostics this branch prints go to
+        # stderr, never stdout) immediately after `nx index repo`
+        # registered it in the SAME process. A real, separate-OS-process
+        # CLI invocation never hit this (mcp_infra's cache always starts
+        # cold), which is why it stayed invisible until an in-process
+        # test chained the two calls.
+        from nexus.mcp_infra import invalidate_collections_cache  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+        invalidate_collections_cache()
 
 
 def _looks_like_stale_registration_error(exc: BaseException) -> bool:

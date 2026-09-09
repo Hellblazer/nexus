@@ -594,3 +594,118 @@ class TestRegistrationSeamProfileCheck:
             ensure_collection_registered(name, registrar=lambda: writer)
 
         writer.register_collection.assert_not_called()
+
+    def test_none_catalog_reader_raises_named_error_not_attributeerror(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """make_catalog_reader() returning None (a storage-backend
+        misconfiguration, or an incompletely faked test double -- its
+        own docstring calls the Optional return type "historical" and
+        callers' None-guards "dead but harmless" for a real install)
+        must raise CatalogReaderUnavailableError, never a bare
+        AttributeError two frames later on ``None.embedding_profile()``.
+        Found live: tests/test_doc_indexer_pagination.py's
+        TestStaleChunkPaginatedPruning tests reached exactly this path
+        once doc_indexer.py started registering before its first read
+        (nexus-ft04v.16 client half)."""
+        from nexus.corpus import CatalogReaderUnavailableError
+        import nexus.catalog.factory as factory_mod
+
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
+        monkeypatch.setattr("nexus.config.get_credential", lambda name: "configured-key")
+        monkeypatch.setattr(factory_mod, "make_catalog_reader", lambda: None)
+        writer = _fake_writer()
+        name = "code__seam-none-reader-test__voyage-code-3__v1"
+
+        with pytest.raises(CatalogReaderUnavailableError, match="make_catalog_reader"):
+            ensure_collection_registered(name, registrar=lambda: writer)
+
+        writer.register_collection.assert_not_called()
+
+
+class TestEnsureCollectionRegisteredInvalidatesCollectionsCache:
+    """RDR-204 Phase 3 (nexus-ft04v.26, fixture-seam round 2, coordinator
+    diagnosis 2026-09-09): ensure_collection_registered must invalidate
+    nexus.mcp_infra's collection-row cache on every successful path
+    (fresh registration and the 409-already-registered race alike) --
+    store_put/store_delete already do this on write (mcp/core.py); this
+    registration funnel, which EVERY OTHER write path routes through
+    (T3 chunks, aspects, taxonomy, the doc indexer), did not, so a
+    newly-registered collection could stay invisible to resolve_corpus's
+    bare-corpus fan-out for the cache's remaining 60s TTL in any
+    long-lived process (the MCP server; an in-process CliRunner test
+    chaining index-then-search calls in one Python process) -- found
+    live via test_scenario_journeys.py::test_index_repo_routes_code_to_
+    code_corpus, whose ``nx search --corpus code --json`` (a second
+    CliRunner.invoke in the SAME test/process) returned empty stdout
+    immediately after ``nx index repo`` registered the code__ collection
+    moments earlier."""
+
+    def test_successful_registration_invalidates_the_stale_cache(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import time
+
+        import nexus.mcp_infra as mcp_infra
+
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client.is_vector_service_mode", lambda: True,
+        )
+        _stub_profile_reader(monkeypatch, {})
+        # Simulate a cache warmed BEFORE this collection existed (an
+        # earlier list_collections() call in the same process, well
+        # within the 60s TTL) -- a fresh timestamp, but no row for the
+        # collection this test is about to register.
+        monkeypatch.setattr(
+            mcp_infra, "_collections_cache",
+            ([], {}, {}, time.monotonic()),
+        )
+        writer = _fake_writer()
+        name = "knowledge__cache-invalidation-test"
+
+        ensure_collection_registered(name, registrar=lambda: writer)
+
+        assert mcp_infra._collections_cache == ([], {}, {}, 0.0), (
+            "ensure_collection_registered must invalidate the stale "
+            "collections cache (reset to the sentinel empty/zero-"
+            "timestamp state _refresh_collections_cache_if_stale treats "
+            "as unconditionally stale) so the NEXT get_collection_row "
+            "call in this process re-fetches and sees the row this "
+            "registration just created, instead of serving the "
+            "pre-registration snapshot for the rest of the TTL window."
+        )
+
+    def test_409_already_registered_race_also_invalidates(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The 409 (another process won the race to register the same
+        name) path must ALSO invalidate -- the collection is new to
+        THIS process's cache either way."""
+        import time
+
+        import httpx
+
+        import nexus.mcp_infra as mcp_infra
+
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client.is_vector_service_mode", lambda: True,
+        )
+        _stub_profile_reader(monkeypatch, {})
+        monkeypatch.setattr(
+            mcp_infra, "_collections_cache",
+            ([], {}, {}, time.monotonic()),
+        )
+        writer = _fake_writer()
+        response = MagicMock()
+        response.status_code = 409
+        writer.register_collection.side_effect = httpx.HTTPStatusError(
+            "already registered", request=MagicMock(), response=response,
+        )
+        name = "knowledge__cache-invalidation-409-test"
+
+        ensure_collection_registered(name, registrar=lambda: writer)
+
+        assert mcp_infra._collections_cache == ([], {}, {}, 0.0)
