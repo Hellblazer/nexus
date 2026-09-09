@@ -551,6 +551,34 @@ def embedding_model_for_collection_name(collection_name: str) -> str | None:
     return match.groupdict()["model"]
 
 
+def model_version_for_collection_name(collection_name: str) -> str | None:
+    """Return the ``v<n>`` model-version segment of a conformant collection
+    name (e.g. ``"v1"``), or ``None`` if *collection_name* is not
+    conformant.
+
+    RDR-204 Phase 3 (nexus-ft04v.27): the sibling of
+    :func:`embedding_model_for_collection_name` for the fourth
+    ``CollectionName`` field. A registration site that is re-registering an
+    EXISTING physical collection it did not just render (a backfill of a
+    name already sitting in T3, a reindex re-registration, an operator-
+    typed rename target) has no in-memory ``CollectionName`` to read the
+    version off of -- the version segment embedded in the name is the
+    only place that fact lives until the collection is registered. Reads
+    the SAME permissive regex :func:`is_conformant_collection_name` and
+    :func:`embedding_model_for_collection_name` use (no canonical-model-set
+    check), so it accepts the same non-canonical test/fixture model tokens
+    (e.g. ``stub-code-1024``) those two already do -- unlike
+    ``CollectionName.parse``, which validates the model segment against
+    :data:`CANONICAL_EMBEDDING_MODELS` / :data:`LOCAL_EMBEDDING_MODELS` and
+    would reject such a name outright, changing what today's registration
+    sites happily accept.
+    """
+    match = _CONFORMANT_COLLECTION_RE.match(collection_name)
+    if not match:
+        return None
+    return f"v{match.groupdict()['ver']}"
+
+
 def _split_legacy_collection_name(name: str) -> tuple[str, str]:
     """(first segment, remainder) for a NAME already known not to be
     RDR-101 canonical-conformant (see :func:`is_conformant_collection_name`).

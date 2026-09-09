@@ -18,9 +18,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import click
-import structlog
-
-_log = structlog.get_logger(__name__)
 
 
 @click.command("backfill-collections")
@@ -114,26 +111,24 @@ def backfill_collections_cmd(dry_run: bool) -> None:
     # the reader's owner_id JOIN excludes them from owner-scoped
     # lookups, which is the desired behaviour.
     from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
+        collection_content_type,
+        collection_model,
+        collection_owner,
         is_conformant_collection_name,
-        parse_conformant_collection_name,
+        model_version_for_collection_name,
     )
     for name in to_register:
         if is_conformant_collection_name(name):
-            try:
-                parsed = parse_conformant_collection_name(name)
-                writer.register_collection(
-                    name,
-                    content_type=parsed["content_type"],
-                    owner_id=parsed["owner_id"],
-                    embedding_model=parsed["embedding_model"],
-                    model_version=parsed["model_version"],
-                )
-                continue
-            except (KeyError, ValueError) as exc:
-                _log.warning(
-                    "backfill_collections_conformant_parse_failed",
-                    name=name, error=str(exc),
-                )
+            # nexus-ft04v.27: the four funnel-style helpers replace the
+            # retired parse_conformant_collection_name dict.
+            writer.register_collection(
+                name,
+                content_type=collection_content_type(name),
+                owner_id=collection_owner(name),
+                embedding_model=collection_model(name),
+                model_version=model_version_for_collection_name(name),
+            )
+            continue
         # Non-conformant fallback (legacy 2-segment names).
         writer.register_collection(name)
 
@@ -241,8 +236,11 @@ def rename_collection_cmd(
         rename_collection_data_plane,
     )
     from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
+        collection_content_type,
+        collection_model,
+        collection_owner,
         is_conformant_collection_name,
-        parse_conformant_collection_name,
+        model_version_for_collection_name,
     )
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
 
@@ -330,13 +328,14 @@ def rename_collection_cmd(
     # plan in front of them.
     try:
         if is_conformant_collection_name(new):
-            segments = parse_conformant_collection_name(new)
+            # nexus-ft04v.27: the four funnel-style helpers replace the
+            # retired parse_conformant_collection_name dict.
             writer.register_collection(
                 new,
-                content_type=segments["content_type"],
-                owner_id=segments["owner_id"],
-                embedding_model=segments["embedding_model"],
-                model_version=segments["model_version"],
+                content_type=collection_content_type(new),
+                owner_id=collection_owner(new),
+                embedding_model=collection_model(new),
+                model_version=model_version_for_collection_name(new),
             )
         else:
             # nexus-cecqy: --allow-legacy documents that a non-conformant name
@@ -344,8 +343,9 @@ def rename_collection_cmd(
             # legacy_grandfathered=True". That flag is now DERIVED inside
             # HttpCatalogClient.register_collection, so this bare call flags the
             # row correctly. Deriving it *here* instead was the too-narrow fix:
-            # two sibling bare-else sites (indexer.py:784, :138 below) have the
-            # same shape and would have stayed defective.
+            # two sibling bare-else sites (indexer.py:800, this file's own
+            # backfill-collections loop at :138) have the same shape and
+            # would have stayed defective.
             writer.register_collection(new)
         superseded_rows = writer.supersede_collection(old, new, reason="rename-collection")
     except Exception as exc:

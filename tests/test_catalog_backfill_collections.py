@@ -206,3 +206,25 @@ def test_backfill_aborts_on_t3_failure(catalog, runner):
     assert "Failed to list T3 collections" in result.output
     # No partial backfill happened.
     assert _projection_names(catalog) == before
+
+
+def test_backfill_registers_conformant_name_with_its_own_version_segment(catalog, runner):
+    """nexus-ft04v.27: a conformant name whose ``v<n>`` segment is NOT
+    ``v1`` must still register with that real version -- proves
+    model_version is read off the name (via the funnel-style
+    ``model_version_for_collection_name`` helper), not hardcoded, now
+    that the retired ``parse_conformant_collection_name`` no longer backs
+    this site."""
+    name = f"code__1-1__{_CODE_MODEL}__v2"
+    fake_t3 = _FakeT3(names=[name])
+
+    with patch("nexus.db.make_t3", return_value=fake_t3):
+        result = runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
+
+    assert result.exit_code == 0, result.output
+    row = catalog.get_collection(name)
+    assert row is not None, f"{name!r} was not registered: {_projection_names(catalog)}"
+    assert row["content_type"] == "code"
+    assert row["owner_id"] == "1-1"
+    assert row["embedding_model"] == _CODE_MODEL
+    assert row["model_version"] == "v2"

@@ -670,7 +670,7 @@ def _migrate_legacy_collections(
         # is configured. Previously reached only because an outer
         # ``except Exception`` in the caller (nx index repo) happened to
         # swallow the raise, not by design.
-        conformant = cat_obj.collection_for(
+        conformant_name = cat_obj.collection_for(
             content_type=ct,
             owner=owner,
             embedding_model=resolve_write_embedding_model(
@@ -681,7 +681,8 @@ def _migrate_legacy_collections(
                     )
                 ),
             ),
-        ).render()
+        )
+        conformant = conformant_name.render()
 
         # nexus-7vuw: pick the first source candidate that exists in T3.
         # Two shapes can carry pre-migration data:
@@ -783,18 +784,17 @@ def _migrate_legacy_collections(
             # this point onward any failure is non-fatal for the caller's
             # write path: ``conformant`` is the right name to use.
             try:
-                from nexus.corpus import (  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
-                    is_conformant_collection_name,
-                    parse_conformant_collection_name,
-                )
+                from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
                 if is_conformant_collection_name(conformant):
-                    segments = parse_conformant_collection_name(conformant)
+                    # nexus-ft04v.27: reuse the CollectionName the render
+                    # above already built instead of parsing the very name
+                    # it just rendered back apart.
                     w.register_collection(
                         conformant,
-                        content_type=segments["content_type"],
-                        owner_id=segments["owner_id"],
-                        embedding_model=segments["embedding_model"],
-                        model_version=segments["model_version"],
+                        content_type=conformant_name.content_type,
+                        owner_id=conformant_name.owner_id,
+                        embedding_model=conformant_name.embedding_model,
+                        model_version=f"v{conformant_name.model_version}",
                     )
                 else:
                     w.register_collection(conformant)

@@ -382,6 +382,46 @@ def test_reindex_routes_delete_through_cascade_not_client_delete(
     mock_db.delete_collection.assert_not_called()
 
 
+def test_reindex_reregisters_conformant_name_with_the_values_it_already_had(
+    runner, env_creds, mock_db, tmp_path,
+) -> None:
+    """nexus-ft04v.27: the post-cascade re-registration of a CONFORMANT
+    name must carry the SAME four fields it did before the fix -- now
+    read via the funnel-style helpers instead of the retired
+    ``parse_conformant_collection_name``.
+
+    Uses ``stub-code-1024`` (this suite's standing non-canonical test
+    model token) rather than a real voyage/bge model: the funnel helpers
+    accept it (same as ``is_conformant_collection_name``) where
+    ``CollectionName.parse`` -- an alternative fix considered and
+    rejected -- would raise, changing what this site accepts today.
+    """
+    doc_file = tmp_path / "doc.md"
+    doc_file.write_text("# Doc\ncontent")
+    vr = _setup_reindex_mock(
+        mock_db,
+        [{"source_path": str(doc_file)}],
+        [{"source_path": str(doc_file)}],
+    )
+    writer = MagicMock()
+    name = "docs__myrepo__stub-code-1024__v5"
+    with patch("nexus.commands.collection._t3", return_value=mock_db), \
+         patch("nexus.db.collection_purge.purge_collection_cascade"), \
+         patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
+         patch("nexus.doc_indexer.index_markdown", return_value=1), \
+         patch("nexus.db.t3.verify_collection_deep", return_value=vr):
+        result = runner.invoke(main, ["collection", "reindex", name])
+    assert result.exit_code == 0, result.output
+    writer.register_collection.assert_called_once_with(
+        name,
+        content_type="docs",
+        owner_id="myrepo",
+        embedding_model="stub-code-1024",
+        model_version="v5",
+    )
+    writer.close.assert_called_once()
+
+
 def _setup_reindex_mock(mock_db, metadatas_check, metadatas_batch, before_count=1, after_count=1):
     from nexus.db.t3 import VerifyResult
     mock_db.collection_info.side_effect = [

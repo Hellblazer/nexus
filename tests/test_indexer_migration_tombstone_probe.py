@@ -167,3 +167,43 @@ def test_present_legacy_candidate_no_tombstone_warning(
 
     tombstone_events = [e for e in cap if e.get("event") == "phase4_migration_candidate_tombstoned"]
     assert tombstone_events == []
+
+
+def test_post_rename_registration_carries_the_rendered_collectionname_fields(
+    repo_with_owner: Path, catalog: ActiveCatalog, registry: RepoRegistry, monkeypatch,
+) -> None:
+    """nexus-ft04v.27: the post-rename ``register_collection`` call must
+    carry the SAME four fields it did before the fix -- now read straight
+    off the ``CollectionName`` the rename path already rendered
+    ``conformant`` from, rather than re-parsed back out of that string via
+    the retired ``parse_conformant_collection_name``.
+
+    Reuses this module's own rename-path harness (the ONLY existing
+    coverage of decision-tree case 1 -- see this file's module docstring
+    and ``tests/test_collection_name_migration.py``'s GAP-CANDIDATE note)
+    so this is real end-to-end coverage of the exact site changed, not a
+    unit test of ``CollectionName`` in isolation.
+    """
+    from nexus.indexer import _legacy_collection_name, _migrate_legacy_collections
+
+    legacy = _legacy_collection_name(repo_with_owner, "code")
+    _patch_get(monkeypatch, stats_names={legacy}, raw_names={legacy})
+    t3_db = HttpVectorClient()
+    registry.add(repo_with_owner)
+    writer = MagicMock()
+    writer.rename_collection_cascade = MagicMock(return_value={})
+
+    result = _migrate_legacy_collections(
+        repo_with_owner, cat=catalog, t3_db=t3_db, registry=registry,
+        writer=writer,
+    )
+
+    conformant = result["code"]
+    assert conformant == "code__1-1__voyage-code-3__v1"
+    writer.register_collection.assert_called_once_with(
+        conformant,
+        content_type="code",
+        owner_id="1-1",
+        embedding_model="voyage-code-3",
+        model_version="v1",
+    )

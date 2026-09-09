@@ -715,20 +715,23 @@ def reindex_cmd(name: str, force: bool) -> None:
     try:
         from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         from nexus.corpus import (  # noqa: PLC0415 — deferred to avoid import cycle
+            collection_model,
+            collection_owner,
             is_conformant_collection_name,
-            parse_conformant_collection_name,
+            model_version_for_collection_name,
         )
 
         _w = make_catalog_writer()
         try:
             if is_conformant_collection_name(name):
-                segments = parse_conformant_collection_name(name)
+                # nexus-ft04v.27: the four funnel-style helpers replace the
+                # retired parse_conformant_collection_name dict.
                 _w.register_collection(
                     name,
-                    content_type=segments["content_type"],
-                    owner_id=segments["owner_id"],
-                    embedding_model=segments["embedding_model"],
-                    model_version=segments["model_version"],
+                    content_type=collection_content_type(name),
+                    owner_id=collection_owner(name),
+                    embedding_model=collection_model(name),
+                    model_version=model_version_for_collection_name(name),
                 )
             else:
                 _w.register_collection(name)

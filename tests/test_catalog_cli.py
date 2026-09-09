@@ -2927,6 +2927,39 @@ class TestWhh61MigrationCarve:
         assert result.exit_code != 0
         assert "no content-type prefix" in result.output
 
+    def test_migrate_fallback_registers_target_with_the_values_it_rendered_from(self):
+        """nexus-ft04v.27: the registration loop must pass the SAME
+        content_type/owner_id/embedding_model/model_version it did before
+        the fix -- now carried through from the local variables the
+        f-string ``target`` was built from, instead of being re-parsed
+        back out of that rendered string via the retired
+        ``parse_conformant_collection_name``."""
+        from unittest.mock import MagicMock, patch
+
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+        from nexus.cli import main
+
+        entry = MagicMock()
+        entry.tumbler = "1.1.1"
+        cat = MagicMock(spec=HttpCatalogClient)
+        cat.get_collection.return_value = {"name": "docs__default"}
+        cat.list_by_collection.return_value = [entry]
+        writer = MagicMock(spec=list(CATALOG_WRITE_OPS))
+        with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
+                patch("nexus.commands.catalog._get_catalog_writer", return_value=writer):
+            result = CliRunner().invoke(
+                main, ["catalog", "migrate-fallback", "docs__default", "--yes"],
+            )
+        assert result.exit_code == 0, result.output
+        writer.register_collection.assert_called_once_with(
+            "docs__1-1__voyage-context-3__v1",
+            content_type="docs",
+            owner_id="1-1",
+            embedding_model="voyage-context-3",
+            model_version="v1",
+        )
+
 
 class TestWhh61MaintenanceCarve:
     """Contract pins for the nexus-whh61.4 maintenance carve.
