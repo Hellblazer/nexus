@@ -633,6 +633,20 @@ public final class CatalogRepository {
             if (prefix == null || prefix.isBlank()) {
                 prefix = existing;
                 if (prefix == null || prefix.isBlank()) {
+                    // nexus-wtzzq (GH #1522): a fresh prefix is max + 1 over the
+                    // tenant's owners, and two first-time registrations in the
+                    // same instant computed the same number: the second INSERT
+                    // landed ON CONFLICT (tenant_id, tumbler_prefix) DO UPDATE on
+                    // the first's row and renamed it to its own repo, so the first
+                    // repo's name was gone when its client read the prefix back
+                    // ("server did not return prefix"; its retry then took the
+                    // next number). Serialise allocation per tenant with a
+                    // transaction-scoped advisory lock, taken BEFORE the max read
+                    // so the second allocator sees the first's committed row.
+                    // Same typed idiom as TaxonomyRepository's persist lock.
+                    ctx.select(DSL.function("pg_advisory_xact_lock", Object.class,
+                               DSL.function("hashtext", Integer.class, DSL.val("catalog_owners/" + tenant))))
+                       .fetch();
                     // Next owner number: MAX(int after the first dot) + 1 over
                     // '1.%' owners. RLS scopes this to the tenant.
                     // nexus-zrcj7 (Sam's no-SQL-strings-in-Java directive, step 4
