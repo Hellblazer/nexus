@@ -251,13 +251,21 @@ def _model_for_collection(name: str) -> str:
     Shared by :func:`_is_same_model_passthrough` and its caller's
     ``declared_model`` derivation so the two can never disagree about
     which model backed the passthrough decision (nexus-ft04v.26 item 6).
+
+    RDR-204 Phase 3 fix round (nexus-ft04v.28 item 7): the row-preferred/
+    name-fallback shape itself is now :func:`nexus.corpus.resolve_row_preferred`
+    -- shared with three sibling diagnostic sites instead of a fourth
+    independent copy. The LAXER ``len(segments) == 4`` fallback (not the
+    strict candidate-string primitive) stays exactly as this function's
+    own docstring above already justifies.
     """
-    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — deferred to avoid import cycle (nexus.mcp_infra)
-    row = get_collection_row(name)
-    if row is not None:
-        return str(row.get("embedding_model") or "")
-    segments = name.split("__")
-    return segments[2] if len(segments) == 4 else ""
+    from nexus.corpus import resolve_row_preferred  # noqa: PLC0415 — deferred to avoid import cycle (nexus.corpus)
+
+    def _name_fallback(n: str) -> str:
+        segments = n.split("__")
+        return segments[2] if len(segments) == 4 else ""
+
+    return resolve_row_preferred(name, "embedding_model", _name_fallback) or ""
 
 
 def _is_same_model_passthrough(name: str, target: str) -> bool:

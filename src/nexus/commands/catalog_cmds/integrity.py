@@ -629,13 +629,20 @@ def _classify_never_chunked(e: object, owner_roots: dict[str, str] | None = None
     # document whose collection may itself be drifted/unregistered --
     # candidate-string derivation, never the row-based
     # collection_content_type, so one bad entry cannot abort the report.
-    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    # RDR-204 Phase 3 fix round (nexus-ft04v.28 item 7): ROW-PREFERRED now
+    # (via the shared nexus.corpus.resolve_row_preferred), falling to the
+    # SAME candidate-string derivation only when e.physical_collection has
+    # no row -- this diagnostic's whole purpose is reporting a
+    # name-versus-row disagreement, so a row that exists must win, matching
+    # the treatment db/reconcile.py's _model_for_collection and
+    # db/http_vector_client.py's _is_cce_collection already got.
+    from nexus.corpus import resolve_row_preferred, split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-    if (
-        split_candidate_collection_name(e.physical_collection)[0] == "knowledge"
-        and not e.file_path
-        and not e.source_uri
-    ):
+    content_type = resolve_row_preferred(
+        e.physical_collection, "content_type",
+        lambda n: split_candidate_collection_name(n)[0],
+    )
+    if content_type == "knowledge" and not e.file_path and not e.source_uri:
         return "rdr145_exempt"
     if owner_roots is not None and _resolves_to_zero_content_by_design(e, owner_roots):
         return "zero_content_by_design"

@@ -387,6 +387,53 @@ class TestClassification:
         )
         assert reconcile_stale_mod._store_put_signature_reason(other_uri) is None
 
+    def test_rdr145_exempt_predicate_row_wins_over_a_disagreeing_name(self, monkeypatch):
+        """RDR-204 Phase 3 fix round (nexus-ft04v.28 item 7): the catalog
+        ROW, not the NAME, decides content_type here now -- a row that
+        disagrees with the name must win, exactly the class of drift
+        this diagnostic exists to surface elsewhere in the report."""
+        import nexus.mcp_infra as mi
+
+        # NAME says "code__", ROW disagrees and says "knowledge" -- the
+        # row must win: this becomes rdr145_exempt (name alone would say
+        # "unclassified", see the earlier not_exempt_wrong_prefix case).
+        monkeypatch.setattr(
+            mi, "get_collection_row",
+            lambda name: {"content_type": "knowledge", "owner_id": "x", "embedding_model": "m"},
+        )
+        row_says_knowledge = _FakeEntry(
+            "2.1.9", "Row Disagrees", physical_collection="code__x", chunk_count=0,
+        )
+        assert reconcile_stale_mod._classify_never_chunked(row_says_knowledge) == "rdr145_exempt"
+
+        # Inverse: NAME says "knowledge__", ROW disagrees and says "code"
+        # -- the row must win the OTHER way too: unclassified, not exempt.
+        monkeypatch.setattr(
+            mi, "get_collection_row",
+            lambda name: {"content_type": "code", "owner_id": "x", "embedding_model": "m"},
+        )
+        row_says_code = _FakeEntry(
+            "2.1.10", "Row Disagrees Other Way", physical_collection="knowledge__x", chunk_count=0,
+        )
+        assert reconcile_stale_mod._classify_never_chunked(row_says_code) == "unclassified"
+
+    def test_store_put_signature_reason_row_wins_over_a_disagreeing_name(self, monkeypatch):
+        """Same row-wins property for the sibling class-(d) site in this
+        module (nexus-ft04v.28 item 7)."""
+        import nexus.mcp_infra as mi
+
+        monkeypatch.setattr(
+            mi, "get_collection_row",
+            lambda name: {"content_type": "knowledge", "owner_id": "x", "embedding_model": "m"},
+        )
+        row_says_knowledge = _FakeEntry(
+            "3.1.9", "Row Disagrees", physical_collection="code__x", chunk_count=1,
+        )
+        assert (
+            reconcile_stale_mod._store_put_signature_reason(row_says_knowledge)
+            == "knowledge_single_chunk_no_path"
+        )
+
     def test_post_sdp0u_store_put_doc_classifies_store_put_origin_not_exempt(self, tmp_path):
         """nexus-sdp0u fix-round (round-1 critique SIGNIFICANT #4), UPDATED
         by the nexus-0y0gk critique fix-round: a post-fix ``store_put``

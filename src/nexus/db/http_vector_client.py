@@ -932,15 +932,19 @@ def _is_cce_collection(collection: str) -> bool | None:
     non-canonical/test token, would misclassify a structurally-CCE
     collection as code, and vice versa). content_type is the stable,
     structural signal this decision has always meant to test.
+
+    RDR-204 Phase 3 fix round (nexus-ft04v.28 item 7): the row-preferred/
+    name-fallback shape itself is now :func:`nexus.corpus.resolve_row_preferred`
+    -- shared with three sibling diagnostic sites instead of a fourth
+    independent copy.
     """
-    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
-    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
-    row = get_collection_row(collection)
-    if row is not None:
-        content_type = row.get("content_type")
-    else:
-        content_type_probe, owner_probe = split_candidate_collection_name(collection)
-        content_type = None if owner_probe == collection else content_type_probe
+    from nexus.corpus import resolve_row_preferred, split_candidate_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
+
+    def _name_fallback(n: str) -> str | None:
+        content_type_probe, owner_probe = split_candidate_collection_name(n)
+        return None if owner_probe == n else content_type_probe
+
+    content_type = resolve_row_preferred(collection, "content_type", _name_fallback)
     if content_type is None:
         return None
     return content_type in _CCE_COLLECTION_PREFIXES

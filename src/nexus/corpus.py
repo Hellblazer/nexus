@@ -923,6 +923,47 @@ def collection_model(name: str) -> str:
     return row["embedding_model"]
 
 
+def resolve_row_preferred(
+    name: str, field: str, name_fallback: "Callable[[str], str | None]",
+) -> "str | None":
+    """Row-preferred, candidate-string-fallback resolution of catalog
+    *field* for collection *name*.
+
+    RDR-204 Phase 3 fix round (nexus-ft04v.28 item 7): the shared shape
+    every class-(d) diagnostic site needs -- read the catalog row's
+    *field* when a row backs *name* (Gap 1, authoritative: a row that
+    disagrees with the name wins), else derive it via *name_fallback*
+    (the site's own class-(d) reason a row-only, fail-loud read would be
+    wrong here: a diagnostic scanning drifted/unregistered catalog state,
+    or a not-yet-written candidate, must tolerate a name with no row --
+    unlike :func:`collection_content_type` / :func:`collection_owner` /
+    :func:`collection_model`, which raise on exactly that case).
+
+    Extracted from FOUR independently-written copies of this same
+    pattern (:func:`nexus.db.reconcile._model_for_collection`,
+    :func:`nexus.db.http_vector_client._is_cce_collection`, and two
+    inline checks in ``commands/catalog_cmds/integrity.py`` /
+    ``reconcile_stale.py``) -- two were upgraded to row-preferred during
+    nexus-ft04v.26's fixture-seam round, two were never touched and kept
+    parsing the name outright even when a row existed and disagreed
+    (code-review-nexus-ft04v.29's finding). One helper means the four
+    can no longer drift independently the way they already had.
+
+    ROW PRESENCE alone gates the fallback -- never field presence WITHIN
+    the row: when *name* has a row but it lacks *field* (an incomplete
+    stats-join edge case), this returns ``None`` immediately rather than
+    falling through to *name_fallback*, matching every one of the four
+    sites' original behaviour (a row that exists, even an incomplete
+    one, is still authoritative and wins outright).
+    """
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+    row = get_collection_row(name)
+    if row is not None:
+        val = row.get(field)
+        return str(val) if val is not None else None
+    return name_fallback(name)
+
+
 def voyage_model_for_collection(collection_name: str) -> str:
     """Return the Voyage AI model for a T3 collection (index and query).
 

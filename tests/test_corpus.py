@@ -423,6 +423,57 @@ def test_resolve_corpus_refresh_never_fires_when_the_first_pass_already_matched(
     ]
 
 
+# ── RDR-204 Phase 3 fix round item 7: resolve_row_preferred ──────────────────
+
+class TestResolveRowPreferred:
+    """Direct unit coverage of the shared helper four class-(d) diagnostic
+    sites now route through (nexus-ft04v.28 item 7): db/reconcile.py's
+    _model_for_collection, db/http_vector_client.py's _is_cce_collection,
+    and two inline checks in commands/catalog_cmds/integrity.py /
+    reconcile_stale.py."""
+
+    def test_row_present_wins_over_the_fallback(self, monkeypatch) -> None:
+        import nexus.mcp_infra as mi
+        from nexus.corpus import resolve_row_preferred
+
+        monkeypatch.setattr(
+            mi, "get_collection_row",
+            lambda name: {"content_type": "docs", "owner_id": "x", "embedding_model": "m"},
+        )
+
+        def _boom(n: str) -> str:
+            raise AssertionError("name_fallback must not run when a row exists")
+
+        assert resolve_row_preferred("anything", "content_type", _boom) == "docs"
+
+    def test_row_absent_falls_to_the_name_fallback(self, monkeypatch) -> None:
+        import nexus.mcp_infra as mi
+        from nexus.corpus import resolve_row_preferred
+
+        monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
+
+        assert resolve_row_preferred(
+            "knowledge__x", "content_type", lambda n: n.split("__")[0],
+        ) == "knowledge"
+
+    def test_row_present_but_field_absent_returns_none_without_falling_back(
+        self, monkeypatch,
+    ) -> None:
+        """Row PRESENCE alone gates the fallback -- a row missing the
+        requested field still wins outright (returns None), never falls
+        through to name_fallback. Matches every one of the four sites'
+        original pre-extraction behaviour."""
+        import nexus.mcp_infra as mi
+        from nexus.corpus import resolve_row_preferred
+
+        monkeypatch.setattr(mi, "get_collection_row", lambda name: {"owner_id": "x"})
+
+        def _boom(n: str) -> str:
+            raise AssertionError("name_fallback must not run when a row exists, even incomplete")
+
+        assert resolve_row_preferred("anything", "content_type", _boom) is None
+
+
 # ── RDR-204 Phase 3 item 7: owner grammar alignment ───────────────────────────
 
 def test_is_conformant_collection_name_admits_underscored_owner() -> None:
