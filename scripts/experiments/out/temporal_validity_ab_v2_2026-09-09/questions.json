@@ -1,0 +1,662 @@
+[
+ {
+  "qid": "RDR-014-current-S1",
+  "kind": "current",
+  "provenance": "S",
+  "pair": "RDR-015<RDR-014",
+  "source": "RDR-014",
+  "gold": "RDR-015",
+  "t": "2026-09-08",
+  "question": "Why does semantic search over our code collection surface unrelated files sharing variable names with the query?"
+ },
+ {
+  "qid": "RDR-014-current-S2",
+  "kind": "current",
+  "provenance": "S",
+  "pair": "RDR-015<RDR-014",
+  "source": "RDR-014",
+  "gold": "RDR-015",
+  "t": "2026-09-08",
+  "question": "What is the current fix for code context retrieval ranking wrong files above the actual algorithm implementation?"
+ },
+ {
+  "qid": "RDR-014-current-T1",
+  "kind": "current",
+  "provenance": "T",
+  "pair": "RDR-015<RDR-014",
+  "source": "RDR-015",
+  "gold": "RDR-015",
+  "t": "2026-09-08",
+  "question": "What is the current status of porting arcaneum's AST extraction helpers into nexus's chunking pipeline?"
+ },
+ {
+  "qid": "RDR-014-current-T2",
+  "kind": "current",
+  "provenance": "T",
+  "pair": "RDR-015<RDR-014",
+  "source": "RDR-015",
+  "gold": "RDR-015",
+  "t": "2026-09-08",
+  "question": "Should nexus align its supported language extensions with arcaneum's broader AST coverage going forward?"
+ },
+ {
+  "qid": "RDR-014-current-N1",
+  "kind": "current",
+  "provenance": "N",
+  "pair": "RDR-015<RDR-014",
+  "source": "",
+  "gold": "RDR-015",
+  "t": "2026-09-08",
+  "question": "What is the current recommended approach for ingesting source code separately from documentation to reduce duplicate search results?"
+ },
+ {
+  "qid": "RDR-014-current-N2",
+  "kind": "current",
+  "provenance": "N",
+  "pair": "RDR-015<RDR-014",
+  "source": "",
+  "gold": "RDR-015",
+  "t": "2026-09-08",
+  "question": "Is there up-to-date guidance on restructuring our ingestion pipeline based on a proven external system's design?"
+ },
+ {
+  "qid": "RDR-014-asof-S1",
+  "kind": "asof",
+  "provenance": "S",
+  "pair": "RDR-015<RDR-014",
+  "source": "RDR-014",
+  "gold": "RDR-014",
+  "t": "2026-06-02",
+  "question": "Why does semantic search on the code collection surface unrelated files for algorithm-specific queries instead of the real implementation?"
+ },
+ {
+  "qid": "RDR-014-asof-S2",
+  "kind": "asof",
+  "provenance": "S",
+  "pair": "RDR-015<RDR-014",
+  "source": "RDR-014",
+  "gold": "RDR-014",
+  "t": "2026-06-02",
+  "question": "What causes surface-level variable name overlap to outrank the canonical file when searching code embeddings?"
+ },
+ {
+  "qid": "RDR-014-asof-N1",
+  "kind": "asof",
+  "provenance": "N",
+  "pair": "RDR-015<RDR-014",
+  "source": "",
+  "gold": "RDR-014",
+  "t": "2026-06-02",
+  "question": "What's the current recommended approach for keeping code snippets and documentation results from overlapping in search output?"
+ },
+ {
+  "qid": "RDR-014-asof-N2",
+  "kind": "asof",
+  "provenance": "N",
+  "pair": "RDR-015<RDR-014",
+  "source": "",
+  "gold": "RDR-014",
+  "t": "2026-06-02",
+  "question": "Is there guidance yet on restructuring how we ingest and process content into the index based on a proven external design?"
+ },
+ {
+  "qid": "RDR-106-current-S1",
+  "kind": "current",
+  "provenance": "S",
+  "pair": "RDR-156<RDR-106",
+  "source": "RDR-106",
+  "gold": "RDR-156",
+  "t": "2026-09-08",
+  "question": "What is the current state of tombstone columns for soft-deleted catalog rows before purge runs?"
+ },
+ {
+  "qid": "RDR-106-current-S2",
+  "kind": "current",
+  "provenance": "S",
+  "pair": "RDR-156<RDR-106",
+  "source": "RDR-106",
+  "gold": "RDR-156",
+  "t": "2026-09-08",
+  "question": "Is purge-trash currently armed, and who decides when reclaimed tombstones actually get removed?"
+ },
+ {
+  "qid": "RDR-106-current-T1",
+  "kind": "current",
+  "provenance": "T",
+  "pair": "RDR-156<RDR-106",
+  "source": "RDR-156",
+  "gold": "RDR-156",
+  "t": "2026-09-08",
+  "question": "What foreign key constraints or integrity enforcement should exist between chunk embedding tables and their collection metadata?"
+ },
+ {
+  "qid": "RDR-106-current-T2",
+  "kind": "current",
+  "provenance": "T",
+  "pair": "RDR-156<RDR-106",
+  "source": "RDR-156",
+  "gold": "RDR-156",
+  "t": "2026-09-08",
+  "question": "Should we add database views or triggers to enforce invariants between vector tables and the catalog registry?"
+ },
+ {
+  "qid": "RDR-106-current-N1",
+  "kind": "current",
+  "provenance": "N",
+  "pair": "RDR-156<RDR-106",
+  "source": "",
+  "gold": "RDR-156",
+  "t": "2026-09-08",
+  "question": "What's the current approach for marking catalog rows as removed while still letting them be restored or purged later?"
+ },
+ {
+  "qid": "RDR-106-current-N2",
+  "kind": "current",
+  "provenance": "N",
+  "pair": "RDR-156<RDR-106",
+  "source": "",
+  "gold": "RDR-156",
+  "t": "2026-09-08",
+  "question": "How are we consolidating retrieval logic to push more query and integrity work down into the underlying store's native features?"
+ },
+ {
+  "qid": "RDR-106-asof-S1",
+  "kind": "asof",
+  "provenance": "S",
+  "pair": "RDR-156<RDR-106",
+  "source": "RDR-106",
+  "gold": "RDR-106",
+  "t": "2026-05-29",
+  "question": "What is the recommended way to add a trashed state to catalog rows instead of hard deleting them?"
+ },
+ {
+  "qid": "RDR-106-asof-S2",
+  "kind": "asof",
+  "provenance": "S",
+  "pair": "RDR-156<RDR-106",
+  "source": "RDR-106",
+  "gold": "RDR-106",
+  "t": "2026-05-29",
+  "question": "How should the prune-stale command avoid misclassifying valid entries before removing them permanently?"
+ },
+ {
+  "qid": "RDR-106-asof-N1",
+  "kind": "asof",
+  "provenance": "N",
+  "pair": "RDR-156<RDR-106",
+  "source": "",
+  "gold": "RDR-106",
+  "t": "2026-05-29",
+  "question": "What's the current approach for marking catalog rows as deleted without dropping them from the projection outright?"
+ },
+ {
+  "qid": "RDR-106-asof-N2",
+  "kind": "asof",
+  "provenance": "N",
+  "pair": "RDR-156<RDR-106",
+  "source": "",
+  "gold": "RDR-106",
+  "t": "2026-05-29",
+  "question": "Should we lean on the database's own query and constraint features instead of a custom layer for retrieval?"
+ },
+ {
+  "qid": "RDR-107-current-S1",
+  "kind": "current",
+  "provenance": "S",
+  "pair": "RDR-108<RDR-107",
+  "source": "RDR-107",
+  "gold": "RDR-108",
+  "t": "2026-09-08",
+  "question": "What is the current status of tombstone-based soft delete for stale T3 chunk duplicates in the code indexer?"
+ },
+ {
+  "qid": "RDR-107-current-S2",
+  "kind": "current",
+  "provenance": "S",
+  "pair": "RDR-108<RDR-107",
+  "source": "RDR-107",
+  "gold": "RDR-108",
+  "t": "2026-09-08",
+  "question": "Has the asymmetric prune logic between the code and doc indexing pipelines been fixed yet?"
+ },
+ {
+  "qid": "RDR-107-current-T1",
+  "kind": "current",
+  "provenance": "T",
+  "pair": "RDR-108<RDR-107",
+  "source": "RDR-108",
+  "gold": "RDR-108",
+  "t": "2026-09-08",
+  "question": "Does the catalog now treat collections as stable identities instead of copied string names?"
+ },
+ {
+  "qid": "RDR-107-current-T2",
+  "kind": "current",
+  "provenance": "T",
+  "pair": "RDR-108<RDR-107",
+  "source": "RDR-108",
+  "gold": "RDR-108",
+  "t": "2026-09-08",
+  "question": "How does content-addressed chunk storage stop duplicate IDs after a re-index in T3?"
+ },
+ {
+  "qid": "RDR-107-current-N1",
+  "kind": "current",
+  "provenance": "N",
+  "pair": "RDR-108<RDR-107",
+  "source": "",
+  "gold": "RDR-108",
+  "t": "2026-09-08",
+  "question": "What is the current design for marking a stored chunk as removed without physically deleting its underlying bytes?"
+ },
+ {
+  "qid": "RDR-107-current-N2",
+  "kind": "current",
+  "provenance": "N",
+  "pair": "RDR-108<RDR-107",
+  "source": "",
+  "gold": "RDR-108",
+  "t": "2026-09-08",
+  "question": "How does the catalog stay the authority for structure and identity while storage just holds immutable content blobs?"
+ },
+ {
+  "qid": "RDR-112-current-S1",
+  "kind": "current",
+  "provenance": "S",
+  "pair": "RDR-120<RDR-112",
+  "source": "RDR-112",
+  "gold": "RDR-120",
+  "t": "2026-09-08",
+  "question": "What is the current plan for running T2 and T3 storage behind a shared daemon instead of direct file access?"
+ },
+ {
+  "qid": "RDR-112-current-S2",
+  "kind": "current",
+  "provenance": "S",
+  "pair": "RDR-120<RDR-112",
+  "source": "RDR-112",
+  "gold": "RDR-120",
+  "t": "2026-09-08",
+  "question": "How should sandboxed containers reach the host's persistent database and vector store without forking their own local copies?"
+ },
+ {
+  "qid": "RDR-112-current-T1",
+  "kind": "current",
+  "provenance": "T",
+  "pair": "RDR-120<RDR-112",
+  "source": "RDR-120",
+  "gold": "RDR-120",
+  "t": "2026-09-08",
+  "question": "What is the current plan for making shared memory tiers visible across sandboxed containers instead of per-process copies?"
+ },
+ {
+  "qid": "RDR-112-current-T2",
+  "kind": "current",
+  "provenance": "T",
+  "pair": "RDR-120<RDR-112",
+  "source": "RDR-120",
+  "gold": "RDR-120",
+  "t": "2026-09-08",
+  "question": "Why was the earlier attempt at splitting storage tiers scrapped, and what scope does the current design deliberately exclude?"
+ },
+ {
+  "qid": "RDR-112-current-N1",
+  "kind": "current",
+  "provenance": "N",
+  "pair": "RDR-120<RDR-112",
+  "source": "",
+  "gold": "RDR-120",
+  "t": "2026-09-08",
+  "question": "What is the current policy on which persistent data stores must run as separate out-of-process services today?"
+ },
+ {
+  "qid": "RDR-112-current-N2",
+  "kind": "current",
+  "provenance": "N",
+  "pair": "RDR-120<RDR-112",
+  "source": "",
+  "gold": "RDR-120",
+  "t": "2026-09-08",
+  "question": "How do we currently decide the boundary between the core storage layer and the consumer components that use it?"
+ },
+ {
+  "qid": "RDR-112-asof-S1",
+  "kind": "asof",
+  "provenance": "S",
+  "pair": "RDR-120<RDR-112",
+  "source": "RDR-112",
+  "gold": "RDR-112",
+  "t": "2026-05-15",
+  "question": "How should sandboxed containers reach shared T2 and T3 stores instead of opening local sqlite or chroma files directly?"
+ },
+ {
+  "qid": "RDR-112-asof-S2",
+  "kind": "asof",
+  "provenance": "S",
+  "pair": "RDR-120<RDR-112",
+  "source": "RDR-112",
+  "gold": "RDR-112",
+  "t": "2026-05-15",
+  "question": "Is there guidance on running persistent storage tiers behind a daemon so multiple containerized nx processes see the same state?"
+ },
+ {
+  "qid": "RDR-112-asof-N1",
+  "kind": "asof",
+  "provenance": "N",
+  "pair": "RDR-120<RDR-112",
+  "source": "",
+  "gold": "RDR-112",
+  "t": "2026-05-15",
+  "question": "Should our shared database process run as its own daemon separate from application containers?"
+ },
+ {
+  "qid": "RDR-112-asof-N2",
+  "kind": "asof",
+  "provenance": "N",
+  "pair": "RDR-120<RDR-112",
+  "source": "",
+  "gold": "RDR-112",
+  "t": "2026-05-15",
+  "question": "What is the current policy on keeping storage services separate from any bundled consumer processes today?"
+ },
+ {
+  "qid": "RDR-123-current-S1",
+  "kind": "current",
+  "provenance": "S",
+  "pair": "RDR-127<RDR-123",
+  "source": "RDR-123",
+  "gold": "RDR-127",
+  "t": "2026-09-08",
+  "question": "What is the current plan for rendering nx_answer citations and synthesis as structured cards instead of markdown text?"
+ },
+ {
+  "qid": "RDR-123-current-S2",
+  "kind": "current",
+  "provenance": "S",
+  "pair": "RDR-127<RDR-123",
+  "source": "RDR-123",
+  "gold": "RDR-127",
+  "t": "2026-09-08",
+  "question": "Which rendering hosts support structured surface output today for analytical query responses in nexus?"
+ },
+ {
+  "qid": "RDR-123-current-T1",
+  "kind": "current",
+  "provenance": "T",
+  "pair": "RDR-127<RDR-123",
+  "source": "RDR-127",
+  "gold": "RDR-127",
+  "t": "2026-09-08",
+  "question": "Does nexus provide any built-in tool or API for rendering UI surfaces to clients?"
+ },
+ {
+  "qid": "RDR-123-current-T2",
+  "kind": "current",
+  "provenance": "T",
+  "pair": "RDR-127<RDR-123",
+  "source": "RDR-127",
+  "gold": "RDR-127",
+  "t": "2026-09-08",
+  "question": "Which project owns the integration story for displaying rendered surfaces, and does it depend on nexus or the reverse?"
+ },
+ {
+  "qid": "RDR-123-current-N1",
+  "kind": "current",
+  "provenance": "N",
+  "pair": "RDR-127<RDR-123",
+  "source": "",
+  "gold": "RDR-127",
+  "t": "2026-09-08",
+  "question": "Is there current guidance on formatting generated answer output into structured visual layouts instead of plain text?"
+ },
+ {
+  "qid": "RDR-123-current-N2",
+  "kind": "current",
+  "provenance": "N",
+  "pair": "RDR-127<RDR-123",
+  "source": "",
+  "gold": "RDR-127",
+  "t": "2026-09-08",
+  "question": "What is the latest decision on whether this project should build its own UI rendering pipeline for query results?"
+ },
+ {
+  "qid": "RDR-123-asof-S1",
+  "kind": "asof",
+  "provenance": "S",
+  "pair": "RDR-127<RDR-123",
+  "source": "RDR-123",
+  "gold": "RDR-123",
+  "t": "2026-05-20",
+  "question": "What wire-level surface descriptor should nx_answer use to render citations and synthesis as structured components instead of markdown?"
+ },
+ {
+  "qid": "RDR-123-asof-S2",
+  "kind": "asof",
+  "provenance": "S",
+  "pair": "RDR-127<RDR-123",
+  "source": "RDR-123",
+  "gold": "RDR-123",
+  "t": "2026-05-20",
+  "question": "Which rendering hosts currently support structured answer surfaces for terminal, desktop, and Claude Code consumers?"
+ },
+ {
+  "qid": "RDR-123-asof-N1",
+  "kind": "asof",
+  "provenance": "N",
+  "pair": "RDR-127<RDR-123",
+  "source": "",
+  "gold": "RDR-123",
+  "t": "2026-05-20",
+  "question": "Should composed retrieval answers be turned into structured UI elements before returning them to callers?"
+ },
+ {
+  "qid": "RDR-123-asof-N2",
+  "kind": "asof",
+  "provenance": "N",
+  "pair": "RDR-127<RDR-123",
+  "source": "",
+  "gold": "RDR-123",
+  "t": "2026-05-20",
+  "question": "Is there a current plan for nexus to own rendering or integration with a downstream UI consumer?"
+ },
+ {
+  "qid": "RDR-124-current-S1",
+  "kind": "current",
+  "provenance": "S",
+  "pair": "RDR-127<RDR-124",
+  "source": "RDR-124",
+  "gold": "RDR-127",
+  "t": "2026-09-08",
+  "question": "What is the current design for having subagents return structured A2UI cards instead of prose to the orchestrator?"
+ },
+ {
+  "qid": "RDR-124-current-S2",
+  "kind": "current",
+  "provenance": "S",
+  "pair": "RDR-127<RDR-124",
+  "source": "RDR-124",
+  "gold": "RDR-127",
+  "t": "2026-09-08",
+  "question": "How should Nexus subagent outputs like code review findings map onto A2UI catalog primitives to reduce context loss?"
+ },
+ {
+  "qid": "RDR-124-current-T1",
+  "kind": "current",
+  "provenance": "T",
+  "pair": "RDR-127<RDR-124",
+  "source": "RDR-127",
+  "gold": "RDR-127",
+  "t": "2026-09-08",
+  "question": "Should nexus own any surface rendering integration, or does that belong entirely to a downstream consumer?"
+ },
+ {
+  "qid": "RDR-124-current-T2",
+  "kind": "current",
+  "provenance": "T",
+  "pair": "RDR-127<RDR-124",
+  "source": "RDR-127",
+  "gold": "RDR-127",
+  "t": "2026-09-08",
+  "question": "What is the current recommended way for a client project to add UI rendering support on top of nexus?"
+ },
+ {
+  "qid": "RDR-124-current-N1",
+  "kind": "current",
+  "provenance": "N",
+  "pair": "RDR-127<RDR-124",
+  "source": "",
+  "gold": "RDR-127",
+  "t": "2026-09-08",
+  "question": "What is the current plan for letting subagents hand back rich, renderable results without flooding the orchestrator's context window?"
+ },
+ {
+  "qid": "RDR-124-current-N2",
+  "kind": "current",
+  "provenance": "N",
+  "pair": "RDR-127<RDR-124",
+  "source": "",
+  "gold": "RDR-127",
+  "t": "2026-09-08",
+  "question": "Does nexus today have any built-in way to display structured subagent output, or is that rendering left entirely to another project?"
+ },
+ {
+  "qid": "RDR-124-asof-S1",
+  "kind": "asof",
+  "provenance": "S",
+  "pair": "RDR-127<RDR-124",
+  "source": "RDR-124",
+  "gold": "RDR-124",
+  "t": "2026-05-20",
+  "question": "Is there guidance yet on having subagents return structured cards instead of flattened prose summaries?"
+ },
+ {
+  "qid": "RDR-124-asof-S2",
+  "kind": "asof",
+  "provenance": "S",
+  "pair": "RDR-127<RDR-124",
+  "source": "RDR-124",
+  "gold": "RDR-124",
+  "t": "2026-05-20",
+  "question": "What's the current approach for cutting orchestrator context cost when relaying subagent findings to users?"
+ },
+ {
+  "qid": "RDR-124-asof-N1",
+  "kind": "asof",
+  "provenance": "N",
+  "pair": "RDR-127<RDR-124",
+  "source": "",
+  "gold": "RDR-124",
+  "t": "2026-05-20",
+  "question": "Is there an approved way for subagents to hand back rich visual output instead of raw text to save context?"
+ },
+ {
+  "qid": "RDR-124-asof-N2",
+  "kind": "asof",
+  "provenance": "N",
+  "pair": "RDR-127<RDR-124",
+  "source": "",
+  "gold": "RDR-124",
+  "t": "2026-05-20",
+  "question": "What is the current stance on building any kind of rendering or display integration for structured subagent results?"
+ },
+ {
+  "qid": "RDR-159-current-S1",
+  "kind": "current",
+  "provenance": "S",
+  "pair": "RDR-185<RDR-159",
+  "source": "RDR-159",
+  "gold": "RDR-185",
+  "t": "2026-09-08",
+  "question": "What is the current status of the guided Chroma to pgvector upgrade flow for existing users?"
+ },
+ {
+  "qid": "RDR-159-current-S2",
+  "kind": "current",
+  "provenance": "S",
+  "pair": "RDR-185<RDR-159",
+  "source": "RDR-159",
+  "gold": "RDR-185",
+  "t": "2026-09-08",
+  "question": "Is there a single command yet that automates migrating existing knowledge from Chroma into the PG16 service stack?"
+ },
+ {
+  "qid": "RDR-159-current-T1",
+  "kind": "current",
+  "provenance": "T",
+  "pair": "RDR-185<RDR-159",
+  "source": "RDR-185",
+  "gold": "RDR-185",
+  "t": "2026-09-08",
+  "question": "What is the current design for collapsing all nexus upgrade paths into one auto-applied migration?"
+ },
+ {
+  "qid": "RDR-159-current-T2",
+  "kind": "current",
+  "provenance": "T",
+  "pair": "RDR-185<RDR-159",
+  "source": "RDR-185",
+  "gold": "RDR-185",
+  "t": "2026-09-08",
+  "question": "Has the multi-command upgrade ceremony been replaced yet, and what happened to the blocked chunk id collections?"
+ },
+ {
+  "qid": "RDR-159-current-N1",
+  "kind": "current",
+  "provenance": "N",
+  "pair": "RDR-185<RDR-159",
+  "source": "",
+  "gold": "RDR-185",
+  "t": "2026-09-08",
+  "question": "What is the current recommended way to move users off the old vector store onto the service backend?"
+ },
+ {
+  "qid": "RDR-159-current-N2",
+  "kind": "current",
+  "provenance": "N",
+  "pair": "RDR-185<RDR-159",
+  "source": "",
+  "gold": "RDR-185",
+  "t": "2026-09-08",
+  "question": "Is there still a multi-step upgrade procedure, or does the latest install just apply data changes automatically now?"
+ },
+ {
+  "qid": "RDR-159-asof-S1",
+  "kind": "asof",
+  "provenance": "S",
+  "pair": "RDR-185<RDR-159",
+  "source": "RDR-159",
+  "gold": "RDR-159",
+  "t": "2026-07-24",
+  "question": "What is the current guidance for building a single guided command that migrates an existing user's Chroma data to the new pgvector-based service stack?"
+ },
+ {
+  "qid": "RDR-159-asof-S2",
+  "kind": "asof",
+  "provenance": "S",
+  "pair": "RDR-185<RDR-159",
+  "source": "RDR-159",
+  "gold": "RDR-159",
+  "t": "2026-07-24",
+  "question": "How should a PyPI upgrade flow detect leftover Chroma data and safely sequence the existing migration primitives without manual intervention?"
+ },
+ {
+  "qid": "RDR-159-asof-N1",
+  "kind": "asof",
+  "provenance": "N",
+  "pair": "RDR-185<RDR-159",
+  "source": "",
+  "gold": "RDR-159",
+  "t": "2026-07-24",
+  "question": "What is the current recommended approach for moving customers off the old local vector store to the hosted backend in one step?"
+ },
+ {
+  "qid": "RDR-159-asof-N2",
+  "kind": "asof",
+  "provenance": "N",
+  "pair": "RDR-185<RDR-159",
+  "source": "",
+  "gold": "RDR-159",
+  "t": "2026-07-24",
+  "question": "Is there a single automatic data migration path planned that skips separate version-by-version upgrade steps for existing installs?"
+ }
+]
