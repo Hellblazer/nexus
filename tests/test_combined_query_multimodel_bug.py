@@ -352,3 +352,95 @@ class TestPartialGroupFailureIsAllOrNothing:
         assert isinstance(out, str) and out.startswith("Error:"), (
             "a later model group's failure must abort the whole call and "
             f"surface as an error, never a partial row set; got {out!r}")
+
+
+class TestGroupCollectionsByModelReadsTheRowNotTheName:
+    """RDR-204 Phase 3 fix round test-validation gap (nexus-ft04v.28 item
+    8, test-validation-rdr-204-phase3): every OTHER test of
+    ``_group_collections_by_model`` in this file uses conformant,
+    row-AGREEING names and this module's own name-parsing ``_model()``
+    helper for its assertions -- it would pass identically whether the
+    production code grouped by the NAME or the ROW. Direct unit coverage
+    here constructs a genuine name/row DISAGREEMENT (the same shape as
+    ``test_corpus.py::test_collection_content_type_row_based_repoint``)
+    to prove authority actually moved to the row for THIS function, per
+    its own docstring's claim ("groups by the catalog row's
+    embedding_model COLUMN... instead of a name parsed via
+    embedding_model_for_collection_name")."""
+
+    def test_row_disagreeing_with_the_name_decides_the_group(self, monkeypatch) -> None:
+        import nexus.mcp_infra as mi
+        from nexus.mcp.core import _group_collections_by_model
+
+        # The NAME says voyage-code-3 (a code__ collection); the ROW (the
+        # exact drift class GH #667 came from) says voyage-context-3 --
+        # the row must win.
+        name = "code__acme__voyage-code-3__v1"
+        monkeypatch.setattr(
+            mi, "get_collection_row",
+            lambda n: {
+                "content_type": "code", "owner_id": "acme",
+                "embedding_model": "voyage-context-3", "lifecycle_state": "live",
+            } if n == name else None,
+        )
+
+        groups = _group_collections_by_model([name])
+
+        assert groups == [[name]]
+        # Non-vacuity: prove the row's model, not the name's, is what
+        # decided the single group -- a SECOND collection whose NAME
+        # says voyage-context-3 (the CCE model) but whose ROW ALSO says
+        # voyage-context-3 (agreeing with the row-disagreeing first
+        # collection, disagreeing with ITS OWN name's sibling story)
+        # must land in the SAME group as the first, which name-based
+        # grouping would never do (their names claim two different
+        # models).
+        other = "docs__acme__voyage-context-3__v1"
+        monkeypatch.setattr(
+            mi, "get_collection_row",
+            lambda n: {
+                "content_type": "code" if n == name else "docs",
+                "owner_id": "acme",
+                "embedding_model": "voyage-context-3",
+                "lifecycle_state": "live",
+            },
+        )
+        groups = _group_collections_by_model([name, other])
+        assert groups == [[name, other]], (
+            "both collections' ROWS agree on voyage-context-3 despite "
+            "the first collection's NAME claiming voyage-code-3 -- "
+            f"name-based grouping would have split them; got {groups!r}"
+        )
+
+    def test_row_agreeing_with_the_name_still_groups_correctly(self, monkeypatch) -> None:
+        """Sanity companion: when name and row agree (the common case),
+        the row-based grouping produces the same result the name-based
+        grouping always did -- the fix is additive, not a behavior
+        change for the non-drifted population."""
+        import nexus.mcp_infra as mi
+        from nexus.mcp.core import _group_collections_by_model
+
+        rows = {
+            CODE_COL: {"content_type": "code", "owner_id": "acme-1-1",
+                       "embedding_model": "voyage-code-3", "lifecycle_state": "live"},
+            DOCS_COL: {"content_type": "docs", "owner_id": "acme-1-1",
+                       "embedding_model": "voyage-context-3", "lifecycle_state": "live"},
+        }
+        monkeypatch.setattr(mi, "get_collection_row", lambda n: rows.get(n))
+
+        groups = _group_collections_by_model([CODE_COL, DOCS_COL])
+
+        assert groups == [[CODE_COL], [DOCS_COL]]
+
+    def test_no_row_falls_to_its_own_singleton_group_never_guessed(self, monkeypatch) -> None:
+        """A collection with no catalog row is never guessed into an
+        inferred model group -- it gets its own singleton group keyed
+        by the raw name (this function's own documented contract)."""
+        import nexus.mcp_infra as mi
+        from nexus.mcp.core import _group_collections_by_model
+
+        monkeypatch.setattr(mi, "get_collection_row", lambda n: None)
+
+        groups = _group_collections_by_model(["ghost__unregistered"])
+
+        assert groups == [["ghost__unregistered"]]
