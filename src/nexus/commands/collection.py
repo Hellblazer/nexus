@@ -342,7 +342,7 @@ def _find_dimension_mismatched_collections(
     skipped, not flagged — there is no name-derived dim to compare against
     for those, and guessing would risk a false-positive delete.
     """
-    from nexus.corpus import is_conformant_collection_name, parse_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.corpus import collection_model, is_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     active_dim, active_label = _active_embedding_dim(t3)
@@ -358,7 +358,9 @@ def _find_dimension_mismatched_collections(
         if not is_conformant_collection_name(name):
             skipped += 1
             continue
-        token = parse_conformant_collection_name(name)["embedding_model"]
+        # nexus-ft04v.27 follow-up: collection_model replaces the retired
+        # parse_conformant_collection_name direct call.
+        token = collection_model(name)
         declared_dim = _dim_for_model_token(token)
         if declared_dim is None:
             skipped += 1

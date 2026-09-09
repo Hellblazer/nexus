@@ -2,18 +2,25 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """RDR-204 Phase 3 item 6 (nexus-ft04v.27). ACCEPTANCE SIGNAL.
 
-THE BUG CLASS THIS FREEZES. Six client registration sites (indexer.py,
+THE BUG CLASS THIS FREEZES. Ten client call sites used to call
+``nexus.corpus.parse_conformant_collection_name`` directly instead of
+going through the funnel helpers: six REGISTRATION sites (indexer.py,
 ``commands/collection.py``'s ``reindex_cmd``, ``commands/catalog_cmds/
 collections.py``'s ``backfill_collections_cmd`` and
 ``rename_collection_cmd``, ``commands/catalog_cmds/migration.py``'s
-``migrate_fallback_cmd``, and ``commands/index.py``) used to call
-``nexus.corpus.parse_conformant_collection_name`` directly to re-derive
-``content_type``/``owner_id``/``embedding_model``/``model_version`` from a
-collection name the SAME client had either just rendered (indexer.py,
-migration.py) or was re-registering unchanged (the other three) --
-extracting facts by parsing a string instead of carrying the values
-through. ``commands/index.py``'s site was already fixed by an earlier
-bead (nexus-ft04v.34); this bead retired the other five.
+``migrate_fallback_cmd``, and ``commands/index.py``, the last already
+fixed by an earlier bead, nexus-ft04v.34) plus four READ-ONLY diagnostic
+sites (``health.py``'s chash-conformance unroutable-collection probe,
+``repo_identity.py``'s ``list_sibling_collections``, ``commands/
+collection.py``'s ``_find_dimension_mismatched_collections``, and
+``commands/catalog_cmds/doctor.py``'s ``_run_name_vs_embed_dim``) that
+were never registration calls but parsed the name directly all the
+same. The coordinator's follow-up on this bead's first pass named the
+four diagnostics: they are exactly the class RDR-204 Phase 3 item 5
+(nexus-ft04v.26, the helper repoint) must end -- once the helpers read
+the catalog row instead of the name, a caller still parsing the name
+DIRECTLY would silently stay on the old, wrong source of truth. All ten
+sites are retired here.
 
 This is a DIFFERENT census from ``test_collection_name_parse_census.py``,
 which counts raw ``split``/``partition``/``startswith``/``"__" in``
@@ -24,21 +31,23 @@ name`` -- a bare name reference or a ``module.parse_conformant_
 collection_name`` attribute access), never grepped, so a comment or
 docstring mentioning the function name cannot contribute a hit.
 
-THE REMAINING CALLERS ARE REAL, NOT A BUG. Per the bead's DECISIONS
-(overriding an earlier RDR draft that expected exactly two callers --
-the backfill and the census gate -- for a DIFFERENT, already-resolved
-symbol, ``CollectionName.parse``): ``parse_conformant_collection_name``
-itself keeps callers beyond the six registration sites, because they are
-either (a) the funnel helpers RDR-204 Phase 3 items 2-5 built and item 5
-(nexus-ft04v.26, not yet landed) will repoint at the catalog row, (b) a
-sibling extraction function this bead's scope never named, or (c) a
-read-only diagnostic that was never one of the six registration sites in
-the first place. Every entry below is real (verified independently by
-``test_allowlisted_sites_are_real_calls_not_stale_entries``) and
-documented with why it survives; the pin is EXACT (neither a floor a
-future bead may raise, nor a ratchet expected to keep shrinking) -- a
-NEW caller appearing anywhere is exactly as much a regression as one of
-the six retired sites coming back.
+THE REMAINING CALLERS ARE THE TARGET, NOT A REMNANT. Per the bead's
+DECISIONS plus the coordinator's follow-up: ``parse_conformant_
+collection_name``'s only surviving direct callers are the render path's
+own helpers -- ``collection_content_type`` / ``collection_owner`` (the
+funnel helpers RDR-204 Phase 3 items 2-5 built, still parsing until
+nexus-ft04v.26 repoints them at the catalog row), ``collection_
+registration_kwargs`` (the write-time registration derivation used by
+``HttpCatalogClient.register_collection``'s own bare-call fallback and
+``ensure_collection_registered``, never one of the ten retired sites),
+and ``CollectionName.parse`` (the render path's parse counterpart, one
+pre-existing caller, unaffected by this bead). This is EXACTLY the
+allowlist named: "the helpers (render path) and the gate" -- this file
+IS the gate. Every entry below is real (verified independently by
+``test_allowlisted_sites_are_real_calls_not_stale_entries``); the pin is
+EXACT (neither a floor a future bead may raise, nor a ratchet expected
+to keep shrinking) -- a NEW caller appearing anywhere is exactly as much
+a regression as one of the ten retired sites coming back.
 """
 from __future__ import annotations
 
@@ -68,46 +77,26 @@ ALLOWED_CALLERS: dict[tuple[str, int], str] = {
         "collection_registration_kwargs: the write-time registration "
         "derivation used by HttpCatalogClient.register_collection's OWN "
         "bare-call fallback and by ensure_collection_registered (T3 chunk "
-        "writes, aspects, taxonomy). Never one of the six sites this bead "
-        "retires -- those six pass content_type/owner_id/embedding_model/ "
-        "model_version explicitly so this fallback path never fires for "
-        "them; out of nexus-ft04v.27's scope."
+        "writes, aspects, taxonomy). Never one of the ten sites this bead "
+        "retires -- those either pass content_type/owner_id/embedding_model/ "
+        "model_version explicitly (registration) or read via the funnel "
+        "helpers (diagnostics), so this fallback path never fires for them; "
+        "out of nexus-ft04v.27's scope."
     ),
     ("src/nexus/catalog/collection_name.py", 113): (
         "CollectionName.parse: the render path's own parse counterpart. "
         "Pre-existing single caller (http_catalog_client.py's "
         "collection_for) unaffected by this bead."
     ),
-    ("src/nexus/commands/collection.py", 361): (
-        "_find_dimension_mismatched_collections: read-only `nx collection "
-        "prune` diagnostic (compares a name's declared model dim against "
-        "the active embedder's dim). Never a registration call and never "
-        "one of the six sites this bead retires."
-    ),
-    ("src/nexus/commands/catalog_cmds/doctor.py", 971): (
-        "_run_name_vs_embed_dim: read-only `nx catalog doctor` diagnostic "
-        "(the 4.28-era mislabeled-collection detector). Never a "
-        "registration call and never one of the six sites this bead "
-        "retires."
-    ),
-    ("src/nexus/health.py", 5222): (
-        "The doctor chash-conformance check's unroutable-collection probe: "
-        "read-only, samples T3 collection names to find ones whose model "
-        "token maps to no known dimension. Never a registration call and "
-        "never one of the six sites this bead retires."
-    ),
-    ("src/nexus/repo_identity.py", 431): (
-        "list_sibling_collections: read-only owner-segment sibling lookup "
-        "used by repo-identity resolution. Never a registration call and "
-        "never one of the six sites this bead retires."
-    ),
 }
 
-#: The six registration sites nexus-ft04v.27 retired -- asserted ABSENT
-#: below, so a regression (someone re-adding a direct parse call at one
-#: of these exact spots) fails loud instead of silently passing because
-#: it happens to also be outside ALLOWED_CALLERS (which would already
-#: fail the exact-set assertion, but this gives a name to the failure).
+#: The ten sites nexus-ft04v.27 retired (six registration + four
+#: read-only diagnostics added on the coordinator's follow-up) --
+#: asserted ABSENT below via the exact-allowlist check, so a regression
+#: (someone re-adding a direct parse call at one of these exact spots)
+#: fails loud instead of silently passing because it happens to also be
+#: outside ALLOWED_CALLERS (which would already fail, but this gives a
+#: name to the failure).
 RETIRED_SITES: tuple[str, ...] = (
     "src/nexus/indexer.py (post-rename registration)",
     "src/nexus/commands/collection.py (reindex_cmd re-registration)",
@@ -116,6 +105,10 @@ RETIRED_SITES: tuple[str, ...] = (
     "src/nexus/commands/catalog_cmds/migration.py (migrate_fallback_cmd)",
     "src/nexus/commands/index.py (already fixed pre-nexus-ft04v.27, "
     "by nexus-ft04v.34)",
+    "src/nexus/health.py (chash-conformance unroutable-collection probe)",
+    "src/nexus/repo_identity.py (list_sibling_collections)",
+    "src/nexus/commands/collection.py (_find_dimension_mismatched_collections)",
+    "src/nexus/commands/catalog_cmds/doctor.py (_run_name_vs_embed_dim)",
 )
 
 
@@ -201,9 +194,9 @@ def test_direct_callers_are_exactly_the_allowlist() -> None:
     """The pin: every direct call to parse_conformant_collection_name in
     src/nexus is one of the documented, verified ALLOWED_CALLERS entries
     -- no more, no fewer. A NEW site (a regression re-adding one of the
-    six retired registration parses, or an entirely new caller) fails
-    here; a site that has since been retired and dropped from
-    ALLOWED_CALLERS also fails here (drop the stale allowlist entry)."""
+    ten retired sites, or an entirely new caller) fails here; a site
+    that has since been retired and dropped from ALLOWED_CALLERS also
+    fails here (drop the stale allowlist entry)."""
     live = _all_call_sites()
     live_set = {
         (rel, lineno) for rel, linenos in live.items() for lineno in linenos
@@ -215,9 +208,12 @@ def test_direct_callers_are_exactly_the_allowlist() -> None:
 
     assert not extra, (
         f"UNDOCUMENTED direct caller(s) of parse_conformant_collection_name: "
-        f"{extra}. If this is a legitimate new funnel-style helper, add it "
+        f"{extra}. If this is a legitimate new render-path helper, add it "
         f"to ALLOWED_CALLERS with a reason; if it is a re-added registration "
-        f"parse, retire it the way nexus-ft04v.27 retired the other six."
+        f"or diagnostic parse, retire it the way nexus-ft04v.27 retired the "
+        f"other ten (route it through collection_content_type / "
+        f"collection_owner / collection_model / "
+        f"model_version_for_collection_name instead)."
     )
     assert not missing, (
         f"ALLOWED_CALLERS entr(y/ies) no longer observed in the live tree: "
@@ -227,7 +223,7 @@ def test_direct_callers_are_exactly_the_allowlist() -> None:
 
 
 def test_retired_sites_are_documented() -> None:
-    """Non-vacuity for the retirement itself: name the six sites so a
+    """Non-vacuity for the retirement itself: name the ten sites so a
     reader (and a future regression) has something concrete to check
     against, independent of the exact-allowlist assertion above."""
-    assert len(RETIRED_SITES) == 6, RETIRED_SITES
+    assert len(RETIRED_SITES) == 10, RETIRED_SITES

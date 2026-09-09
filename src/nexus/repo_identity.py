@@ -420,17 +420,18 @@ def list_sibling_collections(
     Always excludes the input + ``taxonomy__*``.
     """
     from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
+        collection_owner,
         is_conformant_collection_name,
-        parse_conformant_collection_name,
     )
 
     matcher: Any = None
     if is_conformant_collection_name(collection_name):
-        # Conformant path — share by owner_id segment.
-        try:
-            owner_id = parse_conformant_collection_name(collection_name)["owner_id"]
-        except (KeyError, ValueError):
-            return []
+        # Conformant path — share by owner_id segment. nexus-ft04v.27
+        # follow-up: collection_owner replaces the retired
+        # parse_conformant_collection_name direct call; it never raises
+        # for a name already gated by is_conformant_collection_name, so
+        # the try/except that guarded the old dict lookup is gone too.
+        owner_id = collection_owner(collection_name)
         owner_segment = f"__{owner_id}__"
         matcher = lambda n: owner_segment in n  # noqa: E731
     else:

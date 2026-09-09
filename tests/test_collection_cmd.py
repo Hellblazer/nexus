@@ -153,6 +153,45 @@ _MATCHING_VOYAGE = "knowledge__research__voyage-context-3__v1"
 _LEGACY_NAME = "docs__myproj-cafef00d"
 
 
+def test_find_dimension_mismatched_collections_reads_model_via_funnel_helper(
+    mock_db,
+) -> None:
+    """nexus-ft04v.27 follow-up: ``_find_dimension_mismatched_collections``
+    reads the ``__<model>__`` token via ``collection_model`` instead of a
+    direct ``parse_conformant_collection_name`` call. Direct, unmocked
+    call to the function itself (the other prune tests exercise it too,
+    but only through canonical/local model tokens the funnel helper and
+    the retired direct call would extract identically either way) --
+    this pins the exact (mismatches, skipped, active_label) tuple,
+    including a non-canonical fixture token (``stub-code-1024``,
+    unroutable to any known dim either way) to prove the funnel helper
+    is exactly as permissive as the retired direct call was."""
+    from nexus.commands.collection import _find_dimension_mismatched_collections
+
+    mock_db.embedding_mode.return_value = "voyage"
+    mock_db.list_collections.return_value = [
+        {"name": _ORPHAN, "count": 1},
+        {"name": _MATCHING_VOYAGE, "count": 50},
+        {"name": "code__stub__stub-code-1024__v1", "count": 3},
+        {"name": _LEGACY_NAME, "count": 2},
+    ]
+
+    mismatches, skipped, active_label = _find_dimension_mismatched_collections(mock_db)
+
+    assert active_label == "voyage"
+    assert mismatches == [{
+        "name": _ORPHAN,
+        "declared_model": "minilm-l6-v2-384",
+        "declared_dim": 384,
+        "active_dim": 1024,
+        "count": 1,
+    }]
+    # skipped: the legacy 2-segment name (not_conformant) + the
+    # non-canonical stub token (conformant, but _dim_for_model_token
+    # returns None for it) = 2.
+    assert skipped == 2
+
+
 def test_prune_dry_run_default_lists_and_does_not_delete(
     runner, env_creds, mock_db,
 ) -> None:

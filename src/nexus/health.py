@@ -5210,7 +5210,7 @@ def _check_chash_conformance_report() -> list[HealthResult]:
     # never crash this check or hide the primary (non_)conformant result.
     unroutable_collections: list[str] = []
     try:
-        from nexus.corpus import is_conformant_collection_name, parse_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle
+        from nexus.corpus import collection_model, is_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle
         from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid a heavy/optional import at module load
         from nexus.db.reconcile import dim_for_model_token  # noqa: PLC0415 — deferred to avoid import cycle; the canonical dim table (nexus-h1zu0)
 
@@ -5219,7 +5219,9 @@ def _check_chash_conformance_report() -> list[HealthResult]:
             name = str(c.get("name", ""))
             if not name or not is_conformant_collection_name(name):
                 continue
-            token = parse_conformant_collection_name(name)["embedding_model"]
+            # nexus-ft04v.27 follow-up: collection_model replaces the
+            # retired parse_conformant_collection_name direct call.
+            token = collection_model(name)
             if dim_for_model_token(token) is None:
                 unroutable_collections.append(name)
         unroutable_collections = sorted(set(unroutable_collections))

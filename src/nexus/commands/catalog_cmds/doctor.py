@@ -934,8 +934,8 @@ def _run_name_vs_embed_dim() -> dict:
     actual embedding dim to the dim implied by the name's
     ``__<model>__`` segment. Read-only against T3."""
     from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
+        collection_model,
         is_conformant_collection_name,
-        parse_conformant_collection_name,
     )
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
     from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
@@ -968,8 +968,9 @@ def _run_name_vs_embed_dim() -> dict:
         if not is_conformant_collection_name(name):
             skipped_non_conformant += 1
             continue
-        parsed = parse_conformant_collection_name(name)
-        token = parsed["embedding_model"]
+        # nexus-ft04v.27 follow-up: collection_model replaces the retired
+        # parse_conformant_collection_name direct call.
+        token = collection_model(name)
         expected = _expected_dim_for_model_token(token)
         if expected is None:
             unknown_token.append({"collection": name, "token": token})
