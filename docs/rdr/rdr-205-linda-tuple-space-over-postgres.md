@@ -1169,7 +1169,8 @@ A second scheduled task on `sweepScheduler` at the same cadence
 (`SWEEP_INTERVAL_HOURS`), separate from `runScheduledSweep` because that
 method builds its token-derived tenant set once before its arms. It
 enumerates `nexus.tuple_tenants` and, inside `withTenant` for each:
-releases lapsed claims nobody re-took with an `expire` log row, purges
+releases lapsed claims nobody re-took with an `expire` log row, an
+`attempts` increment, and a dead-letter at `max_attempts`; purges
 expired and consumed-past-retention tuple rows, then log rows past the
 log's own TTL, in batches with a commit per batch, under the token
 loop's statement bound on every statement including the enumeration
@@ -1306,7 +1307,8 @@ None. Postgres, pgvector, jOOQ and Liquibase are in place.
   two rows; the same start twice — **Verify**: one row.
 - **Scenario**: two mailbox messages to one address with different
   nonces — **Verify**: two rows; the same message resent with its nonce
-  — **Verify**: one row, `expires_at` refreshed.
+  — **Verify**: one row, `expires_at` unchanged (already at `created_at`
+  plus retention; a refresh can only raise a shorter explicit TTL).
 - **Scenario**: `nack` `max_attempts` times by different claimants, and
   separately `max_attempts` lapsed leases — **Verify**: the row is
   dead-lettered either way, a `dead` log row, no further `in` returns
@@ -1803,3 +1805,7 @@ log row is the per-claim record; CA 4's remaining work is Phase 2 Step
 the post-publish `--acquire` gate after it; the budget scenario uses
 the `last_swept_at` vocabulary; the RDR-120 reference names lines 201,
 206 and 248-249.
+Two clauses from the fix check on the gated commit (T2
+`nexus_rdr/205-fix-check-fdc633f91`) are folded here too: the resent-
+message scenario verifies `expires_at` unchanged, and Phase 1 Step 5's
+release arm names the increment and the dead-letter.
