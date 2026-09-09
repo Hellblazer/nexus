@@ -141,6 +141,20 @@ class TestToEntryFenceFields:
         assert entry.index_started_at == "2026-08-02T00:00:00Z"
 
 
+#: RDR-204 (nexus-ft04v.33): the two mode shapes of ``nexus.embedding_profile``
+#: as the engine writes them at boot — one row per content type.
+VOYAGE_EMBEDDING_PROFILE_ROWS: list[dict[str, Any]] = [
+    {"content_type": "code", "embedding_model": "voyage-code-3", "dimension": 1024},
+    {"content_type": "docs", "embedding_model": "voyage-context-3", "dimension": 1024},
+    {"content_type": "rdr", "embedding_model": "voyage-context-3", "dimension": 1024},
+    {"content_type": "knowledge", "embedding_model": "voyage-context-3", "dimension": 1024},
+]
+BGE_EMBEDDING_PROFILE_ROWS: list[dict[str, Any]] = [
+    {"content_type": ct, "embedding_model": "bge-base-en-v15-768", "dimension": 768}
+    for ct in ("code", "docs", "rdr", "knowledge")
+]
+
+
 class FakeCatalogHandler(BaseHTTPRequestHandler):
     """Routes matching the real CatalogHandler.java switch cases exactly."""
 
@@ -198,11 +212,18 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
     last_owners_by_type_body: dict[str, Any] = {}
     #: nexus-dkymw: last body POSTed to /restore.
     last_restore_body: dict[str, Any] = {}
+    #: RDR-204 (nexus-ft04v.33): rows /embedding_profile serves (the Voyage
+    #: shape by default) and the status it answers with (200, or 404/405 to
+    #: play an engine below the Phase 2 route).
+    embedding_profile_rows: list[dict[str, Any]] = list(VOYAGE_EMBEDDING_PROFILE_ROWS)
+    embedding_profile_status: int = 200
 
     @classmethod
     def reset_log(cls) -> None:
         cls.get_ops = []
         cls.post_ops = []
+        cls.embedding_profile_rows = list(VOYAGE_EMBEDDING_PROFILE_ROWS)
+        cls.embedding_profile_status = 200
         cls.last_link_body = {}
         cls.list_content_type_count = 0
         cls.descendants_count = 2
@@ -446,6 +467,9 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                 "model_version": "1", "display_name": "code__test__voyage-code-3__v1",
                 "legacy_grandfathered": False, "superseded_by": "", "superseded_at": "",
                 "created_at": "2026-07-01T00:00:00+00:00",
+                # RDR-204 Phase 2 (nexus-ft04v.24/.16): collRow carries the
+                # registry row's dimension and lifecycle_state.
+                "dimension": 1024, "lifecycle_state": "active",
             }]})
         elif op == "/collections/get":
             # nexus-8y1tm: echo the requested name; full collRow shape.
@@ -467,7 +491,19 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                     "legacy_grandfathered": "__" not in name,
                     "superseded_by": "", "superseded_at": "",
                     "created_at": "2026-07-01T00:00:00+00:00",
+                    "dimension": 1024, "lifecycle_state": "active",
                 })
+        elif op == "/embedding_profile":
+            # RDR-204 (nexus-ft04v.33): mirror CatalogHandler.handleEmbeddingProfile
+            # — {"profile": [{content_type, embedding_model, dimension}...],
+            # "count": N}; an unprofiled tenant gets an empty list, never a
+            # default. embedding_profile_status lets a test play a pre-Phase-2
+            # engine (404) or a wrong method (405).
+            if FakeCatalogHandler.embedding_profile_status != 200:
+                self._send_json({"error": "not found"}, FakeCatalogHandler.embedding_profile_status)
+            else:
+                rows = FakeCatalogHandler.embedding_profile_rows
+                self._send_json({"profile": rows, "count": len(rows)})
         elif op == "/collections/for_tuple":
             self._send_json({"name": "code__test__voyage-code-3__v1"})
         elif op == "/collections/owner-root":
