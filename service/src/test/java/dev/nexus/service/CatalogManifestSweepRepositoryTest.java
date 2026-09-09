@@ -1344,6 +1344,11 @@ class CatalogManifestSweepRepositoryTest {
         assertThat(lines).as("exactly one timing line per writeManifestMany call").hasSize(1);
         String line = lines.getFirst();
         assertThat(fieldValue(line, "tenant")).isEqualTo(TENANT_A);
+        assertThat(fieldValue(line, "caller"))
+            .as("the sweep-flagged overload is the write_many route's entry point; "
+                + "CombinedWriteService's entry is tagged combined_write "
+                + "(CombinedWriteRepositoryTest)")
+            .isEqualTo("write_many");
         assertThat(fieldValue(line, "docs")).isEqualTo("1");
         assertThat(fieldValue(line, "swept")).isEqualTo("1");
         assertThat(fieldValue(line, "sweep_failed")).isEqualTo("0");

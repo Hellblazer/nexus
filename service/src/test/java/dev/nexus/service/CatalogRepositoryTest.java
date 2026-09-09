@@ -1549,6 +1549,30 @@ class CatalogRepositoryTest {
     }
 
     /**
+     * model_version is pinned on conflict like embedding_model and dimension
+     * (RDR-204 1a; joined the pinned set 2026-09-09 after the substantive
+     * critique of the nexus-uxd2a landing): hygiene-005's GC functions copy a
+     * quarantine sibling's model_version from the origin's row, which is only
+     * ever right if a same-name re-registration cannot move the origin's value.
+     * The mutable attributes (owner_id here) still update on conflict.
+     */
+    @Test @Order(60)
+    void collection_upsert_onConflict_pinsModelVersion_updatesMutableAttributes() {
+        String name = "code__pin-mv__voyage-code-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code", "owner_id", "pin-mv",
+            "embedding_model", "voyage-code-3", "model_version", "v1"));
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code", "owner_id", "pin-mv-renamed",
+            "embedding_model", "voyage-code-3", "model_version", "v7"));
+        var coll = repo.getCollection(TENANT_A, name);
+        assertThat(coll.get("model_version"))
+            .as("a same-name re-registration never moves model_version").isEqualTo("v1");
+        assertThat(coll.get("owner_id"))
+            .as("owner_id is not pinned and follows the re-registration").isEqualTo("pin-mv-renamed");
+    }
+
+    /**
      * nexus-cefa1.2: legacy_grandfathered=true (a real JSON boolean, matching the
      * only shape Python clients send — nexus-cecqy) round-trips through
      * catalog_collections.legacy_grandfathered's boolean column exactly.

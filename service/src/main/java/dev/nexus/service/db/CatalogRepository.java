@@ -4820,10 +4820,16 @@ public final class CatalogRepository {
             sweepReasonsSb.append(e.getKey()).append('=').append(e.getValue());
         }
         long tMethodEnd = System.nanoTime();
-        log.info("event=write_manifest_many_timing tenant={} docs={} rows={} "
+        // caller: the two production entry points into this overload -- the
+        // POST /v1/catalog/manifest/write_many route (resolvedChunks == null,
+        // via the sweep-flagged overload) and CombinedWriteService's combined
+        // write (resolvedChunks != null) -- share this one line, so a per-route
+        // p99 needs the field to split them (substantive critique, 2026-09-09).
+        String caller = resolvedChunks == null ? "write_many" : "combined_write";
+        log.info("event=write_manifest_many_timing tenant={} caller={} docs={} rows={} "
                 + "before_read_ms={} write_ms={} sweep_ms={} total_ms={} "
                 + "swept={} sweep_failed={} sweep_reasons={}",
-            tenant, docsCount, totalRows,
+            tenant, caller, docsCount, totalRows,
             beforeReadNanosTotal[0] / 1_000_000,
             writeNanosTotal[0] / 1_000_000,
             sweepNanosTotal[0] / 1_000_000,
@@ -6481,12 +6487,15 @@ public final class CatalogRepository {
                .doUpdate()
                .set(CATALOG_COLLECTIONS.CONTENT_TYPE,         DSL.excluded(CATALOG_COLLECTIONS.CONTENT_TYPE))
                .set(CATALOG_COLLECTIONS.OWNER_ID,             DSL.excluded(CATALOG_COLLECTIONS.OWNER_ID))
-               // RDR-204 1a: embedding_model/dimension/lifecycle_state are deliberately
-               // ABSENT from this SET list — an existing row is never re-pointed by the
-               // profile (or by a same-name re-registration naming its own model). The
-               // VALUES bound above for those three columns are used only on a genuine
-               // INSERT; a conflict discards them entirely.
-               .set(CATALOG_COLLECTIONS.MODEL_VERSION,        DSL.excluded(CATALOG_COLLECTIONS.MODEL_VERSION))
+               // RDR-204 1a: embedding_model/model_version/dimension/lifecycle_state are
+               // deliberately ABSENT from this SET list — an existing row is never
+               // re-pointed by the profile (or by a same-name re-registration naming its
+               // own model or version). The VALUES bound above for those four columns
+               // are used only on a genuine INSERT; a conflict discards them entirely.
+               // model_version joined the pinned set on 2026-09-09 (substantive critique
+               // of the nexus-uxd2a landing): hygiene-005's GC functions copy a
+               // quarantine sibling's model_version from the origin's row, and that copy
+               // is only ever right if the origin's own value cannot move underneath it.
                .set(CATALOG_COLLECTIONS.DISPLAY_NAME,         DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME))
                .set(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, DSL.excluded(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED))
                // nexus-cecqy: an explicit registration REVIVES a tombstone. Since a rename
@@ -7089,7 +7098,7 @@ public final class CatalogRepository {
      * grant needs). See {@link #NEXUS_DIAG_READABLE_TABLES} for the latter, deliberately kept
      * as a separate, independently-verified set rather than a filtered view of this one.
      */
-    private static final java.util.Set<String> AUDIT_ONLY_TABLES =
+    static final java.util.Set<String> AUDIT_ONLY_TABLES =
         java.util.Set.of("relevance_log", "search_telemetry", "hook_failures", "gc_audit");
 
     /**
@@ -7195,6 +7204,29 @@ public final class CatalogRepository {
      */
     private boolean collectionIsEmpty(DSLContext ctx, String name) {
         return blockingTable(ctx, name).isEmpty();
+    }
+
+    /**
+     * True when a NON-audit table in {@link #COLLECTION_SCOPED_TABLES} holds a row
+     * for {@code name} — {@link #collectionIsEmpty} with the {@link #AUDIT_ONLY_TABLES}
+     * left out of the question. The ghost sweep's predicate
+     * ({@link #sweepGhostsAndMarkDormant}): a registry row nothing but an audit
+     * breadcrumb names holds no content, so there is nothing to keep the row for,
+     * and the breadcrumb itself carries no FK and outlives the row by design. The
+     * rename and delete refusals keep the strict form on purpose — there the
+     * caller is told WHICH table blocked and decides ({@link BlockingTable}).
+     * Same RLS scope and same READ COMMITTED window as {@link #collectionIsEmpty}.
+     */
+    private boolean collectionHoldsContent(DSLContext ctx, String name) {
+        for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
+            if (AUDIT_ONLY_TABLES.contains(t.countKey())) {
+                continue;
+            }
+            if (ctx.fetchExists(ctx.selectOne().from(t.table()).where(t.collection().eq(name)))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName,
@@ -7578,17 +7610,27 @@ public final class CatalogRepository {
      * nexus-snm4y, refined by nexus-n060e). Walks every {@code
      * catalog_collections} row for {@code tenant} and, for each:
      * <ul>
-     *   <li>DELETEs it when {@link #collectionIsEmpty} is true — a ghost: no row
-     *       in ANY {@link #COLLECTION_SCOPED_TABLES} entry names it — REGARDLESS
-     *       of {@code lifecycle_state}, quarantine included. A quarantine
-     *       sibling that has fully drained (every chunk expired by {@code
-     *       gc_expire_quarantine} or restored by {@code gc_restore_rereferenced})
-     *       is reclaimed exactly like any other ghost row (nexus-n060e). This is
-     *       safe because none of the SQL GC functions delete a {@code
+     *   <li>DELETEs it when {@link #collectionHoldsContent} is false — a ghost:
+     *       no row in any NON-audit {@link #COLLECTION_SCOPED_TABLES} entry names
+     *       it — REGARDLESS of {@code lifecycle_state}, quarantine included. A
+     *       quarantine sibling that has fully drained (every chunk expired by
+     *       {@code gc_expire_quarantine} or restored by {@code
+     *       gc_restore_rereferenced}) is reclaimed exactly like any other ghost
+     *       row (nexus-n060e). The four {@link #AUDIT_ONLY_TABLES} are excluded
+     *       from that question on purpose: {@code gc_quarantine_orphans} and
+     *       {@code gc_expire_quarantine} each write a {@code gc_audit} row
+     *       against the sibling's own name (catalog-033), so under the plain
+     *       {@link #collectionIsEmpty} a sibling that had ever held a chunk stayed
+     *       "non-empty" forever after it drained and never reached this branch
+     *       (substantive critique of the n060e landing, 2026-09-09). An audit
+     *       breadcrumb is history keyed by name, not content; it survives the
+     *       delete (no FK) and keeps answering "what happened to this name". This
+     *       is safe because none of the SQL GC functions delete a {@code
      *       catalog_collections} row themselves — {@code gc_quarantine_orphans}
-     *       re-creates the sibling row {@code ON CONFLICT DO NOTHING} the next
-     *       time it needs one (RDR-191), so deleting an EMPTY sibling here loses
-     *       no data and costs nothing but a future re-registration;</li>
+     *       re-creates the sibling row from the origin's row ({@code ON CONFLICT
+     *       DO UPDATE}, hygiene-005-1) the next time it needs one (RDR-191), so
+     *       deleting a drained sibling here loses no data and costs nothing but
+     *       a future re-registration;</li>
      *   <li>else HOLDS it, untouched, when {@code lifecycle_state} is already
      *       {@code 'quarantine'} — hygiene-002 Branch B
      *       ({@code hygiene-002-collection-attributes-walk.xml}) assigns that
@@ -7659,11 +7701,15 @@ public final class CatalogRepository {
             for (var r : nameAndState) {
                 String name = r.value1();
                 String lifecycleState = r.value2();
-                if (collectionIsEmpty(ctx, name)) {
+                if (!collectionHoldsContent(ctx, name)) {
                     // nexus-n060e: a true ghost is reclaimed regardless of lifecycle_state --
                     // a drained quarantine sibling included. Checked BEFORE the quarantine
                     // branch below so a quarantine row never reaches that branch once it has
                     // fully drained; see this method's javadoc for why the delete is safe.
+                    // Audit-only rows do not hold the row (see collectionHoldsContent):
+                    // gc_quarantine_orphans and gc_expire_quarantine both write a gc_audit
+                    // row against the SIBLING's name, so a sibling that ever received a
+                    // chunk would otherwise never read as empty again once it drained.
                     ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute();
                     out.add(new SweptRow(name, SweepDisposition.DELETED));
                 } else if ("quarantine".equals(lifecycleState)) {

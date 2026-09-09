@@ -401,6 +401,41 @@ class CombinedWriteRepositoryTest {
             .doesNotContainKey("chunks_written");
     }
 
+    // ── write_manifest_many_timing carries caller=combined_write on this ─────
+    //    entry point (the write_many route's is pinned in
+    //    CatalogManifestSweepRepositoryTest); one line, two populations. ────
+    @Test @Order(9)
+    void combinedWrite_timingEvent_isTaggedCombinedWrite() throws Exception {
+        String col = "code__cw9b__minilm-l6-v2-384__v1";
+        String x = ch("cw9b-timing-x");
+        registerDoc(TENANT_A, "cw.9b.timing", col);
+
+        ch.qos.logback.classic.Logger root =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+            new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        List<String> lines;
+        try {
+            svc.writeManyCombined(TENANT_A, col,
+                List.of(chunk(x, "cw9b timing text")),
+                List.of(doc("cw.9b.timing", List.of(row(0, x)))),
+                null, false, false);
+            lines = logs.list.stream()
+                .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                .filter(m -> m.startsWith("event=write_manifest_many_timing "))
+                .toList();
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+        assertThat(lines).as("one timing line per combined write").hasSize(1);
+        assertThat(lines.get(0))
+            .as("the combined-write entry point is distinguishable from the write_many route")
+            .contains(" caller=combined_write ");
+    }
+
     // ── RDR-181 hard requirement (design memo §0): known chashes are never ───
     //    re-embedded by the combined write's existence-partition. ────────────
 

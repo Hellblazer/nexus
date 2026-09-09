@@ -186,6 +186,21 @@ class GhostSweepDormantMarkingTest {
             var row = ctx.select(CATALOG_COLLECTIONS.LIFECYCLE_STATE).from(CATALOG_COLLECTIONS)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_PARAM)).and(CATALOG_COLLECTIONS.NAME.eq(coll))
                 .fetchOne();
+            if (CatalogRepository.AUDIT_ONLY_TABLES.contains(t.countKey())) {
+                // An audit breadcrumb (relevance_log, search_telemetry, hook_failures,
+                // gc_audit) holds no content: the sweep's predicate is
+                // collectionHoldsContent, which leaves AUDIT_ONLY_TABLES out of the
+                // question, so a row named only by one of them is a ghost and is
+                // reclaimed (substantive critique of the nexus-n060e landing,
+                // 2026-09-09: gc_quarantine_orphans and gc_expire_quarantine both
+                // audit against the sibling's own name, which under the strict
+                // collectionIsEmpty pinned every drained sibling as held forever).
+                // The breadcrumb itself survives (no FK) -- see the assert below.
+                assertThat(row).as("row named only by audit table " + t.countKey() + " is a ghost").isNull();
+                assertThat(ctx.fetchExists(ctx.selectOne().from(t.table()).where(t.collection().eq(coll))))
+                    .as(t.countKey() + " breadcrumb outlives the registry row").isTrue();
+                return;
+            }
             assertThat(row).as("row referenced only from " + t.countKey() + " must survive the sweep").isNotNull();
             if (CHUNK_COUPLED.contains(t.countKey())) {
                 // RDR-204 nexus-ft04v.4/.5: lifecycle_state is NOT NULL after hygiene-002-1
@@ -566,6 +581,47 @@ class GhostSweepDormantMarkingTest {
                 .fetchOne();
             assertThat(row.value1()).as("lifecycle_state stays 'quarantine', not flipped to 'dormant'")
                 .isEqualTo("quarantine");
+        }
+    }
+
+    /**
+     * The expire-drained sibling: {@code gc_expire_quarantine} hard-deletes the
+     * last quarantined chunk and writes a {@code gc_audit} row keyed to the
+     * SIBLING's name in the same transaction (catalog-033). Under the strict
+     * {@link CatalogRepository#collectionIsEmpty} that breadcrumb made the
+     * sibling "non-empty" forever, so nexus-n060e's reclaim only ever fired for
+     * a sibling drained purely by restore (substantive critique, 2026-09-09).
+     * The sweep asks {@code collectionHoldsContent} instead: the row goes, the
+     * audit row stays.
+     */
+    @Test @Order(63)
+    void quarantineDrainedByExpire_gcAuditRowOnly_isDeletedAsGhost_auditRowSurvives() throws Exception {
+        String tenant = "ghost-sweep-quarantine-expired";
+        String coll = "quarantine-knowledge__gs-q-expired__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, tenant, coll);
+            ctx.insertInto(GC_AUDIT, GC_AUDIT.TENANT_ID, GC_AUDIT.OPERATION, GC_AUDIT.COLLECTION)
+               .values(tenant, "gc_expire_quarantine", coll)
+               .execute();
+        }
+
+        CatalogRepository.GhostSweepResult result = repo.sweepGhostsAndMarkDormant(tenant);
+
+        assertThat(result.scanned()).isEqualTo(1);
+        assertThat(result.ghostsDeleted())
+            .as("a sibling whose only remaining trace is its own expire audit row is drained").isEqualTo(1);
+        assertThat(result.quarantineHeld()).as("never held on an audit breadcrumb alone").isEqualTo(0);
+        assertThat(result.markedDormant()).isEqualTo(0);
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(coll))))
+                .as("the drained sibling's registry row is gone").isFalse();
+            assertThat(ctx.fetchExists(ctx.selectOne().from(GC_AUDIT)
+                .where(GC_AUDIT.TENANT_ID.eq(tenant)).and(GC_AUDIT.COLLECTION.eq(coll))))
+                .as("the audit trail is history keyed by name and survives the delete").isTrue();
         }
     }
 
