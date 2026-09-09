@@ -24,9 +24,16 @@ _CORPUS_PREFIXES: frozenset[str] = frozenset({"knowledge", "code", "docs", "rdr"
 
 def _is_corpus_scope(text: str) -> bool:
     """A bare corpus prefix, a ``prefix__`` form, or a full collection name."""
-    from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415 — deferred: heavy import, branch-local
+    from nexus.corpus import (  # noqa: PLC0415 — deferred: heavy import, branch-local
+        is_conformant_collection_name,
+        split_candidate_collection_name,
+    )
 
-    head = text.split("__", 1)[0]
+    # A user-typed scope token (class (a) in the parse census): the first
+    # segment of a CANDIDATE string, never a read of a registered
+    # collection's attributes.
+    first, _rest = split_candidate_collection_name(text)
+    head = first or text  # a bare token has no separator: the token IS the head
     return head in _CORPUS_PREFIXES or is_conformant_collection_name(text)
 
 

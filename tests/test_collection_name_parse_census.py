@@ -400,6 +400,10 @@ COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {
     # orphan GC backfill -- the collection being registered has no row by
     # construction.
     "src/nexus/catalog/orphan_backfill.py": 1,
+    # (a) mint/candidate-time: resolve_owner_scope's _is_corpus_scope reads
+    # the first segment of a user-typed --scope / corpus token to decide
+    # whether it names a corpus at all (GH #1527 review fix, batch-2).
+    "src/nexus/catalog/owner_scope.py": 1,
     "src/nexus/collection_shape.py": 3,
     # class (d): _backfill_knowledge/_backfill_rdrs/_backfill_papers (3
     # sites) find and register T3 collections NOT YET in the catalog;
@@ -921,8 +925,9 @@ def test_pin_matches_documented_total() -> None:
     callers were already live but invisible to the old two-name
     hardcoded set; then 53 -- 52 on 2026-09-09 when the client-side
     quarantine-sibling pre-registration and its kwargs derivation were
-    deleted) is derived from the same dict the guards above check
+    deleted; then 52 -- 53 the same day when the owner-scope resolver
+    gained a class-(a) candidate split on a user-typed scope token) is derived from the same dict the guards above check
     against -- this catches a hand-edited docstring number drifting from
     the dict it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 52
+    assert PARSE_SITE_PIN == 53
