@@ -3973,6 +3973,7 @@ nexus-mzvwa.8.1
 nexus-mzvwa.9
 nexus-mzvwa.9.1
 nexus-n04cf
+nexus-n060e
 nexus-n0ful
 nexus-n0hwd
 nexus-n145v
