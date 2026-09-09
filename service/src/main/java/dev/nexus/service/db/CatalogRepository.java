@@ -7500,28 +7500,44 @@ public final class CatalogRepository {
             }
             GhostSweepResult result = sweepGhostsAndMarkDormant(tenant);
             setMeta(tenant, GHOST_SWEEP_META_KEY, "done");
-            log.info("event=rdr204_ghost_sweep tenant={} scanned={} deleted={} dormant={}",
-                      tenant, result.scanned(), result.ghostsDeleted(), result.markedDormant());
+            log.info("event=rdr204_ghost_sweep tenant={} scanned={} deleted={} dormant={} held={}",
+                      tenant, result.scanned(), result.ghostsDeleted(), result.markedDormant(),
+                      result.quarantineHeld());
         } catch (RuntimeException e) {
             ghostSweepCheckedTenants.remove(tenant);
             log.warn("event=rdr204_ghost_sweep_failed tenant={} error={}", tenant, e.toString(), e);
         }
     }
 
-    /** Per-tenant ghost-sweep + dormant-marking counts (RDR-204 bead nexus-ft04v.3). */
-    public record GhostSweepResult(int scanned, int ghostsDeleted, int markedDormant) {}
+    /**
+     * Per-tenant ghost-sweep + dormant-marking counts (RDR-204 bead
+     * nexus-ft04v.3; {@code quarantineHeld} added by nexus-snm4y).
+     */
+    public record GhostSweepResult(int scanned, int ghostsDeleted, int markedDormant, int quarantineHeld) {}
 
     /** Per-row disposition {@link #sweepGhostsAndMarkDormant} assigns during its walk. */
-    private enum SweepDisposition { DELETED, MARKED_DORMANT, UNCHANGED }
+    private enum SweepDisposition { DELETED, MARKED_DORMANT, HELD_QUARANTINE, UNCHANGED }
 
     private record SweptRow(String name, SweepDisposition disposition) {}
 
     /**
      * THE SWEEP ITSELF (RDR-204 Technical Design step 3, bead nexus-ft04v.3's
-     * DECISIONS: "this job does two things only"). Walks every {@code
-     * catalog_collections} row for {@code tenant} and, for each:
+     * DECISIONS: "this job does two things only" — now four dispositions,
+     * nexus-snm4y). Walks every {@code catalog_collections} row for {@code
+     * tenant} and, for each:
      * <ul>
-     *   <li>DELETEs it when {@link #collectionIsEmpty} is true — a ghost: no row
+     *   <li>HOLDS it, untouched, when {@code lifecycle_state} is already
+     *       {@code 'quarantine'} — hygiene-002 Branch B
+     *       ({@code hygiene-002-collection-attributes-walk.xml}) assigns that
+     *       state UNCONDITIONALLY, regardless of chunk count or dimension
+     *       agreement; a quarantined collection is a deliberately held row,
+     *       neither a ghost nor dormant, and this sweep must not silently
+     *       relitigate a decision Branch B already made. Fork rehearsal of
+     *       engine-service-v0.1.109 on a PITR fork of production (nexus-snm4y)
+     *       found the sweep re-marking one quarantine row dormant and
+     *       deleting another as a ghost — Branch B's "unconditional" held
+     *       only until this method's first pass;</li>
+     *   <li>else DELETEs it when {@link #collectionIsEmpty} is true — a ghost: no row
      *       in ANY {@link #COLLECTION_SCOPED_TABLES} entry names it;</li>
      *   <li>else, when it has no row in {@code nexus.collection_vector_stats}
      *       (referenced elsewhere but no live chunks to embed or read), sets
@@ -7563,15 +7579,24 @@ public final class CatalogRepository {
      * DELETED branch always evicted; the MARKED_DORMANT branch wrote {@code
      * lifecycle_state} with no eviction, an asymmetry the RDR's own Critical
      * Assumption 5 and Risks section both omitted as an invalidation point).
+     * A HELD_QUARANTINE row gets no eviction — nothing about it changed, so a
+     * cached entry (if any) is still correct.
      */
     public GhostSweepResult sweepGhostsAndMarkDormant(String tenant) {
         List<SweptRow> rows = tenantScope.withTenant(tenant, ctx -> {
-            List<String> names = ctx.select(CATALOG_COLLECTIONS.NAME)
+            var nameAndState = ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
                 .from(CATALOG_COLLECTIONS)
-                .fetch(CATALOG_COLLECTIONS.NAME);
-            List<SweptRow> out = new ArrayList<>(names.size());
-            for (String name : names) {
-                if (collectionIsEmpty(ctx, name)) {
+                .fetch();
+            List<SweptRow> out = new ArrayList<>(nameAndState.size());
+            for (var r : nameAndState) {
+                String name = r.value1();
+                String lifecycleState = r.value2();
+                if ("quarantine".equals(lifecycleState)) {
+                    // nexus-snm4y: hygiene-002 Branch B's assignment is unconditional and
+                    // this sweep never relitigates it — neither collectionIsEmpty nor the
+                    // vector-stats check below is even evaluated for this row.
+                    out.add(new SweptRow(name, SweepDisposition.HELD_QUARANTINE));
+                } else if (collectionIsEmpty(ctx, name)) {
                     ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute();
                     out.add(new SweptRow(name, SweepDisposition.DELETED));
                 } else if (!ctx.fetchExists(ctx.selectOne().from(COLLECTION_VECTOR_STATS)
@@ -7589,6 +7614,7 @@ public final class CatalogRepository {
         });
         int deleted = 0;
         int dormant = 0;
+        int held = 0;
         for (SweptRow r : rows) {
             switch (r.disposition()) {
                 case DELETED -> {
@@ -7601,10 +7627,11 @@ public final class CatalogRepository {
                     // instant this UPDATE commits — evict so the next reader re-verifies.
                     CollectionRegistry.evict(tenant, r.name());
                 }
+                case HELD_QUARANTINE -> held++; // nothing changed; no eviction needed
                 case UNCHANGED -> { }
             }
         }
-        return new GhostSweepResult(rows.size(), deleted, dormant);
+        return new GhostSweepResult(rows.size(), deleted, dormant, held);
     }
 
     /** Return ACTIVE owners filtered by owner_type. Used by repos.py:list_repos_dual (nexus-qnp5s). */

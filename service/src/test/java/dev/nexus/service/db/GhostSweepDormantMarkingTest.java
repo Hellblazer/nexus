@@ -500,6 +500,168 @@ class GhostSweepDormantMarkingTest {
         }
     }
 
+    // ══════════════════════════════════════════════════════════════════════
+    // QUARANTINE HOLD (nexus-snm4y): a row already lifecycle_state =
+    // 'quarantine' -- hygiene-002 Branch B's UNCONDITIONAL assignment -- is
+    // held by the sweep: neither deleted as a ghost nor marked dormant, no
+    // matter what collectionIsEmpty or the vector-stats check would say.
+    // ══════════════════════════════════════════════════════════════════════
+
+    @Test @Order(60)
+    void quarantineGhostRow_survivesSweep_lifecycleStateUnchanged() throws Exception {
+        String tenant = "ghost-sweep-quarantine-ghost";
+        String coll = "quarantine-knowledge__gs-q-ghost__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, coll);
+        }
+
+        CatalogRepository.GhostSweepResult result = repo.sweepGhostsAndMarkDormant(tenant);
+
+        assertThat(result.scanned()).isEqualTo(1);
+        assertThat(result.ghostsDeleted())
+            .as("a quarantine row that would otherwise be a ghost is held, not deleted").isEqualTo(0);
+        assertThat(result.markedDormant()).isEqualTo(0);
+        assertThat(result.quarantineHeld()).isEqualTo(1);
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var row = ctx.select(CATALOG_COLLECTIONS.LIFECYCLE_STATE).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(coll))
+                .fetchOne();
+            assertThat(row).as("the quarantine ghost row must survive the sweep").isNotNull();
+            assertThat(row.value1()).as("lifecycle_state stays 'quarantine', byte-identical").isEqualTo("quarantine");
+        }
+    }
+
+    @Test @Order(62)
+    void quarantineReferencedNoVectorStats_notMarkedDormant() throws Exception {
+        String tenant = "ghost-sweep-quarantine-referenced";
+        String coll = "quarantine-knowledge__gs-q-referenced__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, tenant, coll);
+            // A taxonomy_meta row keeps collectionIsEmpty false (referenced), with no
+            // collection_vector_stats row -- exactly the shape that flips a non-quarantine
+            // row to 'dormant' (see dormantMarking_evictsCollectionRegistry_mirroringDeleteDiscipline).
+            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+               .values(tenant, coll).execute();
+        }
+
+        CatalogRepository.GhostSweepResult result = repo.sweepGhostsAndMarkDormant(tenant);
+
+        assertThat(result.markedDormant())
+            .as("a referenced-but-empty quarantine row is held, never marked dormant").isEqualTo(0);
+        assertThat(result.ghostsDeleted()).isEqualTo(0);
+        assertThat(result.quarantineHeld()).isEqualTo(1);
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var row = ctx.select(CATALOG_COLLECTIONS.LIFECYCLE_STATE).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(coll))
+                .fetchOne();
+            assertThat(row.value1()).as("lifecycle_state stays 'quarantine', not flipped to 'dormant'")
+                .isEqualTo("quarantine");
+        }
+    }
+
+    @Test @Order(64)
+    void quarantineWithLiveChunks_unchanged() throws Exception {
+        String tenant = "ghost-sweep-quarantine-live-chunks";
+        String coll = "quarantine-knowledge__gs-q-live__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, tenant, coll);
+            insertChunk384(ctx, tenant, coll, chashBytes(coll), vector(384));
+        }
+
+        CatalogRepository.GhostSweepResult result = repo.sweepGhostsAndMarkDormant(tenant);
+
+        assertThat(result.quarantineHeld()).isEqualTo(1);
+        assertThat(result.ghostsDeleted()).isEqualTo(0);
+        assertThat(result.markedDormant()).isEqualTo(0);
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var row = ctx.select(CATALOG_COLLECTIONS.LIFECYCLE_STATE).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(coll))
+                .fetchOne();
+            assertThat(row.value1()).as("a quarantine row with live chunks is unchanged, still 'quarantine'")
+                .isEqualTo("quarantine");
+        }
+    }
+
+    /**
+     * The held count and the non-quarantine dispositions in the SAME sweep,
+     * side by side: three quarantine rows (a ghost, a referenced-empty row,
+     * and a live-chunks row) plus a non-quarantine ghost and a non-quarantine
+     * dormant row, one sweep call, one set of counts. Proves the quarantine
+     * branch does not perturb how non-quarantine rows in the same walk are
+     * counted -- the deleted/dormant totals here are the same shape as
+     * {@code countsLoggedPerTenant}'s (one ghost deleted, one dormant), with
+     * three quarantine rows layered in and held.
+     */
+    @Test @Order(66)
+    void quarantineHeldCount_andNonQuarantineCountsUnaffected() throws Exception {
+        String tenant = "ghost-sweep-quarantine-mixed";
+        String qGhost = "quarantine-knowledge__gs-q-mixed-ghost__minilm-l6-v2-384__v1";
+        String qReferenced = "quarantine-knowledge__gs-q-mixed-referenced__minilm-l6-v2-384__v1";
+        String qLive = "quarantine-knowledge__gs-q-mixed-live__minilm-l6-v2-384__v1";
+        String ghost = "knowledge__gs-mixed-ghost__minilm-l6-v2-384__v1";
+        String dormant = "knowledge__gs-mixed-dormant__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, tenant, qGhost);
+            PgContainerHelper.insertCollection(ctx, tenant, qReferenced);
+            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+               .values(tenant, qReferenced).execute();
+            PgContainerHelper.insertCollection(ctx, tenant, qLive);
+            insertChunk384(ctx, tenant, qLive, chashBytes(qLive), vector(384));
+            PgContainerHelper.insertCollection(ctx, tenant, ghost);
+            PgContainerHelper.insertCollection(ctx, tenant, dormant);
+            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+               .values(tenant, dormant).execute();
+        }
+
+        CatalogRepository.GhostSweepResult result = repo.sweepGhostsAndMarkDormant(tenant);
+
+        assertThat(result.scanned()).isEqualTo(5);
+        assertThat(result.quarantineHeld()).as("all three quarantine rows are held").isEqualTo(3);
+        assertThat(result.ghostsDeleted()).as("only the non-quarantine ghost is deleted").isEqualTo(1);
+        assertThat(result.markedDormant()).as("only the non-quarantine referenced-empty row is dormant")
+            .isEqualTo(1);
+    }
+
+    /**
+     * Non-vacuity (bead nexus-snm4y TESTS bullet 5): the EXACT fixture from
+     * {@link #quarantineGhostRow_survivesSweep_lifecycleStateUnchanged} but
+     * with {@code lifecycle_state = 'live'} instead of {@code 'quarantine'}
+     * IS deleted. This proves the new branch actually fires on {@code
+     * lifecycle_state} and the quarantine tests above are not passing
+     * because the sweep does nothing to a fresh ghost row regardless.
+     */
+    @Test @Order(68)
+    void nonVacuity_sameGhostFixtureWithLiveState_isDeleted() throws Exception {
+        String tenant = "ghost-sweep-quarantine-nonvacuity";
+        String coll = "knowledge__gs-q-nonvacuity-live__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, coll);
+        }
+
+        CatalogRepository.GhostSweepResult result = repo.sweepGhostsAndMarkDormant(tenant);
+
+        assertThat(result.quarantineHeld()).isEqualTo(0);
+        assertThat(result.ghostsDeleted())
+            .as("the identical ghost shape, with lifecycle_state='live', IS deleted").isEqualTo(1);
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(coll))))
+                .as("the live-state ghost row must be gone").isFalse();
+        }
+    }
+
     // ── fixture helpers (typed jOOQ DSL only, mirrors CatalogRenameCollectionTest) ──
 
     private static void insertChunk384(DSLContext ctx, String tenant, String collection, byte[] chashBytes,
