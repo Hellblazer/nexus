@@ -469,7 +469,7 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                 "created_at": "2026-07-01T00:00:00+00:00",
                 # RDR-204 Phase 2 (nexus-ft04v.24/.16): collRow carries the
                 # registry row's dimension and lifecycle_state.
-                "dimension": 1024, "lifecycle_state": "active",
+                "dimension": 1024, "lifecycle_state": "live",
             }]})
         elif op == "/collections/get":
             # nexus-8y1tm: echo the requested name; full collRow shape.
@@ -491,7 +491,7 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                     "legacy_grandfathered": "__" not in name,
                     "superseded_by": "", "superseded_at": "",
                     "created_at": "2026-07-01T00:00:00+00:00",
-                    "dimension": 1024, "lifecycle_state": "active",
+                    "dimension": 1024, "lifecycle_state": "live",
                 })
         elif op == "/embedding_profile":
             # RDR-204 (nexus-ft04v.33): mirror CatalogHandler.handleEmbeddingProfile
