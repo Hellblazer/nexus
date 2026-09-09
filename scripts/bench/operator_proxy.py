@@ -75,6 +75,15 @@ from bench.operator_proxy_metrics import (
     spearman_rank_correlation,
 )
 
+# nexus-onn7s: core.py's operator_requests builders append this same
+# clause when a payload carries a [source: ...] line. Imported directly
+# (not re-implemented) so the two sides can never drift on WHAT the
+# clause says -- only the prompt-shape fidelity test below verifies WHERE
+# the resulting call sits in each template, which importing the real
+# function does not make vacuous (the call itself is still one AST
+# substitution slot in each builder's f-string, exactly like core.py's).
+from nexus.context_annotations import source_clause
+
 #: Fixed, seeded input set (RDR-196 .p2a DO 5's "cheap set of inputs" +
 #: "operator tests' existing fixtures + spike_5q corpus hydrations").
 #: Hydrated from ``bench/queries/spike_5q.yaml``'s ground_truth
@@ -116,7 +125,7 @@ def build_filter() -> tuple[str, dict]:
         f"keyed by the item's id, giving the reason each item was kept "
         f"or rejected. The output 'items' array must be a subset of the "
         f"input; never add synthetic items.\n\n"
-        f"Items:\n{_items_json()}"
+        f"Items:\n{_items_json()}{source_clause(_items_json())}"
     )
     schema: dict = {
         "type": "object",
@@ -152,7 +161,7 @@ def build_groupby() -> tuple[str, dict]:
         f"Do not reference items by id-only — carry the full item "
         f"dicts in each group's `items` array so downstream operators "
         f"see the content without a separate lookup.\n\n"
-        f"Items:\n{_items_json()}"
+        f"Items:\n{_items_json()}{source_clause(_items_json())}"
     )
     schema: dict = {
         "type": "object",
@@ -188,18 +197,23 @@ def build_rank() -> tuple[str, dict]:
     Fixed: the ``[rdr-XXX]`` tag is fixture DATA embedded in each item
     STRING (legitimate — ``items`` is caller-supplied opaque content in
     production too), not a template instruction. The template itself is
-    now exactly core.py's three lines. If the model paraphrases far
-    enough to drop a tag, ``_extract_id_tag`` returns ``None`` for that
-    entry and ``spearman_rank_correlation`` scores over the smaller common
+    now exactly core.py's three lines (plus the conditional
+    ``source_clause`` slot core.py's own template carries too, nexus-onn7s
+    — real, not an added instruction, since it appends nothing when no
+    input opens with a ``[source: ...]`` line, which this fixture never
+    does). If the model paraphrases far enough to drop a tag,
+    ``_extract_id_tag`` returns ``None`` for that entry and
+    ``spearman_rank_correlation`` scores over the smaller common
     subsequence (or returns ``None`` if fewer than 2 tags survive) —
     handled honestly, not steered around.
     """
     criterion = "how directly the RDR bears on storage/identity mechanisms (most direct first)"
     items = [f"[{it['id']}] {it['title']}" for it in FIXTURE_ITEMS]
+    items_json = json.dumps(items)
     prompt = (
         f"Rank the following items by {criterion}.\n"
         f"Return them in ranked order, best first.\n\n"
-        f"Items:\n{json.dumps(items)}"
+        f"Items:\n{items_json}{source_clause(items_json)}"
     )
     schema: dict = {
         "type": "object",
@@ -214,7 +228,7 @@ def build_extract() -> tuple[str, dict]:
     fields = "id,category,year"
     prompt = (
         f"Extract the following fields from each item: {fields}\n\n"
-        f"Items:\n{_items_json()}"
+        f"Items:\n{_items_json()}{source_clause(_items_json())}"
     )
     schema: dict = {
         "type": "object",
@@ -237,7 +251,7 @@ def build_check() -> tuple[str, dict]:
         f"record per item containing a short grounding 'quote' and a "
         f"'role' of 'supports', 'contradicts', or 'neutral'. Keep quotes "
         f"short enough to be verifiable against the source item.\n\n"
-        f"Items:\n{_items_json()}"
+        f"Items:\n{_items_json()}{source_clause(_items_json())}"
     )
     schema: dict = {
         "type": "object",
@@ -269,6 +283,7 @@ def build_verify() -> tuple[str, dict]:
         f"verdict. Populate 'citations' with locators (section, page, "
         f"table, or quoted span snippets) that pinpoint the supporting "
         f"or contradicting passages."
+        f"{source_clause(evidence)}"
     )
     schema: dict = {
         "type": "object",
