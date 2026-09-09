@@ -1330,8 +1330,8 @@ def test_collections_cache_ttl_expiry_refetches():
     # Force TTL expiry by rewinding the cached timestamp past the
     # TTL window, then update the mock to return a different set so
     # we can verify the re-fetch path returns fresh state.
-    names, counts, _ts = mi._collections_cache
-    mi._collections_cache = (names, counts, 0.0)  # 0.0 << time.monotonic() - TTL
+    names, counts, rows, _ts = mi._collections_cache
+    mi._collections_cache = (names, counts, rows, 0.0)  # 0.0 << time.monotonic() - TTL
     mock.list_collections.return_value = [{"name": "knowledge__after", "count": 1}]
 
     third = _get_collection_names()

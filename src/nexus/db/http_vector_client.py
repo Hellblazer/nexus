@@ -2952,22 +2952,41 @@ class HttpVectorClient:
             tenant=self._tenant,
         )
 
+    #: Catalog attribute keys the RDR-204 Phase 2 engine joins into
+    #: ``/v1/vectors/stats`` rows (``PgVectorRepository`` joins
+    #: ``catalog_collections`` by name). Carried through by
+    #: :meth:`list_collections` instead of being discarded at the
+    #: name+count merge -- nexus-ft04v.26's collection-row cache
+    #: (``mcp_infra.get_collection_row``) reads exactly these fields off
+    #: the SAME round trip this method already makes. Omitted from a row
+    #: (not present as a key) when no catalog row backs that collection.
+    _STATS_CATALOG_ATTR_KEYS = ("content_type", "owner_id", "embedding_model", "lifecycle_state")
+
     def list_collections(self) -> list[dict]:
         """List the tenant's vector collections with live chunk counts.
 
-        T3Database parity: returns ``[{"name": ..., "count": N}, ...]`` —
-        ``nx collection list`` and friends index both keys (the missing
+        T3Database parity: returns ``[{"name": ..., "count": N, ...}, ...]``
+        — ``nx collection list`` and friends index both keys (the missing
         ``count`` was a live KeyError on every service-mode box, RDR-156 P3).
+        Since RDR-204 Phase 3 (nexus-ft04v.26) each row also carries
+        ``content_type``/``owner_id``/``embedding_model``/``lifecycle_state``
+        when the engine's stats route joined a catalog row for that
+        collection (:data:`_STATS_CATALOG_ATTR_KEYS`) -- these keys are
+        simply ABSENT, never null, when no row backs the collection.
 
         Primary path is ONE ``/v1/vectors/stats`` round-trip
         (tombstone-filtered live counts, replacing T3Database's N-way
         threadpooled ``col.count()`` fan-out). On a pre-catalog-005 service
         JAR the route 404s; fall back to ``/collections`` + per-collection
         ``/count`` so the surface keeps working across the deployment skew
-        (raw counts — tombstones do not exist on a pre-catalog-005 schema).
+        (raw counts — tombstones do not exist on a pre-catalog-005 schema;
+        no catalog attributes either, since that join is RDR-204 Phase 2).
 
         Multi-dim collections (same name in two ``chunks_<dim>`` tables —
-        cross-dim re-indexing residue) collapse to one entry, counts summed.
+        cross-dim re-indexing residue) collapse to one entry, counts summed;
+        the first row's catalog attributes win (a genuinely registered
+        collection has exactly one row, so this only matters for the
+        cross-dim residue case, which predates catalog attribution anyway).
         """
         try:
             stats = self.collection_stats()
@@ -2977,13 +2996,18 @@ class HttpVectorClient:
                 return []
             _log.info("http_vector_stats_unavailable_fallback", error=str(e))
             return self._list_collections_via_count()
-        merged: dict[str, int] = {}
+        merged: dict[str, dict] = {}
         for row in stats:
             name = row.get("name", "")
-            if name:
-                # `or 0` guards an explicit null count, not just an absent key
-                merged[name] = merged.get(name, 0) + int(row.get("count") or 0)
-        return [{"name": n, "count": c} for n, c in sorted(merged.items())]
+            if not name:
+                continue
+            entry = merged.setdefault(name, {"name": name, "count": 0})
+            # `or 0` guards an explicit null count, not just an absent key
+            entry["count"] += int(row.get("count") or 0)
+            for key in self._STATS_CATALOG_ATTR_KEYS:
+                if key in row and key not in entry:
+                    entry[key] = row[key]
+        return [merged[n] for n in sorted(merged)]
 
     def _list_collections_via_count(self) -> list[dict]:
         """Deployment-skew fallback: ``/collections`` names + N ``/count`` calls.
