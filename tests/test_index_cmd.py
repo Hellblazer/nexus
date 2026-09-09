@@ -466,6 +466,39 @@ def test_index_credentials_missing_exits_nonzero_with_message(
     assert "Set via" in result.output or "config set" in result.output
 
 
+@pytest.mark.parametrize("subcmd,fixture", [
+    ("pdf", "fake_pdf"),
+    ("md", "fake_md"),
+])
+def test_index_profile_refusal_exits_nonzero_without_traceback(
+    runner, request, subcmd, fixture, monkeypatch,
+):
+    """7.38.0 shakeout (2026-09-09): the registration seam's refusals
+    (EmbeddingProfileMismatchError, LocalVoyageCredentialMissingError) name
+    the service restart and must render as a clean ClickException on both
+    single-file index commands, not as a raw traceback."""
+    from nexus.corpus import EmbeddingProfileMismatchError  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+
+    fixture_path = request.getfixturevalue(fixture)
+    fn_name = "index_pdf" if subcmd == "pdf" else "index_markdown"
+
+    def _raise(*args, **kwargs):
+        raise EmbeddingProfileMismatchError(
+            "content_type='docs': this install's configured intent is "
+            "'voyage-context-3', but the engine's embedding_profile still says "
+            "'bge-base-en-v15-768'. A restart is required for the engine to "
+            "adopt this: `nx daemon service stop && nx daemon service start`."
+        )
+
+    with patch(f"nexus.doc_indexer.{fn_name}", side_effect=_raise):
+        result = runner.invoke(main, ["index", subcmd, str(fixture_path)])
+
+    assert result.exit_code != 0, result.output
+    assert result.exc_info is not None and result.exc_info[0] is SystemExit, result.exc_info
+    assert "Traceback (most recent call last)" not in result.output, result.output
+    assert "nx daemon service stop && nx daemon service start" in result.output
+
+
 def test_index_md_command_empty_file_exits_nonzero_without_registering(
     runner, home,
 ):

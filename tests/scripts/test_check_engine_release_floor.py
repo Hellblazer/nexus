@@ -1866,6 +1866,24 @@ def test_report_flag_is_refused_in_every_pre_deploy_mode(tmp_path: Path, mode_ar
     assert excinfo.value.code == 2
 
 
+def test_env_directory_does_not_override_no_record_deploy(
+    tmp_path: Path, _tracker_t2: type[_TrackerMemory], monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A globally-set NX_GATE_REPORT_DIR must not turn an explicit
+    --no-record-deploy REASON into a tracker write (2026-09-09: the 7.38.0
+    shakeout's read-only verify reached the production-write guard this way)."""
+    _step6_report(tmp_path, version=_floor_str(), stamp=_T0)
+    monkeypatch.setenv("NX_GATE_REPORT_DIR", str(tmp_path))
+
+    with _clean_post_tag_verify():
+        rc = gate.main(["--url", _TEST_URL, "--no-record-deploy", "shakeout read-only verify"])
+
+    assert rc == 0
+    assert _tracker_t2.puts == []
+    assert "NOTE (--no-record-deploy)" in capsys.readouterr().err
+
+
 def test_env_directory_is_ignored_in_pre_deploy_modes(
     tmp_path: Path, _tracker_t2: type[_TrackerMemory], monkeypatch: pytest.MonkeyPatch
 ) -> None:

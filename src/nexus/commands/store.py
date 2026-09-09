@@ -7,7 +7,7 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
-from nexus.corpus import t3_collection_name
+from nexus.corpus import EmbeddingProfileMismatchError, LocalVoyageCredentialMissingError, t3_collection_name
 from nexus.db import make_t3
 from nexus.db.t3 import T3Database
 from nexus.errors import PutOversizedError
@@ -183,6 +183,20 @@ def put_cmd(
             # never regresses to a raw traceback either. Same compensation
             # as the generic branch below, just a clean ClickException at
             # the end instead of a bare re-raise.
+            if catalog_doc_id:
+                from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+                _fence_fail(catalog_doc_id, str(put_exc))
+            if catalog_doc_id and catalog_row_minted:
+                _rollback_minted_catalog_entry(
+                    catalog_doc_id, original_error=str(put_exc),
+                )
+            raise click.ClickException(str(put_exc)) from put_exc
+        except (EmbeddingProfileMismatchError, LocalVoyageCredentialMissingError) as put_exc:
+            # 7.38.0 shakeout (2026-09-09): the registration seam's two
+            # refusals (a Voyage intent against a bge profile, or a
+            # Voyage intent with no key) name their remedy in the message
+            # and were reaching the operator as raw tracebacks. Same
+            # compensation as the branches around it; clean exit.
             if catalog_doc_id:
                 from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
                 _fence_fail(catalog_doc_id, str(put_exc))
