@@ -783,3 +783,82 @@ class TestEnsureCollectionRegisteredInvalidatesCollectionsCache:
         ensure_collection_registered(name, registrar=lambda: writer)
 
         assert mcp_infra._collections_cache == ([], {}, {}, 0.0)
+
+
+class TestRegisterCollectionCallSitesRouteThroughTheSeam:
+    """RDR-204 Phase 3 fix round (nexus-ft04v.28 item 4): every
+    ``.register_collection(`` call site outside ``corpus.py`` itself
+    must either go through :func:`ensure_collection_registered` (the
+    seam, which gains the early ``EmbeddingProfileMismatchError``
+    diagnostic) or be one of a small, explicitly named set of accepted
+    exceptions this test pins. A NEW site landing outside both means a
+    write path bypassed the seam's profile check silently -- exactly
+    the coverage gap code-review-nexus-ft04v.29 flagged (Significant
+    finding: "four call sites register without going through
+    ensure_collection_registered").
+
+    ``ensure_collection_registered`` itself calls ``writer.
+    register_collection(`` internally (corpus.py) -- that ONE call site
+    is what every routed caller now reaches through, and is excluded by
+    name (it IS the seam, not a bypass of it).
+    """
+
+    #: Files (relative to the repo root) that call ``.register_collection(``
+    #: WITHOUT going through the seam, reviewed and accepted as out of
+    #: nexus-ft04v.28's scope. A NEW entry here requires a documented
+    #: reason, same discipline as every other census allowlist in this
+    #: suite (tests/test_collection_name_parse_census.py's own doctrine).
+    _ACCEPTED_NON_SEAM_SITES = frozenset({
+        # indexer.py:792/800 -- RDR-103 Phase 4 migration rename-cascade:
+        # best-effort, non-fatal registration immediately after a
+        # legacy->conformant data-plane rename, inside its own dedicated
+        # try/except (phase4_register_collection_failed_after_rename).
+        # Not one of the four sites nexus-ft04v.29's finding named.
+        "src/nexus/indexer.py",
+        # commands/catalog_cmds/migration.py:190 -- legacy migration
+        # command, not one of the four named sites.
+        "src/nexus/commands/catalog_cmds/migration.py",
+        # commands/catalog_cmds/doctor.py:454 -- a STRING inside an
+        # error-message remediation suggestion
+        # ("w.register_collection('<TARGET>'); ..."), never a real call;
+        # matches the substring scan below but is not executable code.
+        "src/nexus/commands/catalog_cmds/doctor.py",
+    })
+
+    def test_non_seam_register_collection_call_sites_are_the_pinned_set(self) -> None:
+        import pathlib
+
+        repo_root = pathlib.Path(__file__).resolve().parent.parent
+        src_root = repo_root / "src" / "nexus"
+        needle = ".register_collection("
+        offenders: set[str] = set()
+        for path in src_root.rglob("*.py"):
+            if path == src_root / "corpus.py":
+                continue
+            if needle in path.read_text():
+                offenders.add(str(path.relative_to(repo_root)))
+
+        assert offenders == set(self._ACCEPTED_NON_SEAM_SITES), (
+            f"register_collection call sites outside corpus.py changed: "
+            f"got {sorted(offenders)}, expected "
+            f"{sorted(self._ACCEPTED_NON_SEAM_SITES)}. A NEW site here "
+            f"bypasses the registration seam's profile-mismatch check -- "
+            f"route it through ensure_collection_registered, or add it "
+            f"to _ACCEPTED_NON_SEAM_SITES with a documented reason if it "
+            f"is a genuine, reviewed exception. A site that DISAPPEARED "
+            f"(now routed through the seam) should be removed from "
+            f"_ACCEPTED_NON_SEAM_SITES, not left stale."
+        )
+
+    def test_the_four_named_sites_are_gone_from_the_offender_set(self) -> None:
+        """Non-vacuity: the four sites code-review-nexus-ft04v.29 named
+        (commands/collection.py, commands/catalog_cmds/collections.py x2,
+        commands/index.py) must NOT appear in the pinned allowlist --
+        proving this test would have caught them before the fix, not
+        just after."""
+        named_before_the_fix = {
+            "src/nexus/commands/collection.py",
+            "src/nexus/commands/catalog_cmds/collections.py",
+            "src/nexus/commands/index.py",
+        }
+        assert not (named_before_the_fix & self._ACCEPTED_NON_SEAM_SITES)

@@ -737,35 +737,55 @@ def reindex_cmd(name: str, force: bool) -> None:
     # indexer.py's phase-4 registration; best-effort with a loud warning —
     # a failed projection write must not abort the re-index that follows.
     try:
-        from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        # RDR-204 Phase 3 fix round (nexus-ft04v.28 item 4): routed
+        # through the registration seam (ensure_collection_registered)
+        # instead of a direct writer.register_collection call -- gets
+        # the seam's early EmbeddingProfileMismatchError diagnostic this
+        # re-registration previously skipped.
+        #
+        # `discard_cached_registration` is REQUIRED here (unlike the
+        # other three seam-routed sites): `name`'s row was JUST DELETED
+        # by purge_collection_cascade above, so a stale per-process
+        # "already registered" cache entry from earlier in this SAME
+        # process would make the seam silently skip recreating it --
+        # exactly the t3_not_in_projection drift this call exists to
+        # close. The default registrar (make_catalog_writer, freshly
+        # minted and closed after this one call) matches what this site
+        # constructed manually before.
+        #
+        # EXPLICIT kwargs for the conformant branch, never bare
+        # name-derivation: `name` already has REAL chunks under
+        # whatever model its OWN name segment encodes (this is a
+        # RE-registration of an existing physical collection, not a
+        # fresh mint) -- collection_registration_kwargs's generic
+        # derivation always recomputes embedding_model via the CURRENT
+        # write-intent (nexus-ft04v.34's `effective_embedding_model_
+        # for_writes`), which can disagree with the model the
+        # collection's chunks were actually embedded under (an install
+        # whose local.embed_model changed since the original write).
+        # parse_conformant_collection_name(name) preserves the name's
+        # own segments exactly like the code this replaces did.
         from nexus.corpus import (  # noqa: PLC0415 — deferred to avoid import cycle
+            discard_cached_registration,
+            ensure_collection_registered,
             is_conformant_collection_name,
             parse_conformant_collection_name,
         )
 
-        _w = make_catalog_writer()
-        try:
-            if is_conformant_collection_name(name):
-                # RDR-204 Phase 3 repoint (nexus-ft04v.26): `name`'s row was
-                # JUST DELETED by purge_collection_cascade above -- this call
-                # is what RECREATES it, so the row-based collection_content_type/
-                # collection_owner/collection_model (funnelled by
-                # nexus-ft04v.27) would now raise CollectionNotRegisteredError
-                # every time. `name` is already confirmed conformant by the
-                # `if` above, so its own segments (parsed once, pure regex,
-                # no row lookup) are exactly what a re-registration needs.
-                parsed = parse_conformant_collection_name(name)
-                _w.register_collection(
-                    name,
-                    content_type=parsed["content_type"],
-                    owner_id=parsed["owner_id"],
-                    embedding_model=parsed["embedding_model"],
-                    model_version=parsed["model_version"],
-                )
-            else:
-                _w.register_collection(name)
-        finally:
-            _w.close()
+        discard_cached_registration(name)
+        if is_conformant_collection_name(name):
+            parsed = parse_conformant_collection_name(name)
+            ensure_collection_registered(
+                name,
+                kwargs={
+                    "content_type": parsed["content_type"],
+                    "owner_id": parsed["owner_id"],
+                    "embedding_model": parsed["embedding_model"],
+                    "model_version": parsed["model_version"],
+                },
+            )
+        else:
+            ensure_collection_registered(name)
     except Exception as reg_exc:  # noqa: BLE001 — projection write is best-effort; the re-index below must proceed
         click.echo(
             f"WARNING: could not re-register catalog_collections row for "

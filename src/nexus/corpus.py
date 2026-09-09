@@ -1630,6 +1630,31 @@ def ensure_collection_registered(
         invalidate_collections_cache()
 
 
+def discard_cached_registration(name: str) -> None:
+    """Evict *name* from :func:`ensure_collection_registered`'s
+    per-process ``_REGISTERED_COLLECTIONS`` cache.
+
+    RDR-204 Phase 3 fix round (nexus-ft04v.28 item 4): for a caller that
+    just deleted *name*'s catalog row OUT-OF-BAND (``purge_collection_
+    cascade``, e.g. ``nx collection reindex``'s delete-then-rebuild) and
+    is about to recreate it. Without this, a name this SAME process
+    registered earlier -- before the delete -- would make
+    :func:`ensure_collection_registered`'s cache short-circuit the
+    re-registration entirely, silently reproducing the exact
+    ``t3_not_in_projection`` catalog-drift bug that re-registration call
+    exists to prevent. A no-op when *name* was never cached (the common
+    case: a fresh CLI process's cache starts empty).
+
+    Mirrors :func:`write_with_registration_retry`'s own inline
+    ``_REGISTERED_COLLECTIONS.discard`` on its stale-registration retry
+    path -- exposed here as a public function since THIS eviction is
+    triggered by an out-of-band deletion the write chokepoint has no way
+    to observe, not by a write-time 422.
+    """
+    with _REGISTERED_COLLECTIONS_LOCK:
+        _REGISTERED_COLLECTIONS.discard(name)
+
+
 def _looks_like_stale_registration_error(exc: BaseException) -> bool:
     """True when *exc* is the ONE 422 :func:`write_with_registration_retry`
     retries: the engine's per-tenant, once-per-boot ghost sweep (RDR-204

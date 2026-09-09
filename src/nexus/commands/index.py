@@ -126,18 +126,41 @@ class _CatalogBackedRegistry:
                     # messages already name the concrete remedy, and the
                     # existing log line's error=str(exc) carries it through
                     # to catalog_registry_adapter_register_failed unchanged.
-                    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415 — circular-dep avoidance (corpus)
-                    self._writer.register_collection(
+                    #
+                    # RDR-204 Phase 3 fix round (nexus-ft04v.28 item 4):
+                    # routed through the registration seam
+                    # (ensure_collection_registered) instead of a direct
+                    # register_collection call -- gets the seam's early
+                    # EmbeddingProfileMismatchError diagnostic this site
+                    # previously skipped. An EXPLICIT kwargs override is
+                    # required here (never bare name-derivation): owner_id
+                    # comes from ensure_owner_for_repo(repo), a real owner
+                    # lookup, not the string parsed out of new_name's own
+                    # segments the generic collection_registration_kwargs(
+                    # new_name) derivation would produce -- the two can
+                    # genuinely disagree. registrar=lambda: self._writer
+                    # reuses this adapter's own persistent writer instead
+                    # of minting a fresh one; its .close() (called once
+                    # per registration by the seam) is a documented no-op
+                    # on the shared service-catalog handle it wraps.
+                    from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (corpus)
+                        effective_embedding_model_for_writes,
+                        ensure_collection_registered,
+                    )
+                    ensure_collection_registered(
                         new_name,
-                        content_type=ct,
-                        owner_id=owner_id,
-                        embedding_model=effective_embedding_model_for_writes(ct),
-                        # RDR-137 followup CRITICAL-3 (nexus-43qgm.3):
-                        # 'v1' matches parse_conformant_collection_name's
-                        # f'v{ver}' contract; '1' would trip the
-                        # idempotency check + spawn duplicate
-                        # CollectionCreated events.
-                        model_version="v1",
+                        registrar=lambda: self._writer,
+                        kwargs={
+                            "content_type": ct,
+                            "owner_id": owner_id,
+                            "embedding_model": effective_embedding_model_for_writes(ct),
+                            # RDR-137 followup CRITICAL-3 (nexus-43qgm.3):
+                            # 'v1' matches parse_conformant_collection_name's
+                            # f'v{ver}' contract; '1' would trip the
+                            # idempotency check + spawn duplicate
+                            # CollectionCreated events.
+                            "model_version": "v1",
+                        },
                     )
                 except Exception as exc:  # noqa: BLE001 — boundary catch of undocumented catalog/daemon write exceptions; surfaced via log.warning and success=False
                     _log.warning(
