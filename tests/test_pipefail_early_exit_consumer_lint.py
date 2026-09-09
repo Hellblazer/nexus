@@ -970,10 +970,13 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "service/native-smoke.sh:144",
         "service/native-smoke.sh:205",
         "service/native-smoke.sh:257",
-        "service/native-smoke.sh:361",
-        "service/native-smoke.sh:399",
-        "service/native-smoke.sh:405",
+        # Retargeted again (nexus-ft04v.16 fix round, c7f2ecda2): the
+        # /v1/vectors/embed probe grew three lines, shifting every site
+        # below it by +3.
+        "service/native-smoke.sh:364",
+        "service/native-smoke.sh:402",
         "service/native-smoke.sh:408",
+        "service/native-smoke.sh:411",
         # --- service/linux-native-verify.sh:43 (1 entry): a GENUINE
         # FALSE POSITIVE, not a "needs live infra" deferral -- the
         # matched pipe (`native-image --version | head -1`) sits inside a
