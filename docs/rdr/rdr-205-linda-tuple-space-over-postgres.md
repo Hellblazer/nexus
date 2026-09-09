@@ -1222,7 +1222,13 @@ blocking hooks still run in their 30 to 40 ms.
 
 Phases 1 and 2 are testable end to end on develop against a
 `build-gate-jar.sh` dev jar, and a tag gates delivery, not work
-(AGENTS.md § Engine-service release). This phase is that delivery.
+(AGENTS.md § Engine-service release). This phase is that delivery, and
+it gates nothing else in this RDR: Phases 4 to 6 run on develop against
+the dev jar and close on their own scenario tests and MVV run 1; the
+only work that waits for a deployed engine is Step 2 (the edge
+confirmation of the 25 s cap) and the edge-latency leg of Step 3, which
+complete whenever the next engine cut ships (Sam's decision, on the
+engine's own cadence). The RDR closes after both.
 
 #### Step 1: Engine cut and deploy
 
@@ -1496,8 +1502,9 @@ rest on the conexus session's measurements of 2026-09-09, recorded in
 ### Scope Verification
 
 MVV run 1 is Phase 4's closing deliverable and MVV run 2 is Phase 3
-Step 3, run against the deployed engine that Phase 3 Step 1 delivers;
-neither is deferred. The Test Plan and Performance Expectations set run
+Step 3, its engine-side legs on a developer engine before any cut and
+its edge-latency leg against the deployed engine Phase 3 Step 1
+delivers; neither is deferred, and neither gates Phases 4 to 6. The Test Plan and Performance Expectations set run
 2's targets at the Phase 4 close from the record Step 3 produces. Of
 RDR-120 §Scope Boundaries' blocked bullets this RDR revives two, the
 tuple-space primitives and the subspace registry with its digest, both
@@ -1809,3 +1816,10 @@ Two clauses from the fix check on the gated commit (T2
 `nexus_rdr/205-fix-check-fdc633f91`) are folded here too: the resent-
 message scenario verifies `expires_at` unchanged, and Phase 1 Step 5's
 release arm names the increment and the dead-letter.
+
+### 2026-09-09 — Sequencing note after the gate (Sam)
+
+The engine cut is not a blocker for the consumer phases: Phases 4 to 6
+run on develop against the dev jar; only the two edge legs of Phase 3
+wait for a deploy, on the engine's own cadence. Blocking reads stay in
+v1; a caller that does not want to park uses the probe forms.
