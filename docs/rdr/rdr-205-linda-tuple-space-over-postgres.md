@@ -309,13 +309,21 @@ waiter, deploy-gap retry and the deferred `LISTEN` path.
   RDR-204's ghost sweep is triggered from `AuthFilter` once per tenant
   per JVM lifetime, a different mechanism from the `sweepScheduler` in
   `NexusService`, which runs every `SWEEP_INTERVAL_HOURS` (six hours
-  today). The scheduler's existing arms enumerate tenants as the default
-  tenant plus every row in `service_tokens` (`NexusService.java:558-580`),
-  and the same cycle deletes expired rows from that table, so its tenant
-  set is not the tuple table's. The tuple arm enumerates its own tenants
-  with a distinct `tenant_id` over `nexus.tuples`. It runs at the
-  scheduler's cadence and borrows the ghost sweep's counted outcome
-  record, not its trigger. Nothing in the design needs the sweep sooner:
+  today). The scheduler builds one tenant set before its arms, the
+  default tenant plus every row in `service_tokens`
+  (`NexusService.java:558-580`), which works only because that table has
+  no row-level security; every engine role is `NOBYPASSRLS`
+  (`role-001-nexus-svc.xml:42`), so nothing can enumerate tenants across
+  a forced-RLS table such as `nexus.tuples`, and the same cycle deletes
+  expired token rows, so that set is not the tuple table's either. The
+  tuple sweep therefore enumerates from its own small table with no
+  row-level security, `nexus.tuple_tenants` (one row per tenant that has
+  ever written a tuple, upserted by `out`; the posture `service_tokens`,
+  `install_pings` and `embedding_models` already take for install-wide
+  rows that carry no tenant data), runs as its own scheduled task on the
+  same scheduler at the same cadence, and borrows the ghost sweep's
+  counted outcome record, not its trigger. Reads never return an expired
+  row, so the sweep's latency is hygiene only. Nothing in the design needs the sweep sooner:
   a lapsed lease is claimable by the availability predicate, and the
   sweep's `expire` row and purge are bookkeeping with a worst-case
   latency of one interval.
@@ -516,6 +524,11 @@ nexus.tuples
   expires_at     timestamptz   TTL, never NULL
   created_at     timestamptz
 
+nexus.tuple_tenants               tenant_id PK, first_seen, last_seen
+                                  no RLS (it names tenants and holds no tenant data, the
+                                  service_tokens / embedding_models posture); upserted by out;
+                                  the sweep's enumeration source; never purged by the sweep
+
 nexus.tuple_claim_log             append-only: claim | ack | nack | expire
   log_id, tenant_id (own RLS policy, like every audit table here),
   subspace, template          denormalised so a row reads standalone (May's nexus-pce1.4 fix)
@@ -547,7 +560,7 @@ authority):**
 // in one tenant-scoped transaction, nothing else in it
 row = select(...).from(TUPLES)
         .where(TENANT.eq(t), SUBSPACE.eq(s), KEYS.eq(pattern),
-               CONSUMED_AT.isNull(),
+               CONSUMED_AT.isNull(), EXPIRES_AT.gt(now()),
                CLAIM_STATE.isNull().or(LEASE_UNTIL.lt(now())))
         .orderBy(CREATED_AT).limit(1)
         .forNoKeyUpdate().skipLocked().fetchOne();
@@ -565,9 +578,11 @@ the claim and nothing else, so the taxonomy-015 class (a lock upgrade
 inside one transaction) has nothing to upgrade.
 
 Two rules from the May implementation travel with the statement. The
-availability predicate is `consumed_at IS NULL AND (claim_state IS NULL
-OR lease_until < now())`, so a lapsed lease is claimable the moment it
-lapses; the sweep's `expire` row is bookkeeping, not the release. And a
+availability predicate is `consumed_at IS NULL AND expires_at > now()
+AND (claim_state IS NULL OR lease_until < now())`, so a lapsed lease is
+claimable the moment it lapses and an expired row is invisible the
+moment it expires; the sweep's `expire` row and purge are bookkeeping,
+never the release. And a
 same-claimant retake is idempotent: before the claim statement, `in`
 reads for a live claim held by this claimant on a matching tuple and, if
 one exists, returns its claim id with no new update and no log row.
@@ -690,8 +705,9 @@ per-table storage parameter in the changelog; its measured benefit is
 reclaim during sustained churn, since the default already self-heals
 once churn stops. TTL on every row; the `sweepScheduler` in
 `NexusService`, every `SWEEP_INTERVAL_HOURS` (six hours today,
-`NexusService.java:78`), gains one more arm that enumerates its tenants
-from `nexus.tuples` itself and releases
+`NexusService.java:78`), gains a second scheduled task that enumerates
+its tenants from `nexus.tuple_tenants` (the token loop's set is built
+once before its arms and is not this table's) and, per tenant, releases
 lapsed claims with an `expire` log row, purges expired and
 consumed-past-retention tuple rows (which sets the log's `tuple_id` to
 null), then purges log rows past the log's own longer TTL, in batches of
@@ -755,7 +771,7 @@ against the TSV's so a stalled projection is a finding.
 | --- | --- | --- |
 | Atomic claim | `AspectRepository.claimNext` / `reclaimStale` | Reuse the statement shape and the tenant-scoped transaction; new repository, since the queue's columns are aspect-specific. |
 | Batch claim | `AspectRepository.claimBatch` (a loop) | Do not reuse; a real `LIMIT n` claim is new work and lands only when a consumer asks. |
-| Sweep | `NexusService.sweepScheduler` (every `SWEEP_INTERVAL_HOURS`; the tuple arm enumerates tenants from `nexus.tuples`); RDR-204 ghost sweep (`AuthFilter`, once per tenant per JVM) | Extend the scheduler; borrow the ghost sweep's counted outcome record, not its trigger. |
+| Sweep | `NexusService.sweepScheduler` (every `SWEEP_INTERVAL_HOURS`; its tenant set comes from the non-RLS `service_tokens`); RDR-204 ghost sweep (`AuthFilter`, once per tenant per JVM) | Add a second scheduled task on the same scheduler that enumerates from the non-RLS `nexus.tuple_tenants`; borrow the ghost sweep's counted outcome record, not its trigger. |
 | Pre-send body cap | none (`edge_refusal.py` is post-rejection; `limits.py` holds store quotas) | New: an 8 KB guard in `HttpTupleStore.out`. |
 | Retry across the deploy gap | `nexus.retry` (502, 503, 504, 429 retryable) | Reuse unchanged. |
 | Tenant scoping | `TenantScope`, forced RLS changesets | Reuse unchanged. |
@@ -938,8 +954,11 @@ statement stands.
 
 #### Step 2: Changesets
 
-`tuples-001-baseline.xml`: both tables each with `tenant_id`, a separate
-RLS changeset per table in the catalog-036 shape, the partial index, the
+`tuples-001-baseline.xml`: `nexus.tuples` and `nexus.tuple_claim_log`
+each with `tenant_id` and a separate RLS changeset in the catalog-036
+shape; `nexus.tuple_tenants` with no RLS and a comment giving the reason
+(it names tenants and holds no tenant data, like `service_tokens` and
+`embedding_models`); the partial index, the
 per-table autovacuum factor with a comment naming this RDR as the first
 use, the claim log's `ON DELETE SET NULL` reference and its own TTL, and
 complete rollback blocks
@@ -960,11 +979,12 @@ re-run timer; typed errors.
 
 #### Step 5: Sweep
 
-One more arm in `runScheduledSweep` at its existing cadence
-(`SWEEP_INTERVAL_HOURS`), enumerating its tenants with a distinct
-`tenant_id` over `nexus.tuples` rather than the other arms' token-derived
-set: release lapsed claims with an `expire`
-log row, purge expired and consumed-past-retention tuple rows, then log
+A second scheduled task on `sweepScheduler` at the same cadence
+(`SWEEP_INTERVAL_HOURS`), separate from `runScheduledSweep` because that
+method builds its token-derived tenant set once before its arms. It
+enumerates `nexus.tuple_tenants` and, inside `withTenant` for each:
+releases lapsed claims with an `expire`
+log row, purges expired and consumed-past-retention tuple rows, then log
 rows past the log's own TTL, in batches with a commit per batch; log the
 counted outcome record every run. The sweep test seeds expired rows and
 asserts the counts; production runs that find nothing are normal.
@@ -1034,7 +1054,8 @@ requests from the space. A scenario test with two sessions on one box.
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
 | Templates (resource files) | `nx tuple templates` | `nx tuple stats <subspace>` | Removed in an engine release; a removal with live rows needs a data changeset | Boot validation | git |
-| `nexus.tuples` | `nx tuple stats` | doctor rows | TTL sweep; purge by tenant via admin SQL | `nx doctor` | PG bundle / managed backups |
+| `nexus.tuples` | `nx tuple list` | `nx tuple stats <subspace>`, doctor rows | TTL sweep; purge by tenant via admin SQL | `nx doctor` | PG bundle / managed backups |
+| `nexus.tuple_tenants` | admin SQL | `last_seen` per tenant | never by the sweep; a tenant row is removed only with the tenant | `nx doctor` (sweep enumerated at least the tenants with live rows) | same |
 | `nexus.tuple_claim_log` | via stats | per-claim history | retention sweep | `nx doctor` | same |
 
 ### New Dependencies
@@ -1083,6 +1104,9 @@ None. Postgres, pgvector, jOOQ and Liquibase are in place.
 - **Scenario**: bloat leg — **Verify**: dead-tuple ratio is recorded
   across a million cycles with the per-table autovacuum factor; the
   target is set from that record at the Phase 3 close.
+- **Scenario**: a tenant whose data tokens have all expired still has
+  tuples — **Verify**: the sweep visits it (its `tuple_tenants` row), and
+  a read before the sweep never returns its expired rows.
 - **Scenario**: the sweep runs against seeded expired tuples, lapsed
   claims and old log rows — **Verify**: counts match the seed, `expire`
   rows exist, purged tuples' log rows survive with `tuple_id` null, and
@@ -1262,7 +1286,7 @@ and first-use glosses for T1, T2, beads, TSV, HOT, WAF, ALB and PITR.
 
 ### 2026-09-09 — Fix check on the round-1 fix commit (FAIL), second fix
 
-T2 `nexus_rdr/205-fix-check-` plus that commit's sha. C4 had survived in the Existing
+T2 `nexus_rdr/205-fix-check-8ec08d5af`. C4 had survived in the Existing
 Infrastructure Audit's dispatch-ledger row; closed. C5's Gap 4 query
 needed a time field on `subspace_list`; added (oldest and newest
 `created_at`). The sweep's tenant set is the default tenant plus every
@@ -1285,3 +1309,17 @@ same cycle deletes (four sites). Day 2 points templates at `nx tuple
 templates`. CA 5 cites the T2 record that carries the measurement
 verbatim. The registry parenthetical says what research 4 records.
 Approach counts eleven operations.
+
+### 2026-09-09 — Fix check on the third fix (FAIL), fourth fix: the sweep redesigned
+
+T2 `nexus_rdr/205-fix-check-193d2b5ad`. Three fixes had reworded the
+same clause; the constraint they missed is that no engine role can
+enumerate tenants across a forced-RLS table, and the existing sweep
+manages only because `service_tokens` has no row-level security. The
+tuple sweep now enumerates from its own non-RLS `nexus.tuple_tenants`
+table, upserted by `out` and never purged by the sweep, and runs as a
+second scheduled task on the same scheduler rather than an arm of a loop
+whose tenant set is built once. The availability predicate gains
+`expires_at > now()`, so sweep latency is hygiene only. Day 2's tuples
+row lists with `nx tuple list`; the round-2 revision entry cites
+8ec08d5af now that it is published.
