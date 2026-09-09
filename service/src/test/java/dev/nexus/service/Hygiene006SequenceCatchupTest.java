@@ -20,6 +20,7 @@ import java.time.OffsetDateTime;
 import java.util.List;
 
 import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
+import static dev.nexus.service.jooq.nexus.Tables.PLANS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -92,7 +93,17 @@ class Hygiene006SequenceCatchupTest {
                     assertThat(lastValue(ctx, "memory_id_seq"))
                         .as("precondition: the memory sequence sits behind the imported id")
                         .isLessThan(IMPORTED_MEMORY_ID);
+                    // A POPULATED table whose sequence is already ahead (the row minted
+                    // by the serial itself): the is_called/max arithmetic must leave it
+                    // exactly where it is (review of bace74903, Significant 2).
+                    ctx.insertInto(PLANS, PLANS.TENANT_ID, PLANS.PROJECT, PLANS.QUERY, PLANS.PLAN_JSON,
+                                   PLANS.CREATED_AT)
+                       .values(TENANT, "h006", "serial-minted", org.jooq.JSONB.valueOf("{}"), OffsetDateTime.now())
+                       .execute();
                     plansSeqBefore = lastValue(ctx, "plans_id_seq");
+                    assertThat(plansSeqBefore)
+                        .as("precondition: the plans sequence minted its own row and sits at max(id)")
+                        .isGreaterThanOrEqualTo(1L);
                 }
 
                 applyRemainingChangelog(adminDs);
@@ -105,7 +116,7 @@ class Hygiene006SequenceCatchupTest {
                     assertThat(lastValue(ctx, "memory_id_seq"))
                         .as("memory sequence advanced to the imported max").isEqualTo(IMPORTED_MEMORY_ID);
                     assertThat(lastValue(ctx, "plans_id_seq"))
-                        .as("a sequence already ahead of its (empty) column is never moved")
+                        .as("a populated table whose sequence already sits at max(id) is never moved")
                         .isEqualTo(plansSeqBefore);
 
                     // THE symptom: a serial INSERT after the walk no longer collides.
