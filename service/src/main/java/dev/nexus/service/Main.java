@@ -285,8 +285,26 @@ public final class Main {
             System.exit(1);
         }
 
+        // RDR-205 (bead nexus-em75s.4): load + boot-check the tuple template
+        // registry BEFORE the service starts serving — a breach (an
+        // unparseable/malformed template, or a claim-log TTL that does not
+        // exceed some template's retention by strictly more than one sweep
+        // interval) refuses to start the process, same fail-fast-at-boot
+        // shape as the pooler-mode and HNSW-floor checks above. Same one
+        // clock this process pinned to UTC at the very top of main().
+        dev.nexus.service.tuples.TemplateRegistry tupleTemplateRegistry;
+        try {
+            tupleTemplateRegistry = dev.nexus.service.tuples.TemplateRegistry.loadAtBoot(
+                    NexusService.SWEEP_INTERVAL_HOURS * 3600L);
+        } catch (dev.nexus.service.tuples.TemplateRegistryException e) {
+            ds.close();
+            log.error("event=tuple_template_registry_load_failed error=\"{}\"", e.getMessage(), e);
+            System.exit(1);
+            return;
+        }
+
         var service = new NexusService(port, token, ds, docEmbedRouter, pgVectorRepo, reranker,
-                localEmbedActivitySupplier);
+                localEmbedActivitySupplier, tupleTemplateRegistry);
         service.start();
 
         log.info("event=service_ready port={}", service.getPort());

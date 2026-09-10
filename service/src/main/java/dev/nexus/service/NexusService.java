@@ -16,6 +16,7 @@ import dev.nexus.service.db.TelemetryRepository;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.TokenCache;
 import dev.nexus.service.db.TokenStore;
+import dev.nexus.service.db.TupleRepository;
 import dev.nexus.service.http.AspectHandler;
 import dev.nexus.service.http.AuthFilter;
 import dev.nexus.service.http.CatalogHandler;
@@ -34,8 +35,10 @@ import dev.nexus.service.http.SessionTokenHandler;
 import dev.nexus.service.http.TaxonomyHandler;
 import dev.nexus.service.http.TelemetryHandler;
 import dev.nexus.service.http.TokenAdminHandler;
+import dev.nexus.service.http.TupleHandler;
 import dev.nexus.service.http.VectorHandler;
 import dev.nexus.service.http.WhoamiHandler;
+import dev.nexus.service.tuples.TemplateRegistry;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.slf4j.Logger;
@@ -162,6 +165,14 @@ public final class NexusService {
      * and catalogRepo above.
      */
     private final PlanRepository planRepo;
+
+    /**
+     * RDR-205 (bead nexus-em75s.4): null when this instance was constructed
+     * without a {@link TemplateRegistry} (every narrower constructor overload
+     * below) — {@code /v1/tuples} is then simply not registered (404), and
+     * {@link #stop()} skips its shutdown signal.
+     */
+    private final TupleRepository tupleRepo;
 
     /**
      * Convenience constructor: no vector backend (original signature for existing tests).
@@ -325,6 +336,29 @@ public final class NexusService {
                         PgVectorRepository pgVectorRepository,
                         dev.nexus.service.vectors.Reranker reranker,
                         java.util.function.Supplier<dev.nexus.service.vectors.EmbedActivitySnapshot> localEmbedActivitySupplier) throws IOException {
+        this(port, token, dataSource, docEmbedderRouter, pgVectorRepository, reranker,
+                localEmbedActivitySupplier, null);
+    }
+
+    /**
+     * Full constructor, additionally wired for RDR-205's Linda tuple space
+     * (bead nexus-em75s.4).
+     *
+     * @param tupleTemplateRegistry the boot-loaded, boot-checked template
+     *        registry ({@code TemplateRegistry.loadAtBoot}, called from
+     *        {@code Main.java} BEFORE this constructor is ever reached — a
+     *        breach refuses to start the process there, never here). May be
+     *        null: {@code /v1/tuples} is then simply not registered (404),
+     *        not a 503 stub — unlike the optional embed/vector backends
+     *        above, a null registry here means the feature was never
+     *        loaded, not that it degraded.
+     */
+    public NexusService(int port, String token, DataSource dataSource,
+                        EmbedderRouter docEmbedderRouter,
+                        PgVectorRepository pgVectorRepository,
+                        dev.nexus.service.vectors.Reranker reranker,
+                        java.util.function.Supplier<dev.nexus.service.vectors.EmbedActivitySnapshot> localEmbedActivitySupplier,
+                        TemplateRegistry tupleTemplateRegistry) throws IOException {
         this.tenantScope = new TenantScope(dataSource);
 
         // Token lifecycle (RDR-152 bead nexus-gmiaf.32.2): resolve bearer→tenant
@@ -491,6 +525,18 @@ public final class NexusService {
         vectorCtx.getFilters().addAll(authFilter);
         log.info("event=vector_endpoints_registered has_embed_router={} has_pgvector={} has_reranker={}",
                 docEmbedderRouter != null, pgVectorRepository != null, reranker != null);
+
+        // /v1/tuples/* — RDR-205 Linda tuple space (bead nexus-em75s.4). Registered
+        // only when a boot-checked TemplateRegistry was supplied (see the constructor
+        // javadoc above) — a null registry means the feature was never loaded, so the
+        // route is simply absent (404) rather than a 503 stub.
+        if (tupleTemplateRegistry != null) {
+            this.tupleRepo = TupleRepository.fromEnv(tenantScope, tupleTemplateRegistry);
+            var tuplesCtx = server.createContext("/v1/tuples", new TupleHandler(tupleRepo));
+            tuplesCtx.getFilters().addAll(authFilter);
+        } else {
+            this.tupleRepo = null;
+        }
 
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
 
@@ -774,6 +820,12 @@ public final class NexusService {
      *  executor immediately. */
     public void stop() {
         sweepScheduler.shutdownNow();
+        // RDR-205 (bead nexus-em75s.4): signal every parked rd/in BEFORE the HTTP
+        // server stops, so they return the probe result instead of riding out
+        // their budget past process exit.
+        if (tupleRepo != null) {
+            tupleRepo.shutdown();
+        }
         catalogRepo.close();
         server.stop(0);
         log.info("event=service_stopped");
