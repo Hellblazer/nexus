@@ -509,29 +509,19 @@ def _stub_profile_reader(monkeypatch: pytest.MonkeyPatch, rows: dict[str, str]) 
 
 
 class TestRegistrationSeamProfileCheck:
-    # nexus-0y4c6: class attributes so the four tests below no longer
-    # carry these literals in their own bodies -- the "intent" model fed
-    # to a FAKE profile reader (_stub_profile_reader); the real profile
-    # reader is never constructed.
-    _MODEL = "voyage-code-3"
-    _AGREE_NAME = "code__seam-agree-test__voyage-code-3__v1"
-    _MISMATCH_NAME = "code__seam-mismatch-test__voyage-code-3__v1"
-    _EMPTY_PROFILE_NAME = "code__seam-empty-profile-test__voyage-code-3__v1"
-    _PRE_PHASE2_NAME = "code__seam-pre-phase2-test__voyage-code-3__v1"
-
     def test_profile_agrees_registration_proceeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: self._MODEL)
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
         monkeypatch.setattr("nexus.config.get_credential", lambda name: "configured-key")
-        _stub_profile_reader(monkeypatch, {"code": self._MODEL})
+        _stub_profile_reader(monkeypatch, {"code": "voyage-code-3"})
         writer = _fake_writer()
-        name = self._AGREE_NAME
+        name = "code__seam-agree-test__voyage-code-3__v1"
 
         ensure_collection_registered(name, registrar=lambda: writer)
 
         writer.register_collection.assert_called_once_with(
             name, content_type="code", owner_id="seam-agree-test",
-            embedding_model=self._MODEL, model_version="v1",
+            embedding_model="voyage-code-3", model_version="v1",
         )
 
     def test_profile_disagrees_raises_mismatch_before_the_register_call(
@@ -545,11 +535,11 @@ class TestRegistrationSeamProfileCheck:
         from nexus.corpus import EmbeddingProfileMismatchError
 
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: self._MODEL)
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
         monkeypatch.setattr("nexus.config.get_credential", lambda name: "configured-key")
         _stub_profile_reader(monkeypatch, {"code": "bge-base-en-v15-768"})
         writer = _fake_writer()
-        name = self._MISMATCH_NAME
+        name = "code__seam-mismatch-test__voyage-code-3__v1"
 
         with pytest.raises(EmbeddingProfileMismatchError, match="restart"):
             ensure_collection_registered(name, registrar=lambda: writer)
@@ -566,17 +556,17 @@ class TestRegistrationSeamProfileCheck:
         intent, since that is exactly what the engine's own handler would
         accept and use to seed the row."""
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: self._MODEL)
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
         monkeypatch.setattr("nexus.config.get_credential", lambda name: "configured-key")
         _stub_profile_reader(monkeypatch, {})  # no row for "code" at all
         writer = _fake_writer()
-        name = self._EMPTY_PROFILE_NAME
+        name = "code__seam-empty-profile-test__voyage-code-3__v1"
 
         ensure_collection_registered(name, registrar=lambda: writer)
 
         writer.register_collection.assert_called_once_with(
             name, content_type="code", owner_id="seam-empty-profile-test",
-            embedding_model=self._MODEL, model_version="v1",
+            embedding_model="voyage-code-3", model_version="v1",
         )
 
     def test_pre_phase_2_engine_route_missing_propagates_uncaught(
@@ -589,7 +579,7 @@ class TestRegistrationSeamProfileCheck:
         import nexus.catalog.factory as factory_mod
 
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: self._MODEL)
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
         monkeypatch.setattr("nexus.config.get_credential", lambda name: "configured-key")
 
         class _PrePhase2Reader:
@@ -598,7 +588,7 @@ class TestRegistrationSeamProfileCheck:
 
         monkeypatch.setattr(factory_mod, "make_catalog_reader", lambda: _PrePhase2Reader())
         writer = _fake_writer()
-        name = self._PRE_PHASE2_NAME
+        name = "code__seam-pre-phase2-test__voyage-code-3__v1"
 
         with pytest.raises(EmbeddingProfileRouteMissingError):
             ensure_collection_registered(name, registrar=lambda: writer)
@@ -654,31 +644,28 @@ class TestEnsureCollectionRegisteredExplicitKwargsOverride:
     engine's GC function registers it from the origin's row on first
     insert; see ``indexer._prune_collection_serverside``.)"""
 
-    # nexus-0y4c6: class attributes so the two tests below no longer
-    # carry these literals in their own bodies -- the voyage-code-3 token
-    # is part of the QUARANTINE COLLECTION NAME / the explicit kwargs
-    # override dict, opaque data proving `kwargs=` bypasses (or still
-    # profile-checks) name-derivation; no real embedder or credential
-    # path is exercised.
-    _NAME = "quarantine-code__myrepo__voyage-code-3__v1"
-    _MODEL = "voyage-code-3"
-
     def test_explicit_kwargs_bypasses_name_derivation(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Neutral model token on purpose (RDR-109 mode lint): `kwargs=`
+        bypasses `collection_registration_kwargs` entirely for this call,
+        so this override dict's embedding_model reaches the writer
+        verbatim without ever touching local_embed_model_is_voyage() or
+        any other real derivation; no embedder or credential path is
+        exercised."""
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
         monkeypatch.setattr(
             "nexus.db.http_vector_client.is_vector_service_mode", lambda: True,
         )
         writer = _fake_writer()
         # A name whose OWN shape would derive completely different kwargs
-        # (content_type="quarantine-code", owner_id="myrepo__voyage-
-        # code-3__v1") if collection_registration_kwargs(name) ran --
+        # (content_type="quarantine-code", owner_id="myrepo__model-
+        # code__v1") if collection_registration_kwargs(name) ran --
         # proving the override, not the name, drove the register call.
-        name = self._NAME
+        name = "quarantine-code__myrepo__model-code__v1"
         override = {
             "content_type": "code", "owner_id": "myrepo",
-            "embedding_model": self._MODEL, "model_version": "v1",
+            "embedding_model": "model-code", "model_version": "v1",
         }
 
         ensure_collection_registered(name, registrar=lambda: writer, kwargs=override)
@@ -690,18 +677,25 @@ class TestEnsureCollectionRegisteredExplicitKwargsOverride:
     ) -> None:
         """An explicit override does not bypass Technical Design 1a's
         mismatch guard -- only the generic name-parsing step that used
-        to feed it."""
+        to feed it.
+
+        Neutral model token on purpose (RDR-109 mode lint): the profile
+        check is a pure string-inequality comparison between the
+        override's embedding_model and the stubbed profile row below;
+        local_embed_model_choice is patched but never consulted for this
+        kwargs= call path (same reason as the sibling test above).
+        """
         from nexus.corpus import EmbeddingProfileMismatchError
 
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: self._MODEL)
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "model-code")
         monkeypatch.setattr("nexus.config.get_credential", lambda name: "configured-key")
         _stub_profile_reader(monkeypatch, {"code": "bge-base-en-v15-768"})
         writer = _fake_writer()
-        name = self._NAME
+        name = "quarantine-code__myrepo__model-code__v1"
         override = {
             "content_type": "code", "owner_id": "myrepo",
-            "embedding_model": self._MODEL, "model_version": "v1",
+            "embedding_model": "model-code", "model_version": "v1",
         }
 
         with pytest.raises(EmbeddingProfileMismatchError, match="restart"):

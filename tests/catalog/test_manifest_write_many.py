@@ -29,13 +29,6 @@ from nexus.retry import _is_connectivity_error
 # now requires an explicit collection. A single shared constant keeps the
 # many call sites below from inventing their own plausible-looking values.
 _COLLECTION = "knowledge__manifest-write-many-test__voyage-context-3__v1"
-# nexus-0y4c6: the chunk-carrying-branch collection for the six
-# combined-write tests below, hoisted so their own bodies no longer
-# carry the literal -- a conformant RDR-103 name needed to reach the
-# chunk-carrying branch of write_manifest_many (it raises ValueError
-# without a `collection`); every one of the six monkeypatches `_post`,
-# so the name never leaves the request body and no embedder runs.
-_CODE_COLLECTION = "code__nexus-1-1__voyage-code-3__v1"
 
 
 def _client() -> HttpCatalogClient:
@@ -154,7 +147,15 @@ class TestWriteManifestMany:
 
 
 class TestWriteManifestManyCombined:
-    """nexus-wxjr6: the client half of the kl2z6 combined write."""
+    """nexus-wxjr6: the client half of the kl2z6 combined write.
+
+    Neutral model token on purpose (RDR-109 mode lint), used below in
+    test_combined_wire_shape / test_ack_echo_raises_when_chunks_written_
+    absent: a conformant RDR-103 name is needed only to reach the
+    chunk-carrying branch of write_manifest_many (it raises ValueError
+    without a `collection`); every test here monkeypatches `_post`, so
+    the name never leaves the request body and no embedder runs.
+    """
 
     def test_chunks_requires_collection(self) -> None:
         # RDR-191: collection is unconditionally required now (not only
@@ -186,12 +187,12 @@ class TestWriteManifestManyCombined:
             [("1.9.12", [{"chash": "a" * 64, "position": 0}])],
             sweep=True,
             chunks=chunks,
-            collection=_CODE_COLLECTION,
+            collection="code__nexus-1-1__model-code__v1",
             force_re_embed=True,
         )
         assert len(posts) == 1
         body = posts[0]
-        assert body["collection"] == _CODE_COLLECTION
+        assert body["collection"] == "code__nexus-1-1__model-code__v1"
         assert body["chunks"] == chunks
         assert body["sweep"] is True
         assert body["force_re_embed"] is True
@@ -213,7 +214,7 @@ class TestWriteManifestManyCombined:
             c.write_manifest_many(
                 [("1.9.13", [{"chash": "a" * 64, "position": 0}])],
                 chunks=[{"chash": "a" * 64, "text": "hi", "metadata": {}}],
-                collection=_CODE_COLLECTION,
+                collection="code__nexus-1-1__model-code__v1",
             )
 
     def test_no_chunks_sent_never_checks_ack(self, monkeypatch) -> None:
@@ -269,6 +270,11 @@ class TestWriteManifestManyCombinedTimeout:
     surface). The plain (no ``chunks``) branch of ``write_manifest_many``
     must keep the 30s default; that is what
     ``test_plain_write_never_gets_the_embed_timeout`` pins.
+
+    Neutral model token on purpose (RDR-109 mode lint), used below in
+    test_combined_write_gets_an_embed_grade_timeout: a conformant name
+    reaches the chunk-carrying branch; `_post` is monkeypatched, so no
+    embedder runs.
     """
 
     def test_combined_write_gets_an_embed_grade_timeout(self, monkeypatch) -> None:
@@ -284,7 +290,7 @@ class TestWriteManifestManyCombinedTimeout:
         c.write_manifest_many(
             [("1.9.16", [{"chash": "a" * 64, "position": 0}])],
             chunks=[{"chash": "a" * 64, "text": "hi", "metadata": {}}],
-            collection=_CODE_COLLECTION,
+            collection="code__nexus-1-1__model-code__v1",
         )
 
         assert len(calls) == 1
@@ -340,6 +346,10 @@ class TestCombinedWriteReadTimeoutNotRetried:
     exact call from ``indexer.py``'s combined-write flush path. Ordinary
     connectivity blips (``ConnectionResetError`` et al., GH #1371) must
     still propagate un-converted so they retry as before at BOTH layers.
+
+    Neutral model token on purpose (RDR-109 mode lint), used below in
+    all three tests: a conformant name reaches the chunk-carrying
+    branch; `_post` is monkeypatched, so no embedder runs.
     """
 
     def test_read_timeout_raises_converted_type_after_exactly_one_post(
@@ -358,7 +368,7 @@ class TestCombinedWriteReadTimeoutNotRetried:
             c.write_manifest_many(
                 [("1.9.21", [{"chash": "a" * 64, "position": 0}])],
                 chunks=[{"chash": "a" * 64, "text": "hi", "metadata": {}}],
-                collection=_CODE_COLLECTION,
+                collection="code__nexus-1-1__model-code__v1",
             )
 
         # Exactly one POST at this boundary — write_manifest_many itself
@@ -388,7 +398,7 @@ class TestCombinedWriteReadTimeoutNotRetried:
             c.write_manifest_many(
                 [("1.9.22", [{"chash": "a" * 64, "position": 0}])],
                 chunks=[{"chash": "a" * 64, "text": "hi", "metadata": {}}],
-                collection=_CODE_COLLECTION,
+                collection="code__nexus-1-1__model-code__v1",
             )
         except CombinedWriteEmbedTimeoutError as exc:
             assert _is_connectivity_error(exc) is False
@@ -416,7 +426,7 @@ class TestCombinedWriteReadTimeoutNotRetried:
             c.write_manifest_many(
                 [("1.9.23", [{"chash": "a" * 64, "position": 0}])],
                 chunks=[{"chash": "a" * 64, "text": "hi", "metadata": {}}],
-                collection=_CODE_COLLECTION,
+                collection="code__nexus-1-1__model-code__v1",
             )
 
         assert len(calls) == 1

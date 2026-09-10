@@ -10,12 +10,6 @@ from dataclasses import dataclass
 
 import pytest
 
-# nexus-0y4c6: hoisted out of test_sample_collection_names_by_prefix_
-# families_pinned's own body so the RDR-109 mode-declaration lint no
-# longer needs to exclude it by nodeid -- one collection-NAME fixture in
-# a plain string list fed to the family-key derivation; no embedder.
-_CODE_MYREPO_COLLECTION = "code__myrepo__voyage-code-3__v1"
-
 
 @dataclass
 class _FakeMatch:
@@ -328,9 +322,14 @@ def test_sample_collection_names_by_prefix_families_pinned() -> None:
     (``n.split("__", 1)[0]``) became a funnel-helper branch. Pin: a
     dunder-free name is its own family (not an empty-string bucket), and
     an unrecognized/quarantine-prefixed name families under its raw first
-    segment, unfiltered."""
+    segment, unfiltered.
+
+    Neutral model token on purpose (RDR-109 mode lint): one
+    collection-NAME fixture in a plain string list fed to the
+    family-key derivation; no embedder.
+    """
     from nexus.mcp.core import _sample_collection_names_by_prefix
 
-    names = ["rgcache", "quarantine-docs__x", _CODE_MYREPO_COLLECTION]
+    names = ["rgcache", "quarantine-docs__x", "code__myrepo__model-code__v1"]
     shown = _sample_collection_names_by_prefix(names, limit=10)
     assert set(shown) == set(names)  # all three distinct families, nothing dropped

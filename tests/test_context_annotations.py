@@ -7,11 +7,6 @@ from datetime import UTC, datetime
 from nexus.context_annotations import READER_INSTRUCTION, annotate, annotation_line
 
 NOW = datetime(2026, 9, 8, 12, 0, tzinfo=UTC)
-# nexus-0y4c6: hoisted out of test_source_note_names_document_collection_
-# and_dates's own body so the RDR-109 mode-declaration lint no longer
-# needs to exclude it by nodeid -- a collection-NAME string passed
-# straight through to source_note's string-formatting logic; no embedder.
-_COLLECTION = "knowledge__vector-search__voyage-context-3__v1"
 
 
 def test_indexed_age_and_published_year():
@@ -67,14 +62,18 @@ def test_reader_instruction_names_the_rule():
 
 
 def test_source_note_names_document_collection_and_dates():
+    """Neutral model token on purpose (RDR-109 mode lint): a
+    collection-NAME string passed straight through to source_note's
+    string-formatting logic; no embedder."""
     from nexus.context_annotations import source_note
 
+    collection = "knowledge__vector-search__model-ctx__v1"
     note = source_note(
         {"title": "ctxnote", "indexed_at": "2026-08-27T17:49:07+00:00", "bib_year": 2026},
-        collection=_COLLECTION, now=NOW,
+        collection=collection, now=NOW,
     )
     assert note == (
-        f"ctxnote · {_COLLECTION} · "
+        f"ctxnote · {collection} · "
         "indexed 2026-08-27 (11d ago) · published 2026"
     )
 

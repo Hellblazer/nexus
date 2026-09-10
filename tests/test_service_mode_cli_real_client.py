@@ -39,11 +39,6 @@ from nexus.db.http_vector_client import (
 
 _KNOWLEDGE = "knowledge__nexus-1-1__voyage-context-3__v1"
 _CODE = "code__nexus-1-1__voyage-code-3__v1"
-# nexus-0y4c6: the `--to` CLI flag target for the three re-embed tests
-# below, hoisted so their own bodies no longer carry the literal -- a REAL
-# HttpVectorClient over a monkeypatched `_get`/`_post`, opaque routing
-# data, never a real embedder call.
-_TO_CODE_MODEL = "voyage-code-3"
 
 
 @pytest.fixture
@@ -319,7 +314,7 @@ def test_collection_reembed_dry_run_service_mode_real_client(
 
     with patch("nexus.commands.collection._t3", return_value=real_client):
         result = runner.invoke(
-            main, ["collection", "re-embed", coll, "--to", _TO_CODE_MODEL],
+            main, ["collection", "re-embed", coll, "--to", "voyage-code-3"],
         )
     assert result.exit_code == 0, result.output
     assert "dry-run" in result.output
@@ -355,7 +350,7 @@ def test_collection_reembed_cross_model_rejected_service_mode(
         # _KNOWLEDGE encodes the docs/knowledge embedder; ask for the code one.
         result = runner.invoke(
             main, ["collection", "re-embed", _KNOWLEDGE,
-                   "--to", _TO_CODE_MODEL, "--no-dry-run", "--yes"],
+                   "--to", "voyage-code-3", "--no-dry-run", "--yes"],
         )
     assert result.exit_code != 0
     assert "cannot take effect" in result.output
@@ -391,7 +386,7 @@ def test_collection_reembed_same_model_requests_server_side_re_embed(
             return {
                 "ids": ["c1"],
                 "documents": ["def f(): pass"],
-                "metadatas": [{"embedding_model": _TO_CODE_MODEL}],
+                "metadatas": [{"embedding_model": "voyage-code-3"}],
             }
         if path == "/v1/vectors/upsert-chunks":
             upserts.append(body)
@@ -411,7 +406,7 @@ def test_collection_reembed_same_model_requests_server_side_re_embed(
     with patch("nexus.commands.collection._t3", return_value=real_client):
         result = runner.invoke(
             main, ["collection", "re-embed", coll,
-                   "--to", _TO_CODE_MODEL, "--no-dry-run", "--yes"],
+                   "--to", "voyage-code-3", "--no-dry-run", "--yes"],
         )
     assert result.exit_code == 0, result.output
     assert len(upserts) == 1

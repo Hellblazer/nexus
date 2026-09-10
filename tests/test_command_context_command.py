@@ -22,13 +22,6 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-# nexus-0y4c6: hoisted out of test_knowledge_collections_filters_by_
-# content_type's own body so the RDR-109 mode-declaration lint no longer
-# needs to exclude it by nodeid -- a realistic collection-NAME fixture in
-# a hand-rolled fake list_collections(); nexus.mcp_infra.get_collection_row
-# is stubbed directly in that test, never a real embedder.
-_KNOWLEDGE_DELOS_COLLECTION = "knowledge__delos__voyage-context-3__v1"
-
 
 # ---------------------------------------------------------------------------
 # (a) Registration: command-context group present on main
@@ -1996,7 +1989,13 @@ def test_knowledge_collections_filters_by_content_type(monkeypatch) -> None:
     ``collection_content_type(str(c)) == "knowledge"``. A boundary name
     that merely contains "knowledge" but is not the exact prefix, a
     code__ collection, and a legacy-bare name with no "__" at all all
-    stay excluded, byte-identical to the pre-funnel filter."""
+    stay excluded, byte-identical to the pre-funnel filter.
+
+    Neutral model token on purpose (RDR-109 mode lint): a realistic
+    collection-NAME fixture in a hand-rolled fake list_collections();
+    nexus.mcp_infra.get_collection_row is stubbed directly below, never
+    a real embedder.
+    """
     import nexus.commands.command_context as cc
     import nexus.db as _db
     from tests.conftest import catalog_row_for_collection_name
@@ -2017,7 +2016,7 @@ def test_knowledge_collections_filters_by_content_type(monkeypatch) -> None:
                 "knowledgefoo__bar",       # boundary: not the knowledge__ prefix
                 "code__myrepo",
                 "bare-legacy-name",        # no "__" at all
-                _KNOWLEDGE_DELOS_COLLECTION,
+                "knowledge__delos__model-ctx__v1",
                 "knowledge__notes",
             ]
 
@@ -2027,6 +2026,6 @@ def test_knowledge_collections_filters_by_content_type(monkeypatch) -> None:
     monkeypatch.setattr(_db, "make_t3", lambda: _FakeT3())
     result = cc._knowledge_collections()
     assert result == sorted([
-        _KNOWLEDGE_DELOS_COLLECTION,
+        "knowledge__delos__model-ctx__v1",
         "knowledge__notes",
     ])
