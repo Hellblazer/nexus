@@ -874,6 +874,16 @@ def collection_content_type(name: str) -> str:
     exactly the two-sources-of-truth bug (GH #667) RDR-204 exists to
     close. Callers deriving a CANDIDATE name to mint (not yet a real
     collection) must not call this -- see :func:`split_candidate_collection_name`.
+
+    Tenant-blind by construction (nexus-fryrd fix round, Significant 2):
+    ``get_collection_row`` always reads ``nexus.mcp_infra``'s process-wide
+    cache, which is that singleton's own tenant only -- this function (and
+    :func:`collection_owner` / :func:`collection_model` below, same
+    contract) has no client instance to ask "whose tenant", unlike
+    :meth:`nexus.db.http_vector_client.HttpVectorClient._resolve_collection_row`,
+    which does. Fine for every current caller (all read the ambient
+    process-default catalog); a caller resolving a DIFFERENT tenant's
+    collection identity would need the HttpVectorClient-side seam instead.
     """
     from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
     row = get_collection_row(name)

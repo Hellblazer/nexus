@@ -1152,10 +1152,12 @@ class TestResolveCollectionRowTenantScoping:
     def setup_method(self):
         from nexus import mcp_infra
         mcp_infra.reset_singletons()
+        reset_http_vector_client_for_tests()
 
     def teardown_method(self):
         from nexus import mcp_infra
         mcp_infra.reset_singletons()
+        reset_http_vector_client_for_tests()
 
     def test_default_tenant_client_reads_through_mcp_infra(self):
         from nexus import mcp_infra
@@ -1267,6 +1269,99 @@ class TestResolveCollectionRowTenantScoping:
         client.upsert_chunks("code__proj__voyage-code-3__v1", ["id1"], ["text1"])
 
         assert get_calls == [("/v1/vectors/stats", "tenant-a")]
+
+    def test_process_default_tenant_helper_drives_both_the_singleton_and_the_identity_check(
+        self, monkeypatch,
+    ):
+        """Fix round (Important #1): the case-2/case-3 split must be an
+        IDENTITY check against the SAME source get_http_vector_client()
+        itself reads (_process_default_tenant), never a bare
+        `== "default"` literal -- pinned by constructing the process
+        singleton under a non-"default" configured tenant and asserting
+        it still takes the mcp_infra (case 2) path, while a genuinely
+        different tenant still takes case 3."""
+        import nexus.db.http_vector_client as hvc
+        from nexus import mcp_infra
+        from nexus.db.t3 import T3Database
+
+        monkeypatch.setattr(hvc, "_process_default_tenant", lambda: "acme-tenant")
+        hvc.reset_http_vector_client_for_tests()
+
+        singleton = hvc.get_http_vector_client()
+        assert singleton._tenant == "acme-tenant"  # noqa: SLF001 — the identity this test pins
+
+        fake_t3 = MagicMock(spec=T3Database)
+        fake_t3.list_collections.return_value = [
+            {"name": "docs__x__voyage-context-3__v1", "count": 1, "content_type": "docs"},
+        ]
+        mcp_infra.inject_t3(fake_t3)
+
+        row = singleton._resolve_collection_row("docs__x__voyage-context-3__v1")
+        assert row == {"content_type": "docs"}
+        fake_t3.list_collections.assert_called_once()
+
+        # A genuinely different tenant, even under the same patched
+        # process default, must still take the non-default (case 3) path.
+        other = hvc.HttpVectorClient(tenant="some-other-tenant")
+        get_calls = []
+
+        def fake_get(path, *, tenant="default"):
+            get_calls.append(tenant)
+            return [{"name": "docs__x__voyage-context-3__v1", "count": 1, "content_type": "docs"}]
+
+        monkeypatch.setattr(hvc, "_get", fake_get)
+        other._resolve_collection_row("docs__x__voyage-context-3__v1")
+        assert get_calls == ["some-other-tenant"]
+
+    def test_resolver_failure_is_memoized_not_retried(self, monkeypatch):
+        """Fix round (Important #2): a raising row resolver must be tried
+        ONCE per upsert_chunks() call -- not once per row-consuming caller
+        (cap, then byte budget)."""
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            lambda path, body, **kw: {"upserted": len(body.get("ids", []))},
+        )
+        client = HttpVectorClient(tenant="tenant-a")
+        calls = []
+
+        def raising_resolver(name):
+            calls.append(name)
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(client, "_resolve_collection_row", raising_resolver)
+
+        client.upsert_chunks("code__proj__voyage-code-3__v1", ["id1"], ["text1"])
+
+        assert len(calls) == 1
+
+    def test_list_collections_primes_mcp_infra_only_for_the_process_default_tenant(
+        self, monkeypatch,
+    ):
+        """Critical fix (composed with nexus-7l3zo's list_collections
+        priming, e27665dbb): a non-default-tenant client's OWN
+        list_collections() must never write into mcp_infra's name-keyed,
+        tenant-blind cache -- only the process's own client's listing may
+        prime it."""
+        from nexus import mcp_infra
+
+        def fake_get(path, *, tenant="default"):
+            return [{"name": "code__proj__voyage-code-3__v1", "count": 1, "content_type": "code"}]
+
+        monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
+
+        # A non-default client's own listing leaves the shared cache
+        # untouched -- the composed-defect case this fix closes.
+        other = HttpVectorClient(tenant="tenant-a")
+        other.list_collections()
+        assert mcp_infra._collections_cache[2] == {}  # noqa: SLF001 — the cache tuple's row-dict slot, the invariant this test pins
+
+        # The process-default client's listing DOES still prime it
+        # (unchanged nexus-7l3zo behaviour for the case it was built for).
+        default_client = HttpVectorClient()  # tenant="default"
+        default_client.list_collections()
+        assert mcp_infra._collections_cache[2] == {  # noqa: SLF001
+            "code__proj__voyage-code-3__v1": {"content_type": "code"},
+        }
 
 
 # ── Service-mode split-brain / dead-seam regression tests (RDR-152 .20 fixes) ─

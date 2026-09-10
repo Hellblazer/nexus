@@ -984,6 +984,15 @@ def _write_model_for_collection(collection: str) -> str | None:
     (and its own direct unit tests, tests/db/test_collection_parse_
     funnel_slice2.py::TestWriteModelForCollection) that genuinely need
     the model token itself.
+
+    Unlike :meth:`HttpVectorClient._resolve_collection_row`, this free
+    function reads ``nexus.mcp_infra.get_collection_row`` UNCONDITIONALLY
+    -- it has no client instance to ask "whose tenant", so it is
+    tenant-blind exactly the way the write path was before nexus-fryrd.
+    No live caller reaches it through an ``HttpVectorClient`` instance
+    today (grep confirms only direct unit tests call it); if one ever
+    does, it inherits the same cross-tenant risk nexus-fryrd fixed for
+    the cap/byte-budget path.
     """
     from nexus.corpus import embedding_model_for_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
     from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
@@ -2094,30 +2103,36 @@ class HttpVectorClient:
            (constructor injection, test seam or a caller with its own
            resolution strategy): call it and return whatever it returns,
            verbatim.
-        2. No injected resolver, and this instance's own ``tenant`` is the
-           literal default (``"default"``, the construction
-           :func:`get_http_vector_client` itself uses): read through
+        2. No injected resolver, and this instance IS the process's own
+           client -- ``self._tenant == _process_default_tenant()``, an
+           IDENTITY check against the ONE function
+           :func:`get_http_vector_client` also constructs its singleton
+           from, never a bare ``== "default"`` literal (nexus-fryrd fix
+           round; a literal comparison would silently stop matching the
+           moment either side grew a config-driven own-tenant while the
+           other stayed hardcoded): read through
            :func:`nexus.mcp_infra.get_collection_row`. This is
            byte-identical to the pre-nexus-fryrd behaviour for every
-           default-tenant client -- a stateless HTTP client has no reason
-           to disagree with itself about the SAME tenant's catalog, and
-           this path keeps the TTL-windowed cache ``mcp_infra`` already
-           shares across every default-tenant reader (no new round trips).
-        3. No injected resolver, and this instance's own ``tenant`` is
-           something else: resolve through THIS client's own
+           process-default client -- a stateless HTTP client has no
+           reason to disagree with itself about the SAME tenant's
+           catalog, and this path keeps the TTL-windowed cache
+           ``mcp_infra`` already shares across every such reader (no new
+           round trips).
+        3. No injected resolver, and this instance is NOT the process's
+           own client: resolve through THIS client's own
            :meth:`list_collections` instead of the ``mcp_infra`` singleton
-           (whose tenant is always ``"default"``, per case 2) -- fixes the
-           cross-tenant read nexus-fryrd names: a client explicitly
-           constructed for tenant A must never resolve rows for tenant
-           "default" while it writes as tenant A. No caching at this
-           layer (an uncommon construction, and correctness over a stale
-           read matters more than a saved round trip here); a caller
-           needing a warm cache for a non-default tenant supplies its own
-           ``_row_resolver``.
+           (whose tenant is always :func:`_process_default_tenant`'s
+           value, per case 2) -- fixes the cross-tenant read nexus-fryrd
+           names: a client explicitly constructed for tenant A must never
+           resolve rows for the process-default tenant while it writes as
+           tenant A. No caching at this layer (an uncommon construction,
+           and correctness over a stale read matters more than a saved
+           round trip here); a caller needing a warm cache for a
+           non-default tenant supplies its own ``_row_resolver``.
         """
         if self._row_resolver is not None:
             return self._row_resolver(collection)
-        if self._tenant == "default":
+        if self._tenant == _process_default_tenant():
             from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
             return get_collection_row(collection)
         for row in self.list_collections():
@@ -2253,11 +2268,27 @@ class HttpVectorClient:
         # with no cache of its own (unlike the mcp_infra path the default
         # tenant reads through), so this call-scoped memo is what keeps a
         # single upsert_chunks() call from paying that round trip twice.
+        #
+        # Fix round: the OUTCOME is memoized, a raise included -- not just
+        # a non-raising return. resolve_row_preferred's own try/except
+        # already treats a raising row_resolver as equivalent to "no row"
+        # (falls back to name derivation), so catching it HERE and caching
+        # None is behaviour-preserving for the caller; without this, a
+        # resolver that raises would re-attempt (and re-fail, re-warn) the
+        # SAME failing round trip once for the cap and once for the byte
+        # budget -- exactly the double-cost this memo exists to prevent.
         _row_cache: dict[str, dict | None] = {}
 
         def _memoized_row_resolver(name: str) -> dict | None:
             if name not in _row_cache:
-                _row_cache[name] = self._resolve_collection_row(name)
+                try:
+                    _row_cache[name] = self._resolve_collection_row(name)
+                except Exception:  # noqa: BLE001 — a handled outcome (None), mirroring resolve_row_preferred's own row_resolver contract one level up; see this function's docstring comment.
+                    _log.warning(
+                        "http_vector_client_row_resolver_failed",
+                        collection=name, exc_info=True,
+                    )
+                    _row_cache[name] = None
             return _row_cache[name]
 
         cap = per_collection_chunk_cap(collection, row_resolver=_memoized_row_resolver)
@@ -3276,9 +3307,19 @@ class HttpVectorClient:
         # response just fetched. Before this only search_cmd primed it, and
         # every other verb that listed collections and then resolved a row
         # paid a second /v1/vectors/stats round trip for the same data.
-        # Deferred import: mcp_infra imports this module.
-        from nexus.mcp_infra import prime_collections_cache  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
-        prime_collections_cache(rows)
+        #
+        # nexus-fryrd fix round (Critical): gated on THIS client being the
+        # process's own client (the SAME identity check
+        # _resolve_collection_row uses) -- mcp_infra's cache is name-keyed
+        # only, with no tenant partition, so an UNGATED prime here would let
+        # a non-default-tenant client's list_collections() (case 3 of
+        # _resolve_collection_row) write a DIFFERENT tenant's rows into the
+        # cache the process-default client reads. Only the process's own
+        # tenant's listing may prime it.
+        if self._tenant == _process_default_tenant():
+            # Deferred import: mcp_infra imports this module.
+            from nexus.mcp_infra import prime_collections_cache  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+            prime_collections_cache(rows)
         return rows
 
     def _list_collections_via_count(self) -> list[dict]:
@@ -4103,6 +4144,24 @@ class HttpVectorClient:
 _vector_client_lock = threading.Lock()
 _vector_client_instance: HttpVectorClient | None = None
 
+
+def _process_default_tenant() -> str:
+    """The tenant :func:`get_http_vector_client` constructs its process-wide
+    singleton under -- the ONE function both that construction and
+    :meth:`HttpVectorClient._resolve_collection_row`'s identity check read,
+    so the two can never drift apart (nexus-fryrd fix round).
+
+    Today this is the literal ``"default"`` -- there is no config-driven
+    "this process's own tenant" field feeding either side, so this is a
+    named constant, not a real lookup, ON PURPOSE: the point is that
+    ``_resolve_collection_row``'s question is "is this client the SAME
+    client identity ``get_http_vector_client()`` would hand back", never
+    a bare ``== "default"`` string comparison against two independently
+    hardcoded literals. If a config-driven own-tenant is ever added, it
+    is added HERE, and both call sites move together automatically.
+    """
+    return "default"
+
 #: Cloud-mode version-compatibility probe cache (nexus-jn0nm). ``None`` means
 #: "not yet probed this process". A cached exception means the probe already
 #: failed once -- every subsequent call re-raises a FRESH instance built from
@@ -4347,7 +4406,10 @@ def get_http_vector_client() -> HttpVectorClient:
                 _version_probe_done = True
                 _log.debug("cloud_engine_version_probe_ok")
         if _vector_client_instance is None:
-            _vector_client_instance = HttpVectorClient()
+            # nexus-fryrd: constructed under the SAME tenant
+            # _resolve_collection_row's identity check reads -- see
+            # _process_default_tenant's docstring.
+            _vector_client_instance = HttpVectorClient(tenant=_process_default_tenant())
     return _vector_client_instance
 
 
