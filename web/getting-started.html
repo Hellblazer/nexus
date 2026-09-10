@@ -229,16 +229,16 @@ ul.plain li{margin:3px 0}
 </div>
 <p class="arrowrow">Data moves in one direction only: scratch to memory, then memory to knowledge.</p>
 <figure class="fig"><svg viewBox="0 0 680 230" role="img" aria-label="Three stores by lifetime. Scratch lives one session, memory one project, knowledge permanently. Entries move only forward: scratch to memory by promote or at session end, memory to knowledge by promote. Indexing and storing write to knowledge directly. The catalog registers every knowledge document and its links."><defs><marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor" stroke="none"/></marker></defs>
-<text x="110" y="18" class="sm" text-anchor="middle">one session</text><text x="330" y="18" class="sm" text-anchor="middle">one project</text><text x="560" y="18" class="sm" text-anchor="middle">permanent</text>
-<rect class="box" x="20" y="34" width="180" height="76" rx="6"/><text x="110" y="60" text-anchor="middle" font-weight="600">Scratch</text><text x="110" y="80" text-anchor="middle" class="lbl">Claude and its agents, this session</text><text x="110" y="96" text-anchor="middle" class="lbl">deleted at session end</text>
-<rect class="box" x="240" y="34" width="180" height="76" rx="6"/><text x="330" y="60" text-anchor="middle" font-weight="600">Memory</text><text x="330" y="80" text-anchor="middle" class="lbl">facts and decisions, by project</text><text x="330" y="96" text-anchor="middle" class="lbl">30 days, longer on each read</text>
-<rect class="box" x="460" y="34" width="200" height="76" rx="6"/><text x="560" y="60" text-anchor="middle" font-weight="600">Knowledge</text><text x="560" y="80" text-anchor="middle" class="lbl">code, documents, notes as chunks</text><text x="560" y="96" text-anchor="middle" class="lbl">found by semantic search</text>
-<line x1="200" y1="72" x2="238" y2="72" marker-end="url(#a1)"/><text x="219" y="62" text-anchor="middle" class="lbl">promote</text><text x="219" y="126" text-anchor="middle" class="lbl">or marked, at session end</text><path d="M219 116 L219 90" class="dash"/>
-<line x1="420" y1="72" x2="458" y2="72" marker-end="url(#a1)"/><text x="439" y="62" text-anchor="middle" class="lbl">promote</text>
-<rect class="box" x="240" y="160" width="180" height="44" rx="6"/><text x="330" y="179" text-anchor="middle" font-weight="600">nx index · nx store</text><text x="330" y="195" text-anchor="middle" class="lbl">repositories, PDFs, notes</text>
-<path d="M420 182 L440 182 L440 120 L500 120 L500 112" marker-end="url(#a1)"/>
-<rect class="box" x="460" y="160" width="200" height="44" rx="6"/><text x="560" y="179" text-anchor="middle" font-weight="600">Catalog</text><text x="560" y="195" text-anchor="middle" class="lbl">every document, and its links</text>
-<line x1="600" y1="110" x2="600" y2="158" marker-end="url(#a1)"/><text x="608" y="138" class="lbl">registers</text>
+<text x="100" y="18" class="sm" text-anchor="middle">one session</text><text x="340" y="18" class="sm" text-anchor="middle">one project</text><text x="580" y="18" class="sm" text-anchor="middle">permanent</text>
+<rect class="box" x="10" y="34" width="180" height="76" rx="6"/><text x="100" y="60" text-anchor="middle" font-weight="600">Scratch</text><text x="100" y="80" text-anchor="middle" class="lbl">Claude and its agents</text><text x="100" y="96" text-anchor="middle" class="lbl">deleted at session end</text>
+<rect class="box" x="255" y="34" width="170" height="76" rx="6"/><text x="340" y="60" text-anchor="middle" font-weight="600">Memory</text><text x="340" y="80" text-anchor="middle" class="lbl">facts and decisions</text><text x="340" y="96" text-anchor="middle" class="lbl">30 days, longer on each read</text>
+<rect class="box" x="490" y="34" width="180" height="76" rx="6"/><text x="580" y="60" text-anchor="middle" font-weight="600">Knowledge</text><text x="580" y="80" text-anchor="middle" class="lbl">code, documents, notes</text><text x="580" y="96" text-anchor="middle" class="lbl">found by semantic search</text>
+<line x1="190" y1="72" x2="253" y2="72" marker-end="url(#a1)"/><text x="222" y="62" text-anchor="middle" class="lbl">promote</text><text x="222" y="128" text-anchor="middle" class="lbl">or marked, at session end</text><path d="M222 118 L222 84" class="dash"/>
+<line x1="425" y1="72" x2="488" y2="72" marker-end="url(#a1)"/><text x="457" y="62" text-anchor="middle" class="lbl">promote</text>
+<rect class="box" x="255" y="160" width="170" height="44" rx="6"/><text x="340" y="179" text-anchor="middle" font-weight="600">nx index · nx store</text><text x="340" y="195" text-anchor="middle" class="lbl">repositories, PDFs, notes</text>
+<path d="M425 182 L455 182 L455 122 L520 122 L520 112" marker-end="url(#a1)"/>
+<rect class="box" x="490" y="160" width="180" height="44" rx="6"/><text x="580" y="179" text-anchor="middle" font-weight="600">Catalog</text><text x="580" y="195" text-anchor="middle" class="lbl">every document, and its links</text>
+<line x1="610" y1="110" x2="610" y2="158" marker-end="url(#a1)"/><text x="618" y="138" class="lbl">registers</text>
 </svg><figcaption>The three stores by lifetime. Data moves forward only. Indexing and storing write straight to knowledge, and the catalog registers every knowledge document.</figcaption></figure>
 <div class="callout rule"><p><strong>How to choose a store:</strong> ask how long the data must live. Only this session: scratch. This project, and you will look it up by name: memory. Permanently, and you will look it up by meaning: knowledge.</p></div>
 <p>You rarely choose a store yourself. Claude does it as it works, following the plugin's guidance. The rule above is so you can read what Claude did and see whether it was right.</p>
@@ -285,7 +285,7 @@ ul.plain li{margin:3px 0}
 <line x1="390" y1="158" x2="428" y2="158" marker-end="url(#a2)"/><text x="409" y="149" text-anchor="middle" class="lbl">reads</text>
 <rect class="box" x="580" y="30" width="90" height="56" rx="6"/><text x="625" y="53" text-anchor="middle" font-weight="600">Memory</text><text x="625" y="72" text-anchor="middle" class="lbl">facts persist</text>
 <path d="M180 36 C 200 4, 560 4, 580 36" class="dash"/>
-<path d="M625 86 L625 158 L602 158" marker-end="url(#a2)" class="dash"/><text x="640" y="125" class="lbl" transform="rotate(90 640 125)">loaded at start</text>
+<path d="M625 86 L625 158 L602 158" marker-end="url(#a2)" class="dash"/><text x="658" y="120" class="lbl" transform="rotate(90 658 120)">loaded at start</text>
 </svg><figcaption>The handoff between sessions. Orange marks the two steps you take. Memory persists on its own; the file carries the position.</figcaption></figure>
 <h3>When to run it</h3>
 <p>There are three cases. In each one, run <code>/conexus:continuation</code> first. Then do the other thing.</p>

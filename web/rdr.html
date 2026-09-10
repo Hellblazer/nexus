@@ -183,19 +183,19 @@ ol.plain li,ul.plain li{margin:3px 0}
 <tr><td>superseded</td><td>Replaced by a named later RDR.</td></tr>
 <tr><td>abandoned</td><td>Not going to happen.</td></tr>
 </table></div>
-<figure class="fig"><svg viewBox="0 0 680 190" role="img" aria-label="RDR status lifecycle. Draft goes to accepted when you accept, accepted goes to closed when you close. Draft can be deferred and comes back only to draft. Draft or accepted can be abandoned. Accepted can be superseded by a later RDR. Closed, superseded and abandoned are terminal."><defs><marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor" stroke="none"/></marker><marker id="a3-y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--brass)" stroke="none"/></marker></defs>
+<figure class="fig"><svg viewBox="0 0 680 215" role="img" aria-label="RDR status lifecycle. Draft goes to accepted when you accept, accepted goes to closed when you close. Draft can be deferred and comes back only to draft. Draft or accepted can be abandoned. Accepted can be superseded by a later RDR. Closed, superseded and abandoned are terminal."><defs><marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor" stroke="none"/></marker><marker id="a3-y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--brass)" stroke="none"/></marker></defs>
 <rect class="box" x="20" y="60" width="130" height="48" rx="24"/><text x="85" y="89" text-anchor="middle" font-weight="600">draft</text>
 <rect class="box" x="260" y="60" width="150" height="48" rx="24"/><text x="335" y="89" text-anchor="middle" font-weight="600">accepted</text>
 <rect class="box" x="520" y="60" width="140" height="48" rx="24"/><text x="590" y="89" text-anchor="middle" font-weight="600">closed</text>
 <line x1="150" y1="84" x2="258" y2="84" marker-end="url(#a3-y)" class="you-edge"/><text x="204" y="74" text-anchor="middle" class="lbl">you accept</text>
 <line x1="410" y1="84" x2="518" y2="84" marker-end="url(#a3-y)" class="you-edge"/><text x="464" y="74" text-anchor="middle" class="lbl">you close, built</text>
 <rect class="box" x="20" y="140" width="130" height="36" rx="18"/><text x="85" y="163" text-anchor="middle">deferred</text>
-<path d="M70 108 L70 138" marker-end="url(#a3)"/><path d="M100 138 L100 110" marker-end="url(#a3)"/><text x="160" y="162" class="lbl">parked · returns only to draft</text>
+<path d="M70 108 L70 138" marker-end="url(#a3)"/><path d="M100 138 L100 110" marker-end="url(#a3)"/><text x="85" y="200" text-anchor="middle" class="lbl">parked · returns only to draft</text>
 <rect class="box" x="260" y="140" width="150" height="36" rx="18"/><text x="335" y="163" text-anchor="middle">abandoned</text>
 <path d="M120 108 L120 124 L300 124 L300 138" marker-end="url(#a3)" class="dash"/><path d="M335 108 L335 138" marker-end="url(#a3)" class="dash"/>
 <rect class="box" x="520" y="140" width="140" height="36" rx="18"/><text x="590" y="163" text-anchor="middle">superseded</text>
-<path d="M380 108 L380 124 L590 124 L590 138" marker-end="url(#a3)" class="dash"/><text x="470" y="118" class="lbl">a later RDR replaces it</text>
-<text x="20" y="30" class="sm">terminal states in the bottom row</text>
+<path d="M380 108 L380 124 L590 124 L590 138" marker-end="url(#a3)" class="dash"/><text x="590" y="200" text-anchor="middle" class="lbl">a later RDR replaces it</text>
+<text x="335" y="200" text-anchor="middle" class="sm">bottom row: terminal</text>
 </svg><figcaption>The six statuses. Orange edges are your decisions. Dashed edges end the RDR without building it; the file stays as the record.</figcaption></figure>
 <div class="callout rule"><p><strong>Who does what.</strong> Claude does the work: research, writing, fixing what a review finds, splitting the plan into tasks, building. You move the lifecycle: you say when to run the gate, when to accept, when to close, and when to abandon. To Claude, running the next step can look like finishing the work. So say the rule once, early: <em>"Finish this stage and stop. I move the lifecycle."</em></p></div>
 
@@ -420,7 +420,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 
 <h3>What remains</h3>
 <p>The RDR is now part of the knowledge store. The next time you or Claude research a similar question, in this project or in another project that shares the store, the search finds it. The research agent reads it before it reads the web. This is the purpose of the whole cycle. One RDR is a decision. Many RDRs are a memory of how the project thinks.</p>
-<figure class="fig"><svg viewBox="0 0 680 250" role="img" aria-label="The RDR cycle. A conversation becomes a draft. Research grows it in cycles. You read and react, sometimes with a critic. A gate checks it within a budget. You accept and the plan follows. Sessions build it, each with a continuation, each phase with a review. You close it. It is indexed into knowledge, where the next RDR finds it."><defs><marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor" stroke="none"/></marker><marker id="a4-y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--brass)" stroke="none"/></marker></defs>
+<figure class="fig"><svg viewBox="0 0 680 275" role="img" aria-label="The RDR cycle. A conversation becomes a draft. Research grows it in cycles. You read and react, sometimes with a critic. A gate checks it within a budget. You accept and the plan follows. Sessions build it, each with a continuation, each phase with a review. You close it. It is indexed into knowledge, where the next RDR finds it."><defs><marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor" stroke="none"/></marker><marker id="a4-y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--brass)" stroke="none"/></marker></defs>
 <rect class="box" x="10" y="20" width="120" height="46" rx="6"/><text x="70" y="40" text-anchor="middle" font-weight="600">conversation</text><text x="70" y="56" text-anchor="middle" class="lbl">problem, options</text>
 <rect class="box" x="160" y="20" width="120" height="46" rx="6"/><text x="220" y="40" text-anchor="middle" font-weight="600">draft</text><text x="220" y="56" text-anchor="middle" class="lbl">rdr-create</text>
 <rect class="box" x="310" y="20" width="120" height="46" rx="6"/><text x="370" y="40" text-anchor="middle" font-weight="600">research</text><text x="370" y="56" text-anchor="middle" class="lbl">agent · findings · tags</text>
@@ -433,12 +433,12 @@ ol.plain li,ul.plain li{margin:3px 0}
 <line x1="460" y1="138" x2="432" y2="138" marker-end="url(#a4)"/>
 <rect class="box" x="160" y="115" width="120" height="46" rx="6"/><text x="220" y="135" text-anchor="middle" font-weight="600">build</text><text x="220" y="151" text-anchor="middle" class="lbl">sessions · phase reviews</text>
 <line x1="310" y1="138" x2="282" y2="138" marker-end="url(#a4)"/>
-<path d="M250 161 C250 190, 190 190, 190 163" marker-end="url(#a4)" class="dash"/><text x="220" y="203" text-anchor="middle" class="lbl">each session ends with a continuation</text>
+<path d="M250 161 C250 190, 190 190, 190 163" marker-end="url(#a4)" class="dash"/><text x="300" y="192" text-anchor="middle" class="lbl">each session ends with a continuation</text>
 <rect class="you" x="10" y="115" width="120" height="46" rx="6"/><text x="70" y="135" text-anchor="middle" font-weight="600">close</text><text x="70" y="151" text-anchor="middle" class="lbl">tasks settled · you decide</text>
 <line x1="160" y1="138" x2="132" y2="138" marker-end="url(#a4-y)" class="you-edge"/>
-<rect class="box" x="10" y="200" width="270" height="36" rx="6"/><text x="145" y="223" text-anchor="middle" font-weight="600">knowledge store</text>
-<line x1="70" y1="161" x2="70" y2="198" marker-end="url(#a4)"/><text x="100" y="185" class="lbl">indexed</text>
-<path d="M280 218 L640 218 L640 10 L70 10 L70 18" marker-end="url(#a4)" class="dash"/><text x="460" y="212" text-anchor="middle" class="lbl">the next RDR's research finds it</text>
+<rect class="box" x="10" y="225" width="160" height="36" rx="6"/><text x="90" y="248" text-anchor="middle" font-weight="600">knowledge store</text>
+<line x1="70" y1="161" x2="70" y2="223" marker-end="url(#a4)"/><text x="78" y="196" class="lbl">indexed</text>
+<path d="M170 243 L640 243 L640 10 L70 10 L70 18" marker-end="url(#a4)" class="dash"/><text x="420" y="237" text-anchor="middle" class="lbl">the next RDR's research finds it</text>
 </svg><figcaption>The cycle from conversation to closed RDR. Orange boxes are your decisions. The closed RDR is indexed, and the next RDR's research finds it.</figcaption></figure>
 <div class="callout rule"><p><strong>The cycle again, in one line.</strong> A conversation becomes a draft. Research grows it in cycles. You read and react, sometimes with a critic. A gate checks it, within a budget. You accept, and the plan follows. Sessions build it. Each session ends with a continuation, and each phase ends with a review. You close it. The next RDR can find it.</p></div>
 
