@@ -138,7 +138,7 @@ ul.plain li{margin:3px 0}
 <div class="eyebrow">Nexus · getting started</div>
 <h1>Nexus Getting Started</h1>
 <p class="lede">You do all of this inside Claude Code. You describe what you want. Claude chooses the Nexus tools and skills for you. Each lesson shows the instruction to give, what Claude does, and what you see. Nine lessons, about ninety minutes.</p>
-<p class="note">Words in <span class="ph">ORANGE CAPITALS</span> are placeholders. Replace them with something from your own project before you send the instruction.</p>
+<p class="note">Words in <span class="ph">&lt;ORANGE CAPITALS IN ANGLE BRACKETS&gt;</span> are placeholders. Replace them with something from your own project before you send the instruction.</p>
 <p class="note">Before you start: install Nexus and the plugin with the <a href="./">install guide</a>. Then open a terminal in a project of yours and run <code>claude</code>. Every lesson happens in that Claude Code session.</p>
 
 <div class="gloss-wrap">
@@ -233,23 +233,23 @@ ul.plain li{margin:3px 0}
 
 <h3>Search one topic</h3>
 <div class="see">Say to Claude</div>
-<div class="cmd"><pre>Use Nexus search to show me the main files for the topic "<span class="ph">TOPIC</span>", and explain in a few sentences what they do.</pre><button class="copy" type="button">Copy</button></div>
-<p class="note">Replace <span class="ph">TOPIC</span> with a topic from the list.</p>
+<div class="cmd"><pre>Use Nexus search to show me the main files for the topic "<span class="ph">&lt;TOPIC&gt;</span>", and explain in a few sentences what they do.</pre><button class="copy" type="button">Copy</button></div>
+<p class="note">Replace <span class="ph">&lt;TOPIC&gt;</span> with a topic from the list.</p>
 <div class="see">What you see</div>
 <p>Claude Code shows a tool call named <code>search</code> on the <code>nexus</code> server. The tool returns the best matching chunks, with the file path and the line number of each. Claude answers from those chunks and names the files. Open one of the files to check that the answer is correct.</p>
 <div class="callout"><p><strong>If Claude uses <code>grep</code> instead</strong>, say: <em>"Use Nexus search, not grep."</em> Grep finds exact words. Nexus search finds meaning, so it also finds code that uses different words for the same idea.</p></div>
 
 <h3>Now ask your own questions</h3>
 <p>Search works best with a question in normal language, not with a keyword. Three forms that work for any repository:</p>
-<div class="cmd"><pre>Where in this codebase is <span class="ph">SOMETHING YOU KNOW EXISTS</span> handled?
-Is there any code in this repository that <span class="ph">DOES SOMETHING YOU ARE NOT SURE ABOUT</span>?
-Which files deal with <span class="ph">A CONCEPT</span>, and how are they connected?</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>Where in this codebase is <span class="ph">&lt;SOMETHING YOU KNOW EXISTS&gt;</span> handled?
+Is there any code in this repository that <span class="ph">&lt;DOES SOMETHING YOU ARE NOT SURE ABOUT&gt;</span>?
+Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are they connected?</pre><button class="copy" type="button">Copy</button></div>
 <p>Start with something you know exists. Check that Nexus finds it. Then ask about something you are not sure about. The second kind of question is where semantic search helps most. It finds code that you did not know the name of.</p>
 <p class="note">From the terminal, a search is <code>nx search "your question"</code>. Add <code>--corpus docs</code> to search only documentation, or <code>--files</code> to list only file paths.</p>
 
 <div class="further"><h4>Investigate further</h4><ul>
-<li>Ask Claude: <em>"Search only the documentation, not the code, for <span class="ph">A CONCEPT</span>."</em> Claude limits the search to the <code>docs</code> group.</li>
-<li>Ask Claude: <em>"Search for <span class="ph">AN EXACT CLASS OR FUNCTION NAME</span> with hybrid search."</em> Hybrid search combines exact text matches with semantic matches.</li>
+<li>Ask Claude: <em>"Search only the documentation, not the code, for <span class="ph">&lt;A CONCEPT&gt;</span>."</em> Claude limits the search to the <code>docs</code> group.</li>
+<li>Ask Claude: <em>"Search for <span class="ph">&lt;AN EXACT CLASS OR FUNCTION NAME&gt;</span> with hybrid search."</em> Hybrid search combines exact text matches with semantic matches.</li>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/repo-indexing.md">Repo indexing</a>: how files are classified and cut into chunks.</li>
 </ul></div>
 </section>
@@ -276,7 +276,7 @@ Which files deal with <span class="ph">A CONCEPT</span>, and how are they connec
 <h3>When you want to say something yourself</h3>
 <p>This is the exception, not the rule. Use it when Claude does not know a fact that it cannot find in the code, for example a decision made outside the repository.</p>
 <div class="see">Say to Claude</div>
-<div class="cmd"><pre>Remember in Nexus memory, permanently: <span class="ph">A FACT ABOUT THIS PROJECT THAT IS NOT IN THE CODE</span></pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>Remember in Nexus memory, permanently: <span class="ph">&lt;A FACT ABOUT THIS PROJECT THAT IS NOT IN THE CODE&gt;</span></pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>A tool call named <code>memory_put</code> on the <code>nexus</code> server. Claude chooses a title. "Permanently" tells it to not set a 30-day TTL. If an entry is wrong, say so: <em>"The memory entry about X is wrong. The correct fact is Y."</em> Claude replaces it.</p>
 <p class="note">From the terminal: <code>nx memory list -p PROJECT</code> shows every entry for a project.</p>
@@ -320,8 +320,8 @@ Which files deal with <span class="ph">A CONCEPT</span>, and how are they connec
 
 <h3>A note in a subject collection</h3>
 <div class="see">Say to Claude</div>
-<div class="cmd"><pre>Store this in Nexus knowledge, in the collection "<span class="ph">SUBJECT</span>", with the title "<span class="ph">SHORT-TITLE</span>":
-<span class="ph">A LESSON YOU LEARNED THAT IS TRUE BEYOND THIS PROJECT</span></pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>Store this in Nexus knowledge, in the collection "<span class="ph">&lt;SUBJECT&gt;</span>", with the title "<span class="ph">&lt;SHORT-TITLE&gt;</span>":
+<span class="ph">&lt;A LESSON YOU LEARNED THAT IS TRUE BEYOND THIS PROJECT&gt;</span></pre><button class="copy" type="button">Copy</button></div>
 <p class="note">Example: collection <code>distributed-systems</code>, title <code>idempotency-keys-per-tenant</code>, text "Idempotency keys must be scoped per tenant. A global key space let two tenants collide in production."</p>
 <div class="see">What you see</div>
 <p>A tool call named <code>store_put</code> on the <code>nexus</code> server, with the collection, the title, and the text. Claude confirms the document ID. From now on, a search about that subject finds this note, in any project.</p>
@@ -329,14 +329,14 @@ Which files deal with <span class="ph">A CONCEPT</span>, and how are they connec
 
 <h3>Documents</h3>
 <div class="see">Say to Claude</div>
-<div class="cmd"><pre>Index <span class="ph">PATH/TO/A-MARKDOWN-FILE.md</span> and <span class="ph">PATH/TO/A-PAPER.pdf</span> into Nexus.</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>Index <span class="ph">&lt;PATH/TO/A-MARKDOWN-FILE.md&gt;</span> and <span class="ph">&lt;PATH/TO/A-PAPER.pdf&gt;</span> into Nexus.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What Claude does</div>
 <p>Claude runs <code>nx index md</code> for the Markdown file and <code>nx index pdf</code> for the PDF. Nexus chooses the correct PDF reader automatically, also for scanned PDFs. Both documents are now in the knowledge store and in the catalog.</p>
 
 <h3>The catalog</h3>
 <p>Nexus adds every repository, note, and document to the catalog. The catalog also records links between documents. A link has a type, for example <code>cites</code>, <code>implements</code>, or <code>supersedes</code>. Search finds text inside documents. The catalog answers two other questions: what documents exist, and how they are connected.</p>
 <div class="see">Say to Claude</div>
-<div class="cmd"><pre>Which documents in the Nexus catalog are linked to <span class="ph">THE TITLE OF THE PAPER</span>?</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>Which documents in the Nexus catalog are linked to <span class="ph">&lt;THE TITLE OF THE PAPER&gt;</span>?</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>Tool calls on the <code>nexus-catalog</code> server: <code>show</code> or <code>links</code>. Claude lists the linked documents and the type of each link. In a new install there are few links yet. Links appear when Nexus enriches documents and when an RDR cites a source.</p>
 <p class="note">From the terminal: <code>nx store put</code>, <code>nx index md</code>, <code>nx index pdf</code>, and <code>nx catalog links "TITLE"</code>.</p>
@@ -344,7 +344,7 @@ Which files deal with <span class="ph">A CONCEPT</span>, and how are they connec
 <div class="further"><h4>Investigate further</h4><ul>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/collections.md">Collections</a>: the rules for collection names.</li>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/catalog.md">Document catalog</a>: all link types, and how to add a link yourself.</li>
-<li>Ask Claude: <em>"Export the <span class="ph">SUBJECT</span> collection to a backup file."</em> Claude runs <code>nx store export</code>.</li>
+<li>Ask Claude: <em>"Export the <span class="ph">&lt;SUBJECT&gt;</span> collection to a backup file."</em> Claude runs <code>nx store export</code>.</li>
 </ul></div>
 </section>
 
@@ -355,32 +355,32 @@ Which files deal with <span class="ph">A CONCEPT</span>, and how are they connec
 
 <h3>Research a subject</h3>
 <div class="see">Say to Claude</div>
-<div class="cmd"><pre>/conexus:research <span class="ph">A SUBJECT THAT YOUR PROJECT DEPENDS ON</span></pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>/conexus:research <span class="ph">&lt;A SUBJECT THAT YOUR PROJECT DEPENDS ON&gt;</span></pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>Claude starts a research agent. The agent searches the knowledge store first, then the web, then your code. Claude Code shows the agent's tool calls: <code>search</code>, <code>query</code>, web searches, and at the end <code>store_put</code>. The result is a summary with sources, and the findings are saved in the knowledge store. The next search on that subject finds them.</p>
 <p class="note">Example subjects: the consensus protocol your database uses, the retry rules of an API you call, a library your build depends on. Pick something you want to understand better, not something you already know.</p>
 
 <h3>Follow what you found</h3>
 <p>A research result names documents and files. Each of them is a place to continue. Ask about one:</p>
-<div class="cmd"><pre>Open <span class="ph">ONE DOCUMENT OR FILE FROM THE RESULT</span> and tell me what else in the store is related to it.</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>Open <span class="ph">&lt;ONE DOCUMENT OR FILE FROM THE RESULT&gt;</span> and tell me what else in the store is related to it.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>Claude calls <code>show</code> and <code>links</code> on the <code>nexus-catalog</code> server, and <code>search</code> for related chunks. It tells you what the document is, what links to it, and what is similar. Then ask about one of those. This is how you move through the store: from one document to its neighbours, without knowing the names in advance.</p>
 
 <h3>Connect a document to code</h3>
 <p>The catalog records links between documents. Most links appear by themselves: an indexed paper cites other papers, an RDR cites its sources. You can also add one when you know a connection that Nexus does not.</p>
 <div class="see">Say to Claude</div>
-<div class="cmd"><pre>Link <span class="ph">THE PAPER OR DESIGN DOCUMENT</span> to <span class="ph">THE FILE OR MODULE THAT IMPLEMENTS IT</span> with an "implements" link.</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>Link <span class="ph">&lt;THE PAPER OR DESIGN DOCUMENT&gt;</span> to <span class="ph">&lt;THE FILE OR MODULE THAT IMPLEMENTS IT&gt;</span> with an "implements" link.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
-<p>A tool call named <code>link</code> on the <code>nexus-catalog</code> server, with the two documents and the type <code>implements</code>. From now on, a question about the design finds the code, and a question about the code finds the design. Ask: <em>"What implements <span class="ph">THE DESIGN DOCUMENT</span>?"</em> Claude follows the link.</p>
-<p class="note">Link types: <code>cites</code>, <code>implements</code>, <code>supersedes</code>, <code>relates</code>, and others. If you index papers, ask Claude to <em>"enrich the <span class="ph">COLLECTION</span> collection with bibliographic data"</em>. Claude runs <code>nx enrich bib</code>, which looks up each paper and adds <code>cites</code> links automatically.</p>
+<p>A tool call named <code>link</code> on the <code>nexus-catalog</code> server, with the two documents and the type <code>implements</code>. From now on, a question about the design finds the code, and a question about the code finds the design. Ask: <em>"What implements <span class="ph">&lt;THE DESIGN DOCUMENT&gt;</span>?"</em> Claude follows the link.</p>
+<p class="note">Link types: <code>cites</code>, <code>implements</code>, <code>supersedes</code>, <code>relates</code>, and others. If you index papers, ask Claude to <em>"enrich the <span class="ph">&lt;COLLECTION&gt;</span> collection with bibliographic data"</em>. Claude runs <code>nx enrich bib</code>, which looks up each paper and adds <code>cites</code> links automatically.</p>
 
 <h3>Shape the topic map</h3>
 <p>In lesson 2 you saw the topics that Nexus found in your repository. Topics are not fixed. You can look at them, question them, and change them.</p>
 <div class="see">Say to Claude</div>
 <div class="cmd"><pre>Show me the topic map for this project. Which topics appear in both the code and the documentation?</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
-<p>Claude runs <code>nx taxonomy list</code> and <code>nx taxonomy hubs</code>. The hubs are topics that connect several collections. They are often the most important ideas in the project. Then narrow a search to one topic: <em>"Search for <span class="ph">A QUESTION</span> inside the topic <span class="ph">TOPIC</span> only."</em> Claude passes the topic to the <code>search</code> tool, and results outside that topic are excluded.</p>
-<p>When a topic is wrong, say so: <em>"The topic <span class="ph">TOPIC</span> should be called <span class="ph">BETTER NAME</span>."</em> or <em>"Assign <span class="ph">DOCUMENT</span> to the topic <span class="ph">TOPIC</span>."</em> Claude runs <code>nx taxonomy assign</code>. For a full review of every topic, <code>nx taxonomy review</code> in the terminal walks through them one by one and lets you accept, rename, or merge each.</p>
+<p>Claude runs <code>nx taxonomy list</code> and <code>nx taxonomy hubs</code>. The hubs are topics that connect several collections. They are often the most important ideas in the project. Then narrow a search to one topic: <em>"Search for <span class="ph">&lt;A QUESTION&gt;</span> inside the topic <span class="ph">&lt;TOPIC&gt;</span> only."</em> Claude passes the topic to the <code>search</code> tool, and results outside that topic are excluded.</p>
+<p>When a topic is wrong, say so: <em>"The topic <span class="ph">&lt;TOPIC&gt;</span> should be called <span class="ph">&lt;BETTER NAME&gt;</span>."</em> or <em>"Assign <span class="ph">&lt;DOCUMENT&gt;</span> to the topic <span class="ph">&lt;TOPIC&gt;</span>."</em> Claude runs <code>nx taxonomy assign</code>. For a full review of every topic, <code>nx taxonomy review</code> in the terminal walks through them one by one and lets you accept, rename, or merge each.</p>
 
 <div class="callout rule"><p><strong>The loop:</strong> ask a question. Look at what Claude found. Ask about one of the results. Connect what belongs together. Repeat. Each search, link, and topic you touch makes the next answer better, for you and for Claude.</p></div>
 
@@ -398,7 +398,7 @@ Which files deal with <span class="ph">A CONCEPT</span>, and how are they connec
 <p class="why">A normal question makes one or two searches. Some questions need more: compare what the documentation says with what the code does, or collect a pattern from many files. For these, the plugin has a skill that plans several steps and combines the results.</p>
 
 <div class="see">Say to Claude</div>
-<div class="cmd"><pre>/conexus:query Compare what the documentation says about <span class="ph">A CONCEPT FROM LESSON 2</span> with what the code actually does.</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>/conexus:query Compare what the documentation says about <span class="ph">&lt;A CONCEPT FROM LESSON 2&gt;</span> with what the code actually does.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>A tool call named <code>nx_answer</code>. It searches the documentation and the code, extracts the relevant facts from each, compares them, and returns one answer with sources. This takes longer than a normal search, usually 5 to 15 seconds and sometimes more.</p>
 <p class="note">Use <code>/conexus:query</code> when one search cannot hold the answer. For a simple question, a normal sentence to Claude is faster. You can also ask the large question in plain words. Claude recognizes it and plans the search without the command.</p>
