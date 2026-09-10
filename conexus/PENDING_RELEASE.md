@@ -31,4 +31,30 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.40.0)
 
-(none)
+- `conexus/hooks/scripts/subagent-start.sh`: RDR-205 "Identity and
+  addressing" — parses `agent_id` from its own SubagentStart payload and
+  adds one line to the injected `additionalContext` giving the agent its
+  claimant id and mailbox address (`mailbox/<agent_id>`). No network I/O.
+  bead: nexus-em75s.11
+- `conexus/hooks/hooks.json`: two new `async: true` projection entries,
+  each beside its blocking hook — `subagent-start-tuple-async.sh` on
+  `SubagentStart`, `subagent-stop-tuple-async.sh` on `SubagentStop`. The
+  three blocking TSV hooks (`agent-dispatch-expect.sh`,
+  `subagent-start-stamp.sh`, `subagent-stop.sh`) are untouched.
+  bead: nexus-em75s.11
+- `conexus/hooks/scripts/subagent-start-tuple-async.sh`,
+  `conexus/hooks/scripts/subagent-stop-tuple-async.sh` (new): thin,
+  inert-safe wrappers — read the hook's own stdin payload, then
+  background `tuple_ledger_project.py` with all three fds redirected to
+  `/dev/null` before backgrounding, so the wrapper itself returns in
+  milliseconds regardless of whether the installed harness honors
+  `async: true` on this hooks.json entry (CA 4).
+  bead: nexus-em75s.11
+- `conexus/hooks/scripts/tuple_ledger_project.py` (new): the async
+  projection body. Reads the client's cached storage-service and
+  data-token lease files under `~/.config/nexus/`, POSTs the ledger
+  start/report tuple to `/v1/tuples/out` with `curl`, never mints, and on
+  a missing or near-expiry data-token lease skips and appends the reason
+  to `<session_id>.tuple-projection.log` beside the session's
+  `.expectations` ledger.
+  bead: nexus-em75s.11

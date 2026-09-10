@@ -71,6 +71,23 @@ if [[ -n "$HOOK_SESSION_ID" ]]; then
     export NX_SESSION_ID="$HOOK_SESSION_ID"
 fi
 
+# RDR-205 "Identity and addressing" (bead nexus-em75s.11): no hook mints
+# anything. This is the one line this script adds beyond its existing
+# injection — the harness's own opaque per-instance agent_id, plus the
+# tuple-space mailbox address derived from it. No network I/O: the async
+# SubagentStart/SubagentStop entries beside this one write the ledger
+# tuples independently, keyed on this same id.
+AGENT_ID=$(python3 -c "
+import json, sys
+try:
+    print(json.loads(sys.argv[1]).get('agent_id', ''))
+except Exception:
+    print('')
+" "$STDIN" 2>/dev/null)
+if [[ -n "$AGENT_ID" ]]; then
+    echo "Claimant id: $AGENT_ID — mailbox: mailbox/$AGENT_ID"
+fi
+
 # Classify agent purpose
 SKIP_STORAGE_DOCS=0
 SKIP_T2_SCAN=0
