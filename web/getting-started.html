@@ -155,15 +155,15 @@ ul.plain li{margin:3px 0}
 <p class="why">When Claude Code starts with the Nexus plugin, Nexus gives Claude some context before you type anything. This lesson shows what that context is, and introduces the three stores that all later lessons use.</p>
 
 <h3>What you see when the session starts</h3>
-<p>Run <code>claude</code> in your project. Before your first message, the plugin shows Claude several blocks of text. You can read them too. The important ones are:</p>
+<p>Run <code>claude</code> in your project. Before your first message, the plugin shows Claude several blocks of text, each with a heading. You can read them too. The important ones are:</p>
 <div class="tbl"><table>
 <tr><th>Block</th><th>Content</th></tr>
-<tr><td><code>## T2 Memory</code></td><td>The memory entries for this project. Empty in a new project. Lesson 3 adds the first one.</td></tr>
-<tr><td><code>## Ready Beads</code></td><td>Open tasks from the <code>bd</code> task tracker, if the project uses it.</td></tr>
-<tr><td><code>## nx Capabilities</code></td><td>A short list of the Nexus tools that Claude can use.</td></tr>
-<tr><td><code>## Knowledge Map</code></td><td>The main subjects in the knowledge store, with the number of chunks for each.</td></tr>
+<tr><td>T2 Memory</td><td>The memory entries for this project. Empty in a new project. Lesson 3 adds the first one.</td></tr>
+<tr><td>Ready Beads</td><td>Open tasks from the <code>bd</code> task tracker, if the project uses it.</td></tr>
+<tr><td>nx Capabilities</td><td>A short list of the Nexus tools that Claude can use.</td></tr>
+<tr><td>Knowledge Map</td><td>The main subjects in the knowledge store, with the number of chunks for each.</td></tr>
 </table></div>
-<p class="note">If you see a block named <code>## nx Preflight: FAILED</code>, a part of the install is missing. Type <code>/conexus:nx-preflight</code>. It tells you which part.</p>
+<p class="note">If you see a block with the heading "nx Preflight: FAILED", a part of the install is missing. Type <code>/conexus:nx-preflight</code>. It tells you which part.</p>
 
 <h3>The three stores</h3>
 <p>Every Nexus tool works on one of three stores. The stores differ in one way: how long the data lives.</p>
@@ -223,7 +223,7 @@ Auth uses JWT. Tokens expire after 24 hours. The refresh endpoint is /v2/refresh
 <div class="see">Say to Claude, later or in a new session</div>
 <div class="cmd"><pre>What does Nexus memory say about authentication in this project?</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
-<p>A tool call named <code>memory_search</code> or <code>memory_get</code>. Claude answers with the stored text. In a new session, the entry also appears in the <code>## T2 Memory</code> block from lesson 1, before you ask.</p>
+<p>A tool call named <code>memory_search</code> or <code>memory_get</code>. Claude answers with the stored text. In a new session, the entry also appears in the "T2 Memory" block from lesson 1, before you ask.</p>
 
 <div class="callout rule"><p><strong>Three rules for good entries:</strong> Put one fact in each entry. Give it a title that describes it, for example <code>auth-tokens</code>, not <code>notes-3</code>. Say "permanently" for facts that must stay. Without that word, the entry lives 30 days, and each read makes it live longer.</p></div>
 <p class="note">If you store an entry with the same title again, the new text replaces the old text. To change a fact, store it again. From the terminal: <code>nx memory put "…" -p PROJECT -t TITLE --ttl permanent</code>.</p>
