@@ -242,6 +242,28 @@ ul.plain li{margin:3px 0}
 <div class="see">In the next session</div>
 <p>Type <code>/clear</code>, or start a new session. Paste the copied line as the first message. Claude reads the file, runs the first actions, and continues where the last session stopped. It also receives the memory block from lesson 1, so it has both the facts and the position.</p>
 
+<h3>What it looks like, end to end</h3>
+<p>An example. The project is a small web service. The session fixed one bug and started on a second.</p>
+<div class="see">End of the first session</div>
+<div class="cmd"><pre><span class="c">You:</span>    /conexus:continuation
+
+<span class="c">Claude:</span> Paste this in the next session after /clear:
+
+        cat /tmp/nexus-continuation-orders-api-2026-09-10.md</pre><button class="copy" type="button">Copy</button></div>
+<p>You copy the third line. Then you type <code>/clear</code>, or you close the terminal and come back the next day.</p>
+
+<div class="see">Start of the next session</div>
+<div class="cmd"><pre><span class="c">You:</span>    cat /tmp/nexus-continuation-orders-api-2026-09-10.md
+
+<span class="c">Claude:</span> Reading the handoff.
+        Finished yesterday: the timeout bug in the order endpoint (commit 4f2a91c,
+        task orders-17 closed). Open: the duplicate-webhook bug, task orders-18,
+        with the cause found (retries are not idempotent) and the fix not yet written.
+        First actions from the handoff: I am on branch fix/orders-18, the tree is
+        clean, and the memory entry webhook-idempotency has the analysis.
+        Continuing with the fix. Starting with the test for the duplicate case.</pre><button class="copy" type="button">Copy</button></div>
+<p>Claude ran the first actions from the file (checked the branch, checked that the tree was clean, read the memory entry it named) and continued the open work. You typed one line. The names in this example are made up. The shape is what you will see.</p>
+
 <div class="callout rule"><p><strong>Two stores, two jobs.</strong> Memory holds what is true about the project, for weeks. The continuation file holds where the work stands, for the next session only. Use <code>/conexus:continuation</code> at the end of every work session, and also before a long session gets compressed. It costs a few seconds. Without it, the next session spends its first minutes finding out what this one already knew.</p></div>
 <p class="note">You can give a topic: <code>/conexus:continuation <span class="ph">&lt;TOPIC&gt;</span></code>. The file is then named after the topic, which helps when you work on several things in parallel. The files live in <code>/tmp</code> and disappear at the next reboot. They are a handoff, not a record. The record is memory.</p>
 
