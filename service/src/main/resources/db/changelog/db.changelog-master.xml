@@ -1240,6 +1240,17 @@
     <include file="db/changelog/hygiene-006-sequence-catchup.xml"/>
 
     <!--
+        nexus-c0g6e (GH #1529): a 6.18.1-era fidelity import left
+        nexus.topics.doc_count above the real nexus.topic_assignments count
+        on 94 topics (12,379 recorded vs 9,625 rows, all over-counted) —
+        drift predating taxonomy-013's recompute triggers. hygiene-007-1
+        recounts every topic's doc_count from topic_assignments and
+        corrects the rows that disagree; read-only otherwise. Late-append
+        convention, before the grants tail.
+    -->
+    <include file="db/changelog/hygiene-007-doc-count-recount.xml"/>
+
+    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when

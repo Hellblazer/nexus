@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    hygiene-007 — recount every nexus.topics.doc_count from nexus.topic_
+    assignments (bead nexus-c0g6e, GH #1529). Boot-time walk, same shape as
+    hygiene-006-sequence-catchup.xml.
+
+    THE DEFECT (reporter, confirmed still present on 7.38.0 / engine
+    v0.1.112). 94 topics created 2026-04-22..05-01 on a store that went
+    through the conexus 6.18.1 guided upgrade carry doc_count above their
+    real topic_assignments count: 12,379 recorded vs 9,625 rows, every one
+    of the 94 over-counted. taxonomy-013's recompute triggers
+    (topics_doc_count_recount_ins/_del) are correct for every assignment
+    written since they landed — this is imported drift that predates them,
+    not a live miscount. The store's own import path (a 6.18.1-era fidelity
+    import, the same shape hygiene-006-1's header documents for the
+    sequence-lag defect) wrote topics rows with an explicit doc_count that
+    never matched the assignment rows actually carried across.
+
+    THE FIX. One boot walk over every nexus.topics row: recompute doc_count
+    from a single batched GROUP BY over nexus.topic_assignments (mirroring
+    taxonomy-013's own batched-aggregate recount, not a per-row correlated
+    subquery), and UPDATE only the rows where the stored value disagrees.
+    The zero case is covered by construction: a topic with no assignment
+    rows at all gets the LEFT JOIN's COALESCE(..., 0), not skipped. RAISE
+    NOTICE per topic corrected and one summary line, so a Liquibase walk log
+    names exactly what changed — same idiom as hygiene-006-1.
+
+    LOCK ORDER. This walk reads under the same two tables taxonomy-013's
+    lock-order fix documents (nexus.topics, nexus.topic_assignments) and
+    writes only nexus.topics, one row at a time, each write scoped to its
+    own (tenant_id, id) primary key — the same granularity taxonomy-013
+    established as reliably lock-safe (a single-table, PK-indexed statement
+    with no join to defeat lock ordering). The walk runs once at boot,
+    outside of any concurrent assign_from_chashes_<dim> traffic's steady
+    state, so there is no adversarial concurrent writer to serialize
+    against here the way taxonomy-013/015 had to.
+
+    RLS. Both walked tables carry FORCE ROW LEVEL SECURITY (taxonomy-001,
+    taxonomy-014's own header confirms both still do), under which even the
+    owner sees no rows and the recount would read empty. Unlike hygiene-
+    006-1 — which walks a dynamically-discovered set of heterogeneous
+    tables and so toggles NO FORCE / FORCE per table, per max() read — this
+    walk touches exactly two statically-known tables for both its read and
+    its writes, so the whole pass (the GROUP BY read and every corrective
+    UPDATE) is wrapped in one NO FORCE / FORCE region per table, each
+    toggle still driven by the table's own pg_class.relforcerowsecurity so
+    a table that is not forced is never touched (Approved Shape 1,
+    tests/test_changelog_rls_lint.py).
+
+    NEVER WEDGES (2026-08-16 directive, same as hygiene-006-1): no RAISE
+    EXCEPTION path; a store with no drift (every fresh install, and any
+    store whose topics predate the 6.18.1-era import path or postdate
+    taxonomy-013) runs this as a read-only pass that corrects nothing.
+
+    IDEMPOTENCE: a second run finds every topic's doc_count already equal
+    to its topic_assignments count and corrects nothing; independent of
+    Liquibase's own once-only guarantee.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.29.xsd">
+
+    <changeSet id="hygiene-007-1" author="nexus-c0g6e">
+        <comment>
+            nexus-c0g6e (GH #1529): recount every nexus.topics.doc_count from
+            nexus.topic_assignments (a 6.18.1-era fidelity import wrote
+            topics.doc_count that never matched the assignment rows carried
+            across, predating taxonomy-013's recompute triggers). Read-only
+            except the corrective UPDATE; toggle-wrapped NO FORCE / FORCE
+            per table around the whole pass; NOTICE per topic corrected.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+DECLARE
+    r           record;
+    v_scanned   integer := 0;
+    v_corrected integer := 0;
+    v_forced_t  boolean;
+    v_forced_a  boolean;
+BEGIN
+    SELECT relforcerowsecurity INTO v_forced_t
+      FROM pg_class WHERE oid = 'nexus.topics'::regclass;
+    SELECT relforcerowsecurity INTO v_forced_a
+      FROM pg_class WHERE oid = 'nexus.topic_assignments'::regclass;
+
+    IF v_forced_t THEN
+        ALTER TABLE nexus.topics NO FORCE ROW LEVEL SECURITY;
+    END IF;
+    IF v_forced_a THEN
+        ALTER TABLE nexus.topic_assignments NO FORCE ROW LEVEL SECURITY;
+    END IF;
+
+    FOR r IN
+        SELECT t.tenant_id, t.id, t.doc_count, COALESCE(a.cnt, 0) AS actual_count
+          FROM nexus.topics t
+          LEFT JOIN (
+              SELECT tenant_id, topic_id, COUNT(*) AS cnt
+                FROM nexus.topic_assignments
+               GROUP BY tenant_id, topic_id
+          ) a ON a.tenant_id = t.tenant_id AND a.topic_id = t.id
+         ORDER BY t.tenant_id, t.id
+    LOOP
+        v_scanned := v_scanned + 1;
+        IF r.doc_count IS DISTINCT FROM r.actual_count THEN
+            UPDATE nexus.topics
+               SET doc_count = r.actual_count
+             WHERE tenant_id = r.tenant_id AND id = r.id;
+            v_corrected := v_corrected + 1;
+            RAISE NOTICE 'hygiene-007-1: topic %.% doc_count corrected % -> % (drift predates taxonomy-013 or came through the fidelity import)',
+                r.tenant_id, r.id, r.doc_count, r.actual_count;
+        END IF;
+    END LOOP;
+
+    IF v_forced_a THEN
+        ALTER TABLE nexus.topic_assignments FORCE ROW LEVEL SECURITY;
+    END IF;
+    IF v_forced_t THEN
+        ALTER TABLE nexus.topics FORCE ROW LEVEL SECURITY;
+    END IF;
+
+    RAISE NOTICE 'hygiene-007-1: % topic(s) scanned in schema nexus, % doc_count corrected', v_scanned, v_corrected;
+END $$;
+        </sql>
+        <rollback>
+            <!-- Nothing to undo: a corrected doc_count is the true count: a
+                 rolled-back correction would re-introduce the drift this
+                 changeset removes, and any live INSERT/DELETE since would
+                 make the ORIGINAL (wrong) value strictly less accurate,
+                 never more. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
