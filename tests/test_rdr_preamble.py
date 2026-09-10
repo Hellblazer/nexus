@@ -458,19 +458,30 @@ class TestRdrAccept:
         cmd = (_PLUGIN_DIR / "commands" / "rdr-accept.md").read_text()
         assert _disposition_clause(skill) == _disposition_clause(cmd) == _disposition_clause(out)
 
-    def test_rdr_accept_preamble_opens_no_t2_client(self):
-        """nexus-yjf5l.8: preamble_rdr_accept prints instructions only; it
-        never opens a T2 client itself — the no-T2 boundary is mechanical,
-        not a claim in a docstring."""
-        import inspect
+    def test_rdr_accept_preamble_opens_no_t2_client(self, rdr_env, monkeypatch) -> None:
+        """nexus-yjf5l.8 / .18: preamble_rdr_accept prints instructions
+        only; it never opens a T2 client itself, directly OR through a
+        helper it calls. Runtime pin (nexus-yjf5l.18, Phase 3 review F2):
+        a static ``inspect.getsource`` scan of the callback's own body only
+        catches a direct ``_t2_client_factory`` reference and would miss a
+        future helper that opens one and is merely called from here —
+        monkeypatching the factory to raise catches both, at every calling
+        frame, which is why this is the runtime form rather than the
+        source-scan one."""
+        import nexus.commands.rdr as rdr_mod
 
-        from nexus.commands.rdr import preamble_rdr_accept
+        def _boom() -> None:
+            raise AssertionError("preamble_rdr_accept must never open a T2 client")
 
-        # preamble_rdr_accept is a click Command (@preamble.command wraps
-        # the function); .callback is the underlying function inspect can
-        # read source from.
-        src = inspect.getsource(preamble_rdr_accept.callback)
-        assert "_t2_client_factory" not in src
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", _boom)
+        _write_rdr(
+            rdr_env["rdr_dir"], "rdr-204-example.md",
+            {"title": "Example", "status": "draft", "type": "Architecture", "priority": "medium"},
+            body="## Problem\n\nText.\n",
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-accept", "--", "204"])
+        assert result.exit_code == 0, result.output
+        assert "Planning Handoff" in result.output
 
     def test_rdr_accept_with_draft_rdr_prints_planning_handoff(self, rdr_env):
         """Draft RDR with plan section: prints Planning Handoff block."""
@@ -2083,6 +2094,25 @@ class TestRdrGateRegateBlock:
             == _finding_title_key("Some Title")
         )
 
+    def test_finding_title_key_does_not_strip_a_non_class_bracket_tag(self) -> None:
+        """nexus-yjf5l.18 (Phase 3 review F1): the class-strip regex is
+        built from BLOCKS_PLANNING/DISCOVER_AT_IMPLEMENTATION
+        (VALID_CLASSIFICATIONS), not a generic ``[A-Z][A-Z-]*`` bracket
+        shape — a title genuinely beginning ``[SQL]`` is not a class tag
+        and must keep its bracket, or it silently collides with the
+        differently-titled finding whose bracket was wrongly stripped."""
+        from nexus.commands.rdr import _finding_title_key
+
+        assert _finding_title_key("[SQL] query builder allows injection") != _finding_title_key(
+            "query builder allows injection"
+        )
+        assert _finding_title_key("[SQL] query builder allows injection") == _finding_title_key(
+            "[SQL] query builder allows injection"
+        )
+        # The two real classes are still stripped (regression, same as
+        # test_finding_title_key_strips_a_classed_residual_tag above).
+        assert _finding_title_key("[BLOCKS-PLANNING] Some Title") == _finding_title_key("Some Title")
+
     def test_classed_residual_is_exempt_from_the_survivor_sweep(self, rdr_env, monkeypatch):
         """The same exemption as test_recorded_residual_is_exempt_from_the_
         survivor_sweep, but the prior round's `residuals:` line now carries
@@ -2113,6 +2143,38 @@ class TestRdrGateRegateBlock:
         res_finding_idx = out.index("unused variable in the fallback branch")
         assert rec_idx < res_finding_idx < pf_idx, (
             "the classed residual is still recognised and listed under its own heading"
+        )
+
+    def test_recorded_residual_is_exempt_from_the_survivor_sweep_for_free_form_critique(self, rdr_env, monkeypatch):
+        """nexus-yjf5l.15 (Phase 1 review F2): the same exemption as
+        test_recorded_residual_is_exempt_from_the_survivor_sweep, but the
+        prior critique is the free-form 'CRITICAL — <title>' shape. Before
+        the fix, _critique_findings returned [] for this shape and the
+        exemption never ran."""
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                "outcome: \"PASSED\"\ndate: \"2026-09-09\"\n"
+                "critique: nexus_rdr/204-gate-critique-2026-09-09zz\n"
+                "residuals:\n  - unused variable in the fallback branch\n"
+            ),
+            "204-gate-critique-2026-09-09zz": (
+                "CRITICAL — query timeout doubles under load\nShip-blocker: yes\n\n"
+                "SIGNIFICANT — unused variable in the fallback branch\nShip-blocker: no\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"])
+        assert result.exit_code == 0, result.output
+        out = result.output
+        assert "Recorded residuals (dispositioned at accept; not survivors" in out, out
+        rec_idx = out.index("Recorded residuals")
+        pf_idx = out.index("Prior findings (each must be closed EVERYWHERE")
+        res_finding_idx = out.index("unused variable in the fallback branch")
+        assert rec_idx < res_finding_idx < pf_idx, (
+            "the free-form residual is now recognised and listed under its own heading"
         )
 
     def test_unmatched_residual_is_named_not_dropped(self, rdr_env, monkeypatch):
@@ -2570,6 +2632,40 @@ class TestRdrFixPreamble:
         assert "Residuals (record; do not fix in this change)" in out, out
         assert "query timeout doubles under load" in out
         assert "unused variable in the fallback branch" in out
+        ship_idx = out.index("Ship-blockers (fix these)")
+        res_idx = out.index("Residuals (record; do not fix in this change)")
+        assert ship_idx < out.index("query timeout doubles under load") < res_idx, (
+            "the ship-blocker finding is listed under the fix-these heading"
+        )
+        assert res_idx < out.index("unused variable in the fallback branch"), (
+            "the residual finding is listed under the record-only heading"
+        )
+
+    def test_round_three_splits_ship_blockers_from_residuals_for_free_form_critique(self, rdr_env, monkeypatch):
+        """nexus-yjf5l.15 (Phase 1 review F2): the free-form
+        'CRITICAL — <title>' shape must drive the same round-3+ split as
+        the canonical shape. Before the fix, _critique_findings returned
+        [] for this shape and the split was silently inert."""
+        import nexus.commands.rdr as rdr_mod
+
+        gated = self._commit(rdr_env, self._BODY, "gated")
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                f"outcome: \"BLOCKED\"\ndate: \"2026-09-09\"\ncommit: {gated}\n"
+                "critique: nexus_rdr/204-gate-critique-2026-09-09zz\n"
+                "prior: [1] (BLOCKED 1C), [2] (BLOCKED 1C)\n"
+                "residuals:\n  - unused variable in the fallback branch\n"
+            ),
+            "204-gate-critique-2026-09-09zz": (
+                "CRITICAL — query timeout doubles under load\nShip-blocker: yes\n\n"
+                "SIGNIFICANT — unused variable in the fallback branch\nShip-blocker: no\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        out = _runner().invoke(rdr, ["preamble", "rdr-fix", "--", "204"]).output
+        assert "Gate round 4" in out, out
+        assert "Ship-blockers (fix these)" in out, out
+        assert "Residuals (record; do not fix in this change)" in out, out
         ship_idx = out.index("Ship-blockers (fix these)")
         res_idx = out.index("Residuals (record; do not fix in this change)")
         assert ship_idx < out.index("query timeout doubles under load") < res_idx, (
@@ -3077,3 +3173,40 @@ class TestCritiqueFindings:
         f = _critique_findings(text)
         assert f, "the historical critique's findings must still parse"
         assert not any("Class:" in x for x in f)
+
+    def test_free_form_em_dash_shape_matches_the_tally(self) -> None:
+        """nexus-yjf5l.15 (Phase 1 review F2): the free-form
+        'CRITICAL — <title>' / 'SIGNIFICANT — <title>' shape
+        _critique_tally already counted (RDR-204's seventh gate) must
+        yield findings too, or the round-3+ split (nexus-yjf5l.2) and the
+        Layer 0 exemption (nexus-yjf5l.3) are silently inert for it — as
+        they were before this fix, when this shape parsed to []."""
+        from nexus.commands.rdr import _critique_findings, _critique_tally
+
+        text = (
+            "CRITICAL — a false claim introduced by this fix commit.\n"
+            "Ship-blocker: yes\n\n"
+            "SIGNIFICANT — redundant clause left stale at a second site.\n"
+            "Ship-blocker: no\n"
+        )
+        findings = _critique_findings(text)
+        tally = _critique_tally(text)
+        assert findings, "the free-form em-dash shape must yield findings, not []"
+        assert not any("Ship-blocker" in f for f in findings), "Ship-blocker stays out, as before"
+        for title in tally.criticals + tally.significants:
+            assert any(title in f for f in findings), (title, findings)
+
+    def test_real_free_form_fixture_yields_findings_matching_the_tally(self) -> None:
+        """The actual RDR-204 seventh-gate critique
+        (204-gate-critique-2026-09-07f.md): _critique_tally counts 1
+        Critical + 2 Significants; _critique_findings must now match it,
+        not return [] (nexus-yjf5l.15, Phase 1 review F2 repro)."""
+        from nexus.commands.rdr import _critique_findings, _critique_tally
+
+        text = (FIXTURES / "204-gate-critique-2026-09-07f.md").read_text()
+        tally = _critique_tally(text)
+        findings = _critique_findings(text)
+        assert (len(tally.criticals), len(tally.significants)) == (1, 2)
+        assert len(findings) == 3, findings
+        for title in tally.criticals + tally.significants:
+            assert any(title in f for f in findings), (title, findings)

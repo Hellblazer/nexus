@@ -1718,18 +1718,55 @@ _CRITIQUE_INLINE_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: The RDR-204 seventh-gate free-form shape: a paragraph opening
+#: ``CRITICAL — <title>`` / ``SIGNIFICANT — <title>`` (an em-dash or a run
+#: of hyphens, exact-case severity word). Shared module-level constant so
+#: ``_critique_tally`` (which already counted this shape) and
+#: ``_critique_findings`` (which did not — nexus-yjf5l.15, Phase 1 review
+#: F2) recognise it identically; a second, independently maintained copy
+#: of this regex is exactly how the round-3+ ship-blocker/residual split
+#: (nexus-yjf5l.2) and the Layer 0 survivor exemption (nexus-yjf5l.3) went
+#: silently inert for it.
+_FREEFORM_ISSUE_RE = re.compile(r"^\s*(CRITICAL|SIGNIFICANT)\s*[—-]+\s*(.+)$")
+
+#: A bare ALL-CAPS free-form heading (``OBSERVATIONS``, ``GAP-CLOSURE
+#: CROSS-WALK``, ...) — never a Critical/Significant title, which always
+#: carries an em-dash per :data:`_FREEFORM_ISSUE_RE`. Shared with
+#: ``_critique_tally`` via :func:`_freeform_heading_toggle`.
+_FREEFORM_HEADING_RE = re.compile(r"^[A-Z][A-Z0-9 ,()'/-]+$")
+
+
+def _freeform_heading_toggle(stripped: str) -> bool | None:
+    """``None`` when *stripped* is not a bare ALL-CAPS free-form heading;
+    otherwise the new off-state for free-form Critical/Significant
+    recognition — an OBSERVATIONS/VERIFICATION heading turns it off until
+    the next heading turns it back on, so a free-form ``CRITICAL —``
+    aside quoted inside an Observations block is never counted as a live
+    finding. Shared by ``_critique_tally`` and ``_critique_findings``."""
+    if not _FREEFORM_HEADING_RE.match(stripped):
+        return None
+    return stripped.startswith("OBSERVATION") or stripped.startswith("VERIFICATION")
+
 
 def _critique_findings(text: str) -> list[str]:
     """Extract the Critical and Significant findings from a critique body.
 
-    Two formats are read. The substantive-critic's canonical output
-    (``## Critical Issues`` / ``## Significant Issues`` sections holding
-    ``### Issue: <title>`` blocks with ``- **Location**:`` and
-    ``- **Recommendation**:`` details) yields one line per issue title plus
-    its location and recommendation. Free-form critiques yield any line
-    that opens with Critical, Significant, NEW CRITICAL, or ``Issue:``.
-    Observations and other sections are never findings. Empty input, or a
-    critique with none of either, yields ``[]``.
+    Three shapes are read — every shape ``_critique_tally`` counts, plus
+    one legacy shape it does not (nexus-yjf5l.15). The substantive-critic's
+    canonical output (``## Critical Issues`` / ``## Significant Issues``
+    sections holding ``### Issue: <title>`` blocks with ``- **Location**:``
+    and ``- **Recommendation**:`` details) yields one line per issue title
+    plus its location and recommendation. The RDR-204 seventh-gate
+    free-form shape (``CRITICAL — <title>`` / ``SIGNIFICANT — <title>``,
+    never inside an ALL-CAPS OBSERVATIONS/VERIFICATION block) yields
+    ``Issue: <title>`` per paragraph, the same rendering canonical findings
+    use, so a residual's stored bare title matches either shape through
+    the one ``_finding_title_key`` normalisation. A legacy free-form line
+    that opens with Critical, Significant, NEW CRITICAL, or ``Issue:`` (a
+    shape ``_critique_tally`` itself does not recognise) is read verbatim,
+    for backward compatibility only. Observations and other sections are
+    never findings. Empty input, or a critique with none of the above,
+    yields ``[]``.
     """
     out: list[str] = []
     in_finding_section = False
@@ -1758,14 +1795,44 @@ def _critique_findings(text: str) -> list[str]:
                 continue
     if saw_sections:
         return out
-    # Free-form fallback.
+    # Free-form fallback. Two shapes, checked in this order per line: the
+    # RDR-204 seventh-gate ``CRITICAL — <title>`` paragraph (recognised via
+    # the SAME regex and heading-toggle _critique_tally counts by —
+    # nexus-yjf5l.15, so this is one parser, not two independently
+    # maintained recognitions of what a free-form finding looks like), then
+    # the legacy bold/colon shape (``**Critical 1**: ...``, ``NEW CRITICAL``,
+    # ``Issue: ...``) _CRITIQUE_INLINE_RE has always matched.
+    freeform_off = False
     for raw in text.splitlines():
         stripped = raw.strip()
         if not stripped:
             continue
+        # The heading toggle updates state but never `continue`s here (unlike
+        # _critique_tally): a legacy free-form marker like "NEW CRITICAL" is
+        # itself an ALL-CAPS line and must still reach the legacy check below.
+        off = _freeform_heading_toggle(stripped)
+        if off is not None:
+            freeform_off = off
+        if freeform_off:
+            continue
+        m = _FREEFORM_ISSUE_RE.match(stripped)
+        if m:
+            out.append(f"Issue: {m.group(2).strip()}")
+            continue
         if _CRITIQUE_INLINE_RE.match(stripped) or re.match(r"^(?:\*\*)?issue:", stripped, re.IGNORECASE):
             out.append(stripped.lstrip("-*# ").strip())
     return out
+
+
+#: A leading classed-residual tag on a FINDING/residual title — built from
+#: the same VALID_CLASSIFICATIONS import ``_CLASS_LINE_RE`` uses (nexus-
+#: yjf5l.18, Phase 3 review F1), never a bare ``[A-Z][A-Z-]*`` bracket
+#: shape: a title genuinely beginning ``[SQL]`` is not a class tag and
+#: must keep its bracket, not collide with a differently-titled finding
+#: whose bracket was stripped.
+_FINDING_CLASS_TAG_RE = re.compile(
+    r"^\[(?:" + "|".join(re.escape(c) for c in VALID_CLASSIFICATIONS) + r")\]\s*"
+)
 
 
 def _finding_title_key(text: str) -> str:
@@ -1775,17 +1842,18 @@ def _finding_title_key(text: str) -> str:
     gate record's ``residuals:`` bullet carries the bare title with
     neither that prefix nor list decoration, but from nexus-yjf5l.7 it is
     prefixed with the residual's class instead (``[DISCOVER-AT-IMPLEMENTATION]
-    <title>``). One normalisation — strip a leading classed-residual tag,
-    strip the ``Issue:`` prefix, strip leading/trailing list and markdown
-    decoration, collapse whitespace, casefold — so a residual's stored
-    title and a finding's title match the same way everywhere a surface
-    needs to tell them apart: the fix preamble's ship-blocker/residual
-    split (nexus-yjf5l.2) and the Layer 0 survivor sweep's residual
-    exemption (nexus-yjf5l.3) both call this one function, not their own
-    copy.
+    <title>``). One normalisation — strip a leading classed-residual tag
+    (only :data:`BLOCKS_PLANNING`/:data:`DISCOVER_AT_IMPLEMENTATION`, per
+    :data:`_FINDING_CLASS_TAG_RE` — nexus-yjf5l.18), strip the ``Issue:``
+    prefix, strip leading/trailing list and markdown decoration, collapse
+    whitespace, casefold — so a residual's stored title and a finding's
+    title match the same way everywhere a surface needs to tell them
+    apart: the fix preamble's ship-blocker/residual split (nexus-yjf5l.2)
+    and the Layer 0 survivor sweep's residual exemption (nexus-yjf5l.3)
+    both call this one function, not their own copy.
     """
     t = text.strip()
-    t = re.sub(r"^\[[A-Z][A-Z-]*\]\s*", "", t)
+    t = _FINDING_CLASS_TAG_RE.sub("", t)
     t = re.sub(r"^(?:issue\s*:\s*)", "", t, flags=re.IGNORECASE)
     t = t.lstrip("-*# ").rstrip("*").strip()
     t = re.sub(r"\s+", " ", t)
@@ -3120,27 +3188,41 @@ def preamble_rdr_fix(args: tuple[str, ...]) -> None:
     print()
 
 
-def _residual_count(content: str) -> int:
-    """Residuals in a gate record: bullets under ``residuals:`` (the live
-    shape), or one per ``residuals:`` key line carrying inline text. Never a
-    split on punctuation inside a residual's own prose (code review [24883]
-    finding 1)."""
-    count = 0
+def _residual_bullets(content: str) -> list[str]:
+    """One walk over a gate record's ``residuals:`` block, yielding the
+    RAW text of each residual entry in document order: the inline text on
+    the ``residuals:`` line itself (only when non-empty), then each
+    ``- <title>`` bullet beneath it (unconditionally — an empty bullet
+    still counts as an entry). Never a split on punctuation inside a
+    residual's own prose (code review [24883] finding 1).
+
+    ``_residual_count`` and ``_residual_titles`` both derive from this one
+    walk (nexus-yjf5l.15, Phase 1 review F3) instead of each
+    re-implementing the same active-flag scan, which is exactly how the
+    two could silently drift apart on the next edit to either."""
+    out: list[str] = []
     active = False
-    inline = 0
     for line in content.splitlines():
         stripped = line.strip()
         if stripped.startswith("residuals:"):
             active = True
-            if stripped.split(":", 1)[1].strip():
-                inline += 1
+            inline = stripped.split(":", 1)[1].strip()
+            if inline:
+                out.append(inline)
             continue
         if active and re.match(r"^[A-Za-z_][A-Za-z0-9_]*:", stripped):
             active = False
             continue
         if active and stripped.startswith("-"):
-            count += 1
-    return count + inline
+            out.append(stripped.lstrip("-").strip())
+    return out
+
+
+def _residual_count(content: str) -> int:
+    """Residuals in a gate record: bullets under ``residuals:`` (the live
+    shape), or one per ``residuals:`` key line carrying inline text. See
+    :func:`_residual_bullets` for the shared walk."""
+    return len(_residual_bullets(content))
 
 
 #: A trailing "(carried from round N)" annotation (nexus-yjf5l.14): presentation
@@ -3161,28 +3243,14 @@ def _residual_titles(content: str) -> list[str]:
     per ``- <title>`` bullet, or the inline text on the ``residuals:``
     line itself, with any trailing ``(carried from round N)`` annotation
     stripped (nexus-yjf5l.14 — that marker is presentation, not part of
-    the title being matched). Mirrors ``_residual_count``'s parse but
-    returns the text for matching against a finding's title via
-    ``_finding_title_key`` (the fix preamble's round-3+ ship-blocker/
-    residual split, nexus-yjf5l.2; reused by the Layer 0 survivor sweep's
-    residual exemption, nexus-yjf5l.3, and by ``preamble_rdr_verdict``'s
-    own cross-round carry-forward, nexus-yjf5l.14)."""
-    out: list[str] = []
-    active = False
-    for line in content.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("residuals:"):
-            active = True
-            inline = _CARRIED_FROM_RE.sub("", stripped.split(":", 1)[1].strip()).strip()
-            if inline:
-                out.append(inline)
-            continue
-        if active and re.match(r"^[A-Za-z_][A-Za-z0-9_]*:", stripped):
-            active = False
-            continue
-        if active and stripped.startswith("-"):
-            out.append(_CARRIED_FROM_RE.sub("", stripped.lstrip("-").strip()).strip())
-    return out
+    the title being matched). Derives from :func:`_residual_bullets`'s
+    shared walk and returns the text for matching against a finding's
+    title via ``_finding_title_key`` (the fix preamble's round-3+
+    ship-blocker/residual split, nexus-yjf5l.2; reused by the Layer 0
+    survivor sweep's residual exemption, nexus-yjf5l.3, and by
+    ``preamble_rdr_verdict``'s own cross-round carry-forward,
+    nexus-yjf5l.14)."""
+    return [_CARRIED_FROM_RE.sub("", b).strip() for b in _residual_bullets(content)]
 
 
 def _residual_class_and_title(raw: str) -> tuple[str, str]:
@@ -3375,13 +3443,17 @@ def _critique_tally(text: str) -> CritiqueTally:
             current_kind = section
             (criticals if section == "critical" else significants).append(current)
             continue
-        if not canonical and re.match(r"^[A-Z][A-Z0-9 ,()'/-]+$", stripped):
+        if not canonical:
             # An all-caps free-form heading: OBSERVATIONS (and anything after
-            # it until the next heading) is not a findings block.
-            freeform_off = stripped.startswith("OBSERVATION") or stripped.startswith("VERIFICATION")
-            current = None
-            continue
-        free = re.match(r"^\s*(CRITICAL|SIGNIFICANT)\s*[—-]+\s*(.+)$", stripped)
+            # it until the next heading) is not a findings block. Shared
+            # toggle with _critique_findings (nexus-yjf5l.15) via
+            # _freeform_heading_toggle, not a second copy of this check.
+            off = _freeform_heading_toggle(stripped)
+            if off is not None:
+                freeform_off = off
+                current = None
+                continue
+        free = _FREEFORM_ISSUE_RE.match(stripped)
         if free and not canonical and not freeform_off:
             current = free.group(2).strip()
             current_kind = free.group(1).lower()
