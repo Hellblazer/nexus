@@ -36,6 +36,9 @@ h2{font-size:26px;margin-top:56px;padding-top:20px;border-top:1px solid var(--li
 h3{font-size:19px;margin-top:28px}
 p{margin:12px 0;max-width:66ch}
 .lede{font-size:19px;color:var(--ink-2);max-width:60ch}
+.topnav{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:14px}
+.topnav a{font-size:14px;font-weight:500;text-decoration:none}
+.topnav a:hover{text-decoration:underline}
 .eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--brass);font-weight:600;margin-bottom:14px}
 a{color:var(--blue)}
 code{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.92em;background:var(--blue-soft);padding:1px 5px;border-radius:4px}
@@ -99,7 +102,7 @@ details p{margin:8px 0 4px;font-size:15px}
 <body>
 
 <div class="wrap">
-<div class="eyebrow">Nexus · conexus 7.x</div>
+<div class="topnav"><span class="eyebrow" style="margin:0">Nexus · conexus 7.x</span><a href="getting-started.html">Getting started →</a></div>
 <h1>Installing Nexus</h1>
 <p class="lede">Nexus gives Claude a permanent memory and search by meaning. It runs on your computer. You need no API key, no account, and no separate database install. The install takes about ten minutes.</p>
 
