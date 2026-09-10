@@ -88,6 +88,19 @@ public final class TupleRepository {
     private static final TypeReference<Map<String, String>> STRING_MAP = new TypeReference<>() {
     };
 
+    /**
+     * TEST-ONLY seam (RDR-205 bead nexus-em75s.6, the CA 1 regression pin): invoked
+     * inside {@link #claimOnce}'s transaction between the claim {@code SELECT ... FOR
+     * NO KEY UPDATE SKIP LOCKED} and its {@code UPDATE}, so a test can widen the race
+     * window the lock clause must close -- the exact shape the RDR-110 CA#2 finding
+     * and the {@code nexus_rdr/205-research-3} spike (measurement 1) both probe with
+     * an injected {@code pg_sleep} at the same point in the raw SQL. A no-op {@link
+     * Runnable} by default, so it costs nothing on the production path; package-
+     * private so only a test in this exact package can reach it, and never assigned
+     * outside test code. NOT a mechanism for production delay injection of any kind.
+     */
+    static volatile Runnable TEST_ONLY_CLAIM_SELECT_TO_UPDATE_DELAY = () -> { };
+
     private final TenantScope tenantScope;
     private final TemplateRegistry registry;
     private final TupleWaitRegistry waitRegistry;
@@ -475,6 +488,9 @@ public final class TupleRepository {
                 if (row == null) {
                     return Optional.empty();
                 }
+                // TEST-ONLY (nexus-em75s.6): widens the select-to-update race window
+                // under test; a no-op Runnable on every production path.
+                TEST_ONLY_CLAIM_SELECT_TO_UPDATE_DELAY.run();
 
                 int attempts = row.getAttempts();
                 OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
