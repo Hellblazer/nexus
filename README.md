@@ -94,6 +94,7 @@ especially the first time.
 | Browse the docs tree | [docs/README.md](docs/README.md) |
 | Install step by step | [Install guide](https://hellblazer.github.io/nexus/) |
 | Learn the tooling | [Getting started](https://hellblazer.github.io/nexus/getting-started.html) |
+| Work with RDRs, as practised | [Working with RDRs](https://hellblazer.github.io/nexus/rdr.html) |
 
 ## License
 

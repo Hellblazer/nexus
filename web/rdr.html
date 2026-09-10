@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="How RDRs are used day to day with Claude Code and Nexus: conversation to draft, research cycles, renderings, the gate as a budget, acceptance, phased build across sessions, close.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AD%3C/text%3E%3C/svg%3E">
+<title>Working with RDRs</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#EEF1F4; --paper:#FFFFFF; --ink:#1B2430; --ink-2:#4A5666; --ink-3:#7A8697;
+  --line:#D5DBE3; --brass:#A87A22; --brass-soft:#F3EAD3; --blue:#24466B; --blue-soft:#E1E9F3;
+  --ok:#2E7D4F; --ok-soft:#E3F1E8; --warn:#9A6A12; --code-bg:#1B2430; --code-fg:#E9EDF2; --code-cmt:#8A97A8;
+  --t1:#B96E2B; --t2:#24466B; --t3:#2E7D4F;
+  --radius:6px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#131920; --paper:#1B232D; --ink:#E6EAF0; --ink-2:#B3BDCA; --ink-3:#7F8B9A;
+    --line:#2C3743; --brass:#D9A441; --brass-soft:#2B2618; --blue:#8FB4DD; --blue-soft:#1E2C3C;
+    --ok:#6CC58F; --ok-soft:#1B2E22; --warn:#E0B24C; --code-bg:#0E1319; --code-fg:#E6EAF0; --code-cmt:#7F8B9A;
+    --t1:#E0955A; --t2:#8FB4DD; --t3:#6CC58F;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#131920; --paper:#1B232D; --ink:#E6EAF0; --ink-2:#B3BDCA; --ink-3:#7F8B9A;
+  --line:#2C3743; --brass:#D9A441; --brass-soft:#2B2618; --blue:#8FB4DD; --blue-soft:#1E2C3C;
+  --ok:#6CC58F; --ok-soft:#1B2E22; --warn:#E0B24C; --code-bg:#0E1319; --code-fg:#E6EAF0; --code-cmt:#7F8B9A;
+  --t1:#E0955A; --t2:#8FB4DD; --t3:#6CC58F;
+}
+*{box-sizing:border-box}
+/* Code blocks scroll sideways inside their column. A grid or flex child defaults to min-width:auto, which lets a long <pre> line widen the track and the page; min-width:0 on every wrapper between the track and the <pre> stops that. */
+.wrap,.wrap>*,main,.step,.cmd,.tbl,.further,.callout,.lesson{min-width:0}
+pre{max-width:100%}
+html{margin:0}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;font-size:16px;line-height:1.55;padding-inline:clamp(16px,4vw,40px);padding-block:40px 80px;}
+.wrap{max-width:1040px;margin:0 auto;display:grid;grid-template-columns:220px minmax(0,1fr);gap:48px;align-items:start}
+@media (max-width:820px){.wrap{grid-template-columns:1fr;gap:24px}.rail{position:static!important}}
+h1,h2,h3{font-family:"Source Serif 4",Georgia,"Times New Roman",serif;font-weight:600;line-height:1.15;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,5vw,46px);letter-spacing:-.01em}
+h2{font-size:27px}
+h3{font-size:18px;margin-top:26px}
+p{margin:12px 0;max-width:68ch}
+.lede{font-size:18px;color:var(--ink-2);max-width:62ch}
+.topnav{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:12px}
+.topnav a{font-size:14px;font-weight:500;text-decoration:none}
+.topnav a:hover{text-decoration:underline}
+.eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--brass);font-weight:600;margin-bottom:12px}
+a{color:var(--blue)}
+code{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.92em;background:var(--blue-soft);padding:1px 5px;border-radius:4px}
+.hidden{display:none!important}
+
+/* rail */
+.rail{position:sticky;top:24px}
+.rail .eyebrow{margin-bottom:8px}
+.rail ol{list-style:none;padding:0;margin:0;display:grid;gap:2px}
+.rail a{display:block;padding:7px 8px;border-radius:4px;color:var(--ink-2);text-decoration:none;font-size:14px;line-height:1.35}
+.rail a:hover{background:var(--paper)}
+.rail .meta{font-size:12px;color:var(--ink-3);margin-top:14px;line-height:1.5}
+
+/* lessons */
+.lesson{padding:36px 0 8px;border-top:1px solid var(--line);scroll-margin-top:16px}
+.lesson:first-of-type{border-top:0;padding-top:8px}
+.lhead{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.lnum{font-family:"Source Serif 4",Georgia,serif;font-size:30px;font-weight:600;color:var(--brass);line-height:1}
+.ltime{font-size:13px;color:var(--ink-3);margin-left:auto}
+.why{border-left:3px solid var(--brass);padding:2px 0 2px 14px;color:var(--ink-2);margin:16px 0 10px;max-width:66ch}
+pre{margin:0;background:var(--code-bg);color:var(--code-fg);border-radius:var(--radius);padding:14px 16px;font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;font-size:14px;line-height:1.6;overflow-x:auto}
+pre .c{color:var(--code-cmt)}
+.cmd{position:relative;margin:12px 0}
+.copy{position:absolute;top:8px;right:8px;font:inherit;font-size:12px;font-weight:500;padding:4px 9px;border-radius:4px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:var(--code-fg);cursor:pointer}
+.copy:hover{background:rgba(255,255,255,.14)}
+.copy:focus-visible{outline:2px solid var(--brass)}
+.see{margin:10px 0 4px;font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+pre.out{background:var(--paper);color:var(--ink-2);border:1px dashed var(--line);font-size:13px}
+pre.out b{color:var(--ink);font-weight:500}
+.note{font-size:14px;color:var(--ink-2);margin:8px 0;max-width:68ch}
+.callout{border-left:3px solid var(--brass);background:var(--brass-soft);padding:12px 16px;border-radius:0 var(--radius) var(--radius) 0;margin:18px 0;font-size:15px;max-width:68ch}
+.callout p{margin:4px 0}
+.callout.rule{border-color:var(--blue);background:var(--blue-soft)}
+
+.ph{color:var(--brass);font-style:italic}
+pre .ph{color:#E0B24C}
+
+/* investigate further */
+.further{margin:22px 0 6px;border:1px solid var(--line);border-left:3px solid var(--blue);border-radius:0 var(--radius) var(--radius) 0;background:var(--paper);padding:12px 16px;max-width:68ch}
+.further h4{margin:0 0 6px;font-family:"Source Serif 4",Georgia,serif;font-size:16px;font-weight:600;color:var(--blue)}
+.further ul{margin:0;padding-left:20px;font-size:15px;color:var(--ink-2)}
+.further li{margin:4px 0}
+
+/* tier diagram */
+.tiers{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:18px 0;max-width:68ch}
+@media (max-width:560px){.tiers{grid-template-columns:1fr}}
+.tier{background:var(--paper);border:1px solid var(--line);border-top:4px solid var(--tc);border-radius:var(--radius);padding:12px 14px}
+.tier b{font-family:"Source Serif 4",Georgia,serif;font-size:20px;font-weight:600;color:var(--tc);display:block}
+.tier small{display:block;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin-bottom:6px}
+.tier p{font-size:14px;margin:4px 0;color:var(--ink-2)}
+.tier code{font-size:.85em}
+.arrowrow{font-size:13px;color:var(--ink-3);margin:-6px 0 14px;max-width:68ch}
+
+/* entry table */
+table{border-collapse:collapse;width:100%;font-size:15px;margin:14px 0;max-width:68ch}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+.tbl{overflow-x:auto}
+.gloss-wrap{margin:22px 0 8px;max-width:68ch}
+details.gloss{border:1px solid var(--line);border-radius:var(--radius);background:var(--paper);margin:6px 0}
+details.gloss summary{cursor:pointer;padding:10px 14px;font-weight:500;list-style:none;display:flex;justify-content:space-between}
+details.gloss summary::after{content:"+";color:var(--brass);font-family:"IBM Plex Mono",monospace}
+details.gloss[open] summary::after{content:"–"}
+details.gloss table{margin:0;font-size:14px}
+details.gloss td:first-child{font-weight:500;white-space:nowrap;width:9em}
+details.gloss tr:last-child td{border-bottom:0}
+ol.plain,ul.plain{margin:6px 0 10px;padding-left:22px;max-width:66ch}
+ol.plain li,ul.plain li{margin:3px 0}
+.finish{border:1px solid var(--line);background:var(--paper);border-radius:var(--radius);padding:18px 20px;margin-top:40px;max-width:68ch}
+.finish h2{font-size:24px}
+.footer{margin-top:60px;font-size:13px;color:var(--ink-3)}
+@media (prefers-reduced-motion:reduce){.copy{transition:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<nav class="rail" aria-label="Lessons">
+  <div class="eyebrow">Working with RDRs</div>
+  <ol id="toc">
+    <li><a href="#l1">1. What an RDR is here</a></li>
+    <li><a href="#l2">2. It starts as a conversation</a></li>
+    <li><a href="#l3">3. Research, in cycles</a></li>
+    <li><a href="#l4">4. Read it, react, repeat</a></li>
+    <li><a href="#l5">5. The gate</a></li>
+    <li><a href="#l6">6. Accept, then break it into work</a></li>
+    <li><a href="#l7">7. Build it, across many sessions</a></li>
+    <li><a href="#l8">8. Close it, and what remains</a></li>
+  </ol>
+  <div class="meta"><a href="getting-started.html">← Getting started</a><br><a href="./">← Install guide</a></div>
+</nav>
+
+<main>
+<div class="topnav"><span class="eyebrow" style="margin:0">Nexus · RDR</span><a href="getting-started.html">← Getting started</a></div>
+<h1>Working with RDRs</h1>
+<p class="lede">An RDR records a decision: the problem, what was learned, the options, the choice. This page shows how RDRs are used day to day with Claude Code and Nexus. Not the formal process. The natural one: a conversation that gets written down, grows over several sessions, is checked, is built, and is closed.</p>
+<p class="note">Words in <span class="ph">&lt;ORANGE CAPITALS IN ANGLE BRACKETS&gt;</span> are placeholders for your own subject. The prompts are examples of phrasing, not scripts. Read <a href="getting-started.html">Getting started</a> first, in particular lesson 2 on continuations and lesson 8 on renderings. Both are used on every page here.</p>
+
+<!-- ============ 1 ============ -->
+<section class="lesson" id="l1">
+<div class="lhead"><span class="lnum">1</span><h2>What an RDR is here</h2><span class="ltime">5 min · reading only</span></div>
+<p class="why">RDR means Research, Design, Review. The name describes the order of the work. You research first, then you design, then the design is reviewed. The document is a rendering of that work, in the sense of Getting started lesson 8: one readable file, written from what is in the stores, that changes as the work changes.</p>
+
+<h3>Why write one</h3>
+<p>A decision of any size does not fit in one head, or in one Claude session. Without a written decision, the purpose drifts while the code is written, side problems take over, and three weeks later nobody knows why a choice was made. An RDR puts the thinking before the code, so the code has a fixed target. And because Nexus indexes every RDR, the next decision on a similar subject finds this one.</p>
+
+<h3>What it is not</h3>
+<p>It is not a form to fill. It is not a test plan. It is not a promise to a manager. A bug with one clear cause gets three sections: Problem, Root Cause, Fix. A design with real alternatives gets the full template. The length follows the decision.</p>
+
+<h3>The lifecycle</h3>
+<div class="tbl"><table>
+<tr><th>Status</th><th>Meaning</th></tr>
+<tr><td>draft</td><td>Under discussion. Change it freely. Do not quote it as a decision yet.</td></tr>
+<tr><td>accepted</td><td>The gate passed and you accepted it. This is the design. Code can start.</td></tr>
+<tr><td>deferred</td><td>Parked. It can come back, but only to draft.</td></tr>
+<tr><td>closed</td><td>Built and shipped. The RDR is now history, and indexed into knowledge.</td></tr>
+<tr><td>superseded</td><td>Replaced by a named later RDR.</td></tr>
+<tr><td>abandoned</td><td>Not going to happen.</td></tr>
+</table></div>
+<div class="callout rule"><p><strong>Who does what.</strong> Claude does the work: research, drafting, fixing what a review finds, decomposing into tasks, building. You move the lifecycle: you say when to run the gate, when to accept, when to close, when to abandon. Claude does not take those steps by itself. If it starts to, tell it to stop.</p></div>
+
+<div class="further"><h4>Investigate further</h4><ul>
+<li>Ask Claude: <em>"List the RDRs in this project and their statuses."</em> In a new project the list is empty. In the Nexus repository it is over two hundred.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr.md">RDR</a>: the full template and the reasoning behind it.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-205-linda-tuple-space-over-postgres.md">RDR-205</a>: a real, large one, accepted in September 2026. Read the Problem Statement and the Approach only.</li>
+</ul></div>
+</section>
+
+<!-- ============ 2 ============ -->
+<section class="lesson" id="l2">
+<div class="lhead"><span class="lnum">2</span><h2>It starts as a conversation</h2><span class="ltime">10 min</span></div>
+<p class="why">An RDR does not begin with a template. It begins when you and Claude are talking about a problem and one of you notices that the problem is bigger than a quick fix. At that moment the conversation becomes the first draft.</p>
+
+<h3>The moment</h3>
+<p>You are describing a problem. Claude asks questions, proposes something, you push back. Two or three exchanges in, it is clear that there are several ways to do this, or that the cause is not known yet, or that other things depend on it. Then:</p>
+<div class="see">You might say</div>
+<div class="cmd"><pre>This is bigger than a patch. Let's make it an RDR. Start from what we just discussed.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What Claude does</div>
+<p>Claude creates the file with <code>/conexus:rdr-create</code>: the next number, the frontmatter, the section headings, status <code>draft</code>. It fills the Problem Statement from the conversation so far, and lists the open questions the conversation raised. It also writes a memory entry (Getting started, lesson 4) that names the RDR, so later sessions know it exists. Nothing else is written yet. The rest of the sections are empty on purpose.</p>
+<p class="note">Claude may also propose the RDR itself: "this has three viable designs, do you want an RDR?" The plugin's brainstorming guidance tells it to ask before building anything with no design of record. Say yes or no.</p>
+
+<h3>Right-size it now</h3>
+<p>Tell Claude how big the decision is, because that sets how much of the template is used:</p>
+<div class="cmd"><pre>This is a bug with one cause. Problem, root cause, fix. Nothing else.</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>This is an architecture change. Use the full template, and we will need real alternatives.</pre><button class="copy" type="button">Copy</button></div>
+
+<h3>End the session properly</h3>
+<p>An RDR of any size takes more than one session. At the end of this first one, run <code>/conexus:continuation</code> (Getting started, lesson 2). The handoff names the RDR file, the open questions, and the first research to do. The next session picks it up from there.</p>
+
+<div class="further"><h4>Investigate further</h4><ul>
+<li>Ask Claude to show the new file: <em>"Show me RDR <span class="ph">&lt;NUMBER&gt;</span> as it stands."</em> It is short. That is correct at this stage.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/brainstorming-gate/SKILL.md">The brainstorming gate</a>: why Claude asks before building anything without a design of record.</li>
+</ul></div>
+</section>
+
+<!-- ============ 3 ============ -->
+<section class="lesson" id="l3">
+<div class="lhead"><span class="lnum">3</span><h2>Research, in cycles</h2><span class="ltime">20 min</span></div>
+<p class="why">Research is the R in RDR, and it is where the time goes. It is not one step. It is a cycle: ask, read what came back, ask the next thing. Each cycle adds findings to the RDR. Claude does the searching. You decide what to look at next.</p>
+
+<h3>A cycle</h3>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Research how <span class="ph">&lt;THE THING THE DECISION DEPENDS ON&gt;</span> actually behaves. Check our code, our knowledge store, and the outside sources. Add what you find to RDR <span class="ph">&lt;NUMBER&gt;</span>.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What Claude does</div>
+<p>Claude starts the research agent (<code>/conexus:research</code>). The agent searches the knowledge store first, because an earlier RDR may have settled the question. Then it searches the code, then the web. When it returns, Claude adds each finding to the RDR with <code>/conexus:rdr-research add</code>, and each finding carries a tag:</p>
+<div class="tbl"><table>
+<tr><th>Tag</th><th>Meaning</th></tr>
+<tr><td>Verified</td><td>Confirmed by reading the code, or by a small program that was actually run.</td></tr>
+<tr><td>Documented</td><td>Supported by documentation only. Not checked against reality.</td></tr>
+<tr><td>Assumed</td><td>Believed, not checked. The design may depend on it.</td></tr>
+</table></div>
+<p>The tags matter later. An Assumed finding that the design depends on is a Critical Assumption. The gate (lesson 5) looks at exactly those.</p>
+
+<h3>The next cycle</h3>
+<p>Read what came back. Not the whole RDR, only the new findings. Something in them raises the next question. Ask it. Typical next questions:</p>
+<ul class="plain">
+<li>"That finding is Assumed. Can you verify it? Write a small test or read the source."</li>
+<li>"You found that <span class="ph">&lt;X&gt;</span>. Does that rule out option <span class="ph">&lt;B&gt;</span>?"</li>
+<li>"We did something like this in RDR <span class="ph">&lt;OLDER NUMBER&gt;</span>. What did we learn there?"</li>
+<li>"Measure it. How long does <span class="ph">&lt;THE OPERATION&gt;</span> take now?"</li>
+</ul>
+<p>Three to six cycles is normal for a design of medium size. Some cycles are five minutes. Some are a whole session, when a finding needs a small program written and run to verify it.</p>
+
+<h3>Verify in batches</h3>
+<p>When several Assumed findings need a small program to verify them, do them together, in one branch and one test run, not one at a time. A test run costs the same for one check or five. Say so: <em>"Collect the assumptions that need a spike. Verify them together."</em></p>
+
+<div class="callout rule"><p><strong>Alternatives appear here, not later.</strong> As research shows what is possible, the options become clear. Have Claude write each one into Alternatives Considered as soon as it is clear, with the reason it is or is not attractive. An RDR whose alternatives are written after the decision is a justification, not a decision.</p></div>
+
+<div class="further"><h4>Investigate further</h4><ul>
+<li>Ask Claude: <em>"Which findings in RDR <span class="ph">&lt;NUMBER&gt;</span> are still Assumed, and which of those does the design depend on?"</em></li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/rdr-research/SKILL.md">The research skill</a>: how findings are recorded and verified.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr.md#evidence-classification">Evidence classification</a>: the three tags and why they exist.</li>
+</ul></div>
+</section>
+
+<!-- ============ 4 ============ -->
+<section class="lesson" id="l4">
+<div class="lhead"><span class="lnum">4</span><h2>Read it, react, repeat</h2><span class="ltime">15 min</span></div>
+<p class="why">Between research cycles, and especially when the Proposed Solution starts to form, you read the RDR as a whole and react to it. This is the rendering loop from Getting started lesson 8, applied to one document. You do not edit the RDR line by line. You say what is wrong, and Claude changes the document and the stores together.</p>
+
+<h3>Ask for a reading</h3>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Give me RDR <span class="ph">&lt;NUMBER&gt;</span> as it stands. Problem, what we know, the options, and where the design is leaning.</pre><button class="copy" type="button">Copy</button></div>
+<p>Claude renders the current state. Read it as a reader, not as an author. Where does it lose you? Where does a claim have no finding behind it? Where does an option get one line while another gets a page?</p>
+
+<h3>React</h3>
+<p>Say what you see, in your own words. Examples of the kind of thing that moves an RDR:</p>
+<ul class="plain">
+<li>"The problem statement is about performance, but the findings are all about correctness. Which is it?"</li>
+<li>"Option B is dismissed in one sentence. Give it the same treatment as A."</li>
+<li>"That number in the approach, where does it come from? I do not see a finding for it."</li>
+<li>"This section repeats the last one. Cut it."</li>
+<li>"I think the real constraint is <span class="ph">&lt;X&gt;</span>. Does the research support that?"</li>
+</ul>
+<p>Claude changes the document. When the change is a fact, a count, a name, a decision, it also changes every other place that fact appears, in the RDR and in memory. A fact has one home. If you see the same fact stated two ways, that is a defect. Say so.</p>
+
+<h3>Bring in a second reader</h3>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Have the critic read RDR <span class="ph">&lt;NUMBER&gt;</span> before I do. Structural problems, unsupported claims, missing alternatives.</pre><button class="copy" type="button">Copy</button></div>
+<p>Claude starts the critic agent (<code>/conexus:substantive-critique</code>). It reads the RDR and reports what it finds, ranked. Claude fixes what is clearly wrong and shows you what needs a decision. This is cheaper than the gate (lesson 5) and you can do it as often as you like. Many RDRs go through two or three critic readings before anyone mentions a gate.</p>
+
+<div class="callout rule"><p><strong>Drafts are for changing.</strong> While the status is draft, nothing is fixed. Change the problem statement. Drop an option. Split the RDR in two when research shows two decisions hiding in one. The chain of changes is not visible in the final document, and it does not need to be. The stores and the git history carry it.</p></div>
+
+<div class="further"><h4>Investigate further</h4><ul>
+<li>Ask for a rendering aimed at a reader who was not in the conversation: <em>"Render RDR <span class="ph">&lt;NUMBER&gt;</span> for a new team member."</em> Gaps that you no longer see become visible.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/agents/substantive-critic.md">The critic agent</a>: what it looks for.</li>
+</ul></div>
+</section>
+
+<!-- ============ 5 ============ -->
+<section class="lesson" id="l5">
+<div class="lhead"><span class="lnum">5</span><h2>The gate</h2><span class="ltime">15 min</span></div>
+<p class="why">The gate is a formal check before acceptance: does the document hold together, are the critical assumptions verified, and does an independent critique find anything that blocks. It is optional. Use it for decisions that are expensive to reverse. Skip it for a bug fix RDR. When you use it, treat the rounds as a budget, not as a loop to run until it is clean.</p>
+
+<h3>You say when</h3>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Run the gate on RDR <span class="ph">&lt;NUMBER&gt;</span>. Budget: two rounds.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What Claude does</div>
+<p>Claude runs <code>/conexus:rdr-gate</code>. Three checks: the structure (are the required sections present and consistent), the assumptions (is every Critical Assumption verified or explicitly accepted), and a critique by an independent agent. The result is PASSED, or BLOCKED with findings ranked Critical, Significant, Minor. Claude shows you the findings before it fixes anything.</p>
+
+<h3>Fixing what it finds</h3>
+<p>Claude runs <code>/conexus:rdr-fix</code>, which shows each finding with the place in the document it refers to, and then fixes them. Two rules apply, and you will see Claude follow them:</p>
+<ul class="plain">
+<li>A fix changes a fact, not a sentence. If a count was wrong, every place that count appears changes, including memory.</li>
+<li>A fix adds no new explanation. New prose is where the next round's findings come from. A fact that needs support goes into a research finding first, and the RDR sentence is copied from it.</li>
+</ul>
+<p>Then Claude runs the gate again. That is round two.</p>
+
+<h3>The budget</h3>
+<div class="callout rule"><p><strong>Two rounds, three if a round changed the design.</strong> If findings are still arriving at the end of the budget, the RDR is done and the remaining findings are residuals: recorded, fixed once after the pass, not re-gated. From round three on, fix only the finding that actually blocks shipping. A gate that runs five rounds is finding problems in the text that the previous round's fix wrote. That is the gate examining itself. Stop it.</p></div>
+<p>The signal to stop is yours. Pick a word for it and use it. Claude will keep going otherwise, because each round produces findings and findings look like work.</p>
+
+<h3>When it passes</h3>
+<p>Claude reports PASSED and the residuals, if any. If the pass came with Significant findings fixed in place, Claude pauses and shows you the fixes before anything else. Read them. Then lesson 6.</p>
+
+<div class="further"><h4>Investigate further</h4><ul>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/rdr-gate/SKILL.md">The gate skill</a>: the three checks in detail.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/rdr-fix/SKILL.md">The fix skill</a>: the fix rules and why a fix commit carries no new prose.</li>
+</ul></div>
+</section>
+
+<!-- ============ 6 ============ -->
+<section class="lesson" id="l6">
+<div class="lhead"><span class="lnum">6</span><h2>Accept, then break it into work</h2><span class="ltime">15 min</span></div>
+<p class="why">Accepting is a decision, and it is yours. After it, the RDR stops being a draft and becomes the reference that the code is built against. Then Claude turns the Implementation Plan into tracked tasks, in phases, so the build can happen across many sessions without losing the thread.</p>
+
+<h3>Accept</h3>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Accept RDR <span class="ph">&lt;NUMBER&gt;</span>.</pre><button class="copy" type="button">Copy</button></div>
+<p>Claude runs <code>/conexus:rdr-accept</code>. The status becomes <code>accepted</code>. Memory records the acceptance. From now on the RDR is not edited to match what gets built. If the build proves it wrong, lesson 7 says what happens.</p>
+
+<h3>Decompose</h3>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Break RDR <span class="ph">&lt;NUMBER&gt;</span> into tasks by phase. Audit the plan once before I look at it.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What Claude does</div>
+<p>Claude uses the planning skill (<code>/conexus:create-plan</code>) to turn each phase of the Implementation Plan into tasks in the <code>bd</code> task tracker, with dependencies between them, under one epic that names the RDR. Then it runs the plan audit (<code>/conexus:plan-audit</code>), which checks the tasks against the code as it is: do the files exist, is the order possible, is anything assumed that the code contradicts. It shows you the task tree.</p>
+<p class="note">The plan audit has the same budget rule as the gate. One round, two at most. A plan audited five times is a plan nobody has tried to build.</p>
+
+<h3>Read the tree, not the tasks</h3>
+<p>Look at the phases and the dependencies. Is the first phase the one that proves the design works, or the one that is easiest? It should be the first. Is there a phase that ships nothing visible? Ask why. Then say go, or move things.</p>
+
+<div class="further"><h4>Investigate further</h4><ul>
+<li>Ask Claude: <em>"Show the task tree for RDR <span class="ph">&lt;NUMBER&gt;</span>, and which task is ready to start."</em></li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/strategic-planning/SKILL.md">The planning skill</a>: how phases become tasks.</li>
+</ul></div>
+</section>
+
+<!-- ============ 7 ============ -->
+<section class="lesson" id="l7">
+<div class="lhead"><span class="lnum">7</span><h2>Build it, across many sessions</h2><span class="ltime">20 min</span></div>
+<p class="why">The build takes days or weeks, in many sessions. Two things hold it together: the continuation at the end of every session, and the phase review at the end of every phase. The RDR is the fixed reference the whole time. This lesson is about the rhythm, not about writing code.</p>
+
+<h3>A session in the build</h3>
+<ol class="plain">
+<li>Start the session by pasting the continuation from the last one. Claude reads it, checks the branch, and picks the ready task.</li>
+<li>Claude implements the task. The plugin's guidance has it write the test first, then the code, then ask for review.</li>
+<li>For the review, Claude starts the reviewer agents: one for the code, one critic for the design fit. It fixes what they find and shows you the rest.</li>
+<li>Claude closes the task. The task tracker knows what is done. Memory records any decision made along the way.</li>
+<li>Before you stop, <code>/conexus:continuation</code>. Always.</li>
+</ol>
+<p>You are present for the decisions and absent for the typing. A useful habit: at the start of each session, ask <em>"where are we on RDR <span class="ph">&lt;NUMBER&gt;</span>?"</em> before the paste. Compare the answer with the continuation. They should agree.</p>
+
+<h3>The end of a phase</h3>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Phase <span class="ph">&lt;N&gt;</span> looks done. Run the phase review.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What Claude does</div>
+<p>Claude runs <code>/conexus:phase-review-gate</code>. It reads the RDR's Approach from top to bottom, lists every concrete thing the Approach says this phase delivers, and finds the closed task that shipped each one. Anything named in the Approach with no task is one of three things: built somewhere else (Claude shows where), deferred to a named task, or missing. Missing means the phase is not done. This is the check that stops scope from shrinking quietly, one small omission at a time.</p>
+<p class="note">Code review and test validation cannot catch this. They check what was built. Only a reading of the RDR against the tasks checks what was not built.</p>
+
+<h3>When the build proves the RDR wrong</h3>
+<div class="callout rule"><p><strong>Do not edit the accepted RDR.</strong> If a phase shows that a decision does not work, say so, and have Claude mark the RDR abandoned or superseded and start a new one with what was learned. The new RDR is short, because most of the research still holds. The old one stays as the record of what was believed and why. An accepted RDR that is edited to match the code is not a record of anything.</p></div>
+<p>Small things are different. A file name that changed, a detail the Approach did not specify: those are noted in the task and in memory, not in the RDR. The test is whether the decision changed.</p>
+
+<div class="further"><h4>Investigate further</h4><ul>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/phase-review-gate/SKILL.md">The phase review gate</a>: the cross-walk and the incident that produced it.</li>
+<li>Ask Claude, mid-build: <em>"What does the Approach of RDR <span class="ph">&lt;NUMBER&gt;</span> promise that has no task yet?"</em> Do this before the phase review, not after.</li>
+</ul></div>
+</section>
+
+<!-- ============ 8 ============ -->
+<section class="lesson" id="l8">
+<div class="lhead"><span class="lnum">8</span><h2>Close it, and what remains</h2><span class="ltime">10 min</span></div>
+<p class="why">Closing is the last decision, and yours. It does three things: it settles every task that is still open, it records what the build taught, and it moves the RDR into the knowledge store so that the next decision finds it.</p>
+
+<h3>Before you close</h3>
+<div class="see">You might say</div>
+<div class="cmd"><pre>RDR <span class="ph">&lt;NUMBER&gt;</span> is built. What is still open under it?</pre><button class="copy" type="button">Copy</button></div>
+<p>Claude lists every task under the RDR's epic that is not closed: open, deferred, blocked. For each one you decide: close it because it is done, defer it to a named later piece of work, or keep the RDR open until it is done. Claude does not close a blocker to make the gate pass. If it proposes to, refuse.</p>
+
+<h3>Close</h3>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Close RDR <span class="ph">&lt;NUMBER&gt;</span>, implemented. Write the post-mortem.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What Claude does</div>
+<p>Claude runs <code>/conexus:rdr-close</code>. The status becomes <code>closed</code>. Claude writes a short post-mortem: what the build changed compared with the plan, what took longer, what was learned. Then the RDR is indexed into the knowledge store. Memory records the close.</p>
+
+<h3>What remains</h3>
+<p>The RDR is now part of the corpus. The next time you or Claude research a similar question, in this project or another that shares the store, the search finds it, and the research agent reads it before it reads the web. This is the point of the whole cycle. One RDR is a decision. Two hundred are a memory of how the project thinks.</p>
+<div class="callout rule"><p><strong>The cycle again, in one line.</strong> A conversation becomes a draft. Research grows it in cycles. You read and react, sometimes with a critic. A gate checks it, within a budget. You accept. Claude breaks it into phases. Sessions build it, each ending with a continuation, each phase ending with a review. You close it. It becomes something the next RDR can find.</p></div>
+
+<div class="further"><h4>Investigate further</h4><ul>
+<li>After a close, ask Claude to research something adjacent to the RDR's subject. Watch it find the RDR.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/rdr-close/SKILL.md">The close skill</a>: the task gate and the post-mortem template.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/README.md">The Nexus RDR index</a>: every RDR of the project with its status. Pick a closed one and read its post-mortem.</li>
+</ul></div>
+</section>
+
+<div class="finish">
+<h2>Complete</h2>
+<p>You know what an RDR is for and what it is not. You know that it begins in conversation, grows through research cycles, and is read and changed as a rendering. You know that the gate has a budget, that accepting and closing are your decisions, and that the build runs across sessions held together by continuations and phase reviews. And you know that an accepted RDR is never edited to fit the code: it is abandoned and succeeded.</p>
+<p>Reference: <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr.md">RDR</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/AGENTS.md">RDR lifecycle rules</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/README.md">Plugin README</a> · <a href="getting-started.html">Getting started</a></p>
+</div>
+
+<p class="footer">Source: <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a> docs and the working practice of the Nexus project. This page is <a href="https://github.com/Hellblazer/nexus/blob/main/web/rdr.html">web/rdr.html</a> in the repo. Corrections are welcome.</p>
+</main>
+</div>
+
+<script>
+(function(){
+  document.querySelectorAll(".copy").forEach(function(btn){
+    btn.addEventListener("click",function(){
+      var pre=btn.parentElement.querySelector("pre");
+      var text=pre.textContent.split("\n").map(function(l){return l.replace(/\s+#.*$/,"");}).filter(function(l){return l.trim();}).join("\n");
+      function ok(){btn.textContent="Copied";setTimeout(function(){btn.textContent="Copy";},1400);}
+      function fail(){btn.textContent="Select and copy";setTimeout(function(){btn.textContent="Copy";},2200);}
+      if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(ok,fail);}else{fail();}
+    });
+  });
+})();
+</script>
+</body>
+</html>
