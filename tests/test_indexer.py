@@ -158,6 +158,19 @@ def _patches(db, *, cfg=None, extra=None):
         # explicit fixture, not a weaker patch.
         "nexus.catalog.factory.make_catalog_reader": {"return_value": None},
         "nexus.indexer._catalog_hook": {"return_value": {}},
+        # nexus-bd44g: the indexer now registers each freshly-minted T3
+        # collection (ensure_collection_registered) BEFORE the staleness
+        # sweep. That seam reads the engine's embedding profile via the
+        # SAME make_catalog_reader() this module stubs to None above, so
+        # left unpatched it raises CatalogReaderUnavailableError on every
+        # journey below — a boundary these tests never previously
+        # reached, since `db` (nexus.db.make_t3`'s return) already stubs
+        # every write wholesale (upsert_chunks_with_embeddings et al.),
+        # bypassing the REAL write path's own ensure_collection_registered
+        # call inside HttpVectorClient. Stubbed here at the same fidelity
+        # as _catalog_hook/make_catalog_reader above; a test asserting
+        # registration behaviour overrides this via `extra`.
+        "nexus.corpus.ensure_collection_registered": {},
     }
     if extra: patches.update(extra)
     mocks, stack = {}, []
@@ -2644,6 +2657,96 @@ def test_run_index_creates_both_for_mixed_repo(tmp_path):
     assert docs_created, (
         "mixed repo must create docs__ collection; "
         "lazy-creation gate is over-eager"
+    )
+
+
+def test_run_index_registers_collection_before_staleness_sweep(tmp_path, caplog):
+    """nexus-bd44g: a first-time ``nx index repo`` run must register the
+    freshly-minted T3 collection with the engine BEFORE the staleness-
+    cache read that follows it (``build_staleness_cache`` ->
+    ``col.get_all_metadata``).
+
+    ``db.get_or_create_collection`` returns a bare client-side handle with
+    NO registration side effect — RDR-204 Phase 1 retired the engine's
+    auto-register-on-first-write behaviour, so registration now happens
+    lazily at the first per-file chunk WRITE, further down this same run
+    (``write_with_registration_retry`` -> ``ensure_collection_registered``).
+    Pre-fix, the staleness sweep ran unconditionally BEFORE that first
+    write, so on a genuinely first-time collection it hit the engine's
+    "not registered" 422 on every single run — logging a
+    ``build_staleness_cache_fast_path_failed_falling_back`` warning (with
+    a full traceback) though the run itself still completed correctly
+    with an empty (all-new) cache.
+
+    A fake ``ensure_collection_registered`` flips a shared flag; the mock
+    collection's ``get_all_metadata`` raises the engine's exact "not
+    registered" 422 shape until that flag is set. This is a code-only
+    repo (one collection minted, so no cross-collection ambiguity), and
+    the flag is keyed on "any registration happened yet" rather than on
+    the collection's own conformant name — ``_migrate_legacy_collections``
+    promotes the legacy 2-segment name ``_reg()`` supplies to a real
+    RDR-103 4-segment name at run time, so the exact string is not
+    knowable up front. Removing the fix's pre-sweep registration call
+    makes this test fail: the flag is never set before the sweep, so the
+    raise fires and the warning is logged.
+    """
+    import logging
+
+    import structlog
+
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "main.py").write_text("x = 1\n")
+
+    state = {"registered": False}
+
+    def _fake_ensure_registered(name, *, registrar=None, kwargs=None):
+        state["registered"] = True
+
+    col = MagicMock()
+    col.get.return_value = {"metadatas": [], "ids": []}
+
+    def _get_all_metadata(where=None):
+        if not state["registered"]:
+            raise RuntimeError(
+                "POST /v1/vectors/get-all-metadata -> HTTP 422: "
+                f"collection {col.name!r} is not registered for tenant 'default'"
+            )
+        return {"ids": [], "metadatas": []}
+    col.get_all_metadata.side_effect = _get_all_metadata
+
+    db = MagicMock()
+    db.get_or_create_collection.return_value = col
+    db.get_collection.return_value = col
+
+    v = _voyage(1)
+    structlog.configure(
+        processors=[structlog.stdlib.render_to_log_kwargs],
+        wrapper_class=structlog.stdlib.BoundLogger,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+    )
+    with caplog.at_level(logging.WARNING, logger="nexus.indexer_utils"):
+        with _patches(db, extra={
+            "nexus.chunker.chunk_file": {"return_value": [_chunk()]},
+            "voyageai.Client": {"return_value": v},
+            "nexus.corpus.ensure_collection_registered": {
+                "side_effect": _fake_ensure_registered,
+            },
+        }):
+            _run_index(repo, _reg())
+
+    assert state["registered"], (
+        "ensure_collection_registered was never called for the "
+        "freshly-minted collection"
+    )
+    fast_path_failures = [
+        r for r in caplog.records
+        if r.msg == "build_staleness_cache_fast_path_failed_falling_back"
+    ]
+    assert not fast_path_failures, (
+        "staleness-cache read reached the engine before registration: "
+        f"{[getattr(r, 'collection', None) for r in fast_path_failures]}"
     )
 
 

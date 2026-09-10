@@ -4797,6 +4797,32 @@ def _run_index(
     )
     _log.debug("collections ready")
 
+    # nexus-bd44g: register each freshly-minted T3 collection with the
+    # engine BEFORE anything reads it. RDR-204 Phase 1 retired the
+    # engine's auto-register-on-first-write behaviour for T3 chunk
+    # writes (write_with_registration_retry / ensure_collection_
+    # registered, called from HttpVectorClient.upsert_chunks at the
+    # per-file write further down this run) — but the staleness-cache
+    # build below (build_staleness_cache -> col.get_all_metadata /
+    # the paginated get fallback) is a READ that runs before any file
+    # has been written, so on a genuinely first-time collection it hit
+    # the engine's ``collection ... is not registered for tenant``
+    # 422 unconditionally, logging a fast-path-failed traceback
+    # followed by a paginated-get-failed traceback before falling
+    # through to the (correct) empty-cache result every downstream
+    # write path already tolerates. Registering here — same name,
+    # same per-process cache ensure_collection_registered's write path
+    # already relies on, so the later write is a cache hit, not a
+    # second round trip — closes the read-before-registration window
+    # entirely rather than papering over its symptom.
+    from nexus.corpus import ensure_collection_registered  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+
+    for _name in (code_collection if have_code_files else None,
+                  docs_collection if have_docs_files else None,
+                  rdr_col_name):
+        if _name is not None:
+            ensure_collection_registered(_name)
+
     # ── Pre-index catalog registration (RDR-101 Phase 3 PR δ Stage B) ───────
     # Register catalog entries BEFORE per-file indexing so the prose
     # (and forthcoming code / PDF / RDR) indexers can write the catalog
