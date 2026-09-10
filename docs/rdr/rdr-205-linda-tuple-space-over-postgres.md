@@ -211,7 +211,10 @@ map; (2) the client, MCP, CLI, ledger and hook-path map; (3) the CA 1
 spike on the bundled Postgres 17.5; (4) what transfers from the May
 implementation on the archive branch; (5) the CA 2 and CA 4 hook spikes
 on Claude Code 2.1.266; (6) blocking reads through the edge, the in-JVM
-waiter, deploy-gap retry and the deferred `LISTEN` path.
+waiter, deploy-gap retry and the deferred `LISTEN` path. A seventh
+pass after the gate (`205-research-11`) read the Jini and JavaSpaces
+specifications, the Linda descendant with a leased, transactional take,
+against §Technical Design.
 
 #### Dependency Source Verification
 
@@ -383,6 +386,40 @@ waiter, deploy-gap retry and the deferred `LISTEN` path.
   timeout; a 30 s park sits exactly on it and fails on jitter. Not yet
   measured: Crunchy's server-side idle and statement timeouts on a
   held-open connection, which matters only when `LISTEN` is adopted.
+
+- **Documented** (research 11, post-gate; JavaSpaces Service
+  Specification JS.1 to JS.3, Jini Distributed Leasing Specification,
+  Jini Transaction Specification) — JavaSpaces is the leased,
+  transactional form of this design, and four of its six points of
+  contact are already met: `in` requires the template's full pinned
+  key set where JavaSpaces places no floor on a take template's
+  generality; the substrate is fixed as Postgres where the
+  specification permits transient spaces; one engine reached over HTTP
+  removes the multicast lookup and RMI coupling that Jini's
+  deployments foundered on; and a parked call held in the engine's own
+  process is the in-process form of `notify`, with `ParkCapExceeded`
+  standing where a leaked remote listener registration stood. Two
+  points are not met and are accepted for v1. First, Jini leases are
+  renewable and cancellable by their holder; a claim here holds a
+  fixed lease clamped to the tuple's `expires_at`, and the mailbox
+  template's `max_lease_seconds` of 900 is what makes the absence of a
+  renew operation safe: neither v1 consumer holds a claim across work
+  that long, and lease-renewal traffic was Jini's third failure cause,
+  which this design avoids by scope rather than by construction.
+  Second, JavaSpaces commits a `take` and the `write` that answers it
+  in one transaction; here they are two calls, so a consumer that
+  crashes between writing its reply and acking the request either
+  produces a duplicate reply (the same tuple, by the nonce) or sees the
+  request re-delivered at lease lapse and repeats the work. The window
+  is bounded by the lease and visible in the claim log. Both are named
+  as candidates for a later version, not scheduled here: a `renew`
+  operation on a live claim, and an `ack` that carries an optional
+  reply `out` committed in the ack's own transaction (a fixed compound
+  shape, not a transaction manager; a retried compound ack from the
+  same claimant must return the same reply id, and a reply that fails
+  template validation rolls the ack back and leaves the request
+  claimed). The window between `in` and `ack` while the work runs is
+  inherent to any leased take and is not what the compound closes.
 
 ### Critical Assumptions
 
@@ -1823,3 +1860,11 @@ The engine cut is not a blocker for the consumer phases: Phases 4 to 6
 run on develop against the dev jar; only the two edge legs of Phase 3
 wait for a deploy, on the engine's own cadence. Blocking reads stay in
 v1; a caller that does not want to park uses the probe forms.
+
+### 2026-09-09 — Post-gate research finding: Jini and JavaSpaces (Sam)
+
+Research 11 added as a Key Discovery: four of six JavaSpaces points of
+contact already met; fixed leases and the separate take and reply
+accepted for v1, with `renew` and a compound `ack` with reply named as
+later-version candidates. No design changed. Fix-checked under the
+post-gate rule.
