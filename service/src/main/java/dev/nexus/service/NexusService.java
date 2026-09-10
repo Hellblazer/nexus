@@ -115,9 +115,11 @@ public final class NexusService {
      * moves on to the NEXT tenant in {@code tuple_tenants} order: this bound
      * protects OTHER tenants' forward progress within one run. Distinct from
      * {@value #TUPLE_SWEEP_WALL_CLOCK_BUDGET_SECONDS_ENV} below, which bounds
-     * the WHOLE run's wall-clock duration and, when it fires, stops the task
-     * outright at whichever tenant boundary it is at — no further tenant is
-     * started once it fires, mid-tenant or between tenants.
+     * the WHOLE run's wall-clock duration and is checked ONLY at tenant
+     * boundaries, before starting the next tenant — never mid-tenant. A
+     * tenant already underway always finishes cleanly or hits this cap
+     * first; only THEN, at the next tenant boundary, can the wall-clock
+     * budget stop the run.
      */
     public static final String TUPLE_SWEEP_MAX_BATCHES_PER_TENANT_ENV = "NX_TUPLE_SWEEP_MAX_BATCHES_PER_TENANT";
     public static final int DEFAULT_TUPLE_SWEEP_MAX_BATCHES_PER_TENANT = 50;
@@ -967,8 +969,10 @@ public final class NexusService {
      * maxBatchesPerTenant} was reached (self-limiting — the run moves on to the next
      * tenant in the SAME run, never starves the rest); {@code TENANT_ERROR} when a
      * tenant's own arms threw; {@code WALL_CLOCK} when the run's {@code
-     * wallClockBudget} was exhausted, either before starting a tenant or mid-tenant —
-     * the one cause that stops the WHOLE run outright (see {@code stopWholeRun} in
+     * wallClockBudget} was exhausted BEFORE starting the next tenant — the wall clock
+     * is checked ONLY at that tenant boundary, never mid-tenant, so a tenant already
+     * underway always finishes cleanly or hits its own {@code TENANT_CAP} first; this
+     * is the one cause that stops the WHOLE run outright (see
      * {@link #runScheduledTupleSweep(OffsetDateTime, Duration, int, int, Duration)}).
      * Declared in ascending severity ({@link Enum#ordinal()} order) so a run touching
      * more than one incomplete tenant reports the worst cause it reached — the enum
@@ -983,11 +987,15 @@ public final class NexusService {
      * {@code CatalogRepository.GhostSweepResult}). {@code scanned} is the
      * release arm's candidate count ({@code == released + deadLettered}, same
      * shape as the ghost sweep's own {@code scanned == } the sum of its
-     * dispositions); {@code oldestLastSweptAt} is null only when {@code
-     * nexus.tuple_tenants} has no rows at all (nothing has ever called {@code
-     * out}), OR when every tenant reached this run was stamped (RDR-205 Phase 1
-     * review, bead nexus-em75s.7 — see {@code stampTupleTenantSwept} below), in
-     * which case it reports {@code now}.
+     * dispositions); {@code oldestLastSweptAt} reports the TRUE oldest {@code
+     * last_swept_at} across {@code nexus.tuple_tenants} after the run (RDR-205 Phase 1
+     * review, bead nexus-em75s.7, Sam's ruling — a tenant is stamped ONLY on a clean
+     * finish; see {@code stampTupleTenantSwept} below): {@code now} when every tenant
+     * reached this run finished cleanly and was freshly stamped (nothing older
+     * remains); the FIRST cut-short tenant's ORIGINAL, unchanged stamp — {@code null}
+     * when that tenant had never been swept before — when the run leaves one behind;
+     * or {@code null} outright when {@code nexus.tuple_tenants} has no rows at all
+     * (nothing has ever called {@code out}).
      */
     record TupleSweepRunResult(
             int tenantsVisited, OffsetDateTime oldestLastSweptAt,
@@ -1021,11 +1029,14 @@ public final class NexusService {
      * {@code statementTimeout}, applied to EVERY statement this task issues,
      * including {@link #listTupleSweepTenants}'s own enumeration; (2) this
      * task's own budget — {@code maxBatchesPerTenant} caps batches spent on ONE
-     * tenant before moving to the NEXT tenant in the same run (that tenant
-     * keeps its old stamp and sorts first again next run); {@code
-     * wallClockBudget} caps the WHOLE run and, once exceeded, stops the task
-     * outright — no further tenant is started, mid-tenant or between tenants.
-     * Neither bound is ever checked mid-batch: every batch call is one
+     * tenant before moving to the NEXT tenant in the SAME run (that tenant keeps
+     * its old stamp, per RDR-205 §Technical Design "Sweep" — a cut-short tenant
+     * is stamped only on a clean finish — and sorts first again next run); {@code
+     * wallClockBudget} caps the WHOLE run and is checked ONLY at a tenant
+     * boundary, before starting the next tenant — NEVER mid-tenant. A tenant
+     * already underway always finishes cleanly or hits {@code maxBatchesPerTenant}
+     * first; only then, at the next boundary, can the wall clock stop the task
+     * outright. Neither bound is ever checked mid-batch: every batch call is one
      * committed transaction, so the task always stops AT a batch boundary,
      * never inside one.
      */
@@ -1050,30 +1061,33 @@ public final class NexusService {
 
         for (TupleTenantCursor cursor : tenants) {
             if (System.nanoTime() >= deadlineNanos) {
-                // Wall clock already exhausted: never START a new tenant, mid-run or not —
-                // the task stops at THIS tenant boundary. Zero progress was spent on this
-                // tenant, so (unlike the stamped-on-progress case below) its pre-run stamp
-                // is still accurate and is what "oldest remaining" reports.
+                // Wall clock exhausted: never START a new tenant — the task stops at
+                // THIS tenant boundary, and ONLY here (the three arms below carry no
+                // wall-clock check of their own, per RDR-205 §Technical Design "Sweep":
+                // a tenant already underway always finishes cleanly or hits its own
+                // maxBatchesPerTenant cap first). Zero progress was spent on this
+                // tenant, so its pre-run stamp is still accurate. Guarded on
+                // !oldestRemainingSet: tenants are visited least-recently-swept first,
+                // so an EARLIER tenant left unstamped this run (TENANT_CAP or
+                // TENANT_ERROR) already holds the true oldest remaining stamp — this
+                // cursor's own (later) stamp must not overwrite it.
                 cause = TupleSweepIncompleteCause.WALL_CLOCK;
-                oldestRemaining = cursor.lastSweptAt();
-                oldestRemainingSet = true;
+                if (!oldestRemainingSet) {
+                    oldestRemaining = cursor.lastSweptAt();
+                    oldestRemainingSet = true;
+                }
                 break;
             }
             String tenant = cursor.tenantId();
             int batches = 0;
             boolean complete = true;
-            boolean stopWholeRun = false;
             TupleSweepIncompleteCause tenantCause = TupleSweepIncompleteCause.NONE;
 
             try {
-                // Arm 1: release lapsed claims nobody re-took.
+                // Arm 1: release lapsed claims nobody re-took. No wall-clock check here
+                // or in arms 2/3 below — maxBatchesPerTenant is the only bound WITHIN a
+                // tenant; the wall clock is checked only at the tenant boundary above.
                 while (complete) {
-                    if (System.nanoTime() >= deadlineNanos) {
-                        complete = false;
-                        stopWholeRun = true;
-                        tenantCause = TupleSweepIncompleteCause.WALL_CLOCK;
-                        break;
-                    }
                     if (batches >= maxBatchesPerTenant) {
                         complete = false;
                         tenantCause = TupleSweepIncompleteCause.TENANT_CAP;
@@ -1091,12 +1105,6 @@ public final class NexusService {
                 }
                 // Arm 2: purge expired / consumed-past-retention tuples.
                 while (complete) {
-                    if (System.nanoTime() >= deadlineNanos) {
-                        complete = false;
-                        stopWholeRun = true;
-                        tenantCause = TupleSweepIncompleteCause.WALL_CLOCK;
-                        break;
-                    }
                     if (batches >= maxBatchesPerTenant) {
                         complete = false;
                         tenantCause = TupleSweepIncompleteCause.TENANT_CAP;
@@ -1111,12 +1119,6 @@ public final class NexusService {
                 }
                 // Arm 3: purge claim-log rows past their own (longer) TTL.
                 while (complete) {
-                    if (System.nanoTime() >= deadlineNanos) {
-                        complete = false;
-                        stopWholeRun = true;
-                        tenantCause = TupleSweepIncompleteCause.WALL_CLOCK;
-                        break;
-                    }
                     if (batches >= maxBatchesPerTenant) {
                         complete = false;
                         tenantCause = TupleSweepIncompleteCause.TENANT_CAP;
@@ -1138,36 +1140,37 @@ public final class NexusService {
             }
 
             tenantsVisited++;
-            // RDR-205 Phase 1 review (nexus-em75s.7, ship-blocker — the wall-clock
-            // starvation finding): stamp on ANY real progress this run, not only full
-            // completion. The three arms are idempotent and cumulative (a re-run of a
-            // batch call simply resumes wherever the last one left off), so re-stamping
-            // a partially-swept tenant loses no work; it only moves the tenant to the
-            // BACK of next run's least-recently-swept order. Leaving a tenant UNSTAMPED
-            // after real work was already spent on it is what let a tenant whose own
-            // backlog always exceeds the wall-clock budget sort first FOREVER and starve
-            // every other tenant, run after run. Incompleteness now travels in `cause`,
-            // never in the stamp.
-            if (complete || batches > 0) {
+            // RDR-205 Phase 1 review, Sam's ruling (nexus-em75s.7, superseding the prior
+            // "stamp on any progress" fix): stamp ONLY on a clean finish, per RDR-205
+            // §Technical Design "Sweep" verbatim — a tenant cut short (TENANT_CAP or
+            // TENANT_ERROR) keeps its OLD stamp and therefore sorts first again next
+            // run. This is safe against starvation WITHOUT stamping partial progress,
+            // because TENANT_CAP and TENANT_ERROR never stop the whole run (only
+            // WALL_CLOCK does, and only at the NEXT tenant boundary, never mid-tenant):
+            // a tenant that keeps hitting its own cap still yields the run to every
+            // OTHER tenant within the SAME run, so the rest are reached; the arms are
+            // also idempotent and cumulative, so the cut-short tenant's own backlog
+            // still shrinks run over run even while unstamped, and completes within a
+            // bounded number of runs.
+            if (complete) {
                 stampTupleTenantSwept(tenant, now, statementTimeout);
             } else if (!oldestRemainingSet) {
-                // Zero batches spent (the deadline hit before this tenant's first
-                // statement): genuinely untouched, so its pre-run stamp is still accurate.
+                // Cut short (cap or error): its pre-run stamp is still accurate and, by
+                // visitation order (least-recently-swept first), is the oldest remaining
+                // stamp after the run — the FIRST such tenant encountered, so a later
+                // cut-short tenant here must never overwrite it.
                 oldestRemaining = cursor.lastSweptAt();
                 oldestRemainingSet = true;
             }
             if (!complete && tenantCause.ordinal() > cause.ordinal()) {
                 cause = tenantCause;
             }
-            if (stopWholeRun) {
-                break;
-            }
         }
 
         if (!oldestRemainingSet) {
-            // Every tenant reached this run either completed cleanly or was stamped on
-            // partial progress: "oldest last_swept_at after the run" is trivially `now`,
-            // or null if there is no tuple_tenants row to report at all.
+            // Every tenant reached this run finished cleanly and was freshly stamped:
+            // "oldest last_swept_at after the run" is trivially `now`, or null if there
+            // is no tuple_tenants row to report at all.
             oldestRemaining = tenants.isEmpty() ? null : now;
         }
 

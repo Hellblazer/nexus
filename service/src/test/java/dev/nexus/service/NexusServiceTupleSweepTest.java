@@ -44,10 +44,14 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>Covers the RDR-205 §Test Plan scenarios this bead owns: seeded expired tuples,
  * lapsed claims and old log rows sweep cleanly and an idle run logs zeros; the budget
  * stops mid-list and the next run visits the unreached tenants first with no JVM
- * cursor; the budget is exhausted across several tenants, stopping at a tenant
- * boundary with every tenant reached within a bounded number of runs, and the T1
- * sweep still runs in the same cycle; a tenant reachable only through its {@code
- * tuple_tenants} row (no {@code service_tokens} row at all) is still visited.
+ * cursor; a tenant cut short by its own per-tenant cap does not stop the whole run,
+ * so later tenants are still reached within the same run; a tenant whose backlog
+ * always exceeds that cap never gets stamped and never starves the rest (RDR-205
+ * Phase 1 review, Sam's ruling, nexus-em75s.7 — a tenant is stamped ONLY on a clean
+ * finish, and the wall clock is checked ONLY at a tenant boundary, never mid-tenant,
+ * so a tenant already underway always finishes cleanly or hits its own cap first);
+ * the T1 sweep still runs in the same cycle; a tenant reachable only through its
+ * {@code tuple_tenants} row (no {@code service_tokens} row at all) is still visited.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class NexusServiceTupleSweepTest {
@@ -156,10 +160,13 @@ class NexusServiceTupleSweepTest {
         return su.fetchExists(su.selectFrom(TUPLES).where(TUPLES.ID.eq(id)));
     }
 
-    /** Row count for a tenant across ALL subspaces — used post-fix (nexus-em75s.7) as
-     *  the true "is this tenant's backlog fully drained" signal, since {@link
-     *  #lastSweptAt} now advances on partial progress too and can no longer serve
-     *  that role on its own. */
+    /** Row count for a tenant across ALL subspaces — a direct, stamp-independent
+     *  "is this tenant's backlog fully drained" signal for the convergence loops
+     *  below, rather than inferring completion from {@link #lastSweptAt} advancing
+     *  (RDR-205 Phase 1 review, Sam's ruling, nexus-em75s.7: a cut-short tenant's
+     *  stamp stays put across every run until the one that finally finishes it
+     *  cleanly, so {@code lastSweptAt} non-null WOULD also signal completion here —
+     *  this is the more direct check). */
     private int countTuples(String tenant) {
         return su.fetchCount(su.selectFrom(TUPLES).where(TUPLES.TENANT_ID.eq(tenant)));
     }
@@ -346,26 +353,30 @@ class NexusServiceTupleSweepTest {
         // The run stops at a tenant boundary: tenantA's own per-tenant cap does NOT
         // stop the whole run — tenantB (next in order, since it's already swept-once
         // and sorts after the never-swept tenantA) still gets visited and completed.
-        assertThat(run1.tenantsVisited()).isEqualTo(2);
+        // Lower-bound, not exact: this test class is @TestInstance(PER_CLASS) and
+        // shares one `tuple_tenants` table across every test method, so a tenant
+        // already stamped (drained) by an earlier-run sibling test can legitimately
+        // be re-visited (trivially, at zero cost) within this run's generous budget.
+        assertThat(run1.tenantsVisited()).isGreaterThanOrEqualTo(2);
         assertThat(run1.incompleteCause()).isEqualTo(TENANT_CAP);
         assertThat(run1.purged()).isEqualTo(5); // 4 from tenantA's capped batches + 1 from tenantB
-        // RDR-205 Phase 1 review (nexus-em75s.7): tenantA spent 3 real batches this run
-        // (batches > 0) even though its own cap cut it short, so it IS stamped —
-        // otherwise it would sort first again next run and starve every OTHER tenant
-        // for as long as its own backlog keeps exceeding the per-tenant cap.
-        assertThat(lastSweptAt(tenantA)).as("cut short but progressed -- stamped anyway").isNotNull();
+        // RDR-205 Phase 1 review, Sam's ruling (nexus-em75s.7): a tenant is stamped
+        // ONLY on a clean finish, per the RDR verbatim — tenantA's own cap cut it
+        // short, so it keeps its OLD (null) stamp and sorts first again next run.
+        // This does not starve tenantB: TENANT_CAP never stops the whole run, so
+        // tenantB is still visited and completes within this SAME run.
+        assertThat(lastSweptAt(tenantA)).as("cut short by its own cap -- keeps its old stamp").isNull();
         assertThat(lastSweptAt(tenantB)).isNotNull(); // completed cleanly: stamped
 
-        // Both tenants reached this run are stamped (one on full completion, one on
-        // progress), so nothing stale remains to report: "oldest last_swept_at" falls
-        // through to `now`.
-        assertThat(run1.oldestLastSweptAt()).isEqualTo(now);
+        // tenantA is the only tenant left unstamped, and (least-recently-swept-first
+        // order) the oldest remaining: "oldest last_swept_at" reports its true,
+        // unchanged (null) stamp -- never `now`.
+        assertThat(run1.oldestLastSweptAt()).isNull();
 
         // tenantA's remaining backlog (1 of 5 rows) is drained within a bounded number
         // of further runs: each makes durable, cumulative progress (idempotent — the
-        // remaining row and both other arms simply run on the next call). `lastSweptAt`
-        // no longer signals "fully done" on its own (it already advanced on run1's
-        // partial progress), so completion is read off the actual row count instead.
+        // remaining row and both other arms simply run on the next call), even though
+        // tenantA is never stamped until a run finally finishes it cleanly.
         int runsToComplete = 0;
         OffsetDateTime clock = now;
         while (countTuples(tenantA) > 0 && runsToComplete < 10) {
@@ -379,61 +390,149 @@ class NexusServiceTupleSweepTest {
         assertThat(runsToComplete).isLessThanOrEqualTo(10);
     }
 
-    // ── Scenario: wall-clock starvation across several tenants (nexus-em75s.7) ──
+    // ── Scenario: per-tenant-cap starvation across several tenants (nexus-em75s.7,
+    //    Sam's ruling) ──────────────────────────────────────────────────────────
 
     /**
-     * RDR-205 Phase 1 review (nexus-em75s.7, ship-blocker): pre-fix, a tenant that
-     * always exhausts the wall-clock budget mid-processing was never stamped, so it
-     * sorted first ({@code last_swept_at ASC NULLS FIRST}) again on the NEXT run too —
-     * and because the wall clock (unlike the per-tenant cap) stops the WHOLE run at
-     * that tenant, no other tenant was ever reached, run after run. Fixed by stamping
-     * on any real progress (see {@code runScheduledTupleSweep}'s own comment).
+     * RDR-205 Phase 1 review, Sam's ruling (nexus-em75s.7, superseding the prior
+     * "stamp on any progress" fix): a tenant is stamped ONLY on a clean finish, so a
+     * tenant whose own backlog always exceeds its {@code maxBatchesPerTenant} NEVER
+     * gets stamped and sorts first ({@code last_swept_at ASC NULLS FIRST}) again
+     * every run, forever. This does not starve the rest: unlike {@code WALL_CLOCK},
+     * {@code TENANT_CAP} never stops the WHOLE run — the task moves on to the next
+     * tenant in the SAME run, so every other tenant is still reached.
      */
     @Test
-    void sweep_tenantAlwaysExhaustsWallClockBudget_laterTenantsStillVisitedWithinThreeRuns() throws Exception {
+    void sweep_tenantAlwaysExhaustsPerTenantCap_laterTenantsStillVisitedWithinTheSameRun() throws Exception {
         // Lexicographic tenant_id order ("...-1-" < "...-2-" < "...-3-") matches the
         // ASC-NULLS-FIRST sort's tie-break while every tenant is still unswept, so
-        // `starver` is picked first in run 1.
-        String starver = "sweep-starve-1-" + UUID.randomUUID();
-        String second = "sweep-starve-2-" + UUID.randomUUID();
-        String third = "sweep-starve-3-" + UUID.randomUUID();
+        // `starver` is picked first every run.
+        String starver = "sweep-cap-starve-1-" + UUID.randomUUID();
+        String second = "sweep-cap-starve-2-" + UUID.randomUUID();
+        String third = "sweep-cap-starve-3-" + UUID.randomUUID();
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         insertTupleTenant(starver, now.minusDays(2), now.minusDays(2), null);
         insertTupleTenant(second, now.minusDays(2), now.minusDays(2), null);
         insertTupleTenant(third, now.minusDays(2), now.minusDays(2), null);
 
-        // `starver` has far more expired rows than a 100ms wall-clock budget at
-        // batchSize=1 can drain (each batch is its own round trip) — every run that
-        // reaches it spends its whole remaining budget there and is cut off
-        // mid-tenant, exactly the review's starvation scenario: a tenant whose own
-        // backlog always exceeds the budget.
-        for (int i = 0; i < 3000; i++) {
+        // `starver` has far more expired rows than a per-tenant cap of 5 batches at
+        // batchSize=1 can ever drain in a single run — it hits TENANT_CAP every run,
+        // never completes, and (per the ruling) is therefore never stamped.
+        for (int i = 0; i < 200; i++) {
             byte[] id = fakeId(starver + "-row-" + i);
-            insertTuple(id, starver, "mailbox/agent-starve", null, null, null,
+            insertTuple(id, starver, "mailbox/agent-cap-starve", null, null, null,
+                    null, 0, null, now.minusMinutes(1), now.minusHours(1).plusSeconds(i));
+        }
+        // `second`/`third` each have a single trivial row — either completes
+        // comfortably inside the same per-tenant cap once reached.
+        insertTuple(fakeId(second + "-row"), second, "mailbox/agent-cap-starve-2", null, null, null,
+                null, 0, null, now.minusMinutes(1), now.minusHours(1));
+        insertTuple(fakeId(third + "-row"), third, "mailbox/agent-cap-starve-3", null, null, null,
+                null, 0, null, now.minusMinutes(1), now.minusHours(1));
+
+        // A generous wall-clock budget: TENANT_CAP, never WALL_CLOCK, is the only
+        // possible cause of incompleteness in this run.
+        var run1 = service.runScheduledTupleSweep(now, Duration.ofSeconds(30),
+                /* batchSize */ 1, /* maxBatchesPerTenant */ 5, /* wallClockBudget */ Duration.ofSeconds(30));
+
+        // Lower-bound, not exact: this test class is @TestInstance(PER_CLASS) and
+        // shares one `tuple_tenants` table across every test method, so a tenant
+        // already stamped (drained) by an earlier-run sibling test can legitimately
+        // be re-visited (trivially, at zero cost) within this run's generous budget.
+        assertThat(run1.tenantsVisited())
+                .as("starver's own cap does not stop the run -- second and third are still reached")
+                .isGreaterThanOrEqualTo(3);
+        assertThat(run1.incompleteCause()).isEqualTo(TENANT_CAP);
+        assertThat(lastSweptAt(starver)).as("cut short by its own cap -- keeps its old (null) stamp").isNull();
+        assertThat(lastSweptAt(second)).isNotNull(); // completed cleanly: stamped
+        assertThat(lastSweptAt(third)).isNotNull(); // completed cleanly: stamped
+
+        // A second run confirms this is not a one-off: starver's backlog is barely
+        // dented by one run's worth of capped batches, so it hits its cap again and
+        // stays unstamped, while second/third simply stay stamped.
+        var run2 = service.runScheduledTupleSweep(now.plusMinutes(1), Duration.ofSeconds(30), 1, 5,
+                Duration.ofSeconds(30));
+        assertThat(run2.incompleteCause()).isEqualTo(TENANT_CAP);
+        assertThat(lastSweptAt(starver)).as("still cut short on run 2 -- still unstamped").isNull();
+
+        // Drain starver's remaining backlog and let it finish cleanly, so this test
+        // does not leave a PERMANENTLY unswept tenant behind: this class is
+        // @TestInstance(PER_CLASS) and shares one `tuple_tenants` table across every
+        // test method, and every OTHER test here is self-cleaning by the time its own
+        // method returns.
+        service.runScheduledTupleSweep(now.plusMinutes(2), Duration.ofSeconds(30), 300, 300, Duration.ofMinutes(2));
+        assertThat(lastSweptAt(starver)).as("cleaned up -- no longer polluting later tests").isNotNull();
+    }
+
+    // ── Scenario: wall-clock stop lands only at a tenant boundary, never mid-tenant
+    //    (RDR-205 Phase 1 review, Sam's ruling, nexus-em75s.7) ────────────────────
+
+    /**
+     * RDR-205 Phase 1 review, Sam's ruling (nexus-em75s.7): the wall-clock budget is
+     * checked ONLY before starting a tenant, never inside one — a tenant already
+     * underway always finishes cleanly (and IS stamped) or hits its own {@code
+     * maxBatchesPerTenant} cap first, however far past the nominal budget that takes;
+     * only THEN, at the NEXT tenant boundary, does the already-exhausted budget stop
+     * the run.
+     */
+    @Test
+    void sweep_wallClockExhaustedMidTenant_tenantFinishesAnyway_runStopsOnlyAtNextBoundary() throws Exception {
+        // Warm up the (pooled) DataSource this service's sweep queries actually run
+        // through -- distinct from `su`'s own dedicated superuser connection used by
+        // this file's seeding helpers -- BEFORE the timing-sensitive budget below. A
+        // cold first connection acquisition through a freshly-constructed
+        // HikariDataSource can itself cost more than a tiny nominal budget, which
+        // would make the very first tenant-boundary check fire before ANY tenant
+        // (`midTenant` included) ever starts -- a false negative unrelated to the
+        // property this test exists to prove.
+        service.runScheduledTupleSweep(
+                OffsetDateTime.now(ZoneOffset.UTC), Duration.ofSeconds(30), 300, 50, Duration.ofSeconds(30));
+
+        // Lexicographic order picks `midTenant` first (both start unswept, null
+        // last_swept_at, so the tie-break is tenant_id).
+        String midTenant = "sweep-boundary-1-" + UUID.randomUUID();
+        String afterTenant = "sweep-boundary-2-" + UUID.randomUUID();
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        insertTupleTenant(midTenant, now.minusDays(2), now.minusDays(2), null);
+        insertTupleTenant(afterTenant, now.minusDays(2), now.minusDays(2), null);
+
+        // `midTenant` has far more expired rows than a 100ms wall-clock budget at
+        // batchSize=1 can drain (each batch is its own round trip against the real
+        // Testcontainers Postgres): the deadline WILL be exceeded partway through its
+        // own processing, not merely before it starts (this same row-count/budget
+        // ratio is what proved, empirically, a reliable mid-processing overrun under
+        // the pre-ruling code).
+        for (int i = 0; i < 3000; i++) {
+            byte[] id = fakeId(midTenant + "-row-" + i);
+            insertTuple(id, midTenant, "mailbox/agent-boundary", null, null, null,
                     null, 0, null, now.minusMinutes(1), now.minusHours(1).plusNanos(i * 1_000_000L));
         }
-        // `second`/`third` each have a single trivial row -- either completes within
-        // whatever budget remains once it is finally reached.
-        insertTuple(fakeId(second + "-row"), second, "mailbox/agent-starve-2", null, null, null,
-                null, 0, null, now.minusMinutes(1), now.minusHours(1));
-        insertTuple(fakeId(third + "-row"), third, "mailbox/agent-starve-3", null, null, null,
+        insertTuple(fakeId(afterTenant + "-row"), afterTenant, "mailbox/agent-boundary-2", null, null, null,
                 null, 0, null, now.minusMinutes(1), now.minusHours(1));
 
-        OffsetDateTime clock = now;
-        int runs = 0;
-        while (runs < 3 && (lastSweptAt(second) == null || lastSweptAt(third) == null)) {
-            clock = clock.plusMinutes(1);
-            service.runScheduledTupleSweep(clock, Duration.ofSeconds(30),
-                    /* batchSize */ 1, /* maxBatchesPerTenant */ 100_000, Duration.ofMillis(100));
-            runs++;
-        }
+        // maxBatchesPerTenant is generous enough to never bind against midTenant's
+        // own 3000-row backlog — the ONLY bound in play is the wall clock, and it is
+        // checked at tenant boundaries only. "sweep-boundary-" sorts before every
+        // other tenant-id prefix this file uses (and before any never-swept tenant a
+        // sibling test method may have left behind), so `midTenant` is guaranteed to
+        // be the first tenant this run touches, however many other tenants a sibling
+        // test method has already added to the shared `tuple_tenants` table.
+        var result = service.runScheduledTupleSweep(now, Duration.ofSeconds(30),
+                /* batchSize */ 1, /* maxBatchesPerTenant */ 100_000, /* wallClockBudget */ Duration.ofMillis(100));
 
-        assertThat(lastSweptAt(second)).as("tenant #2 must be reached within three runs").isNotNull();
-        assertThat(lastSweptAt(third)).as("tenant #3 must be reached within three runs").isNotNull();
-        assertThat(runs).isLessThanOrEqualTo(3);
-        // `starver` itself made real progress and was stamped despite being cut
-        // short — exactly what stops it from starving the other two across runs.
-        assertThat(lastSweptAt(starver)).isNotNull();
+        assertThat(result.incompleteCause()).isEqualTo(WALL_CLOCK);
+        assertThat(lastSweptAt(midTenant))
+                .as("midTenant, already underway, finished cleanly despite the expired budget -- stamped")
+                .isNotNull();
+        assertThat(countTuples(midTenant)).as("midTenant's whole backlog drained in the one run").isZero();
+        assertThat(lastSweptAt(afterTenant))
+                .as("the run stopped at the boundary before it -- never started, keeps its pre-run (null) stamp")
+                .isNull();
+
+        // Drain afterTenant too, so this test does not leave a permanently unswept
+        // tenant behind for sibling test methods sharing this PER_CLASS instance.
+        service.runScheduledTupleSweep(now.plusMinutes(1), Duration.ofSeconds(30), 300, 50, Duration.ofMinutes(2));
+        assertThat(lastSweptAt(afterTenant)).as("cleaned up -- no longer polluting later tests").isNotNull();
     }
 
     // ── Scenario: T1 sweep still runs in the same interval ──────────────────────
