@@ -167,10 +167,10 @@ ol.plain li,ul.plain li{margin:3px 0}
 <tr><td>superseded</td><td>Replaced by a named later RDR.</td></tr>
 <tr><td>abandoned</td><td>Not going to happen.</td></tr>
 </table></div>
-<div class="callout rule"><p><strong>Who does what.</strong> Claude does the work: research, drafting, fixing what a review finds, decomposing into tasks, building. You move the lifecycle: you say when to run the gate, when to accept, when to close, when to abandon. This boundary is not stable by itself. Claude crosses it, because running the next step looks like finishing the work. In the Nexus project it happened twice in one week of September 2026. The sentence that stops it: <em>"Finish this stage and stop. I move the lifecycle."</em> Say it early, and again when needed.</p></div>
+<div class="callout rule"><p><strong>Who does what.</strong> Claude does the work: research, drafting, fixing what a review finds, decomposing into tasks, building. You move the lifecycle: you say when to run the gate, when to accept, when to close, when to abandon. Running the next step can look like finishing the work, so say the boundary once, early: <em>"Finish this stage and stop. I move the lifecycle."</em></p></div>
 
 <div class="further"><h4>Investigate further</h4><ul>
-<li>Ask Claude: <em>"List the RDRs in this project and their statuses."</em> In a new project the list is empty. In the Nexus repository it is over two hundred.</li>
+<li>Ask Claude: <em>"List the RDRs in this project and their statuses."</em> In a new project the list is empty.</li>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr.md">RDR</a>: the full template and the reasoning behind it.</li>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-205-linda-tuple-space-over-postgres.md">RDR-205</a>: a real, large one, accepted in September 2026. Read the Problem Statement and the Approach only.</li>
 </ul></div>
@@ -298,7 +298,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 
 <h3>The budget</h3>
 <div class="callout rule"><p><strong>Two rounds, three if a round changed the design.</strong> If findings are still arriving at the end of the budget, the RDR is done and the remaining findings are residuals: recorded, fixed once after the pass, not re-gated. From round three on, fix only the finding that actually blocks shipping.</p>
-<p><strong>What happens without the budget, measured.</strong> RDR-204, September 2026: ten gate rounds in 24 hours, no design change after round four. Every finding after that was in text the previous fix had written. RDR-205, the same week: five rounds and twelve fix checks, and the file grew from 844 to 1,870 lines with no design change after round two. Four independent runs of the same check on the same commit agreed on one finding out of eleven. A gate that runs five rounds is examining itself. The budget, and a fix check that counts a defect only when two of three independent readers raise it, were added after those two weeks. They are the reason the loop no longer runs, not a reason it never did.</p></div>
+<p><strong>Why the budget exists.</strong> After the first two rounds, new findings tend to sit in text that the previous fix added, not in the design. Two independent readers of the same document also do not agree on every finding, so a rule of "fix every finding, run again" never converges. The gate runs a fix check with three independent readers and counts a defect only when two of them raise it. A gate past its budget is examining itself, not the design.</p></div>
 <p>The signal to stop is yours. Pick a word for it and use it. Claude will keep going otherwise, because each round produces findings and findings look like work.</p>
 
 <h3>When it passes</h3>
@@ -361,7 +361,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 <h3>When the build proves the RDR wrong</h3>
 <div class="callout rule"><p><strong>Do not edit the accepted RDR.</strong> If a phase shows that a decision does not work, say so, and have Claude mark the RDR abandoned or superseded and start a new one with what was learned. The new RDR is short, because most of the research still holds. The old one stays as the record of what was believed and why. An accepted RDR that is edited to match the code is not a record of anything.</p></div>
 <p>Small things are different. A file name that changed, a detail the Approach did not specify: those are noted in the task and in memory, not in the RDR. The test is whether the decision changed.</p>
-<div class="callout rule"><p><strong>Status and code are two facts.</strong> An RDR's status says what was decided. It says nothing about whether code exists. A day spent on tooling measured against an RDR, or on documents about it, reads in a status line like a day spent building it. On 2026-09-10 the Nexus project ended a day believing RDR-205 was accepted and built. It was a draft with no code. Ask, at any point: <em>"Does RDR <span class="ph">&lt;NUMBER&gt;</span> have code yet, and on which branch?"</em> The answer is one sentence, and Claude should give it in every status report without being asked.</p></div>
+<div class="callout rule"><p><strong>Status and code are two facts.</strong> An RDR's status says what was decided. It says nothing about whether code exists. A day spent on tooling around an RDR, or on documents about it, can read in a status line like a day spent building it. Ask, at any point: <em>"Does RDR <span class="ph">&lt;NUMBER&gt;</span> have code yet, and on which branch?"</em> The answer is one sentence, and Claude should give it in every status report without being asked.</p></div>
 
 <div class="further"><h4>Investigate further</h4><ul>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/phase-review-gate/SKILL.md">The phase review gate</a>: the cross-walk and the incident that produced it.</li>
