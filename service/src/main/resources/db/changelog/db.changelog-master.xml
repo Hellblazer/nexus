@@ -1143,6 +1143,16 @@
          view), so it is safe ahead of the extension relocation. -->
     <include file="db/changelog/hygiene-002-collection-attributes-walk.xml"/>
 
+    <!-- RDR-205 Phase 1 Step 2 (bead nexus-em75s.2): the Linda tuple space
+         baseline — nexus.tuples, nexus.tuple_claim_log (both RLS), and
+         nexus.tuple_tenants (no RLS, sweep-cursor bookkeeping only). No
+         earlier changeset references it and nothing here is vector-typed,
+         so it is safe anywhere in this pre-grants tail; placed immediately
+         after hygiene-002-collection-attributes-walk.xml (current tail) and
+         before search-path-001 (reserved changeset-id family "tuples-001",
+         unused on develop at this bead's base). -->
+    <include file="db/changelog/tuples-001-baseline.xml"/>
+
     <!--
         nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): relocates the
         pgvector-family extensions into the nexus schema. GUARDED (a
