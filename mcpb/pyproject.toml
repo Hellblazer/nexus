@@ -20,4 +20,8 @@ package = false
 # which reads THIS table). Pinned to parity by tests/test_install_source_wiring_pins.py.
 override-dependencies = [
     "av; sys_platform == 'never'",
+    # nexus-gqrg0 (GH #1533): same pdftext<0.7 bound as the root
+    # pyproject.toml and src/nexus/_install/overrides.txt -- pdftext 0.7.x
+    # broke mineru's span_pre_proc.py (see root pyproject.toml for detail).
+    "pdftext>=0.6.3,<0.7",
 ]

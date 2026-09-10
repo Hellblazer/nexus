@@ -13,7 +13,10 @@ resolution-markers = [
 ]
 
 [manifest]
-overrides = [{ name = "av", marker = "sys_platform == 'never'" }]
+overrides = [
+    { name = "av", marker = "sys_platform == 'never'" },
+    { name = "pdftext", specifier = ">=0.6.3,<0.7" },
+]
 
 [[package]]
 name = "accelerate"

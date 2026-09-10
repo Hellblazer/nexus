@@ -318,6 +318,16 @@ dev = [
 # The never-true marker drops `av` from resolution on every platform.
 override-dependencies = [
     "av; sys_platform == 'never'",
+    # nexus-gqrg0 (GH #1533): bound pdftext below 0.7. mineru declares
+    # `pdftext>=0.6.3` with no upper bound; pdftext 0.7.1 rewrote its
+    # `PageChars` into a column-oriented type with `__len__` and no
+    # `__iter__`, while mineru's own `span_pre_proc.py:60` still iterates
+    # `page_chars['chars']` as a list of char dicts -- every `import mineru`
+    # still succeeds and every real parse raises `TypeError: 'PageChars'
+    # object is not iterable`. Only mineru depends on pdftext, so the bound
+    # affects nothing else. Raise the ceiling once mineru's own
+    # span_pre_proc.py handles the new PageChars shape upstream.
+    "pdftext>=0.6.3,<0.7",
 ]
 
 # nexus-mt1tj (Sam, 2026-09-04): CPU-only torch on Linux by default. The PyPI

@@ -72,6 +72,16 @@
 #   --self-test        run the pure-function unit checks (nexus-1ktd5 items
 #                       A/B/C) against synthetic fixtures only — no wheel
 #                       build, no venv, no engine, no network. Safe anywhere.
+#
+# NX_MVV_FORMULA_PDF_CHECK=1 (opt-in, --published mode only; nexus-gqrg0 /
+# GH #1533): also indexes tests/fixtures/bft-to-smr.pdf through the real
+# MinerU path against the PUBLISHED dependency resolution and asserts a real
+# LaTeX formula survives extraction. Off by default — it pays a MinerU
+# pipeline model download (~2-3 GB) that would dominate every default MVV
+# run, and the pre-tag battery's dev-venv run already covers the resolver
+# bound itself via tests/test_install_source_wiring_pins.py. The release
+# skill's Step 11c post-publish invocation is where this is meant to run;
+# see that step for the exact command.
 # Exit 0 == FRESH-INSTALL MVV PASSED (the literal sentinel on the last line).
 set -euo pipefail
 
@@ -842,6 +852,53 @@ if ! "$PROBE_PYTHON" "$REPO_ROOT/tests/e2e/lib/generation_install_probe.py" \
 fi
 cat "$LOGS/generation-install.log"
 
+# ── formula-PDF index (opt-in, --published mode only; nexus-gqrg0 / GH #1533) ──
+# Not part of the fixed 10-leg count above (NX_MVV_FORMULA_PDF_CHECK=1 is an
+# explicit opt-in, never run by default) -- see the usage comment at the top
+# of this file for why it is gated instead of promoted into the numbered
+# journey. GH #1533: mineru's unbounded `pdftext>=0.6.3` let a fresh resolve
+# install pdftext 0.7.x, whose PageChars dropped __iter__ while mineru's own
+# span_pre_proc.py still iterates it as a list -- import succeeded, `nx
+# doctor --check-mineru` reported healthy, and every real formula-PDF parse
+# raised TypeError. The resolver bound (pyproject.toml's override-dependencies)
+# and its lint pin cover the LOCAL wheel; this leg is the one place that
+# proves the PUBLISHED dependency resolution actually indexes a real formula
+# PDF and keeps the LaTeX.
+FORMULA_PDF_CHECK_RAN=0
+if [ "${NX_MVV_FORMULA_PDF_CHECK:-0}" = "1" ]; then
+    if [ "$PUBLISHED_MODE" != 1 ]; then
+        echo "  (NX_MVV_FORMULA_PDF_CHECK is only meaningful with --published; ignored on the local-wheel layer)"
+    else
+        echo "── formula-PDF index via MinerU (opt-in, published bytes) ──"
+        FORMULA_PDF_CHECK_RAN=1
+        FIXTURE_PDF="$REPO_ROOT/tests/fixtures/bft-to-smr.pdf"
+        [ -f "$FIXTURE_PDF" ] || _fail "fixture missing: $FIXTURE_PDF (nexus-gqrg0 formula-pdf check)"
+
+        _nx doctor --check-mineru >"$LOGS/mineru-doctor.log" 2>&1 || true
+        if grep -q '✗' "$LOGS/mineru-doctor.log"; then
+            cat "$LOGS/mineru-doctor.log" >&2
+            _fail "nx doctor --check-mineru failed on the published install — see $LOGS/mineru-doctor.log (nexus-gqrg0 class)"
+        fi
+
+        if ! _nx index pdf "$FIXTURE_PDF" --extractor mineru --collection fresh-mvv-formula \
+                >"$LOGS/index-formula-pdf.log" 2>&1; then
+            tail -20 "$LOGS/index-formula-pdf.log" >&2
+            _fail "nx index pdf (MinerU path, published bytes) exited non-zero — see $LOGS/index-formula-pdf.log (GH #1533 class)"
+        fi
+
+        # A real formula from tests/fixtures/bft-to-smr.pdf's own text
+        # ("$n \geq 3 f + 1$", the replica-count bound in its System Model
+        # section) -- proof that the indexed content still carries LaTeX,
+        # not the formula-stripped/crashed shape GH #1533 shipped.
+        _nx search "byzantine replicas tolerate faults n >= 3f+1" >"$LOGS/search-formula-pdf.log" 2>&1 || true
+        if ! grep -qE '\$[^$]*3[[:space:]]*f[[:space:]]*\+[[:space:]]*1[^$]*\$' "$LOGS/search-formula-pdf.log"; then
+            cat "$LOGS/search-formula-pdf.log" >&2
+            _fail "search after the formula-PDF index did not surface a LaTeX-delimited formula (nexus-gqrg0 / GH #1533 class) — see $LOGS/search-formula-pdf.log"
+        fi
+        echo "  [ok] formula-PDF indexed via MinerU and LaTeX survived (published bytes)"
+    fi
+fi
+
 echo "── 10/10 non-vacuity ──"
 # The gate must never skip-pass: prove the substantive legs actually ran.
 # nexus-1ktd5 item C: `test -s` alone only proves non-emptiness -- every
@@ -856,6 +913,9 @@ if [ "$PUBLISHED_MODE" = 1 ]; then
     LEGS_TO_CHECK="install.log $LEGS_TO_CHECK"
 else
     LEGS_TO_CHECK="build.log $LEGS_TO_CHECK"
+fi
+if [ "$FORMULA_PDF_CHECK_RAN" = 1 ]; then
+    LEGS_TO_CHECK="$LEGS_TO_CHECK mineru-doctor.log index-formula-pdf.log search-formula-pdf.log"
 fi
 for f in $LEGS_TO_CHECK; do
     LEG_VERDICT="$(_leg_log_is_substantive "$LOGS/$f")"

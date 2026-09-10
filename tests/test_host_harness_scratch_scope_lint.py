@@ -235,10 +235,15 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
            "`nx`/curl invocation.",
     ),
     "tests/e2e/fresh-install-mvv.sh": (
-        3, "NX_LOCAL+SANDBOX: HOME=\"$HOME_DIR\" (L364, L395) + NX_LOCAL=1 "
-           "(L367); the real `_nx store put` / `_nx index md` invocations "
-           "(L572, L590, L614) target the scratch HOME's own bundled local "
-           "engine.",
+        5, "NX_LOCAL+SANDBOX: HOME=\"$HOME_DIR\" (L364, L395) + NX_LOCAL=1 "
+           "(L367); the real `_nx store put` / `_nx index md` / `_nx index "
+           "pdf` invocations target the scratch HOME's own bundled local "
+           "engine -- the opt-in formula-PDF leg (nexus-gqrg0, NX_MVV_"
+           "FORMULA_PDF_CHECK=1) adds one more `_nx index pdf` call under "
+           "the identical `_nx` wrapper. The fifth site is PROSE-ONLY: the "
+           "`_fail \"nx index pdf (MinerU path...\"` line is an error-message "
+           "string literal naming the failed step, never itself executed as "
+           "a command.",
     ),
     "tests/e2e/local-index-memory-gate.sh": (
         2, "NX_LOCAL+SANDBOX (isolated config dir): HOME=\"$HOME_DIR\" "
