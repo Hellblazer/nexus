@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Nexus getting started, inside Claude Code. Nine lessons: the session, indexing and search, memory, scratch, knowledge and the catalog, exploration, large questions, RDRs, and maintenance.">
+<meta name="description" content="Nexus getting started, inside Claude Code. Ten lessons: the session, indexing and search, memory, scratch, knowledge and the catalog, exploration, rendering, large questions, RDRs, and maintenance.">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AD%3C/text%3E%3C/svg%3E">
 <title>Nexus Getting Started</title>
@@ -127,9 +127,10 @@ ul.plain li{margin:3px 0}
     <li><a href="#l4">4. Scratch: shared notes</a></li>
     <li><a href="#l5">5. Knowledge and the catalog</a></li>
     <li><a href="#l6">6. Explore: research, links, topics</a></li>
-    <li><a href="#l7">7. Questions that need many documents</a></li>
-    <li><a href="#l8">8. Record a decision</a></li>
-    <li><a href="#l9">9. Maintenance</a></li>
+    <li><a href="#l7">7. Render and iterate</a></li>
+    <li><a href="#l8">8. Questions that need many documents</a></li>
+    <li><a href="#l9">9. Record a decision</a></li>
+    <li><a href="#l10">10. Maintenance</a></li>
   </ol>
   <div class="meta"><a href="./">← Install guide</a></div>
 </nav>
@@ -137,7 +138,7 @@ ul.plain li{margin:3px 0}
 <main>
 <div class="eyebrow">Nexus · getting started</div>
 <h1>Nexus Getting Started</h1>
-<p class="lede">You do all of this inside Claude Code. You describe what you want. Claude chooses the Nexus tools and skills for you. Each lesson shows the instruction to give, what Claude does, and what you see. Nine lessons, about ninety minutes.</p>
+<p class="lede">You do all of this inside Claude Code. You describe what you want. Claude chooses the Nexus tools and skills for you. Each lesson shows the instruction to give, what Claude does, and what you see. Ten lessons, about ninety minutes.</p>
 <p class="note">Words in <span class="ph">&lt;ORANGE CAPITALS IN ANGLE BRACKETS&gt;</span> are placeholders. Replace them with something from your own project before you send the instruction.</p>
 <p class="note">Before you start: install Nexus and the plugin with the <a href="./">install guide</a>. Then open a terminal in a project of yours and run <code>claude</code>. Every lesson happens in that Claude Code session.</p>
 
@@ -161,6 +162,7 @@ ul.plain li{margin:3px 0}
 <tr><td>Tool</td><td>An action that Claude can take. Nexus adds tools to Claude Code. When Claude uses one, Claude Code shows the tool name.</td></tr>
 <tr><td>Skill</td><td>A named procedure that Claude follows for one kind of situation. Claude chooses it from what you say. A command such as <code>/conexus:query</code> starts it directly.</td></tr>
 <tr><td>Session</td><td>One run of Claude Code. The scratch store belongs to one session.</td></tr>
+<tr><td>Rendering</td><td>A readable document, in Markdown or as a web page, that Claude writes from what is in the stores at that moment.</td></tr>
 <tr><td>RDR</td><td>Research, Design, Review. A short document that records a decision before the code is written.</td></tr>
 <tr><td><code>nx</code></td><td>The Nexus terminal command. Claude runs it for you when needed. You can also run it yourself.</td></tr>
 </table></div></details>
@@ -377,7 +379,40 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 
 <!-- ============ 7 ============ -->
 <section class="lesson" id="l7">
-<div class="lhead"><span class="lnum">7</span><h2>Questions that need many documents</h2><span class="ltime">10 min</span></div>
+<div class="lhead"><span class="lnum">7</span><h2>Render and iterate</h2><span class="ltime">15 min</span></div>
+<p class="why">After some sessions, the stores hold a lot about a subject: findings in knowledge, decisions in memory, links in the catalog. It is spread over many entries, and Claude manages them. When you want to see the whole picture, you ask for a rendering: one readable document written from the current state of the stores. Then you change it, Claude carries the changes back into the stores, and you ask again. The document and the stores stay in agreement. This is how most design work with Nexus is done.</p>
+
+<h3>Ask for a rendering</h3>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Render everything we have on <span class="ph">&lt;A SUBJECT YOU HAVE WORKED ON&gt;</span> as a Markdown document: what we know, what we decided, and what is still open.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What you see</div>
+<p>Claude collects the material: <code>memory_search</code> and <code>memory_get</code> for the decisions, <code>search</code> and <code>query</code> for the findings, <code>links</code> on the catalog for what is connected. Then it writes one file. The result is not a copy of the entries. It is a document with a structure, written for a reader, from what the entries say.</p>
+<p class="note">Ask for the form that suits you. A Markdown file in the repository is easy to edit and to commit. A web page (Claude Code can publish one as an artifact) is easier to read and to share. Both are renderings of the same state.</p>
+
+<h3>Change it</h3>
+<p>Read the rendering. Where it is wrong or incomplete, change it in the way that is natural for you:</p>
+<ul class="plain">
+<li>Edit the file directly, then tell Claude: "I changed the section on <span class="ph">&lt;TOPIC&gt;</span>, update the stores."</li>
+<li>Or say what is wrong in conversation: "the second decision is out of date, we dropped that in March", "add the constraint about <span class="ph">&lt;X&gt;</span>", "this section is too long".</li>
+<li>Or, on a web page, leave comments on the parts you disagree with and ask Claude to work through them.</li>
+</ul>
+<div class="see">What you see</div>
+<p>Claude changes the document, and then writes the change back to where it belongs: a corrected decision goes to memory with <code>memory_put</code>, a new finding goes to knowledge with <code>store_put</code>, a new connection becomes a catalog link. You see those calls after the file edit. This step is what keeps the stores true. Without it, the document and the stores drift apart, and the next session works from the old state.</p>
+
+<h3>Ask again</h3>
+<p>Later, after more work, ask for the rendering again. Claude writes it from the current state, so it includes what changed since the last one: what you edited, what the sessions in between decided, what the research found. Compare it with the previous rendering if you want to see the movement.</p>
+<div class="callout rule"><p><strong>The rhythm:</strong> work, and the stores fill. Render, and you see the whole. Change the rendering, and the stores follow. Render again. An RDR (lesson 9) is a rendering of one decision, with a fixed form and a lifecycle. This lesson is the general case.</p></div>
+
+<div class="further"><h4>Investigate further</h4><ul>
+<li>Ask for two renderings of the same subject a week apart. Ask Claude to show the differences.</li>
+<li>Ask for a rendering aimed at a reader who is not you: "write this for a new team member". The material is the same. The document is not.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/plan-centric-retrieval.md">Plan-centric retrieval</a>: how Claude collects material from several stores for one document.</li>
+</ul></div>
+</section>
+
+<!-- ============ 8 ============ -->
+<section class="lesson" id="l8">
+<div class="lhead"><span class="lnum">8</span><h2>Questions that need many documents</h2><span class="ltime">10 min</span></div>
 <p class="why">A normal question makes one or two searches. Some questions need more: compare what the documentation says with what the code does, or collect a pattern from many files. For these, the plugin has a skill that plans several steps and combines the results.</p>
 
 <div class="see">You might say</div>
@@ -405,9 +440,9 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 </ul></div>
 </section>
 
-<!-- ============ 8 ============ -->
-<section class="lesson" id="l8">
-<div class="lhead"><span class="lnum">8</span><h2>Record a decision with an RDR</h2><span class="ltime">15 min</span></div>
+<!-- ============ 9 ============ -->
+<section class="lesson" id="l9">
+<div class="lhead"><span class="lnum">9</span><h2>Record a decision with an RDR</h2><span class="ltime">15 min</span></div>
 <p class="why">An RDR is a short document that you write before you write code. It records the problem, what you found out, the options, and the option you chose. When you close an RDR, Nexus indexes it into the knowledge store. Later, when you or Claude work on a similar decision, the old RDR appears in search.</p>
 
 <h3>When to write one</h3>
@@ -434,9 +469,9 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 </ul></div>
 </section>
 
-<!-- ============ 9 ============ -->
-<section class="lesson" id="l9">
-<div class="lhead"><span class="lnum">9</span><h2>Maintenance</h2><span class="ltime">5 min</span></div>
+<!-- ============ 10 ============ -->
+<section class="lesson" id="l10">
+<div class="lhead"><span class="lnum">10</span><h2>Maintenance</h2><span class="ltime">5 min</span></div>
 <p class="why">Three things keep Nexus working: a health check, the correct way to update, and a current index.</p>
 
 <h3>Health check</h3>
@@ -463,7 +498,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 
 <div class="finish">
 <h2>Complete</h2>
-<p>You know the three stores and how to choose one. You can ask Claude to index a repository and search it. You know what Claude keeps in memory and scratch, and how to look inside. You can store notes and documents in knowledge, research a subject, follow and add links, and shape the topic map. You know the commands for large questions, for RDRs, and for maintenance. Search results and session context get better as you index and record more.</p>
+<p>You know the three stores and how to choose one. You can ask Claude to index a repository and search it. You know what Claude keeps in memory and scratch, and how to look inside. You can store notes and documents in knowledge, research a subject, follow and add links, and shape the topic map. You can ask for a rendering of a subject, change it, and have the stores follow. You know the commands for large questions, for RDRs, and for maintenance. Search results and session context get better as you index and record more.</p>
 <p>Reference: <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/README.md">Plugin README</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md">CLI reference</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/querying-guide.md">Querying guide</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr.md">RDR</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md">Storage tiers</a></p>
 </div>
 
