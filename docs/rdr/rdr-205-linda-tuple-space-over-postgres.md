@@ -399,27 +399,24 @@ against §Technical Design.
   deployments foundered on; and a parked call held in the engine's own
   process is the in-process form of `notify`, with `ParkCapExceeded`
   standing where a leaked remote listener registration stood. Two
-  points are not met and are accepted for v1. First, Jini leases are
-  renewable and cancellable by their holder; a claim here holds a
-  fixed lease clamped to the tuple's `expires_at`, and the mailbox
-  template's `max_lease_seconds` of 900 is what makes the absence of a
-  renew operation safe: neither v1 consumer holds a claim across work
-  that long, and lease-renewal traffic was Jini's third failure cause,
-  which this design avoids by scope rather than by construction.
-  Second, JavaSpaces commits a `take` and the `write` that answers it
-  in one transaction; here they are two calls, so a consumer that
-  crashes between writing its reply and acking the request either
-  produces a duplicate reply (the same tuple, by the nonce) or sees the
-  request re-delivered at lease lapse and repeats the work. The window
-  is bounded by the lease and visible in the claim log. Both are named
-  as candidates for a later version, not scheduled here: a `renew`
-  operation on a live claim, and an `ack` that carries an optional
-  reply `out` committed in the ack's own transaction (a fixed compound
-  shape, not a transaction manager; a retried compound ack from the
-  same claimant must return the same reply id, and a reply that fails
-  template validation rolls the ack back and leaves the request
-  claimed). The window between `in` and `ack` while the work runs is
-  inherent to any leased take and is not what the compound closes.
+  points are not met. First, Jini leases are renewable and cancellable
+  by their holder; a claim here holds a fixed lease clamped to the
+  tuple's `expires_at`, with no renew operation. This is accepted for
+  v1 on an assumption the record does not argue: that no v1 consumer
+  holds a mailbox claim across work longer than the template's
+  `max_lease_seconds` of 900. Lease-renewal traffic was among Jini's
+  failure causes, and this design avoids it by scope, not by
+  construction. Second, JavaSpaces commits a `take` and the `write`
+  that answers it in one transaction; here they are two calls, so a
+  consumer that crashes after its `in` and before its answering `out`
+  sees the request re-delivered at lease lapse and repeats the work.
+  The window is bounded by the lease and visible in the claim log;
+  no reply is lost, since none was written. Both are named as
+  candidates for a later version, not scheduled and not designed here:
+  a `renew` operation on a live claim, and an `ack` that carries an
+  optional reply `out` in the ack's own transaction. The window
+  between `in` and `ack` while the work runs is inherent to any leased
+  take and is not what either candidate closes.
 
 ### Critical Assumptions
 
@@ -1864,7 +1861,10 @@ v1; a caller that does not want to park uses the probe forms.
 ### 2026-09-09 — Post-gate research finding: Jini and JavaSpaces (Sam)
 
 Research 11 added as a Key Discovery: four of six JavaSpaces points of
-contact already met; fixed leases and the separate take and reply
-accepted for v1, with `renew` and a compound `ack` with reply named as
-later-version candidates. No design changed. Fix-checked under the
-post-gate rule.
+contact already met; fixed leases (on an assumption named as such) and
+the separate take and reply accepted for v1, with `renew` and an `ack`
+carrying a reply named as later-version candidates. No design changed.
+Fix-checked under the post-gate rule; the first check failed three rows
+(a settled premise the record calls an assumption, a crash window the
+record never analysed, and candidate text carrying binding rules), all
+closed in the second commit.
