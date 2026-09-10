@@ -1792,6 +1792,47 @@ def _finding_title_key(text: str) -> str:
     return t.casefold()
 
 
+#: A file:line style pointer inside an otherwise-matching title (nexus-yjf5l.14).
+_FINDING_TITLE_LOC_RE = re.compile(r"\b[\w./-]+:\d+\b")
+
+
+def _finding_title_key_loose(text: str) -> str:
+    """A second, looser normalisation of :func:`_finding_title_key`, used
+    only when the strict key finds no match (nexus-yjf5l.14). Digits and
+    file:line pointer tokens are stripped from the strict key's output,
+    tolerating a residual title that drifted by nothing but a
+    self-referential count or a dated pointer between gate rounds — the
+    shape that recurs most in this project's own gate history (the live
+    RDR-204 repro this bead fixes). Never the first attempt at a match: two
+    genuinely different findings that happen to share every non-digit word
+    would otherwise collide. Callers needing "is this the same finding"
+    try the strict key first and fall back to this one only on a miss.
+    """
+    key = _finding_title_key(text)
+    key = _FINDING_TITLE_LOC_RE.sub("", key)
+    key = re.sub(r"\d+", "", key)
+    return re.sub(r"\s+", " ", key).strip()
+
+
+def _nearest_finding_title(residual_title: str, candidate_titles: list[str]) -> str | None:
+    """Best-effort nearest finding for a residual that matches nothing by
+    strict or loose key (nexus-yjf5l.14): the candidate sharing the most
+    loose-key tokens with *residual_title*. Returns ``None`` when no
+    candidate shares a single token — a genuinely unrelated residual must
+    still print bare rather than naming a false guess."""
+    residual_tokens = set(_finding_title_key_loose(residual_title).split())
+    if not residual_tokens or not candidate_titles:
+        return None
+    best_title: str | None = None
+    best_overlap = 0
+    for title in candidate_titles:
+        overlap = len(residual_tokens & set(_finding_title_key_loose(title).split()))
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_title = title
+    return best_title
+
+
 def _preamble_regate_block(
     *, repo_root: str, repo_name: str, t2_key: str, rdr_file: Path, status: str = "",
 ) -> list[str]:
@@ -1889,25 +1930,49 @@ def _preamble_regate_block(
     # separate copies of the comparison.
     residual_titles = _residual_titles(content)
     residual_keys = {_finding_title_key(t) for t in residual_titles}
+    # nexus-yjf5l.14: a residual's title can drift by a self-referential
+    # count or pointer between rounds — the loose key catches that drift
+    # as a second pass, never the first, so two genuinely different
+    # findings sharing every non-digit word cannot collide on it.
+    residual_loose_keys = {_finding_title_key_loose(t) for t in residual_titles}
     if findings:
         survivors: list[str] = []
         recorded: list[str] = []
         matched_keys: set[str] = set()
+        matched_loose_keys: set[str] = set()
         is_residual = False
         for f in findings:
             if not f.startswith("  "):
-                is_residual = _finding_title_key(f) in residual_keys
+                fkey = _finding_title_key(f)
+                is_residual = fkey in residual_keys
                 if is_residual:
-                    matched_keys.add(_finding_title_key(f))
+                    matched_keys.add(fkey)
+                else:
+                    floose = _finding_title_key_loose(f)
+                    is_residual = floose in residual_loose_keys
+                    if is_residual:
+                        matched_loose_keys.add(floose)
             (recorded if is_residual else survivors).append(f)
 
         if recorded:
             lines.append("Recorded residuals (dispositioned at accept; not survivors — do not re-open):")
             lines.extend(f"- {f}" for f in recorded)
             lines.append("")
-        unmatched = [t for t in residual_titles if _finding_title_key(t) not in matched_keys]
+        unmatched = [
+            t for t in residual_titles
+            if _finding_title_key(t) not in matched_keys
+            and _finding_title_key_loose(t) not in matched_loose_keys
+        ]
+        survivor_titles = [f for f in survivors if not f.startswith("  ")]
         for t in unmatched:
-            lines.append(f"- Recorded residual, no matching finding in the critique: {t}")
+            nearest = _nearest_finding_title(t, survivor_titles)
+            if nearest:
+                lines.append(
+                    f"- Recorded residual, no matching finding in the critique "
+                    f"(nearest by title: {nearest}): {t}"
+                )
+            else:
+                lines.append(f"- Recorded residual, no matching finding in the critique: {t}")
         if unmatched:
             lines.append("")
 
@@ -3078,20 +3143,37 @@ def _residual_count(content: str) -> int:
     return count + inline
 
 
+#: A trailing "(carried from round N)" annotation (nexus-yjf5l.14): presentation
+#: metadata written by ``preamble_rdr_verdict``'s carry-forward, never part of
+#: the finding's own title, so every reader of ``_residual_titles`` strips it
+#: before matching.
+_CARRIED_FROM_RE = re.compile(r"\s*\(carried from round \d+\)\s*$", re.IGNORECASE)
+
+#: A leading classed-residual tag (``[DISCOVER-AT-IMPLEMENTATION] <title>``,
+#: nexus-yjf5l.7). ``_finding_title_key`` strips this too, for matching; this
+#: copy exists so ``_residual_class_and_title`` can recover the class instead
+#: of discarding it.
+_RESIDUAL_CLASS_TAG_RE = re.compile(r"^\[([A-Z][A-Z-]*)\]\s*")
+
+
 def _residual_titles(content: str) -> list[str]:
     """The titles recorded in a gate record's ``residuals:`` block: one
     per ``- <title>`` bullet, or the inline text on the ``residuals:``
-    line itself. Mirrors ``_residual_count``'s parse but returns the text
-    for matching against a finding's title via ``_finding_title_key``
-    (the fix preamble's round-3+ ship-blocker/residual split, nexus-yjf5l.2;
-    reused by the Layer 0 survivor sweep's residual exemption, nexus-yjf5l.3)."""
+    line itself, with any trailing ``(carried from round N)`` annotation
+    stripped (nexus-yjf5l.14 — that marker is presentation, not part of
+    the title being matched). Mirrors ``_residual_count``'s parse but
+    returns the text for matching against a finding's title via
+    ``_finding_title_key`` (the fix preamble's round-3+ ship-blocker/
+    residual split, nexus-yjf5l.2; reused by the Layer 0 survivor sweep's
+    residual exemption, nexus-yjf5l.3, and by ``preamble_rdr_verdict``'s
+    own cross-round carry-forward, nexus-yjf5l.14)."""
     out: list[str] = []
     active = False
     for line in content.splitlines():
         stripped = line.strip()
         if stripped.startswith("residuals:"):
             active = True
-            inline = stripped.split(":", 1)[1].strip()
+            inline = _CARRIED_FROM_RE.sub("", stripped.split(":", 1)[1].strip()).strip()
             if inline:
                 out.append(inline)
             continue
@@ -3099,8 +3181,24 @@ def _residual_titles(content: str) -> list[str]:
             active = False
             continue
         if active and stripped.startswith("-"):
-            out.append(stripped.lstrip("-").strip())
+            out.append(_CARRIED_FROM_RE.sub("", stripped.lstrip("-").strip()).strip())
     return out
+
+
+def _residual_class_and_title(raw: str) -> tuple[str, str]:
+    """Split a stored residual bullet's leading class tag from its bare
+    title (nexus-yjf5l.14). Defaults to :data:`BLOCKS_PLANNING` when no
+    tag is present — the same conservative default
+    ``preamble_rdr_verdict`` already prints for an unclassified finding —
+    so carrying a residual forward across rounds keeps the class it was
+    recorded with instead of discarding it. Expects *raw* already through
+    ``_residual_titles`` (the carried-from marker, if any, already
+    stripped)."""
+    text = raw.strip()
+    m = _RESIDUAL_CLASS_TAG_RE.match(text)
+    if m:
+        return m.group(1), text[m.end():].strip()
+    return BLOCKS_PLANNING, text
 
 
 #: The day the round cap shipped (nexus-g7zgw.2). Gate records dated before
@@ -3457,9 +3555,36 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
     else:
         blocked = False
     outcome = "BLOCKED" if blocked else "PASSED"
+    # nexus-yjf5l.14: a residual recorded at round N that Layer 0 tells the
+    # critic not to re-raise vanishes from round N+1's OWN critique — so this
+    # round's residuals: is the union of this round's own new non-ship-blocker
+    # findings AND the prior gate-latest record's still-open residuals, never
+    # this round's tally alone. A prior residual duplicated by a fresh finding
+    # (matched strict-then-loose, nexus-yjf5l.14) is not carried a second time;
+    # one still unmatched is carried forward, marked, keeping its own class.
     residuals: list[str] = []
+    residual_classes: dict[str, str] = {}
+    carried_titles: set[str] = set()
+    carried_round_label = ""
     if rule.blocks_on == "ship-blocker":
         residuals = [t for t in tally.criticals + tally.significants if t not in tally.ship_blocker_titles]
+        new_strict_keys = {_finding_title_key(t) for t in residuals}
+        new_loose_keys = {_finding_title_key_loose(t) for t in residuals}
+        carried_round_label = (_preamble_parse_t2_field(latest_content, "round") or "").strip()
+        for raw in _residual_titles(latest_content):
+            cls, bare_title = _residual_class_and_title(raw)
+            if _finding_title_key(bare_title) in new_strict_keys:
+                continue
+            if _finding_title_key_loose(bare_title) in new_loose_keys:
+                continue
+            residuals.append(bare_title)
+            residual_classes[bare_title] = cls
+            carried_titles.add(bare_title)
+
+    def _residual_line(title: str) -> str:
+        cls = tally.classifications.get(title, residual_classes.get(title, BLOCKS_PLANNING))
+        suffix = f" (carried from round {carried_round_label})" if title in carried_titles and carried_round_label else ""
+        return f"[{cls}] {title}{suffix}"
 
     commit = (_git_out(repo_root, "log", "-1", "--format=%h", "--", rel) or "").strip()
     prev_outcome = (_preamble_parse_t2_field(latest_content, "outcome") or "").strip().upper()
@@ -3496,7 +3621,7 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
     if residuals:
         print(f"Residuals ({len(residuals)}), recorded for accept to disposition:")
         for r in residuals:
-            print(f"- [{tally.classifications.get(r, BLOCKS_PLANNING)}] {r}")
+            print(f"- {_residual_line(r)}")
     print()
     print("Gate record to write (memory_put project=\"" + project + f"\", title=\"{t2_key}-gate-latest\", ttl=\"permanent\", tags=\"rdr,gate\"):")
     print()
@@ -3514,7 +3639,7 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
     if residuals:
         print("residuals:")
         for r in residuals:
-            print(f"  - [{tally.classifications.get(r, BLOCKS_PLANNING)}] {r}")
+            print(f"  - {_residual_line(r)}")
     if prior_parts:
         print("prior: " + ", ".join(prior_parts))
     print("```")

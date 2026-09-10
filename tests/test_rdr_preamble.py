@@ -2138,6 +2138,35 @@ class TestRdrGateRegateBlock:
             "a residual the critique no longer states" in out
         ), out
 
+    def test_unmatched_residual_names_the_nearest_finding_by_loose_key(self, rdr_env, monkeypatch):
+        """nexus-yjf5l.14: a recorded residual that matches no current
+        finding, even under the digit-stripped loose key, still names the
+        survivor sharing the most loose-key tokens as a hint for a human —
+        never a silent guess, which is why
+        test_unmatched_residual_is_named_not_dropped's zero-overlap case
+        must keep printing bare."""
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                "outcome: \"PASSED\"\ndate: \"2026-09-09\"\n"
+                "critique: nexus_rdr/204-gate-critique-2026-09-09x\n"
+                "residuals:\n  - gate timeout retries 3 times before it eventually times out\n"
+            ),
+            "204-gate-critique-2026-09-09x": (
+                "## Significant Issues\n\n### Issue: gate timeout retries 5 times before it always times out\n"
+                "- **Location**: L1\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        out = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"]).output
+        assert (
+            "Recorded residual, no matching finding in the critique "
+            "(nearest by title: Issue: gate timeout retries 5 times before it always times out): "
+            "gate timeout retries 3 times before it eventually times out" in out
+        ), out
+
     def test_no_residuals_regate_output_is_unchanged(self, rdr_env, monkeypatch):
         """Regression pin (round-1/round-2 path, nexus-yjf5l.3): a gate
         record with no `residuals:` field prints the same Prior-findings and
@@ -2901,6 +2930,70 @@ class TestRdrVerdictPreamble:
         assert "ship_blockers: 1" in out, out
         assert "residuals:\n  - [BLOCKS-PLANNING] beta" in out, out
         assert "[BLOCKS-PLANNING] alpha" not in out, "alpha is the ship-blocker, not a residual"
+
+    def test_residual_absent_from_the_critique_is_carried_forward(self, rdr_env, monkeypatch):
+        """nexus-yjf5l.14 F1: with Layer 0 telling critics not to re-raise a
+        recorded residual, round N's residual (gamma, recorded at round 3)
+        is absent from round 4's own critique. It must still appear in
+        round 4's `residuals:` field, carrying its class and a marker
+        naming the round it was carried from — otherwise it vanishes from
+        the chain before accept can ever disposition it."""
+        self._commit(rdr_env)
+        crit = (
+            "## Critical Issues\n\n### Issue: alpha\n- **Location**: L1\n"
+            "- **Ship-blocker**: yes\n\n"
+            "## Significant Issues\nNone.\n\n"
+            "## Verdict\n\n- **outcome**: not-justified\n- **critical_count**: 1\n"
+            "- **significant_count**: 0\n- **ship_blockers**: 1\n"
+        )
+        store = {
+            "c": crit,
+            "204-gate-latest": (
+                "outcome: \"BLOCKED\"\ndate: \"2026-09-07\"\nround: 3\n"
+                "prior: [1] (1C), [2] (1C)\n"
+                "residuals:\n  - [DISCOVER-AT-IMPLEMENTATION] gamma\n"
+            ),
+        }
+        out = self._run(rdr_env, monkeypatch, store, "c").output
+        assert "Gate round 4" in out, out
+        assert "outcome: \"BLOCKED\"" in out, out
+        assert (
+            "residuals:\n  - [DISCOVER-AT-IMPLEMENTATION] gamma (carried from round 3)" in out
+        ), out
+
+    def test_drifted_residual_title_matches_and_is_not_duplicated(self, rdr_env, monkeypatch):
+        """nexus-yjf5l.14 F1/critique 1: a residual's title carries a
+        self-referential count that drifts between rounds (the RDR-204
+        live repro's exact shape). The strict key misses on the digit
+        alone, but the looser key must still recognise it as the same
+        finding and never carry a duplicate copy forward. ``epsilon`` is
+        untouched by this round's critique and anchors that carry-forward
+        actually ran (with no carry logic at all, ``epsilon`` would be
+        silently lost, and the dedup assertion below would pass
+        vacuously)."""
+        self._commit(rdr_env)
+        crit = (
+            "## Critical Issues\nNone.\n\n"
+            "## Significant Issues\n\n### Issue: Finalization Gate critique count is stale by 3\n"
+            "- **Location**: L1\n- **Ship-blocker**: no\n\n"
+            "## Verdict\n\n- **outcome**: not-justified\n- **critical_count**: 0\n"
+            "- **significant_count**: 1\n- **ship_blockers**: 0\n"
+        )
+        store = {
+            "c": crit,
+            "204-gate-latest": (
+                "outcome: \"PASSED\"\ndate: \"2026-09-08\"\nround: 5\n"
+                "prior: [1] (1C), [2] (1C), [3] (1C), [4] (1C)\n"
+                "residuals:\n  - [BLOCKS-PLANNING] Finalization Gate critique count is stale by 2\n"
+                "  - [BLOCKS-PLANNING] epsilon untouched\n"
+            ),
+        }
+        out = self._run(rdr_env, monkeypatch, store, "c").output
+        assert "Gate round 6" in out, out
+        assert "epsilon untouched (carried from round 5)" in out, "carry-forward must still run for the untouched residual"
+        assert out.count("stale by") == 2, out  # once in the "Residuals (N)" line, once in `residuals:`
+        assert "stale by 3" in out
+        assert "stale by 2" not in out, "the drifted-count duplicate must not be carried forward"
 
 
 class TestCritiqueFindings:

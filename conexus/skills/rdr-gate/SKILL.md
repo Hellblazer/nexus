@@ -224,6 +224,11 @@ by hand. The rules it applies (`review-rounds.toml`, contract `rdr-gate`):
   Significant is a residual: the gate writes `outcome: PASSED` with one
   `residuals:` line per finding in the gate record, appends "Gate N residuals"
   to Revision History, and accept dispositions each one (rdr-accept skill).
+  `residuals:` is a union across rounds, not just this round's own critique:
+  a residual absent from a later round's critique (Layer 0 tells the critic
+  not to re-raise it) is carried forward from the prior gate record into
+  this one rather than dropped, marked `(carried from round <N>)` and keeping
+  its own class.
 - A Verdict with no `ship_blockers` line is read as `ship_blockers = critical_count`
   (the conservative default of `nexus.plans.audit_rounds`); never as zero.
 - Classification governs disposition, not blocking: `ship_blockers` stays the
@@ -243,7 +248,7 @@ by hand. The rules it applies (`review-rounds.toml`, contract `rdr-gate`):
 ### On Pass
 
 1. Store the critique in T2 FIRST: mcp__plugin_conexus_nexus__memory_put(content="{critique}", project="{repo}_rdr", title="{id}-gate-critique-{date}", ttl="permanent", tags="rdr,gate,critique"). Same-day re-gates append a letter (`{date}b`, `{date}c`). T2 is where the preamble reads; a T3 copy (collection="<subject>", title="gate-rdr-NNN-{date}") is optional and never the only copy.
-2. Write gate result to T2: mcp__plugin_conexus_nexus__memory_put(content="outcome: PASSED\ndate: YYYY-MM-DD\ncritical_count: 0\nsignificant_count: N\nobservation_count: N\nship_blockers: 0\nsummary: One-sentence summary\ncritique: {repo}_rdr/{id}-gate-critique-{date}\ncommit: <git log -1 --format=%h -- <rdr file>>\nfix_check: <{repo}_rdr/{id}-fix-check-<sha>, sha equal to commit:, or 'none (no change since <sha>)'; mandatory on every re-gate>\nresiduals: <one line per residual finding, round 3+, each `  - [<class>] <title>`>\nprior: [<previous record id>] (<OUTCOME> <nC> <nS>), <the previous record's own prior chain>", project="{repo}_rdr", title="{id}-gate-latest", ttl="permanent", tags="rdr,gate"). `critique:`, `commit:` and `prior:` are what the re-gate block reads; `fix_check:` must equal `commit:`.
+2. Write gate result to T2: mcp__plugin_conexus_nexus__memory_put(content="outcome: PASSED\ndate: YYYY-MM-DD\ncritical_count: 0\nsignificant_count: N\nobservation_count: N\nship_blockers: 0\nsummary: One-sentence summary\ncritique: {repo}_rdr/{id}-gate-critique-{date}\ncommit: <git log -1 --format=%h -- <rdr file>>\nfix_check: <{repo}_rdr/{id}-fix-check-<sha>, sha equal to commit:, or 'none (no change since <sha>)'; mandatory on every re-gate>\nresiduals: <one line per residual finding, round 3+, each `  - [<class>] <title>`, or `  - [<class>] <title> (carried from round <N>)` when it is carried forward from the prior record>\nprior: [<previous record id>] (<OUTCOME> <nC> <nS>), <the previous record's own prior chain>", project="{repo}_rdr", title="{id}-gate-latest", ttl="permanent", tags="rdr,gate"). `critique:`, `commit:` and `prior:` are what the re-gate block reads; `fix_check:` must equal `commit:`.
 3. Append gate findings to the RDR's Revision History section
 4. Print: `> Run '/conexus:rdr-accept <id>' to accept this RDR.`
 

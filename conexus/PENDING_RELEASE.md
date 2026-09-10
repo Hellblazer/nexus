@@ -106,3 +106,9 @@ mechanize, it matters enough to ship.
   line (as check (6), the T3-lead clause's (4) capitalised to match).
 - `conexus/commands/rdr-fix.md`: nexus-yjf5l.17 — the sixth check added
   as its own bullet, mirroring the skill.
+- `conexus/skills/rdr-gate/SKILL.md`: nexus-yjf5l.14 — Gate Aggregation
+  states that `residuals:` is a union across rounds: a residual absent
+  from a later round's own critique is carried forward from the prior
+  gate record, marked `(carried from round <N>)`, rather than dropped.
+- `conexus/commands/rdr-gate.md`: nexus-yjf5l.14 — mirrors the same
+  cross-round carry-forward statement.
