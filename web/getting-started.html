@@ -123,8 +123,8 @@ ul.plain li{margin:3px 0}
   <ol id="toc">
     <li><a href="#l1">1. Start a session</a></li>
     <li><a href="#l2">2. Index and search</a></li>
-    <li><a href="#l3">3. Memory</a></li>
-    <li><a href="#l4">4. Scratch</a></li>
+    <li><a href="#l3">3. Memory: what Claude keeps</a></li>
+    <li><a href="#l4">4. Scratch: shared notes</a></li>
     <li><a href="#l5">5. Knowledge and the catalog</a></li>
     <li><a href="#l6">6. Questions that need many documents</a></li>
     <li><a href="#l7">7. Record a decision</a></li>
@@ -176,7 +176,7 @@ ul.plain li{margin:3px 0}
 <p>Claude repeats the blocks. The important ones are:</p>
 <div class="tbl"><table>
 <tr><th>Block</th><th>Content</th></tr>
-<tr><td>T2 Memory</td><td>The memory entries for this project. Empty in a new project. Lesson 3 adds the first one.</td></tr>
+<tr><td>T2 Memory</td><td>The memory entries for this project. Empty in a new project. Claude fills it as it works. Lesson 3 explains.</td></tr>
 <tr><td>Ready Beads</td><td>Open tasks from the <code>bd</code> task tracker, if the project uses it.</td></tr>
 <tr><td>nx Capabilities</td><td>A short list of the Nexus tools that Claude can use.</td></tr>
 <tr><td>Knowledge Map</td><td>The main subjects in the knowledge store, with the number of chunks for each.</td></tr>
@@ -193,7 +193,7 @@ ul.plain li{margin:3px 0}
 </div>
 <p class="arrowrow">Data moves in one direction only: scratch to memory, then memory to knowledge.</p>
 <div class="callout rule"><p><strong>How to choose a store:</strong> ask how long the data must live. Only this session: scratch. This project, and you will look it up by name: memory. Permanently, and you will look it up by meaning: knowledge.</p></div>
-<p>You do not need to name the store when you talk to Claude. Say what you want to keep and for how long. Claude chooses the store. The lessons below show the words that make the choice clear.</p>
+<p>You rarely choose a store yourself. Claude does it as it works, following the plugin's guidance. The rule above is so you can read what Claude did and see whether it was right.</p>
 
 <div class="further"><h4>Investigate further</h4><ul>
 <li>Ask Claude: <em>"Which Nexus tools do you have, and what does each one do?"</em></li>
@@ -245,50 +245,60 @@ Which files deal with <span class="ph">A CONCEPT</span>, and how are they connec
 
 <!-- ============ 3 ============ -->
 <section class="lesson" id="l3">
-<div class="lhead"><span class="lnum">3</span><h2>Memory: facts about your project</h2><span class="ltime">5 min</span></div>
-<p class="why">The memory store holds facts and decisions about a project. When a new session starts, Claude receives these entries first. This is how a decision from today is still known next month, in a new session, without you repeating it.</p>
+<div class="lhead"><span class="lnum">3</span><h2>Memory: what Claude keeps between sessions</h2><span class="ltime">5 min</span></div>
+<p class="why">The memory store holds facts and decisions about a project. Claude writes to it by itself while it works: a decision it made, a finding from an investigation, the state of the work at the end of a session. When a new session starts, Claude receives these entries first. You do not manage this store. You watch it, and now and then you correct it.</p>
 
+<h3>See what Claude remembers</h3>
+<div class="see">Say to Claude, in your second or later session on a project</div>
+<div class="cmd"><pre>What do you remember about this project from previous sessions?</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What you see</div>
+<p>Claude answers from the "T2 Memory" block it received at session start, and may call <code>memory_search</code> or <code>memory_get</code> for details. In a brand-new project the answer is "nothing yet". After a few sessions of real work, the answer lists the decisions and findings that Claude recorded.</p>
+
+<h3>Where the entries come from</h3>
+<ul class="plain">
+<li>Claude records a decision or a finding while it works, when the plugin's guidance tells it the finding is worth keeping.</li>
+<li>At the end of a session, <code>/conexus:continuation</code> writes the state of the work, and the plugin saves notes that were marked for keeping.</li>
+<li>Helper agents that Claude starts write their results to memory, because memory is the store that all agents share.</li>
+</ul>
+<p>Each entry has a project name and a title. An entry lives 30 days by default. Each time Claude reads it, it lives longer. So facts that stay useful stay, and facts that nobody reads expire.</p>
+
+<h3>When you want to say something yourself</h3>
+<p>This is the exception, not the rule. Use it when Claude does not know a fact that it cannot find in the code, for example a decision made outside the repository.</p>
 <div class="see">Say to Claude</div>
-<div class="cmd"><pre>Remember this in Nexus memory for this project, permanently, with the title "<span class="ph">SHORT-TITLE</span>":
-<span class="ph">ONE FACT ABOUT YOUR PROJECT THAT YOU WANT CLAUDE TO KNOW NEXT MONTH</span></pre><button class="copy" type="button">Copy</button></div>
-<p class="note">Example: title <code>auth-tokens</code>, fact "Auth uses JWT. Tokens expire after 24 hours. The refresh endpoint is /v2/refresh." Choose a real fact from your own project.</p>
+<div class="cmd"><pre>Remember in Nexus memory, permanently: <span class="ph">A FACT ABOUT THIS PROJECT THAT IS NOT IN THE CODE</span></pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
-<p>A tool call named <code>memory_put</code> on the <code>nexus</code> server, with the project name, your title, and the text. Claude confirms that the entry is stored.</p>
-
-<div class="see">Say to Claude, later or in a new session</div>
-<div class="cmd"><pre>What does Nexus memory say about <span class="ph">THE SUBJECT OF YOUR FACT</span> in this project?</pre><button class="copy" type="button">Copy</button></div>
-<div class="see">What you see</div>
-<p>A tool call named <code>memory_search</code> or <code>memory_get</code>. Claude answers with the stored text. In a new session, Claude also receives the entry in the "T2 Memory" block from lesson 1, before you ask.</p>
-
-<div class="callout rule"><p><strong>Three rules for good entries:</strong> Put one fact in each entry. Give it a title that describes it, for example <code>auth-tokens</code>, not <code>notes-3</code>. Say "permanently" for facts that must stay. Without that word, the entry lives 30 days, and each read makes it live longer.</p></div>
-<p class="note">If you store an entry with the same title again, the new text replaces the old text. To change a fact, store it again. From the terminal: <code>nx memory put "…" -p PROJECT -t TITLE --ttl permanent</code>.</p>
+<p>A tool call named <code>memory_put</code> on the <code>nexus</code> server. Claude chooses a title. "Permanently" tells it to not set a 30-day TTL. If an entry is wrong, say so: <em>"The memory entry about X is wrong. The correct fact is Y."</em> Claude replaces it.</p>
+<p class="note">From the terminal: <code>nx memory list -p PROJECT</code> shows every entry for a project.</p>
 
 <div class="further"><h4>Investigate further</h4><ul>
-<li>Ask Claude: <em>"List all Nexus memory entries for this project."</em></li>
-<li>Ask Claude: <em>"Delete the memory entry <span class="ph">SHORT-TITLE</span>."</em> Then store it again to practice.</li>
-<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md#heat-weighted-t2-expiry">Configuration: heat-weighted T2 expiry</a>: the exact rule for how reads extend the TTL.</li>
+<li>Ask Claude: <em>"List every Nexus memory entry for this project, with its age."</em></li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md#t2----memory-bank">Storage tiers: T2</a>: how the TTL grows with each read, and how entries move on to knowledge.</li>
 </ul></div>
 </section>
 
 <!-- ============ 4 ============ -->
 <section class="lesson" id="l4">
-<div class="lhead"><span class="lnum">4</span><h2>Scratch: notes for this session only</h2><span class="ltime">5 min</span></div>
-<p class="why">The scratch store belongs to the current session. Nexus deletes it when the session ends. Claude and every helper agent that Claude starts share the same scratch store. It is the place for ideas and partial results while you work on a problem.</p>
+<div class="lhead"><span class="lnum">4</span><h2>Scratch: how Claude and its agents share notes</h2><span class="ltime">5 min</span></div>
+<p class="why">The scratch store belongs to the current session. Claude uses it as a shared notepad. When Claude starts helper agents to investigate a problem, each agent reads and writes the same scratch store. That is how the agents coordinate. Nexus deletes the store when the session ends. You rarely write to it. It is useful to know that it exists, and how to look inside.</p>
 
-<div class="see">Say to Claude</div>
-<div class="cmd"><pre>Note in Nexus scratch: hypothesis, <span class="ph">SOMETHING YOU SUSPECT BUT HAVE NOT CHECKED YET</span>.</pre><button class="copy" type="button">Copy</button></div>
+<h3>Look inside</h3>
+<div class="see">Say to Claude, while it is working on something with several steps</div>
+<div class="cmd"><pre>What is in Nexus scratch right now?</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
-<p>A tool call named <code>scratch</code> on the <code>nexus</code> server, with the action <code>put</code>. Claude confirms the entry. When Claude later starts a helper agent to investigate, that agent can read the same note and add its own findings.</p>
+<p>A tool call named <code>scratch</code> on the <code>nexus</code> server, with the action <code>list</code> or <code>search</code>. Claude lists the notes: hypotheses, partial results, and messages between agents. Early in a session the store is often empty. This is normal.</p>
 
-<div class="see">Say to Claude, when the idea proves true</div>
-<div class="cmd"><pre>Promote that scratch note to Nexus memory for this project, with the title "<span class="ph">SHORT-TITLE</span>".</pre><button class="copy" type="button">Copy</button></div>
-<div class="see">What you see</div>
-<p>A tool call named <code>scratch_manage</code> with the action <code>promote</code>. The note is now a memory entry and survives the session. If the memory store already has a similar entry with a different title, the tool reports <code>overlap_detected</code>. Then Claude, or you, can merge the two.</p>
-<p class="note">Scratch notes that you do not promote disappear when the session ends. This is the purpose of the store. From the terminal: <code>nx scratch put "…"</code> and <code>nx scratch promote ID -p PROJECT -t TITLE</code>.</p>
+<h3>What happens at the end of a session</h3>
+<p>Most scratch notes disappear. That is the purpose of the store. Two things survive:</p>
+<ul class="plain">
+<li>Notes that Claude marked for keeping. The plugin copies them to memory when the session ends.</li>
+<li>Notes that Claude promoted during the session, because a hypothesis proved true. These are already in memory.</li>
+</ul>
+<p>You can ask for either: <em>"Keep that scratch note. Promote it to memory."</em> Claude calls <code>scratch_manage</code> with the action <code>promote</code>.</p>
+<p class="note">From the terminal: <code>nx scratch list</code> shows the notes of the current session.</p>
 
 <div class="further"><h4>Investigate further</h4><ul>
-<li>Ask Claude: <em>"Show all Nexus scratch notes from this session."</em></li>
-<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md#t1----session-scratch">Storage tiers: T1</a>: how a session is identified, and how helper agents share the store.</li>
+<li>Start a task that makes Claude use helper agents, for example <code>/conexus:analyze-code</code>. While it runs, ask what is in scratch. You see the agents' notes appear.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md#t1----session-scratch">Storage tiers: T1</a>: how a session is identified, and how agents share the store.</li>
 </ul></div>
 </section>
 
@@ -414,7 +424,7 @@ Which files deal with <span class="ph">A CONCEPT</span>, and how are they connec
 
 <div class="finish">
 <h2>Complete</h2>
-<p>You know the three stores and how to choose one. You can ask Claude to index a repository and search it. You can keep facts in memory and working notes in scratch. You can store notes and documents in knowledge and find their links in the catalog. You know the commands for large questions, for RDRs, and for maintenance. Search results and session context get better as you index and record more.</p>
+<p>You know the three stores and how to choose one. You can ask Claude to index a repository and search it. You know what Claude keeps in memory and scratch, and how to look inside. You can store notes and documents in knowledge and find their links in the catalog. You know the commands for large questions, for RDRs, and for maintenance. Search results and session context get better as you index and record more.</p>
 <p>Reference: <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/README.md">Plugin README</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md">CLI reference</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/querying-guide.md">Querying guide</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr.md">RDR</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md">Storage tiers</a></p>
 </div>
 
