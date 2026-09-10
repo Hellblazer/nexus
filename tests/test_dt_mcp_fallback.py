@@ -191,11 +191,6 @@ class TestLayerDFallback:
     """Layer D: DT absent → non-file-backed records skipped; file chunks
     carry no extraction_source key (absent == file)."""
 
-    # nexus-0y4c6: a class attribute so the test below no longer carries
-    # the literal in its own body -- an opaque embedding_model label
-    # passed straight through to metadata; no embedder is constructed.
-    _MODEL = "voyage-context-3"
-
     def test_dt_content_record_skipped_when_dt_down(self):
         from nexus.commands.dt import _index_dt_content_record
         with patch("nexus.doc_indexer.index_markdown") as idx, \
@@ -204,13 +199,16 @@ class TestLayerDFallback:
             idx.assert_not_called()  # never reached the chunking pipeline
 
     def test_file_backed_chunk_has_no_extraction_source(self):
+        # Neutral model token on purpose (RDR-109 mode lint): opaque
+        # embedding_model label passed straight through to metadata by
+        # make_chunk_metadata; no embedder is constructed.
         from nexus.metadata_schema import make_chunk_metadata
         meta = make_chunk_metadata(
             content_type="markdown",
             chunk_text_hash="a" * 64,
             content_hash="b" * 64,
             indexed_at="2026-05-30T00:00:00Z",
-            embedding_model=self._MODEL,
+            embedding_model="model-ctx",
         )
         assert "extraction_source" not in meta  # absent == file
 

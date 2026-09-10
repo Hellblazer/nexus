@@ -22,14 +22,6 @@ from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbed
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
 
-# nexus-0y4c6: hoisted out of test_strict_true_accepts_conformant_new's
-# own body so the RDR-109 mode-declaration lint no longer needs to
-# exclude this file -- a conformant collection-NAME string used only to
-# prove the strict-naming gate accepts it; no embedder is constructed
-# (t3_db is local-mode, ONNX-backed).
-_CONFORMANT_NAME = "knowledge__1-1__voyage-context-3__v1"
-
-
 @pytest.fixture()
 def t3_db():
     db = T3Database(
@@ -55,8 +47,12 @@ def test_strict_true_rejects_non_conformant_new(t3_db):
 
 
 def test_strict_true_accepts_conformant_new(t3_db):
-    """A NEW collection with a conformant name is accepted when strict=True."""
-    name = _CONFORMANT_NAME
+    """A NEW collection with a conformant name is accepted when strict=True.
+
+    Neutral model token on purpose (RDR-109 mode lint): the strict-naming
+    gate checks shape only (is_conformant_collection_name), never the
+    model segment's identity; t3_db is local-mode, ONNX-backed."""
+    name = "knowledge__1-1__model-ctx__v1"
     col = t3_db.get_or_create_collection(name, strict=True)
     assert col is not None
     assert t3_db.collection_exists(name)

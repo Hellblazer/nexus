@@ -29,13 +29,6 @@ from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbed
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
 
-# nexus-0y4c6: hoisted out of test_enrich_preserves_doc_id_round_trip's
-# own body so the RDR-109 mode-declaration lint no longer needs to
-# exclude this file -- an opaque pre-existing chunk-metadata literal
-# fed directly into a local-mode T3Database; no embedder is constructed.
-_PRE_EXISTING_MODEL = "voyage-context-3"
-
-
 @pytest.fixture
 def local_t3() -> T3Database:
     return T3Database(
@@ -248,7 +241,7 @@ def test_enrich_preserves_doc_id_round_trip(
         "chunk_start_char": 0,
         "chunk_end_char": 50,
         "indexed_at": "2026-05-01T00:00:00+00:00",
-        "embedding_model": _PRE_EXISTING_MODEL,
+        "embedding_model": "model-ctx",  # neutral model token on purpose (RDR-109 mode lint) -- opaque pre-existing chunk-metadata literal fed directly into a local-mode T3Database
         "store_type": "prose",
         "corpus": coll_name,
         "tags": "test",

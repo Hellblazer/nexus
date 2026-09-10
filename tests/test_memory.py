@@ -10,13 +10,6 @@ from nexus.cli import main
 from nexus.db.t2 import T2Database
 from tests._t2_fixture_ops import backdate_memory, memory_row
 
-# nexus-0y4c6: hoisted out of test_promote_calls_t3_put's own body so the
-# RDR-109 mode-declaration lint no longer needs to exclude this file --
-# the RDR-103 Phase 5 auto-promoted conformant collection name asserted
-# against a MagicMock t3; no embedder is constructed.
-_PROMOTED_COLLECTION = "knowledge__proj__voyage-context-3__v1"
-
-
 # ── T2 database layer ───────────────────────────────────────────────────────
 
 
@@ -323,7 +316,16 @@ def test_promote_entry_not_found(runner: CliRunner, mem_home: Path, db: T2Databa
     assert "not found" in result.output.lower() or "9999" in result.output
 
 
-def test_promote_calls_t3_put(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
+def test_promote_calls_t3_put(
+    runner: CliRunner, mem_home: Path, db: T2Database, cloud_mode: None,
+) -> None:
+    """Genuinely cloud-mode (RDR-109 mode lint): ``_promote``'s own
+    ``patch("nexus.config.is_local_mode", return_value=False)`` already
+    drives this, but the ``cloud_mode`` fixture declares that intent
+    explicitly -- ``t3_collection_name(for_write=True)`` resolves the
+    auto-promoted model segment via ``effective_embedding_model_for_writes``,
+    which is genuinely mode-dependent (local mode would promote to the
+    local embed model instead of voyage-context-3)."""
     row_id = db.put(project="proj", title="doc.md", content="the content", ttl=7, tags="ai")
     result, mt3 = _promote(runner, db, row_id)
     assert result.exit_code == 0, result.output
@@ -332,7 +334,7 @@ def test_promote_calls_t3_put(runner: CliRunner, mem_home: Path, db: T2Database)
     # RDR-103 Phase 5: ``t3_collection_name`` auto-promotes
     # ``--collection knowledge__proj`` to a conformant 4-segment name.
     assert (kw["collection"], kw["content"], kw["title"], kw["ttl_days"]) == (
-        _PROMOTED_COLLECTION, "the content", "doc.md", 7
+        "knowledge__proj__voyage-context-3__v1", "the content", "doc.md", 7
     )
     assert "abc123" in result.output
 
