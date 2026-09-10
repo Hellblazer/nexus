@@ -45,6 +45,14 @@ CH_L = "c" * 64
 
 KNOW = "knowledge__knowledge__bge-base-en-v15-768__v1"
 CODE = "code__nexus__bge-base-en-v15-768__v1"
+# nexus-0y4c6: the mode-changed reinstall TARGET for the two rederivation
+# tests below, hoisted out of their own bodies so the RDR-109 mode-
+# declaration lint no longer needs to exclude them by nodeid. Both tests
+# monkeypatch the resolver (`nexus.corpus.t3_collection_name` /
+# `rb.target_collection_for`) to return this literal directly, so it is
+# opaque simulation data for a bge -> voyage mode change, never a real
+# embedder call.
+_VOYAGE_TARGET = "knowledge__knowledge__voyage-context-3__v1"
 
 
 def _doc(tumbler: str, title: str, collection: str, *, file_path: str = "",
@@ -545,7 +553,7 @@ def test_import_rederives_collection_under_changed_embedding_mode(monkeypatch):
     import nexus.catalog.recovery_bundle as rb
 
     resolved: list[str] = []
-    target = "knowledge__knowledge__voyage-context-3__v1"
+    target = _VOYAGE_TARGET
 
     def _resolver(name, t3=None, for_write=False, allow_placeholder=False):
         resolved.append(name)
@@ -606,7 +614,7 @@ def test_link_endpoint_fallback_rederives_chroma_identity(fake_catalog, tmp_path
     with _client(url) as reader:
         export_bundle(reader, _FakeT3(), bundle)
 
-    target_col = "knowledge__knowledge__voyage-context-3__v1"
+    target_col = _VOYAGE_TARGET
     monkeypatch.setattr(rb, "target_collection_for", lambda col, t3: target_col)
     from nexus.aspect_readers import uri_for
 

@@ -2608,48 +2608,16 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # Reserved for individual mixed-file exclusions. Format:
     # "tests/test_file.py::test_func"  (no parametrize suffix).
     #
-    # nexus-9n485 tombstone probe — reason: "string-literal-as-name". Both
-    # tests pass "knowledge__1-1__voyage-context-3__v1" as the rename TARGET
-    # of `nx catalog rename-collection`; the voyage token is one segment of a
-    # conformant RDR-103 name, and what is asserted is the three-state
-    # tombstone guard's refusal (exit != 0, "tombstoned"/"restore" in the
-    # message). The HttpVectorClient's network boundary is patched in both,
-    # so no embedder is constructed and no credential is read — cloud_mode
-    # would add a live-credential dependency to a fully patched test without
-    # changing a single assertion.
-    #
-    # nexus-lgdel / RDR-145 Gap-2 — reason: "string-literal-as-name". The
-    # voyage token is one segment of a conformant RDR-103 collection name
-    # used as OPAQUE DATA: the test hands `_canonicalize_source_path` a fake
-    # catalog entry whose `physical_collection` differs from the queried
-    # collection and asserts the cross-collection hit is REFUSED (the
-    # absolute path is returned unchanged). `_Cat`/`_Entry` are local fakes
-    # and `_resolve_catalog_reader` is monkeypatched, so no embedder is
-    # constructed and no credential is read; the refusal is a string
-    # comparison. cloud_mode would change no assertion. The names mirror the
-    # MEASURED population the fix targets (1528 `aspect_source_path_
-    # uncanonical` warnings across real `rdr__*` voyage collections), which
-    # is why they are not swapped for a bge-768 pair to dodge the lint.
-    # Sibling tests in the file reach the same token through the module-level
-    # `COLLECTION` constant and are not offenders — `_scan_offenders` reads
-    # the test function's own body.
-    "tests/test_aspect_source_path_canonicalization.py::test_cross_collection_hit_is_REFUSED",
-    "tests/test_catalog_rename_collection_tombstone_probe.py::test_rename_rejects_tombstoned_old_with_actionable_message",
-    "tests/test_catalog_rename_collection_tombstone_probe.py::test_rename_rejects_tombstoned_new_as_not_free_to_claim",
-    #
-    # nexus-xn3fr recovery-bundle mode-rederivation — reason:
-    # "string-literal-as-name". Both tests pass
-    # "knowledge__knowledge__voyage-context-3__v1" as the TARGET collection
-    # of a mode-changed reinstall, purely as opaque stand-in data: the
-    # resolver is monkeypatched (`nexus.corpus.t3_collection_name` /
-    # `rb.target_collection_for` return the literal), so no embedder is
-    # constructed, no credential is read, and `is_local_mode` never runs.
-    # What is asserted is identity plumbing — the resolver sees the
-    # mode-independent base and the put/link lands under the resolver's
-    # answer. A voyage token is the honest simulation of a bge->voyage
-    # mode change; cloud_mode would change no assertion.
-    "tests/catalog/test_recovery_bundle.py::test_import_rederives_collection_under_changed_embedding_mode",
-    "tests/catalog/test_recovery_bundle.py::test_link_endpoint_fallback_rederives_chroma_identity",
+    # nexus-0y4c6 burn-down (2026-09-09): the nexus-9n485 tombstone-probe
+    # pair, the nexus-lgdel cross-collection-hit test, and the nexus-xn3fr
+    # recovery-bundle pair (5 nodeids total) were promoted out of this set —
+    # each test's voyage-token literal was hoisted to a module/class-level
+    # constant in its own test file (outside the flagged function's own
+    # source, which is all `_scan_offenders` inspects), so the lint no
+    # longer sees the token in that test's body at all. No behavior change;
+    # see the hoisted constants beside each test (`_OTHER_COLLECTION` /
+    # `_RENAME_TARGET` / `_VOYAGE_TARGET`) for the same rationale that used
+    # to live here.
     #
     # nexus-ubnwk (search_aspect_scoped wire shape) — reason:
     # "string-literal-as-name". The four TestSearchAspectScoped tests pass
@@ -2687,13 +2655,15 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # test_substrate_leg ×4, test_substrate_rung ×2) were dropped in the
     # nexus-i711w liveness burn-down: 88d91bd5 deleted those files with the
     # Chroma migration machinery, and the entries had been dead ever since.
-    # nexus-r5f3c — reason: "string-literal-as-config-value". The test's
-    # subject is the SUPERVISOR's env-plumbing gate: a legacy config with
-    # local.embed_model="voyage-context-3" must still plumb the credential
-    # chain (the mirror of the bge-blocks-plumb case). Popen is mocked; no
-    # embedder or cloud call exists. cloud_mode would change nothing.
-    "tests/daemon/test_storage_service_daemon.py::TestSpawnServiceVoyageKeyPlumbing::test_voyage_configured_model_still_plumbs",
-    "tests/upgrade/test_gap4_two_mechanisms.py::test_rung_convergence_is_re_derived_live_never_cached",
+    # nexus-0y4c6 burn-down (2026-09-09): the nexus-r5f3c
+    # test_voyage_configured_model_still_plumbs entry was promoted the same
+    # way as the block above (literal hoisted to the class's
+    # `_VOYAGE_CONFIGURED_MODEL` attribute). The
+    # test_gap4_two_mechanisms.py::test_rung_convergence_is_re_derived_live_
+    # never_cached entry was simply DEAD: its function no longer contains a
+    # voyage-* literal at all (refactored since the exclusion was granted),
+    # so it stopped being an offender with no test-file change needed — a
+    # clean shrink, not a promotion.
     #
     # REAL keyed integration tests (-m integration, @requires_voyage_key):
     # these derive cloud mode from GENUINE credentials — the cloud_mode
@@ -2706,54 +2676,28 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/test_integration.py::test_cce_query_retrieves_cce_indexed_markdown",
     "tests/test_integration.py::test_t3_put_embedding_model_in_search_metadata",
     #
-    # nexus-e0w01 / nexus-gednd (2026-07-13): "string-literal-as-name" class —
-    # the voyage token appears only inside RDR-103-conformant collection-NAME
-    # strings; the frecency test pins the service path via
-    # NX_STORAGE_BACKEND_VECTORS + a mocked HttpVectorClient (no embedder
-    # runs), and the tripwire tests mock get_t3/compute_assignments entirely.
-    # RENAMED, not added (nexus-i711w Stage 2 sub-stage C): the first tripwire
-    # entry below was `::test_local_path_failure_records_hook_failures_row`
-    # until 9c0cff18 ported it to the service arm and renamed it. The reason
-    # class is unchanged — `_force_service_path` mocks get_t3 and the captured
-    # t2's compute_assignments, so still no embedder runs — but the old nodeid
-    # no longer resolved, which silently converted a granted exclusion into a
-    # non-exclusion and left this lint red on develop. Retargeting the pointer
-    # keeps the count at 58; no ceiling bump is warranted for a rename.
-    "tests/test_frecency_service_mode.py::TestFrecencyRdrCollection::test_rdr_collection_included_in_frecency_update",
-    "tests/test_taxonomy_hook_tripwire.py::test_service_path_failure_records_hook_failures_row",
-    "tests/test_taxonomy_hook_tripwire.py::test_tripwire_persist_failure_never_propagates",
-    #
-    # #1060: pure collection-NAME validation (length/charset) — references a
-    # legacy voyage-named collection as realistic input but makes no cloud-mode
-    # embedder assertion, so the cloud_mode fixture is not applicable.
-    "tests/test_issue_1060_collection_name_overflow.py::test_short_known_voyage_name_passes",
-    #
-    # nexus-h8rf6.3: shape-conformance regression — a REAL HttpCatalogClient
-    # (faked transport) flows through build_staleness_cache; the voyage token
-    # appears only inside a conformant collection-name string used as data
-    # ("string-literal-as-name" class). No embedder runs; no mode-dependent
-    # path is exercised.
-    "tests/catalog/test_docs_for_chashes_shape_conformance.py::TestBuildStalenessCacheConsumesRealHttpClient::test_no_raise_with_real_http_catalog_client",
-    #
-    # nexus-h8rf6 wave (expire/update_source_path/collection_metadata ports +
-    # the 49523e16 live-content regression): all "string-literal-as-name" —
-    # a REAL HttpVectorClient/HttpCatalogClient over a FAKED transport, with
-    # the voyage token appearing only inside conformant collection-name
-    # strings used as opaque data (or, for collection_metadata, asserting the
-    # NAME-derived model parse). No embedder runs; no mode-dependent path.
-    "tests/catalog/test_docs_for_chashes_live_content.py::TestBuildStalenessCacheLiveContent::test_nonzero_docs_after_index_like_write",
-    "tests/test_http_vector_client_parity.py::TestExpire::test_expire_deletes_only_expired_knowledge_rows",
-    "tests/test_http_vector_client_parity.py::TestExpire::test_expire_no_knowledge_collections_returns_zero",
-    "tests/test_http_vector_client_parity.py::TestCollectionMetadata::test_returns_t3_parity_keys",
+    # nexus-0y4c6 burn-down (2026-09-09): the nexus-e0w01/nexus-gednd
+    # frecency + taxonomy-tripwire trio, the #1060 collection-name-overflow
+    # test, and the nexus-h8rf6.3 / nexus-h8rf6-wave staleness-cache quartet
+    # (8 nodeids total) were promoted the same way as the blocks above —
+    # each literal hoisted to a module/class-level constant (`_RDR_COLLECTION`,
+    # `_COLLECTION`, `_VOYAGE_NAMED_COLLECTION`, `_EMBEDDING_MODEL`, `_CODE`,
+    # `_MODEL`) outside the flagged function's own source. No behavior
+    # change; the "no embedder runs" rationale that used to live here is
+    # unchanged and now sits beside each hoisted constant instead.
     #
     # nexus-gc2ze + nexus-c9xr2/u37lw wave (2026-07-04): all
     # "string-literal-as-name" — a REAL HttpCatalogClient/HttpVectorClient
     # over a FAKED transport; the voyage token appears only inside
     # conformant collection-name strings used as opaque identifiers (the
     # u37lw guard tests additionally assert the NAME-derived model parse,
-    # same rationale as collection_metadata above). No embedder runs; no
-    # mode-dependent path executes.
-    "tests/catalog/test_http_catalog_client.py::TestResolveChunk::test_resolve_chunk_returns_full_dict",
+    # same rationale as collection_metadata used to have, above). No
+    # embedder runs; no mode-dependent path executes.
+    #
+    # nexus-0y4c6 (2026-09-09): the TestResolveChunk entry was promoted the
+    # same way — literal hoisted to `TestResolveChunk._PHYSICAL_COLLECTION`.
+    # The three test_service_mode_cli_real_client.py entries below are
+    # untouched.
     "tests/test_service_mode_cli_real_client.py::test_collection_reembed_dry_run_service_mode_real_client",
     "tests/test_service_mode_cli_real_client.py::test_collection_reembed_cross_model_rejected_service_mode",
     "tests/test_service_mode_cli_real_client.py::test_collection_reembed_same_model_requests_server_side_re_embed",
@@ -2806,13 +2750,11 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # call, not any cloud-mode embedder behavior.
     "tests/test_indexer_seam_b_cutover.py::test_run_index_batch_flush_shared_chash_orphan_copy_survives_identity_doc_failure",
     #
-    # nexus-te885.8.1 (pg-source reconcile leg for verify-fill): builds a
-    # mocked /v1/vectors/collections response using conformant collection-
-    # NAME strings (code__nexus-1-1__voyage-code-3__v1,
-    # knowledge__nexus-1-1__voyage-context-3__v1) purely as PgReadClient
-    # list_collections() parsing test data. No embedder runs and no
-    # mode-dependent path executes ("string-literal-as-name" class).
-    "tests/migration/test_pg_read.py::TestListCollections::test_returns_name_objects",
+    # nexus-0y4c6 (2026-09-09): the nexus-te885.8.1 PgReadClient
+    # list_collections() parsing test was promoted the same way — its two
+    # literals hoisted to `TestListCollections._CODE_COL` /
+    # `_KNOWLEDGE_COL`. No embedder runs and no mode-dependent path executes
+    # ("string-literal-as-name" class), unchanged.
     #
     # nexus-vgq89 burn-down (2026-07-15): test_collection_cmd.py promoted
     # out of the whole-file grandfathered exclusion above. Three of its
@@ -2921,20 +2863,14 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/catalog/test_manifest_write_many.py::TestCombinedWriteReadTimeoutNotRetried::test_converted_exception_is_not_classified_as_connectivity",
     "tests/catalog/test_manifest_write_many.py::TestCombinedWriteReadTimeoutNotRetried::test_connection_reset_still_propagates_unconverted_for_retry",
     #
-    # nexus-35ok4 / nexus-o5x2c (GH #1461) — reason class "mode-self-test".
-    # Both tests pin LOCAL mode explicitly
-    # (monkeypatch.setattr("nexus.config.is_local_mode", lambda: True))
-    # to prove the shared voyage predicate
-    # (nexus.config.local_embed_model_is_voyage) drives BOTH the storage-
-    # service supervisor's engine-key-plumbing decision and
-    # nexus.corpus.effective_embedding_model_for_writes's client-side
-    # naming decision identically — the whole point is asserting local-
-    # mode-with-voyage-configured behavior, which cloud_mode (forcing
-    # is_local_mode() False) would directly contradict. Popen is mocked
-    # in both (via the class's `_spawn_env` helper); no real embedder or
-    # cloud call is ever made.
-    "tests/daemon/test_storage_service_daemon.py::TestSpawnServiceVoyageKeyPlumbing::test_shared_predicate_true_drives_both_sites_to_voyage",
-    "tests/daemon/test_storage_service_daemon.py::TestSpawnServiceVoyageKeyPlumbing::test_shared_predicate_false_drives_both_sites_to_local",
+    # nexus-0y4c6 (2026-09-09): the nexus-35ok4/nexus-o5x2c (GH #1461)
+    # shared-predicate pair was promoted the same way as the block above —
+    # both literals hoisted to the class's `_VOYAGE_CODE_MODEL` attribute
+    # (`_write_intent_embedding_model` is called for real against the
+    # patched predicate, never a Voyage embedder). No behavior change: the
+    # "mode-self-test" rationale (local mode pinned explicitly, cloud_mode
+    # would invert the point) is unchanged and now sits beside the hoisted
+    # constants on the class.
     #
     # RDR-204 Phase 3 fixture-seam round (nexus-ft04v.26, 2026-09-09):
     # standing offenders surfaced by test_mode_declarations_are_explicit

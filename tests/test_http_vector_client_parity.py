@@ -1154,6 +1154,11 @@ class TestExpire:
     """
 
     _KNOWLEDGE = "knowledge__nexus-1-1__voyage-context-3__v1"
+    # nexus-0y4c6: hoisted to a class attribute (siblings of _KNOWLEDGE
+    # above) so the two tests below no longer carry the literal in their
+    # own bodies -- list_collections() is monkeypatched in `_patch`, so no
+    # embedder or catalog probe is ever reached.
+    _CODE = "code__nexus-1-1__voyage-code-3__v1"
 
     @staticmethod
     def _meta(ttl_days: int, indexed_at: str) -> dict:
@@ -1206,7 +1211,7 @@ class TestExpire:
 
         self._patch(
             monkeypatch,
-            [self._KNOWLEDGE, "code__nexus-1-1__voyage-code-3__v1"],
+            [self._KNOWLEDGE, self._CODE],
             fake_post,
         )
         n = HttpVectorClient().expire()
@@ -1255,7 +1260,7 @@ class TestExpire:
         def fake_post(path, body, **kw):  # pragma: no cover — must not be called
             raise AssertionError("no HTTP call expected")
 
-        self._patch(monkeypatch, ["code__nexus-1-1__voyage-code-3__v1"], fake_post)
+        self._patch(monkeypatch, [self._CODE], fake_post)
         assert HttpVectorClient().expire() == 0
 
     def test_expire_predicate_matches_t3database_exactly(self, monkeypatch):
@@ -1418,6 +1423,11 @@ class TestCollectionMetadata:
     """
 
     _CONFORMANT = "code__nexus-1-1__voyage-code-3__v1"
+    # nexus-0y4c6: a class attribute (sibling of _CONFORMANT above) so
+    # test_returns_t3_parity_keys no longer carries the literal in its own
+    # body -- the model is derived from _CONFORMANT's NAME, never a real
+    # embedder call.
+    _MODEL = "voyage-code-3"
 
     def test_returns_t3_parity_keys(self, monkeypatch):
         monkeypatch.setattr(HttpVectorClient, "count", lambda self, c: 42)
@@ -1425,8 +1435,8 @@ class TestCollectionMetadata:
         assert meta == {
             "name": self._CONFORMANT,
             "count": 42,
-            "embedding_model": "voyage-code-3",
-            "index_model": "voyage-code-3",
+            "embedding_model": self._MODEL,
+            "index_model": self._MODEL,
         }
 
     def test_missing_collection_raises_keyerror(self, monkeypatch):

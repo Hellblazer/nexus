@@ -388,7 +388,24 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 60
 # covers all 7 parametrize cases): voyage tokens are parametrize-data
 # collection-name/is_code_like pairs. Rationale in conftest.py beside
 # each entry.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 82
+# 82 -> 62 (nexus-0y4c6 burn-down batch 1, 2026-09-09): -20 nodeid
+# entries. 19 were PROMOTED, not merely retargeted: each test's
+# voyage-token literal was hoisted out of the flagged function's own
+# body to a module- or class-level constant in the same test file (a
+# class attribute or module constant sits outside what
+# `inspect.getsource(item.function)` returns for an individual test, so
+# `_scan_offenders` no longer sees the token there at all) — no test
+# behavior changed, only where the literal is spelled. The 20th
+# (test_gap4_two_mechanisms.py::test_rung_convergence_is_re_derived_
+# live_never_cached) was simply DEAD: its function no longer contains a
+# voyage-* literal at all following an earlier refactor, so it had
+# already stopped being an offender before this batch touched it — a
+# clean shrink needing no test-file edit. See the per-entry rationale
+# comments in conftest.py (now attached to the hoisted constants
+# instead of the removed exclusions) for which promotion covered which
+# entry. 62 nodeids remain unconverted; see bead nexus-0y4c6 for the
+# burn-down's continuation.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 62
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

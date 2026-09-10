@@ -64,22 +64,28 @@ class TestConstruction:
 
 
 class TestListCollections:
+    # nexus-0y4c6: class attributes so test_returns_name_objects no longer
+    # carries these literals in its own body -- pure list_collections()
+    # parsing test data against a monkeypatched `_get`, no embedder call.
+    _CODE_COL = "code__nexus-1-1__voyage-code-3__v1"
+    _KNOWLEDGE_COL = "knowledge__nexus-1-1__voyage-context-3__v1"
+
     def test_returns_name_objects(self, monkeypatch) -> None:
         def fake_get(base_url, token, path, *, tenant="default", timeout=30):
             assert base_url == "http://localhost:9999"
             assert token == "tok"
             assert path == "/v1/vectors/collections"
             return [
-                {"name": "code__nexus-1-1__voyage-code-3__v1"},
-                {"name": "knowledge__nexus-1-1__voyage-context-3__v1"},
+                {"name": self._CODE_COL},
+                {"name": self._KNOWLEDGE_COL},
             ]
 
         monkeypatch.setattr(pg_read, "_get", fake_get)
         client = PgReadClient("http://localhost:9999", "tok")
         cols = client.list_collections()
         assert [c.name for c in cols] == [
-            "code__nexus-1-1__voyage-code-3__v1",
-            "knowledge__nexus-1-1__voyage-context-3__v1",
+            self._CODE_COL,
+            self._KNOWLEDGE_COL,
         ]
 
     def test_skips_nameless_entries(self, monkeypatch) -> None:

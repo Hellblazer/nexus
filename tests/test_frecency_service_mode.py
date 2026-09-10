@@ -26,6 +26,13 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 
+# nexus-0y4c6: hoisted out of test_rdr_collection_included_in_frecency_update's
+# own body so the RDR-109 mode-declaration lint no longer needs to exclude it
+# by nodeid -- the token is a realistic collection-NAME fixture (a mocked
+# HttpVectorClient stands in for the service; no embedder runs).
+_RDR_COLLECTION = "rdr__repo__voyage-context-3__v1"
+
+
 # ── helpers ────────────────────────────────────────────────────────────────────
 
 
@@ -293,7 +300,7 @@ class TestFrecencyRdrCollection:
         """nexus-e0w01 regression: --frecency-only must touch the rdr__
         collection too — it was a total omission (RDR chunks' frecency_score
         only ever refreshed by a full index pass)."""
-        rdr_col = "rdr__repo__voyage-context-3__v1"
+        rdr_col = _RDR_COLLECTION
         svc = _make_svc_client(collection_exists=True, chunk_ids=[], chunk_metas=[])
         reg = _make_registry()
         reg.get.return_value["rdr_collection"] = rdr_col

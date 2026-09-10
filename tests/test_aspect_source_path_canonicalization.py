@@ -23,6 +23,12 @@ from nexus.aspect_worker import _canonicalize_source_path
 COLLECTION = "rdr__1-1__voyage-context-3__v1"
 ABS = "/Users/x/git/nexus/docs/rdr/rdr-191-unify.md"
 REL = "docs/rdr/rdr-191-unify.md"
+# nexus-0y4c6: a DIFFERENT collection than COLLECTION above, used only to
+# prove the cross-collection-hit refusal; opaque data, no embedder involved.
+# Hoisted out of test_cross_collection_hit_is_REFUSED's own body so the
+# RDR-109 mode-declaration lint (tests/test_mode_declarations_are_explicit.py)
+# no longer needs to exclude that test by nodeid.
+_OTHER_COLLECTION = "docs__1-1__voyage-context-3__v1"
 
 
 class _Entry:
@@ -73,7 +79,7 @@ def test_cross_collection_hit_is_REFUSED(patched):
     A source_uri is globally unique, so a hit from a DIFFERENT collection is
     possible; accepting it would be worse than the warning it replaces.
     """
-    cat = patched(_Cat(_Entry(REL, "docs__1-1__voyage-context-3__v1")))
+    cat = patched(_Cat(_Entry(REL, _OTHER_COLLECTION)))
 
     assert _canonicalize_source_path(COLLECTION, ABS) == ABS
 

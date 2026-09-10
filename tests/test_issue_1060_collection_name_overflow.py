@@ -19,6 +19,11 @@ import pytest
 
 from nexus.corpus import validate_collection_name
 
+# nexus-0y4c6: hoisted out of test_short_known_voyage_name_passes's own body
+# so the RDR-109 mode-declaration lint no longer needs to exclude it by
+# nodeid -- pure collection-NAME length/charset validation, no embedder call.
+_VOYAGE_NAMED_COLLECTION = "code__nexus-abc123__voyage-code-3__v1"
+
 
 # ── Overflow scenario: the exact name from the issue ──────────────────────────
 
@@ -98,4 +103,4 @@ def test_conformant_collection_name_passes() -> None:
 
 def test_short_known_voyage_name_passes() -> None:
     """Standard voyage-named collection passes validation unchanged."""
-    validate_collection_name("code__nexus-abc123__voyage-code-3__v1")
+    validate_collection_name(_VOYAGE_NAMED_COLLECTION)

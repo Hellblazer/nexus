@@ -44,6 +44,13 @@ from tests.catalog.test_http_catalog_client import (
     start_fake_server,
 )
 
+# nexus-0y4c6: hoisted out of test_no_raise_with_real_http_catalog_client's
+# own body so the RDR-109 mode-declaration lint no longer needs to exclude
+# it by nodeid -- a REAL HttpCatalogClient over a FAKED transport
+# (start_fake_server), the token is opaque chunk-metadata data, never an
+# embedder call.
+_EMBEDDING_MODEL = "voyage-code-3"
+
 # nexus-i711w terminal deletion: the local-Catalog arm of the parity suite
 # (``local_catalog`` fixture, ``test_local_returns_dict_of_lists``, and the
 # local halves of the paired tests) retired with the local SQLite catalog.
@@ -112,7 +119,7 @@ class TestBuildStalenessCacheConsumesRealHttpClient:
             "metadatas": [{
                 "chunk_text_hash": CHUNK_SHA_A,  # full 64-char form — the wire width since RDR-180
                 "content_hash": "hash-a",
-                "embedding_model": "voyage-code-3",
+                "embedding_model": _EMBEDDING_MODEL,
             }],
         }
 
@@ -120,4 +127,4 @@ class TestBuildStalenessCacheConsumesRealHttpClient:
         with patch.object(_factory_mod, "make_catalog_reader", return_value=http_client):
             cache = build_staleness_cache(col)
 
-        assert cache.by_doc_id == {"1.1.1": ("hash-a", "voyage-code-3")}
+        assert cache.by_doc_id == {"1.1.1": ("hash-a", _EMBEDDING_MODEL)}

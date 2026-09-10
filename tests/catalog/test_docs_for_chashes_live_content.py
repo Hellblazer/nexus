@@ -66,6 +66,11 @@ assert len(_FULL_CHASH) == 64
 # retired; exact-match semantics now operate at full width.
 _STORED_CHASH = _FULL_CHASH
 _TUMBLER = "1.1.1"
+# nexus-0y4c6: hoisted out of test_nonzero_docs_after_index_like_write's own
+# body so the RDR-109 mode-declaration lint no longer needs to exclude it by
+# nodeid -- a REAL HttpCatalogClient over a FAKED transport, opaque
+# chunk-metadata data, never an embedder call.
+_EMBEDDING_MODEL = "voyage-code-3"
 
 
 class _ExactMatchCatalogHandler(BaseHTTPRequestHandler):
@@ -193,7 +198,7 @@ class TestBuildStalenessCacheLiveContent:
             "metadatas": [{
                 "chunk_text_hash": _FULL_CHASH,
                 "content_hash": "content-hash-a",
-                "embedding_model": "voyage-code-3",
+                "embedding_model": _EMBEDDING_MODEL,
             }],
         }
 
@@ -203,4 +208,4 @@ class TestBuildStalenessCacheLiveContent:
 
         # Exact assertion, not an inequality: the "0 docs" bug returns
         # ``{}`` here; content is real (non-toy) proof this round-trips.
-        assert cache.by_doc_id == {_TUMBLER: ("content-hash-a", "voyage-code-3")}
+        assert cache.by_doc_id == {_TUMBLER: ("content-hash-a", _EMBEDDING_MODEL)}

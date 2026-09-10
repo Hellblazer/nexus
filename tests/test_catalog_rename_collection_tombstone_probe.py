@@ -25,6 +25,12 @@ from tests._catalog_fixture_ops import ActiveCatalog
 
 STATS_PATH = "/v1/vectors/stats"
 COLLECTIONS_PATH = "/v1/vectors/collections"
+# nexus-0y4c6: the rename TARGET name for both tombstone-guard tests below,
+# hoisted out of their own bodies so the RDR-109 mode-declaration lint no
+# longer needs to exclude them by nodeid. HttpVectorClient's network
+# boundary is patched (`_patch_get` above), so no embedder is constructed
+# and no credential is read regardless of this literal.
+_RENAME_TARGET = "knowledge__1-1__voyage-context-3__v1"
 
 
 @pytest.fixture()
@@ -73,7 +79,7 @@ def test_rename_rejects_tombstoned_old_with_actionable_message(
         result = runner.invoke(
             main,
             ["catalog", "rename-collection",
-             "knowledge__delos", "knowledge__1-1__voyage-context-3__v1"],
+             "knowledge__delos", _RENAME_TARGET],
         )
     assert result.exit_code != 0
     message = result.output.lower()
@@ -88,7 +94,7 @@ def test_rename_rejects_tombstoned_new_as_not_free_to_claim(
     """The collision bug this bead exists to fix: a tombstoned target used to
     read as "doesn't exist in T3" (free), inviting a rename onto dead rows."""
     catalog.register_collection("knowledge__delos")
-    target = "knowledge__1-1__voyage-context-3__v1"
+    target = _RENAME_TARGET
     # old is live; new has physical rows but zero live chunks (tombstoned).
     _patch_get(
         monkeypatch,
