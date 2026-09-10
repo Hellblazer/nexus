@@ -1205,15 +1205,13 @@ no third.
 
 `TupleRepository` (claim, out, read, ack, nack, stats, sweep) in jOOQ;
 `TupleHandler` under `/v1/tuples`; the waiter set and the one-second
-re-run timer; typed errors; the two engine settings this step
-introduces, `NX_TUPLE_READ_MAX` (default 300, an over-cap `n` is
-clamped) and `NX_TUPLE_CLAIM_PASSES` (default 8, the claim re-run's
-pass cap); and the `## Unshipped` entry for `/v1/tuples` in
-`docs/wire-contract-pending.md`, in the shape that file requires: the
-note leads with `[additive]`, names the owning bead and the engine tag
-that carries the engine half, and carries direction-safety prose naming
-both directions (old client with new engine, new client with old
-engine).
+re-run timer; typed errors; and the engine settings this step
+introduces: `NX_TUPLE_READ_MAX` (default 300, an over-cap `n` is
+clamped), `NX_TUPLE_CLAIM_PASSES` (default 8, the claim re-run's pass
+cap), the `timeout_s` cap (25 s, CA 3) and the two park caps
+(`ParkCapExceeded`, four per subspace and sixteen per engine). The
+wire-ledger entry for `/v1/tuples` is written in Phase 3 Step 1, where
+the engine tag it must name exists.
 
 #### Step 5: Sweep
 
@@ -1290,25 +1288,37 @@ RDR closes after both.
 
 The engine-release skill's battery on the tagged commit: the full
 engine suite and the migration-rehearsal shakeout. Sam cuts the
-`engine-service-vX.Y.Z` tag. Because `tuples-001-baseline.xml` is a
-changeset, the order after the tag is: the post-publish `--acquire`
-gate against the published bytes (engine-release skill §5), then the
-deploy relay to conexus, whose pre-deploy step is their Liquibase walk
-rehearsal against a point-in-time fork of production (a conexus-owned
-gate, AGENTS.md § Engine-service release), then the deploy. The deploy
-is paired with the client release that bumps `REQUIRED_ENGINE_VERSION`
-to that tag so local installs receive the same engine (the
-paired-release choreography in AGENTS.md). The wire change is additive
-(a new route family, no existing contract touched); the `## Unshipped`
-entry Phase 1 Step 4 writes records that, in the shape
-`docs/wire-contract-pending.md` requires. The engine deploys before the
-client tag because the whole `## Unshipped` section is all-`[additive]`
-with the pairing named, which `check_client_release_precondition.py`
-accepts (AGENTS.md, the nexus-1emxn refinement); the pairing lint
-(`scripts/check_wire_contract_pairing.py`) fires only on a commit
-carrying both halves, which this plan's engine-only Phase 1 never
-produces, so the entry is the record of the change, not what the lint
-demands.
+`engine-service-vX.Y.Z` tag. The order after the tag follows the
+engine-release skill's own numbering: §5, the post-publish `--acquire`
+gate against the published bytes; §5b, the migration-release steps,
+which this tag triggers because `tuples-001-baseline.xml` is a
+changeset (the representative-scale rehearsal, the rollback decision,
+the freeze-window derivation, the post-deploy data-integrity check);
+then §6, the deploy relay to conexus, whose pre-deploy step is their
+Liquibase walk rehearsal against a point-in-time fork of production (a
+conexus-owned gate, AGENTS.md § Engine-service release), then the
+deploy. The deploy is paired with the client release that bumps
+`REQUIRED_ENGINE_VERSION` to that tag so local installs receive the
+same engine (the paired-release choreography in AGENTS.md).
+
+This step also writes the wire-ledger entry, once the tag exists to
+name: one line under `## Unshipped` in `docs/wire-contract-pending.md`
+in the form the parser reads (`- \`<sha>\` -- bead <id> -- engine tag
+\`engine-service-vX.Y.Z\` -- [additive] ...`), where `<sha>` is the
+Phase 1 commit that added the `/v1/tuples` routes, the note leads with
+`[additive]` and carries direction-safety prose naming both directions
+(old client with new engine: the routes are unreachable dead surface;
+new client with old engine: `HttpTupleStore` fails loud on 404). The
+same step moves that line to `## Shipped` when the paired client
+release publishes, because the lint's STALE arm fails any `## Unshipped`
+entry whose commit is an ancestor of the newest published `v*` tag,
+whether or not the commit was ever flagged. The wire change is additive
+(a new route family, no existing contract touched). The engine may
+deploy before the client tag when the whole `## Unshipped` section is
+all-`[additive]` with the pairing named, which
+`check_client_release_precondition.py` accepts (AGENTS.md, the
+nexus-1emxn refinement); the section's state at that moment is read
+from the file, not assumed here.
 
 #### Step 2: CA 3 through the public edge
 
@@ -1622,7 +1632,7 @@ each with its trigger: a semantic destructive read (a consumer plus a
 fuzz gate on the engine's embedding), `LISTEN/NOTIFY` (a second engine
 JVM), partitioning (millions of rows), a batch claim (a consumer that
 drains many tuples at once), and any wrapping of scratch, memory or
-plans (its own RDR). The document's length is the record of four gate
+plans (its own RDR). The document's length is the record of five gate
 rounds, kept in Revision History; the design sections themselves are
 sized to the change.
 
@@ -1925,11 +1935,14 @@ rule; the table sketch carries nulls-first and the clean-finish stamp;
 the claim re-run has its own cap, `NX_TUPLE_CLAIM_PASSES` (default 8),
 the sketch header and the taxonomy-015 sentence say what the
 transaction may hold, and a Test Plan scenario asserts the count; Phase
-1 Step 4 names both settings and the ledger entry in the shape
-`docs/wire-contract-pending.md` requires; `--acquire` runs after the
-tag and before the relay, as AGENTS.md and the engine-release skill
-order it; the deploy-before-tag ordering rests on an all-`[additive]`
-Unshipped section, not on the entry existing; the Phase 4 close sets
-the five engine-side targets and the edge wake-latency target when its
-leg lands; an over-cap `n` scenario is added; the lift-clause range and
-the gate-round count are corrected. No design decision changed.
+1 Step 4 names its settings; `--acquire` runs after the
+tag and before the relay, with §5b between them, as the engine-release
+skill orders it; the wire-ledger entry moves to Phase 3 Step 1, where
+its engine tag exists, in the parser's line form, with its move to
+Shipped owned by the same step; the deploy-before-tag ordering rests on
+an all-`[additive]` Unshipped section, not on the entry existing; the
+Phase 4 close sets the five engine-side targets and the edge
+wake-latency target when its leg lands; an over-cap `n` scenario is
+added; the lift-clause range and the gate-round count are corrected at
+both sites. No design decision changed; one bound that borrowed the read
+cap gained its own setting, `NX_TUPLE_CLAIM_PASSES`.
