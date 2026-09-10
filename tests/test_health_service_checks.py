@@ -970,6 +970,8 @@ _ALL_TENANT_TABLES = [
     "nexus.topic_assignments",
     "nexus.topic_links",
     "nexus.topics",
+    "nexus.tuple_claim_log",  # RDR-205 Phase 1 (mirrors health._RLS_TENANT_TABLES)
+    "nexus.tuples",
     "t1.scratch",
 ]
 
