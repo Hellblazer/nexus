@@ -37,7 +37,9 @@ h3{font-size:19px;margin-top:28px}
 p{margin:12px 0;max-width:66ch}
 .lede{font-size:19px;color:var(--ink-2);max-width:60ch}
 .topnav{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:14px}
+.topnav .links{display:flex;gap:16px;flex-wrap:wrap}
 .topnav a{font-size:14px;font-weight:500;text-decoration:none}
+h2{scroll-margin-top:16px}
 .topnav a:hover{text-decoration:underline}
 .eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--brass);font-weight:600;margin-bottom:14px}
 a{color:var(--blue)}
@@ -104,7 +106,7 @@ details p{margin:8px 0 4px;font-size:15px}
 <body>
 
 <div class="wrap">
-<div class="topnav"><span class="eyebrow" style="margin:0">Nexus · conexus 7.x</span><a href="getting-started.html">Getting started →</a></div>
+<div class="topnav"><span class="eyebrow" style="margin:0">Nexus · conexus 7.x</span><span class="links"><a href="#update">Update</a><a href="#uninstall">Uninstall</a><a href="#problems">Problems</a><a href="getting-started.html">Getting started →</a></span></div>
 <h1>Installing Nexus</h1>
 <p class="lede">Nexus gives Claude a permanent memory and search by meaning. It runs on your computer. You need no API key, no account, and no separate database install. The install takes about ten minutes.</p>
 
@@ -126,7 +128,7 @@ details p{margin:8px 0 4px;font-size:15px}
   </div>
 </div>
 
-<h2>Before you start</h2>
+<h2 id="before">Before you start</h2>
 <div class="tbl"><table>
 <tr><th>Need</th><th>Why</th><th>Check</th></tr>
 <tr><td>Python 3.12 or 3.13</td><td>Python 3.14 does not work yet. If needed, uv downloads Python 3.13 for you.</td><td><code>python3 --version</code></td></tr>
@@ -226,14 +228,14 @@ nx doctor</pre><button class="copy">Copy</button></div>
 <div class="callout"><p>Next: <a href="getting-started.html"><strong>Getting started</strong></a>. If you already use the conexus plugin in Claude Code, do not install the extension. Claude Desktop already sees the plugin's tools. With both, you get two copies with different names.</p></div>
 </section>
 
-<h2>Update Nexus</h2>
+<h2 id="update">Update Nexus</h2>
 <p>Two commands. Always run both:</p>
 <div class="cmd"><pre>nx self install   <span class="c"># install the new version next to the current one</span>
 nx upgrade        <span class="c"># update the service, the data, and the plugins</span></pre><button class="copy">Copy</button></div>
 <div class="callout"><p><strong>Do not</strong> update with <code>uv tool install conexus</code> or with <code>--force</code>. That command removes the local search model, and search then returns nothing. If this happened, <code>nx self install</code> repairs it.</p></div>
 <p class="note">If you update the plugin with <code>/plugin update</code> in Claude Code, the next session runs both commands for you.</p>
 
-<h2>Remove Nexus completely</h2>
+<h2 id="uninstall">Remove Nexus completely</h2>
 <p>Four steps, in this order. The first one is optional. Nothing here touches a managed cloud tenant. It removes only what is on this computer.</p>
 <ol class="steps">
 <li><div class="step">
@@ -273,7 +275,7 @@ systemctl --user list-unit-files | grep -i nexus  <span class="c"># must print n
 ls ~/.config/nexus                                <span class="c"># must not exist</span></pre><button class="copy" type="button">Copy</button></div>
 <p class="note">Old installs from before mid-2026 may also have a directory <code>~/.local/share/nexus/chroma</code> or a <code>com.nexus.t2</code> unit. The commands above remove both.</p>
 
-<h2>Problems</h2>
+<h2 id="problems">Problems</h2>
 <details><summary>nx: command not found</summary><p>Add <code>~/.local/bin</code> to your PATH. Then open a new terminal. If PATH is already correct, run <code>nx self install</code>. If <code>nx</code> was never installed, run <code>uv tool install conexus</code>.</p></details>
 <details><summary>Crash on startup, or an import error mentioning voyageai or Pydantic v1</summary><p>Nexus runs on Python 3.14, which does not work. Run these three commands in order: <code>uv python install 3.13</code>, then <code>uv tool install conexus --force --python 3.13</code>, then <code>nx self install</code>.</p></details>
 <details><summary>nx doctor says credentials not set</summary><p>This is normal for a local install. Only the cloud service needs a token.</p></details>
@@ -281,7 +283,7 @@ ls ~/.config/nexus                                <span class="c"># must not exi
 <details><summary>Plugin installed but its tools never appear</summary><p>There are two common causes. The <code>nx</code> command is not installed, or Node.js is not installed. Run <code>/conexus:nx-preflight</code>. It tells you which one.</p></details>
 <details><summary>Nothing above helps</summary><p>Use the <a href="https://gist.github.com/Hellblazer/08f0a615e3d73e47d8062bce4829b611">recovery runbook</a>. Paste it as the first message of a Claude Code session. Claude then checks the install step by step. It asks you before it changes any data.</p></details>
 
-<h2>What you installed</h2>
+<h2 id="what">What you installed</h2>
 <p>One service on your computer. It contains a database (Postgres 17 with pgvector) and three stores: scratch for one session, memory for project facts, and knowledge for everything you index. The search model also runs on your computer, so your data does not leave it. One time per day, Nexus sends one anonymous message with six values: install id, version, mode, operating system, CPU type, and Python version. <code>nx telemetry off</code> stops this.</p>
 <p>More: <a href="https://tensegrity.blog/2026/04/26/how-i-actually-use-nexus/">How I actually use Nexus</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md">Getting Started</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md">CLI reference</a></p>
 
