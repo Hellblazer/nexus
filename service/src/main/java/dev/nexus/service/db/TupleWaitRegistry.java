@@ -7,6 +7,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BiConsumer;
 
 /**
  * RDR-205 §Technical Design "Wake": one {@link Condition} per {@code
@@ -29,12 +30,39 @@ import java.util.concurrent.locks.ReentrantLock;
  * and only ever consumes the global slot; {@code in}/{@code inp} consume
  * both the global slot and their claimant's own slot.
  *
+ * <p><b>Lost-wakeup closure (RDR-205 Phase 1 review, bead nexus-em75s.7).</b>
+ * {@link #register} alone records nothing a signal can observe — a {@code
+ * signalAll} landing between the caller's own first {@link #register}/query
+ * and its first {@link Waiter#awaitSignalOrTimer} call would previously be
+ * dropped: {@link Condition#signalAll()} wakes only threads ALREADY parked
+ * on the condition at the moment it runs, and is not sticky. Each {@link
+ * Group} now carries a monotonic {@code generation}, bumped under its own
+ * lock by every {@link #signalAll}; a {@link Waiter} captures the
+ * generation at {@link #register} and compares it at each {@link
+ * Waiter#awaitSignalOrTimer} call — a mismatch means a signal already
+ * happened since the last observation, so the waiter returns immediately
+ * instead of parking for the full one-second timer.
+ *
  * <p><b>Shutdown.</b> {@link #shutdown} signals every waiter and flips
  * {@link #isShuttingDown()} so a parked call's next wake runs one final
  * query and returns instead of re-parking, riding out its budget past
  * process exit.
  */
 final class TupleWaitRegistry {
+
+    /**
+     * TEST-ONLY (RDR-205 bead nexus-em75s.7, the wake-test mutation pins): invoked
+     * once per {@code (tenant, subspace)} GROUP that {@link #signalAll} actually
+     * delivers a signal to. The wake tests pinning subspace isolation live in {@code
+     * dev.nexus.service} (a different package from this class), so they cannot reach
+     * a package-private field here directly — {@link TupleRepository
+     * #setTestOnlySignalHook} is the cross-package installer. Counting hook
+     * invocations lets a test distinguish "woke because signalled" from "woke
+     * because the 1-second timer elapsed" and catch a {@code signalAll} that
+     * silently widens to every group instead of the one it was called for. No-op by
+     * default; never assigned outside test code.
+     */
+    static volatile BiConsumer<String, String> TEST_ONLY_SIGNAL_HOOK = (tenant, subspace) -> { };
 
     private final int maxPerClaimant;
     private final int maxGlobal;
@@ -55,6 +83,11 @@ final class TupleWaitRegistry {
     private static final class Group {
         final ReentrantLock lock = new ReentrantLock();
         final Condition condition = lock.newCondition();
+        /** Bumped, under {@link #lock}, by every {@link #signalAll} delivered to this
+         *  group — the lost-wakeup fix (nexus-em75s.7): a {@link Waiter} compares its
+         *  own last-observed value against this to detect a signal it never parked
+         *  for. */
+        long generation;
     }
 
     private Group group(String tenant, String subspace) {
@@ -69,29 +102,54 @@ final class TupleWaitRegistry {
         }
         g.lock.lock();
         try {
+            g.generation++;
             g.condition.signalAll();
         } finally {
             g.lock.unlock();
         }
+        TEST_ONLY_SIGNAL_HOOK.accept(tenant, subspace);
     }
 
     /** Registers interest in {@code (tenant, subspace)} BEFORE the caller's first query. */
     Waiter register(String tenant, String subspace) {
-        return new Waiter(group(tenant, subspace));
+        Group g = group(tenant, subspace);
+        long seenGeneration;
+        g.lock.lock();
+        try {
+            seenGeneration = g.generation;
+        } finally {
+            g.lock.unlock();
+        }
+        return new Waiter(g, seenGeneration);
     }
 
     /** A registered interest; parks the calling thread until signalled or one second elapses. */
     final class Waiter {
         private final Group g;
+        private long seenGeneration;
 
-        private Waiter(Group g) {
+        private Waiter(Group g, long seenGeneration) {
             this.g = g;
+            this.seenGeneration = seenGeneration;
         }
 
+        /**
+         * Parks until {@link #signalAll} bumps this waiter's group's generation past
+         * what it last observed, or one second elapses — whichever comes first. A
+         * generation mismatch found on ENTRY (a signal landed since the last
+         * observation, before this call ever parked) returns immediately without
+         * calling {@link Condition#await}, closing the lost-wakeup window between a
+         * caller's {@link #register}/first query and its first park.
+         */
         void awaitSignalOrTimer() throws InterruptedException {
             g.lock.lock();
             try {
+                if (g.generation != seenGeneration) {
+                    seenGeneration = g.generation;
+                    return;
+                }
                 g.condition.await(1, TimeUnit.SECONDS);
+                seenGeneration = g.generation;
             } finally {
                 g.lock.unlock();
             }

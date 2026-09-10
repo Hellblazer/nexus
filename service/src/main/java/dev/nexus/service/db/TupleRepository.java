@@ -18,6 +18,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -105,6 +106,22 @@ public final class TupleRepository {
      * outside test code. NOT a mechanism for production delay injection of any kind.
      */
     static volatile Runnable TEST_ONLY_CLAIM_SELECT_TO_UPDATE_DELAY = () -> { };
+
+    /**
+     * TEST-ONLY (RDR-205 bead nexus-em75s.7, the wake-test mutation pins): installs a
+     * hook invoked once per {@code (tenant, subspace)} group {@link TupleWaitRegistry
+     * #signalAll} actually delivers a signal to, so a test can count SIGNAL-DRIVEN
+     * wakes and distinguish them from the registry's own 1-second timer fallback --
+     * catching a {@code signalAll} that silently widens to every group, which an
+     * un-instrumented black-box test cannot tell apart from correct behaviour. The
+     * wake tests pinning this live in {@code dev.nexus.service} (a different package
+     * from {@link TupleWaitRegistry}'s package-private hook field), hence this public
+     * cross-package installer. Pass {@code null} to restore the no-op default. Never
+     * call this outside test code.
+     */
+    public static void setTestOnlySignalHook(java.util.function.BiConsumer<String, String> hookOrNull) {
+        TupleWaitRegistry.TEST_ONLY_SIGNAL_HOOK = hookOrNull == null ? (tenant, subspace) -> { } : hookOrNull;
+    }
 
     private final TenantScope tenantScope;
     private final TemplateRegistry registry;
@@ -302,30 +319,65 @@ public final class TupleRepository {
      * {@link TemplateSchema#keys()}/{@link TemplateSchema#idDims()} are immutable lists
      * fixed at template-load time), so the same logical tuple always hashes identically.
      * Insert time is never part of the id (RDR-110 gate finding C3).
+     *
+     * <p>RDR-205 Phase 1 review (nexus-em75s.7, the RDR-110 C3 class recurring): every
+     * field is fed to the digest via {@link #digestField}, which length-prefixes it
+     * instead of being joined into a delimited string first -- the ORIGINAL join used a
+     * literal NUL byte (0x00) between fields and a plain {@code '='} inside a key/dim
+     * pair, and neither is escaped: a caller-supplied key/dim/nonce/body value that
+     * itself contains that same byte could make two logically distinct tuples collide
+     * on the same id. Length-prefixing makes the encoding unambiguous regardless of
+     * what bytes any field contains.
      */
     private static byte[] computeId(String tenant, String subspace, TemplateSchema t,
                                      Map<String, String> keys, Map<String, String> dims,
                                      String nonce, String body) {
-        StringBuilder sb = new StringBuilder();
-        sb.append(tenant).append(' ').append(subspace);
-        for (String k : t.keys()) {
-            sb.append(' ').append(k).append('=').append(keys.get(k));
-        }
-        for (String d : t.idDims()) {
-            sb.append(' ').append(d).append('=').append(dims.get(d));
-        }
-        switch (t.idFrom()) {
-            case KEYS -> {
-                // nothing further
-            }
-            case KEYS_NONCE -> sb.append(' ').append("nonce=").append(nonce);
-            case KEYS_BODY -> sb.append(' ').append("body=").append(body == null ? "" : body);
-        }
         try {
-            return MessageDigest.getInstance("SHA-256").digest(sb.toString().getBytes(StandardCharsets.UTF_8));
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            digestField(md, tenant);
+            digestField(md, subspace);
+            for (String k : t.keys()) {
+                digestField(md, k);
+                digestField(md, keys.get(k));
+            }
+            for (String d : t.idDims()) {
+                digestField(md, d);
+                digestField(md, dims.get(d));
+            }
+            switch (t.idFrom()) {
+                case KEYS -> {
+                    // nothing further
+                }
+                case KEYS_NONCE -> {
+                    digestField(md, "nonce");
+                    digestField(md, nonce);
+                }
+                case KEYS_BODY -> {
+                    digestField(md, "body");
+                    digestField(md, body == null ? "" : body);
+                }
+            }
+            return md.digest();
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 unavailable", e);
         }
+    }
+
+    /**
+     * Feeds one field to {@code md} as a 4-byte big-endian UTF-8 byte-length prefix
+     * followed by the field's own bytes -- no sequence of (length, bytes) pairs can be
+     * reinterpreted as a different sequence, which is what makes {@link #computeId}
+     * injective across field boundaries regardless of a field's own content. A null
+     * value encodes as length -1, distinct from an empty string's length 0.
+     */
+    private static void digestField(MessageDigest md, String value) {
+        if (value == null) {
+            md.update(ByteBuffer.allocate(4).putInt(-1).array());
+            return;
+        }
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        md.update(ByteBuffer.allocate(4).putInt(bytes.length).array());
+        md.update(bytes);
     }
 
     // ── rd / rdp ─────────────────────────────────────────────────────────────
@@ -473,12 +525,17 @@ public final class TupleRepository {
             // Same-claimant idempotent retake (RDR-205 §Technical Design "Claim"): a
             // retry after a lost response must recover the SAME claim, not take a new
             // one or fail. Checked BEFORE the claim statement, no new update, no log row.
+            // RDR-205 Phase 1 review (nexus-em75s.7, ship-blocker): LEASE_UNTIL must be
+            // checked too — without it, a claimant whose own lease already LAPSED (but
+            // nobody has re-claimed the row yet) reads back the stale, dead claim_id
+            // instead of falling through to the claim loop below and taking a fresh one.
             TuplesRecord existing = ctx.selectFrom(TUPLES)
                     .where(matchCond
                             .and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_CLAIMED))
                             .and(TUPLES.CLAIMANT.eq(claimant))
                             .and(TUPLES.CONSUMED_AT.isNull())
-                            .and(TUPLES.EXPIRES_AT.gt(DSL.currentOffsetDateTime())))
+                            .and(TUPLES.EXPIRES_AT.gt(DSL.currentOffsetDateTime()))
+                            .and(TUPLES.LEASE_UNTIL.gt(DSL.currentOffsetDateTime())))
                     .orderBy(TUPLES.CREATED_AT.asc())
                     .limit(1)
                     .fetchOne();
@@ -773,12 +830,21 @@ public final class TupleRepository {
         });
     }
 
+    /**
+     * RDR-205 Phase 1 review (nexus-em75s.7, ship-blocker): LEASE_UNTIL must be part
+     * of "live" here too — without it, {@code ack}/{@code nack} on a claim_id whose
+     * lease already lapsed (but the sweep or a retake has not yet released it) would
+     * succeed against a claim that is no longer actually held, instead of raising
+     * {@link ClaimNotFoundException} the way an already-released or already-consumed
+     * claim_id does.
+     */
     private static TuplesRecord liveClaimRow(DSLContext ctx, String tenant, String claimId) {
         return ctx.selectFrom(TUPLES)
                 .where(TUPLES.TENANT_ID.eq(tenant)
                         .and(TUPLES.CLAIM_ID.eq(claimId))
                         .and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_CLAIMED))
-                        .and(TUPLES.CONSUMED_AT.isNull()))
+                        .and(TUPLES.CONSUMED_AT.isNull())
+                        .and(TUPLES.LEASE_UNTIL.gt(DSL.currentOffsetDateTime())))
                 .fetchOne();
     }
 

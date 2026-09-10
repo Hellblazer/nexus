@@ -161,6 +161,47 @@ class TupleRepositoryTest {
                 .isInstanceOf(SchemaViolationException.class);
     }
 
+    /**
+     * RDR-205 Phase 1 review (nexus-em75s.7, the RDR-110 C3 class recurring):
+     * {@code computeId}'s ORIGINAL join delimited each field with a fixed separator
+     * byte and joined a key/dim's name to its value with a plain {@code '='}, neither
+     * escaped -- so a value that itself embeds "{@code <delimiter>from=...}" could
+     * make two logically distinct {@code (from, nonce)} pairs hash to the identical
+     * id. Constructed below with an underscore standing in for that separator (a
+     * printable, storable character demonstrating the same field-boundary-collision
+     * class): {@code from1 = "sender1" + delim + "nonce=" + nonce1}, {@code nonce2 =
+     * nonce1 + delim + "nonce=" + nonce1B} against {@code from2 = "sender1"} -- the
+     * two "to=agentX<delim>from=sender1<delim>nonce=..." byte sequences a naive
+     * delimiter-joined encoding would produce are identical for both rows despite
+     * every one of {@code from}/{@code nonce} differing. The length-prefixed fix
+     * (RDR-205 §Technical Design) makes this unreachable regardless of what a field
+     * contains.
+     */
+    @Test
+    void out_distinctFromNoncePairsWithEmbeddedFieldBoundary_produceDistinctIds() {
+        String delim = "_"; // stand-in field separator (see javadoc)
+        String to = "agent-collide-" + UUID.randomUUID();
+        String subspace = "mailbox/" + to;
+
+        String from1 = "sender1" + delim + "nonce=n1";
+        String nonce1 = "n1b";
+
+        String from2 = "sender1";
+        String nonce2 = "n1" + delim + "nonce=n1b";
+
+        byte[] id1 = repo.out(TENANT_A, subspace, Map.of("to", to), Map.of("from", from1),
+                "body", nonce1, null);
+        byte[] id2 = repo.out(TENANT_A, subspace, Map.of("to", to), Map.of("from", from2),
+                "body", nonce2, null);
+
+        assertThat(id2)
+                .as("distinct (from, nonce) splits of the same field-boundary bytes must not collide")
+                .isNotEqualTo(id1);
+
+        var rows = repo.rdp(TENANT_A, subspace, Map.of("to", to), 10, null);
+        assertThat(rows).as("two distinct rows, not one collapsed by a shared id").hasSize(2);
+    }
+
     // ── ten concurrent inp on one row ───────────────────────────────────────
 
     @Test
@@ -266,6 +307,48 @@ class TupleRepositoryTest {
         assertThat(second).isPresent();
 
         assertThat(second.get().claimId()).isEqualTo(first.get().claimId());
+    }
+
+    /**
+     * RDR-205 Phase 1 review (nexus-em75s.7, ship-blocker): the retake SELECT and
+     * {@code liveClaimRow} both had no {@code LEASE_UNTIL} bound, so a claimant whose
+     * OWN lease had already lapsed (nobody has re-claimed the row yet) read back the
+     * stale, dead claim_id from {@code in_sameClaimantTwiceWithinLease}'s retake path
+     * instead of falling through to the claim loop and taking a fresh one.
+     */
+    @Test
+    void in_sameClaimant_afterOwnLeaseLapsed_takesNewClaim_notTheStaleRetake() throws Exception {
+        String to = "agent-retake-lapsed-" + UUID.randomUUID();
+        repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to),
+                Map.of("from", "sender-retake-lapsed"), "body", "nonce-retake-lapsed-1", null);
+
+        var first = repo.inp(TENANT_A, "mailbox/" + to, Map.of("to", to), "retaker-lapsed", 1);
+        assertThat(first).isPresent();
+
+        Thread.sleep(1_500); // let the 1-second lease lapse
+
+        var second = repo.inp(TENANT_A, "mailbox/" + to, Map.of("to", to), "retaker-lapsed", 60);
+        assertThat(second)
+                .as("a lapsed OWN lease must be reclaimed as a NEW claim, not the stale retake")
+                .isPresent();
+        assertThat(second.get().claimId()).isNotEqualTo(first.get().claimId());
+        assertThat(second.get().tuple().attempts()).isEqualTo(1);
+
+        // The old claim_id is dead: ack against it must raise ClaimNotFound, not
+        // succeed against a claim that is no longer actually held.
+        assertThatThrownBy(() -> repo.ack(TENANT_A, first.get().claimId(), "retaker-lapsed"))
+                .isInstanceOf(ClaimNotFoundException.class);
+
+        // Exactly one `expire` log row -- the lapsed claim's own release, written once
+        // by the claim loop's lapsed-lease branch, not by the (bypassed) retake path.
+        try (Connection su = pg.createConnection("")) {
+            var dsl = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES);
+            int expireRows = dsl.fetchCount(dsl.selectFrom(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG)
+                    .where(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.TENANT_ID.eq(TENANT_A)
+                            .and(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.SUBSPACE.eq("mailbox/" + to))
+                            .and(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.TRANSITION.eq("expire"))));
+            assertThat(expireRows).isEqualTo(1);
+        }
     }
 
     @Test
@@ -376,6 +459,15 @@ class TupleRepositoryTest {
 
     // ── wake: park, signal, cross-subspace isolation ─────────────────────────
 
+    /**
+     * RDR-205 Phase 1 review (nexus-em75s.7): as originally written this test passed
+     * identically with {@code TupleWaitRegistry.signalAll} deleted outright, because
+     * the registry's own 1-second timer fallback alone was enough to find the row
+     * within the test's 5-second {@code Future#get} bound. Asserting the ELAPSED time
+     * from {@code out} to the result -- well under the 1-second timer -- distinguishes
+     * "woke on the signal" from "woke on the next timer tick", which is what actually
+     * pins {@link dev.nexus.service.db.TupleWaitRegistry#signalAll}.
+     */
     @Test
     void rd_withTimeoutS_wakesOnAnotherClientOut() throws Exception {
         String session = "session-wake-" + UUID.randomUUID();
@@ -385,24 +477,46 @@ class TupleRepositoryTest {
                     repo.rd(TENANT_A, "ledger/" + session, null, 10, null, 8));
 
             Thread.sleep(300); // let the reader register + park
+            long beforeOut = System.nanoTime();
             repo.out(TENANT_A, "ledger/" + session,
                     Map.of("agent_id", "waker", "kind", "start"), Map.of(), null, null, null);
 
             List<TupleRepository.TupleRow> result = parked.get(5, TimeUnit.SECONDS);
+            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - beforeOut);
             assertThat(result).hasSize(1);
+            assertThat(elapsedMs)
+                    .as("woke on the signal, not the registry's 1-second timer fallback")
+                    .isLessThan(700);
         } finally {
             pool.shutdownNow();
         }
     }
 
+    /**
+     * RDR-205 Phase 1 review (nexus-em75s.7): as originally written this test passed
+     * identically with {@code TupleWaitRegistry.signalAll} WIDENED to signal every
+     * group regardless of subspace, because an early-but-spurious wake on B still
+     * re-queries, still finds nothing (nothing was ever written to B), and still rides
+     * out the same 3-second timeout to the same empty result. {@link
+     * TupleRepository#setTestOnlySignalHook} counts SIGNAL-DRIVEN wakes for subspace
+     * B specifically, so a write to subspace A that (incorrectly) signals B's group is
+     * now directly observable and asserted to never happen.
+     */
     @Test
     void rd_parkedCallersOnSubspaceB_doNotWakeOnWriteToSubspaceA() throws Exception {
         String sessionA = "session-wakeA-" + UUID.randomUUID();
         String sessionB = "session-wakeB-" + UUID.randomUUID();
+        String subspaceB = "ledger/" + sessionB;
+        java.util.concurrent.atomic.AtomicInteger subspaceBSignals = new java.util.concurrent.atomic.AtomicInteger();
+        TupleRepository.setTestOnlySignalHook((tenant, subspace) -> {
+            if (subspaceB.equals(subspace)) {
+                subspaceBSignals.incrementAndGet();
+            }
+        });
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
             Future<List<TupleRepository.TupleRow>> parkedOnB = pool.submit(() ->
-                    repo.rd(TENANT_A, "ledger/" + sessionB, null, 10, null, 3));
+                    repo.rd(TENANT_A, subspaceB, null, 10, null, 3));
 
             Thread.sleep(300);
             repo.out(TENANT_A, "ledger/" + sessionA,
@@ -412,8 +526,12 @@ class TupleRepositoryTest {
             // timeout and returns empty (no row ever landed on subspace B).
             List<TupleRepository.TupleRow> result = parkedOnB.get(6, TimeUnit.SECONDS);
             assertThat(result).isEmpty();
+            assertThat(subspaceBSignals.get())
+                    .as("A's write must never signal B's wait group")
+                    .isZero();
         } finally {
             pool.shutdownNow();
+            TupleRepository.setTestOnlySignalHook(null);
         }
     }
 

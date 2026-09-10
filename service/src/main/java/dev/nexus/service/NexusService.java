@@ -960,6 +960,24 @@ public final class NexusService {
     }
 
     /**
+     * Why a {@link #runScheduledTupleSweep} run finished with unswept work remaining
+     * (RDR-205 Phase 1 review, bead nexus-em75s.7, replacing the prior plain {@code
+     * boolean budgetExhausted}): {@code NONE} when every tenant this run reached
+     * completed all three arms; {@code TENANT_CAP} when a tenant's own {@code
+     * maxBatchesPerTenant} was reached (self-limiting — the run moves on to the next
+     * tenant in the SAME run, never starves the rest); {@code TENANT_ERROR} when a
+     * tenant's own arms threw; {@code WALL_CLOCK} when the run's {@code
+     * wallClockBudget} was exhausted, either before starting a tenant or mid-tenant —
+     * the one cause that stops the WHOLE run outright (see {@code stopWholeRun} in
+     * {@link #runScheduledTupleSweep(OffsetDateTime, Duration, int, int, Duration)}).
+     * Declared in ascending severity ({@link Enum#ordinal()} order) so a run touching
+     * more than one incomplete tenant reports the worst cause it reached — the enum
+     * constant order below IS that severity order, checked via {@code ordinal()} at
+     * every incompleteness site, so reordering these constants changes precedence.
+     */
+    enum TupleSweepIncompleteCause { NONE, TENANT_CAP, TENANT_ERROR, WALL_CLOCK }
+
+    /**
      * One counted outcome record for the tuple sweep's scheduled run, in the
      * RDR-204 ghost sweep's convention (its RECORD, not its trigger — see
      * {@code CatalogRepository.GhostSweepResult}). {@code scanned} is the
@@ -967,12 +985,14 @@ public final class NexusService {
      * shape as the ghost sweep's own {@code scanned == } the sum of its
      * dispositions); {@code oldestLastSweptAt} is null only when {@code
      * nexus.tuple_tenants} has no rows at all (nothing has ever called {@code
-     * out}).
+     * out}), OR when every tenant reached this run was stamped (RDR-205 Phase 1
+     * review, bead nexus-em75s.7 — see {@code stampTupleTenantSwept} below), in
+     * which case it reports {@code now}.
      */
     record TupleSweepRunResult(
             int tenantsVisited, OffsetDateTime oldestLastSweptAt,
             int scanned, int released, int deadLettered, int purged, int logRowsPurged,
-            boolean budgetExhausted) { }
+            TupleSweepIncompleteCause incompleteCause) { }
 
     /**
      * One cycle of the tuple sweep's scheduled task (RDR-205 Phase 1 Step 5,
@@ -1013,7 +1033,7 @@ public final class NexusService {
                                                 int batchSize, int maxBatchesPerTenant,
                                                 Duration wallClockBudget) {
         if (tupleRepo == null) {
-            return new TupleSweepRunResult(0, null, 0, 0, 0, 0, 0, false);
+            return new TupleSweepRunResult(0, null, 0, 0, 0, 0, 0, TupleSweepIncompleteCause.NONE);
         }
         long deadlineNanos = System.nanoTime() + wallClockBudget.toNanos();
         List<TupleTenantCursor> tenants = listTupleSweepTenants(statementTimeout);
@@ -1024,15 +1044,17 @@ public final class NexusService {
         int deadLettered = 0;
         int purged = 0;
         int logRowsPurged = 0;
-        boolean budgetExhausted = false;
+        TupleSweepIncompleteCause cause = TupleSweepIncompleteCause.NONE;
         OffsetDateTime oldestRemaining = null;
         boolean oldestRemainingSet = false;
 
         for (TupleTenantCursor cursor : tenants) {
             if (System.nanoTime() >= deadlineNanos) {
                 // Wall clock already exhausted: never START a new tenant, mid-run or not —
-                // the task stops at THIS tenant boundary.
-                budgetExhausted = true;
+                // the task stops at THIS tenant boundary. Zero progress was spent on this
+                // tenant, so (unlike the stamped-on-progress case below) its pre-run stamp
+                // is still accurate and is what "oldest remaining" reports.
+                cause = TupleSweepIncompleteCause.WALL_CLOCK;
                 oldestRemaining = cursor.lastSweptAt();
                 oldestRemainingSet = true;
                 break;
@@ -1041,6 +1063,7 @@ public final class NexusService {
             int batches = 0;
             boolean complete = true;
             boolean stopWholeRun = false;
+            TupleSweepIncompleteCause tenantCause = TupleSweepIncompleteCause.NONE;
 
             try {
                 // Arm 1: release lapsed claims nobody re-took.
@@ -1048,10 +1071,12 @@ public final class NexusService {
                     if (System.nanoTime() >= deadlineNanos) {
                         complete = false;
                         stopWholeRun = true;
+                        tenantCause = TupleSweepIncompleteCause.WALL_CLOCK;
                         break;
                     }
                     if (batches >= maxBatchesPerTenant) {
                         complete = false;
+                        tenantCause = TupleSweepIncompleteCause.TENANT_CAP;
                         break;
                     }
                     TupleRepository.ReleaseBatchResult r =
@@ -1069,10 +1094,12 @@ public final class NexusService {
                     if (System.nanoTime() >= deadlineNanos) {
                         complete = false;
                         stopWholeRun = true;
+                        tenantCause = TupleSweepIncompleteCause.WALL_CLOCK;
                         break;
                     }
                     if (batches >= maxBatchesPerTenant) {
                         complete = false;
+                        tenantCause = TupleSweepIncompleteCause.TENANT_CAP;
                         break;
                     }
                     int n = tupleRepo.purgeExpiredTuplesBatch(tenant, batchSize, statementTimeout);
@@ -1087,10 +1114,12 @@ public final class NexusService {
                     if (System.nanoTime() >= deadlineNanos) {
                         complete = false;
                         stopWholeRun = true;
+                        tenantCause = TupleSweepIncompleteCause.WALL_CLOCK;
                         break;
                     }
                     if (batches >= maxBatchesPerTenant) {
                         complete = false;
+                        tenantCause = TupleSweepIncompleteCause.TENANT_CAP;
                         break;
                     }
                     int n = tupleRepo.purgeOldClaimLogBatch(tenant, batchSize, statementTimeout);
@@ -1104,20 +1133,31 @@ public final class NexusService {
                 // One tenant's failure must not starve the rest (same doctrine as
                 // runScheduledSweep's per-tenant catch above) — never stops the whole run.
                 complete = false;
+                tenantCause = TupleSweepIncompleteCause.TENANT_ERROR;
                 log.warn("event=tuple_sweep_tenant_failed tenant={} error={}", tenant, ex.getMessage(), ex);
             }
 
             tenantsVisited++;
-            if (complete) {
+            // RDR-205 Phase 1 review (nexus-em75s.7, ship-blocker — the wall-clock
+            // starvation finding): stamp on ANY real progress this run, not only full
+            // completion. The three arms are idempotent and cumulative (a re-run of a
+            // batch call simply resumes wherever the last one left off), so re-stamping
+            // a partially-swept tenant loses no work; it only moves the tenant to the
+            // BACK of next run's least-recently-swept order. Leaving a tenant UNSTAMPED
+            // after real work was already spent on it is what let a tenant whose own
+            // backlog always exceeds the wall-clock budget sort first FOREVER and starve
+            // every other tenant, run after run. Incompleteness now travels in `cause`,
+            // never in the stamp.
+            if (complete || batches > 0) {
                 stampTupleTenantSwept(tenant, now, statementTimeout);
-            } else {
-                budgetExhausted = true;
-                if (!oldestRemainingSet) {
-                    // Ascending traversal: the FIRST incomplete tenant carries the globally
-                    // oldest remaining last_swept_at among tenants not freshly stamped this run.
-                    oldestRemaining = cursor.lastSweptAt();
-                    oldestRemainingSet = true;
-                }
+            } else if (!oldestRemainingSet) {
+                // Zero batches spent (the deadline hit before this tenant's first
+                // statement): genuinely untouched, so its pre-run stamp is still accurate.
+                oldestRemaining = cursor.lastSweptAt();
+                oldestRemainingSet = true;
+            }
+            if (!complete && tenantCause.ordinal() > cause.ordinal()) {
+                cause = tenantCause;
             }
             if (stopWholeRun) {
                 break;
@@ -1125,19 +1165,19 @@ public final class NexusService {
         }
 
         if (!oldestRemainingSet) {
-            // Every tenant reached this run completed cleanly (or there were none at all):
-            // "oldest last_swept_at after the run" is trivially `now`, or null if there is
-            // no tuple_tenants row to report at all.
+            // Every tenant reached this run either completed cleanly or was stamped on
+            // partial progress: "oldest last_swept_at after the run" is trivially `now`,
+            // or null if there is no tuple_tenants row to report at all.
             oldestRemaining = tenants.isEmpty() ? null : now;
         }
 
         log.info("event=tuple_sweep_run tenants_visited={} oldest_last_swept_at={} scanned={} released={} "
-                + "dead_lettered={} purged={} log_rows_purged={} budget_exhausted={}",
+                + "dead_lettered={} purged={} log_rows_purged={} incomplete_cause={}",
             tenantsVisited, oldestRemaining, scanned, released, deadLettered, purged, logRowsPurged,
-            budgetExhausted);
+            cause);
 
         return new TupleSweepRunResult(tenantsVisited, oldestRemaining, scanned, released, deadLettered,
-                purged, logRowsPurged, budgetExhausted);
+                purged, logRowsPurged, cause);
     }
 
     /**
