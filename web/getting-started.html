@@ -223,7 +223,7 @@ ul.plain li{margin:3px 0}
 
 <!-- ============ 2 ============ -->
 <section class="lesson" id="l2">
-<div class="lhead"><span class="lnum">2</span><h2>End a session, start the next one</h2><span class="ltime">10 min</span></div>
+<div class="lhead"><span class="lnum">2</span><h2>End a session, start the next one</h2><span class="ltime">15 min</span></div>
 <p class="why">Work with Nexus happens in many sessions, not one. What connects them is a small habit at the end of each session. Learn it now, before the first real work, because every later lesson ends with it.</p>
 <p>A Claude Code session has a limited memory of the conversation. When it gets long, Claude Code compresses it, and detail is lost. When you close the session or type <code>/clear</code>, the conversation is gone. Memory (lesson 3) keeps the facts and decisions. It does not keep "where was I": which branch, what was half done, what to do first tomorrow. That is what <code>/conexus:continuation</code> is for.</p>
 
@@ -250,10 +250,20 @@ ul.plain li{margin:3px 0}
 <div class="tbl"><table>
 <tr><th>Moment</th><th>How you notice it</th><th>Then</th></tr>
 <tr><td>You are about to stop working</td><td>End of the day, a meeting, lunch. Anything where the terminal will sit for more than an hour.</td><td>Run it. Then close the terminal or leave the session open. Either is fine.</td></tr>
-<tr><td>You are about to change subject</td><td>The next task has nothing to do with the current one: a different branch, a different part of the system.</td><td>Run it. Then <code>/clear</code>. Start the new subject in the empty session. Paste the handoff only when you return to the old subject.</td></tr>
-<tr><td>The conversation is getting long</td><td>Claude Code shows a warning when the conversation is close to its limit. Before that, you may notice Claude asking about things you told it an hour ago.</td><td>Run it. Then <code>/clear</code> and paste the handoff. You lose nothing, and the session is fast again.</td></tr>
+<tr><td>You finished a task, or are about to change subject</td><td>The task is committed, or the next task has nothing to do with the current one: a different branch, a different part of the system.</td><td>Run it. Then <code>/clear</code>. Start the next task in the empty session. Paste the handoff only when you return to the old subject.</td></tr>
+<tr><td>The context window is filling</td><td><code>/context</code> shows it well used, or Claude Code shows its warning, or Claude asks about things you told it an hour ago.</td><td>Run it. Then <code>/clear</code> and paste the handoff. You lose nothing, and the session is fast again. Details below.</td></tr>
 </table></div>
-<p class="note">Why the third one matters: when the conversation reaches its limit, Claude Code compresses it by itself. The compressed version keeps the outline and loses the detail: exact file names, the reason for a decision, what was tried and did not work. A continuation written before that point keeps the detail in a file. After compression it is too late to write a good one.</p>
+<h3>The context window, concretely</h3>
+<p>Claude works from a fixed amount of text called the context window. Everything in the session goes into it: your messages, Claude's answers, every file Claude read, every command output, every search result, and the blocks the plugin added at the start. Nothing leaves by itself. So the window fills, and a full window has two costs. Claude reasons less well when the useful part of the window is buried in old tool output. And when the window is full, Claude Code compresses the conversation without asking. The compressed version keeps the outline and loses the detail: exact file names, the reason for a decision, what was tried and did not work.</p>
+
+<div class="see">See how full it is</div>
+<div class="cmd"><pre>/context</pre><button class="copy" type="button">Copy</button></div>
+<p>Claude Code shows how much of the window is used and by what. Look at it when a session has run for a while, or when an answer feels off. When the window is close to full, Claude Code also shows a warning above the input line. The warning is the last call. Run the continuation when you see it, not after.</p>
+
+<div class="callout rule"><p><strong>Keep it lean on purpose.</strong> Do not wait for the warning. The habit that works: one unit of work per session. Finish the task, run <code>/conexus:continuation</code>, <code>/clear</code>, and start the next task in an empty window with only the handoff and the plugin's context in it. A session that stays lean answers faster, costs less, and does not lose detail to compression. The continuation is what makes clearing free: nothing you need is in the window that is not also in the file or in memory.</p></div>
+
+<p class="note">What fills the window fastest: reading large files, long command outputs, and wide searches. If Claude is about to read a big file, ask for the part you need. If a command prints thousands of lines, ask Claude to summarize it instead of showing it. This is not fussiness. It is the difference between a session that lasts an afternoon and one that compresses before lunch.</p>
+<p class="note">Compression by hand, <code>/compact</code>, exists too. It is better than the automatic one because you choose the moment, but it still loses detail. Continuation and <code>/clear</code> lose nothing. Prefer them.</p>
 <p>If you forget: nothing is lost that was in memory (lesson 4). Start the new session and ask <em>"What do you know about this project, and what was I working on?"</em> Claude answers from memory. The last continuation file, if there was one, is still in <code>/tmp</code> until the next reboot. Ask Claude to find it.</p>
 
 <h3>What it looks like, end to end</h3>
