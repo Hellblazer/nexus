@@ -3573,6 +3573,118 @@ nx tenant create NAME
 
 Create tenant `NAME` and mint its first bound service token. The token is printed **once** (store it immediately); only its hash is kept server-side. The name `*` is reserved for the bootstrap token and is rejected.
 
+## nx tuple
+
+The RDR-205 Linda tuple space: a coordination primitive over Postgres for cross-agent/cross-instance state (mailboxes, ledgers, work queues). Every subcommand calls through `HttpTupleStore` over `/v1/tuples`; requires `NX_SERVICE_PORT` / `NX_SERVICE_TOKEN`. A *subspace* (e.g. `mailbox/agent-7`) resolves to a registered template (`nx tuple templates`), which pins which `--key`/`--dim` fields it accepts.
+
+### nx tuple out
+
+```
+nx tuple out SUBSPACE [--key KEY=VALUE ...] [--dim KEY=VALUE ...] [--body TEXT] [--nonce TEXT] [--ttl-seconds N]
+```
+
+Write a tuple into `SUBSPACE`. Idempotent by construction: the tuple id is derived from the template's `id_from` fields only (never the insert time), so a retry lands on the same tuple. Prints the tuple id (lowercase hex).
+
+| Flag | Description |
+|------|-------------|
+| `--key KEY=VALUE` | A pinned key field (repeatable; every key the template requires) |
+| `--dim KEY=VALUE` | A dimension field (repeatable) |
+| `--body TEXT` | Tuple payload |
+| `--nonce TEXT` | Caller-minted nonce, for templates whose `id_from` includes it |
+| `--ttl-seconds N` | Explicit TTL, capped at the template's retention ceiling (`TtlTooLong` if it isn't) |
+
+### nx tuple rd
+
+```
+nx tuple rd SUBSPACE [--pattern KEY=VALUE ...] [-n N] [--timeout-s SECONDS] [--json]
+```
+
+Non-destructive read from `SUBSPACE`. Matches on equality over whatever subset of the pinned keys `--pattern` supplies (an empty pattern reads the whole subspace); returns dead-lettered rows too (dead-lettering is a claim state, not an exclusion). A probe by default (`--timeout-s 0`, never blocks); parks up to `--timeout-s` seconds (capped by the engine) when nothing matches immediately.
+
+| Flag | Description |
+|------|-------------|
+| `--pattern KEY=VALUE` | A key-equality filter (repeatable; subset match) |
+| `-n N` | Max rows to return (default 1) |
+| `--timeout-s SECONDS` | Seconds to park when nothing matches immediately; 0 (default) never blocks |
+| `--json` | Output as a JSON array |
+
+### nx tuple in
+
+```
+nx tuple in SUBSPACE --pattern KEY=VALUE ... --claimant ID --lease-s N [--timeout-s SECONDS] [--json]
+```
+
+Destructive (claiming) read from `SUBSPACE`. Unlike `rd`, every key the template declares must be pinned in `--pattern` (no subset match) and dead-lettered rows are never returned. A probe by default (`--timeout-s 0`); prints the claimed tuple and its claim id, or exits 1 with "No matching tuple." on a probe miss. Ack or nack the claim with `nx tuple ack`/`nx tuple nack` — the row stays claimed (and unavailable to others) until then or until the lease lapses.
+
+| Flag | Description |
+|------|-------------|
+| `--pattern KEY=VALUE` | Every pinned key the template declares, exact match (repeatable, required) |
+| `--claimant ID` | This caller's identity (required) |
+| `--lease-s N` | Claim lease length, capped at the template's `max_lease_seconds` and the row's remaining TTL (required) |
+| `--timeout-s SECONDS` | Seconds to park when nothing matches immediately; 0 (default) never blocks |
+| `--json` | Output as JSON |
+
+### nx tuple ack
+
+```
+nx tuple ack CLAIM_ID --claimant ID
+```
+
+Consume a claimed tuple. The row is invisible to `rd`/`in` after this.
+
+| Flag | Description |
+|------|-------------|
+| `--claimant ID` | Must match the identity that made the claim (required) |
+
+### nx tuple nack
+
+```
+nx tuple nack CLAIM_ID --claimant ID
+```
+
+Release a claim back to available. Counts an attempt toward the template's `max_attempts` (dead-lettered at the cap).
+
+| Flag | Description |
+|------|-------------|
+| `--claimant ID` | Must match the identity that made the claim (required) |
+
+### nx tuple templates
+
+```
+nx tuple templates [--json]
+```
+
+The boot-loaded template registry: digest, source directories, and the registered template names. `digest` changes whenever a template file changes.
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output as JSON |
+
+### nx tuple list
+
+```
+nx tuple list [--prefix PREFIX] [--json]
+```
+
+Concrete tuple subspaces that exist, optionally filtered to those starting with `--prefix`. Each row reports `total`/`available`/`claimed`/`dead`/`consumed`/`expired_unpurged`.
+
+| Flag | Description |
+|------|-------------|
+| `--prefix PREFIX` | Filter to subspaces starting with this prefix |
+| `--json` | Output as a JSON array |
+
+### nx tuple stats
+
+```
+nx tuple stats SUBSPACE [--json]
+```
+
+The census for one subspace: `total`, `available`, `claimed`, `dead`, `consumed`, `expired_unpurged`, `oldest_created_at`, `newest_created_at`.
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output as JSON |
+
 ## nx service
 
 Storage-service administration.

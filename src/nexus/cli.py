@@ -67,6 +67,7 @@ from nexus.commands.stranded_cmd import stranded_group
 from nexus.commands.t3 import t3 as t3_group
 from nexus.commands.taxonomy_cmd import taxonomy
 from nexus.commands.tenant_cmd import tenant
+from nexus.commands.tuple_cmd import tuple_group
 from nexus.commands.tier_status import tier_status_cmd
 from nexus.commands.agents_cmd import agents_group
 from nexus.commands.answer_runs import answer_runs_cmd
@@ -203,6 +204,7 @@ main.add_command(stranded_group, name="stranded")
 main.add_command(t3_group, name="t3")
 main.add_command(taxonomy)
 main.add_command(tenant, name="tenant")
+main.add_command(tuple_group, name="tuple")
 main.add_command(tier_status_cmd, name="tier-status")
 main.add_command(agents_group, name="agents")
 main.add_command(answer_runs_cmd, name="answer-runs")

@@ -1,6 +1,6 @@
 # Tuple Space
 
-> Status: design of record from RDR-205 (gated 2026-09-09, not yet accepted), not yet shipped. The routes, tools and verbs named here land with RDR-205 Phases 1 and 2; until then nothing in a running install serves them.
+> Status: design of record from RDR-205 (accepted). The engine (Phase 1) and client surface (Phase 2 — `nx tuple`, the eight `tuple_*` MCP tools, the doctor rows) are on `develop`; `/v1/tuples` has no released `engine-service` tag carrying it yet, so a local install pinned to an older engine 404s until Phase 3 (optional and parallel) cuts one.
 
 ## What it is
 

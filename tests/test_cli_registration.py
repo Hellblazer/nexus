@@ -52,6 +52,7 @@ def test_all_command_modules_registered():
         "taxonomy_cmd": "taxonomy",
         "telemetry_cmd": "telemetry",
         "tenant_cmd": "tenant",
+        "tuple_cmd": "tuple",
         "tier_status": "tier-status",
         "answer_runs": "answer-runs",
     }
