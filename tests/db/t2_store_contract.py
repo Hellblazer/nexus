@@ -347,7 +347,11 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         # trigger-maintained (RDR-154 P0), so no SQLite twin ever counted
         # topic_assignments directly. Not used by the doctor drift check as
         # of the nexus-c0g6e fix round (GH #1529 review) — see the next two
-        # entries, its batched replacement.
+        # entries, its batched replacement. After that round it has NO
+        # production caller at all (grep-verified); kept for a future
+        # single-topic caller of the route it already wraps, not deleted
+        # as dead code, since the route itself remains live and the method
+        # is the only typed accessor for it.
         'count_assignments': ['topic_id'],
         # nexus-c0g6e fix round (GH #1529 review): the batched doc_count-
         # drift read (GET /topics/doc_count_drift) and its apply/dry-run

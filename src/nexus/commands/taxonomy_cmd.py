@@ -2935,10 +2935,36 @@ def _run_fix_doc_count(collection: str, *, apply: bool) -> None:
     both read); an apply always corrects the whole tenant regardless of
     which collection's rows are shown here. Documented in the option's own
     help text so this is never a silent surprise.
+
+    A pre-route engine (404 on ``/topics/recount_doc_count``) is reported
+    with one line naming the route and exits non-zero without a
+    traceback — the same distinction :func:`nexus.health.
+    _check_topics_doc_count_drift` already makes for its own 404 case
+    (fix round, GH #1529 review addendum: this verb previously let the
+    raw ``httpx.HTTPStatusError`` propagate uncaught, contradicting the
+    wire-ledger entry's claim that both the doctor row and this flag
+    read 404 the same way). Any OTHER HTTP error still propagates, as a
+    :class:`click.ClickException` rather than a raw traceback.
     """
+    import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
+
     db = _T2Database(_default_db_path(), client=_command_shared_t2_client())
     try:
-        result = db.taxonomy.recount_doc_count(dry_run=not apply)
+        try:
+            result = db.taxonomy.recount_doc_count(dry_run=not apply)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                click.echo(
+                    "doc_count-drift fix cannot run: the deployed engine has no "
+                    "/topics/recount_doc_count route (bead nexus-c0g6e, GH #1529 — "
+                    "needs the engine tag carrying "
+                    "taxonomy-016-doc-count-drift-functions.xml; see "
+                    "docs/wire-contract-pending.md). Deploy an engine carrying it "
+                    "and re-run.",
+                    err=True,
+                )
+                raise click.exceptions.Exit(2) from None
+            raise click.ClickException(str(exc)) from exc
         rows = [r for r in (result.get("topics") or []) if r.get("collection") == collection]
         verb = "Would correct" if not apply else "Corrected"
         if not rows:

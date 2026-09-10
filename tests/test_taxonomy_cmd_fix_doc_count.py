@@ -10,17 +10,20 @@ logic.
 """
 from __future__ import annotations
 
+import httpx
 from click.testing import CliRunner
 
 from nexus.commands.taxonomy_cmd import taxonomy
 
 
-def _fake_db(recount_result: dict):
+def _fake_db(recount_result: dict | None = None, *, raise_exc: Exception | None = None):
     calls: list[dict] = []
 
     class _Store:
         def recount_doc_count(self, *, dry_run: bool) -> dict:
             calls.append({"dry_run": dry_run})
+            if raise_exc is not None:
+                raise raise_exc
             return recount_result
 
     class _Db:
@@ -33,6 +36,12 @@ def _fake_db(recount_result: dict):
     db = _Db()
     db.calls = calls  # type: ignore[attr-defined]
     return db
+
+
+def _http_status_error(status: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://engine.example/v1/taxonomy/topics/recount_doc_count")
+    response = httpx.Response(status, request=request)
+    return httpx.HTTPStatusError(f"{status} error", request=request, response=response)
 
 
 def _run(monkeypatch, db, *args: str):
@@ -109,4 +118,31 @@ def test_no_drift_anywhere_reports_cleanly(monkeypatch) -> None:
 def test_db_closed_even_on_success(monkeypatch) -> None:
     db = _fake_db({"dry_run": True, "corrected": 0, "topics": []})
     _run(monkeypatch, db)
+    assert db.closed is True
+
+
+def test_route_missing_404_reports_one_line_and_exits_nonzero_without_traceback(monkeypatch) -> None:
+    """Fix round, GH #1529 review addendum: a pre-route engine must be
+    reported the same way the doctor row's own 404 case is handled
+    (nexus.health._check_topics_doc_count_drift) — one line naming the
+    route, a clean non-zero exit, never a raw httpx traceback."""
+    db = _fake_db(raise_exc=_http_status_error(404))
+    result = _run(monkeypatch, db)
+    assert result.exit_code == 2, result.output
+    assert result.exception is None or not isinstance(result.exception, httpx.HTTPStatusError), (
+        "the raw httpx.HTTPStatusError must not escape as an uncaught traceback"
+    )
+    assert "recount_doc_count" in result.output
+    assert "nexus-c0g6e" in result.output
+    assert db.closed is True
+
+
+def test_other_http_error_propagates_as_click_exception(monkeypatch) -> None:
+    """A non-404 HTTP failure is a real error, not a missing-route skip —
+    it still surfaces, but as a click.ClickException (a clean "Error: ..."
+    message and exit 1), never a raw traceback either."""
+    db = _fake_db(raise_exc=_http_status_error(500))
+    result = _run(monkeypatch, db)
+    assert result.exit_code == 1, result.output
+    assert "500" in result.output
     assert db.closed is True
