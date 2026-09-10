@@ -2492,7 +2492,7 @@ FIX_CHECK_CLASS_CLAUSE: Final = (
 #: about half noise and "any FAIL: re-run" resamples forever. Same
 #: placement and pinning contract as FIX_CHECK_CLASS_CLAUSE.
 FIX_CHECK_CONSENSUS_CLAUSE: Final = (
-    "The fix check is three independent dispatches of this brief on the same range, never one; a defect counts only when at least two of the three raise it at the same site, and a defect one critic alone raises is recorded as an observation and never fails the check; the check fails only on a counted BLOCKS-PLANNING defect; a failed check is fixed once and checked once more, and a second failure ends the loop with its counted defects recorded as residuals for accept, never a third run."
+    "The fix check is three independent dispatches of this brief on the same range, never one; a defect counts only when at least two of the three raise it at the same site, its Class is the one at least two of the three assign, and a defect one critic alone raises is recorded as an observation and never fails the check; the check fails only on a counted BLOCKS-PLANNING defect; a failed check is fixed once and checked once more, and a second failure ends the loop with its counted defects recorded as residuals for accept, never a third run."
 )
 
 

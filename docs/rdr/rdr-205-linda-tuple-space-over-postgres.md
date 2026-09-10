@@ -1209,7 +1209,7 @@ re-run timer; typed errors; and the engine settings this step
 introduces: `NX_TUPLE_READ_MAX` (default 300, an over-cap `n` is
 clamped), `NX_TUPLE_CLAIM_PASSES` (default 8, the claim re-run's pass
 cap), the `timeout_s` cap (25 s, CA 3) and the two park caps
-(`ParkCapExceeded`, four per subspace and sixteen per engine). The
+(`ParkCapExceeded`, four per claimant and sixteen per engine). The
 wire-ledger entry for `/v1/tuples` is written in Phase 3 Step 1, where
 the engine tag it must name exists.
 
