@@ -1395,9 +1395,10 @@ class TestRdrGateLoopRemedies:
         assert "never counts toward the round" in skill
         # nexus-yjf5l.5 (R2): the serial precondition — fix, check, then
         # Layer 1 and Layer 3, never a parallel dispatch against one commit.
-        assert "dispatched against the same commit in parallel" in skill, (
-            "rdr-gate/SKILL.md: the serial precondition is missing"
-        )
+        for path in (self.GATE_SKILL, self.GATE_CMD):
+            assert "dispatched against the same commit in parallel" in path.read_text(), (
+                f"{path}: the serial precondition is missing"
+            )
 
     def test_termination_rule_and_ship_blockers_in_gate_skill(self) -> None:
         """Remedy 2: rounds 1-2 block on any Critical; from round 3 only a
@@ -1512,6 +1513,15 @@ class TestRdrGateLoopRemedies:
             "fix-check-", "Ship-blocker: yes", "every other occurrence",
         ):
             assert phrase in skill, f"rdr-fix/SKILL.md lacks '{phrase}'"
+        # The Relay Template is the brief a fix check dispatched through
+        # /conexus:rdr-fix actually receives, so it carries every numbered
+        # check the printed brief carries, in the same order: (1) to (5),
+        # the T3-lead clause included.
+        deliverable = next(l for l in skill.splitlines() if l.startswith("One row per ADDED"))
+        numbers = re.findall(r"\((\d)\)", deliverable)
+        assert numbers == ["1", "2", "3", "4", "5"], f"Relay Template checks are {numbers}, not (1) to (5)"
+        assert "lead, not a citation" in deliverable, "Relay Template lacks the T3-lead clause"
+        assert "(5) For every identifier" in deliverable, "the identifier clause is check (5), capitalised as printed"
         assert "/conexus:rdr-fix" in self.GATE_SKILL.read_text()
         lifecycle = (SKILLS_DIR / "using-nx-skills" / "SKILL.md").read_text()
         assert "/conexus:rdr-fix" in lifecycle

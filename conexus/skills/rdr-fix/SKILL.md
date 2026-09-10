@@ -56,7 +56,7 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 - Files: $RDR_DIR/NNN-*.md and the diff range above
 
 ### Deliverable
-One row per ADDED or CHANGED clause, PASS or FAIL with line numbers: (1) contradicted by any other line in this file; (2) an attribution, count or universal without an enumeration or quoted source, in the diff or in the research entry it cites; (3) a cited source that does not carry the claim as stated; (4) for every identifier whose meaning, bound, or owning phase this change alters (a column, a caller-supplied parameter, a typed error, a setting, a phase or step number), list every other occurrence in the file and say whether each still holds. Standard Verdict block.
+One row per ADDED or CHANGED clause, PASS or FAIL with line numbers: (1) contradicted by any other line in this file; (2) an attribution, count or universal without an enumeration or quoted source, in the diff or in the research entry it cites; (3) a cited source that does not carry the claim as stated; (4) a `file:line` taken from a T3 search or query hit is a lead, not a citation: the store carries the line as of index time, and the clause passes only when the line was re-read from the working tree; (5) For every identifier whose meaning, bound, or owning phase this change alters (a column, a caller-supplied parameter, a typed error, a setting, a phase or step number), list every other occurrence in the file and say whether each still holds. Standard Verdict block.
 
 ### Quality Criteria
 - [ ] Every FAIL cites both lines or the source read
