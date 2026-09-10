@@ -1,12 +1,12 @@
 # Tuple Space Walkthroughs
 
-> Status: design of record from RDR-205 (gate PASSED 2026-09-09), not yet shipped. The routes, tools and verbs named here land with RDR-205 Phases 1 and 2; until then nothing in a running install serves them.
+> Status: design of record from RDR-205 (gated 2026-09-09, not yet accepted), not yet shipped. The routes, tools and verbs named here land with RDR-205 Phases 1 and 2; until then nothing in a running install serves them.
 
 Scenario walkthroughs for the [Tuple Space reference](tuple-space.md). Each section follows one use of the space from the caller's side, drawn as a sequence between the processes involved.
 
 ## Ledger: dispatch start and report
 
-Consumer one. Today the RDR-184 dispatch ledger is a TSV that three blocking hooks append to. The space does not replace that file; two new asynchronous hook entries project the same payload into `ledger/<session_id>`, and the orchestrator can wait on a report instead of hand-counting. The agent itself never touches the space. See [Operations](tuple-space.md#operations) and [Blocking reads](tuple-space.md#blocking-reads).
+Consumer one. Today the RDR-184 dispatch ledger is a tab-separated (TSV) file that three blocking hooks append to. The space does not replace that file; two new asynchronous hook entries project the same payload into `ledger/<session_id>`, and the orchestrator can wait on a report instead of hand-counting. The agent itself never touches the space. See [Operations](tuple-space.md#operations) and [Blocking reads](tuple-space.md#blocking-reads).
 
 ```mermaid
 sequenceDiagram
@@ -115,7 +115,7 @@ Every claim reaches a terminal transition: ack, nack, expire or dead. `lease_unt
 
 ## Cross-instance request and ack
 
-Gap 5, the request that sat unacknowledged for five weeks, is the same mailbox with an instance name as the address. Both instances on the box mint against one tenant, so `mailbox/conexus-58` is reachable from the nexus session and vice versa. The requester parks an `in` on its own mailbox for the ack. See [What it is not for](tuple-space.md#what-it-is-not-for) for the scope this stays inside.
+A request from one instance to another is the same mailbox with an instance name as the address. Both instances on the box mint against one tenant, so `mailbox/conexus-58` is reachable from the nexus session and vice versa. The requester parks an `in` on its own mailbox for the ack. See [What it is not for](tuple-space.md#what-it-is-not-for) for the scope this stays inside.
 
 ```mermaid
 sequenceDiagram

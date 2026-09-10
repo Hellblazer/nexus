@@ -1,12 +1,12 @@
 # Tuple Space
 
-> Status: design of record from RDR-205 (gate PASSED 2026-09-09), not yet shipped. The routes, tools and verbs named here land with RDR-205 Phases 1 and 2; until then nothing in a running install serves them.
+> Status: design of record from RDR-205 (gated 2026-09-09, not yet accepted), not yet shipped. The routes, tools and verbs named here land with RDR-205 Phases 1 and 2; until then nothing in a running install serves them.
 
 ## What it is
 
-A tuple space is a shared bag of typed records that any process can add to, read from, or take out of, where taking is atomic: when two processes try to take the same record, exactly one gets it. Linda (Gelernter, 1985) named four operations, `out` (add), `read`, `in` (take) and `eval`; this design ships the non-blocking probe forms as well. A work queue, a mailbox, a lock and a request-reply channel are the same three operations over different record shapes.
+A tuple space is a shared bag of typed records that any process can add to, read from, or take out of, where taking is atomic: when two processes try to take the same record, exactly one gets it. Linda (Gelernter, 1985) named four operations, `out` (add), `read`, `in` (take) and `eval`; this design ships the non-blocking probe forms as well. A work queue, a mailbox, a lock and a request-reply channel are the same three operations over different record shapes. The [walkthroughs](tuple-space-walkthroughs.md) draw each of this design's uses as a sequence.
 
-Two consumers ship with this design and no others: the RDR-184 dispatch ledger (start and report tuples keyed on the harness's per-instance agent id) and a mailbox addressed to an agent id or an instance name, which also carries the cross-instance request-and-ack between the nexus and conexus sessions on one box. Nothing else: not the build lease, not the T1 identity files, not the push vouching, not any wrapping of scratch, memory or plans, not surfaces. A consumer not named here needs its own RDR.
+Two consumers ship with this design and no others: the RDR-184 dispatch ledger (start and report tuples keyed on the harness's per-instance agent id; today a tab-separated file, the TSV, that the hooks keep) and a mailbox addressed to an agent id or an instance name, which also carries the cross-instance request-and-ack between the nexus and conexus sessions on one box. Nothing else: not the build lease, not the T1 identity files, not the push vouching, not any wrapping of scratch, memory or plans, not surfaces. A consumer not named here needs its own RDR.
 
 ## Operations
 
@@ -46,7 +46,7 @@ subspace_stats(subspace) -> {total, available, claimed, dead, consumed, expired_
 | `subspace_list` | no | yes | none |
 | `subspace_stats` | no | yes | none |
 
-Matching differs by read. `in` and `inp` require every pinned key and match by equality, because exclusion needs an exact target. `rd` and `rdp` match by equality on every key the pattern supplies and place no condition on keys it omits; a pattern of `None` or `{}` reads the whole subspace, which is what a census does and what a claimant never may. `rd` and `rdp` return up to `n` live tuples, live meaning `expires_at > now()` and not acked, whatever the claim state: a row under a live claim and a dead-lettered row are both returned, with their state. Results are ordered by `(created_at, id)`, resuming strictly after `since`, a `(created_at, id)` cursor the caller keeps. Acked rows are never returned by any read.
+Matching differs by read. `in` and `inp` require every pinned key and match by equality, because exclusion needs an exact target. `rd` and `rdp` match by equality on every key the pattern supplies and place no condition on keys it omits; a pattern of `None` or `{}` reads the whole subspace, which is what a census does and what a claimant never may. `rd` and `rdp` return up to `n` live tuples, live meaning `expires_at > now()` and not acked, whatever the claim state: a row under a live claim and a dead-lettered row are both returned, with their state. `n` is capped by the engine setting `NX_TUPLE_READ_MAX` (default 300, the client's paging convention); an `n` above the cap is clamped, not refused. Results are ordered by `(created_at, id)`, resuming strictly after `since`, a `(created_at, id)` cursor the caller keeps. Acked rows are never returned by any read.
 
 ## Templates and subspaces
 
@@ -203,7 +203,7 @@ Three `nx doctor` rows: oldest unclaimed age per subspace over claimable rows on
 
 ## What it is not for
 
-The build lease (it guards building the engine and must work with the engine down), the T1 identity files (a reader needs a credential before it can read a tuple), the push vouching, and any wrapping of scratch, memory or plans. A consumer not named in RDR-205 needs its own RDR.
+The build lease (it guards building the engine and must work with the engine down), the T1 identity files (a reader needs a credential before it can read a tuple), the push vouching, any wrapping of scratch, memory or plans, and surfaces. A consumer not named in RDR-205 needs its own RDR.
 
 ## Prior art
 
