@@ -167,7 +167,7 @@ ul.plain li{margin:3px 0}
 </table></div></details>
 <details class="gloss"><summary>Claude Code</summary><div class="tbl"><table>
 <tr><td>Tool</td><td>An action that Claude can take. Nexus adds tools to Claude Code. When Claude uses one, Claude Code shows the tool name.</td></tr>
-<tr><td>Skill</td><td>A named procedure that Claude follows for one kind of situation. Claude chooses it from what you say. A command such as <code>/conexus:query</code> starts it directly.</td></tr>
+<tr><td>Skill</td><td>A named procedure that Claude follows for one kind of situation. Claude chooses it from what you say. A command such as <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/query/SKILL.md"><code>/conexus:query</code></a> starts it directly.</td></tr>
 <tr><td>Session</td><td>One run of Claude Code. The scratch store belongs to one session.</td></tr>
 <tr><td>Rendering</td><td>A readable document, in Markdown or as a web page, that Claude writes from what is in the stores at that moment.</td></tr>
 <tr><td>RDR</td><td>Research, Design, Review. A short document that records a decision before the code is written.</td></tr>
@@ -186,13 +186,13 @@ ul.plain li{margin:3px 0}
 <p>Claude repeats the blocks. The important ones are:</p>
 <div class="tbl"><table>
 <tr><th>Block</th><th>Content</th></tr>
-<tr><td>T2 Memory</td><td>The memory entries for this project. Empty in a new project. Claude fills it as it works. Lesson 4 explains.</td></tr>
+<tr><td>T2 Memory</td><td>The memory entries for this project. Empty in a new project. Claude fills it as it works. <a href="#l4">Lesson 4</a> explains.</td></tr>
 <tr><td>Ready Beads</td><td>Open tasks from the <code>bd</code> task tracker, if the project uses it.</td></tr>
 <tr><td>nx Capabilities</td><td>A short list of the Nexus tools that Claude can use.</td></tr>
 <tr><td>Knowledge Map</td><td>The main subjects in the knowledge store, with the number of chunks for each.</td></tr>
 </table></div>
 <p class="note">Not every project has every block. A project without the <code>bd</code> task tracker has no Ready Beads block. A project without RDRs has no RDR block. A new install has an empty T2 Memory block and a short Knowledge Map. This is normal.</p>
-<p class="note">If Claude reports a block with the heading "nx Preflight: FAILED", a part of the install is missing. Type <code>/conexus:nx-preflight</code>. It tells you which part.</p>
+<p class="note">If Claude reports a block with the heading "nx Preflight: FAILED", a part of the install is missing. Type <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/commands/nx-preflight.md"><code>/conexus:nx-preflight</code></a>. It tells you which part.</p>
 
 <h3>Why Claude receives this context</h3>
 <p>The context is how Nexus works. Claude does not follow a fixed script. It reads the situation and chooses what to do. The blocks above give it what it needs to choose well:</p>
@@ -224,50 +224,50 @@ ul.plain li{margin:3px 0}
 <!-- ============ 2 ============ -->
 <section class="lesson" id="l2">
 <div class="lhead"><span class="lnum">2</span><h2>End a session, start the next one</h2><span class="ltime">15 min</span></div>
-<p class="why">Work with Nexus happens in many sessions, not one. What connects them is a small habit at the end of each session. Learn it now, before the first real work, because every later lesson ends with it.</p>
-<p>A Claude Code session has a limited memory of the conversation. When it gets long, Claude Code compresses it, and detail is lost. When you close the session or type <code>/clear</code>, the conversation is gone. Memory (lesson 3) keeps the facts and decisions. It does not keep "where was I": which branch, what was half done, what to do first tomorrow. That is what <code>/conexus:continuation</code> is for.</p>
+<p class="why">Work with Nexus happens in many sessions, not in one. A small habit at the end of each session connects them. Learn it now, before the first real work, because every later lesson ends with it.</p>
+<p>A Claude Code session remembers only a limited amount of the conversation. When the conversation gets long, Claude Code compresses it, and detail is lost. When you close the session or type <code>/clear</code>, the conversation is gone. Memory (<a href="#l4">lesson 4</a>) keeps the facts and decisions. It does not keep the answer to "where was I": which branch, what was half finished, what to do first tomorrow. That is the job of <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/commands/continuation.md"><code>/conexus:continuation</code></a>.</p>
 
 <div class="see">You might say, when you are about to stop</div>
 <div class="cmd"><pre>/conexus:continuation</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What Claude does</div>
-<p>Claude writes one file under <code>/tmp</code> with the state of the work. The file has a fixed set of sections:</p>
+<p>Claude writes one file under <code>/tmp</code> that describes the state of the work. The file always has the same sections:</p>
 <ul class="plain">
 <li>What was finished in this session: commits, closed tasks, memory entries written.</li>
 <li>Where the state lives: the branch, the files, the memory entries, the task IDs.</li>
-<li>The first actions for the next session, as commands that can be run as they are.</li>
+<li>The first actions for the next session, as commands that can be run without change.</li>
 <li>Open work, and what blocks it.</li>
 <li>Decisions from this session that the next session must keep.</li>
 <li>Things the next session must not do.</li>
 <li>What went wrong in this session, so the next one avoids it.</li>
 </ul>
-<p>Then Claude answers with three lines only. The third line is a command of the form <code>cat /tmp/…</code>. Copy that line.</p>
+<p>Then Claude answers with only three lines. The third line is a command that starts with <code>cat /tmp/</code>. Copy that line.</p>
 
 <div class="see">In the next session</div>
-<p>Type <code>/clear</code>, or start a new session. Paste the copied line as the first message. Claude reads the file, runs the first actions, and continues where the last session stopped. It also receives the memory block from lesson 1, so it has both the facts and the position.</p>
+<p>Type <code>/clear</code>, or start a new session. Paste the copied line as the first message. Claude reads the file, runs the first actions, and continues where the last session stopped. Claude also receives the memory block from <a href="#l1">lesson 1</a>. So it has both the facts and the position.</p>
 
 <h3>When to run it</h3>
-<p>Three moments. In each one, run <code>/conexus:continuation</code> first, and then do the thing.</p>
+<p>There are three moments. In each one, run <code>/conexus:continuation</code> first. Then do the other thing.</p>
 <div class="tbl"><table>
 <tr><th>Moment</th><th>How you notice it</th><th>Then</th></tr>
-<tr><td>You are about to stop working</td><td>End of the day, a meeting, lunch. Anything where the terminal will sit for more than an hour.</td><td>Run it. Then close the terminal or leave the session open. Either is fine.</td></tr>
-<tr><td>You finished a task, or are about to change subject</td><td>The task is committed, or the next task has nothing to do with the current one: a different branch, a different part of the system.</td><td>Run it. Then <code>/clear</code>. Start the next task in the empty session. Paste the handoff only when you return to the old subject.</td></tr>
-<tr><td>The context window is filling</td><td><code>/context</code> shows it well used, or Claude Code shows its warning, or Claude asks about things you told it an hour ago.</td><td>Run it. Then <code>/clear</code> and paste the handoff. You lose nothing, and the session is fast again. Details below.</td></tr>
+<tr><td>You are about to stop working</td><td>End of the day, a meeting, lunch. Any time the terminal will wait for more than one hour.</td><td>Run it. Then close the terminal, or leave the session open. Both are fine.</td></tr>
+<tr><td>You finished a task, or are about to change subject</td><td>The task is committed, or the next task is not related to the current one: a different branch, a different part of the system.</td><td>Run it. Then type <code>/clear</code>. Start the next task in the empty session. Paste the handoff later, when you return to the old subject.</td></tr>
+<tr><td>The context window is filling</td><td><code>/context</code> shows that most of the window is used, or Claude Code shows its warning, or Claude asks about things you told it one hour ago.</td><td>Run it. Then type <code>/clear</code> and paste the handoff. You lose nothing, and the session is fast again. Details are below.</td></tr>
 </table></div>
 <h3>The context window, concretely</h3>
-<p>Claude works from a fixed amount of text called the context window. Everything in the session goes into it: your messages, Claude's answers, every file Claude read, every command output, every search result, and the blocks the plugin added at the start. Nothing leaves by itself. So the window fills, and a full window has two costs. Claude reasons less well when the useful part of the window is buried in old tool output. And when the window is full, Claude Code compresses the conversation without asking. The compressed version keeps the outline and loses the detail: exact file names, the reason for a decision, what was tried and did not work.</p>
+<p>Claude works with a fixed amount of text. This is called the context window. Everything in the session goes into it: your messages, Claude's answers, every file that Claude read, every command output, every search result, and the blocks that the plugin added at the start. Nothing leaves by itself. So the window fills up. A full window has two costs. First, Claude reasons less well when the useful text is hidden between old tool outputs. Second, when the window is full, Claude Code compresses the conversation without asking you. The compressed version keeps the outline and loses the detail: exact file names, the reason for a decision, what was tried and did not work.</p>
 
 <div class="see">See how full it is</div>
 <div class="cmd"><pre>/context</pre><button class="copy" type="button">Copy</button></div>
-<p>Claude Code shows how much of the window is used and by what. Look at it when a session has run for a while, or when an answer feels off. When the window is close to full, Claude Code also shows a warning above the input line. The warning is the last call. Run the continuation when you see it, not after.</p>
+<p>Claude Code shows how much of the window is used, and what uses it. Look at it when a session has run for some time, or when an answer seems wrong. When the window is almost full, Claude Code also shows a warning above the input line. The warning is the last moment. Run the continuation when you see it, not later.</p>
 
-<div class="callout rule"><p><strong>Keep it lean on purpose.</strong> Do not wait for the warning. The habit that works: one unit of work per session. Finish the task, run <code>/conexus:continuation</code>, <code>/clear</code>, and start the next task in an empty window with only the handoff and the plugin's context in it. A session that stays lean answers faster, costs less, and does not lose detail to compression. The continuation is what makes clearing free: nothing you need is in the window that is not also in the file or in memory.</p></div>
+<div class="callout rule"><p><strong>Keep it lean on purpose.</strong> Do not wait for the warning. The habit that works is one task per session. Finish the task. Run <code>/conexus:continuation</code>. Type <code>/clear</code>. Start the next task in an empty window that contains only the handoff and the plugin's context. A session that stays small answers faster, costs less, and does not lose detail to compression. The continuation makes clearing safe: everything you need is in the file or in memory, not only in the window.</p></div>
 
-<p class="note">What fills the window fastest: reading large files, long command outputs, and wide searches. If Claude is about to read a big file, ask for the part you need. If a command prints thousands of lines, ask Claude to summarize it instead of showing it. This is not fussiness. It is the difference between a session that lasts an afternoon and one that compresses before lunch.</p>
-<p class="note">Compression by hand, <code>/compact</code>, exists too. It is better than the automatic one because you choose the moment, but it still loses detail. Continuation and <code>/clear</code> lose nothing. Prefer them.</p>
-<p>If you forget: nothing is lost that was in memory (lesson 4). Start the new session and ask <em>"What do you know about this project, and what was I working on?"</em> Claude answers from memory. The last continuation file, if there was one, is still in <code>/tmp</code> until the next reboot. Ask Claude to find it.</p>
+<p class="note">These fill the window fastest: reading large files, long command outputs, and wide searches. If Claude is about to read a big file, ask for only the part you need. If a command prints thousands of lines, ask Claude to summarize the output instead of showing it. This is not a small detail. It is the difference between a session that lasts an afternoon and a session that is compressed before lunch.</p>
+<p class="note">You can also compress by hand with <code>/compact</code>. This is better than automatic compression, because you choose the moment. But it still loses detail. Continuation and <code>/clear</code> lose nothing. Prefer them.</p>
+<p>If you forget to run it: everything that was in memory (<a href="#l4">lesson 4</a>) is still there. Start the new session and ask <em>"What do you know about this project, and what was I working on?"</em> Claude answers from memory. The last continuation file, if there was one, is still in <code>/tmp</code> until the next restart of the computer. Ask Claude to find it.</p>
 
 <h3>What it looks like, end to end</h3>
-<p>An example. The project is a small web service. The session fixed one bug and started on a second.</p>
+<p>An example. The project is a small web service. The session fixed one bug and started a second one.</p>
 <div class="see">End of the first session</div>
 <div class="cmd"><pre><span class="c">You:</span>    /conexus:continuation
 
@@ -286,14 +286,14 @@ ul.plain li{margin:3px 0}
         First actions from the handoff: I am on branch fix/orders-18, the tree is
         clean, and the memory entry webhook-idempotency has the analysis.
         Continuing with the fix. Starting with the test for the duplicate case.</pre><button class="copy" type="button">Copy</button></div>
-<p>Claude ran the first actions from the file (checked the branch, checked that the tree was clean, read the memory entry it named) and continued the open work. You typed one line. The names in this example are made up. The shape is what you will see.</p>
+<p>Claude ran the first actions from the file: it checked the branch, checked that there were no uncommitted changes, and read the memory entry that the file named. Then it continued the open work. You typed one line. The names in this example are invented. The form is what you will see.</p>
 
-<div class="callout rule"><p><strong>Two stores, two jobs.</strong> Memory holds what is true about the project, for weeks. The continuation file holds where the work stands, for the next session only. Use <code>/conexus:continuation</code> at the three moments above. It costs a few seconds. Without it, the next session spends its first minutes finding out what this one already knew.</p></div>
-<p class="note">You can give a topic: <code>/conexus:continuation <span class="ph">&lt;TOPIC&gt;</span></code>. The file is then named after the topic, which helps when you work on several things in parallel. The files live in <code>/tmp</code> and disappear at the next reboot. They are a handoff, not a record. The record is memory.</p>
+<div class="callout rule"><p><strong>Two stores, two jobs.</strong> Memory holds what is true about the project, for weeks. The continuation file holds where the work stands, for the next session only. Use <code>/conexus:continuation</code> at the three moments above. It takes a few seconds. Without it, the next session spends its first minutes finding out what this session already knew.</p></div>
+<p class="note">You can give a topic: <code>/conexus:continuation <span class="ph">&lt;TOPIC&gt;</span></code>. The file is then named after the topic. This helps when you work on several things at the same time. The files live in <code>/tmp</code> and disappear at the next restart of the computer. They are a handoff, not a record. The record is memory.</p>
 
 
 <div class="further"><h4>Investigate further</h4><ul>
-<li>Read one continuation file after Claude writes it. The sections are plain text. If a section is empty or wrong, tell Claude before you close.</li>
+<li>Read one continuation file after Claude writes it. The sections are plain text. If a section is empty or wrong, tell Claude before you close the session.</li>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/continuation/SKILL.md">The continuation skill</a>: the exact list of sections Claude writes, and why the answer is three lines.</li>
 </ul></div>
 </section>
@@ -346,7 +346,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <p class="why">The memory store holds facts and decisions about a project. Claude writes to it by itself while it works: a decision it made, a finding from an investigation, the state of the work at the end of a session. When a new session starts, Claude receives these entries first. Memory is not a to-do list or a place for your own notes. Claude fills it, and Claude reads it. You do not manage this store. You work, and it fills.</p>
 
 <h3>How it fills</h3>
-<p>Nothing to do here except work. Spend a session with Claude on a real task: fix a bug, add a feature, investigate a question. As it works, Claude records what it decided and what it found. At the end, if you close the session with <code>/conexus:continuation</code> (lesson 2), the state of the work is recorded too. Helper agents that Claude starts write their results to the same store.</p>
+<p>Nothing to do here except work. Spend a session with Claude on a real task: fix a bug, add a feature, investigate a question. As it works, Claude records what it decided and what it found. At the end, if you close the session with <code>/conexus:continuation</code> (<a href="#l2">lesson 2</a>), the state of the work is recorded too. Helper agents that Claude starts write their results to the same store.</p>
 <p>Each entry has a project name and a title. An entry lives 30 days by default. Each time Claude reads it, it lives longer. So facts that stay useful stay, and facts that nobody reads expire.</p>
 
 <h3>How you notice it</h3>
@@ -370,7 +370,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <p class="why">The scratch store belongs to the current session. Claude uses it as a shared notepad. When Claude starts helper agents to investigate a problem, each agent reads and writes the same scratch store. That is how the agents coordinate. Nexus deletes the store when the session ends. You do not write to it. It is useful to know that it exists, and what it looks like while it is in use.</p>
 
 <h3>Where you see it</h3>
-<p>Give Claude a task that takes several steps, for example an investigation of a bug that has more than one possible cause, or <code>/conexus:analyze-code</code> on a part of the codebase. Watch the tool calls. Between the searches and file reads you see calls named <code>scratch</code> on the <code>nexus</code> server: Claude and its agents writing hypotheses and partial results for each other. When the task ends, the notes have served their purpose.</p>
+<p>Give Claude a task that takes several steps, for example an investigation of a bug that has more than one possible cause, or <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/commands/analyze-code.md"><code>/conexus:analyze-code</code></a> on a part of the codebase. Watch the tool calls. Between the searches and file reads you see calls named <code>scratch</code> on the <code>nexus</code> server: Claude and its agents writing hypotheses and partial results for each other. When the task ends, the notes have served their purpose.</p>
 <p>If you are curious what is in there at some moment, ask. Any phrasing works: "what have you noted so far", "what are the agents finding". Claude lists the notes.</p>
 
 <h3>What survives the session</h3>
@@ -385,7 +385,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <!-- ============ 6 ============ -->
 <section class="lesson" id="l6">
 <div class="lhead"><span class="lnum">6</span><h2>Knowledge: notes, documents, and the catalog</h2><span class="ltime">10 min</span></div>
-<p class="why">The knowledge store is permanent, and Claude searches it by meaning. In lesson 3 you added a repository. In this lesson you add a written note and a document. You also meet the catalog, which lists every document and the links between them.</p>
+<p class="why">The knowledge store is permanent, and Claude searches it by meaning. In <a href="#l3">lesson 3</a> you added a repository. In this lesson you add a written note and a document. You also meet the catalog, which lists every document and the links between them.</p>
 
 <h3>A note in a subject collection</h3>
 <div class="see">You might say</div>
@@ -393,21 +393,21 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <span class="ph">&lt;A LESSON YOU LEARNED THAT IS TRUE BEYOND THIS PROJECT&gt;</span></pre><button class="copy" type="button">Copy</button></div>
 <p class="note">Example: collection <code>distributed-systems</code>, title <code>idempotency-keys-per-tenant</code>, text "Idempotency keys must be scoped per tenant. A global key space let two tenants collide in production."</p>
 <div class="see">What you see</div>
-<p>A tool call named <code>store_put</code> on the <code>nexus</code> server, with the collection, the title, and the text. Claude confirms the document ID. From now on, a search about that subject finds this note, in any project.</p>
-<div class="callout rule"><p><strong>A collection is a subject.</strong> Name it after a subject that will exist for years: <code>distributed-systems</code>, <code>postgres</code>, <code>team-process</code>. Do not name it after a session, a task, or a program. Nexus refuses the names <code>knowledge</code>, <code>notes</code>, <code>default</code>, <code>tmp</code>, and <code>test</code>. If you do not know the existing collections, ask Claude: <em>"List the Nexus collections."</em></p></div>
+<p>A tool call named <code>store_put</code> on the <code>nexus</code> server, with the collection, the title, and the text. Claude confirms the document ID. From now on, a search about that subject finds this note, from any project.</p>
+<div class="callout rule"><p><strong>A collection is a subject.</strong> Name it after a subject that will still exist in some years: <code>distributed-systems</code>, <code>postgres</code>, <code>team-process</code>. Do not name it after a session, a task, or a program. Nexus refuses the names <code>knowledge</code>, <code>notes</code>, <code>default</code>, <code>tmp</code>, and <code>test</code>. If you do not know the existing collections, ask Claude: <em>"List the Nexus collections."</em></p></div>
 
 <h3>Documents</h3>
 <div class="see">You might say</div>
 <div class="cmd"><pre>Index <span class="ph">&lt;PATH/TO/A-MARKDOWN-FILE.md&gt;</span> and <span class="ph">&lt;PATH/TO/A-PAPER.pdf&gt;</span> into Nexus.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What Claude does</div>
-<p>Claude runs <code>nx index md</code> for the Markdown file and <code>nx index pdf</code> for the PDF. Nexus chooses the correct PDF reader automatically, also for scanned PDFs. Both documents are now in the knowledge store and in the catalog.</p>
+<p>Claude runs <code>nx index md</code> for the Markdown file and <code>nx index pdf</code> for the PDF. Nexus chooses the correct PDF reader automatically. This also works for scanned PDFs. Both documents are now in the knowledge store and in the catalog.</p>
 
 <h3>The catalog</h3>
 <p>Nexus adds every repository, note, and document to the catalog. The catalog also records links between documents. A link has a type, for example <code>cites</code>, <code>implements</code>, or <code>supersedes</code>. Search finds text inside documents. The catalog answers two other questions: what documents exist, and how they are connected.</p>
 <div class="see">You might say</div>
 <div class="cmd"><pre>Which documents in the Nexus catalog are linked to <span class="ph">&lt;THE TITLE OF THE PAPER&gt;</span>?</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
-<p>Tool calls on the <code>nexus-catalog</code> server: <code>show</code> or <code>links</code>. Claude lists the linked documents and the type of each link. In a new install there are few links yet. Links appear when Nexus enriches documents and when an RDR cites a source.</p>
+<p>Tool calls on the <code>nexus-catalog</code> server: <code>show</code> or <code>links</code>. Claude lists the linked documents and the type of each link. In a new install there are few links. Links appear when Nexus enriches documents, and when an RDR cites a source.</p>
 <p class="note">From the terminal: <code>nx store put</code>, <code>nx index md</code>, <code>nx index pdf</code>, and <code>nx catalog links "TITLE"</code>.</p>
 
 <div class="further"><h4>Investigate further</h4><ul>
@@ -420,38 +420,38 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <!-- ============ 7 ============ -->
 <section class="lesson" id="l7">
 <div class="lhead"><span class="lnum">7</span><h2>Explore: research, links, and the topic map</h2><span class="ltime">20 min</span></div>
-<p class="why">The lessons so far put things into Nexus and took them out again. This lesson is the loop that Nexus is built for: you ask, Claude searches, you follow what it finds, you connect it to other things, and the store gets better each time. Every step here is a conversation, not a command.</p>
+<p class="why">The lessons until now put things into Nexus and took them out again. This lesson is the loop that Nexus is made for: you ask, Claude searches, you follow what it finds, you connect it to other things, and the store gets better each time. Every step is a conversation, not a command.</p>
 
 <h3>Research a subject</h3>
 <div class="see">You might say</div>
 <div class="cmd"><pre>/conexus:research <span class="ph">&lt;A SUBJECT THAT YOUR PROJECT DEPENDS ON&gt;</span></pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
-<p>Claude starts a research agent. The agent searches the knowledge store first, then the web, then your code. Claude Code shows the agent's tool calls: <code>search</code>, <code>query</code>, web searches, and at the end <code>store_put</code>. The result is a summary with sources, and the findings are saved in the knowledge store. The next search on that subject finds them.</p>
-<p class="note">Example subjects: the consensus protocol your database uses, the retry rules of an API you call, a library your build depends on. Pick something you want to understand better, not something you already know.</p>
+<p>Claude starts a research agent. The agent searches the knowledge store first, then the web, then your code. Claude Code shows the agent's tool calls: <code>search</code>, <code>query</code>, web searches, and at the end <code>store_put</code>. The result is a summary with sources. The findings are saved in the knowledge store, so the next search on that subject finds them.</p>
+<p class="note">Example subjects: the consensus protocol that your database uses, the retry rules of an API that you call, a library that your build depends on. Choose something you want to understand better, not something you already know.</p>
 
 <h3>Follow what you found</h3>
-<p>A research result names documents and files. Each of them is a place to continue. Ask about one:</p>
+<p>A research result names documents and files. Each of them is a place where you can continue. Ask about one:</p>
 <div class="cmd"><pre>Open <span class="ph">&lt;ONE DOCUMENT OR FILE FROM THE RESULT&gt;</span> and tell me what else in the store is related to it.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
-<p>Claude calls <code>show</code> and <code>links</code> on the <code>nexus-catalog</code> server, and <code>search</code> for related chunks. It tells you what the document is, what links to it, and what is similar. Then ask about one of those. This is how you move through the store: from one document to its neighbours, without knowing the names in advance.</p>
+<p>Claude calls <code>show</code> and <code>links</code> on the <code>nexus-catalog</code> server, and <code>search</code> for related chunks. It tells you what the document is, which documents link to it, and which documents are similar. Then ask about one of those. This is how you move through the store: from one document to the documents near it, without knowing any names in advance.</p>
 
 <h3>Connect a document to code</h3>
-<p>The catalog records links between documents. Most links appear by themselves: an indexed paper cites other papers, an RDR cites its sources. You can also add one when you know a connection that Nexus does not.</p>
+<p>The catalog records links between documents. Most links appear automatically: an indexed paper cites other papers, an RDR cites its sources. You can also add a link when you know a connection that Nexus does not know.</p>
 <div class="see">You might say</div>
 <div class="cmd"><pre>Link <span class="ph">&lt;THE PAPER OR DESIGN DOCUMENT&gt;</span> to <span class="ph">&lt;THE FILE OR MODULE THAT IMPLEMENTS IT&gt;</span> with an "implements" link.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>A tool call named <code>link</code> on the <code>nexus-catalog</code> server, with the two documents and the type <code>implements</code>. From now on, a question about the design finds the code, and a question about the code finds the design. Ask: <em>"What implements <span class="ph">&lt;THE DESIGN DOCUMENT&gt;</span>?"</em> Claude follows the link.</p>
-<p class="note">Link types: <code>cites</code>, <code>implements</code>, <code>supersedes</code>, <code>relates</code>, and others. If you index papers, ask Claude to <em>"enrich the <span class="ph">&lt;COLLECTION&gt;</span> collection with bibliographic data"</em>. Claude runs <code>nx enrich bib</code>, which looks up each paper and adds <code>cites</code> links automatically.</p>
+<p class="note">Link types: <code>cites</code>, <code>implements</code>, <code>supersedes</code>, <code>relates</code>, and others. If you index papers, ask Claude to <em>"enrich the <span class="ph">&lt;COLLECTION&gt;</span> collection with bibliographic data"</em>. Claude runs <code>nx enrich bib</code>. It looks up each paper and adds <code>cites</code> links automatically.</p>
 
 <h3>Shape the topic map</h3>
-<p>In lesson 3 you saw the topics that Nexus found in your repository. Topics are not fixed. You can look at them, question them, and change them.</p>
+<p>In <a href="#l3">lesson 3</a> you saw the topics that Nexus found in your repository. Topics are not fixed. You can look at them, question them, and change them.</p>
 <div class="see">You might say</div>
 <div class="cmd"><pre>Show me the topic map for this project. Which topics appear in both the code and the documentation?</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
-<p>Claude runs <code>nx taxonomy list</code> and <code>nx taxonomy hubs</code>. The hubs are topics that connect several collections. They are often the most important ideas in the project. Then narrow a search to one topic: <em>"Search for <span class="ph">&lt;A QUESTION&gt;</span> inside the topic <span class="ph">&lt;TOPIC&gt;</span> only."</em> Claude passes the topic to the <code>search</code> tool, and results outside that topic are excluded.</p>
-<p>When a topic is wrong, say so: <em>"The topic <span class="ph">&lt;TOPIC&gt;</span> should be called <span class="ph">&lt;BETTER NAME&gt;</span>."</em> or <em>"Assign <span class="ph">&lt;DOCUMENT&gt;</span> to the topic <span class="ph">&lt;TOPIC&gt;</span>."</em> Claude runs <code>nx taxonomy assign</code>. For a full review of every topic, <code>nx taxonomy review</code> in the terminal walks through them one by one and lets you accept, rename, or merge each.</p>
+<p>Claude runs <code>nx taxonomy list</code> and <code>nx taxonomy hubs</code>. The hubs are topics that connect several collections. They are often the most important ideas in the project. Then limit a search to one topic: <em>"Search for <span class="ph">&lt;A QUESTION&gt;</span> inside the topic <span class="ph">&lt;TOPIC&gt;</span> only."</em> Claude gives the topic to the <code>search</code> tool, and results outside that topic are left out.</p>
+<p>When a topic is wrong, say so: <em>"The topic <span class="ph">&lt;TOPIC&gt;</span> should be called <span class="ph">&lt;BETTER NAME&gt;</span>."</em> or <em>"Assign <span class="ph">&lt;DOCUMENT&gt;</span> to the topic <span class="ph">&lt;TOPIC&gt;</span>."</em> Claude runs <code>nx taxonomy assign</code>. To review every topic, run <code>nx taxonomy review</code> in the terminal. It goes through the topics one by one, and you accept, rename, or merge each one.</p>
 
-<div class="callout rule"><p><strong>The loop:</strong> ask a question. Look at what Claude found. Ask about one of the results. Connect what belongs together. Repeat. Each search, link, and topic you touch makes the next answer better, for you and for Claude.</p></div>
+<div class="callout rule"><p><strong>The loop:</strong> ask a question. Look at what Claude found. Ask about one of the results. Connect what belongs together. Repeat. Each search, link, and topic that you touch makes the next answer better, for you and for Claude.</p></div>
 
 <div class="further"><h4>Investigate further</h4><ul>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/catalog.md">Document catalog</a>: all link types, and how links change search ranking.</li>
@@ -464,32 +464,32 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <!-- ============ 8 ============ -->
 <section class="lesson" id="l8">
 <div class="lhead"><span class="lnum">8</span><h2>Render and iterate</h2><span class="ltime">15 min</span></div>
-<p class="why">After some sessions, the stores hold a lot about a subject: findings in knowledge, decisions in memory, links in the catalog. It is spread over many entries, and Claude manages them. When you want to see the whole picture, you ask for a rendering: one readable document written from the current state of the stores. Then you change it, Claude carries the changes back into the stores, and you ask again. The document and the stores stay in agreement. This is how most design work with Nexus is done.</p>
+<p class="why">After some sessions, the stores hold a lot about a subject: findings in knowledge, decisions in memory, links in the catalog. The material is spread over many entries, and Claude manages them. When you want to see the whole picture, you ask for a rendering: one readable document, written from the current state of the stores. Then you change it. Claude carries the changes back into the stores. Then you ask again. The document and the stores stay in agreement. This is how most design work with Nexus is done.</p>
 
 <h3>Ask for a rendering</h3>
 <div class="see">You might say</div>
 <div class="cmd"><pre>Render everything we have on <span class="ph">&lt;A SUBJECT YOU HAVE WORKED ON&gt;</span> as a Markdown document: what we know, what we decided, and what is still open.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
-<p>Claude collects the material: <code>memory_search</code> and <code>memory_get</code> for the decisions, <code>search</code> and <code>query</code> for the findings, <code>links</code> on the catalog for what is connected. Then it writes one file. The result is not a copy of the entries. It is a document with a structure, written for a reader, from what the entries say.</p>
-<p class="note">Ask for the form that suits you. A Markdown file in the repository is easy to edit and to commit. A web page (Claude Code can publish one as an artifact) is easier to read and to share. Both are renderings of the same state.</p>
+<p>Claude collects the material: <code>memory_search</code> and <code>memory_get</code> for the decisions, <code>search</code> and <code>query</code> for the findings, <code>links</code> on the catalog for what is connected. Then it writes one file. The result is not a copy of the entries. It is a structured document, written for a reader, from what the entries say.</p>
+<p class="note">Ask for the form that you prefer. A Markdown file in the repository is easy to edit and to commit. A web page (Claude Code can publish one as an artifact) is easier to read and to share. Both are renderings of the same state.</p>
 
 <h3>Change it</h3>
-<p>Read the rendering. Where it is wrong or incomplete, change it in the way that is natural for you:</p>
+<p>Read the rendering. Where it is wrong or incomplete, change it in the way that is easiest for you:</p>
 <ul class="plain">
 <li>Edit the file directly, then tell Claude: "I changed the section on <span class="ph">&lt;TOPIC&gt;</span>, update the stores."</li>
 <li>Or say what is wrong in conversation: "the second decision is out of date, we dropped that in March", "add the constraint about <span class="ph">&lt;X&gt;</span>", "this section is too long".</li>
-<li>Or, on a web page, leave comments on the parts you disagree with and ask Claude to work through them.</li>
+<li>Or, on a web page, write comments on the parts you disagree with, and ask Claude to go through them.</li>
 </ul>
 <div class="see">What you see</div>
-<p>Claude changes the document, and then writes the change back to where it belongs: a corrected decision goes to memory with <code>memory_put</code>, a new finding goes to knowledge with <code>store_put</code>, a new connection becomes a catalog link. You see those calls after the file edit. This step is what keeps the stores true. Without it, the document and the stores drift apart, and the next session works from the old state.</p>
+<p>Claude changes the document. Then it writes each change back to the store where it belongs: a corrected decision goes to memory with <code>memory_put</code>, a new finding goes to knowledge with <code>store_put</code>, a new connection becomes a catalog link. You see those tool calls after the file edit. This step keeps the stores correct. Without it, the document and the stores become different, and the next session works from the old state.</p>
 
 <h3>Ask again</h3>
-<p>Later, after more work, ask for the rendering again. Claude writes it from the current state, so it includes what changed since the last one: what you edited, what the sessions in between decided, what the research found. Compare it with the previous rendering if you want to see the movement.</p>
-<div class="callout rule"><p><strong>The rhythm:</strong> work, and the stores fill. Render, and you see the whole. Change the rendering, and the stores follow. Render again. An RDR (lesson 10) is a rendering of one decision, with a fixed form and a lifecycle. This lesson is the general case.</p></div>
+<p>Later, after more work, ask for the rendering again. Claude writes it from the current state, so it includes everything that changed since the last one: what you edited, what the sessions between decided, what the research found. Compare it with the previous rendering if you want to see the change.</p>
+<div class="callout rule"><p><strong>The rhythm:</strong> work, and the stores fill. Render, and you see the whole. Change the rendering, and the stores follow. Render again. An RDR (<a href="#l10">lesson 10</a>) is a rendering of one decision, with a fixed form and a lifecycle. This lesson is the general case.</p></div>
 
 <div class="further"><h4>Investigate further</h4><ul>
 <li>Ask for two renderings of the same subject a week apart. Ask Claude to show the differences.</li>
-<li>Ask for a rendering aimed at a reader who is not you: "write this for a new team member". The material is the same. The document is not.</li>
+<li>Ask for a rendering for a reader who is not you: "write this for a new team member". The material is the same. The document is different.</li>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/plan-centric-retrieval.md">Plan-centric retrieval</a>: how Claude collects material from several stores for one document.</li>
 </ul></div>
 </section>
@@ -497,23 +497,23 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <!-- ============ 9 ============ -->
 <section class="lesson" id="l9">
 <div class="lhead"><span class="lnum">9</span><h2>Questions that need many documents</h2><span class="ltime">10 min</span></div>
-<p class="why">A normal question makes one or two searches. Some questions need more: compare what the documentation says with what the code does, or collect a pattern from many files. For these, the plugin has a skill that plans several steps and combines the results.</p>
+<p class="why">A normal question makes one or two searches. Some questions need more: compare what the documentation says with what the code does, or collect one pattern from many files. For these questions, the plugin has a skill that plans several steps and combines the results.</p>
 
 <div class="see">You might say</div>
-<div class="cmd"><pre>/conexus:query Compare what the documentation says about <span class="ph">&lt;A CONCEPT FROM LESSON 2&gt;</span> with what the code actually does.</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>/conexus:query Compare what the documentation says about <span class="ph">&lt;A CONCEPT FROM LESSON 3&gt;</span> with what the code actually does.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
-<p>A tool call named <code>nx_answer</code>. It searches the documentation and the code, extracts the relevant facts from each, compares them, and returns one answer with sources. This takes longer than a normal search, usually 5 to 15 seconds and sometimes more.</p>
+<p>A tool call named <code>nx_answer</code>. It searches the documentation and the code, takes the relevant facts from each, compares them, and returns one answer with sources. This takes longer than a normal search: usually 5 to 15 seconds, sometimes more.</p>
 <p class="note">Use <code>/conexus:query</code> when one search cannot hold the answer. For a simple question, a normal sentence to Claude is faster. You can also ask the large question in plain words. Claude recognizes it and plans the search without the command.</p>
 
 <h3>Other commands to know</h3>
-<p>Each command below starts one skill directly. You can also describe the task in your own words, and Claude picks the same skill. The commands are useful when you want to be certain which skill runs.</p>
+<p>Each command below starts one skill directly. You can also describe the task in your own words, and Claude chooses the same skill. The commands are useful when you want to be sure which skill runs.</p>
 <div class="tbl"><table>
 <tr><th>Task</th><th>Command</th></tr>
 <tr><td>Understand a codebase that is new to you</td><td><code>/conexus:analyze-code</code></td></tr>
-<tr><td>Plan a feature before you write code</td><td><code>/conexus:brainstorming-gate</code>, then <code>/conexus:create-plan</code></td></tr>
-<tr><td>Review code before you commit it</td><td><code>/conexus:review-code</code></td></tr>
-<tr><td>Debug a problem after two failed tries</td><td><code>/conexus:debug</code></td></tr>
-<tr><td>Hand the work to the next session</td><td><code>/conexus:continuation</code>, lesson 2</td></tr>
+<tr><td>Plan a feature before you write code</td><td><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/brainstorming-gate/SKILL.md"><code>/conexus:brainstorming-gate</code></a>, then <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/commands/create-plan.md"><code>/conexus:create-plan</code></a></td></tr>
+<tr><td>Review code before you commit it</td><td><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/commands/review-code.md"><code>/conexus:review-code</code></a></td></tr>
+<tr><td>Debug a problem after two failed tries</td><td><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/debug/SKILL.md"><code>/conexus:debug</code></a></td></tr>
+<tr><td>Hand the work to the next session</td><td><code>/conexus:continuation</code>, <a href="#l2">lesson 2</a></td></tr>
 <tr><td>Not sure which one</td><td>Ask Claude: <em>"Read the using-nx-skills skill and tell me which skill fits my task."</em></td></tr>
 </table></div>
 <div class="further"><h4>Investigate further</h4><ul>
@@ -546,7 +546,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <div class="callout rule"><p><strong>Accepting locks the record.</strong> While the RDR is a draft, change it as often as you want. After you accept it, it says what was decided. If the code later shows that the decision was wrong, do not edit the accepted RDR. Mark it as abandoned and write a new RDR with what you learned.</p></div>
 
 <div class="further"><h4>Investigate further</h4><ul>
-<li><code>/conexus:rdr-list</code> and <code>/conexus:rdr-show</code>: read the RDRs that already exist in a project.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/rdr-list/SKILL.md"><code>/conexus:rdr-list</code></a> and <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/rdr-show/SKILL.md"><code>/conexus:rdr-show</code></a>: read the RDRs that already exist in a project.</li>
 <li><a href="rdr.html">Working with RDRs</a>: the whole cycle as it is practised, in eight lessons.</li>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr.md">RDR</a>: the full template, the sections, and the status values.</li>
 <li><a href="https://github.com/Hellblazer/nexus/tree/main/docs/rdr">The Nexus RDR directory</a>: real examples, closed and open.</li>
