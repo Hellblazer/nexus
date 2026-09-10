@@ -182,6 +182,23 @@ class TupleRepositoryTest {
     }
 
     /**
+     * nexus-em75s.36: {@code ledger/<session_id>}'s {@code kind} key is pinned to
+     * {@code {start, report}} (RDR-205 §Technical Design "Registry" ~844). A value
+     * outside that set is refused as a {@code SchemaViolation} naming {@code kind},
+     * and no row is written.
+     */
+    @Test
+    void out_ledgerKindOutsidePinnedSet_schemaViolation_namesKind_noRowWritten() {
+        assertThatThrownBy(() -> repo.out(TENANT_A, "ledger/session-kind-breach",
+                Map.of("agent_id", "agent-x", "kind", "other"), Map.of(), null, null, null))
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("kind");
+
+        var rows = repo.rdp(TENANT_A, "ledger/session-kind-breach", null, 10, null);
+        assertThat(rows).isEmpty();
+    }
+
+    /**
      * RDR-205 Phase 1 review (nexus-em75s.7, the RDR-110 C3 class recurring):
      * {@code computeId}'s ORIGINAL join delimited each field with a fixed separator
      * byte and joined a key/dim's name to its value with a plain {@code '='}, neither

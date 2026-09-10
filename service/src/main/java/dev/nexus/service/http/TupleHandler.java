@@ -255,10 +255,31 @@ public final class TupleHandler implements HttpHandler {
         HttpUtil.send(ex, 200, MAPPER.writeValueAsString(out));
     }
 
+    /**
+     * nexus-em75s.36: a Phase 2 client learns a template's shape solely from this
+     * response, so it must carry everything {@code out()} validates against — the
+     * original omitted {@code dimensions} entirely (a client could not learn a
+     * template's required dims) and {@code keys} carried no hint that a key's value
+     * is pinned to a set. {@code key_values} is present only for templates that pin
+     * at least one key (mirrors {@link TemplateRegistry}'s canonical-map digest
+     * shape, which also omits it when empty).
+     */
     private Map<String, Object> renderTemplate(TemplateSchema t) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("name", t.name());
         m.put("keys", t.keys());
+        if (!t.keyValues().isEmpty()) {
+            m.put("key_values", t.keyValues());
+        }
+        Map<String, Object> dims = new LinkedHashMap<>();
+        for (var e : t.dimensions().entrySet()) {
+            Map<String, Object> d = new LinkedHashMap<>();
+            d.put("type", e.getValue().type());
+            d.put("values", e.getValue().values());
+            d.put("required", e.getValue().required());
+            dims.put(e.getKey(), d);
+        }
+        m.put("dimensions", dims);
         m.put("id_from", t.idFrom().wire());
         m.put("id_dims", t.idDims());
         Map<String, Object> take = new LinkedHashMap<>();

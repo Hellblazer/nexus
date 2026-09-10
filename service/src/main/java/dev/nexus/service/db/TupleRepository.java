@@ -290,6 +290,10 @@ public final class TupleRepository {
             if (v == null || v.isBlank()) {
                 throw new SchemaViolationException(k, "required key missing or blank");
             }
+            List<String> allowed = t.keyValues().get(k);
+            if (allowed != null && !allowed.contains(v)) {
+                throw new SchemaViolationException(k, "value '" + v + "' not in " + allowed);
+            }
         }
         TreeSet<String> unknownDims = new TreeSet<>(dims.keySet());
         unknownDims.removeAll(t.dimensions().keySet());

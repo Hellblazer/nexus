@@ -50,6 +50,8 @@ class TemplateRegistryTest {
         TemplateSchema ledger = registry.templates().stream()
                 .filter(t -> t.name().equals("ledger/<session_id>")).findFirst().orElseThrow();
         assertEquals(Set.of("agent_id", "kind"), Set.copyOf(ledger.keys()));
+        assertEquals(List.of("start", "report"), ledger.keyValues().get("kind"));
+        assertFalse(ledger.keyValues().containsKey("agent_id"));
         assertFalse(ledger.take().enabled());
         assertEquals(7_776_000L, ledger.retentionSeconds());
         assertEquals(TemplateSchema.IdFrom.KEYS, ledger.idFrom());
@@ -57,6 +59,7 @@ class TemplateRegistryTest {
         TemplateSchema mailbox = registry.templates().stream()
                 .filter(t -> t.name().equals("mailbox/<address>")).findFirst().orElseThrow();
         assertEquals(Set.of("to"), Set.copyOf(mailbox.keys()));
+        assertTrue(mailbox.keyValues().isEmpty());
         assertTrue(mailbox.take().enabled());
         assertEquals(3L, mailbox.take().maxAttempts());
         assertEquals(900L, mailbox.take().maxLeaseSeconds());
@@ -89,6 +92,32 @@ class TemplateRegistryTest {
         TemplateRegistry r2 = TemplateRegistry.load(
                 List.of(new TemplateRegistry.SourceGroup("test",
                         List.of(new TemplateRegistry.TemplateSource("a.yaml", changed)))),
+                DAYS(180), SWEEP_INTERVAL_SECONDS);
+
+        assertNotEquals(r1.digest(), r2.digest());
+    }
+
+    @Test
+    void registryDigestChangesWhenAKeyGainsAPinnedValueSet() {
+        String unconstrained = minimalTemplateYaml("ledger/<session_id>", 100L);
+        String constrained = """
+                name: ledger/<session_id>
+                keys:
+                  agent_id:
+                    values: [start, report]
+                id_from: keys
+                take:
+                  enabled: false
+                retention_seconds: 100
+                """;
+
+        TemplateRegistry r1 = TemplateRegistry.load(
+                List.of(new TemplateRegistry.SourceGroup("test",
+                        List.of(new TemplateRegistry.TemplateSource("a.yaml", unconstrained)))),
+                DAYS(180), SWEEP_INTERVAL_SECONDS);
+        TemplateRegistry r2 = TemplateRegistry.load(
+                List.of(new TemplateRegistry.SourceGroup("test",
+                        List.of(new TemplateRegistry.TemplateSource("a.yaml", constrained)))),
                 DAYS(180), SWEEP_INTERVAL_SECONDS);
 
         assertNotEquals(r1.digest(), r2.digest());

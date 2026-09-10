@@ -309,6 +309,9 @@ public final class TemplateRegistry {
         Map<String, Object> m = new TreeMap<>();
         m.put("name", t.name());
         m.put("keys", t.keys());
+        if (!t.keyValues().isEmpty()) {
+            m.put("key_values", new TreeMap<>(t.keyValues()));
+        }
         Map<String, Object> dims = new TreeMap<>();
         for (Map.Entry<String, TemplateSchema.Dimension> e : t.dimensions().entrySet()) {
             Map<String, Object> d = new TreeMap<>();

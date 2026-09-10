@@ -126,6 +126,46 @@ class TupleHandlerWiringTest {
         assertThat((java.util.List<?>) body.get("templates")).hasSize(2);
     }
 
+    /**
+     * nexus-em75s.36: {@code registry()}'s wire form omitted {@code dimensions}
+     * entirely (a Phase 2 client could not learn a template's required dims) and
+     * gave no hint that a key's value is pinned to a set. The digest stays a
+     * SHA-256 hex string throughout -- unchanged in form, even though its value
+     * necessarily differs from before this bead (the canonical map now folds in
+     * {@code key_values}).
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void registryPresent_templatesCarryDimensionsAndKeyValues() throws Exception {
+        var resp = get(withRegistry, "/v1/tuples/registry");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+
+        assertThat((String) body.get("digest")).matches("[0-9a-f]{64}");
+
+        var templates = (java.util.List<Map<String, Object>>) body.get("templates");
+        Map<String, Object> ledger = templates.stream()
+                .filter(t -> "ledger/<session_id>".equals(t.get("name")))
+                .findFirst().orElseThrow();
+
+        var ledgerDims = (Map<String, Object>) ledger.get("dimensions");
+        assertThat(ledgerDims).containsKey("agent_type");
+        var agentType = (Map<String, Object>) ledgerDims.get("agent_type");
+        assertThat(agentType.get("type")).isEqualTo("string");
+
+        var keyValues = (Map<String, Object>) ledger.get("key_values");
+        assertThat(keyValues).containsEntry("kind", java.util.List.of("start", "report"));
+        assertThat(keyValues).doesNotContainKey("agent_id");
+
+        Map<String, Object> mailbox = templates.stream()
+                .filter(t -> "mailbox/<address>".equals(t.get("name")))
+                .findFirst().orElseThrow();
+        var mailboxDims = (Map<String, Object>) mailbox.get("dimensions");
+        assertThat(mailboxDims).containsKeys("from", "kind", "correlation_id", "address_kind");
+        // mailbox pins no key value -- key_values is omitted entirely, not an empty map.
+        assertThat(mailbox).doesNotContainKey("key_values");
+    }
+
     @Test
     void registryAbsent_tuplesRouteNotRegistered() throws Exception {
         var resp = get(withoutRegistry, "/v1/tuples/registry");

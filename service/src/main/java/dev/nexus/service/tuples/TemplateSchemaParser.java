@@ -24,6 +24,9 @@ final class TemplateSchemaParser {
 
     private static final Set<String> DIMENSION_FIELDS = Set.of("type", "values", "required");
 
+    /** Fields allowed on a {@code keys} mapping-form entry's spec (nexus-em75s.36). */
+    private static final Set<String> KEY_SPEC_FIELDS = Set.of("values");
+
     private static final Set<String> TAKE_FIELDS =
             Set.of("enabled", "default_lease_seconds", "max_lease_seconds", "max_attempts");
 
@@ -33,7 +36,8 @@ final class TemplateSchemaParser {
         String name = requireString(source, doc, "name");
         List<String> nameSegments = parseNameSegments(source, name);
 
-        List<String> keys = requireStringList(source, doc, "keys");
+        ParsedKeys parsedKeys = parseKeys(source, doc.get("keys"));
+        List<String> keys = parsedKeys.names();
         if (keys.isEmpty()) {
             throw breach(source, "keys", "must be a non-empty list");
         }
@@ -42,6 +46,7 @@ final class TemplateSchemaParser {
                 throw breach(source, "keys", "must not contain a blank entry");
             }
         }
+        Map<String, List<String>> keyValues = parsedKeys.values();
 
         Map<String, TemplateSchema.Dimension> dimensions = parseDimensions(source, doc.get("dimensions"));
 
@@ -67,7 +72,61 @@ final class TemplateSchemaParser {
         TemplateSchema.Take take = parseTake(source, doc.get("take"));
         long retentionSeconds = requirePositiveLong(source, doc, "retention_seconds");
 
-        return new TemplateSchema(name, nameSegments, keys, dimensions, idFrom, idDims, take, retentionSeconds);
+        return new TemplateSchema(name, nameSegments, keys, keyValues, dimensions, idFrom, idDims, take,
+                retentionSeconds);
+    }
+
+    /** {@code keys} document-shape entries, split from the pinned name order (RDR-205's {@code
+     *  keys} list) so a caller-supplied out() request can be validated against both in one pass. */
+    private record ParsedKeys(List<String> names, Map<String, List<String>> values) {
+    }
+
+    /**
+     * {@code keys} accepts two forms (nexus-em75s.36): the original flat list of key-name
+     * strings (every key unconstrained), or a mapping from key name to an optional spec
+     * carrying {@code values} — the same allowed-value-set shape {@link #parseDimensions}
+     * already gives {@code dimensions} entries, applied here to a key instead of moving
+     * the field to {@code dimensions} (RDR-205 §Technical Design "Registry" ~844, e.g.
+     * {@code ledger/<session_id>}'s {@code kind} pinned to {@code {start, report}}). A
+     * bare {@code key_name:} entry (no nested {@code values}) is unconstrained, same as
+     * the list form.
+     */
+    @SuppressWarnings("unchecked")
+    private static ParsedKeys parseKeys(String source, Object raw) {
+        if (raw instanceof List<?> list) {
+            List<String> names = new ArrayList<>();
+            for (Object o : list) {
+                if (!(o instanceof String s)) {
+                    throw breach(source, "keys", "must contain only strings");
+                }
+                names.add(s);
+            }
+            return new ParsedKeys(names, Map.of());
+        }
+        if (raw instanceof Map) {
+            Map<String, Object> map = (Map<String, Object>) raw;
+            List<String> names = new ArrayList<>();
+            Map<String, List<String>> values = new LinkedHashMap<>();
+            for (Map.Entry<String, Object> entry : map.entrySet()) {
+                String keyName = entry.getKey();
+                names.add(keyName);
+                Object spec = entry.getValue();
+                if (spec == null) {
+                    continue;
+                }
+                if (!(spec instanceof Map)) {
+                    throw breach(source, "keys." + keyName, "must be a mapping (or empty)");
+                }
+                Map<String, Object> specDoc = (Map<String, Object>) spec;
+                rejectUnknownKeys(source, "keys." + keyName + ".", specDoc.keySet(), KEY_SPEC_FIELDS);
+                List<String> vals = parseValuesList(source, "keys." + keyName + ".values", specDoc);
+                if (vals != null) {
+                    values.put(keyName, vals);
+                }
+            }
+            return new ParsedKeys(names, values);
+        }
+        throw breach(source, "keys", "is required and must be a list or a mapping");
     }
 
     private static List<String> parseNameSegments(String source, String name) {
@@ -113,21 +172,7 @@ final class TemplateSchemaParser {
                 throw breach(source, "dimensions." + dimName + ".type", "is required and must be a non-blank string");
             }
 
-            List<String> values = null;
-            if (dimDoc.containsKey("values")) {
-                Object valuesRaw = dimDoc.get("values");
-                if (!(valuesRaw instanceof List<?> list) || list.isEmpty()) {
-                    throw breach(source, "dimensions." + dimName + ".values", "must be a non-empty list");
-                }
-                values = new ArrayList<>();
-                for (Object v : list) {
-                    if (!(v instanceof String s) || s.isBlank()) {
-                        throw breach(source, "dimensions." + dimName + ".values",
-                                "must contain only non-blank strings");
-                    }
-                    values.add(s);
-                }
-            }
+            List<String> values = parseValuesList(source, "dimensions." + dimName + ".values", dimDoc);
 
             boolean required = false;
             if (dimDoc.containsKey("required")) {
@@ -142,6 +187,29 @@ final class TemplateSchemaParser {
             out.put(dimName, new TemplateSchema.Dimension((String) typeRaw, values, required));
         }
         return out;
+    }
+
+    /**
+     * The {@code values} sub-field shared by a {@code dimensions} entry and a {@code keys}
+     * mapping-form entry: absent means unconstrained ({@code null}); present must be a
+     * non-empty list of non-blank strings.
+     */
+    private static List<String> parseValuesList(String source, String field, Map<String, Object> containingDoc) {
+        if (!containingDoc.containsKey("values")) {
+            return null;
+        }
+        Object valuesRaw = containingDoc.get("values");
+        if (!(valuesRaw instanceof List<?> list) || list.isEmpty()) {
+            throw breach(source, field, "must be a non-empty list");
+        }
+        List<String> values = new ArrayList<>();
+        for (Object v : list) {
+            if (!(v instanceof String s) || s.isBlank()) {
+                throw breach(source, field, "must contain only non-blank strings");
+            }
+            values.add(s);
+        }
+        return values;
     }
 
     @SuppressWarnings("unchecked")

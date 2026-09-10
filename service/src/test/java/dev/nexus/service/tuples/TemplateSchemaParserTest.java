@@ -137,6 +137,58 @@ class TemplateSchemaParserTest {
         assertTrue(ex.getMessage().contains("keys"), ex.getMessage());
     }
 
+    // ── keys mapping form: a key may carry values (nexus-em75s.36) ─────
+
+    @Test
+    void keysMappingFormParsesUnconstrainedAndConstrainedKeys() {
+        Map<String, Object> doc = validDoc();
+        Map<String, Object> keysDoc = new LinkedHashMap<>();
+        keysDoc.put("to", null);
+        Map<String, Object> kindSpec = new LinkedHashMap<>();
+        kindSpec.put("values", List.of("start", "report"));
+        keysDoc.put("kind", kindSpec);
+        doc.put("keys", keysDoc);
+
+        TemplateSchema t = TemplateSchemaParser.parse("t.yaml", doc);
+        assertEquals(List.of("to", "kind"), t.keys());
+        assertEquals(Map.of("kind", List.of("start", "report")), t.keyValues());
+    }
+
+    @Test
+    void keysMappingFormEntryWithUnknownSpecFieldIsABreach() {
+        Map<String, Object> doc = validDoc();
+        Map<String, Object> keysDoc = new LinkedHashMap<>();
+        Map<String, Object> spec = new LinkedHashMap<>();
+        spec.put("required", true);
+        keysDoc.put("to", spec);
+        doc.put("keys", keysDoc);
+
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateSchemaParser.parse("broken.yaml", doc));
+        assertTrue(ex.getMessage().contains("keys.to"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("unknown field"), ex.getMessage());
+    }
+
+    @Test
+    void keysMappingFormEntryWithEmptyValuesListIsABreach() {
+        Map<String, Object> doc = validDoc();
+        Map<String, Object> keysDoc = new LinkedHashMap<>();
+        Map<String, Object> spec = new LinkedHashMap<>();
+        spec.put("values", List.of());
+        keysDoc.put("to", spec);
+        doc.put("keys", keysDoc);
+
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateSchemaParser.parse("broken.yaml", doc));
+        assertTrue(ex.getMessage().contains("keys.to.values"), ex.getMessage());
+    }
+
+    @Test
+    void keysFlatListFormLeavesKeyValuesEmpty() {
+        TemplateSchema t = TemplateSchemaParser.parse("mailbox.yaml", validDoc());
+        assertTrue(t.keyValues().isEmpty());
+    }
+
     @Test
     void invalidIdFromIsABreach() {
         Map<String, Object> doc = validDoc();

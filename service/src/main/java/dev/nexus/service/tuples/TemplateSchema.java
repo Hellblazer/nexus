@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.tuples;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -20,6 +21,18 @@ import java.util.Objects;
  *                          literally
  * @param keys             the pinned key set ({@code in}/{@code inp} match every key by
  *                          equality); required and non-empty
+ * @param keyValues         per-key allowed value sets (nexus-em75s.36; RDR:844 —
+ *                           {@code ledger/<session_id>}'s {@code kind} pinned to {@code
+ *                           {start, report}}). A key absent from this map is unconstrained
+ *                           (any non-blank string); a key present here must, when out()
+ *                           supplies it, be one of the listed values. Declared in the
+ *                           document shape via {@code keys}'s mapping form, e.g.
+ *                           {@code keys: {kind: {values: [start, report]}}} — the smaller
+ *                           change against moving a values-constrained field to {@link
+ *                           #dimensions}, which {@link TemplateSchemaParser} also still
+ *                           accepts as the flat {@code keys: [a, b]} list form for keys
+ *                           needing no constraint. Every name in this map's key set is
+ *                           also present in {@link #keys}.
  * @param dimensions        dimension name to schema; may be empty
  * @param idFrom            how the tuple id is formed
  * @param idDims            dimensions that also enter the id; every one named here must
@@ -31,6 +44,7 @@ public record TemplateSchema(
         String name,
         List<String> nameSegments,
         List<String> keys,
+        Map<String, List<String>> keyValues,
         Map<String, Dimension> dimensions,
         IdFrom idFrom,
         List<String> idDims,
@@ -43,6 +57,11 @@ public record TemplateSchema(
         Objects.requireNonNull(take, "take");
         nameSegments = List.copyOf(nameSegments);
         keys = List.copyOf(keys);
+        Map<String, List<String>> copiedKeyValues = new LinkedHashMap<>();
+        for (var e : keyValues.entrySet()) {
+            copiedKeyValues.put(e.getKey(), List.copyOf(e.getValue()));
+        }
+        keyValues = Map.copyOf(copiedKeyValues);
         dimensions = Map.copyOf(dimensions);
         idDims = List.copyOf(idDims);
     }
