@@ -1152,18 +1152,18 @@ class TestResolveCollectionRowTenantScoping:
     # Neutral model tokens on purpose (RDR-109 mode lint): none of these tests
     # touch an embedder, so a voyage-* name would be a cloud-mode claim they do not make.
     def setup_method(self):
-        from nexus import mcp_infra
+        from nexus import mcp_infra  # noqa: PLC0415 — deferred, matches the file's other in-test imports
         mcp_infra.reset_singletons()
         reset_http_vector_client_for_tests()
 
     def teardown_method(self):
-        from nexus import mcp_infra
+        from nexus import mcp_infra  # noqa: PLC0415 — deferred, matches the file's other in-test imports
         mcp_infra.reset_singletons()
         reset_http_vector_client_for_tests()
 
     def test_default_tenant_client_reads_through_mcp_infra(self):
-        from nexus import mcp_infra
-        from nexus.db.t3 import T3Database
+        from nexus import mcp_infra  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        from nexus.db.t3 import T3Database  # noqa: PLC0415 — deferred, matches the file's other in-test imports
 
         fake_t3 = MagicMock(spec=T3Database)
         fake_t3.list_collections.return_value = [
@@ -1181,8 +1181,8 @@ class TestResolveCollectionRowTenantScoping:
         fake_t3.list_collections.assert_called_once()
 
     def test_explicit_tenant_client_never_touches_mcp_infra_and_reads_its_own(self, monkeypatch):
-        from nexus import mcp_infra
-        from nexus.db.t3 import T3Database
+        from nexus import mcp_infra  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        from nexus.db.t3 import T3Database  # noqa: PLC0415 — deferred, matches the file's other in-test imports
 
         # If the write path fell through to mcp_infra's singleton (the
         # nexus-fryrd defect), THIS would answer instead of the tenant-
@@ -1245,8 +1245,8 @@ class TestResolveCollectionRowTenantScoping:
         """End-to-end (still HTTP-mocked): upsert_chunks's own cap and
         byte-budget lookups go through THIS client's tenant -- once per
         collection, memoized within the call -- and never mcp_infra's."""
-        from nexus import mcp_infra
-        from nexus.db.t3 import T3Database
+        from nexus import mcp_infra  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        from nexus.db.t3 import T3Database  # noqa: PLC0415 — deferred, matches the file's other in-test imports
 
         fake_default_t3 = MagicMock(spec=T3Database)
         fake_default_t3.list_collections.side_effect = AssertionError(
@@ -1282,9 +1282,9 @@ class TestResolveCollectionRowTenantScoping:
         singleton under a non-"default" configured tenant and asserting
         it still takes the mcp_infra (case 2) path, while a genuinely
         different tenant still takes case 3."""
-        import nexus.db.http_vector_client as hvc
-        from nexus import mcp_infra
-        from nexus.db.t3 import T3Database
+        import nexus.db.http_vector_client as hvc  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        from nexus import mcp_infra  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        from nexus.db.t3 import T3Database  # noqa: PLC0415 — deferred, matches the file's other in-test imports
 
         monkeypatch.setattr(hvc, "_process_default_tenant", lambda: "acme-tenant")
         hvc.reset_http_vector_client_for_tests()
@@ -1344,7 +1344,7 @@ class TestResolveCollectionRowTenantScoping:
         list_collections() must never write into mcp_infra's name-keyed,
         tenant-blind cache -- only the process's own client's listing may
         prime it."""
-        from nexus import mcp_infra
+        from nexus import mcp_infra  # noqa: PLC0415 — deferred, matches the file's other in-test imports
 
         def fake_get(path, *, tenant="default"):
             return [{"name": "code__proj__model-code__v1", "count": 1, "content_type": "code"}]
@@ -1378,12 +1378,12 @@ class TestServiceModeIndexerRouting:
     """Verify doc_indexer.py routes through get_t3() in service mode (no split-brain)."""
 
     def setup_method(self):
-        from nexus import mcp_infra
+        from nexus import mcp_infra  # noqa: PLC0415 — deferred, matches the file's other in-test imports
         mcp_infra.reset_singletons()
         reset_http_vector_client_for_tests()
 
     def teardown_method(self):
-        from nexus import mcp_infra
+        from nexus import mcp_infra  # noqa: PLC0415 — deferred, matches the file's other in-test imports
         mcp_infra.reset_singletons()
         reset_http_vector_client_for_tests()
 
