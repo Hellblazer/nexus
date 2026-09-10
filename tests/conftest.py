@@ -2750,6 +2750,38 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/test_service_mode_cli_real_client.py::test_collection_reembed_dry_run_service_mode_real_client",
     "tests/test_service_mode_cli_real_client.py::test_collection_reembed_cross_model_rejected_service_mode",
     "tests/test_service_mode_cli_real_client.py::test_collection_reembed_same_model_requests_server_side_re_embed",
+    #
+    # Reason class "mode-self-test" (nexus-0y4c6 fix round, 2026-09-10,
+    # code-review-expert CRITICAL finding): both are NEGATIVE assertions
+    # proving the local-mode embed fallback does NOT tag chunks with the
+    # cloud model name (`embedding_model != "voyage-context-3"`). The
+    # first redo pass swapped the comparison target to a neutral token
+    # ("model-ctx"), which made the assertion unable to catch the
+    # regression it exists to catch -- a chunk genuinely tagged
+    # "voyage-context-3" would still satisfy `!= "model-ctx"`. Reverted
+    # to the real literal; cloud_mode would be the wrong declaration
+    # here since the whole point is the LOCAL fallback path (same class
+    # as test_local_mode.py).
+    "tests/test_doc_indexer.py::test_index_md_falls_back_to_local_embedder_when_no_credentials",
+    "tests/test_doc_indexer.py::test_make_local_embed_fn_returns_consistent_model_name",
+    #
+    # Reason class "string-literal-as-name" (nexus-0y4c6 fix round,
+    # 2026-09-10, substantive-critic Significant finding): the legacy
+    # 2-segment parametrize case added to exercise
+    # embedding_model_for_collection's fallback branch THROUGH the `nx
+    # collection info` command (embedding_model_for_collection_name
+    # returns None for a 2-segment name, so it falls through to
+    # voyage_model_for_collection -- a fixed, mode-INDEPENDENT
+    # prefix->model dispatch table that never consults is_local_mode()
+    # and unconditionally returns the real "voyage-code-3" /
+    # "voyage-context-3" strings). Not swappable to a neutral token
+    # without asserting something false about what the command actually
+    # prints for a legacy name; mirrors test_h1zu0_dim_routing.py's
+    # rationale. inspect.getsource(item.function) includes the
+    # decorator line directly above a test (confirmed empirically), so
+    # this literal in the parametrize table is visible to the scanner
+    # even though it names one case among several.
+    "tests/test_collection_cmd.py::test_info_shows_embedding_model",
 })
 
 

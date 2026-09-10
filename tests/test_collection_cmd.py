@@ -197,12 +197,31 @@ def _mock_db_for_info(mock_db, name, count, metadatas):
     [
         # Conformant 4-segment names: embedding_model_for_collection_name
         # parses the model segment directly, whatever it is -- neutral
-        # tokens on purpose (RDR-109 mode lint), since this test's point
-        # is "info displays the collection's own model token", not the
-        # legacy 2-segment voyage-inference fallback (pinned separately
-        # by test_list_shows_the_row_values_when_the_name_disagrees).
+        # tokens on purpose (RDR-109 mode lint), since this part of the
+        # test's point is "info displays the collection's own model
+        # token" and any string proves it equally well.
         ("code__nexus__model-code__v1", "model-code"),
         ("knowledge__research__model-ctx__v1", "model-ctx"),
+        # Legacy 2-segment name: embedding_model_for_collection_name
+        # returns None for this shape, so embedding_model_for_collection
+        # falls through to voyage_model_for_collection -- a fixed,
+        # mode-INDEPENDENT prefix->model dispatch table (never consults
+        # is_local_mode()) that unconditionally returns the real
+        # "voyage-code-3"/"voyage-context-3" strings. Not swappable to a
+        # neutral token without asserting something false about what
+        # `nx collection info` actually prints for a legacy name; reason
+        # class "string-literal-as-name" (mirrors test_h1zu0_dim_routing.py
+        # -- see the exclusion in tests/conftest.py). This is the only
+        # place in the suite that exercises the fallback THROUGH the
+        # `info` command itself; test_corpus.py / test_local_mode.py /
+        # test_local_daemon_client_embed.py cover
+        # embedding_model_for_collection / voyage_model_for_collection
+        # directly, not this command's display path (a prior commit
+        # message incorrectly cited
+        # test_list_shows_the_row_values_when_the_name_disagrees above as
+        # covering this branch -- that test uses a conformant 4-segment
+        # name and never reaches the legacy fallback at all).
+        ("code__nexus", "voyage-code-3"),
     ],
 )
 def test_info_shows_embedding_model(runner, env_creds, mock_db, col_name, expected_model) -> None:

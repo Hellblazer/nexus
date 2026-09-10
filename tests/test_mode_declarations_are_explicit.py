@@ -537,7 +537,45 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 44
 # 14 entries total. This is the nodeid burn-down's floor: the 44-entry
 # _MODE_LINT_EXCLUDE_FILES set is a SEPARATE, unconverted burn-down
 # surface -- see bead nexus-0y4c6.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 14
+# 14 -> 16 (nexus-0y4c6 fix round, 2026-09-10, code-review-expert
+# CRITICAL): +2, tests/test_doc_indexer.py::{test_index_md_falls_back_
+# to_local_embedder_when_no_credentials, test_make_local_embed_fn_
+# returns_consistent_model_name}. Both assert `embedding_model !=
+# "voyage-context-3"` / `model_name != "voyage-context-3"` -- NEGATIVE
+# assertions proving the local fallback does NOT tag chunks with the
+# cloud model name. The batch-4 fix-round redo (bf18f94ce) swapped the
+# comparison target to a neutral token ("model-ctx"), which broke the
+# assertion's ability to catch the regression it exists to catch: a
+# chunk genuinely tagged "voyage-context-3" still satisfies `!=
+# "model-ctx"`. This is the failure mode case (b)'s own definition
+# (verify against the production dispatch code, not the comment) was
+# meant to catch, missed here because the check was "does anything
+# BRANCH on this string" rather than "does the ASSERTION'S OWN
+# DIRECTION depend on this being the real value" -- an inequality
+# check against a real production constant is a different hazard than
+# an equality check passed straight through as opaque metadata. Both
+# reverted to the real literal; reason class "mode-self-test" (the
+# whole point is the LOCAL fallback path, same as test_local_mode.py).
+# Rationale in conftest.py beside the entries.
+# 16 -> 17 (nexus-0y4c6 fix round, 2026-09-10, substantive-critic
+# Significant): +1, tests/test_collection_cmd.py::test_info_shows_
+# embedding_model. The batch-4 redo rewrote this test's parametrize
+# table to conformant 4-segment names only, which moved it entirely
+# off embedding_model_for_collection's legacy-fallback branch
+# (src/nexus/corpus.py voyage_model_for_collection) -- and the removal
+# commit's own comment cited test_list_shows_the_row_values_when_the_
+# name_disagrees as covering that branch, which is false (that test
+# uses a conformant 4-segment name and never reaches the fallback).
+# Fixed by adding back one legacy 2-segment case
+# ("code__nexus" -> "voyage-code-3") so the fallback stays exercised
+# THROUGH this command specifically (test_corpus.py / test_local_mode.py
+# / test_local_daemon_client_embed.py cover the fallback FUNCTION
+# directly, not this command's display path). The fallback is a fixed,
+# mode-independent dispatch table -- not swappable to a neutral token
+# -- so reason class "string-literal-as-name" (mirrors
+# test_h1zu0_dim_routing.py). Rationale in conftest.py beside the
+# entry.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 17
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

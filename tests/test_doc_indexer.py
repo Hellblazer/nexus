@@ -1266,7 +1266,7 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     rows = col.get(limit=1, include=["metadatas"])
     assert rows["metadatas"], "expected at least one chunk in collection"
     embedding_model = rows["metadatas"][0].get("embedding_model", "")
-    assert embedding_model and embedding_model != "model-ctx", (
+    assert embedding_model and embedding_model != "voyage-context-3", (
         f"chunk metadata should record the LOCAL model name; got "
         f"{embedding_model!r}. The staleness check on re-index "
         f"compares stored_model == target_model, and using the local "
@@ -1300,9 +1300,9 @@ def test_make_local_embed_fn_returns_consistent_model_name():
 
     embed_fn, model_name = _make_local_embed_fn()
     assert isinstance(model_name, str) and model_name
-    assert model_name != "model-ctx"
+    assert model_name != "voyage-context-3"
 
-    embeddings, reported_model = embed_fn(["hello world"], "model-ctx")
+    embeddings, reported_model = embed_fn(["hello world"], "voyage-context-3")
     assert len(embeddings) == 1
     assert isinstance(embeddings[0], list)
     assert len(embeddings[0]) > 0
