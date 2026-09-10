@@ -2343,12 +2343,6 @@ class TestResolveChunk:
     chunk-address resolution (replaces the ``resolve(tumbler).__dict__``
     placeholder that treated any tumbler as a document)."""
 
-    # nexus-0y4c6: a class attribute so test_resolve_chunk_returns_full_dict
-    # no longer carries the literal in its own body -- the fake server's
-    # OWN fixed response, a conformant collection-NAME string used as
-    # opaque identifier; no embedder is constructed.
-    _PHYSICAL_COLLECTION = "code__test__voyage-code-3__v1"
-
     def test_resolve_chunk_returns_full_dict(self) -> None:
         """Happy path: a real 4-segment chunk tumbler resolves to the
         document + chunk metadata dict."""
@@ -2362,7 +2356,7 @@ class TestResolveChunk:
             assert result is not None
             assert result["document_tumbler"] == "1.1.1"
             assert result["chunk_index"] == 2
-            assert result["physical_collection"] == self._PHYSICAL_COLLECTION
+            assert result["physical_collection"] == "code__test__voyage-code-3__v1"
             assert result["title"] == "Test Doc"
             assert result["content_type"] == "code"
         finally:

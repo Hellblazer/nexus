@@ -1498,13 +1498,6 @@ class TestSpawnServiceVoyageKeyPlumbing:
     supervisor must resolve the key through the nexus credential chain
     (``VOYAGE_API_KEY`` env > ``config.yml`` credentials) and pass it down."""
 
-    # nexus-0y4c6: class attributes, not an individual test's own body, so
-    # the RDR-109 mode-declaration lint's per-function source scan does not
-    # see them. Popen is mocked throughout this class; no embedder or cloud
-    # call is ever made against these configured-model literals.
-    _VOYAGE_CONFIGURED_MODEL = "voyage-context-3"
-    _VOYAGE_CODE_MODEL = "voyage-code-3"
-
     def _spawn_env(
         self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
     ) -> dict[str, str]:
@@ -1592,7 +1585,7 @@ class TestSpawnServiceVoyageKeyPlumbing:
         monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
         with patch(
             "nexus.config.local_embed_model_choice",
-            return_value=self._VOYAGE_CONFIGURED_MODEL,
+            return_value="voyage-context-3",
         ), patch(
             "nexus.config.get_credential", return_value="chain-key",
         ) as get_cred:
@@ -1649,7 +1642,7 @@ class TestSpawnServiceVoyageKeyPlumbing:
         # Engine side: key plumbed (voyage-capable engine).
         assert env["NX_VOYAGE_API_KEY"] == "shared-key"
         # Client side: mints the matching voyage token, not bge.
-        assert client_model == self._VOYAGE_CODE_MODEL
+        assert client_model == "voyage-code-3"
 
     def test_shared_predicate_false_drives_both_sites_to_local(
         self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
@@ -1670,10 +1663,7 @@ class TestSpawnServiceVoyageKeyPlumbing:
         # ...but the underlying string IS voyage-shaped — a naive inline
         # ``.startswith("voyage")`` re-derivation would say True here and
         # plumb/mint; only genuinely calling the predicate stays local.
-        monkeypatch.setattr(
-            "nexus.config.local_embed_model_choice",
-            lambda: self._VOYAGE_CODE_MODEL,
-        )
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
         with patch("nexus.config.get_credential") as get_cred:
             env = self._spawn_env(config_dir, clock, monkeypatch)
             client_model = _write_intent_embedding_model("code")
