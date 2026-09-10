@@ -81,11 +81,14 @@ public final class TemplateRegistry {
     private final List<TemplateSchema> templates;
     private final List<String> sources;
     private final String digest;
+    private final long claimLogTtlSeconds;
 
-    private TemplateRegistry(List<TemplateSchema> templates, List<String> sources, String digest) {
+    private TemplateRegistry(List<TemplateSchema> templates, List<String> sources, String digest,
+                              long claimLogTtlSeconds) {
         this.templates = templates;
         this.sources = sources;
         this.digest = digest;
+        this.claimLogTtlSeconds = claimLogTtlSeconds;
     }
 
     public List<TemplateSchema> templates() {
@@ -99,6 +102,18 @@ public final class TemplateRegistry {
 
     public String digest() {
         return digest;
+    }
+
+    /**
+     * The claim log's TTL, in seconds ({@value #CLAIM_LOG_TTL_DAYS_ENV}, parsed once at
+     * boot). RDR-205 Phase 1 Step 5 (bead nexus-em75s.5): the sweep's log-purge arm reads
+     * this rather than re-parsing {@value #CLAIM_LOG_TTL_DAYS_ENV} itself — the value this
+     * registry's own boot check already validated against every template's {@code
+     * retention_seconds} is the value the sweep purges by; a second parse of the same env
+     * var would risk drifting from what boot actually enforced.
+     */
+    public long claimLogTtlSeconds() {
+        return claimLogTtlSeconds;
     }
 
     /** {@code registry() -> {digest, templates}} (RDR-205 §Technical Design), plus {@link #sources()}. */
@@ -276,7 +291,7 @@ public final class TemplateRegistry {
         String digest = computeDigest(templates);
         log.info("event=tuple_template_registry_loaded sources={} templates={} digest={}",
                 sources, templates.size(), digest);
-        return new TemplateRegistry(templates, List.copyOf(sources), digest);
+        return new TemplateRegistry(templates, List.copyOf(sources), digest, claimLogTtlSeconds);
     }
 
     private static String computeDigest(List<TemplateSchema> templates) {

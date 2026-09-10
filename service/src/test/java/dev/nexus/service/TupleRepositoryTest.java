@@ -18,6 +18,7 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -497,5 +498,125 @@ class TupleRepositoryTest {
         var snap = repo.registry();
         assertThat(snap.templates()).hasSize(2);
         assertThat(snap.digest()).isNotBlank();
+    }
+
+    // ── sweep batch arms (RDR-205 Phase 1 Step 5, bead nexus-em75s.5) ───────────
+
+    /**
+     * Raw-SQL seeding bypasses RLS (superuser) and the repo's own clock — the only
+     * way to construct an "already lapsed"/"already expired" row directly, since
+     * every {@link TupleRepository} write uses the current instant.
+     */
+    private byte[] seedExpiredTuple(String tenant, String label, OffsetDateTime createdAt) throws Exception {
+        byte[] id = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(label.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        try (Connection su = pg.createConnection("")) {
+            org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                    .insertInto(dev.nexus.service.jooq.nexus.Tables.TUPLES,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLES.ID,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLES.TENANT_ID,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLES.SUBSPACE,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLES.TEMPLATE,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLES.KEYS,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLES.ATTEMPTS,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLES.EXPIRES_AT,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLES.CREATED_AT)
+                    .values(id, tenant, "mailbox/batch-probe", "mailbox", org.jooq.JSONB.valueOf("{}"),
+                            0, createdAt.minusMinutes(1), createdAt)
+                    .execute();
+        }
+        return id;
+    }
+
+    @Test
+    void purgeExpiredTuplesBatch_respectsBatchSize_multipleCallsDrainTheRest() throws Exception {
+        String tenant = "tuple-tenant-purge-batch-" + UUID.randomUUID();
+        OffsetDateTime base = OffsetDateTime.now(java.time.ZoneOffset.UTC).minusHours(1);
+        for (int i = 0; i < 5; i++) {
+            seedExpiredTuple(tenant, tenant + "-purge-row-" + i, base.plusSeconds(i));
+        }
+
+        int first = repo.purgeExpiredTuplesBatch(tenant, 2, null);
+        assertThat(first).isEqualTo(2);
+        int second = repo.purgeExpiredTuplesBatch(tenant, 2, null);
+        assertThat(second).isEqualTo(2);
+        int third = repo.purgeExpiredTuplesBatch(tenant, 2, null);
+        assertThat(third).isEqualTo(1); // drained: fewer than batchSize remained
+        int fourth = repo.purgeExpiredTuplesBatch(tenant, 2, null);
+        assertThat(fourth).isZero(); // nothing left
+    }
+
+    @Test
+    void releaseLapsedClaimsBatch_scannedEqualsReleasedPlusDeadLettered() throws Exception {
+        String tenant = "tuple-tenant-release-batch-" + UUID.randomUUID();
+        String to = "agent-release-batch-" + UUID.randomUUID();
+        OffsetDateTime now = OffsetDateTime.now(java.time.ZoneOffset.UTC);
+        byte[] id = repo.out(tenant, "mailbox/" + to, Map.of("to", to), Map.of("from", "sender-x"),
+                null, "nonce-release-batch", null);
+
+        // Force the row into an already-lapsed claimed state directly, bypassing the
+        // repo's own clock (its API always writes the current instant).
+        try (Connection su = pg.createConnection("")) {
+            org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                    .update(dev.nexus.service.jooq.nexus.Tables.TUPLES)
+                    .set(dev.nexus.service.jooq.nexus.Tables.TUPLES.CLAIM_STATE, "claimed")
+                    .set(dev.nexus.service.jooq.nexus.Tables.TUPLES.CLAIMANT, "worker-release-batch")
+                    .set(dev.nexus.service.jooq.nexus.Tables.TUPLES.CLAIM_ID, "claim-release-batch")
+                    .set(dev.nexus.service.jooq.nexus.Tables.TUPLES.LEASE_UNTIL, now.minusMinutes(5))
+                    .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.ID.eq(id))
+                    .execute();
+        }
+
+        var result = repo.releaseLapsedClaimsBatch(tenant, 300, null);
+        assertThat(result.scanned()).isEqualTo(result.released() + result.deadLettered());
+        assertThat(result.scanned()).isEqualTo(1);
+        assertThat(result.released()).isEqualTo(1);
+        assertThat(result.deadLettered()).isZero();
+    }
+
+    @Test
+    void purgeOldClaimLogBatch_purgesRowsPastTtl_leavesRecentRows() throws Exception {
+        String tenant = "tuple-tenant-log-batch-" + UUID.randomUUID();
+        OffsetDateTime now = OffsetDateTime.now(java.time.ZoneOffset.UTC);
+        try (Connection su = pg.createConnection("")) {
+            var dsl = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES);
+            dsl.insertInto(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.TENANT_ID,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.SUBSPACE,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.TEMPLATE,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.TRANSITION,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.AT,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.EXPIRES_AT)
+                    .values(tenant, "mailbox/log-batch-old", "mailbox", "claim",
+                            now.minusDays(200), now.minusDays(199))
+                    .execute();
+            dsl.insertInto(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.TENANT_ID,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.SUBSPACE,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.TEMPLATE,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.TRANSITION,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.AT,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.EXPIRES_AT)
+                    .values(tenant, "mailbox/log-batch-recent", "mailbox", "claim",
+                            now.minusDays(1), now.plusDays(1))
+                    .execute();
+        }
+
+        int purged = repo.purgeOldClaimLogBatch(tenant, 300, null);
+        assertThat(purged).isEqualTo(1);
+
+        try (Connection su = pg.createConnection("")) {
+            var dsl = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES);
+            boolean oldGone = !dsl.fetchExists(dsl.selectFrom(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG)
+                    .where(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.TENANT_ID.eq(tenant)
+                            .and(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.SUBSPACE.eq(
+                                    "mailbox/log-batch-old"))));
+            boolean recentSurvives = dsl.fetchExists(dsl.selectFrom(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG)
+                    .where(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.TENANT_ID.eq(tenant)
+                            .and(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.SUBSPACE.eq(
+                                    "mailbox/log-batch-recent"))));
+            assertThat(oldGone).isTrue();
+            assertThat(recentSurvives).isTrue();
+        }
     }
 }

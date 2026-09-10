@@ -14,6 +14,8 @@ import org.jooq.Field;
 import org.jooq.JSONB;
 import org.jooq.impl.DSL;
 import org.jooq.types.DayToSecond;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -23,6 +25,7 @@ import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -60,6 +63,8 @@ import static dev.nexus.service.jooq.nexus.Tables.TUPLE_TENANTS;
  * WHERE-clause backoff gate and its {@code last_attempt_at} write.
  */
 public final class TupleRepository {
+
+    private static final Logger log = LoggerFactory.getLogger(TupleRepository.class);
 
     public static final String READ_MAX_ENV = "NX_TUPLE_READ_MAX";
     public static final int DEFAULT_READ_MAX = 300;
@@ -169,6 +174,15 @@ public final class TupleRepository {
             String subspace, long total, long available, long claimed, long dead,
             long consumed, long expiredUnpurged,
             OffsetDateTime oldestCreatedAt, OffsetDateTime newestCreatedAt) {
+    }
+
+    /**
+     * RDR-205 Phase 1 Step 5 (bead nexus-em75s.5): one BATCH of the sweep's release
+     * arm — always {@code scanned == released + deadLettered}, mirroring the RDR-204
+     * ghost sweep's {@code GhostSweepResult} shape ({@code scanned} == the sum of its
+     * three dispositions).
+     */
+    public record ReleaseBatchResult(int scanned, int released, int deadLettered) {
     }
 
     // ── out ──────────────────────────────────────────────────────────────────
@@ -591,31 +605,171 @@ public final class TupleRepository {
             int attempts = row.getAttempts() + 1;
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
 
-            insertClaimLog(ctx, tenant, row.getSubspace(), row.getTemplate(), row.getId(),
-                    claimId, claimant, TRANSITION_NACK, now, row.getExpiresAt());
-
-            if (attempts >= maxAttempts) {
-                ctx.update(TUPLES)
-                        .set(TUPLES.CLAIM_STATE, CLAIM_STATE_DEAD)
-                        .set(TUPLES.CLAIMANT, (String) null)
-                        .set(TUPLES.CLAIM_ID, (String) null)
-                        .set(TUPLES.LEASE_UNTIL, (OffsetDateTime) null)
-                        .set(TUPLES.ATTEMPTS, attempts)
-                        .where(TUPLES.ID.eq(row.getId()))
-                        .execute();
-                insertClaimLog(ctx, tenant, row.getSubspace(), row.getTemplate(), row.getId(),
-                        null, null, TRANSITION_DEAD, now, row.getExpiresAt());
-            } else {
-                ctx.update(TUPLES)
-                        .set(TUPLES.CLAIM_STATE, (String) null)
-                        .set(TUPLES.CLAIMANT, (String) null)
-                        .set(TUPLES.CLAIM_ID, (String) null)
-                        .set(TUPLES.LEASE_UNTIL, (OffsetDateTime) null)
-                        .set(TUPLES.ATTEMPTS, attempts)
-                        .where(TUPLES.ID.eq(row.getId()))
-                        .execute();
-            }
+            releaseOrDeadLetter(ctx, tenant, row.getSubspace(), row.getTemplate(), row.getId(),
+                    claimId, claimant, TRANSITION_NACK, now, row.getExpiresAt(), attempts, maxAttempts);
             return null;
+        });
+    }
+
+    /**
+     * Shared release-or-dead-letter core (RDR-205 Phase 1 Step 5, bead nexus-em75s.5):
+     * {@link #nack} and the sweep's {@link #releaseLapsedClaimsBatch} release arm both
+     * release a live claim back to available, dead-lettering it instead once {@code
+     * attempts} reaches the template's {@code max_attempts} — the SAME rule, so it lives
+     * once here rather than as two copies that can drift (Quality Criterion: "the release
+     * arm and TupleRepository's dead-letter rule cannot drift"). {@code releaseTransition}
+     * is the FIRST log row's transition name ({@code nack} for an explicit client call,
+     * {@code expire} for the sweep finding a lapsed lease nobody re-took); the SECOND row,
+     * written only on dead-letter, is always {@code dead} — matching {@link #claimOnce}'s
+     * own dead-letter branch exactly.
+     *
+     * @return true iff this row was dead-lettered (attempts reached max_attempts)
+     */
+    private static boolean releaseOrDeadLetter(DSLContext ctx, String tenant, String subspace, String template,
+                                                 byte[] tupleId, String claimId, String claimant,
+                                                 String releaseTransition, OffsetDateTime now,
+                                                 OffsetDateTime expiresAt, int attempts, long maxAttempts) {
+        insertClaimLog(ctx, tenant, subspace, template, tupleId, claimId, claimant, releaseTransition, now, expiresAt);
+        if (attempts >= maxAttempts) {
+            ctx.update(TUPLES)
+                    .set(TUPLES.CLAIM_STATE, CLAIM_STATE_DEAD)
+                    .set(TUPLES.CLAIMANT, (String) null)
+                    .set(TUPLES.CLAIM_ID, (String) null)
+                    .set(TUPLES.LEASE_UNTIL, (OffsetDateTime) null)
+                    .set(TUPLES.ATTEMPTS, attempts)
+                    .where(TUPLES.ID.eq(tupleId))
+                    .execute();
+            insertClaimLog(ctx, tenant, subspace, template, tupleId, null, null, TRANSITION_DEAD, now, expiresAt);
+            return true;
+        }
+        ctx.update(TUPLES)
+                .set(TUPLES.CLAIM_STATE, (String) null)
+                .set(TUPLES.CLAIMANT, (String) null)
+                .set(TUPLES.CLAIM_ID, (String) null)
+                .set(TUPLES.LEASE_UNTIL, (OffsetDateTime) null)
+                .set(TUPLES.ATTEMPTS, attempts)
+                .where(TUPLES.ID.eq(tupleId))
+                .execute();
+        return false;
+    }
+
+    // ── sweep (RDR-205 Phase 1 Step 5, bead nexus-em75s.5) ──────────────────────
+
+    /**
+     * One BATCH, one transaction, of the scheduled sweep's release arm: selects up
+     * to {@code batchSize} rows whose lease has lapsed — {@code claimed}, unconsumed,
+     * {@code lease_until < now()}, oldest-lapsed first — and releases each with an
+     * {@code expire} log row, dead-lettering at the row's template {@code max_attempts}
+     * via the SAME {@link #releaseOrDeadLetter} core {@link #nack} uses.
+     *
+     * <p>A row whose subspace no longer resolves against the live registry (its
+     * template was removed or renamed since the row was written) is released with
+     * an unbounded {@code max_attempts} rather than skipped — an unreachable claim
+     * must not be left claimed forever on a schema drift the row itself cannot see —
+     * and logged once per occurrence so the drift is visible.
+     *
+     * <p>{@code statementTimeout} is applied to the batch's OWN selecting enumeration
+     * as well as its writes (NexusService's per-task statement bound, passed to every
+     * statement the sweep issues — bounding only the writes would leave the
+     * enumeration itself unbounded).
+     *
+     * @return {@code scanned} always equals {@code released + deadLettered}
+     */
+    public ReleaseBatchResult releaseLapsedClaimsBatch(String tenant, int batchSize, Duration statementTimeout) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            SweepBounds.applyStatementTimeout(ctx, statementTimeout);
+            var rows = ctx.selectFrom(TUPLES)
+                    .where(TUPLES.TENANT_ID.eq(tenant)
+                            .and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_CLAIMED))
+                            .and(TUPLES.CONSUMED_AT.isNull())
+                            .and(TUPLES.LEASE_UNTIL.lt(DSL.currentOffsetDateTime())))
+                    .orderBy(TUPLES.LEASE_UNTIL.asc(), TUPLES.ID.asc())
+                    .limit(batchSize)
+                    .forNoKeyUpdate()
+                    .skipLocked()
+                    .fetch();
+            OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+            int released = 0;
+            int deadLettered = 0;
+            for (TuplesRecord row : rows) {
+                TemplateSchema t = registry.resolve(row.getSubspace());
+                if (t == null) {
+                    log.warn("event=tuple_sweep_release_unknown_subspace tenant={} subspace={} tuple_id={}",
+                            tenant, row.getSubspace(), HexFormat.of().formatHex(row.getId()));
+                }
+                long maxAttempts = (t == null || t.take().maxAttempts() == null)
+                        ? Long.MAX_VALUE : t.take().maxAttempts();
+                int attempts = row.getAttempts() + 1;
+                boolean dead = releaseOrDeadLetter(ctx, tenant, row.getSubspace(), row.getTemplate(), row.getId(),
+                        row.getClaimId(), row.getClaimant(), TRANSITION_EXPIRE, now, row.getExpiresAt(),
+                        attempts, maxAttempts);
+                if (dead) {
+                    deadLettered++;
+                } else {
+                    released++;
+                }
+            }
+            return new ReleaseBatchResult(rows.size(), released, deadLettered);
+        });
+    }
+
+    /**
+     * One BATCH, one transaction, of the scheduled sweep's purge arm: deletes up to
+     * {@code batchSize} rows whose {@code expires_at} has passed — covering BOTH a
+     * never-claimed expired tuple and a consumed tuple past its retention ceiling in
+     * ONE predicate, since {@code expires_at} is already the retention-clamped
+     * ceiling {@link #out} writes (see its refire-clamp comment: a refire never
+     * moves {@code expires_at} past {@code created_at + retention_seconds}), never
+     * touched by {@link #ack}. {@code nexus.tuple_claim_log.tuple_id} is {@code ON
+     * DELETE SET NULL} (tuples-001-2's FK) — a purged tuple's log rows survive with
+     * a null {@code tuple_id}, never deleted here; the log's own retention is the
+     * separate {@link #purgeOldClaimLogBatch} arm.
+     */
+    public int purgeExpiredTuplesBatch(String tenant, int batchSize, Duration statementTimeout) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            SweepBounds.applyStatementTimeout(ctx, statementTimeout);
+            List<byte[]> ids = ctx.select(TUPLES.ID)
+                    .from(TUPLES)
+                    .where(TUPLES.TENANT_ID.eq(tenant).and(TUPLES.EXPIRES_AT.le(DSL.currentOffsetDateTime())))
+                    .orderBy(TUPLES.CREATED_AT.asc(), TUPLES.ID.asc())
+                    .limit(batchSize)
+                    .forUpdate()
+                    .skipLocked()
+                    .fetch(TUPLES.ID);
+            if (ids.isEmpty()) {
+                return 0;
+            }
+            return ctx.deleteFrom(TUPLES).where(TUPLES.ID.in(ids)).execute();
+        });
+    }
+
+    /**
+     * One BATCH, one transaction, of the scheduled sweep's log-retention arm:
+     * deletes up to {@code batchSize} {@code nexus.tuple_claim_log} rows older than
+     * {@link TemplateRegistry#claimLogTtlSeconds()} — the SAME value the registry's
+     * own boot check validated against every template's {@code retention_seconds}
+     * (never a second, independently-parsed copy of {@code
+     * NX_TUPLE_CLAIM_LOG_TTL_DAYS}). The cutoff is evaluated server-side via {@code
+     * DSL.currentOffsetDateTime().sub(...)}, the same now/interval split {@link #out}
+     * uses (see the class javadoc's now/interval convention).
+     */
+    public int purgeOldClaimLogBatch(String tenant, int batchSize, Duration statementTimeout) {
+        DayToSecond ttlInterval = interval(registry.claimLogTtlSeconds());
+        return tenantScope.withTenant(tenant, ctx -> {
+            SweepBounds.applyStatementTimeout(ctx, statementTimeout);
+            Field<OffsetDateTime> cutoff = DSL.currentOffsetDateTime().sub(ttlInterval);
+            List<Long> ids = ctx.select(TUPLE_CLAIM_LOG.LOG_ID)
+                    .from(TUPLE_CLAIM_LOG)
+                    .where(TUPLE_CLAIM_LOG.TENANT_ID.eq(tenant).and(TUPLE_CLAIM_LOG.AT.lt(cutoff)))
+                    .orderBy(TUPLE_CLAIM_LOG.LOG_ID.asc())
+                    .limit(batchSize)
+                    .forUpdate()
+                    .skipLocked()
+                    .fetch(TUPLE_CLAIM_LOG.LOG_ID);
+            if (ids.isEmpty()) {
+                return 0;
+            }
+            return ctx.deleteFrom(TUPLE_CLAIM_LOG).where(TUPLE_CLAIM_LOG.LOG_ID.in(ids)).execute();
         });
     }
 
