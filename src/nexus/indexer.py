@@ -4838,13 +4838,39 @@ def _run_index(
     # sibling, which documents that incident and asserts the client
     # never eagerly pre-registers the quarantine sibling for exactly
     # this reason. No code change here; tracked in bead notes.
-    from nexus.corpus import ensure_collection_registered  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+    #
+    # nexus-bd44g fix check (full-suite finding, /tmp/wt-int2): a bare
+    # ensure_collection_registered(_name) call (kwargs=None) derives
+    # embedding_model via collection_registration_kwargs ->
+    # effective_embedding_model_for_writes(content_type) -- an
+    # INDEPENDENT, env-sensitive computation (local vs. service-vector
+    # mode, fastembed tier availability) that can genuinely disagree
+    # with the model token this run's OWN collection name already
+    # carries (observed live: a name minted while
+    # NX_STORAGE_BACKEND_VECTORS read one way, registered moments later
+    # after a test/run flipped it to another -- code__tiny-repo-
+    # 721d1ff1__bge-base-en-v15-768__v1 registered with embedding_model
+    # 'minilm-l6-v2-384'). The engine 422s on ANY kwargs/profile
+    # disagreement regardless of which side is "right", so re-deriving
+    # independently is itself the hazard. code_collection/docs_collection/
+    # rdr_col_name are ALREADY confirmed conformant by this point (Phase-4
+    # migration + the is_conformant_collection_name re-checks above), so
+    # index_model_for_collection(_name) -- the SAME name-token read
+    # index_model_for_collection above already uses for the service-mode
+    # embed-fn selection -- makes the registration kwargs agree with the
+    # name BY CONSTRUCTION, never a second independent guess.
+    from nexus.corpus import (  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+        collection_registration_kwargs,
+        ensure_collection_registered,
+    )
 
     for _name in (code_collection if have_code_files else None,
                   docs_collection if have_docs_files else None,
                   rdr_col_name):
         if _name is not None:
-            ensure_collection_registered(_name)
+            _reg_kwargs = collection_registration_kwargs(_name)
+            _reg_kwargs["embedding_model"] = index_model_for_collection(_name)
+            ensure_collection_registered(_name, kwargs=_reg_kwargs)
 
     # ── Pre-index catalog registration (RDR-101 Phase 3 PR δ Stage B) ───────
     # Register catalog entries BEFORE per-file indexing so the prose

@@ -2859,6 +2859,76 @@ def test_run_index_propagates_embedding_profile_mismatch_from_registration_loop(
             _run_index(repo, _reg())
 
 
+def test_run_index_registration_loop_derives_model_from_name_not_independent_guess(
+    tmp_path,
+):
+    """nexus-bd44g fix check (full-suite finding, /tmp/wt-int2): a bare
+    ``ensure_collection_registered(_name)`` call (kwargs=None) derives
+    ``embedding_model`` via ``collection_registration_kwargs`` ->
+    ``effective_embedding_model_for_writes(content_type)`` -- an
+    INDEPENDENT, env-sensitive computation that can genuinely disagree
+    with the model token already embedded in this run's OWN conformant
+    collection name. Live failure: ``code__tiny-repo-721d1ff1__bge-
+    base-en-v15-768__v1`` (a real name minted under one
+    NX_STORAGE_BACKEND_VECTORS state) registered with embedding_model
+    'minilm-l6-v2-384' (effective_embedding_model_for_writes evaluated
+    moments later, after the run flipped that env var) -- the engine
+    422s on ANY kwargs/profile disagreement regardless of which side is
+    "right".
+
+    Reproduces the split directly: the registry supplies an ALREADY
+    CONFORMANT ``code_collection`` name naming 'bge-base-en-v15-768' (so
+    _run_index's Phase-4 migration is a pass-through, not a re-mint),
+    while ``effective_embedding_model_for_writes`` is patched to return
+    a DIFFERENT model ('minilm-l6-v2-384') -- simulating exactly the
+    env-ordering split observed live. The registration call's kwargs
+    must still carry the NAME's own model, never the independent guess.
+    """
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "main.py").write_text("x = 1\n")
+
+    conformant_code_collection = "code__repo__bge-base-en-v15-768__v1"
+    registered_kwargs: list[dict] = []
+
+    def _fake_ensure_registered(name, *, registrar=None, kwargs=None):
+        registered_kwargs.append({"name": name, "kwargs": kwargs})
+
+    db, col = _mock_db()
+    v = _voyage(1)
+    with _patches(db, extra={
+        "nexus.chunker.chunk_file": {"return_value": [_chunk()]},
+        "voyageai.Client": {"return_value": v},
+        "nexus.corpus.effective_embedding_model_for_writes": {
+            "return_value": "minilm-l6-v2-384",
+        },
+        "nexus.corpus.ensure_collection_registered": {
+            "side_effect": _fake_ensure_registered,
+        },
+    }):
+        _run_index(
+            repo,
+            _reg({
+                "collection": conformant_code_collection,
+                "code_collection": conformant_code_collection,
+                "docs_collection": "docs__repo",
+            }),
+        )
+
+    code_calls = [c for c in registered_kwargs if c["name"] == conformant_code_collection]
+    assert code_calls, (
+        f"expected a registration call for {conformant_code_collection!r}; "
+        f"got {registered_kwargs!r}"
+    )
+    assert code_calls[0]["kwargs"]["embedding_model"] == "bge-base-en-v15-768", (
+        "registration kwargs must derive embedding_model from the "
+        "collection's OWN name segment, not the independent "
+        "effective_embedding_model_for_writes() guess (patched here to "
+        f"'minilm-l6-v2-384'); got {code_calls[0]['kwargs']!r}"
+    )
+
+
 # nexus-sghyo (2026-08-06): the ``_legacy_vector_backend`` autouse
 # fixture that force-pinned this whole module to
 # NX_STORAGE_BACKEND_VECTORS=chroma (the legacy chroma/local embed

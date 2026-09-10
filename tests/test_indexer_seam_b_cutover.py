@@ -75,6 +75,16 @@ def _service_mode_patches(db, *, extra=None):
         "nexus.indexer._migrate_legacy_collections": {"return_value": {}},
         "nexus.catalog.factory.make_catalog_reader": {"return_value": None},
         "nexus.catalog.factory.make_catalog_writer": {"return_value": None},
+        # nexus-bd44g fix check: _run_index's pre-staleness-sweep
+        # registration loop now calls ensure_collection_registered before
+        # any per-file write. That seam reads the engine's embedding
+        # profile via make_catalog_reader() (stubbed to None above for
+        # this journey), so left unpatched it raises
+        # CatalogReaderUnavailableError on every test in this file --
+        # a boundary these tests never previously reached (make_t3
+        # already stubs every write wholesale). No-op stub, same
+        # fidelity as make_catalog_reader/make_catalog_writer above.
+        "nexus.corpus.ensure_collection_registered": {},
     }
     if extra:
         patches.update(extra)
