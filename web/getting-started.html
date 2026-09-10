@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Nexus getting started: eight lessons covering the storage tiers, indexing and search, memory, scratch, the knowledge store, the Claude Code plugin, RDRs, and maintenance.">
+<meta name="description" content="Nexus getting started, inside Claude Code. Eight lessons: the session, indexing and search, memory, scratch, knowledge and the catalog, large questions, RDRs, and maintenance.">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AD%3C/text%3E%3C/svg%3E">
 <title>Nexus Getting Started</title>
@@ -49,17 +49,10 @@ code{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;fon
 /* rail */
 .rail{position:sticky;top:24px}
 .rail .eyebrow{margin-bottom:8px}
-.progress{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin:6px 0 14px}
-.progress i{display:block;height:100%;width:0;background:var(--brass);transition:width .3s}
 .rail ol{list-style:none;padding:0;margin:0;display:grid;gap:2px}
-.rail a{display:grid;grid-template-columns:18px 1fr;gap:10px;align-items:start;padding:7px 8px;border-radius:4px;color:var(--ink-2);text-decoration:none;font-size:14px;line-height:1.35}
+.rail a{display:block;padding:7px 8px;border-radius:4px;color:var(--ink-2);text-decoration:none;font-size:14px;line-height:1.35}
 .rail a:hover{background:var(--paper)}
-.rail a .dot{width:14px;height:14px;border:1.5px solid var(--ink-3);border-radius:50%;margin-top:3px}
-.rail li.done a{color:var(--ink)}
-.rail li.done .dot{background:var(--ok);border-color:var(--ok);position:relative}
-.rail li.done .dot::after{content:"";position:absolute;left:4px;top:1px;width:3px;height:7px;border:solid var(--bg);border-width:0 2px 2px 0;transform:rotate(45deg)}
 .rail .meta{font-size:12px;color:var(--ink-3);margin-top:14px;line-height:1.5}
-.rail .meta button{font:inherit;color:var(--blue);background:none;border:0;padding:0;cursor:pointer;text-decoration:underline}
 
 /* lessons */
 .lesson{padding:36px 0 8px;border-top:1px solid var(--line);scroll-margin-top:16px}
@@ -82,27 +75,11 @@ pre.out b{color:var(--ink);font-weight:500}
 .callout p{margin:4px 0}
 .callout.rule{border-color:var(--blue);background:var(--blue-soft)}
 
-/* self-check + done */
-.check{margin:22px 0 6px;border:1px solid var(--line);border-radius:var(--radius);background:var(--paper);max-width:68ch}
-.check summary{cursor:pointer;padding:12px 16px;font-weight:500;list-style:none;display:flex;gap:10px;align-items:baseline}
-.check summary::before{content:"?";font-family:"Source Serif 4",Georgia,serif;color:var(--brass);font-weight:600;font-size:18px}
-.check div{padding:0 16px 14px;color:var(--ink-2);font-size:15px}
-.done{display:flex;align-items:center;gap:10px;margin:18px 0 6px;font-size:15px}
-.done input{width:18px;height:18px;accent-color:var(--ok)}
-.done label{cursor:pointer}
-.done.is-done label{color:var(--ok);font-weight:500}
-
-/* tier quiz */
-.quiz{display:grid;gap:8px;margin:14px 0;max-width:68ch}
-.q{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);padding:10px 14px}
-.q span{font-size:15px}
-.q .opts{display:flex;gap:6px}
-.q button{font:inherit;font-size:13px;font-weight:600;width:38px;height:30px;border-radius:4px;border:1px solid var(--line);background:transparent;color:var(--ink-2);cursor:pointer}
-.q button:focus-visible{outline:2px solid var(--brass)}
-.q button.right{background:var(--ok-soft);border-color:var(--ok);color:var(--ok)}
-.q button.wrong{opacity:.4;text-decoration:line-through}
-.q .ans{grid-column:1/-1;font-size:14px;color:var(--ink-2);border-top:1px dashed var(--line);padding-top:8px}
-@media (max-width:480px){.q{grid-template-columns:1fr}}
+/* investigate further */
+.further{margin:22px 0 6px;border:1px solid var(--line);border-left:3px solid var(--blue);border-radius:0 var(--radius) var(--radius) 0;background:var(--paper);padding:12px 16px;max-width:68ch}
+.further h4{margin:0 0 6px;font-family:"Source Serif 4",Georgia,serif;font-size:16px;font-weight:600;color:var(--blue)}
+.further ul{margin:0;padding-left:20px;font-size:15px;color:var(--ink-2)}
+.further li{margin:4px 0}
 
 /* tier diagram */
 .tiers{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:18px 0;max-width:68ch}
@@ -119,10 +96,13 @@ table{border-collapse:collapse;width:100%;font-size:15px;margin:14px 0;max-width
 th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
 th{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
 .tbl{overflow-x:auto}
-.finish{border:1px solid var(--ok);background:var(--ok-soft);border-radius:var(--radius);padding:18px 20px;margin-top:40px;max-width:68ch}
+table.gloss td:first-child{font-weight:500;white-space:nowrap}
+ul.plain{margin:6px 0 10px;padding-left:22px;max-width:66ch}
+ul.plain li{margin:3px 0}
+.finish{border:1px solid var(--line);background:var(--paper);border-radius:var(--radius);padding:18px 20px;margin-top:40px;max-width:68ch}
 .finish h2{font-size:24px}
 .footer{margin-top:60px;font-size:13px;color:var(--ink-3)}
-@media (prefers-reduced-motion:reduce){.progress i,.copy{transition:none}}
+@media (prefers-reduced-motion:reduce){.copy{transition:none}}
 </style>
 </head>
 <body>
@@ -130,305 +110,291 @@ th{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-
 
 <nav class="rail" aria-label="Lessons">
   <div class="eyebrow">Getting started</div>
-  <div class="progress" aria-hidden="true"><i id="bar"></i></div>
   <ol id="toc">
-    <li data-l="1"><a href="#l1"><span class="dot"></span>Where things live</a></li>
-    <li data-l="2"><a href="#l2"><span class="dot"></span>Index a repo, search it</a></li>
-    <li data-l="3"><a href="#l3"><span class="dot"></span>A note that outlives the session</a></li>
-    <li data-l="4"><a href="#l4"><span class="dot"></span>Scratch while you work</a></li>
-    <li data-l="5"><a href="#l5"><span class="dot"></span>Knowledge that stays</a></li>
-    <li data-l="6"><a href="#l6"><span class="dot"></span>Let Claude use it</a></li>
-    <li data-l="7"><a href="#l7"><span class="dot"></span>Your first RDR</a></li>
-    <li data-l="8"><a href="#l8"><span class="dot"></span>Keeping it healthy</a></li>
+    <li><a href="#l1">1. Start a session</a></li>
+    <li><a href="#l2">2. Index and search</a></li>
+    <li><a href="#l3">3. Memory</a></li>
+    <li><a href="#l4">4. Scratch</a></li>
+    <li><a href="#l5">5. Knowledge and the catalog</a></li>
+    <li><a href="#l6">6. Questions that need many documents</a></li>
+    <li><a href="#l7">7. Record a decision</a></li>
+    <li><a href="#l8">8. Maintenance</a></li>
   </ol>
-  <div class="meta"><span id="count">0</span> of 8 complete. Stored in this browser. <button id="reset" type="button">Reset</button><br><br><a href="./">← Install guide</a></div>
+  <div class="meta"><a href="./">← Install guide</a></div>
 </nav>
 
 <main>
 <div class="eyebrow">Nexus · getting started</div>
 <h1>Nexus Getting Started</h1>
-<p class="lede">Eight lessons, in dependency order, about an hour in total. Each gives the reason a command exists, the command, and the output it produces. Prerequisite: <code>nx doctor</code> reports no failures.</p>
-<p class="note">Not installed: see the <a href="./">install guide</a>. Everything here runs locally and needs no API key.</p>
+<p class="lede">You do all of this inside Claude Code. You give Claude a short instruction. Claude uses Nexus for you. Each lesson shows the instruction to give, what Claude does, and what you see. Eight lessons, about one hour.</p>
+<p class="note">Before you start: install Nexus and the plugin with the <a href="./">install guide</a>. Then open a terminal in a project of yours and run <code>claude</code>. Every lesson happens in that Claude Code session.</p>
+
+<h3 style="margin-top:22px">Words used in these lessons</h3>
+<div class="tbl"><table class="gloss">
+<tr><th>Word</th><th>Meaning here</th></tr>
+<tr><td>Store</td><td>A place where Nexus keeps data. There are three stores: scratch, memory, and knowledge.</td></tr>
+<tr><td>Tool</td><td>An action that Claude can take. Nexus adds tools to Claude Code. When Claude uses one, Claude Code shows the tool name.</td></tr>
+<tr><td>Entry</td><td>One item in the scratch store or the memory store.</td></tr>
+<tr><td>Document</td><td>One item in the knowledge store: a file from a repository, a note, or a PDF.</td></tr>
+<tr><td>Chunk</td><td>A piece of a document. Nexus cuts each document into chunks before it indexes them.</td></tr>
+<tr><td>Index</td><td>To read documents, cut them into chunks, and add the chunks to the knowledge store.</td></tr>
+<tr><td>Semantic search</td><td>Search by meaning. The question and the chunks are compared as meanings, not as exact words.</td></tr>
+<tr><td>Collection</td><td>A named group of documents in the knowledge store, for example <code>distributed-systems</code>.</td></tr>
+<tr><td>Catalog</td><td>The list of all documents and the links between them.</td></tr>
+<tr><td>TTL</td><td>Time to live. How long an entry stays before Nexus deletes it.</td></tr>
+<tr><td>Promote</td><td>To copy an entry from one store to the next store. Scratch to memory, or memory to knowledge.</td></tr>
+<tr><td>Session</td><td>One run of Claude Code. The scratch store belongs to one session.</td></tr>
+<tr><td>Skill</td><td>A named procedure that Claude follows. You start one with a command such as <code>/conexus:query</code>.</td></tr>
+<tr><td>RDR</td><td>Research, Design, Review. A short document that records a decision before the code is written.</td></tr>
+<tr><td><code>nx</code></td><td>The Nexus terminal command. Claude runs it for you when needed. You can also run it yourself.</td></tr>
+</table></div>
 
 <!-- ============ 1 ============ -->
 <section class="lesson" id="l1">
-<div class="lhead"><span class="lnum">1</span><h2>Where things live</h2><span class="ltime">5 min · no typing</span></div>
-<p class="why">Every Nexus command operates on one of three stores. They differ by lifetime. Knowing the lifetime determines the command.</p>
+<div class="lhead"><span class="lnum">1</span><h2>Start a session</h2><span class="ltime">5 min</span></div>
+<p class="why">When Claude Code starts with the Nexus plugin, Nexus gives Claude some context before you type anything. This lesson shows what that context is, and introduces the three stores that all later lessons use.</p>
 
+<h3>What you see when the session starts</h3>
+<p>Run <code>claude</code> in your project. Before your first message, the plugin shows Claude several blocks of text. You can read them too. The important ones are:</p>
+<div class="tbl"><table>
+<tr><th>Block</th><th>Content</th></tr>
+<tr><td><code>## T2 Memory</code></td><td>The memory entries for this project. Empty in a new project. Lesson 3 adds the first one.</td></tr>
+<tr><td><code>## Ready Beads</code></td><td>Open tasks from the <code>bd</code> task tracker, if the project uses it.</td></tr>
+<tr><td><code>## nx Capabilities</code></td><td>A short list of the Nexus tools that Claude can use.</td></tr>
+<tr><td><code>## Knowledge Map</code></td><td>The main subjects in the knowledge store, with the number of chunks for each.</td></tr>
+</table></div>
+<p class="note">If you see a block named <code>## nx Preflight: FAILED</code>, a part of the install is missing. Type <code>/conexus:nx-preflight</code>. It tells you which part.</p>
+
+<h3>The three stores</h3>
+<p>Every Nexus tool works on one of three stores. The stores differ in one way: how long the data lives.</p>
 <div class="tiers">
-  <div class="tier" style="--tc:var(--t1)"><small>T1 · this session</small><b>Scratch</b><p>Working notes for the current session. Deleted at session end unless promoted.</p><p><code>nx scratch</code></p></div>
-  <div class="tier" style="--tc:var(--t2)"><small>T2 · this project</small><b>Memory</b><p>Project decisions and facts. Keyed by project and title. Default expiry 30 days, extended on read; permanent on request.</p><p><code>nx memory</code></p></div>
-  <div class="tier" style="--tc:var(--t3)"><small>T3 · forever</small><b>Knowledge</b><p>Indexed code, docs, PDFs, and durable notes. Retrieved by semantic search.</p><p><code>nx index</code> · <code>nx store</code> · <code>nx search</code></p></div>
+  <div class="tier" style="--tc:var(--t1)"><small>T1 · lives for one session</small><b>Scratch</b><p>Notes for the current session. Nexus deletes them when the session ends, unless you promote them.</p></div>
+  <div class="tier" style="--tc:var(--t2)"><small>T2 · lives for one project</small><b>Memory</b><p>Facts and decisions about a project. Each entry has a project name and a title. An entry lives 30 days by default. Each read makes it live longer. You can also make it permanent.</p></div>
+  <div class="tier" style="--tc:var(--t3)"><small>T3 · lives permanently</small><b>Knowledge</b><p>Indexed code, documents, PDFs, and notes. Claude finds them with semantic search.</p></div>
 </div>
-<p class="arrowrow">Entries move in one direction: scratch → memory with <code>nx scratch promote</code>, memory → knowledge with <code>nx memory promote</code>.</p>
+<p class="arrowrow">Data moves in one direction only: scratch to memory, then memory to knowledge.</p>
+<div class="callout rule"><p><strong>How to choose a store:</strong> ask how long the data must live. Only this session: scratch. This project, and you will look it up by name: memory. Permanently, and you will look it up by meaning: knowledge.</p></div>
+<p>You do not need to name the store when you talk to Claude. Say what you want to keep and for how long. Claude chooses the store. The lessons below show the words that make the choice clear.</p>
 
-<div class="callout rule"><p><strong>Selection rule:</strong> required lifetime. This session: scratch. This project, retrievable by name: memory. Indefinite, retrievable by meaning: knowledge.</p></div>
-
-<h3>Exercise: select the tier</h3>
-<p class="note">Select T1, T2 or T3 for each case. The correct answer is shown after a selection.</p>
-<div class="quiz" id="quiz">
-  <div class="q" data-a="1"><span>A hypothesis formed during debugging: the flaky test is a clock-skew problem.</span><div class="opts"><button type="button">T1</button><button type="button">T2</button><button type="button">T3</button></div><div class="ans hidden">T1. Useful only for the current session. Promote it if confirmed.</div></div>
-  <div class="q" data-a="2"><span>Auth tokens expire after 24 h; the refresh endpoint is /v2/refresh. Needed by the team for months.</span><div class="opts"><button type="button">T1</button><button type="button">T2</button><button type="button">T3</button></div><div class="ans hidden">T2. A project fact retrieved by name. Use <code>--ttl permanent</code>.</div></div>
-  <div class="q" data-a="3"><span>A 40-page design paper on the replication protocol.</span><div class="opts"><button type="button">T1</button><button type="button">T2</button><button type="button">T3</button></div><div class="ans hidden">T3. Passages are retrieved by meaning. <code>nx index pdf</code>.</div></div>
-  <div class="q" data-a="3"><span>A source repository.</span><div class="opts"><button type="button">T1</button><button type="button">T2</button><button type="button">T3</button></div><div class="ans hidden">T3. <code>nx index repo .</code>, lesson 2.</div></div>
-</div>
-
-<details class="check"><summary>Check: why does memory (T2) expire entries by default?</summary><div>To keep the tier limited to facts still in use. Each read extends an entry's TTL (effective TTL = base × (1 + ln(reads + 1))), so consulted facts persist and unread ones expire. Facts that must persist regardless take <code>--ttl permanent</code>.</div></details>
-<div class="done"><input type="checkbox" id="d1" data-l="1"><label for="d1">Lesson 1 complete</label></div>
+<div class="further"><h4>Investigate further</h4><ul>
+<li>Ask Claude: <em>"Which Nexus tools do you have, and what does each one do?"</em></li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md">Storage tiers</a>: how the three stores work, and how the TTL grows with each read.</li>
+</ul></div>
 </section>
 
 <!-- ============ 2 ============ -->
 <section class="lesson" id="l2">
-<div class="lhead"><span class="lnum">2</span><h2>Index a repository and search it</h2><span class="ltime">10 min</span></div>
-<p class="why">Indexing populates the knowledge tier (T3) from a repository. Search then ranks chunks by semantic similarity to a natural-language query, so a question such as "where is retry handled" resolves without knowing identifiers.</p>
+<div class="lhead"><span class="lnum">2</span><h2>Index your repository, then search it</h2><span class="ltime">10 min</span></div>
+<p class="why">Indexing reads your repository and adds its chunks to the knowledge store. After that, Claude can answer "where is retry handled" by searching for meaning, instead of reading many files. This is the step that makes all later searches possible.</p>
 
 <h3>Index</h3>
-<div class="cmd"><pre>cd your-project
-nx index repo .</pre><button class="copy" type="button">Copy</button></div>
-<div class="see">What you should see</div>
-<pre class="out">Registered /Users/you/your-project.
-<b>Indexing</b> /Users/you/your-project…
-  [1/412] retry.py — 6 chunks  (0.4s)        <span class="c">← one line per file with --monitor; a progress bar otherwise</span>
-  …
-Tip: run `nx hooks install` to auto-index this repo on every commit.
-<b>Done.</b></pre>
-<p class="note">Files are chunked by structure (functions, classes, sections) before embedding. Topic discovery runs after the first index. On re-run, unchanged files are skipped and reported as <code>skipped: index fresh</code>.</p>
+<div class="see">Say to Claude</div>
+<div class="cmd"><pre>Index this repository into Nexus.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What Claude does</div>
+<p>Claude runs the terminal command <code>nx index repo .</code> for you. Claude Code shows a Bash tool call with that command. The command reads every file, cuts it into chunks, and stores the chunks. On a large repository this takes a few minutes. At the end the output shows <code>Done.</code> and, after the first index, the topics that Nexus found.</p>
+<p class="note">If you index the same repository again later, Nexus skips files that did not change. The output then shows <code>skipped: index fresh</code> for them.</p>
 
 <h3>Search</h3>
-<div class="cmd"><pre>nx search "how are retries handled"
-nx search "how are retries handled" --files       <span class="c"># just the file paths</span>
-nx search "config loading" --corpus docs          <span class="c"># only prose, not code</span>
-nx search "RetryPolicy" --hybrid                  <span class="c"># meaning + exact text (needs ripgrep)</span></pre><button class="copy" type="button">Copy</button></div>
-<div class="see">What you should see</div>
-<pre class="out"><b>src/net/retry.py</b>:41:class RetryPolicy:
-<b>src/net/retry.py</b>:42:    """Exponential backoff with a jittered cap."""
-<b>src/net/retry.py</b>:43:    def backoff(self, attempt: int) -&gt; float:
-…
-<b>src/net/client.py</b>:88:def _send_with_retry(req, policy):</pre>
-<p class="note">Each matching chunk prints as <code>path:line:text</code>, best match first, in grep's shape; <code>--vimgrep</code> emits <code>path:line:col:text</code> for editor quickfix lists. Queries are natural-language and ranked by meaning, not by keyword match.</p>
+<div class="see">Say to Claude</div>
+<div class="cmd"><pre>Use Nexus search: how are retries handled in this codebase?</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What you see</div>
+<p>Claude Code shows a tool call named <code>search</code> on the <code>nexus</code> server. The tool returns the best matching chunks, grouped by topic, with the file path and the line number of each chunk. Claude then answers your question from those chunks and names the files.</p>
+<div class="callout"><p><strong>If Claude uses <code>grep</code> instead</strong>, say: <em>"Use Nexus search, not grep."</em> Grep finds exact words. Nexus search finds meaning, so it also finds code that does not contain the word "retry".</p></div>
+<p class="note">From the terminal, the same search is <code>nx search "how are retries handled"</code>.</p>
 
-<h3>Topics</h3>
-<div class="cmd"><pre>nx taxonomy status
-nx taxonomy list</pre><button class="copy" type="button">Copy</button></div>
-<div class="see">What you should see</div>
-<pre class="out">Taxonomy Status
-
-  code__your-project…
-    <b>9 topics</b>, 1 812 docs assigned (9 accepted)</pre>
-<p class="note">Topics feed search ranking and are the grouping the MCP search tools present. Labels are generated when the <code>claude</code> CLI is on PATH.</p>
-
-<details class="check"><summary>Check: when is <code>--hybrid</code> appropriate?</summary><div>When the query contains an exact identifier (class name, error string) and semantically related chunks are also wanted. Hybrid merges ripgrep matches with the embedding search. Plain search for questions; hybrid for identifiers.</div></details>
-<div class="done"><input type="checkbox" id="d2" data-l="2"><label for="d2">Lesson 2 complete</label></div>
+<div class="further"><h4>Investigate further</h4><ul>
+<li>Ask Claude: <em>"Search only the documentation, not the code, for how configuration is loaded."</em> Claude limits the search to the <code>docs</code> group.</li>
+<li>Ask Claude: <em>"Which topics did Nexus find in this repository?"</em> Claude runs <code>nx taxonomy list</code>.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/repo-indexing.md">Repo indexing</a>: how files are classified and cut into chunks.</li>
+</ul></div>
 </section>
 
 <!-- ============ 3 ============ -->
 <section class="lesson" id="l3">
-<div class="lhead"><span class="lnum">3</span><h2>Memory: project facts</h2><span class="ltime">5 min</span></div>
-<p class="why">Memory (T2) holds project decisions and facts. Every entry is keyed by project and title, so it is retrievable by name, and the Claude Code plugin loads the project's entries at session start.</p>
+<div class="lhead"><span class="lnum">3</span><h2>Memory: facts about your project</h2><span class="ltime">5 min</span></div>
+<p class="why">The memory store holds facts and decisions about a project. When a new session starts, Claude receives these entries first. This is how a decision from today is still known next month, in a new session, without you repeating it.</p>
 
-<div class="cmd"><pre>nx memory put "Auth uses JWT; tokens expire after 24h; refresh at /v2/refresh" \
-  -p myproject -t auth-tokens --ttl permanent
-nx memory search "JWT" -p myproject
-nx memory get -p myproject -t auth-tokens
-nx memory list -p myproject</pre><button class="copy" type="button">Copy</button></div>
-<div class="see">What you should see</div>
-<pre class="out">Stored: <b>myproject/auth-tokens</b> (id=4471)
-[4471] myproject/auth-tokens  (permanent, 2026-09-10T17:19:39Z)
-  Auth uses JWT; tokens expire after 24h; refresh at /v2/refresh
-Auth uses JWT; tokens expire after 24h; refresh at /v2/refresh</pre>
-<p class="note">The confirmation, the search hit, then <code>get</code>, which prints content only and is suitable for piping.</p>
+<div class="see">Say to Claude</div>
+<div class="cmd"><pre>Remember this in Nexus memory for this project, permanently, with the title "auth-tokens":
+Auth uses JWT. Tokens expire after 24 hours. The refresh endpoint is /v2/refresh.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What you see</div>
+<p>A tool call named <code>memory_put</code> on the <code>nexus</code> server, with the project name, the title <code>auth-tokens</code>, and the text. Claude confirms that the entry is stored.</p>
 
-<div class="callout"><p><strong>Conventions:</strong> one fact per entry; a descriptive title (<code>auth-tokens</code>, not <code>notes-3</code>); one spelling of the project name. Writing the same project and title again replaces the entry.</p></div>
-<p class="note">Default TTL is 30 days, extended on each read. Use <code>--ttl permanent</code> for durable facts; leave the default for working context.</p>
+<div class="see">Say to Claude, later or in a new session</div>
+<div class="cmd"><pre>What does Nexus memory say about authentication in this project?</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What you see</div>
+<p>A tool call named <code>memory_search</code> or <code>memory_get</code>. Claude answers with the stored text. In a new session, the entry also appears in the <code>## T2 Memory</code> block from lesson 1, before you ask.</p>
 
-<details class="check"><summary>Check: an entry was written under the wrong title. How is it corrected?</summary><div>Write it under the correct title, then <code>nx memory delete</code> the old one. There is no rename; upsert is keyed on project plus title.</div></details>
-<div class="done"><input type="checkbox" id="d3" data-l="3"><label for="d3">Lesson 3 complete</label></div>
+<div class="callout rule"><p><strong>Three rules for good entries:</strong> Put one fact in each entry. Give it a title that describes it, for example <code>auth-tokens</code>, not <code>notes-3</code>. Say "permanently" for facts that must stay. Without that word, the entry lives 30 days, and each read makes it live longer.</p></div>
+<p class="note">If you store an entry with the same title again, the new text replaces the old text. To change a fact, store it again. From the terminal: <code>nx memory put "…" -p PROJECT -t TITLE --ttl permanent</code>.</p>
+
+<div class="further"><h4>Investigate further</h4><ul>
+<li>Ask Claude: <em>"List all Nexus memory entries for this project."</em></li>
+<li>Ask Claude: <em>"Delete the memory entry auth-tokens."</em> Then store it again to practice.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md#heat-weighted-t2-expiry">Configuration: heat-weighted T2 expiry</a>: the exact rule for how reads extend the TTL.</li>
+</ul></div>
 </section>
 
 <!-- ============ 4 ============ -->
 <section class="lesson" id="l4">
-<div class="lhead"><span class="lnum">4</span><h2>Scratch: session notes</h2><span class="ltime">5 min</span></div>
-<p class="why">Scratch (T1) is scoped to the current session and deleted at its end. It holds hypotheses and intermediate findings that are not yet worth recording.</p>
+<div class="lhead"><span class="lnum">4</span><h2>Scratch: notes for this session only</h2><span class="ltime">5 min</span></div>
+<p class="why">The scratch store belongs to the current session. Nexus deletes it when the session ends. Claude and every helper agent that Claude starts share the same scratch store. It is the place for ideas and partial results while you work on a problem.</p>
 
-<div class="cmd"><pre>nx scratch put "working hypothesis: the cache TTL is too short" --tags cache
-nx scratch list
-nx scratch search "cache"</pre><button class="copy" type="button">Copy</button></div>
-<div class="see">What you should see</div>
-<pre class="out">Stored: <b>7b09cc46</b>-0d91-4921-8353-dabb574f232f
-[7b09cc46] cache  flagged=False
-  working hypothesis: the cache TTL is too short</pre>
+<div class="see">Say to Claude</div>
+<div class="cmd"><pre>Note in Nexus scratch: hypothesis, the unstable test is caused by clock skew between the two containers.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What you see</div>
+<p>A tool call named <code>scratch</code> on the <code>nexus</code> server, with the action <code>put</code>. Claude confirms the entry. When Claude later starts a helper agent to investigate, that agent can read the same note and add its own findings.</p>
 
-<h3>Promotion</h3>
-<div class="cmd"><pre>nx scratch promote 7b09cc46 -p myproject -t cache-ttl-finding   <span class="c"># copy to memory now</span>
-nx scratch put "…" --persist -p myproject -t some-title        <span class="c"># or: flush to memory at session end</span></pre><button class="copy" type="button">Copy</button></div>
-<p class="note">An ID prefix from <code>nx scratch list</code> suffices. Promotion reports <code>overlap_detected</code> when a similar memory entry exists under another title.</p>
+<div class="see">Say to Claude, when the idea proves true</div>
+<div class="cmd"><pre>Promote that scratch note to Nexus memory for this project, with the title "flaky-test-cause".</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What you see</div>
+<p>A tool call named <code>scratch_manage</code> with the action <code>promote</code>. The note is now a memory entry and survives the session. If the memory store already has a similar entry with a different title, the tool reports <code>overlap_detected</code>. Then Claude, or you, can merge the two.</p>
+<p class="note">Scratch notes that you do not promote disappear when the session ends. This is the purpose of the store. From the terminal: <code>nx scratch put "…"</code> and <code>nx scratch promote ID -p PROJECT -t TITLE</code>.</p>
 
-<details class="check"><summary>Check: what happens to unpromoted scratch at session end?</summary><div>It is deleted. Promote entries worth keeping; the rest is discarded by design.</div></details>
-<div class="done"><input type="checkbox" id="d4" data-l="4"><label for="d4">Lesson 4 complete</label></div>
+<div class="further"><h4>Investigate further</h4><ul>
+<li>Ask Claude: <em>"Show all Nexus scratch notes from this session."</em></li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md#t1----session-scratch">Storage tiers: T1</a>: how a session is identified, and how helper agents share the store.</li>
+</ul></div>
 </section>
 
 <!-- ============ 5 ============ -->
 <section class="lesson" id="l5">
-<div class="lhead"><span class="lnum">5</span><h2>Knowledge: notes, documents, catalog</h2><span class="ltime">10 min</span></div>
-<p class="why">Knowledge (T3) is the permanent, semantically searched tier. Lesson 2 added a repository. This lesson adds written notes and documents, and introduces the catalog that registers all three.</p>
+<div class="lhead"><span class="lnum">5</span><h2>Knowledge: notes, documents, and the catalog</h2><span class="ltime">10 min</span></div>
+<p class="why">The knowledge store is permanent, and Claude searches it by meaning. In lesson 2 you added a repository. In this lesson you add a written note and a document. You also meet the catalog, which lists every document and the links between them.</p>
 
-<h3>A note under a subject collection</h3>
-<div class="cmd"><pre>echo "Idempotency keys must be scoped per tenant; a global key space let two tenants collide in prod (2026-03)." \
-  | nx store put - --collection distributed-systems --title "idempotency-keys-per-tenant" --tags "incident,design"
-nx search "idempotency key collision"</pre><button class="copy" type="button">Copy</button></div>
-<div class="see">What you should see</div>
-<pre class="out">Stored: 9f2c…e41a  →  <b>knowledge__distributed-systems</b>…</pre>
-<p class="note">The search returns the note near the top in the <code>path:line:text</code> shape of lesson 2, with the title in the path position.</p>
-
-<div class="callout rule"><p><strong>Collections are subjects.</strong> A collection names a durable subject area: <code>distributed-systems</code>, <code>postgres</code>, <code>team-process</code>. Not a session, task, source application, or placeholder. The CLI refuses <code>knowledge</code>, <code>notes</code>, <code>default</code>, <code>tmp</code> and <code>test</code>. Check <code>nx collection list</code> before creating a new one.</p></div>
+<h3>A note in a subject collection</h3>
+<div class="see">Say to Claude</div>
+<div class="cmd"><pre>Store this in Nexus knowledge, in the collection "distributed-systems", with the title "idempotency-keys-per-tenant":
+Idempotency keys must be scoped per tenant. A global key space let two tenants collide in production (2026-03).</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What you see</div>
+<p>A tool call named <code>store_put</code> on the <code>nexus</code> server, with the collection, the title, and the text. Claude confirms the document ID. From now on, a search for "idempotency key collision" finds this note.</p>
+<div class="callout rule"><p><strong>A collection is a subject.</strong> Name it after a subject that will exist for years: <code>distributed-systems</code>, <code>postgres</code>, <code>team-process</code>. Do not name it after a session, a task, or a program. Nexus refuses the names <code>knowledge</code>, <code>notes</code>, <code>default</code>, <code>tmp</code>, and <code>test</code>. If you do not know the existing collections, ask Claude: <em>"List the Nexus collections."</em></p></div>
 
 <h3>Documents</h3>
-<div class="cmd"><pre>nx index md ./docs/design-notes.md --corpus myproject
-nx index pdf ./papers/replication-protocol.pdf --corpus papers
-nx search "leader election under partition" --corpus papers -c</pre><button class="copy" type="button">Copy</button></div>
-<p class="note">PDFs are routed to the appropriate extractor automatically, including scanned ones. <code>--corpus</code> names the document group; the docs collection is derived from it.</p>
+<div class="see">Say to Claude</div>
+<div class="cmd"><pre>Index docs/design-notes.md and papers/replication-protocol.pdf into Nexus.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What Claude does</div>
+<p>Claude runs <code>nx index md</code> for the Markdown file and <code>nx index pdf</code> for the PDF. Nexus chooses the correct PDF reader automatically, also for scanned PDFs. Both documents are now in the knowledge store and in the catalog.</p>
 
-<h3>Catalog</h3>
-<p>Every repository, note and document is registered in the catalog, which records typed links between documents (<code>cites</code>, <code>implements</code>, <code>supersedes</code>). Search retrieves passages; the catalog answers inventory and relationship questions.</p>
-<div class="cmd"><pre>nx catalog search replication         <span class="c"># by title, author or path</span>
-nx catalog show "replication-protocol" <span class="c"># full entry with every link in and out</span>
-nx catalog links "replication-protocol"</pre><button class="copy" type="button">Copy</button></div>
-<p class="note">Registration happens at index and store time. Links are added by enrichment and by RDR citations; the MCP <code>query</code> tool follows them.</p>
+<h3>The catalog</h3>
+<p>Nexus adds every repository, note, and document to the catalog. The catalog also records links between documents. A link has a type, for example <code>cites</code>, <code>implements</code>, or <code>supersedes</code>. Search finds text inside documents. The catalog answers two other questions: what documents exist, and how they are connected.</p>
+<div class="see">Say to Claude</div>
+<div class="cmd"><pre>Which documents in the Nexus catalog are linked to the replication protocol paper?</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What you see</div>
+<p>Tool calls on the <code>nexus-catalog</code> server: <code>show</code> or <code>links</code>. Claude lists the linked documents and the type of each link. In a new install there are few links yet. Links appear when Nexus enriches documents and when an RDR cites a source.</p>
+<p class="note">From the terminal: <code>nx store put</code>, <code>nx index md</code>, <code>nx index pdf</code>, and <code>nx catalog links "TITLE"</code>.</p>
 
-<details class="check"><summary>Check: search or catalog for "which documents cite the replication paper"?</summary><div>Catalog. The question is about relationships between documents, not passages within them. <code>nx catalog links "replication-protocol"</code>, or <code>/conexus:query</code>, which traverses the same links.</div></details>
-<details class="check"><summary>Check: memory (T2) or knowledge (T3) for "the Postgres connection pool is sized at 40"?</summary><div>Memory. A project fact retrieved by name, subject to change. A write-up of the sizing rationale with measurements belongs in knowledge under <code>postgres</code>.</div></details>
-<div class="done"><input type="checkbox" id="d5" data-l="5"><label for="d5">Lesson 5 complete</label></div>
+<div class="further"><h4>Investigate further</h4><ul>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/collections.md">Collections</a>: the rules for collection names.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/catalog.md">Document catalog</a>: all link types, and how to add a link yourself.</li>
+<li>Ask Claude: <em>"Export the distributed-systems collection to a backup file."</em> Claude runs <code>nx store export</code>.</li>
+</ul></div>
 </section>
 
 <!-- ============ 6 ============ -->
 <section class="lesson" id="l6">
-<div class="lhead"><span class="lnum">6</span><h2>The Claude Code plugin</h2><span class="ltime">10 min · Claude Code plugin</span></div>
-<p class="why">The plugin gives Claude Code the same three tiers through MCP tools. A session starts with the project's memory loaded, and agents retrieve from the store rather than crawling files.</p>
+<div class="lhead"><span class="lnum">6</span><h2>Questions that need many documents</h2><span class="ltime">10 min</span></div>
+<p class="why">A normal question makes one or two searches. Some questions need more: compare what the documentation says with what the code does, or collect a pattern from many files. For these, the plugin has a skill that plans several steps and combines the results.</p>
 
-<h3>Session start</h3>
-<p>Run <code>claude</code> in the indexed project. Session-start hooks surface the project's T2 memory, list ready beads, and check tooling. The fact stored in lesson 3 should appear in the opening context.</p>
-<p class="note">Scratch (lesson 4) is shared within the session: the operator and every agent Claude spawns read and write the same T1.</p>
+<div class="see">Say to Claude</div>
+<div class="cmd"><pre>/conexus:query Compare what the architecture docs say about caching with what the code actually does.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What you see</div>
+<p>A tool call named <code>nx_answer</code>. It searches the documentation and the code, extracts the relevant facts from each, compares them, and returns one answer with sources. This takes longer than a normal search, usually 5 to 15 seconds and sometimes more.</p>
+<p class="note">Use <code>/conexus:query</code> when one search cannot hold the answer. For a simple question, a normal sentence to Claude is faster.</p>
 
-<h3>A retrieval question</h3>
-<div class="cmd"><pre>Where do we handle retries, and what does our memory say about the auth tokens?</pre><button class="copy" type="button">Copy</button></div>
-<p class="note">Expected tool calls: <code>search</code> and <code>memory_get</code> on the nexus MCP server. If Claude greps the tree instead, instruct it to use nexus search.</p>
-
-<h3>Entry points</h3>
+<h3>Other commands to know</h3>
 <div class="tbl"><table>
 <tr><th>Task</th><th>Command</th></tr>
-<tr><td>Analyze an unfamiliar codebase</td><td><code>/conexus:analyze-code</code></td></tr>
-<tr><td>Answer a question spanning many documents</td><td><code>/conexus:query</code> <em>Compare what the docs say about caching with what the code does</em></td></tr>
-<tr><td>Plan a feature before implementation</td><td><code>/conexus:brainstorming-gate</code> then <code>/conexus:create-plan</code></td></tr>
-<tr><td>Review code before committing</td><td><code>/conexus:review-code</code></td></tr>
-<tr><td>Debug after two failed attempts</td><td><code>/conexus:debug</code></td></tr>
-<tr><td>Write a handoff for the next session</td><td><code>/conexus:continuation</code></td></tr>
-<tr><td>Routing between these</td><td>The <code>using-nx-skills</code> skill</td></tr>
+<tr><td>Understand a codebase that is new to you</td><td><code>/conexus:analyze-code</code></td></tr>
+<tr><td>Plan a feature before you write code</td><td><code>/conexus:brainstorming-gate</code>, then <code>/conexus:create-plan</code></td></tr>
+<tr><td>Review code before you commit it</td><td><code>/conexus:review-code</code></td></tr>
+<tr><td>Debug a problem after two failed tries</td><td><code>/conexus:debug</code></td></tr>
+<tr><td>Prepare the next session</td><td><code>/conexus:continuation</code></td></tr>
+<tr><td>Not sure which one</td><td>Ask Claude: <em>"Read the using-nx-skills skill and tell me which skill fits my task."</em></td></tr>
 </table></div>
-<p class="note">Direct questions and <code>/conexus:query</code> cover most retrieval. The others apply when the task has a defined shape: a plan, a review, a persistent bug.</p>
+<div class="callout"><p><strong>At the end of a session</strong>, run <code>/conexus:continuation</code>. It writes a short text with the branch, the open work, and the active memory. Paste this text as the first message of the next session. The next session then continues where this one stopped.</p></div>
 
-<div class="callout"><p><strong>Session close:</strong> <code>/conexus:continuation</code> writes a handoff (branch, open work, active memory) that the next session takes as its first message.</p></div>
-
-<details class="check"><summary>Check: a direct question versus <code>/conexus:query</code>?</summary><div>A direct question performs one or two lookups. <code>/conexus:query</code> plans a multi-step retrieval (search several corpora, extract, compare, synthesize) for answers that must be reduced from many documents.</div></details>
-<div class="done"><input type="checkbox" id="d6" data-l="6"><label for="d6">Lesson 6 complete</label></div>
+<div class="further"><h4>Investigate further</h4><ul>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/querying-guide.md">Querying guide</a>: the four ways to search, and when to use each.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/README.md">Plugin README</a>: all agents, skills, commands, and tools.</li>
+</ul></div>
 </section>
 
 <!-- ============ 7 ============ -->
 <section class="lesson" id="l7">
-<div class="lhead"><span class="lnum">7</span><h2>RDR: recording a decision</h2><span class="ltime">15 min</span></div>
-<p class="why">An RDR (Research, Design, Review) is a specification written before implementation. It records the problem, research, alternatives and chosen approach, and is indexed into knowledge on close, so prior decisions surface during later design work.</p>
+<div class="lhead"><span class="lnum">7</span><h2>Record a decision with an RDR</h2><span class="ltime">15 min</span></div>
+<p class="why">An RDR is a short document that you write before you write code. It records the problem, what you found out, the options, and the option you chose. When you close an RDR, Nexus indexes it into the knowledge store. Later, when you or Claude work on a similar decision, the old RDR appears in search.</p>
 
-<h3>Criteria</h3>
-<p>Write one when the problem has more than one viable solution, when a bug needs root-cause analysis rather than a patch, or when the change affects something others depend on. Skip it when the rationale is evident from the code.</p>
+<h3>When to write one</h3>
+<ul class="plain">
+<li>The problem has more than one good solution.</li>
+<li>A bug needs a real cause, not a quick fix.</li>
+<li>The change affects something that other people depend on.</li>
+</ul>
+<p>Do not write one when the reason is clear from the code.</p>
 
-<h3>Lifecycle, in Claude Code</h3>
-<div class="cmd"><pre>/conexus:rdr-create             <span class="c"># scaffold with metadata, status Draft</span>
-/conexus:rdr-research add 12    <span class="c"># append a finding with an evidence tag, as you learn</span>
-/conexus:rdr-gate 12            <span class="c"># optional: structure check, assumption audit, critique</span>
+<h3>The steps</h3>
+<div class="see">Say to Claude</div>
+<div class="cmd"><pre>/conexus:rdr-create             <span class="c"># create the document, status Draft</span>
+/conexus:rdr-research add 12    <span class="c"># add a finding, with a tag that says how sure you are</span>
+/conexus:rdr-gate 12            <span class="c"># optional: automatic checks and a critique</span>
 /conexus:rdr-accept 12          <span class="c"># lock the decision</span></pre><button class="copy" type="button">Copy</button></div>
-<p class="note">Depth matches the decision. A bug fix: Problem, Root Cause, Fix. The full template is for architectural decisions with real alternatives.</p>
+<p class="note">Replace <code>12</code> with the number that <code>rdr-create</code> gives you. Make the RDR as long as the decision needs. For a bug fix, three sections are enough: Problem, Root Cause, Fix. Use the full template only for large design decisions with real options.</p>
+<div class="callout rule"><p><strong>Accepting locks the record.</strong> While the RDR is a draft, change it as often as you want. After you accept it, it says what was decided. If the code later shows that the decision was wrong, do not edit the accepted RDR. Mark it as abandoned and write a new RDR with what you learned.</p></div>
 
-<div class="callout rule"><p><strong>Acceptance locks the record.</strong> Iterate freely while drafting. After acceptance the RDR states what was decided. If implementation invalidates it, mark it abandoned and write a successor; do not edit it to match what shipped.</p></div>
-
-<h3>Retrieval</h3>
-<p>Closed RDRs are indexed into knowledge. Research on a similar decision later, by an operator or by Claude, retrieves the prior record.</p>
-
-<details class="check"><summary>Check: implementation shows the accepted design does not work. What changes in the RDR?</summary><div>Its status only: abandoned. A new RDR records what was learned. Rewriting an accepted RDR to match the outcome destroys the record it exists to keep.</div></details>
-<div class="done"><input type="checkbox" id="d7" data-l="7"><label for="d7">Lesson 7 complete</label></div>
+<div class="further"><h4>Investigate further</h4><ul>
+<li><code>/conexus:rdr-list</code> and <code>/conexus:rdr-show</code>: read the RDRs that already exist in a project.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr.md">RDR</a>: the full template, the sections, and the status values.</li>
+<li><a href="https://github.com/Hellblazer/nexus/tree/main/docs/rdr">The Nexus RDR directory</a>: more than 200 real examples.</li>
+</ul></div>
 </section>
 
 <!-- ============ 8 ============ -->
 <section class="lesson" id="l8">
 <div class="lhead"><span class="lnum">8</span><h2>Maintenance</h2><span class="ltime">5 min</span></div>
-<p class="why">Three diagnostic commands, the update procedure, and re-indexing.</p>
+<p class="why">Three things keep Nexus working: a health check, the correct way to update, and a current index.</p>
 
-<div class="cmd"><pre>nx doctor              <span class="c"># every row ✓; the first diagnostic in every case</span>
-nx taxonomy status     <span class="c"># topics per collection; empty topics mean discovery never ran</span>
-nx collection list     <span class="c"># what is actually indexed, and how big</span></pre><button class="copy" type="button">Copy</button></div>
+<h3>Health check</h3>
+<div class="see">Say to Claude</div>
+<div class="cmd"><pre>Run nx doctor and tell me if anything is wrong.</pre><button class="copy" type="button">Copy</button></div>
+<p>Every line must show ✓. One line may say "credentials not set". This is normal for a local install. Inside Claude Code, <code>/conexus:nx-preflight</code> checks the plugin in the same way.</p>
 
-<h3>Updating</h3>
-<div class="cmd"><pre>nx self install
-nx upgrade</pre><button class="copy" type="button">Copy</button></div>
-<div class="callout"><p><strong>Both commands, every time. Never upgrade with <code>uv tool install conexus</code>:</strong> it resets the environment and drops the local embedder, after which search returns nothing. <code>nx self install</code> repairs that state.</p></div>
+<h3>Update</h3>
+<div class="see">Say to Claude</div>
+<div class="cmd"><pre>/conexus:upgrade</pre><button class="copy" type="button">Copy</button></div>
+<p>The skill shows what an update would change, then runs it. From the terminal, the same update is two commands: <code>nx self install</code>, then <code>nx upgrade</code>. Always run both.</p>
+<div class="callout"><p><strong>Never update with <code>uv tool install conexus</code>.</strong> That command removes the local search model, and search then returns nothing. If this happened, <code>nx self install</code> repairs it.</p></div>
 
-<h3>Re-indexing</h3>
-<p><code>nx index repo .</code> re-indexes changed files only. <code>nx hooks install</code> adds a git hook that runs it on commit.</p>
+<h3>Keep the index current</h3>
+<div class="see">Say to Claude</div>
+<div class="cmd"><pre>Install the Nexus git hooks in this repository.</pre><button class="copy" type="button">Copy</button></div>
+<p>Claude runs <code>nx hooks install</code>. After that, git indexes the changed files after each commit. Without the hooks, say <em>"Index this repository into Nexus"</em> again after the code changes. Only changed files are indexed.</p>
 
-<details class="check"><summary>Check: search returns nothing. First two diagnostics?</summary><div><code>nx doctor</code>, then whether the last upgrade was a bare <code>uv tool install</code>. <code>nx self install</code> repairs the second.</div></details>
-<div class="done"><input type="checkbox" id="d8" data-l="8"><label for="d8">Lesson 8 complete</label></div>
+<div class="further"><h4>Investigate further</h4><ul>
+<li>Ask Claude: <em>"Show what nx upgrade would change, without running it."</em> Claude runs <code>nx upgrade --dry-run</code>.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md#troubleshooting">Getting started: troubleshooting</a>: more problems and their fixes.</li>
+</ul></div>
 </section>
 
-<div class="finish" id="finish">
+<div class="finish">
 <h2>Complete</h2>
-<p>Covered: tier selection by lifetime, indexing and search, memory, scratch, the knowledge store and catalog, the plugin entry points, the RDR lifecycle, and maintenance. Retrieval quality and session-start context improve with the volume indexed and recorded.</p>
-<p>Reference: <a href="https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md">CLI reference</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/querying-guide.md">Querying guide</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr.md">RDR</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md">Storage tiers</a></p>
+<p>You know the three stores and how to choose one. You can ask Claude to index a repository and search it. You can keep facts in memory and working notes in scratch. You can store notes and documents in knowledge and find their links in the catalog. You know the commands for large questions, for RDRs, and for maintenance. Search results and session context get better as you index and record more.</p>
+<p>Reference: <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/README.md">Plugin README</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md">CLI reference</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/querying-guide.md">Querying guide</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr.md">RDR</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md">Storage tiers</a></p>
 </div>
 
-<p class="footer">Source: <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a> docs. This page is <a href="https://github.com/Hellblazer/nexus/blob/main/web/getting-started.html">web/getting-started.html</a> in the repo; corrections welcome. Output blocks show real shapes with example file names and counts.</p>
+<p class="footer">Source: <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a> docs. This page is <a href="https://github.com/Hellblazer/nexus/blob/main/web/getting-started.html">web/getting-started.html</a> in the repo. Corrections are welcome.</p>
 </main>
 </div>
 
 <script>
 (function(){
-  var KEY="nx-first-hour";
-  var done={};
-  try{done=JSON.parse(localStorage.getItem(KEY)||"{}")||{};}catch(e){done={};}
-  function save(){try{localStorage.setItem(KEY,JSON.stringify(done));}catch(e){}}
-  function render(){
-    var n=0;
-    document.querySelectorAll(".done input").forEach(function(cb){
-      var l=cb.getAttribute("data-l"), on=!!done[l];
-      cb.checked=on; cb.parentElement.classList.toggle("is-done",on); if(on)n++;
-      var li=document.querySelector('#toc li[data-l="'+l+'"]'); if(li)li.classList.toggle("done",on);
-    });
-    document.getElementById("count").textContent=String(n);
-    document.getElementById("bar").style.width=(n/8*100)+"%";
-    var fin=document.getElementById("finish"); fin.style.borderColor=n===8?"var(--ok)":"var(--line)"; fin.style.background=n===8?"var(--ok-soft)":"var(--paper)";
-  }
-  document.querySelectorAll(".done input").forEach(function(cb){
-    cb.addEventListener("change",function(){var l=cb.getAttribute("data-l"); if(cb.checked)done[l]=1; else delete done[l]; save(); render();});
-  });
-  document.getElementById("reset").addEventListener("click",function(){done={}; save(); render();});
-  render();
-
-  // tier quiz
-  document.querySelectorAll("#quiz .q").forEach(function(q){
-    var a=q.getAttribute("data-a");
-    q.querySelectorAll("button").forEach(function(b,i){
-      b.addEventListener("click",function(){
-        q.querySelectorAll("button").forEach(function(x,j){x.classList.toggle("right",String(j+1)===a);x.classList.toggle("wrong",String(j+1)!==a);x.disabled=true;});
-        q.querySelector(".ans").classList.remove("hidden");
-      });
-    });
-  });
-
-  // copy buttons: skip comments, keep line continuations
   document.querySelectorAll(".copy").forEach(function(btn){
     btn.addEventListener("click",function(){
       var pre=btn.parentElement.querySelector("pre");
       var text=pre.textContent.split("\n").map(function(l){return l.replace(/\s+#.*$/,"");}).filter(function(l){return l.trim();}).join("\n");
-      function done_(){btn.textContent="Copied";setTimeout(function(){btn.textContent="Copy";},1400);}
+      function ok(){btn.textContent="Copied";setTimeout(function(){btn.textContent="Copy";},1400);}
       function fail(){btn.textContent="Select and copy";setTimeout(function(){btn.textContent="Copy";},2200);}
-      if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(done_,fail);}else{fail();}
+      if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(ok,fail);}else{fail();}
     });
   });
 })();

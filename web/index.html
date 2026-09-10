@@ -101,7 +101,7 @@ details p{margin:8px 0 4px;font-size:15px}
 <div class="wrap">
 <div class="eyebrow">Nexus · conexus 7.x</div>
 <h1>Installing Nexus</h1>
-<p class="lede">Persistent memory and semantic search for Claude, running locally. No API keys, no accounts, no separate Postgres install. About ten minutes to a working search.</p>
+<p class="lede">Nexus gives Claude a permanent memory and search by meaning. It runs on your computer. You need no API key, no account, and no separate database install. The install takes about ten minutes.</p>
 
 <p class="choose-label">How do you use Claude?</p>
 <div class="choose" role="group" aria-label="Surface">
@@ -109,9 +109,9 @@ details p{margin:8px 0 4px;font-size:15px}
   <button data-surface="cli" aria-pressed="false">Just the nx CLI</button>
   <button data-surface="desktop" aria-pressed="false">Claude Desktop only</button>
 </div>
-<p class="who" data-for="code">You run <code>claude</code> in a terminal. You get the CLI plus a plugin with 48 MCP tools, 13 agents and 43 skills. <strong>The plugin needs Node.js.</strong></p>
-<p class="who hidden" data-for="cli">You want indexing and search from the shell, no Claude integration yet. You can add the plugin later.</p>
-<p class="who hidden" data-for="desktop">You use the Claude Desktop chat app and do not have Claude Code. Nexus arrives as a one-click extension.</p>
+<p class="who" data-for="code">You run <code>claude</code> in a terminal. You install the <code>nx</code> command and a plugin. The plugin adds 48 tools, 13 agents, and 43 skills to Claude Code. <strong>The plugin needs Node.js.</strong></p>
+<p class="who hidden" data-for="cli">You want to index and search from the terminal only. You can add the Claude plugin later.</p>
+<p class="who hidden" data-for="desktop">You use the Claude Desktop app and you do not have Claude Code. You install Nexus as an extension with one click.</p>
 
 <div class="oswrap" style="margin-top:14px">
   <span class="choose-label" style="margin:0">Operating system</span>
@@ -124,14 +124,14 @@ details p{margin:8px 0 4px;font-size:15px}
 <h2>Before you start</h2>
 <div class="tbl"><table>
 <tr><th>Need</th><th>Why</th><th>Check</th></tr>
-<tr><td>Python 3.12 or 3.13</td><td>3.14 is not yet supported. uv will fetch 3.13 for you if needed.</td><td><code>python3 --version</code></td></tr>
-<tr><td>uv</td><td>Installs and runs the <code>nx</code> CLI.</td><td><code>uv --version</code></td></tr>
-<tr><td>git</td><td>Repo indexing reads git metadata.</td><td><code>git --version</code></td></tr>
-<tr data-for="code" class="must"><td>Node.js (with npm)</td><td><strong>Required for the plugin.</strong> Its <code>sequential-thinking</code> MCP server starts via <code>npx</code>. Without Node it fails silently: the plugin installs fine and its tools simply never appear.</td><td><code>node --version</code><br><code>npm --version</code></td></tr>
-<tr><td>~600 MB download, a few minutes</td><td>First run downloads a signed service binary, a Postgres bundle and the embedding model.</td><td>—</td></tr>
+<tr><td>Python 3.12 or 3.13</td><td>Python 3.14 does not work yet. If needed, uv downloads Python 3.13 for you.</td><td><code>python3 --version</code></td></tr>
+<tr><td>uv</td><td>Installs and runs the <code>nx</code> command.</td><td><code>uv --version</code></td></tr>
+<tr><td>git</td><td>Nexus reads git information when it indexes a repository.</td><td><code>git --version</code></td></tr>
+<tr data-for="code" class="must"><td>Node.js (with npm)</td><td><strong>Required for the plugin.</strong> The plugin starts one of its servers with <code>npx</code>. Without Node.js there is no error message. The plugin installs, but its tools never appear.</td><td><code>node --version</code><br><code>npm --version</code></td></tr>
+<tr><td>~600 MB download, a few minutes</td><td>The first run downloads the service program, a database, and the search model.</td><td>—</td></tr>
 </table></div>
 
-<p>If uv or Node.js is missing:</p>
+<p>If uv or Node.js is not installed, install them first:</p>
 <div class="cmd" data-os-block="mac"><pre><span class="c"># macOS</span>
 brew install uv<span data-for="code">
 brew install node</span></pre><button class="copy">Copy</button></div>
@@ -139,59 +139,59 @@ brew install node</span></pre><button class="copy">Copy</button></div>
 curl -LsSf https://astral.sh/uv/install.sh | sh<span data-for="code">
 <span class="c"># Node.js (required for the plugin): distro package, or</span>
 curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - &amp;&amp; sudo apt-get install -y nodejs</span></pre><button class="copy">Copy</button></div>
-<p class="note">If Python reports 3.14, run <code>uv python install 3.13</code> once. uv picks it up automatically.</p>
+<p class="note">If <code>python3 --version</code> shows 3.14, run <code>uv python install 3.13</code> one time. uv then uses 3.13 automatically.</p>
 
 <!-- ===== Claude Code + CLI path ===== -->
 <section data-for="code cli">
 <h2>Install</h2>
 <div class="callout must" data-for="code">
   <div class="eyebrow">Before step 1</div>
-  <p><strong>Install Node.js now.</strong> The plugin's <code>sequential-thinking</code> server launches through <code>npx</code>. Without <code>node</code> and <code>npm</code> on PATH, step 4 will report success and the tools will never show up, with no error anywhere.</p>
-  <p>Confirm with <code>node --version</code> and <code>npm --version</code> before continuing.</p>
+  <p><strong>Install Node.js now.</strong> The plugin starts one of its servers with <code>npx</code>. If <code>node</code> and <code>npm</code> are not installed, step 4 reports success, but the tools never appear. There is no error message.</p>
+  <p>Check with <code>node --version</code> and <code>npm --version</code> before you continue.</p>
 </div>
-<p>Run these in order. Each one is safe to re-run.</p>
+<p>Run the steps in this order. You can run each step more than once without harm.</p>
 <ol class="steps">
 <li><div class="step">
-  <h3>Install the <code>nx</code> CLI</h3>
-  <p>The second command moves it onto the generation layout, which drops a conflicting media wheel and, on Linux, swaps the 4.5 GB CUDA torch build for a CPU one.</p>
+  <h3>Install the <code>nx</code> command</h3>
+  <p>The first command installs <code>nx</code>. The second command moves it to the layout that Nexus manages. This removes one package that causes conflicts. On Linux, it also replaces a 4.5 GB GPU package with a smaller CPU package.</p>
   <div class="cmd"><pre>uv tool install conexus
 nx self install</pre><button class="copy">Copy</button></div>
-  <p class="note">If <code>nx</code> is not found afterwards, add <code>~/.local/bin</code> to your PATH and open a new shell.</p>
+  <p class="note">If the terminal cannot find <code>nx</code> after this, add <code>~/.local/bin</code> to your PATH. Then open a new terminal.</p>
 </div></li>
 <li><div class="step">
-  <h3>Provision the storage service</h3>
-  <p>Downloads the signed engine and Postgres bundle, sets up pgvector and the bge-768 embedder, starts the service, and prompts to register autostart at login (accept).</p>
+  <h3>Set up the storage service</h3>
+  <p>This command downloads the service program, the database, and the search model. It starts the service. Then it asks if the service should start at login. Answer yes.</p>
   <div class="cmd"><pre>nx init</pre><button class="copy">Copy</button></div>
   <div class="expect">
     <div><b>~600 MB</b><span>downloaded, first run only</span></div>
     <div><b>2–5 min</b><span>on a normal connection</span></div>
-    <div><b>0</b><span>configuration steps</span></div>
+    <div><b>0</b><span>settings to change</span></div>
   </div>
-  <p class="note">Non-interactive: <code>nx init --yes</code>. To skip autostart: <code>nx init --no-autostart</code>.</p>
+  <p class="note">To answer yes automatically: <code>nx init --yes</code>. To not start at login: <code>nx init --no-autostart</code>.</p>
 </div></li>
 <li><div class="step">
-  <h3>Verify</h3>
+  <h3>Check the install</h3>
   <div class="cmd"><pre>nx doctor</pre><button class="copy">Copy</button></div>
-  <p class="note">Every row should show <span style="color:var(--ok);font-weight:600">✓</span>. A "credentials not set" line is expected in local mode and is not a problem.</p>
+  <p class="note">Every line must show <span style="color:var(--ok);font-weight:600">✓</span>. One line may say "credentials not set". This is normal for a local install. It is not a problem.</p>
 </div></li>
 <li data-for="code"><div class="step">
   <h3>Add the Claude Code plugin</h3>
-  <p><strong>Node.js check first:</strong> <code>node --version</code> must print a version. If it does not, install Node and come back; the plugin cannot start its servers without it.</p>
-  <p>Then, inside a <code>claude</code> session, not in the shell:</p>
+  <p><strong>First, check Node.js:</strong> <code>node --version</code> must print a version number. If it does not, install Node.js and return here. The plugin cannot start without it.</p>
+  <p>Then start <code>claude</code>. Type these two commands inside Claude Code, not in the terminal:</p>
   <div class="cmd"><pre>/plugin marketplace add Hellblazer/nexus
 /plugin install conexus@nexus-plugins</pre><button class="copy">Copy</button></div>
-  <p class="note">Then run <code>/conexus:nx-preflight</code> to confirm every dependency is present. The plugin's MCP servers are the <code>nx</code> package you installed in step 1, so the order matters.</p>
+  <p class="note">Then run <code>/conexus:nx-preflight</code>. It checks that everything the plugin needs is present. The plugin uses the <code>nx</code> command from step 1. This is why step 1 must come first.</p>
 </div></li>
 <li><div class="step">
-  <h3>Index something and search it</h3>
+  <h3>Index a repository and search it</h3>
   <div class="cmd"><pre>cd your-project
 nx index repo .
 nx search "how does retry work"</pre><button class="copy">Copy</button></div>
-  <p class="note">Indexing skips unchanged files on re-run. Add <code>--monitor</code> for per-file progress on a large repo.</p>
+  <p class="note">If you index the same repository again, Nexus skips files that did not change. For a large repository, add <code>--monitor</code> to see the progress for each file.</p>
 </div></li>
 </ol>
 
-<div class="callout ok"><p><strong>Install complete.</strong> Search runs locally. Topics are discovered automatically after indexing; <code>nx taxonomy status</code> shows them.</p><p>Next: <a href="getting-started.html"><strong>Getting started</strong></a>, eight lessons from indexing through the RDR lifecycle.</p></div>
+<div class="callout ok"><p><strong>The install is complete.</strong> Search runs on your computer. After indexing, Nexus finds topics automatically. <code>nx taxonomy status</code> shows them.</p><p>Next: <a href="getting-started.html"><strong>Getting started</strong></a>. Eight lessons, all done inside Claude Code.</p></div>
 </section>
 
 <!-- ===== Desktop path ===== -->
@@ -200,47 +200,47 @@ nx search "how does retry work"</pre><button class="copy">Copy</button></div>
 <ol class="steps">
 <li><div class="step">
   <h3>Install uv</h3>
-  <p>Claude Desktop finds it without any PATH setup when installed this way.</p>
+  <p>When you install uv this way, Claude Desktop finds it. You do not need to change your PATH.</p>
   <div class="cmd" data-os-block="mac"><pre>brew install uv</pre><button class="copy">Copy</button></div>
   <div class="cmd hidden" data-os-block="linux"><pre>curl -LsSf https://astral.sh/uv/install.sh | sh</pre><button class="copy">Copy</button></div>
 </div></li>
 <li><div class="step">
-  <h3>Provision the storage service</h3>
-  <p>The extension does not start a service itself. Do this once in a terminal:</p>
+  <h3>Set up the storage service</h3>
+  <p>The extension does not start the service itself. Run these commands one time in a terminal:</p>
   <div class="cmd"><pre>uv tool install conexus
 nx self install
 nx init
 nx doctor</pre><button class="copy">Copy</button></div>
-  <p class="note">First run downloads about 600 MB and takes a few minutes. Every <code>nx doctor</code> row should show ✓.</p>
+  <p class="note">The first run downloads about 600 MB and takes a few minutes. Every line of <code>nx doctor</code> must show ✓.</p>
 </div></li>
 <li><div class="step">
   <h3>Add the extension</h3>
-  <p>Download <code>conexus.mcpb</code> from the <a href="https://github.com/Hellblazer/nexus/releases/latest">latest release</a> and double-click it. Claude Desktop registers it under Settings → Connectors as "Conexus". First launch resolves dependencies, about 20 seconds.</p>
+  <p>Download <code>conexus.mcpb</code> from the <a href="https://github.com/Hellblazer/nexus/releases/latest">latest release</a>. Double-click the file. Claude Desktop adds it under Settings → Connectors with the name "Conexus". The first start takes about 20 seconds.</p>
 </div></li>
 </ol>
-<div class="callout"><p>Next: <a href="getting-started.html"><strong>Getting started</strong></a>. Already have the conexus plugin in Claude Code? Skip the extension. Desktop chat already sees the plugin's tools, and installing both gives you two copies under different names.</p></div>
+<div class="callout"><p>Next: <a href="getting-started.html"><strong>Getting started</strong></a>. If you already use the conexus plugin in Claude Code, do not install the extension. Claude Desktop already sees the plugin's tools. With both, you get two copies with different names.</p></div>
 </section>
 
-<h2>Keeping it current</h2>
-<p>Two commands, always both:</p>
-<div class="cmd"><pre>nx self install   <span class="c"># new code, installed beside the running one</span>
-nx upgrade        <span class="c"># converge engine, data and plugins</span></pre><button class="copy">Copy</button></div>
-<div class="callout"><p><strong>Do not</strong> upgrade with <code>uv tool install conexus</code> or <code>--force</code>. That resets the environment and drops the local embedder, and search returns nothing. If you already did, <code>nx self install</code> repairs it.</p></div>
-<p class="note">Updating the plugin from Claude Code with <code>/plugin update</code> runs both commands for you at the next session start.</p>
+<h2>Update Nexus</h2>
+<p>Two commands. Always run both:</p>
+<div class="cmd"><pre>nx self install   <span class="c"># install the new version next to the current one</span>
+nx upgrade        <span class="c"># update the service, the data, and the plugins</span></pre><button class="copy">Copy</button></div>
+<div class="callout"><p><strong>Do not</strong> update with <code>uv tool install conexus</code> or with <code>--force</code>. That command removes the local search model, and search then returns nothing. If this happened, <code>nx self install</code> repairs it.</p></div>
+<p class="note">If you update the plugin with <code>/plugin update</code> in Claude Code, the next session runs both commands for you.</p>
 
-<h2>If something goes wrong</h2>
-<details><summary>nx: command not found</summary><p>Add <code>~/.local/bin</code> to your PATH and open a new shell. If it is on PATH already, <code>ls -l ~/.local/bin/nx</code> tells you which layout you are on; <code>nx self install</code> from any working nx, or <code>uv tool install conexus</code> if nothing is installed yet.</p></details>
-<details><summary>Crash on startup, or an import error mentioning voyageai or Pydantic v1</summary><p>You are on Python 3.14 under the plain uv layout. Run <code>uv python install 3.13</code> then <code>uv tool install conexus --force --python 3.13</code>, and follow with <code>nx self install</code>.</p></details>
-<details><summary>nx doctor says credentials not set</summary><p>Expected in local mode. Only the managed cloud service uses a token.</p></details>
-<details><summary>nx search returns nothing</summary><p>Run <code>nx doctor</code>. If indexing was interrupted, re-run <code>nx index repo .</code>; it resumes. If you upgraded with a bare <code>uv tool install</code>, see Keeping it current above.</p></details>
-<details><summary>Plugin installed but its tools never appear</summary><p>Two usual causes: the <code>nx</code> CLI is not installed (the plugin's servers are that package), or Node.js is missing so <code>npx</code> cannot start the bundled server. <code>/conexus:nx-preflight</code> names which.</p></details>
-<details><summary>Still stuck</summary><p>The <a href="https://gist.github.com/Hellblazer/08f0a615e3d73e47d8062bce4829b611">recovery runbook</a> is a diagnose-first procedure you paste into a Claude Code session as its first message. It pauses for your go-ahead before anything that changes data.</p></details>
+<h2>Problems</h2>
+<details><summary>nx: command not found</summary><p>Add <code>~/.local/bin</code> to your PATH. Then open a new terminal. If PATH is already correct, run <code>nx self install</code>. If <code>nx</code> was never installed, run <code>uv tool install conexus</code>.</p></details>
+<details><summary>Crash on startup, or an import error mentioning voyageai or Pydantic v1</summary><p>Nexus runs on Python 3.14, which does not work. Run these three commands in order: <code>uv python install 3.13</code>, then <code>uv tool install conexus --force --python 3.13</code>, then <code>nx self install</code>.</p></details>
+<details><summary>nx doctor says credentials not set</summary><p>This is normal for a local install. Only the cloud service needs a token.</p></details>
+<details><summary>nx search returns nothing</summary><p>Run <code>nx doctor</code>. If the index was interrupted, run <code>nx index repo .</code> again. It continues where it stopped. If you updated with <code>uv tool install</code>, see "Update Nexus" above.</p></details>
+<details><summary>Plugin installed but its tools never appear</summary><p>There are two common causes. The <code>nx</code> command is not installed, or Node.js is not installed. Run <code>/conexus:nx-preflight</code>. It tells you which one.</p></details>
+<details><summary>Nothing above helps</summary><p>Use the <a href="https://gist.github.com/Hellblazer/08f0a615e3d73e47d8062bce4829b611">recovery runbook</a>. Paste it as the first message of a Claude Code session. Claude then checks the install step by step. It asks you before it changes any data.</p></details>
 
-<h2>What you just installed</h2>
-<p>One local service, Postgres 17 with pgvector, serving three tiers of memory: session scratch, persistent project notes, and a permanent semantic store of everything you index. An on-device embedder means nothing leaves your machine. Once a day the MCP server sends one anonymous ping with six fields (install id, version, mode, OS, CPU, Python); <code>nx telemetry off</code> disables it.</p>
-<p>Further reading: <a href="https://tensegrity.blog/2026/04/26/how-i-actually-use-nexus/">How I actually use Nexus</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md">Getting Started</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md">CLI reference</a></p>
+<h2>What you installed</h2>
+<p>One service on your computer. It contains a database (Postgres 17 with pgvector) and three stores: scratch for one session, memory for project facts, and knowledge for everything you index. The search model also runs on your computer, so your data does not leave it. One time per day, Nexus sends one anonymous message with six values: install id, version, mode, operating system, CPU type, and Python version. <code>nx telemetry off</code> stops this.</p>
+<p>More: <a href="https://tensegrity.blog/2026/04/26/how-i-actually-use-nexus/">How I actually use Nexus</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md">Getting Started</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md">CLI reference</a></p>
 
-<p class="footer">Source: <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a> README and docs. Commands match the current conexus release. This page is <a href="https://github.com/Hellblazer/nexus/blob/main/web/index.html">web/index.html</a> in the repo; fixes welcome.</p>
+<p class="footer">Source: <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a> README and docs. The commands match the current conexus release. This page is <a href="https://github.com/Hellblazer/nexus/blob/main/web/index.html">web/index.html</a> in the repo. Corrections are welcome.</p>
 </div>
 
 <script>
