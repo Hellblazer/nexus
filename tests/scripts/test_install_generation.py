@@ -54,6 +54,13 @@ def _stub_uv(bin_dir: Path, *, argv_log: Path, fail_install: bool = False) -> No
     consults. ``uv pip install`` appends its argv to *argv_log* so the tests
     can assert the SPEC uv actually received, rather than asserting the
     builder's string construction against itself.
+
+    ``uv venv`` also emulates uv 0.9+: a non-empty target directory is
+    refused unless ``--allow-existing`` is passed (the builder claims the
+    tree with its build marker BEFORE creating the venv, so without the
+    flag every generation install fails on a current uv; the 7.39.0
+    release PR's CI smoke measured exactly that while uv 0.8 on the dev
+    box tolerated it). Every build in this file therefore pins the flag.
     """
     fail = "exit 1" if fail_install else "exit 0"
     _make_executable(
@@ -62,14 +69,21 @@ def _stub_uv(bin_dir: Path, *, argv_log: Path, fail_install: bool = False) -> No
 echo "$@" >> "{argv_log}"
 if [[ "$1" == "venv" ]]; then
     target=""
+    allow_existing=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --python) shift 2 ;;
+            --allow-existing) allow_existing=1; shift ;;
             -*) shift ;;
             venv) shift ;;
             *) target="$1"; shift ;;
         esac
     done
+    if [[ -d "$target" && -n "$(ls -A "$target")" && "$allow_existing" -eq 0 ]]; then
+        echo "error: Failed to create virtual environment" >&2
+        echo "  Caused by: A directory already exists at: $target" >&2
+        exit 2
+    fi
     mkdir -p "$target/bin"
     printf '#!/bin/sh\\necho stub-python\\n' > "$target/bin/python"
     chmod +x "$target/bin/python"

@@ -150,7 +150,12 @@ trap _cleanup_incomplete EXIT
 # inside the env and would need UV_TOOL_BIN_DIR redirected too, or it clobbers
 # the shared bin entries — and those must be nexus-owned regular files (.4),
 # never uv-owned symlinks.
-uv venv --python "$PYTHON_VERSION" "$GEN" >&2
+# --allow-existing: the tree is already claimed above (mkdir + the build
+# marker), and uv 0.9+ refuses to create a venv in a non-empty directory
+# without it ("A directory already exists at: ..."; measured on the 7.39.0
+# release PR's CI smoke, uv 0.8 on the dev box tolerated it). The flag
+# preserves the marker; never --clear, which would delete the claim.
+uv venv --allow-existing --python "$PYTHON_VERSION" "$GEN" >&2
 # Refresh the claim (nexus-xn84f): each phase gets the full claim window.
 touch "$GEN/$NX_BUILDING_MARKER_NAME"
 # nexus-heykz: pyproject's [tool.uv] override-dependencies (the `av`

@@ -4859,18 +4859,32 @@ def _run_index(
     # index_model_for_collection above already uses for the service-mode
     # embed-fn selection -- makes the registration kwargs agree with the
     # name BY CONSTRUCTION, never a second independent guess.
+    #
+    # Release-battery finding (7.39.0 local-service gate, 35 reds): this
+    # loop runs only when the vector backend is the engine. The write path
+    # it fronts registers from INSIDE HttpVectorClient, so with
+    # NX_STORAGE_BACKEND_VECTORS opted out (a client-embedding T3 double
+    # injected by tests, the only non-service topology left) no write ever
+    # registered anything, and there is no engine-side collection to
+    # register: the name carries the double's own model token
+    # (minilm-l6-v2-384) and the engine 422s it against the tenant's real
+    # profile. Gated on the same is_vector_service_mode() that chose `db`
+    # above, so the loop and the client it registers for agree by
+    # construction.
     from nexus.corpus import (  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
         collection_registration_kwargs,
         ensure_collection_registered,
     )
+    from nexus.db.http_vector_client import is_vector_service_mode as _reg_service_mode  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
 
-    for _name in (code_collection if have_code_files else None,
-                  docs_collection if have_docs_files else None,
-                  rdr_col_name):
-        if _name is not None:
-            _reg_kwargs = collection_registration_kwargs(_name)
-            _reg_kwargs["embedding_model"] = index_model_for_collection(_name)
-            ensure_collection_registered(_name, kwargs=_reg_kwargs)
+    if _reg_service_mode():
+        for _name in (code_collection if have_code_files else None,
+                      docs_collection if have_docs_files else None,
+                      rdr_col_name):
+            if _name is not None:
+                _reg_kwargs = collection_registration_kwargs(_name)
+                _reg_kwargs["embedding_model"] = index_model_for_collection(_name)
+                ensure_collection_registered(_name, kwargs=_reg_kwargs)
 
     # ── Pre-index catalog registration (RDR-101 Phase 3 PR δ Stage B) ───────
     # Register catalog entries BEFORE per-file indexing so the prose
