@@ -1149,6 +1149,8 @@ class TestGetT3Routing:
 # identical to the old behaviour), else THIS client's own list_collections().
 
 class TestResolveCollectionRowTenantScoping:
+    # Neutral model tokens on purpose (RDR-109 mode lint): none of these tests
+    # touch an embedder, so a voyage-* name would be a cloud-mode claim they do not make.
     def setup_method(self):
         from nexus import mcp_infra
         mcp_infra.reset_singletons()
@@ -1165,12 +1167,12 @@ class TestResolveCollectionRowTenantScoping:
 
         fake_t3 = MagicMock(spec=T3Database)
         fake_t3.list_collections.return_value = [
-            {"name": "docs__x__voyage-context-3__v1", "count": 1, "content_type": "docs"},
+            {"name": "docs__x__model-ctx__v1", "count": 1, "content_type": "docs"},
         ]
         mcp_infra.inject_t3(fake_t3)
 
         client = HttpVectorClient()  # tenant="default"
-        row = client._resolve_collection_row("docs__x__voyage-context-3__v1")
+        row = client._resolve_collection_row("docs__x__model-ctx__v1")
         # mcp_infra.get_collection_row's own contract: only the catalog-
         # attribute subset, never "name"/"count" (see
         # _collections_cache_tuple_from_rows) -- still enough for the
@@ -1197,22 +1199,22 @@ class TestResolveCollectionRowTenantScoping:
         def fake_get(path, *, tenant="default"):
             get_calls.append((path, tenant))
             return [
-                {"name": "knowledge__x__voyage-context-3__v1", "count": 2, "content_type": "knowledge"},
+                {"name": "knowledge__x__model-ctx__v1", "count": 2, "content_type": "knowledge"},
             ]
 
         monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
 
         client = HttpVectorClient(tenant="tenant-a")
-        row = client._resolve_collection_row("knowledge__x__voyage-context-3__v1")
-        assert row == {"name": "knowledge__x__voyage-context-3__v1", "count": 2, "content_type": "knowledge"}
+        row = client._resolve_collection_row("knowledge__x__model-ctx__v1")
+        assert row == {"name": "knowledge__x__model-ctx__v1", "count": 2, "content_type": "knowledge"}
         assert get_calls == [("/v1/vectors/stats", "tenant-a")]
 
     def test_two_clients_of_different_tenants_resolve_through_their_own_tenant(self, monkeypatch):
         """The concrete defect this closes: two live clients, two tenants,
         one catalog each -- neither may answer for the other."""
         rows_by_tenant = {
-            "tenant-a": [{"name": "code__proj__voyage-code-3__v1", "count": 1, "content_type": "code"}],
-            "tenant-b": [{"name": "code__proj__voyage-code-3__v1", "count": 1, "content_type": "docs"}],
+            "tenant-a": [{"name": "code__proj__model-code__v1", "count": 1, "content_type": "code"}],
+            "tenant-b": [{"name": "code__proj__model-code__v1", "count": 1, "content_type": "docs"}],
         }
 
         def fake_get(path, *, tenant="default"):
@@ -1223,8 +1225,8 @@ class TestResolveCollectionRowTenantScoping:
         client_a = HttpVectorClient(tenant="tenant-a")
         client_b = HttpVectorClient(tenant="tenant-b")
 
-        row_a = client_a._resolve_collection_row("code__proj__voyage-code-3__v1")
-        row_b = client_b._resolve_collection_row("code__proj__voyage-code-3__v1")
+        row_a = client_a._resolve_collection_row("code__proj__model-code__v1")
+        row_b = client_b._resolve_collection_row("code__proj__model-code__v1")
         assert row_a is not None and row_a["content_type"] == "code"
         assert row_b is not None and row_b["content_type"] == "docs"
 
@@ -1257,7 +1259,7 @@ class TestResolveCollectionRowTenantScoping:
 
         def fake_get(path, *, tenant="default"):
             get_calls.append((path, tenant))
-            return [{"name": "code__proj__voyage-code-3__v1", "count": 1, "content_type": "code"}]
+            return [{"name": "code__proj__model-code__v1", "count": 1, "content_type": "code"}]
 
         monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
         monkeypatch.setattr(
@@ -1266,7 +1268,7 @@ class TestResolveCollectionRowTenantScoping:
         )
 
         client = HttpVectorClient(tenant="tenant-a")
-        client.upsert_chunks("code__proj__voyage-code-3__v1", ["id1"], ["text1"])
+        client.upsert_chunks("code__proj__model-code__v1", ["id1"], ["text1"])
 
         assert get_calls == [("/v1/vectors/stats", "tenant-a")]
 
@@ -1292,11 +1294,11 @@ class TestResolveCollectionRowTenantScoping:
 
         fake_t3 = MagicMock(spec=T3Database)
         fake_t3.list_collections.return_value = [
-            {"name": "docs__x__voyage-context-3__v1", "count": 1, "content_type": "docs"},
+            {"name": "docs__x__model-ctx__v1", "count": 1, "content_type": "docs"},
         ]
         mcp_infra.inject_t3(fake_t3)
 
-        row = singleton._resolve_collection_row("docs__x__voyage-context-3__v1")
+        row = singleton._resolve_collection_row("docs__x__model-ctx__v1")
         assert row == {"content_type": "docs"}
         fake_t3.list_collections.assert_called_once()
 
@@ -1307,10 +1309,10 @@ class TestResolveCollectionRowTenantScoping:
 
         def fake_get(path, *, tenant="default"):
             get_calls.append(tenant)
-            return [{"name": "docs__x__voyage-context-3__v1", "count": 1, "content_type": "docs"}]
+            return [{"name": "docs__x__model-ctx__v1", "count": 1, "content_type": "docs"}]
 
         monkeypatch.setattr(hvc, "_get", fake_get)
-        other._resolve_collection_row("docs__x__voyage-context-3__v1")
+        other._resolve_collection_row("docs__x__model-ctx__v1")
         assert get_calls == ["some-other-tenant"]
 
     def test_resolver_failure_is_memoized_not_retried(self, monkeypatch):
@@ -1330,7 +1332,7 @@ class TestResolveCollectionRowTenantScoping:
 
         monkeypatch.setattr(client, "_resolve_collection_row", raising_resolver)
 
-        client.upsert_chunks("code__proj__voyage-code-3__v1", ["id1"], ["text1"])
+        client.upsert_chunks("code__proj__model-code__v1", ["id1"], ["text1"])
 
         assert len(calls) == 1
 
@@ -1345,7 +1347,7 @@ class TestResolveCollectionRowTenantScoping:
         from nexus import mcp_infra
 
         def fake_get(path, *, tenant="default"):
-            return [{"name": "code__proj__voyage-code-3__v1", "count": 1, "content_type": "code"}]
+            return [{"name": "code__proj__model-code__v1", "count": 1, "content_type": "code"}]
 
         monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
 
@@ -1360,7 +1362,7 @@ class TestResolveCollectionRowTenantScoping:
         default_client = HttpVectorClient()  # tenant="default"
         default_client.list_collections()
         assert mcp_infra._collections_cache[2] == {  # noqa: SLF001
-            "code__proj__voyage-code-3__v1": {"content_type": "code"},
+            "code__proj__model-code__v1": {"content_type": "code"},
         }
 
 

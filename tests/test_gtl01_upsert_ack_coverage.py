@@ -214,7 +214,7 @@ class TestPagingLogsOnePairPerPage:
     def test_two_pages_log_two_request_and_response_pairs(self, monkeypatch):
         monkeypatch.setattr(
             "nexus.db.http_vector_client.per_collection_chunk_cap",
-            lambda collection: 1,
+            lambda collection, **_: 1,
         )
         posts: list[dict] = []
 
