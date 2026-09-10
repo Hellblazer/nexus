@@ -591,6 +591,28 @@ def test_holders_row_names_the_bytes_held_and_the_remedy(layout, monkeypatch) ->
     assert "nx self gc" in row.detail, row.detail
 
 
+def test_holders_row_reports_a_lower_bound_when_the_walk_is_capped(layout, monkeypatch) -> None:
+    """nexus-xn84f residual: the size walk is capped so a box with many
+    stranded generations does not turn doctor into a disk walk; past the cap
+    the row says 'at least'."""
+    from nexus import install_census  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+
+    tools, bin_dir = layout
+    old = _generation(tools, "20260101T000000Z")
+    new = _generation(tools, "20260826T010000Z")
+    (tools / "current").symlink_to(new)
+    (bin_dir / "nx").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(
+        install_census, "generation_holder_pids",
+        lambda gen, snapshot=None: [4242] if Path(gen).name == old.name else [],
+    )
+    monkeypatch.setattr(health, "_TREE_BYTES_MAX_FILES", 1)
+
+    row = _result(health._check_generation_layout(), "Holders")
+
+    assert "at least" in row.detail, row.detail
+
+
 # --------------------------------------------------------------------------
 # the silent-green regression guard the bead asked for BY NAME
 # --------------------------------------------------------------------------

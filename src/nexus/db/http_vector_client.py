@@ -3178,7 +3178,16 @@ class HttpVectorClient:
             for key in self._STATS_CATALOG_ATTR_KEYS:
                 if key in row and key not in entry:
                     entry[key] = row[key]
-        return [merged[n] for n in sorted(merged)]
+        rows = [merged[n] for n in sorted(merged)]
+        # nexus-7l3zo: this IS the listing seam every CLI verb goes through,
+        # so prime the process's collection-row cache here, once, with the
+        # response just fetched. Before this only search_cmd primed it, and
+        # every other verb that listed collections and then resolved a row
+        # paid a second /v1/vectors/stats round trip for the same data.
+        # Deferred import: mcp_infra imports this module.
+        from nexus.mcp_infra import prime_collections_cache  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+        prime_collections_cache(rows)
+        return rows
 
     def _list_collections_via_count(self) -> list[dict]:
         """Deployment-skew fallback: ``/collections`` names + N ``/count`` calls.

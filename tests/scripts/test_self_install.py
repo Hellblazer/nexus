@@ -313,6 +313,23 @@ def test_it_does_not_run_the_migration_ladder(bed, monkeypatch) -> None:
     )
 
 
+def test_the_builder_claims_its_tree_and_the_receipt_supersedes_it(bed, monkeypatch) -> None:
+    """nexus-xn84f: install_generation.sh writes .nx-building the instant the
+    directory exists and refreshes it after the venv step, so gc.sh keeps a
+    receipt-less tree through a quiet download; the receipt written last is
+    what makes the marker moot."""
+    tools, _, src = bed
+    host = _hosting_generation(tools, "20260101T000000Z", source=str(src))
+    (tools / "current").symlink_to(host)
+    monkeypatch.setattr(sys, "prefix", str(host))
+
+    _run_self_install()
+
+    current = (tools / "current").resolve()
+    assert (current / ".nx-building").is_file(), "the builder never claimed its tree"
+    assert (current / "nexus-install.json").is_file()
+
+
 def test_the_packaged_machinery_is_resolvable(bed) -> None:
     """`nx self install` execs the PACKAGED scripts, not the repo's. If they do
     not ship, this command cannot work from a real install and the failure

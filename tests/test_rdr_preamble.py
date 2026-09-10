@@ -1597,6 +1597,21 @@ class TestPhaseBlockParser:
         assert len(items) == 2
         assert all("Phase 0" in lbl for _, lbl, _ in items)
 
+    def test_a_bullet_continuation_line_is_kept(self):
+        """GH #1443 critique residual: a non-bulleted line inside a phase
+        block after a bullet used to be dropped on the floor; it is that
+        bullet's continuation."""
+        from nexus.commands.rdr import _prg_parse_phase_block_items  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "**Phase 1: Core**\n"
+            "- **Daemon**: stand it up\n"
+            "  and keep it up across restarts\n"
+            "- route reads\n"
+        )
+        items = _prg_parse_phase_block_items(text, phase="1")
+        assert [n for n, _, _ in items] == [1, 2]
+        assert items[0][2] == "stand it up and keep it up across restarts"
+
     def test_no_phase_enumerates_all_blocks(self):
         from nexus.commands.rdr import _prg_parse_phase_block_items
         items = _prg_parse_phase_block_items(self._APPROACH, phase=None)

@@ -64,6 +64,28 @@ class TestCollectionStats:
         assert got == rows
         assert paths == [STATS_PATH]
 
+    def test_list_collections_primes_the_row_cache_at_the_seam(self, monkeypatch):
+        """nexus-7l3zo: every CLI verb lists collections through
+        list_collections(); a row resolved right after must come from that
+        same response, never a second /v1/vectors/stats round trip (before
+        this only search_cmd primed the cache)."""
+        from nexus import mcp_infra  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+
+        rows = [
+            {"name": "code__a__model-x__v1", "dim": 1024, "count": 7,
+             "last_write": "2026-06-11T00:00:00Z", "content_type": "code",
+             "owner_id": "a", "embedding_model": "model-x", "lifecycle_state": "live"},
+        ]
+        paths = _patch_get(monkeypatch, lambda p: rows)
+        monkeypatch.setattr(mcp_infra, "_collections_cache", ([], {}, {}, 0.0))
+
+        listed = HttpVectorClient().list_collections()
+        row = mcp_infra.get_collection_row("code__a__model-x__v1")
+
+        assert [r["name"] for r in listed] == ["code__a__model-x__v1"]
+        assert row is not None and row["content_type"] == "code" and row["owner_id"] == "a"
+        assert paths.count(STATS_PATH) == 1, paths
+
     def test_non_list_response_returns_empty(self, monkeypatch):
         _patch_get(monkeypatch, lambda p: {"error": "weird"})
         assert HttpVectorClient().collection_stats() == []

@@ -4059,6 +4059,11 @@ def _prg_parse_phase_block_items(
             bm = bullet_re.match(line)
             if bm and bm.group(1).strip():
                 cur[2].append(bm.group(1).strip())
+            elif cur[2] and line.strip():
+                # A non-bulleted line inside a block after a bullet is that
+                # bullet's continuation (a wrapped label or summary), not
+                # something to drop on the floor (GH #1443 critique residual).
+                cur[2][-1] = cur[2][-1] + " " + line.strip()
     if cur is not None:
         blocks.append(cur)
 
