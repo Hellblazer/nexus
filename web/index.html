@@ -127,8 +127,8 @@ details p{margin:8px 0 4px;font-size:15px}
 <tr><td>Python 3.12 or 3.13</td><td>3.14 is not yet supported. uv will fetch 3.13 for you if needed.</td><td><code>python3 --version</code></td></tr>
 <tr><td>uv</td><td>Installs and runs the <code>nx</code> CLI.</td><td><code>uv --version</code></td></tr>
 <tr><td>git</td><td>Repo indexing reads git metadata.</td><td><code>git --version</code></td></tr>
-<tr data-for="code" class="must"><td>Node.js (with npm)</td><td><strong>Required for the plugin.</strong> Two of its MCP servers start via <code>npx</code>. Without Node they fail silently: the plugin installs fine and its tools simply never appear.</td><td><code>node --version</code><br><code>npm --version</code></td></tr>
-<tr><td>~1 GB disk, a few minutes</td><td>First run downloads a signed service binary, a Postgres bundle and the embedding model.</td><td>—</td></tr>
+<tr data-for="code" class="must"><td>Node.js (with npm)</td><td><strong>Required for the plugin.</strong> Its <code>sequential-thinking</code> MCP server starts via <code>npx</code>. Without Node it fails silently: the plugin installs fine and its tools simply never appear.</td><td><code>node --version</code><br><code>npm --version</code></td></tr>
+<tr><td>~600 MB download, a few minutes</td><td>First run downloads a signed service binary, a Postgres bundle and the embedding model.</td><td>—</td></tr>
 </table></div>
 
 <p>Missing uv or Node? Install them first:</p>
@@ -146,7 +146,7 @@ curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - &amp;&amp; su
 <h2>Install</h2>
 <div class="callout must" data-for="code">
   <div class="eyebrow">Before step 1</div>
-  <p><strong>Install Node.js now.</strong> The plugin's <code>sequential-thinking</code> and <code>context7</code> servers launch through <code>npx</code>. Without <code>node</code> and <code>npm</code> on PATH, step 4 will report success and the tools will never show up, with no error anywhere.</p>
+  <p><strong>Install Node.js now.</strong> The plugin's <code>sequential-thinking</code> server launches through <code>npx</code>. Without <code>node</code> and <code>npm</code> on PATH, step 4 will report success and the tools will never show up, with no error anywhere.</p>
   <p>Confirm with <code>node --version</code> and <code>npm --version</code> before continuing.</p>
 </div>
 <p>Run these in order. Each one is safe to re-run.</p>
@@ -233,14 +233,14 @@ nx upgrade        <span class="c"># converge engine, data and plugins</span></pr
 <details><summary>Crash on startup, or an import error mentioning voyageai or Pydantic v1</summary><p>You are on Python 3.14 under the plain uv layout. Run <code>uv python install 3.13</code> then <code>uv tool install conexus --force --python 3.13</code>, and follow with <code>nx self install</code>.</p></details>
 <details><summary>nx doctor says credentials not set</summary><p>Expected in local mode. Only the managed cloud service uses a token.</p></details>
 <details><summary>nx search returns nothing</summary><p>Run <code>nx doctor</code>. If indexing was interrupted, re-run <code>nx index repo .</code>; it resumes. If you upgraded with a bare <code>uv tool install</code>, see Keeping it current above.</p></details>
-<details><summary>Plugin installed but its tools never appear</summary><p>Two usual causes: the <code>nx</code> CLI is not installed (the plugin's servers are that package), or Node.js is missing so <code>npx</code> cannot start the bundled servers. <code>/conexus:nx-preflight</code> names which.</p></details>
+<details><summary>Plugin installed but its tools never appear</summary><p>Two usual causes: the <code>nx</code> CLI is not installed (the plugin's servers are that package), or Node.js is missing so <code>npx</code> cannot start the bundled server. <code>/conexus:nx-preflight</code> names which.</p></details>
 <details><summary>Still stuck</summary><p>The <a href="https://gist.github.com/Hellblazer/08f0a615e3d73e47d8062bce4829b611">recovery runbook</a> is a diagnose-first procedure you paste into a Claude Code session as its first message. It pauses for your go-ahead before anything that changes data.</p></details>
 
 <h2>What you just installed</h2>
 <p>One local service, Postgres 17 with pgvector, serving three tiers of memory: session scratch, persistent project notes, and a permanent semantic store of everything you index. An on-device embedder means nothing leaves your machine. Once a day the MCP server sends one anonymous ping with six fields (install id, version, mode, OS, CPU, Python); <code>nx telemetry off</code> disables it.</p>
 <p>Further reading: <a href="https://tensegrity.blog/2026/04/26/how-i-actually-use-nexus/">How I actually use Nexus</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md">Getting Started</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md">CLI reference</a></p>
 
-<p class="footer">Source: <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a> README and docs. Commands match conexus 7.40. This page is <a href="https://github.com/Hellblazer/nexus/blob/main/web/index.html">web/index.html</a> in the repo; fixes welcome.</p>
+<p class="footer">Source: <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a> README and docs. Commands match the current conexus release. This page is <a href="https://github.com/Hellblazer/nexus/blob/main/web/index.html">web/index.html</a> in the repo; fixes welcome.</p>
 </div>
 
 <script>
@@ -268,8 +268,8 @@ nx upgrade        <span class="c"># converge engine, data and plugins</span></pr
         return !(n.nodeType===1&&n.classList.contains("hidden"));
       }).map(function(n){return n.textContent;}).join("");
       text=text.split("\n").map(function(l){return l.replace(/\s*#.*$/,"");}).filter(function(l){return l.trim();}).join("\n");
-      function done(){btn.textContent="Copied";setTimeout(function(){btn.textContent="Copy";},1400);}
-      if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(done,done);}else{done();}
+      function done(){btn.textContent="Copied";setTimeout(function(){btn.textContent="Copy";},1400);}function fail(){btn.textContent="Select and copy";setTimeout(function(){btn.textContent="Copy";},2200);}
+      if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(done,fail);}else{fail();}
     });
   });
   apply();
