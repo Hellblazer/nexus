@@ -42,8 +42,7 @@ mechanize, it matters enough to ship.
   three blocking TSV hooks (`agent-dispatch-expect.sh`,
   `subagent-start-stamp.sh`, `subagent-stop.sh`) are untouched.
   bead: nexus-em75s.11
-- `conexus/hooks/scripts/subagent-start-tuple-async.sh`,
-  `conexus/hooks/scripts/subagent-stop-tuple-async.sh` (new): thin,
+- `conexus/hooks/scripts/subagent-start-tuple-async.sh`, `conexus/hooks/scripts/subagent-stop-tuple-async.sh` (new): thin,
   inert-safe wrappers — read the hook's own stdin payload, then
   background `tuple_ledger_project.py` with all three fds redirected to
   `/dev/null` before backgrounding, so the wrapper itself returns in

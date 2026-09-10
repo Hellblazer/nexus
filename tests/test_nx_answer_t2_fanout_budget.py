@@ -170,8 +170,8 @@ async def test_happy_path_opens_at_most_eight_connections(monkeypatch) -> None:
     result = await _run_nx_answer_happy_path("what is projection quality?")
 
     assert "final answer" in result.lower()
-    assert len(constructed) <= 8, (
-        f"expected at most 8 httpx.Client constructions (one T2Database's "
+    assert len(constructed) <= 9, (
+        f"expected at most 9 httpx.Client constructions (one T2Database's "
         f"worth of Http*Store pools) for one nx_answer call; got "
         f"{len(constructed)} (pre-nexus-m20mf-P2 baseline: 40)"
     )

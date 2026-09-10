@@ -320,11 +320,15 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         timeout: float | None = None,
     ) -> Any:
         _check_request_size(payload)
-        kwargs: dict[str, Any] = {"idempotent": idempotent, "mutates": mutates}
-        if timeout is not None:
-            kwargs["timeout"] = timeout
         try:
-            return super()._post(f"{_ROUTE_PREFIX}{path}", payload, **kwargs)
+            if timeout is not None:
+                return super()._post(
+                    f"{_ROUTE_PREFIX}{path}", payload,
+                    idempotent=idempotent, mutates=mutates, timeout=timeout,
+                )
+            return super()._post(
+                f"{_ROUTE_PREFIX}{path}", payload, idempotent=idempotent, mutates=mutates,
+            )
         except httpx.HTTPStatusError as exc:
             _raise_typed(exc)
 
