@@ -116,3 +116,11 @@ mechanize, it matters enough to ship.
   `conexus/commands/rdr-gate.md`, `conexus/commands/rdr-fix.md`:
   nexus-yjf5l.17 review — the cross-walk check names a pair once: a pair
   the identifier check already named is not named again.
+- `conexus/skills/rdr-gate/SKILL.md`: nexus-yjf5l.13 — On Pass step 2's
+  `prior:` field names the previous round's own critique record id,
+  never the upserted `{id}-gate-latest` row's own id (that row is one
+  fixed title, re-written every round, so its id never changes); also
+  notes that `nx rdr preamble rdr-verdict` prints the whole block to
+  copy verbatim rather than retype by hand.
+- `conexus/commands/rdr-gate.md`: nexus-yjf5l.13 — the same `prior:`
+  wording fix and verbatim-copy note, mirroring the skill.

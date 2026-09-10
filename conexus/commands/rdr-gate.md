@@ -44,8 +44,8 @@ All data is pre-loaded above — no additional tool calls needed, except the rea
   commit: <output of: git log -1 --format=%h -- <rdr file>>
   fix_check: <{repo_name}_rdr/{id}-fix-check-<sha> with sha equal to commit:, or 'none (no change since <sha>)'; mandatory on every re-gate (a record with prior:)>
   residuals: <one line per residual finding, round 3 onward, each `  - [<class>] <title>`, or `  - [<class>] <title> (carried from round <N>)` when it is carried forward from the prior record>
-  prior: [<previous gate-latest id>] (<OUTCOME> <nC> <nS>), <the previous record's own prior chain>
+  prior: [<the PREVIOUS round's own critique record id, never this record's own upserted id — `{id}-gate-latest` is one fixed title, re-written every round, so its id never changes; nexus-yjf5l.13>] (<OUTCOME> <nC> <nS>), <the previous record's own prior chain>
   ```
-  `critique:`, `commit:` and `prior:` are what the re-gate block reads; `fix_check:` must equal `commit:`. This overwrites any previous gate result for this RDR, so only the latest gate run is stored.
+  `critique:`, `commit:` and `prior:` are what the re-gate block reads; `fix_check:` must equal `commit:`. This overwrites any previous gate result for this RDR, so only the latest gate run is stored. `nx rdr preamble rdr-verdict` computes and prints this whole block, `prior:` included — copy it verbatim rather than retyping the chain by hand.
 - **If PASSED**, print: `> Run '/conexus:rdr-accept <id>' to accept this RDR.`
 - If no ID given, show the available RDR table above and prompt for an ID.

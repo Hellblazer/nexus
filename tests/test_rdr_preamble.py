@@ -918,6 +918,53 @@ class _FakeT2ResearchClient:
         return len(self._store)
 
 
+class _FakeT2UpsertClient(_FakeT2ResearchClient):
+    """Like ``_FakeT2ResearchClient``, but with real T2 id semantics
+    (nexus-yjf5l.13): a title gets a permanent id at its first ``put()``,
+    and every later ``put()`` to the SAME title reuses that id —
+    ``memory_put``'s "Upserts by (project, title)" contract. ``get()``
+    returns that id.
+
+    ``_FakeT2ResearchClient.get()`` never set an ``id`` key at all, so it
+    could not model the defect this reproduces: a ``-gate-latest`` row is
+    upserted under one fixed title every round, so a real T2 id for that
+    title stays constant across every round while a critique record's id
+    (a fresh, date-suffixed title each round, never overwritten) does not.
+    """
+
+    def __init__(
+        self,
+        entries: dict[str, str] | None = None,
+        ids: dict[str, int] | None = None,
+    ) -> None:
+        super().__init__(entries)
+        self._ids: dict[str, int] = dict(ids or {})
+        self._next_id = max(self._ids.values(), default=0) + 1
+
+    def get(self, project: str | None = None, title: str | None = None, id: int | None = None):
+        content = self._store.get(title)
+        if content is None:
+            return None
+        return {"title": title, "content": content, "id": self._ids.get(title)}
+
+    def put(
+        self,
+        project: str,
+        title: str,
+        content: str,
+        tags: str = "",
+        ttl: int | None = 30,
+        agent: str | None = None,
+        session: str | None = None,
+    ) -> int:
+        self.put_calls.append((title, content))
+        self._store[title] = content
+        if title not in self._ids:
+            self._ids[title] = self._next_id
+            self._next_id += 1
+        return self._ids[title]
+
+
 class TestRdrResearchAdd:
     """Tests for ``nx rdr preamble rdr-research -- add <id> <text>``
     (nexus-zu1q0): the next sequence number must be derived from existing
@@ -2357,6 +2404,29 @@ class TestRdrGateRoundAndFixCheck:
         out = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"]).output
         assert "Fix check record missing" not in out and "Fix check" in out
 
+    def test_round_number_same_from_repeated_or_distinct_prior_ids(self):
+        """nexus-yjf5l.13: ``_gate_round_number`` counts ``[<digits>]``
+        chain entries and is indifferent to whether the ids repeat (the
+        pre-fix defect shape — the real ``205-gate-latest`` record's four
+        entries all read ``[25098]``, the upserted row's own constant id)
+        or are distinct (the fixed shape: each round's own critique
+        record id). Both shapes must derive the identical round number —
+        the fix must not change round counting, only which id is
+        printed."""
+        from nexus.commands.rdr import _gate_round_number
+
+        old_shape = (
+            'outcome: "PASSED"\n'
+            "prior: [25098] (BLOCKED 2C 7S), [25098] (BLOCKED 2C 7S), "
+            "[25098] (BLOCKED 3C 11S), [25098] (BLOCKED 6C 11S)\n"
+        )
+        new_shape = (
+            'outcome: "PASSED"\n'
+            "prior: [25125] (BLOCKED 2C 7S), [25122] (BLOCKED 2C 7S), "
+            "[25114] (BLOCKED 3C 11S), [25096] (BLOCKED 6C 11S)\n"
+        )
+        assert _gate_round_number(old_shape, 0) == _gate_round_number(new_shape, 0) == 6
+
     def test_round_number_without_prior_field_is_two(self, rdr_env, monkeypatch):
         sha = self._commit(rdr_env, self._BODY, "gated")
         result = self._gate(rdr_env, monkeypatch, outcome="BLOCKED", commit=sha, prior=None)
@@ -2883,6 +2953,82 @@ class TestRdrVerdictPreamble:
         store["204-gate-critique-2026-09-07h"] = crit_new
         out = self._run(rdr_env, monkeypatch, store, "204-gate-critique-2026-09-07h").output
         assert "assumes this critique is the new" in out
+
+    def test_prior_chain_names_each_rounds_own_critique_never_the_upserted_latest_id(
+        self, rdr_env, monkeypatch
+    ):
+        """nexus-yjf5l.13: the real ``205-gate-latest`` record's ``prior:``
+        chain had four entries all reading ``[25098]``, the record's OWN
+        T2 id. Cause: ``205-gate-latest`` is upserted under one fixed
+        title every round (``memory_put`` "Upserts by (project, title)"),
+        so its id never changes across rounds — but the tool printed
+        ``[<id of the record it just read>]`` for "the previous round",
+        which IS that upserted row. The fix: name the previous round by
+        its own CRITIQUE record's id (a fresh, never-overwritten title
+        each round), never the upserted ``-gate-latest`` row's id.
+
+        ``_FakeT2ResearchClient`` (every other test in this class) never
+        set an ``id`` key at all, so it could not reproduce this — the
+        defect is specifically about WHICH id gets read back, and the old
+        fake supplied none. ``_FakeT2UpsertClient`` models real T2
+        upsert-by-title id semantics: same title, same id, forever."""
+        import nexus.commands.rdr as rdr_mod
+
+        self._commit(rdr_env)
+        crit1 = "## Critical Issues\n\n### Issue: one\n- **Location**: L1\n- **Ship-blocker**: yes\n"
+        crit2 = "## Critical Issues\n\n### Issue: two\n- **Location**: L2\n- **Ship-blocker**: yes\n"
+        crit3 = "## Critical Issues\n\n### Issue: three\n- **Location**: L3\n- **Ship-blocker**: yes\n"
+
+        fake = _FakeT2UpsertClient(
+            {"204-gate-critique-2026-09-09": crit1},
+            ids={"204-gate-critique-2026-09-09": 501},
+        )
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+
+        # Round 1: first gate, no prior chain yet.
+        out1 = _runner().invoke(
+            rdr, ["preamble", "rdr-verdict", "--", "204", "204-gate-critique-2026-09-09"]
+        ).output
+        assert "Gate round 1" in out1, out1
+        block1 = re.search(r"```\n(.*?)```", out1, re.DOTALL).group(1)
+        # The upserted "-gate-latest" row's OWN id, assigned once here and
+        # reused verbatim on every later put to that same title — exactly
+        # the real T2 upsert-by-title contract.
+        latest_row_id = fake.put(project="nexus_rdr", title="204-gate-latest", content=block1)
+        crit2_id = fake.put(project="nexus_rdr", title="204-gate-critique-2026-09-09b", content=crit2)
+
+        # Round 2: the prior chain's one entry must name round 1's own
+        # critique id (501), never the upserted row's id.
+        out2 = _runner().invoke(
+            rdr, ["preamble", "rdr-verdict", "--", "204", "204-gate-critique-2026-09-09b"]
+        ).output
+        assert "Gate round 2" in out2, out2
+        prior_line2 = re.search(r"^prior: (.+)$", out2, re.MULTILINE).group(1)
+        assert f"[{latest_row_id}]" not in prior_line2, (
+            "the upserted gate-latest row's own (constant) id must never "
+            f"appear in the prior chain: {prior_line2!r}"
+        )
+        assert "[501]" in prior_line2, f"round 1's own critique id must name round 1: {prior_line2!r}"
+
+        block2 = re.search(r"```\n(.*?)```", out2, re.DOTALL).group(1)
+        assert fake.put(project="nexus_rdr", title="204-gate-latest", content=block2) == latest_row_id
+        fake.put(project="nexus_rdr", title="204-gate-critique-2026-09-09c", content=crit3)
+
+        # Round 3: proves this is not a one-round coincidence — the old
+        # code would print the constant upserted id again here (and at
+        # every future round), since that id never changes. The fixed
+        # chain must carry each of the first two rounds' OWN critique ids
+        # exactly once.
+        out3 = _runner().invoke(
+            rdr, ["preamble", "rdr-verdict", "--", "204", "204-gate-critique-2026-09-09c"]
+        ).output
+        assert "Gate round 3" in out3, out3
+        prior_line3 = re.search(r"^prior: (.+)$", out3, re.MULTILINE).group(1)
+        assert f"[{latest_row_id}]" not in prior_line3, (
+            f"the constant upserted id must never appear, at any round: {prior_line3!r}"
+        )
+        assert prior_line3.count("[501]") == 1, prior_line3
+        assert prior_line3.count(f"[{crit2_id}]") == 1, prior_line3
 
     def test_tally_is_not_poisoned_by_earlier_verdict_shaped_text(self):
         """Code review [24900] 1-3: a fenced example verdict, a duplicate

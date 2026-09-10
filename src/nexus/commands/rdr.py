@@ -17,6 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import click
 import yaml
@@ -220,6 +221,34 @@ def _preamble_parse_t2_field(content: str, field: str) -> str | None:
             val = stripped.split(":", 1)[1].strip().strip('"').strip("'")
             return val
     return None
+
+
+def _prior_round_identity(client: Any, project: str, latest_content: str) -> str:
+    """The stable identity for the gate round *latest_content* represents,
+    to name in the ``prior:`` chain's newest entry — that round's own
+    critique record id, resolved from its ``critique:`` field. ``'?'``
+    when it cannot be resolved.
+
+    Never the upserted ``{id}-gate-latest`` row's own id (nexus-yjf5l.13).
+    That row is stored under ONE fixed title, re-written every round
+    (``memory_put`` upserts by ``(project, title)``), so its id is
+    constant across every round; a chain built from it points every
+    entry at whichever round happens to be current when read — the real
+    ``205-gate-latest`` record's four ``prior:`` entries all read
+    ``[25098]``, its own id, for exactly this reason. A critique record,
+    by contrast, is stored under a fresh, date-suffixed title each round
+    and is never overwritten, so its id is a genuine per-round identity.
+    """
+    field = (_preamble_parse_t2_field(latest_content, "critique") or "").strip()
+    title = field.rsplit("/", 1)[-1].strip() if field else ""
+    if not title:
+        return "?"
+    try:
+        record = client.get(project=project, title=title)
+    except Exception:  # noqa: BLE001 — best-effort identity; '?' is the safe fallback
+        return "?"
+    rid = record.get("id") if isinstance(record, dict) else None
+    return str(rid) if rid is not None else "?"
 
 
 def _preamble_get_rdrs_from_t2(repo_name: str, rdr_dir: str) -> list[dict]:
@@ -3556,7 +3585,10 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
                 return
             latest = client.get(project=project, title=f"{t2_key}-gate-latest")
             latest_content = latest.get("content", "") if isinstance(latest, dict) else ""
-            latest_id = latest.get("id") if isinstance(latest, dict) else None
+            # nexus-yjf5l.13: the chain's newest entry names the round
+            # `latest_content` represents by ITS critique record's id,
+            # never `latest`'s own id — see `_prior_round_identity`.
+            prev_round_id = _prior_round_identity(client, project, latest_content)
             rows = client.get_all(project=project) or [] if callable(getattr(client, "get_all", None)) else []
             prefix = f"{t2_key}-gate-critique-"
             critique_count = sum(
@@ -3685,7 +3717,7 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
     prev_chain = _t2_field_block(latest_content, "prior")
     prior_parts: list[str] = []
     if latest_content:
-        prior_parts.append(f"[{latest_id if latest_id is not None else '?'}] ({prev_outcome or '?'} {prev_c}C {prev_s}S)")
+        prior_parts.append(f"[{prev_round_id}] ({prev_outcome or '?'} {prev_c}C {prev_s}S)")
     if prev_chain:
         prior_parts.append(prev_chain)
 
