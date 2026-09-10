@@ -75,6 +75,9 @@ pre.out b{color:var(--ink);font-weight:500}
 .callout p{margin:4px 0}
 .callout.rule{border-color:var(--blue);background:var(--blue-soft)}
 
+.ph{color:var(--brass);font-style:italic}
+pre .ph{color:#E0B24C}
+
 /* investigate further */
 .further{margin:22px 0 6px;border:1px solid var(--line);border-left:3px solid var(--blue);border-radius:0 var(--radius) var(--radius) 0;background:var(--paper);padding:12px 16px;max-width:68ch}
 .further h4{margin:0 0 6px;font-family:"Source Serif 4",Georgia,serif;font-size:16px;font-weight:600;color:var(--blue)}
@@ -134,6 +137,7 @@ ul.plain li{margin:3px 0}
 <div class="eyebrow">Nexus · getting started</div>
 <h1>Nexus Getting Started</h1>
 <p class="lede">You do all of this inside Claude Code. You give Claude a short instruction. Claude uses Nexus for you. Each lesson shows the instruction to give, what Claude does, and what you see. Eight lessons, about one hour.</p>
+<p class="note">Words in <span class="ph">ORANGE CAPITALS</span> are placeholders. Replace them with something from your own project before you send the instruction.</p>
 <p class="note">Before you start: install Nexus and the plugin with the <a href="./">install guide</a>. Then open a terminal in a project of yours and run <code>claude</code>. Every lesson happens in that Claude Code session.</p>
 
 <div class="gloss-wrap">
@@ -200,7 +204,7 @@ ul.plain li{margin:3px 0}
 <!-- ============ 2 ============ -->
 <section class="lesson" id="l2">
 <div class="lhead"><span class="lnum">2</span><h2>Index your repository, then search it</h2><span class="ltime">10 min</span></div>
-<p class="why">Indexing reads your repository and adds its chunks to the knowledge store. After that, Claude can answer "where is retry handled" by searching for meaning, instead of reading many files. This is the step that makes all later searches possible.</p>
+<p class="why">Indexing reads your repository and adds its chunks to the knowledge store. After that, Claude can answer questions about the code by searching for meaning, instead of reading many files. This is the step that makes all later searches possible.</p>
 
 <h3>Index</h3>
 <div class="see">Say to Claude</div>
@@ -209,17 +213,32 @@ ul.plain li{margin:3px 0}
 <p>Claude runs the terminal command <code>nx index repo .</code> for you. Claude Code shows a Bash tool call with that command. The command reads every file, cuts it into chunks, and stores the chunks. On a large repository this takes a few minutes. At the end the output shows <code>Done.</code> and, after the first index, the topics that Nexus found.</p>
 <p class="note">If you index the same repository again later, Nexus skips files that did not change. The output then shows <code>skipped: index fresh</code> for them.</p>
 
-<h3>Search</h3>
+<h3>Find out what is in the index</h3>
+<p>You know your repository. The lessons do not. So the first question after indexing is one that works for every repository: what did Nexus find?</p>
 <div class="see">Say to Claude</div>
-<div class="cmd"><pre>Use Nexus search: how are retries handled in this codebase?</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>Which topics did Nexus find in this repository? List them with a short description of each.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
-<p>Claude Code shows a tool call named <code>search</code> on the <code>nexus</code> server. The tool returns the best matching chunks, grouped by topic, with the file path and the line number of each chunk. Claude then answers your question from those chunks and names the files.</p>
-<div class="callout"><p><strong>If Claude uses <code>grep</code> instead</strong>, say: <em>"Use Nexus search, not grep."</em> Grep finds exact words. Nexus search finds meaning, so it also finds code that does not contain the word "retry".</p></div>
-<p class="note">From the terminal, the same search is <code>nx search "how are retries handled"</code>.</p>
+<p>Claude runs <code>nx taxonomy list</code> and describes each topic. The topics are groups of related code that Nexus found by itself. They are a map of your repository. Pick one topic that interests you for the next step.</p>
+
+<h3>Search one topic</h3>
+<div class="see">Say to Claude</div>
+<div class="cmd"><pre>Use Nexus search to show me the main files for the topic "<span class="ph">TOPIC</span>", and explain in a few sentences what they do.</pre><button class="copy" type="button">Copy</button></div>
+<p class="note">Replace <span class="ph">TOPIC</span> with a topic from the list.</p>
+<div class="see">What you see</div>
+<p>Claude Code shows a tool call named <code>search</code> on the <code>nexus</code> server. The tool returns the best matching chunks, with the file path and the line number of each. Claude answers from those chunks and names the files. Open one of the files to check that the answer is correct.</p>
+<div class="callout"><p><strong>If Claude uses <code>grep</code> instead</strong>, say: <em>"Use Nexus search, not grep."</em> Grep finds exact words. Nexus search finds meaning, so it also finds code that uses different words for the same idea.</p></div>
+
+<h3>Now ask your own questions</h3>
+<p>Search works best with a question in normal language, not with a keyword. Three forms that work for any repository:</p>
+<div class="cmd"><pre>Where in this codebase is <span class="ph">SOMETHING YOU KNOW EXISTS</span> handled?
+Is there any code in this repository that <span class="ph">DOES SOMETHING YOU ARE NOT SURE ABOUT</span>?
+Which files deal with <span class="ph">A CONCEPT</span>, and how are they connected?</pre><button class="copy" type="button">Copy</button></div>
+<p>Start with something you know exists. Check that Nexus finds it. Then ask about something you are not sure about. The second kind of question is where semantic search helps most. It finds code that you did not know the name of.</p>
+<p class="note">From the terminal, a search is <code>nx search "your question"</code>. Add <code>--corpus docs</code> to search only documentation, or <code>--files</code> to list only file paths.</p>
 
 <div class="further"><h4>Investigate further</h4><ul>
-<li>Ask Claude: <em>"Search only the documentation, not the code, for how configuration is loaded."</em> Claude limits the search to the <code>docs</code> group.</li>
-<li>Ask Claude: <em>"Which topics did Nexus find in this repository?"</em> Claude runs <code>nx taxonomy list</code>.</li>
+<li>Ask Claude: <em>"Search only the documentation, not the code, for <span class="ph">A CONCEPT</span>."</em> Claude limits the search to the <code>docs</code> group.</li>
+<li>Ask Claude: <em>"Search for <span class="ph">AN EXACT CLASS OR FUNCTION NAME</span> with hybrid search."</em> Hybrid search combines exact text matches with semantic matches.</li>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/repo-indexing.md">Repo indexing</a>: how files are classified and cut into chunks.</li>
 </ul></div>
 </section>
@@ -230,13 +249,14 @@ ul.plain li{margin:3px 0}
 <p class="why">The memory store holds facts and decisions about a project. When a new session starts, Claude receives these entries first. This is how a decision from today is still known next month, in a new session, without you repeating it.</p>
 
 <div class="see">Say to Claude</div>
-<div class="cmd"><pre>Remember this in Nexus memory for this project, permanently, with the title "auth-tokens":
-Auth uses JWT. Tokens expire after 24 hours. The refresh endpoint is /v2/refresh.</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>Remember this in Nexus memory for this project, permanently, with the title "<span class="ph">SHORT-TITLE</span>":
+<span class="ph">ONE FACT ABOUT YOUR PROJECT THAT YOU WANT CLAUDE TO KNOW NEXT MONTH</span></pre><button class="copy" type="button">Copy</button></div>
+<p class="note">Example: title <code>auth-tokens</code>, fact "Auth uses JWT. Tokens expire after 24 hours. The refresh endpoint is /v2/refresh." Choose a real fact from your own project.</p>
 <div class="see">What you see</div>
-<p>A tool call named <code>memory_put</code> on the <code>nexus</code> server, with the project name, the title <code>auth-tokens</code>, and the text. Claude confirms that the entry is stored.</p>
+<p>A tool call named <code>memory_put</code> on the <code>nexus</code> server, with the project name, your title, and the text. Claude confirms that the entry is stored.</p>
 
 <div class="see">Say to Claude, later or in a new session</div>
-<div class="cmd"><pre>What does Nexus memory say about authentication in this project?</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>What does Nexus memory say about <span class="ph">THE SUBJECT OF YOUR FACT</span> in this project?</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>A tool call named <code>memory_search</code> or <code>memory_get</code>. Claude answers with the stored text. In a new session, Claude also receives the entry in the "T2 Memory" block from lesson 1, before you ask.</p>
 
@@ -245,7 +265,7 @@ Auth uses JWT. Tokens expire after 24 hours. The refresh endpoint is /v2/refresh
 
 <div class="further"><h4>Investigate further</h4><ul>
 <li>Ask Claude: <em>"List all Nexus memory entries for this project."</em></li>
-<li>Ask Claude: <em>"Delete the memory entry auth-tokens."</em> Then store it again to practice.</li>
+<li>Ask Claude: <em>"Delete the memory entry <span class="ph">SHORT-TITLE</span>."</em> Then store it again to practice.</li>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md#heat-weighted-t2-expiry">Configuration: heat-weighted T2 expiry</a>: the exact rule for how reads extend the TTL.</li>
 </ul></div>
 </section>
@@ -256,12 +276,12 @@ Auth uses JWT. Tokens expire after 24 hours. The refresh endpoint is /v2/refresh
 <p class="why">The scratch store belongs to the current session. Nexus deletes it when the session ends. Claude and every helper agent that Claude starts share the same scratch store. It is the place for ideas and partial results while you work on a problem.</p>
 
 <div class="see">Say to Claude</div>
-<div class="cmd"><pre>Note in Nexus scratch: hypothesis, the unstable test is caused by clock skew between the two containers.</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>Note in Nexus scratch: hypothesis, <span class="ph">SOMETHING YOU SUSPECT BUT HAVE NOT CHECKED YET</span>.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>A tool call named <code>scratch</code> on the <code>nexus</code> server, with the action <code>put</code>. Claude confirms the entry. When Claude later starts a helper agent to investigate, that agent can read the same note and add its own findings.</p>
 
 <div class="see">Say to Claude, when the idea proves true</div>
-<div class="cmd"><pre>Promote that scratch note to Nexus memory for this project, with the title "flaky-test-cause".</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>Promote that scratch note to Nexus memory for this project, with the title "<span class="ph">SHORT-TITLE</span>".</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>A tool call named <code>scratch_manage</code> with the action <code>promote</code>. The note is now a memory entry and survives the session. If the memory store already has a similar entry with a different title, the tool reports <code>overlap_detected</code>. Then Claude, or you, can merge the two.</p>
 <p class="note">Scratch notes that you do not promote disappear when the session ends. This is the purpose of the store. From the terminal: <code>nx scratch put "…"</code> and <code>nx scratch promote ID -p PROJECT -t TITLE</code>.</p>
@@ -279,22 +299,23 @@ Auth uses JWT. Tokens expire after 24 hours. The refresh endpoint is /v2/refresh
 
 <h3>A note in a subject collection</h3>
 <div class="see">Say to Claude</div>
-<div class="cmd"><pre>Store this in Nexus knowledge, in the collection "distributed-systems", with the title "idempotency-keys-per-tenant":
-Idempotency keys must be scoped per tenant. A global key space let two tenants collide in production (2026-03).</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>Store this in Nexus knowledge, in the collection "<span class="ph">SUBJECT</span>", with the title "<span class="ph">SHORT-TITLE</span>":
+<span class="ph">A LESSON YOU LEARNED THAT IS TRUE BEYOND THIS PROJECT</span></pre><button class="copy" type="button">Copy</button></div>
+<p class="note">Example: collection <code>distributed-systems</code>, title <code>idempotency-keys-per-tenant</code>, text "Idempotency keys must be scoped per tenant. A global key space let two tenants collide in production."</p>
 <div class="see">What you see</div>
-<p>A tool call named <code>store_put</code> on the <code>nexus</code> server, with the collection, the title, and the text. Claude confirms the document ID. From now on, a search for "idempotency key collision" finds this note.</p>
+<p>A tool call named <code>store_put</code> on the <code>nexus</code> server, with the collection, the title, and the text. Claude confirms the document ID. From now on, a search about that subject finds this note, in any project.</p>
 <div class="callout rule"><p><strong>A collection is a subject.</strong> Name it after a subject that will exist for years: <code>distributed-systems</code>, <code>postgres</code>, <code>team-process</code>. Do not name it after a session, a task, or a program. Nexus refuses the names <code>knowledge</code>, <code>notes</code>, <code>default</code>, <code>tmp</code>, and <code>test</code>. If you do not know the existing collections, ask Claude: <em>"List the Nexus collections."</em></p></div>
 
 <h3>Documents</h3>
 <div class="see">Say to Claude</div>
-<div class="cmd"><pre>Index docs/design-notes.md and papers/replication-protocol.pdf into Nexus.</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>Index <span class="ph">PATH/TO/A-MARKDOWN-FILE.md</span> and <span class="ph">PATH/TO/A-PAPER.pdf</span> into Nexus.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What Claude does</div>
 <p>Claude runs <code>nx index md</code> for the Markdown file and <code>nx index pdf</code> for the PDF. Nexus chooses the correct PDF reader automatically, also for scanned PDFs. Both documents are now in the knowledge store and in the catalog.</p>
 
 <h3>The catalog</h3>
 <p>Nexus adds every repository, note, and document to the catalog. The catalog also records links between documents. A link has a type, for example <code>cites</code>, <code>implements</code>, or <code>supersedes</code>. Search finds text inside documents. The catalog answers two other questions: what documents exist, and how they are connected.</p>
 <div class="see">Say to Claude</div>
-<div class="cmd"><pre>Which documents in the Nexus catalog are linked to the replication protocol paper?</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>Which documents in the Nexus catalog are linked to <span class="ph">THE TITLE OF THE PAPER</span>?</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>Tool calls on the <code>nexus-catalog</code> server: <code>show</code> or <code>links</code>. Claude lists the linked documents and the type of each link. In a new install there are few links yet. Links appear when Nexus enriches documents and when an RDR cites a source.</p>
 <p class="note">From the terminal: <code>nx store put</code>, <code>nx index md</code>, <code>nx index pdf</code>, and <code>nx catalog links "TITLE"</code>.</p>
@@ -302,7 +323,7 @@ Idempotency keys must be scoped per tenant. A global key space let two tenants c
 <div class="further"><h4>Investigate further</h4><ul>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/collections.md">Collections</a>: the rules for collection names.</li>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/catalog.md">Document catalog</a>: all link types, and how to add a link yourself.</li>
-<li>Ask Claude: <em>"Export the distributed-systems collection to a backup file."</em> Claude runs <code>nx store export</code>.</li>
+<li>Ask Claude: <em>"Export the <span class="ph">SUBJECT</span> collection to a backup file."</em> Claude runs <code>nx store export</code>.</li>
 </ul></div>
 </section>
 
@@ -312,7 +333,7 @@ Idempotency keys must be scoped per tenant. A global key space let two tenants c
 <p class="why">A normal question makes one or two searches. Some questions need more: compare what the documentation says with what the code does, or collect a pattern from many files. For these, the plugin has a skill that plans several steps and combines the results.</p>
 
 <div class="see">Say to Claude</div>
-<div class="cmd"><pre>/conexus:query Compare what the architecture docs say about caching with what the code actually does.</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>/conexus:query Compare what the documentation says about <span class="ph">A CONCEPT FROM LESSON 2</span> with what the code actually does.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>A tool call named <code>nx_answer</code>. It searches the documentation and the code, extracts the relevant facts from each, compares them, and returns one answer with sources. This takes longer than a normal search, usually 5 to 15 seconds and sometimes more.</p>
 <p class="note">Use <code>/conexus:query</code> when one search cannot hold the answer. For a simple question, a normal sentence to Claude is faster.</p>
