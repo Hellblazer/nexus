@@ -1435,6 +1435,30 @@ def _all_crosswalk_clauses(text: str) -> list[str]:
     return [m.strip() for m in _CROSSWALK_CLAUSE_RE.findall(normalized)]
 
 
+
+#: nexus-dxksa: the fix-check consensus clause and the per-row Class clause,
+#: one sentence each, pinned by equality across every placement of the
+#: brief (the printed brief in rdr.py, the gate and fix skills, their
+#: command mirrors, the accept skill and command).
+_CONSENSUS_CLAUSE_RE = re.compile(
+    r"The fix check is three independent dispatches of this brief on the same "
+    r"range, never one;.*?never a third run\.",
+    re.DOTALL,
+)
+_CLASS_CLAUSE_RE = re.compile(
+    r"Every row carries a `Class:` of exactly one of `BLOCKS-PLANNING`.*?"
+    r"is never BLOCKS-PLANNING\)\.",
+    re.DOTALL,
+)
+
+
+def _all_consensus_clauses(text: str) -> list[str]:
+    return [m.strip() for m in _CONSENSUS_CLAUSE_RE.findall(re.sub(r"\s+", " ", text))]
+
+
+def _all_class_clauses(text: str) -> list[str]:
+    return [m.strip() for m in _CLASS_CLAUSE_RE.findall(re.sub(r"\s+", " ", text))]
+
 class TestRdrGateLoopRemedies:
     """nexus-g7zgw: the five process remedies for the RDR gate/fix loop
     (T2 nexus/deep-analysis-rdr-gate-fix-loop-2026-09-07) are stated in the
@@ -1483,6 +1507,41 @@ class TestRdrGateLoopRemedies:
             assert "dispatched against the same commit in parallel" in path.read_text(), (
                 f"{path}: the serial precondition is missing"
             )
+
+    def test_fix_check_consensus_rule_in_every_placement(self) -> None:
+        """nexus-dxksa: a fix check is three dispatches; a defect counts at
+        two of three; only a counted BLOCKS-PLANNING defect fails; one fix
+        round, then residuals. The same sentence everywhere, by equality,
+        and the old single-run re-run rule is gone from every placement."""
+        from nexus.commands.rdr import (
+            FIX_CHECK_CLASS_CLAUSE, FIX_CHECK_CONSENSUS_CLAUSE, _FIX_RULES, _fix_check_lines,
+        )
+
+        printed = "\n".join(_fix_check_lines(
+            repo_root=str(REPO_ROOT), t2_key="0", rel="README.md",
+            gated_commit="HEAD", changed=True,
+        ))
+        assert _all_consensus_clauses(printed) == [FIX_CHECK_CONSENSUS_CLAUSE]
+        assert _all_class_clauses(printed) == [FIX_CHECK_CLASS_CLAUSE]
+        assert FIX_CHECK_CONSENSUS_CLAUSE in _FIX_RULES
+        expected_consensus = {
+            self.GATE_SKILL: 1, self.GATE_CMD: 1, self.FIX_SKILL: 2, self.FIX_CMD: 1,
+            self.ACCEPT_SKILL: 1, self.ACCEPT_CMD: 1,
+        }
+        for path, count in expected_consensus.items():
+            clauses = _all_consensus_clauses(path.read_text())
+            assert clauses == [FIX_CHECK_CONSENSUS_CLAUSE] * count, (
+                f"{path}: expected {count} verbatim consensus clause(s), found {clauses}"
+            )
+        for path in (self.GATE_SKILL, self.GATE_CMD, self.FIX_SKILL):
+            assert _all_class_clauses(path.read_text()) == [FIX_CHECK_CLASS_CLAUSE], path
+        for path in expected_consensus:
+            text = path.read_text()
+            assert "Any FAIL" not in text, f"{path}: the single-run re-run rule survives"
+            assert "re-run the fix check on the new diff" not in text, path
+            assert "re-run the check on the new diff" not in text, path
+            assert "re-run on the new diff" not in text, path
+        assert "Any FAIL" not in printed
 
     def test_termination_rule_and_ship_blockers_in_gate_skill(self) -> None:
         """Remedy 2: rounds 1-2 block on any Critical; from round 3 only a

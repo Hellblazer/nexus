@@ -73,3 +73,45 @@ mechanize, it matters enough to ship.
 - `conexus/commands/rdr-accept.md`: same follow-on review — Step 2b
   mirrors the skill's disposition-recording bound.
   bead: nexus-yjf5l.12
+- `conexus/skills/rdr-gate/SKILL.md`: nexus-dxksa — the fix check is three independent dispatches of one brief; a defect
+  counts only when at least two raise it; every row carries a Class
+  (BLOCKS-PLANNING, DISCOVER-AT-IMPLEMENTATION, OBSERVATION) and only a
+  counted BLOCKS-PLANNING defect fails; a failed check is fixed once and
+  checked once more, then its counted defects are residuals for accept.
+  Replaces "any FAIL: fix, re-run" in every placement.
+  bead: nexus-dxksa
+- `conexus/skills/rdr-fix/SKILL.md`: nexus-dxksa — the fix check is three independent dispatches of one brief; a defect
+  counts only when at least two raise it; every row carries a Class
+  (BLOCKS-PLANNING, DISCOVER-AT-IMPLEMENTATION, OBSERVATION) and only a
+  counted BLOCKS-PLANNING defect fails; a failed check is fixed once and
+  checked once more, then its counted defects are residuals for accept.
+  Replaces "any FAIL: fix, re-run" in every placement.
+  bead: nexus-dxksa
+- `conexus/skills/rdr-accept/SKILL.md`: nexus-dxksa — the fix check is three independent dispatches of one brief; a defect
+  counts only when at least two raise it; every row carries a Class
+  (BLOCKS-PLANNING, DISCOVER-AT-IMPLEMENTATION, OBSERVATION) and only a
+  counted BLOCKS-PLANNING defect fails; a failed check is fixed once and
+  checked once more, then its counted defects are residuals for accept.
+  Replaces "any FAIL: fix, re-run" in every placement.
+  bead: nexus-dxksa
+- `conexus/commands/rdr-gate.md`: nexus-dxksa — the fix check is three independent dispatches of one brief; a defect
+  counts only when at least two raise it; every row carries a Class
+  (BLOCKS-PLANNING, DISCOVER-AT-IMPLEMENTATION, OBSERVATION) and only a
+  counted BLOCKS-PLANNING defect fails; a failed check is fixed once and
+  checked once more, then its counted defects are residuals for accept.
+  Replaces "any FAIL: fix, re-run" in every placement.
+  bead: nexus-dxksa
+- `conexus/commands/rdr-fix.md`: nexus-dxksa — the fix check is three independent dispatches of one brief; a defect
+  counts only when at least two raise it; every row carries a Class
+  (BLOCKS-PLANNING, DISCOVER-AT-IMPLEMENTATION, OBSERVATION) and only a
+  counted BLOCKS-PLANNING defect fails; a failed check is fixed once and
+  checked once more, then its counted defects are residuals for accept.
+  Replaces "any FAIL: fix, re-run" in every placement.
+  bead: nexus-dxksa
+- `conexus/commands/rdr-accept.md`: nexus-dxksa — the fix check is three independent dispatches of one brief; a defect
+  counts only when at least two raise it; every row carries a Class
+  (BLOCKS-PLANNING, DISCOVER-AT-IMPLEMENTATION, OBSERVATION) and only a
+  counted BLOCKS-PLANNING defect fails; a failed check is fixed once and
+  checked once more, then its counted defects are residuals for accept.
+  Replaces "any FAIL: fix, re-run" in every placement.
+  bead: nexus-dxksa

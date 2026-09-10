@@ -83,12 +83,12 @@ fix commits, and the T2 title for the verdict. Then:
       setting this change adds or alters, name every check, bound or rule
       that constrains it, whether or not they share a name, and a pair the previous check already named is not named again.
 2. Deliverable: one row per clause, PASS or FAIL with line numbers, plus the
-   standard Verdict block.
+   standard Verdict block. Every row carries a `Class:` of exactly one of `BLOCKS-PLANNING` (an implementer executing the plan as written would build the wrong thing, or a step cannot run in the order given), `DISCOVER-AT-IMPLEMENTATION` (real, and the first test run or first hour at the keyboard surfaces it), or `OBSERVATION` (a wording, count, paraphrase or citation-form defect that changes no decision and no step; a documentation-accuracy defect is never BLOCKS-PLANNING).
 3. Store the verdict in T2: mcp__plugin_conexus_nexus__memory_put(project="{repo}_rdr", title="{id}-fix-check-<sha>", ttl="permanent", tags="rdr,gate,fix-check"), where `<sha>` is the RDR file's tip commit as printed by the preamble.
-4. Any FAIL: fix it, re-run the fix check on the new diff. Do not enter Layer 1
-   or Layer 3 with a FAIL open. Zero FAIL: proceed. The fix check and the gate
-   critique are never dispatched against the same commit in parallel: fix,
-   then check, then Layer 1 and Layer 3.
+4. The fix check is three independent dispatches of this brief on the same range, never one; a defect counts only when at least two of the three raise it at the same site, and a defect one critic alone raises is recorded as an observation and never fails the check; the check fails only on a counted BLOCKS-PLANNING defect; a failed check is fixed once and checked once more, and a second failure ends the loop with its counted defects recorded as residuals for accept, never a third run. Do not enter Layer 1 or Layer 3 with a failed check
+   open. The fix check and the gate critique are never
+   dispatched against the same commit in parallel: fix, then check, then
+   Layer 1 and Layer 3.
 
 Every re-gated record (one with a `prior:` chain) carries `fix_check:`: either
 `{repo}_rdr/{id}-fix-check-<sha>` with the sha equal to the record's `commit:`, or

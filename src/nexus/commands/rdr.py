@@ -17,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import click
 import yaml
@@ -2479,6 +2479,23 @@ def _fix_check_pointer_lines(
     return []
 
 
+#: The per-row classification the fix-check brief demands (nexus-dxksa). One
+#: sentence, carried verbatim by every placement of the brief (the gate and
+#: fix skills, their command mirrors, the accept skill and command);
+#: tests/test_plugin_structure.py pins each placement to this string.
+FIX_CHECK_CLASS_CLAUSE: Final = (
+    "Every row carries a `Class:` of exactly one of `BLOCKS-PLANNING` (an implementer executing the plan as written would build the wrong thing, or a step cannot run in the order given), `DISCOVER-AT-IMPLEMENTATION` (real, and the first test run or first hour at the keyboard surfaces it), or `OBSERVATION` (a wording, count, paraphrase or citation-form defect that changes no decision and no step; a documentation-accuracy defect is never BLOCKS-PLANNING)."
+)
+
+#: The consensus rule (nexus-dxksa): four runs of one brief on one commit
+#: disagreed on five of eleven findings, so a single run's FAIL list is
+#: about half noise and "any FAIL: re-run" resamples forever. Same
+#: placement and pinning contract as FIX_CHECK_CLASS_CLAUSE.
+FIX_CHECK_CONSENSUS_CLAUSE: Final = (
+    "The fix check is three independent dispatches of this brief on the same range, never one; a defect counts only when at least two of the three raise it at the same site, and a defect one critic alone raises is recorded as an observation and never fails the check; the check fails only on a counted BLOCKS-PLANNING defect; a failed check is fixed once and checked once more, and a second failure ends the loop with its counted defects recorded as residuals for accept, never a third run."
+)
+
+
 def _fix_check_lines(
     *, repo_root: str, t2_key: str, rel: str, gated_commit: str, changed: bool,
 ) -> list[str]:
@@ -2545,10 +2562,12 @@ def _fix_check_lines(
         "setting it constrains, and for every parameter, column or setting this change adds "
         "or alters, name every check, bound or rule that constrains it, whether or not they "
         "share a name, and a pair the previous check already named is not named again.",
+        FIX_CHECK_CLASS_CLAUSE,
         "",
-        f"Verdict goes to T2 `{t2_key}-fix-check-{tip_sha}` (project `<repo>_rdr`); the gate "
-        f"record's `fix_check:` must name `{tip_sha}`, equal to its `commit:`. Any FAIL: fix, "
-        "re-run the fix check on the new diff. Do not enter Layer 1 or Layer 3 with a FAIL open. "
+        FIX_CHECK_CONSENSUS_CLAUSE,
+        f"The consensus verdict goes to T2 `{t2_key}-fix-check-{tip_sha}` (project `<repo>_rdr`), "
+        f"naming all three dispatches; the gate record's `fix_check:` must name `{tip_sha}`, equal "
+        "to its `commit:`. Do not enter Layer 1 or Layer 3 with a failed check open. "
         "The fix check and the gate critique are never dispatched against the same commit in "
         "parallel: fix, then check, then Layer 1 and Layer 3.",
     ])
@@ -2664,6 +2683,7 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
         "tip after the disposition. A residual dispositioned by a bead id changed nothing "
         "in the file and needs none (nexus-yjf5l.1)."
     )
+    print(f"   {FIX_CHECK_CONSENSUS_CLAUSE}")
     print(
         f"   Classification determines which disposition applies: a residual classed "
         f"`{DISCOVER_AT_IMPLEMENTATION}` is dispositioned by a bead id, and the bead names "
@@ -3219,6 +3239,7 @@ _FIX_RULES: tuple[str, ...] = (
     "A Criterion 6 readability WARN is never closed inside a fix commit.",
     "The fix check and the gate critique are never dispatched against the same commit in "
     "parallel: fix, then check, then Layer 1 and Layer 3.",
+    FIX_CHECK_CONSENSUS_CLAUSE,
 )
 
 
