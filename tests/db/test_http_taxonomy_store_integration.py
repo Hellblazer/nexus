@@ -743,7 +743,7 @@ class TestTaxonomyMVV:
         t = other_taxonomy_store.get_topic_by_id(4001)
         assert t is None, "RLS isolation failed: tenant B saw tenant A's topic"
 
-    def test_e_etl_fidelity_topic_id_preserved(self, taxonomy_store) -> None:
+    def test_e_etl_fidelity_topic_id_preserved(self, taxonomy_store, pg_instance) -> None:
         """e) import_topic preserves original id, doc_count, created_at."""
         src_id = 5001
         taxonomy_store.import_topic(
@@ -757,11 +757,22 @@ class TestTaxonomyMVV:
             review_status="accepted",
             terms='["ai"]',
         )
+        # doc_count is trigger-maintained (RDR-154 P0) and, since
+        # nexus-c0g6e's root-cause fix (GH #1529), import recounts it from
+        # real topic_assignments rows rather than trusting the caller's 77;
+        # three real assignments are seeded, so the fidelity claim is 3.
+        for i in range(3):
+            chash = canonical_chunk_id(f"doc-fidelity-topic-inttest-{i}")
+            _seed_chunk(pg_instance, "default", "knowledge__papers", chash)
+            taxonomy_store.import_assignment(
+                doc_id=chash, topic_id=src_id, assigned_by="projection",
+                similarity=0.5, assigned_at=None, source_collection="knowledge__papers",
+            )
         t = taxonomy_store.get_topic_by_id(src_id)
         assert t is not None
         assert t["id"] == src_id
         assert t["label"] == "fidelity-topic-inttest"
-        assert t["doc_count"] == 77
+        assert t["doc_count"] == 3
         assert t["centroid_hash"] == "abc123"
         assert t["review_status"] == "accepted"
 
@@ -833,8 +844,14 @@ class TestTaxonomyMVV:
         assert not taxonomy_store.needs_rebalance("knowledge__papers-inttest-rb", 103)
         assert taxonomy_store.needs_rebalance("knowledge__papers-inttest-rb", 200)
 
-    def test_h_etl_greatest_merge_doc_count(self, taxonomy_store) -> None:
-        """h) Re-import with stale doc_count does NOT clobber live PG value (GREATEST)."""
+    def test_h_etl_reimport_never_trusts_caller_doc_count(self, taxonomy_store, pg_instance) -> None:
+        """h) Re-import with any caller doc_count leaves the recounted value.
+
+        Formerly the GREATEST-merge test: since nexus-c0g6e's root-cause fix
+        (GH #1529) the import path discards the caller's doc_count on both
+        the first import and the re-import and recounts from real
+        topic_assignments rows, so neither 50 nor 10 can ever land.
+        """
         taxonomy_store.import_topic(
             src_id=8001,
             label="greatest-merge-inttest",
@@ -846,24 +863,30 @@ class TestTaxonomyMVV:
             review_status="pending",
             terms=None,
         )
+        for i in range(2):
+            chash = canonical_chunk_id(f"greatest-merge-inttest-{i}")
+            _seed_chunk(pg_instance, "default", "knowledge__papers", chash)
+            taxonomy_store.import_assignment(
+                doc_id=chash, topic_id=8001, assigned_by="projection",
+                similarity=0.5, assigned_at=None, source_collection="knowledge__papers",
+            )
         t1 = taxonomy_store.get_topic_by_id(8001)
-        assert t1["doc_count"] == 50
+        assert t1["doc_count"] == 2
 
-        # Re-import with a stale (lower) doc_count — GREATEST should preserve 50
         taxonomy_store.import_topic(
             src_id=8001,
             label="greatest-merge-inttest",
             parent_id=None,
             collection="knowledge__papers",
             centroid_hash=None,
-            doc_count=10,  # stale — lower than live value
+            doc_count=10,  # the caller's value is discarded either way
             created_at="2026-01-01T00:00:00Z",
             review_status="pending",
             terms=None,
         )
         t2 = taxonomy_store.get_topic_by_id(8001)
-        assert t2["doc_count"] == 50, (
-            f"GREATEST failed: doc_count={t2['doc_count']} should be 50, not 10"
+        assert t2["doc_count"] == 2, (
+            f"re-import trusted the caller: doc_count={t2['doc_count']}, expected the recounted 2"
         )
 
 
