@@ -222,9 +222,11 @@ by hand. The rules it applies (`review-rounds.toml`, contract `rdr-gate`):
 - Rounds 1 and 2: BLOCKED iff `critical_count > 0`. Significants never block.
 - Round 3 onward: BLOCKED iff `ship_blockers > 0`. Every other Critical and
   Significant is a residual: the gate writes `outcome: PASSED` with one
-  `residuals:` line per finding in the gate record, appends "Gate N residuals"
-  to Revision History, and accept dispositions each one (rdr-accept skill).
-  `residuals:` is a union across rounds, not just this round's own critique:
+  `residuals:` line per finding in the gate record, appends the one printed
+  Revision History line (date, round, outcome, counts, ship-blockers, the
+  commit and the two T2 record titles — nothing else) to Revision History,
+  and accept dispositions each residual from the gate record (rdr-accept
+  skill). `residuals:` is a union across rounds, not just this round's own critique:
   a residual absent from a later round's critique (Layer 0 tells the critic
   not to re-raise it) is carried forward from the prior gate record into
   this one rather than dropped, marked `(carried from round <N>)` and keeping
@@ -249,7 +251,9 @@ by hand. The rules it applies (`review-rounds.toml`, contract `rdr-gate`):
 
 1. Store the critique in T2 FIRST: mcp__plugin_conexus_nexus__memory_put(content="{critique}", project="{repo}_rdr", title="{id}-gate-critique-{date}", ttl="permanent", tags="rdr,gate,critique"). Same-day re-gates append a letter (`{date}b`, `{date}c`). T2 is where the preamble reads; a T3 copy (collection="<subject>", title="gate-rdr-NNN-{date}") is optional and never the only copy.
 2. Write gate result to T2: mcp__plugin_conexus_nexus__memory_put(content="outcome: PASSED\ndate: YYYY-MM-DD\ncritical_count: 0\nsignificant_count: N\nobservation_count: N\nship_blockers: 0\nsummary: One-sentence summary\ncritique: {repo}_rdr/{id}-gate-critique-{date}\ncommit: <git log -1 --format=%h -- <rdr file>>\nfix_check: <{repo}_rdr/{id}-fix-check-<sha>, sha equal to commit:, or 'none (no change since <sha>)'; mandatory on every re-gate>\nresiduals: <one line per residual finding, round 3+, each `  - [<class>] <title>`, or `  - [<class>] <title> (carried from round <N>)` when it is carried forward from the prior record>\nprior: [<the PREVIOUS round's own critique record id, never this record's own upserted id — `{id}-gate-latest` is one fixed title, re-written every round, so its id never changes; nexus-yjf5l.13>] (<OUTCOME> <nC> <nS>), <the previous record's own prior chain>", project="{repo}_rdr", title="{id}-gate-latest", ttl="permanent", tags="rdr,gate"). `critique:`, `commit:` and `prior:` are what the re-gate block reads; `fix_check:` must equal `commit:`. `nx rdr preamble rdr-verdict` computes and prints this whole block, `prior:` included — copy it verbatim rather than retyping the chain by hand.
-3. Append gate findings to the RDR's Revision History section
+3. Append the one printed Revision History line to the RDR's Revision History
+   section — never the findings themselves; those live only in the two T2
+   records written in steps 1 and 2.
 4. Print: `> Run '/conexus:rdr-accept <id>' to accept this RDR.`
 
 Status remains **Draft** until the author explicitly accepts via `/conexus:rdr-accept`.
@@ -306,7 +310,7 @@ For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/REL
 - [ ] Fix check run on the diff since the gated commit, verdict stored as `{id}-fix-check-<sha>`, before Layer 1
 - [ ] Gate outcome computed by `nx rdr preamble rdr-verdict -- <id> <critique-title>`, never by hand
 - [ ] Gate result written to T2 as `{id}-gate-latest` (both pass and fail), with `prior:` chain, `fix_check:` and `residuals:`
-- [ ] On pass: gate findings appended to Revision History, accept prompt displayed
+- [ ] On pass: the one printed Revision History line appended to Revision History, accept prompt displayed
 - [ ] On fail: specific sections to address displayed to user
 
 ## Agent-Specific PRODUCE

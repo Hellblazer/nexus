@@ -3769,6 +3769,19 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
     print("```")
     print()
     print("Write these fields as printed; the outcome is not recomputed by hand.")
+    print()
+    print(
+        "Revision History line to append (this is the ENTIRE entry; the findings, "
+        "residual lists and fix narrative live only in the two T2 records above, "
+        "never repeated here):"
+    )
+    print()
+    print(
+        f"- {datetime.now(timezone.utc).date().isoformat()}: Gate round {round_no} — {outcome} "
+        f"({critical_count} Critical, {significant_count} Significant, {ship_blockers} "
+        f"ship-blocker(s)); commit `{commit or '?'}`; gate record `{project}/{t2_key}-gate-latest`; "
+        f"critique `{project}/{critique_title}`."
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -1518,6 +1518,28 @@ class TestRdrGateLoopRemedies:
         assert "recorded residual" in skill, "Layer 0 must exempt recorded residuals from the sweep"
         assert "recorded residual" in cmd, "Layer 0 must exempt recorded residuals from the sweep"
 
+    def test_gate_round_appends_one_revision_history_line(self) -> None:
+        """nexus-yjf5l.12: a gate round appends ONE Revision History line —
+        the findings, residual lists and fix narrative live only in the two
+        T2 records (the gate record and the critique), never repeated in
+        the RDR file. Before this change the skill instructed the author to
+        append the findings themselves ("Append gate findings to the RDR's
+        Revision History section", "appends \"Gate N residuals\" to Revision
+        History", "gate findings appended to Revision History"); after, it
+        instructs appending only the one line `nx rdr preamble rdr-verdict`
+        prints."""
+        skill = self.GATE_SKILL.read_text()
+        cmd = self.GATE_CMD.read_text()
+        assert "Revision History line" in skill, "the one-line form is named"
+        assert "Revision History line" in cmd, "the command mirror names the one-line form"
+        # Old wording promised the findings themselves in the RDR file.
+        assert "Append gate findings to the RDR's Revision History section" not in skill
+        assert 'appends "Gate N residuals"\n  to Revision History' not in skill
+        assert "gate findings appended to Revision History" not in skill
+        assert "Revision History for accept to disposition" not in cmd, (
+            "accept dispositions residuals from the gate record's residuals:, not Revision History"
+        )
+
     def test_command_and_skill_agree_on_fix_check_scope(self) -> None:
         cmd = self.GATE_CMD.read_text()
         assert "research entry" in cmd, "the enumeration rule covers the cited research entry"

@@ -23,6 +23,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -3236,6 +3237,39 @@ class TestRdrVerdictPreamble:
         assert out.count("stale by") == 2, out  # once in the "Residuals (N)" line, once in `residuals:`
         assert "stale by 3" in out
         assert "stale by 2" not in out, "the drifted-count duplicate must not be carried forward"
+
+    def test_prints_one_line_revision_history_form(self, rdr_env, monkeypatch):
+        """nexus-yjf5l.12: a gate round appends ONE Revision History line —
+        date, round, outcome, critical and significant counts, ship-blockers,
+        the gated commit, the T2 gate record title and the critique record
+        title — and nothing else. The finding titles (alpha, beta) live only
+        in the T2 gate record and critique above; they must not appear in the
+        printed Revision History block."""
+        sha = self._commit(rdr_env)
+        repo_name = rdr_env["repo_root"].name
+        project = f"{repo_name}_rdr"
+        crit = (
+            "## Critical Issues\n\n### Issue: alpha\n- **Location**: L1\n"
+            "- **Ship-blocker**: yes\n\n"
+            "## Significant Issues\n\n### Issue: beta\n- **Location**: L2\n"
+            "- **Ship-blocker**: no\n\n"
+            "## Verdict\n\n- **outcome**: not-justified\n- **critical_count**: 1\n"
+            "- **significant_count**: 1\n- **ship_blockers**: 1\n"
+        )
+        store = {"c": crit, "204-gate-latest": "outcome: \"PASSED\"\nprior: [1] (1C), [2] (1C)\n"}
+        out = self._run(rdr_env, monkeypatch, store, "c").output
+        assert "Gate round 4" in out, out
+        assert "Revision History line to append" in out, out
+        today = datetime.now(timezone.utc).date().isoformat()
+        expected = (
+            f"- {today}: Gate round 4 — BLOCKED (1 Critical, 1 Significant, "
+            f"1 ship-blocker(s)); commit `{sha}`; gate record `{project}/204-gate-latest`; "
+            f"critique `{project}/c`."
+        )
+        assert expected in out, out
+        after = out.split("Revision History line to append", 1)[1]
+        assert "alpha" not in after, after
+        assert "beta" not in after, after
 
 
 class TestCritiqueFindings:

@@ -124,3 +124,13 @@ mechanize, it matters enough to ship.
   copy verbatim rather than retype by hand.
 - `conexus/commands/rdr-gate.md`: nexus-yjf5l.13 — the same `prior:`
   wording fix and verbatim-copy note, mirroring the skill.
+- `conexus/skills/rdr-gate/SKILL.md`: nexus-yjf5l.12 — Gate Aggregation, On
+  Pass step 3, and the Success Criteria checklist all now say a gate round
+  appends ONE printed Revision History line (date, round, outcome, counts,
+  ship-blockers, the commit and the two T2 record titles); the findings,
+  residual lists and fix narrative live only in the gate record and the
+  critique, never repeated in the RDR file.
+- `conexus/commands/rdr-gate.md`: nexus-yjf5l.12 — the gate outcome bullet
+  mirrors the same one-line Revision History rule and drops the earlier
+  claim that residuals are also recorded in Revision History for accept
+  to disposition (accept reads the gate record's `residuals:` field).
