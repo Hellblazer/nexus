@@ -142,6 +142,26 @@ class TupleRepositoryTest {
                 .isInstanceOf(UnknownSubspaceException.class);
     }
 
+    // ── rd/rdp: template resolution (nexus-em75s.35) ────────────────────────
+    //
+    // rd and rdp both funnel through the private queryOnce, which — unlike
+    // out's and in/inp's own "Once" helper (claimOnce) — never resolved the
+    // subspace against the TemplateRegistry: an unregistered subspace read
+    // as an empty result instead of UnknownSubspaceException, same class of
+    // gap out_unknownSubspace_refused above already pins for out().
+
+    @Test
+    void rdp_unknownSubspace_refused() {
+        assertThatThrownBy(() -> repo.rdp(TENANT_A, "bogus/nowhere", Map.of("k", "v"), 10, null))
+                .isInstanceOf(UnknownSubspaceException.class);
+    }
+
+    @Test
+    void rd_unknownSubspace_refused() {
+        assertThatThrownBy(() -> repo.rd(TENANT_A, "bogus/nowhere", Map.of("k", "v"), 10, null, 0))
+                .isInstanceOf(UnknownSubspaceException.class);
+    }
+
     @Test
     void out_ttlAboveRetention_refused_noRow() {
         Map<String, String> keys = Map.of("agent_id", "agent-ttl", "kind", "start");

@@ -341,7 +341,12 @@ public final class TupleHandler implements HttpHandler {
         m.put("body", t.body());
         m.put("claim_state", t.claimState());
         m.put("claimant", t.claimant());
-        m.put("claim_id", t.claimId());
+        // nexus-em75s.35 (RDR-205 review, M5): claim_id is the ack/nack credential --
+        // never readable off a probe/read response (/rd, /rdp). This same method also
+        // renders the tuple embedded in /in and /inp's response, but those already
+        // deliver the credential via their own top-level "claim_id" field (see
+        // renderClaim), so dropping it here loses nothing there and closes the leak
+        // for every other caller who reads a claimed row without having won the claim.
         m.put("lease_until", t.leaseUntil());
         m.put("attempts", t.attempts());
         m.put("consumed_at", t.consumedAt());

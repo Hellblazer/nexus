@@ -426,6 +426,11 @@ public final class TupleRepository {
 
     private List<TupleRow> queryOnce(String tenant, String subspace, Map<String, String> pattern,
                                       int n, ReadCursor since) {
+        // RDR-205 review (nexus-em75s.35, M4): rd/rdp must refuse an unregistered
+        // subspace exactly as out() and in()/inp() (via claimOnce) do -- this was
+        // the one "Once" helper that never resolved the template, so a probe/read
+        // against a bogus subspace silently read back empty instead of raising.
+        resolveOrThrow(subspace);
         Map<String, String> patternSafe = pattern == null ? Map.of() : pattern;
         int limit = Math.min(n <= 0 ? 1 : n, readMax);
 

@@ -132,12 +132,72 @@ class TupleHandlerWiringTest {
         assertThat(resp.statusCode()).isEqualTo(404);
     }
 
+    /**
+     * nexus-em75s.35 (RDR-205 review finding M5): {@code claim_id} is the ack/nack
+     * credential — a reader that never won the claim must never be able to read it
+     * off a probe/read response. Round-trips a real claim through {@code /out} then
+     * {@code /in} (so the row's persisted {@code claim_id} column is genuinely set,
+     * not null), then reads it back via {@code /rd} and asserts the rendered tuple
+     * carries {@code claimant}/{@code claim_state} but has NO {@code claim_id} key at
+     * all — not null, absent — while the claimant who actually won the claim still
+     * receives the credential via {@code /in}'s own top-level {@code claim_id} field.
+     */
+    @SuppressWarnings("unchecked")
+    @Test
+    void rd_claimedTuple_omitsClaimIdKey_keepsClaimantAndClaimState() throws Exception {
+        String to = "wire-shape-test-addr";
+        String from = "wire-shape-test-sender";
+        String claimant = "wire-shape-test-claimant";
+
+        var outResp = post(withRegistry, "/v1/tuples/out", Map.of(
+                "subspace", "mailbox/" + to,
+                "keys", Map.of("to", to),
+                "dims", Map.of("from", from),
+                "body", "hello",
+                "nonce", "wire-shape-test-nonce-1"));
+        assertThat(outResp.statusCode()).isEqualTo(200);
+
+        var inResp = post(withRegistry, "/v1/tuples/in", Map.of(
+                "subspace", "mailbox/" + to,
+                "keys_pattern", Map.of("to", to),
+                "claimant", claimant,
+                "lease_s", 60));
+        assertThat(inResp.statusCode()).isEqualTo(200);
+        var inJson = mapper.readValue(inResp.body(), MAP_T);
+        // The actual credential DOES reach the claimant — via /in's own top-level
+        // field, never via the tuple object itself.
+        assertThat(inJson.get("claim_id")).isNotNull();
+
+        var rdResp = post(withRegistry, "/v1/tuples/rd", Map.of(
+                "subspace", "mailbox/" + to,
+                "keys_pattern", Map.of("to", to)));
+        assertThat(rdResp.statusCode()).isEqualTo(200);
+        var rdJson = mapper.readValue(rdResp.body(), MAP_T);
+        var tuples = (java.util.List<Map<String, Object>>) rdJson.get("tuples");
+        assertThat(tuples).hasSize(1);
+        Map<String, Object> tuple = tuples.get(0);
+        assertThat(tuple).containsEntry("claim_state", "claimed");
+        assertThat(tuple).containsEntry("claimant", claimant);
+        assertThat(tuple).doesNotContainKey("claim_id");
+    }
+
     private HttpResponse<String> get(NexusService svc, String path) throws Exception {
         var req = HttpRequest.newBuilder()
                 .uri(URI.create("http://127.0.0.1:" + svc.getPort() + path))
                 .header("Authorization", "Bearer " + TOKEN)
                 .header("X-Nexus-Tenant", TENANT)
                 .GET()
+                .build();
+        return http.send(req, HttpResponse.BodyHandlers.ofString());
+    }
+
+    private HttpResponse<String> post(NexusService svc, String path, Object body) throws Exception {
+        var req = HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + svc.getPort() + path))
+                .header("Authorization", "Bearer " + TOKEN)
+                .header("X-Nexus-Tenant", TENANT)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(body)))
                 .build();
         return http.send(req, HttpResponse.BodyHandlers.ofString());
     }
