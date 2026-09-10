@@ -20,13 +20,14 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 
-# nexus-0y4c6: hoisted out of the four tests below' own bodies so the
-# RDR-109 mode-declaration lint no longer needs to exclude them by
-# nodeid -- the fixtures name an orphan collection to mirror the measured
-# live population the arm classifies; the tests assert classification/
-# drop/refusal against a fake writer and fake count routes, never a real
-# embedder or credential.
-_ORPHAN_CODE_COLLECTION = "code__test-repo-abc123__voyage-code-3__v1"
+# Neutral model token on purpose (RDR-109 mode lint), used throughout
+# this file: this name mirrors the measured live population the arm
+# classifies (a collection with 0 catalog docs), but
+# classify_t3_orphan_collections dispatches purely on chunk/doc counts
+# and the content-type PREFIX -- the model segment is opaque to it, so
+# "model-code" carries the same shape without a cloud-mode claim. The
+# tests below assert classification/drop/refusal against a fake writer
+# and fake count routes, never a real embedder.
 
 
 class _Cat:
@@ -147,7 +148,7 @@ def world():
     reference it), and one whose chunk count read fails (unresolvable --
     never a delete target)."""
     t3_names = [
-        "code__test-repo-abc123__voyage-code-3__v1",  # orphan: 5 chunks, 0 docs (live+all)
+        "code__test-repo-abc123__model-code__v1",  # orphan: 5 chunks, 0 docs (live+all)
         "docs__hotfix_smoke",                          # orphan: 2 chunks, 0 docs (live+all)
         "docs__1-2188",                                 # tombstoned-only: 7 chunks, 0 live, 2828 tombstoned
         "docs__empty_zombie",                          # 0 chunks, 0 docs -- not this arm's target
@@ -161,7 +162,7 @@ def world():
     t3 = _T3(
         t3_names,
         counts={
-            "code__test-repo-abc123__voyage-code-3__v1": 5,
+            "code__test-repo-abc123__model-code__v1": 5,
             "docs__hotfix_smoke": 2,
             "docs__1-2188": 7,
             "docs__empty_zombie": 0,
@@ -183,7 +184,7 @@ def test_dry_run_default_lists_candidates_and_never_builds_the_writer(world, mon
     assert result.exit_code == 0, result.output
     out = result.output
     assert "drop-orphan-collections: 2 candidate(s)" in out, out
-    assert _ORPHAN_CODE_COLLECTION in out
+    assert "code__test-repo-abc123__model-code__v1" in out
     assert "docs__hotfix_smoke" in out
     assert "docs__empty_zombie" not in out  # zombie, not an orphan
     assert "1 collection(s) are tombstoned-only" in out, out
@@ -219,7 +220,7 @@ def test_confirmed_drops_exactly_the_classified_orphans(world, monkeypatch) -> N
 
     assert result.exit_code == 0, result.output
     assert set(writer.deleted) == {
-        _ORPHAN_CODE_COLLECTION, "docs__hotfix_smoke",
+        "code__test-repo-abc123__model-code__v1", "docs__hotfix_smoke",
     }
     assert writer.closed
     assert "Done: dropped 2 orphan collection(s)." in result.output
@@ -287,7 +288,7 @@ def test_orphan_still_drops_when_tombstone_count_is_available(world, monkeypatch
     ])
 
     assert result.exit_code == 0, result.output
-    assert _ORPHAN_CODE_COLLECTION in writer.deleted
+    assert "code__test-repo-abc123__model-code__v1" in writer.deleted
     assert "docs__hotfix_smoke" in writer.deleted
 
 
@@ -350,7 +351,7 @@ def test_delete_failure_for_one_collection_reports_and_exits_nonzero(world, monk
     ])
 
     assert result.exit_code == 1, result.output
-    assert writer.deleted == [_ORPHAN_CODE_COLLECTION]
+    assert writer.deleted == ["code__test-repo-abc123__model-code__v1"]
     assert writer.closed
     assert "1 failure(s)" in result.output
     assert "docs__hotfix_smoke" in result.output

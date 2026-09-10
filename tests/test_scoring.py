@@ -96,24 +96,24 @@ def test_hybrid_score_weighted_sum():
 # input classes the bead names, since a wrong verdict here silently
 # changes which results get the frecency-blended score. ──────────────────
 
-# nexus-0y4c6: hoisted out of test_hybrid_scoring_code_detection_pinned's
-# own decorator so the RDR-109 mode-declaration lint no longer needs to
-# exclude it by nodeid -- parametrize-data collection-name/is_code_like
-# pairs; nexus.mcp_infra.get_collection_row is stubbed directly
-# (_code_row_stub), no embedder or credential path.
-_CODE_DETECTION_CASES = [
-    ("code__repo", True),                            # legacy 2-segment
-    ("code__repo__voyage-code-3__v1", True),          # conformant
-    ("docs__papers", False),
-    ("knowledge__notes", False),
-    ("quarantine-code__repo", False),                 # NOT "code__"-prefixed
-    ("other__repo", False),                           # unrecognized prefix
-    ("codebase__repo", False),                        # startswith("code") but not "code__"
-]
-
-
-@pytest.mark.parametrize("coll, is_code_like", _CODE_DETECTION_CASES)
+@pytest.mark.parametrize(
+    "coll, is_code_like",
+    [
+        ("code__repo", True),                            # legacy 2-segment
+        ("code__repo__model-code__v1", True),             # conformant
+        ("docs__papers", False),
+        ("knowledge__notes", False),
+        ("quarantine-code__repo", False),                 # NOT "code__"-prefixed
+        ("other__repo", False),                           # unrecognized prefix
+        ("codebase__repo", False),                        # startswith("code") but not "code__"
+    ],
+)
 def test_hybrid_scoring_code_detection_pinned(coll: str, is_code_like: bool, monkeypatch) -> None:
+    """Neutral model token on purpose (RDR-109 mode lint): the
+    conformant-name case's model segment is irrelevant to code
+    detection, which is purely positional on the first "__" segment;
+    nexus.mcp_infra.get_collection_row is stubbed directly
+    (_code_row_stub), no embedder or credential path."""
     monkeypatch.setattr("nexus.mcp_infra.get_collection_row", _code_row_stub)
     r = _r(coll=coll, dist=0.2, frecency=0.8)
     with patch("nexus.scoring._log") as mock_log:
