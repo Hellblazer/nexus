@@ -111,6 +111,68 @@ class HighlightRecord:
     ingested_at: str
 
 
+@dataclass(frozen=True)
+class TupleRow:
+    """One RDR-205 tuple, as rendered by ``TupleHandler.renderTuple``.
+
+    ``id`` is lowercase hex (the RDR-086 chunk-identity convention this
+    repo already uses at every other bytea-identity boundary — RDR-205
+    §Technical Design "Operations"). ``keys`` / ``dims`` are plain
+    string-valued maps. ``claim_state`` is one of ``None`` (never
+    claimed), ``"claimed"`` or ``"dead"`` — the engine's own vocabulary,
+    not re-typed here. Every ``*_at`` / ``lease_until`` field is an
+    ISO-8601 timestamp string or ``None``, exactly as the wire sends it —
+    parsing is the caller's job, not this record's.
+
+    Deliberately has NO ``claim_id`` field (nexus-em75s.35, RDR-205
+    review M5): the engine stopped rendering it on an embedded tuple —
+    it is the ack/nack credential, never readable off a probe/read
+    response (``rd``/``rdp``), and the SAME render method backs the
+    tuple embedded in ``in``/``inp``'s response too, so a field here
+    would silently be absent on some call paths and present on none.
+    ``in_``/``inp`` deliver the claim id as the SECOND element of their
+    own ``(TupleRow, claim_id)`` return, never inside the row.
+    """
+
+    id: str
+    subspace: str
+    template: str
+    keys: dict[str, str]
+    dims: dict[str, str]
+    body: str | None
+    claim_state: str | None
+    claimant: str | None
+    lease_until: str | None
+    attempts: int
+    consumed_at: str | None
+    consumed_by: str | None
+    expires_at: str | None
+    created_at: str | None
+
+
+@dataclass(frozen=True)
+class SubspaceCensus:
+    """One subspace's row-count breakdown, as rendered by
+    ``TupleHandler.renderCensus`` (``subspace_list`` / ``subspace_stats``).
+
+    ``total`` counts LIVE rows only (available + claimed + dead);
+    ``oldest_created_at`` / ``newest_created_at`` span ALL rows
+    including expired/consumed ones — the census needs the newest
+    write, not the newest live row (RDR-205 §Technical Design
+    "Operations").
+    """
+
+    subspace: str
+    total: int
+    available: int
+    claimed: int
+    dead: int
+    consumed: int
+    expired_unpurged: int
+    oldest_created_at: str | None
+    newest_created_at: str | None
+
+
 #: The relevance_log retention horizon — THE single source for the sweep's
 #: default. Rehomed from the deleted SQLite ``telemetry.py`` (nexus-i711w
 #: Stage 2 sub-stage A); surviving consumers are ``T2Database.trim_telemetry``

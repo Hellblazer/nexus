@@ -18,6 +18,7 @@ Attribute                  Class                       Responsibility
 ``db.chash_index``         ``HttpChashIndex``          chash → (collection, doc_id) global lookup (RDR-086)
 ``db.document_aspects``    ``HttpDocumentAspectsStore``  Per-document structured aspects table (RDR-089)
 ``db.aspect_queue``        ``HttpAspectQueue``         Async queue feeding the aspect-extraction worker (nexus-qeo8)
+``db.tuples``               ``HttpTupleStore``          Linda tuple space over ``/v1/tuples`` (RDR-205)
 =========================  ==========================  =================================================================
 
 ``T2Database`` is a facade: it constructs the six stores and re-exposes
@@ -247,6 +248,11 @@ class T2Database:
         # store — the SQLite DocumentHighlights it used to select is deleted.
         from nexus.db.t2.http_document_highlights_store import HttpDocumentHighlightsStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
         self.document_highlights: HttpDocumentHighlightsStore = HttpDocumentHighlightsStore(client=self._client)
+        # RDR-205 Phase 2 Step 1 (bead nexus-em75s.9): the Linda tuple
+        # space's client surface over /v1/tuples. Service-only from
+        # birth — there was never a SQLite predecessor to collapse.
+        from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+        self.tuples: HttpTupleStore = HttpTupleStore(client=self._client)
 
     @property
     def taxonomy(self) -> "HttpTaxonomyStore":
@@ -303,8 +309,9 @@ class T2Database:
         closing it, once, after this facade (and any sibling using the
         same client) is done with it.
         """
-        # Reverse-construction order: document_highlights was built after
-        # aspect_queue (RDR-139 Layer E), so it closes first.
+        # Reverse-construction order: tuples was built after
+        # document_highlights (RDR-205 Phase 2 Step 1), so it closes first.
+        self.tuples.close()
         self.document_highlights.close()
         self.aspect_queue.close()
         self.document_aspects.close()

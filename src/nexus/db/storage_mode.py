@@ -75,6 +75,7 @@ VALID_STORE_NAMES: frozenset[str] = frozenset(
         "document_aspects",
         "document_highlights",
         "aspect_queue",
+        "tuples",
         "catalog",
         "t1",
     }
@@ -98,6 +99,7 @@ T2_FACADE_STORES: tuple[str, ...] = (
     "document_aspects",
     "document_highlights",
     "aspect_queue",
+    "tuples",
 )
 
 #: Accepted backend value strings. ``sqlite`` is recognised-but-retired:
