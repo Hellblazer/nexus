@@ -155,7 +155,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 
 <h3>What it is not</h3>
 <p>It is not a form to fill. It is not a test plan. It is not a promise to a manager. A bug with one clear cause gets three sections: Problem, Root Cause, Fix. A design with real alternatives gets the full template. The length follows the decision.</p>
-<p>In practice the danger runs the other way. Of the 216 RDRs in the Nexus project, 119 are typed Architecture and 12 are bugs. Closed RDRs run from 90 lines to over 1,200. The discipline that RDRs need is cutting, not filling. When Claude adds a section, ask what decision it serves. If the answer is none, remove it.</p>
+<p>In practice the danger runs the other way: an RDR grows. Sections accrete, each defensible on its own, until the document is longer than the decision. The discipline that RDRs need is cutting, not filling. When Claude adds a section, ask what decision it serves. If the answer is none, remove it.</p>
 
 <h3>The lifecycle</h3>
 <div class="tbl"><table>
@@ -219,7 +219,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 <tr><td>Documented</td><td>Supported by documentation only. Not checked against reality.</td></tr>
 <tr><td>Assumed</td><td>Believed, not checked. The design may depend on it.</td></tr>
 </table></div>
-<p>The tags matter later. An Assumed finding that the design depends on is a Critical Assumption. The gate (lesson 5) looks at exactly those. In practice this section is often skipped: 82 of the 216 Nexus RDRs have one. When the design rests on something nobody checked, ask for it by name: <em>"List the assumptions this design depends on, and mark which are verified."</em></p>
+<p>The tags matter later. An Assumed finding that the design depends on is a Critical Assumption. The gate (lesson 5) looks at exactly those. This section is the easiest one to leave empty, and an empty one is how an unchecked belief reaches the design. When the design rests on something nobody checked, ask for it by name: <em>"List the assumptions this design depends on, and mark which are verified."</em></p>
 
 <h3>The next cycle</h3>
 <p>Read what came back. Not the whole RDR, only the new findings. Something in them raises the next question. Ask it. Typical next questions:</p>
@@ -280,7 +280,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 <!-- ============ 5 ============ -->
 <section class="lesson" id="l5">
 <div class="lhead"><span class="lnum">5</span><h2>The gate</h2><span class="ltime">15 min · read even if you never run one</span></div>
-<p class="why">The gate is a formal check before acceptance: does the document hold together, are the critical assumptions verified, and does an independent critique find anything that blocks. Most RDRs never see it. In the Nexus project, 49 of 166 closed RDRs mention a gate. The rest went from draft to closed on the strength of the reading loop in lesson 4. Use the gate for the few decisions that are expensive to reverse. When you use it, treat the rounds as a budget, not as a loop to run until it is clean. The budget rule below is not old wisdom. It was learned in one week.</p>
+<p class="why">The gate is a formal check before acceptance: does the document hold together, are the critical assumptions verified, and does an independent critique find anything that blocks. Not every RDR needs it. A small decision that the reading loop in lesson 4 has already tested can go from draft to accepted on that reading alone. Use the gate for the decisions that are expensive to reverse: a schema, a wire contract, a migration. When you use it, treat the rounds as a budget, not as a loop to run until it is clean; a critique will always find something, and past the second round what it finds is cheaper to discover by building.</p>
 
 <h3>You say when</h3>
 <div class="see">You might say</div>
@@ -325,7 +325,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 <div class="cmd"><pre>Break RDR <span class="ph">&lt;NUMBER&gt;</span> into tasks by phase. Audit the plan once before I look at it.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What Claude does</div>
 <p>Claude uses the planning skill (<code>/conexus:create-plan</code>) to turn each phase of the Implementation Plan into tasks in the <code>bd</code> task tracker, with dependencies between them, under one epic that names the RDR. Then it runs the plan audit (<code>/conexus:plan-audit</code>), which checks the tasks against the code as it is: do the files exist, is the order possible, is anything assumed that the code contradicts. It shows you the task tree.</p>
-<p class="note">The plan audit has the same budget rule as the gate. One round, two at most. A plan audited five times is a plan nobody has tried to build.</p>
+<p class="note">The plan audit has the same budget rule as the gate. One round, two at most. Past that, the first task's first test run tells you more than a third audit would.</p>
 
 <h3>Read the tree, not the tasks</h3>
 <p>Look at the phases and the dependencies. Is the first phase the one that proves the design works, or the one that is easiest? It should be the first. Is there a phase that ships nothing visible? Ask why. Then say go, or move things.</p>
@@ -384,7 +384,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 <div class="cmd"><pre>Close RDR <span class="ph">&lt;NUMBER&gt;</span>, implemented. Write the post-mortem.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What Claude does</div>
 <p>Claude runs <code>/conexus:rdr-close</code>. The status becomes <code>closed</code>. If you asked for it, Claude writes a short post-mortem: what the build changed compared with the plan, what took longer, what was learned. Then the RDR is indexed into the knowledge store. Memory records the close.</p>
-<p class="note">A post-mortem is worth writing when the build taught something the RDR did not predict. In the Nexus project, 54 of 166 closed RDRs have one. For the rest, the close is a status flip and nothing more, and that is correct.</p>
+<p class="note">A post-mortem is worth writing when the build taught something the RDR did not predict. When it did not, the close is a status flip and nothing more, and that is correct.</p>
 
 <h3>What remains</h3>
 <p>The RDR is now part of the corpus. The next time you or Claude research a similar question, in this project or another that shares the store, the search finds it, and the research agent reads it before it reads the web. This is the point of the whole cycle. One RDR is a decision. Two hundred are a memory of how the project thinks.</p>
@@ -399,7 +399,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 
 <div class="finish">
 <h2>Complete</h2>
-<p>You know what an RDR is for and what it is not. You know that it begins in conversation, grows through research cycles, and is read and changed as a rendering. You know that most RDRs never see the gate, that the gate has a budget when it is used, that accepting and closing are your decisions and that Claude will cross that line unless told, and that the build runs across sessions held together by continuations and phase reviews. You know that status and code are separate facts. And you know that an accepted RDR is never edited to fit the code: it is abandoned and succeeded.</p>
+<p>You know what an RDR is for and what it is not. You know that it begins in conversation, grows through research cycles, and is read and changed as a rendering. You know that the gate is for the decisions that are expensive to reverse and that it has a budget when it is used, that accepting and closing are your decisions, and that the build runs across sessions held together by continuations and phase reviews. You know that an RDR's status says where the decision is, not whether the code exists, and to ask for both. And you know that an accepted RDR is never edited to fit the code: it is abandoned and succeeded.</p>
 <p>Reference: <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr.md">RDR</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/AGENTS.md">RDR lifecycle rules</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/README.md">Plugin README</a> · <a href="getting-started.html">Getting started</a></p>
 </div>
 
