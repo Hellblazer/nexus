@@ -19,7 +19,6 @@ from tests.conftest import fake_credentials, make_vector_test_client
 # docs's own body so the RDR-109 mode-declaration lint no longer needs to
 # exclude it by nodeid -- a fabricated metadata literal for a seeded fake
 # chunk, never derived from an actual embedder call.
-_FAKE_CODE_EMBEDDING_MODEL = "voyage-code-3"
 
 # All tests in this module are end-to-end: real vector substrate, real local
 # embeddings, real CLI subprocesses. They average ~5.8s/test on CI and
@@ -743,7 +742,7 @@ def test_migration_moves_prose_from_code_to_docs(
             "doc_id": readme_tumbler,
             "title": "README.md:chunk-0",
             "content_hash": "old-hash",
-            "embedding_model": _FAKE_CODE_EMBEDDING_MODEL, "store_type": "code",
+            "embedding_model": "model-code", "store_type": "code",  # neutral model token on purpose (RDR-109 mode lint) -- fabricated metadata literal, never derived from an actual embedder call
         }],
     )
     assert len(code_col.get(ids=["fake-prose-in-code"])["ids"]) == 1

@@ -21,14 +21,6 @@ import pytest
 # ── Fixtures and helpers ─────────────────────────────────────────────────────
 
 
-# nexus-0y4c6: hoisted out of the five tests below' own bodies so the
-# RDR-109 mode-declaration lint no longer needs to exclude them by
-# nodeid -- collection-NAME fixtures passed to a mocked flush closure /
-# monkeypatched embed fallback; no embedder or cloud call is ever made.
-_CODE_REPO_COLLECTION = "code__repo__voyage-code-3__v1"
-_DOCS_TEST_COLLECTION = "docs__test__voyage-context-3__v1"
-_CLOUD_DOCS_MODEL = "voyage-context-3"
-
 _DEFAULT_CONFIG = {
     "server": {"ignorePatterns": []},
     "indexing": {
@@ -141,7 +133,14 @@ def test_run_index_service_mode_skips_voyageai_client(tmp_path, monkeypatch):
 def _flush_ctx(doc_id: str = "1.1", chash: str = "a" * 64) -> list:
     """One nexus-wxjr6 combined-write-shaped file_contexts entry — the
     (path, context) pair _batch_flush needs to build full_docs (a
-    catalog_doc_id and metadatas carrying chunk_text_hash/position 0)."""
+    catalog_doc_id and metadatas carrying chunk_text_hash/position 0).
+
+    Neutral model tokens on purpose (RDR-109 mode lint), used by the
+    four ``captured["flush"](...)`` calls below: the collection-NAME
+    fixture passed to the mocked flush closure; the tests assert the
+    force_re_embed kwarg / retry / shared-chash behavior of the flush
+    call, not any cloud-mode embedder behavior.
+    """
     return [(
         "hello.py",
         {
@@ -230,7 +229,7 @@ def test_run_index_batch_flush_forwards_force_re_embed(tmp_path, monkeypatch):
         # exits), or the deferred import resolves to the REAL
         # get_catalog_writer and attempts a real HTTP call.
         captured["flush"](
-            _CODE_REPO_COLLECTION, ["a" * 64], ["doc1"], [{"m": 1}],
+            "code__repo__model-code__v1", ["a" * 64], ["doc1"], [{"m": 1}],
             _flush_ctx(),
         )
     assert catalog_writer.write_manifest_many.call_count == 1
@@ -295,7 +294,7 @@ def test_run_index_batch_flush_force_false_omits_force_re_embed(tmp_path, monkey
         # nexus-wxjr6: flush() must be invoked INSIDE this patch context —
         # see the sibling test's comment.
         captured["flush"](
-            _CODE_REPO_COLLECTION, ["a" * 64], ["doc1"], [{"m": 1}],
+            "code__repo__model-code__v1", ["a" * 64], ["doc1"], [{"m": 1}],
             _flush_ctx(),
         )
     assert catalog_writer.write_manifest_many.call_count == 1
@@ -380,7 +379,7 @@ def test_run_index_batch_flush_retries_transient_failure_then_succeeds(tmp_path,
         # Must not raise — the transient error is swallowed by the retry
         # wrapper and the second attempt succeeds.
         captured["flush"](
-            _CODE_REPO_COLLECTION, ["a" * 64], ["doc1"], [{"m": 1}],
+            "code__repo__model-code__v1", ["a" * 64], ["doc1"], [{"m": 1}],
             _flush_ctx(),
         )
 
@@ -488,7 +487,7 @@ def test_run_index_batch_flush_shared_chash_orphan_copy_survives_identity_doc_fa
         # Flatten fctx into the (ids, docs, metas) shape a real
         # ChunkBatcher flush would carry — one entry per claiming file.
         captured["flush"](
-            _CODE_REPO_COLLECTION,
+            "code__repo__model-code__v1",
             [shared_chash, shared_chash],
             ["shared", "shared"],
             [
@@ -733,7 +732,13 @@ def test_index_pdf_incremental_service_mode_skips_embed_fallback(tmp_path, monke
     nexus-sghyo (2026-08-06): the legacy non-service embed path
     (``_embed_with_fallback``) is deleted outright — there is nothing
     left to mock/assert-not-called; a successful run through the
-    service-mode branch IS the proof."""
+    service-mode branch IS the proof.
+
+    Neutral model tokens on purpose (RDR-109 mode lint): the prepared
+    chunk metadata's embedding_model and the collection name are
+    unasserted pass-through data; embed_fn=None below is the actual
+    proof.
+    """
     from nexus.doc_indexer import _index_pdf_incremental
 
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
@@ -743,8 +748,8 @@ def test_index_pdf_incremental_service_mode_skips_embed_fallback(tmp_path, monke
     col.get.return_value = {"ids": [], "metadatas": []}
 
     prepared = [
-        ("id1", "chunk text 1", {"embedding_model": _CLOUD_DOCS_MODEL}),
-        ("id2", "chunk text 2", {"embedding_model": _CLOUD_DOCS_MODEL}),
+        ("id1", "chunk text 1", {"embedding_model": "model-ctx"}),
+        ("id2", "chunk text 2", {"embedding_model": "model-ctx"}),
     ]
 
     mock_hooks = MagicMock()
@@ -767,7 +772,7 @@ def test_index_pdf_incremental_service_mode_skips_embed_fallback(tmp_path, monke
             corpus="test-corpus",
             prepared=prepared,
             content_hash="abc123",
-            collection_name=_DOCS_TEST_COLLECTION,
+            collection_name="docs__test__model-ctx__v1",
             t3=db,
             embed_fn=None,
             hooks=mock_hooks,

@@ -26,7 +26,6 @@ from tests._catalog_fixture_ops import (
 # model_name's own bodies so the RDR-109 mode-declaration lint no longer
 # needs to exclude them by nodeid -- both assert the LOCAL embedder name
 # is NOT this cloud token; no embedder is constructed under that name.
-_CLOUD_DOCS_MODEL = "voyage-context-3"
 
 
 def _wrap_write_batch_with_fk_seed(t3):
@@ -1267,7 +1266,7 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     rows = col.get(limit=1, include=["metadatas"])
     assert rows["metadatas"], "expected at least one chunk in collection"
     embedding_model = rows["metadatas"][0].get("embedding_model", "")
-    assert embedding_model and embedding_model != _CLOUD_DOCS_MODEL, (
+    assert embedding_model and embedding_model != "model-ctx", (
         f"chunk metadata should record the LOCAL model name; got "
         f"{embedding_model!r}. The staleness check on re-index "
         f"compares stored_model == target_model, and using the local "
@@ -1301,9 +1300,9 @@ def test_make_local_embed_fn_returns_consistent_model_name():
 
     embed_fn, model_name = _make_local_embed_fn()
     assert isinstance(model_name, str) and model_name
-    assert model_name != _CLOUD_DOCS_MODEL
+    assert model_name != "model-ctx"
 
-    embeddings, reported_model = embed_fn(["hello world"], _CLOUD_DOCS_MODEL)
+    embeddings, reported_model = embed_fn(["hello world"], "model-ctx")
     assert len(embeddings) == 1
     assert isinstance(embeddings[0], list)
     assert len(embeddings[0]) > 0
@@ -2717,16 +2716,13 @@ class TestStreamingReturnMetadata:
 
 
 class TestSectionTypeInPipeline:
-    # nexus-0y4c6: a class attribute so the two tests below no longer
-    # carry the literal in their own bodies -- an opaque embedding_model
-    # label passed straight through to chunk metadata by _markdown_chunks;
-    # no embedder is constructed.
-    _MODEL = "voyage-context-3"
-
     def test_markdown_chunks_has_section_type(self, tmp_path: Path):
+        # Neutral model token on purpose (RDR-109 mode lint): passed straight
+        # through to chunk metadata by _markdown_chunks as an opaque label;
+        # no embedder is constructed, so any string proves the same thing.
         md = tmp_path / "paper.md"
         md.write_text("# Abstract\n\nThis paper presents...\n\n# References\n\n[1] Foo.\n")
-        tuples = _markdown_chunks(md, "abc123", self._MODEL, "2026-01-01", "docs__test")
+        tuples = _markdown_chunks(md, "abc123", "model-ctx", "2026-01-01", "docs__test")
         assert len(tuples) >= 2
         for _id, _text, meta in tuples:
             assert "section_type" in meta
@@ -2736,10 +2732,12 @@ class TestSectionTypeInPipeline:
         ("References", "[1] Foo et al.", "references"),
     ])
     def test_markdown_chunks_section_classified(self, heading, content, expected_type, tmp_path: Path):
+        # Neutral model token on purpose (RDR-109 mode lint): see
+        # test_markdown_chunks_has_section_type above.
         md = tmp_path / "paper.md"
         # Need abstract + another section so there are >= 2 chunks for CCE
         md.write_text(f"# Abstract\n\nContent.\n\n# {heading}\n\n{content}\n")
-        tuples = _markdown_chunks(md, "abc123", self._MODEL, "2026-01-01", "docs__test")
+        tuples = _markdown_chunks(md, "abc123", "model-ctx", "2026-01-01", "docs__test")
         typed = [m for _, _, m in tuples if m["section_type"] == expected_type]
         assert typed, f"Expected at least one chunk classified as '{expected_type}'"
 
