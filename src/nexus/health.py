@@ -3238,6 +3238,12 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.topic_assignments",
     "nexus.topic_links",
     "nexus.topics",
+    # nexus.tuples and nexus.tuple_claim_log: RDR-205 Phase 1 (nexus-em75s.2),
+    # tuples-001-baseline.xml, ENABLE + FORCE + tenant_isolation on both;
+    # nexus.tuple_tenants is deliberately NOT here (no RLS, it names tenants
+    # and holds no tenant data).
+    "nexus.tuple_claim_log",
+    "nexus.tuples",
     "t1.scratch",
 )
 
