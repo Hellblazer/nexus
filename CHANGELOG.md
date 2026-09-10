@@ -6,6 +6,39 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.40.0] - 2026-09-10
+
+Paired engine: engine-service-v0.1.113, unchanged from 7.39.0 (no
+`service/` change in this release). `REQUIRED_ENGINE_VERSION` is
+(0, 1, 113).
+
+### RDR fix check: replicate critics and consensus (nexus-dxksa)
+
+- Four runs of the identical fix-check brief on the identical commit
+  (RDR-205 at fb60c3ff0) raised eleven distinct findings, one in all four
+  runs and five in exactly one, so about half of any single run's FAIL
+  rows did not reproduce, and "any FAIL: fix, re-run" resampled on every
+  re-run (RDR-204: ten gate rounds; RDR-205: five rounds and twelve fix
+  checks in two days). The fix check is now three independent dispatches
+  of one brief; a defect counts only when at least two raise it at the
+  same site, with the majority class; every row carries a Class
+  (BLOCKS-PLANNING, DISCOVER-AT-IMPLEMENTATION, OBSERVATION) and only a
+  counted BLOCKS-PLANNING defect fails; a failed check is fixed once and
+  checked once more, then its counted defects are residuals for accept.
+  One sentence in `nexus.commands.rdr`, carried verbatim by the printed
+  brief, the fix rules, the accept preamble, and the rdr-gate, rdr-fix
+  and rdr-accept skills and command mirrors, pinned by equality in
+  `tests/test_plugin_structure.py`. Tested before shipping: the six
+  consensus findings were fixed and three fresh replicates under the new
+  brief converged on the same document in one round.
+
+### RDR tooling (carried from develop after 7.39.0)
+
+- Layer 0 retires a finding confirmed closed in the last two rounds; a
+  gate round appends one Revision History line and the findings live in
+  the T2 records; the gate record's prior chain names each round's own
+  critique id; one disposition line at accept (nexus-yjf5l.11, .12, .13).
+
 ## [7.39.0] - 2026-09-10
 
 Paired engine: engine-service-v0.1.113 (tagged on e222a8fb6; deployed and
