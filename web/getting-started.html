@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Nexus getting started, inside Claude Code. Ten lessons: the session, indexing and search, memory, scratch, knowledge and the catalog, exploration, rendering, large questions, RDRs, and maintenance.">
+<meta name="description" content="Nexus getting started, inside Claude Code. Eleven lessons: the session, the handoff between sessions, indexing and search, memory, scratch, knowledge and the catalog, exploration, rendering, large questions, RDRs, and maintenance.">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AD%3C/text%3E%3C/svg%3E">
 <title>Nexus Getting Started</title>
@@ -125,15 +125,16 @@ ul.plain li{margin:3px 0}
   <div class="eyebrow">Getting started</div>
   <ol id="toc">
     <li><a href="#l1">1. Start a session</a></li>
-    <li><a href="#l2">2. Index and search</a></li>
-    <li><a href="#l3">3. Memory: what Claude keeps</a></li>
-    <li><a href="#l4">4. Scratch: shared notes</a></li>
-    <li><a href="#l5">5. Knowledge and the catalog</a></li>
-    <li><a href="#l6">6. Explore: research, links, topics</a></li>
-    <li><a href="#l7">7. Render and iterate</a></li>
-    <li><a href="#l8">8. Questions that need many documents</a></li>
-    <li><a href="#l9">9. Record a decision</a></li>
-    <li><a href="#l10">10. Maintenance</a></li>
+    <li><a href="#l2">2. End a session, start the next</a></li>
+    <li><a href="#l3">3. Index and search</a></li>
+    <li><a href="#l4">4. Memory: what Claude keeps</a></li>
+    <li><a href="#l5">5. Scratch: shared notes</a></li>
+    <li><a href="#l6">6. Knowledge and the catalog</a></li>
+    <li><a href="#l7">7. Explore: research, links, topics</a></li>
+    <li><a href="#l8">8. Render and iterate</a></li>
+    <li><a href="#l9">9. Questions that need many documents</a></li>
+    <li><a href="#l10">10. Record a decision</a></li>
+    <li><a href="#l11">11. Maintenance</a></li>
   </ol>
   <div class="meta"><a href="./">← Install guide</a></div>
 </nav>
@@ -141,7 +142,7 @@ ul.plain li{margin:3px 0}
 <main>
 <div class="topnav"><span class="eyebrow" style="margin:0">Nexus · getting started</span><a href="./">← Install guide</a></div>
 <h1>Nexus Getting Started</h1>
-<p class="lede">You do all of this inside Claude Code. You describe what you want. Claude chooses the Nexus tools and skills for you. Each lesson shows the instruction to give, what Claude does, and what you see. Ten lessons, about ninety minutes.</p>
+<p class="lede">You do all of this inside Claude Code. You describe what you want. Claude chooses the Nexus tools and skills for you. Each lesson shows the instruction to give, what Claude does, and what you see. Eleven lessons, about ninety minutes.</p>
 <p class="note">Words in <span class="ph">&lt;ORANGE CAPITALS IN ANGLE BRACKETS&gt;</span> are placeholders. Replace them with something from your own project before you send the instruction.</p>
 <p class="note">Before you start: install Nexus and the plugin with the <a href="./">install guide</a>. Then open a terminal in a project of yours and run <code>claude</code>. Every lesson happens in that Claude Code session.</p>
 
@@ -182,7 +183,7 @@ ul.plain li{margin:3px 0}
 <p>Claude repeats the blocks. The important ones are:</p>
 <div class="tbl"><table>
 <tr><th>Block</th><th>Content</th></tr>
-<tr><td>T2 Memory</td><td>The memory entries for this project. Empty in a new project. Claude fills it as it works. Lesson 3 explains.</td></tr>
+<tr><td>T2 Memory</td><td>The memory entries for this project. Empty in a new project. Claude fills it as it works. Lesson 4 explains.</td></tr>
 <tr><td>Ready Beads</td><td>Open tasks from the <code>bd</code> task tracker, if the project uses it.</td></tr>
 <tr><td>nx Capabilities</td><td>A short list of the Nexus tools that Claude can use.</td></tr>
 <tr><td>Knowledge Map</td><td>The main subjects in the knowledge store, with the number of chunks for each.</td></tr>
@@ -219,7 +220,41 @@ ul.plain li{margin:3px 0}
 
 <!-- ============ 2 ============ -->
 <section class="lesson" id="l2">
-<div class="lhead"><span class="lnum">2</span><h2>Index your repository, then search it</h2><span class="ltime">10 min</span></div>
+<div class="lhead"><span class="lnum">2</span><h2>End a session, start the next one</h2><span class="ltime">10 min</span></div>
+<p class="why">Work with Nexus happens in many sessions, not one. What connects them is a small habit at the end of each session. Learn it now, before the first real work, because every later lesson ends with it.</p>
+<p>A Claude Code session has a limited memory of the conversation. When it gets long, Claude Code compresses it, and detail is lost. When you close the session or type <code>/clear</code>, the conversation is gone. Memory (lesson 3) keeps the facts and decisions. It does not keep "where was I": which branch, what was half done, what to do first tomorrow. That is what <code>/conexus:continuation</code> is for.</p>
+
+<div class="see">You might say, when you are about to stop</div>
+<div class="cmd"><pre>/conexus:continuation</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What Claude does</div>
+<p>Claude writes one file under <code>/tmp</code> with the state of the work. The file has a fixed set of sections:</p>
+<ul class="plain">
+<li>What was finished in this session: commits, closed tasks, memory entries written.</li>
+<li>Where the state lives: the branch, the files, the memory entries, the task IDs.</li>
+<li>The first actions for the next session, as commands that can be run as they are.</li>
+<li>Open work, and what blocks it.</li>
+<li>Decisions from this session that the next session must keep.</li>
+<li>Things the next session must not do.</li>
+<li>What went wrong in this session, so the next one avoids it.</li>
+</ul>
+<p>Then Claude answers with three lines only. The third line is a command of the form <code>cat /tmp/…</code>. Copy that line.</p>
+
+<div class="see">In the next session</div>
+<p>Type <code>/clear</code>, or start a new session. Paste the copied line as the first message. Claude reads the file, runs the first actions, and continues where the last session stopped. It also receives the memory block from lesson 1, so it has both the facts and the position.</p>
+
+<div class="callout rule"><p><strong>Two stores, two jobs.</strong> Memory holds what is true about the project, for weeks. The continuation file holds where the work stands, for the next session only. Use <code>/conexus:continuation</code> at the end of every work session, and also before a long session gets compressed. It costs a few seconds. Without it, the next session spends its first minutes finding out what this one already knew.</p></div>
+<p class="note">You can give a topic: <code>/conexus:continuation <span class="ph">&lt;TOPIC&gt;</span></code>. The file is then named after the topic, which helps when you work on several things in parallel. The files live in <code>/tmp</code> and disappear at the next reboot. They are a handoff, not a record. The record is memory.</p>
+
+
+<div class="further"><h4>Investigate further</h4><ul>
+<li>Read one continuation file after Claude writes it. The sections are plain text. If a section is empty or wrong, tell Claude before you close.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/continuation/SKILL.md">The continuation skill</a>: the exact list of sections Claude writes, and why the answer is three lines.</li>
+</ul></div>
+</section>
+
+<!-- ============ 3 ============ -->
+<section class="lesson" id="l3">
+<div class="lhead"><span class="lnum">3</span><h2>Index your repository, then search it</h2><span class="ltime">10 min</span></div>
 <p class="why">Indexing reads your repository and adds its chunks to the knowledge store. After that, Claude can answer questions about the code by searching for meaning, instead of reading many files. This is the step that makes all later searches possible.</p>
 
 <h3>Index</h3>
@@ -259,13 +294,13 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 </ul></div>
 </section>
 
-<!-- ============ 3 ============ -->
-<section class="lesson" id="l3">
-<div class="lhead"><span class="lnum">3</span><h2>Memory: what Claude keeps between sessions</h2><span class="ltime">5 min</span></div>
+<!-- ============ 4 ============ -->
+<section class="lesson" id="l4">
+<div class="lhead"><span class="lnum">4</span><h2>Memory: what Claude keeps between sessions</h2><span class="ltime">5 min</span></div>
 <p class="why">The memory store holds facts and decisions about a project. Claude writes to it by itself while it works: a decision it made, a finding from an investigation, the state of the work at the end of a session. When a new session starts, Claude receives these entries first. Memory is not a to-do list or a place for your own notes. Claude fills it, and Claude reads it. You do not manage this store. You work, and it fills.</p>
 
 <h3>How it fills</h3>
-<p>Nothing to do here except work. Spend a session with Claude on a real task: fix a bug, add a feature, investigate a question. As it works, Claude records what it decided and what it found. At the end, if you close the session with <code>/conexus:continuation</code> (lesson 8), the state of the work is recorded too. Helper agents that Claude starts write their results to the same store.</p>
+<p>Nothing to do here except work. Spend a session with Claude on a real task: fix a bug, add a feature, investigate a question. As it works, Claude records what it decided and what it found. At the end, if you close the session with <code>/conexus:continuation</code> (lesson 2), the state of the work is recorded too. Helper agents that Claude starts write their results to the same store.</p>
 <p>Each entry has a project name and a title. An entry lives 30 days by default. Each time Claude reads it, it lives longer. So facts that stay useful stay, and facts that nobody reads expire.</p>
 
 <h3>How you notice it</h3>
@@ -283,9 +318,9 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 </ul></div>
 </section>
 
-<!-- ============ 4 ============ -->
-<section class="lesson" id="l4">
-<div class="lhead"><span class="lnum">4</span><h2>Scratch: how Claude and its agents share notes</h2><span class="ltime">5 min</span></div>
+<!-- ============ 5 ============ -->
+<section class="lesson" id="l5">
+<div class="lhead"><span class="lnum">5</span><h2>Scratch: how Claude and its agents share notes</h2><span class="ltime">5 min</span></div>
 <p class="why">The scratch store belongs to the current session. Claude uses it as a shared notepad. When Claude starts helper agents to investigate a problem, each agent reads and writes the same scratch store. That is how the agents coordinate. Nexus deletes the store when the session ends. You do not write to it. It is useful to know that it exists, and what it looks like while it is in use.</p>
 
 <h3>Where you see it</h3>
@@ -301,10 +336,10 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 </ul></div>
 </section>
 
-<!-- ============ 5 ============ -->
-<section class="lesson" id="l5">
-<div class="lhead"><span class="lnum">5</span><h2>Knowledge: notes, documents, and the catalog</h2><span class="ltime">10 min</span></div>
-<p class="why">The knowledge store is permanent, and Claude searches it by meaning. In lesson 2 you added a repository. In this lesson you add a written note and a document. You also meet the catalog, which lists every document and the links between them.</p>
+<!-- ============ 6 ============ -->
+<section class="lesson" id="l6">
+<div class="lhead"><span class="lnum">6</span><h2>Knowledge: notes, documents, and the catalog</h2><span class="ltime">10 min</span></div>
+<p class="why">The knowledge store is permanent, and Claude searches it by meaning. In lesson 3 you added a repository. In this lesson you add a written note and a document. You also meet the catalog, which lists every document and the links between them.</p>
 
 <h3>A note in a subject collection</h3>
 <div class="see">You might say</div>
@@ -336,9 +371,9 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 </ul></div>
 </section>
 
-<!-- ============ 6 ============ -->
-<section class="lesson" id="l6">
-<div class="lhead"><span class="lnum">6</span><h2>Explore: research, links, and the topic map</h2><span class="ltime">20 min</span></div>
+<!-- ============ 7 ============ -->
+<section class="lesson" id="l7">
+<div class="lhead"><span class="lnum">7</span><h2>Explore: research, links, and the topic map</h2><span class="ltime">20 min</span></div>
 <p class="why">The lessons so far put things into Nexus and took them out again. This lesson is the loop that Nexus is built for: you ask, Claude searches, you follow what it finds, you connect it to other things, and the store gets better each time. Every step here is a conversation, not a command.</p>
 
 <h3>Research a subject</h3>
@@ -363,7 +398,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <p class="note">Link types: <code>cites</code>, <code>implements</code>, <code>supersedes</code>, <code>relates</code>, and others. If you index papers, ask Claude to <em>"enrich the <span class="ph">&lt;COLLECTION&gt;</span> collection with bibliographic data"</em>. Claude runs <code>nx enrich bib</code>, which looks up each paper and adds <code>cites</code> links automatically.</p>
 
 <h3>Shape the topic map</h3>
-<p>In lesson 2 you saw the topics that Nexus found in your repository. Topics are not fixed. You can look at them, question them, and change them.</p>
+<p>In lesson 3 you saw the topics that Nexus found in your repository. Topics are not fixed. You can look at them, question them, and change them.</p>
 <div class="see">You might say</div>
 <div class="cmd"><pre>Show me the topic map for this project. Which topics appear in both the code and the documentation?</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
@@ -380,9 +415,9 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 </ul></div>
 </section>
 
-<!-- ============ 7 ============ -->
-<section class="lesson" id="l7">
-<div class="lhead"><span class="lnum">7</span><h2>Render and iterate</h2><span class="ltime">15 min</span></div>
+<!-- ============ 8 ============ -->
+<section class="lesson" id="l8">
+<div class="lhead"><span class="lnum">8</span><h2>Render and iterate</h2><span class="ltime">15 min</span></div>
 <p class="why">After some sessions, the stores hold a lot about a subject: findings in knowledge, decisions in memory, links in the catalog. It is spread over many entries, and Claude manages them. When you want to see the whole picture, you ask for a rendering: one readable document written from the current state of the stores. Then you change it, Claude carries the changes back into the stores, and you ask again. The document and the stores stay in agreement. This is how most design work with Nexus is done.</p>
 
 <h3>Ask for a rendering</h3>
@@ -404,7 +439,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 
 <h3>Ask again</h3>
 <p>Later, after more work, ask for the rendering again. Claude writes it from the current state, so it includes what changed since the last one: what you edited, what the sessions in between decided, what the research found. Compare it with the previous rendering if you want to see the movement.</p>
-<div class="callout rule"><p><strong>The rhythm:</strong> work, and the stores fill. Render, and you see the whole. Change the rendering, and the stores follow. Render again. An RDR (lesson 9) is a rendering of one decision, with a fixed form and a lifecycle. This lesson is the general case.</p></div>
+<div class="callout rule"><p><strong>The rhythm:</strong> work, and the stores fill. Render, and you see the whole. Change the rendering, and the stores follow. Render again. An RDR (lesson 10) is a rendering of one decision, with a fixed form and a lifecycle. This lesson is the general case.</p></div>
 
 <div class="further"><h4>Investigate further</h4><ul>
 <li>Ask for two renderings of the same subject a week apart. Ask Claude to show the differences.</li>
@@ -413,9 +448,9 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 </ul></div>
 </section>
 
-<!-- ============ 8 ============ -->
-<section class="lesson" id="l8">
-<div class="lhead"><span class="lnum">8</span><h2>Questions that need many documents</h2><span class="ltime">15 min</span></div>
+<!-- ============ 9 ============ -->
+<section class="lesson" id="l9">
+<div class="lhead"><span class="lnum">9</span><h2>Questions that need many documents</h2><span class="ltime">10 min</span></div>
 <p class="why">A normal question makes one or two searches. Some questions need more: compare what the documentation says with what the code does, or collect a pattern from many files. For these, the plugin has a skill that plans several steps and combines the results.</p>
 
 <div class="see">You might say</div>
@@ -432,42 +467,18 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <tr><td>Plan a feature before you write code</td><td><code>/conexus:brainstorming-gate</code>, then <code>/conexus:create-plan</code></td></tr>
 <tr><td>Review code before you commit it</td><td><code>/conexus:review-code</code></td></tr>
 <tr><td>Debug a problem after two failed tries</td><td><code>/conexus:debug</code></td></tr>
-<tr><td>Hand the work to the next session</td><td><code>/conexus:continuation</code>, explained below</td></tr>
+<tr><td>Hand the work to the next session</td><td><code>/conexus:continuation</code>, lesson 2</td></tr>
 <tr><td>Not sure which one</td><td>Ask Claude: <em>"Read the using-nx-skills skill and tell me which skill fits my task."</em></td></tr>
 </table></div>
-<h3>End a session, start the next one</h3>
-<p>A Claude Code session has a limited memory of the conversation. When it gets long, Claude Code compresses it, and detail is lost. When you close the session or type <code>/clear</code>, the conversation is gone. Memory (lesson 3) keeps the facts and decisions. It does not keep "where was I": which branch, what was half done, what to do first tomorrow. That is what <code>/conexus:continuation</code> is for.</p>
-
-<div class="see">You might say, when you are about to stop</div>
-<div class="cmd"><pre>/conexus:continuation</pre><button class="copy" type="button">Copy</button></div>
-<div class="see">What Claude does</div>
-<p>Claude writes one file under <code>/tmp</code> with the state of the work. The file has a fixed set of sections:</p>
-<ul class="plain">
-<li>What was finished in this session: commits, closed tasks, memory entries written.</li>
-<li>Where the state lives: the branch, the files, the memory entries, the task IDs.</li>
-<li>The first actions for the next session, as commands that can be run as they are.</li>
-<li>Open work, and what blocks it.</li>
-<li>Decisions from this session that the next session must keep.</li>
-<li>Things the next session must not do.</li>
-<li>What went wrong in this session, so the next one avoids it.</li>
-</ul>
-<p>Then Claude answers with three lines only. The third line is a command of the form <code>cat /tmp/…</code>. Copy that line.</p>
-
-<div class="see">In the next session</div>
-<p>Type <code>/clear</code>, or start a new session. Paste the copied line as the first message. Claude reads the file, runs the first actions, and continues where the last session stopped. It also receives the memory block from lesson 1, so it has both the facts and the position.</p>
-
-<div class="callout rule"><p><strong>Two stores, two jobs.</strong> Memory holds what is true about the project, for weeks. The continuation file holds where the work stands, for the next session only. Use <code>/conexus:continuation</code> at the end of every work session, and also before a long session gets compressed. It costs a few seconds. Without it, the next session spends its first minutes finding out what this one already knew.</p></div>
-<p class="note">You can give a topic: <code>/conexus:continuation <span class="ph">&lt;TOPIC&gt;</span></code>. The file is then named after the topic, which helps when you work on several things in parallel. The files live in <code>/tmp</code> and disappear at the next reboot. They are a handoff, not a record. The record is memory.</p>
-
 <div class="further"><h4>Investigate further</h4><ul>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/querying-guide.md">Querying guide</a>: the four ways to search, and when to use each.</li>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/README.md">Plugin README</a>: all agents, skills, commands, and tools.</li>
 </ul></div>
 </section>
 
-<!-- ============ 9 ============ -->
-<section class="lesson" id="l9">
-<div class="lhead"><span class="lnum">9</span><h2>Record a decision with an RDR</h2><span class="ltime">15 min</span></div>
+<!-- ============ 10 ============ -->
+<section class="lesson" id="l10">
+<div class="lhead"><span class="lnum">10</span><h2>Record a decision with an RDR</h2><span class="ltime">15 min</span></div>
 <p class="why">An RDR is a short document that you write before you write code. It records the problem, what you found out, the options, and the option you chose. When you close an RDR, Nexus indexes it into the knowledge store. Later, when you or Claude work on a similar decision, the old RDR appears in search.</p>
 
 <h3>When to write one</h3>
@@ -494,9 +505,9 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 </ul></div>
 </section>
 
-<!-- ============ 10 ============ -->
-<section class="lesson" id="l10">
-<div class="lhead"><span class="lnum">10</span><h2>Maintenance</h2><span class="ltime">5 min</span></div>
+<!-- ============ 11 ============ -->
+<section class="lesson" id="l11">
+<div class="lhead"><span class="lnum">11</span><h2>Maintenance</h2><span class="ltime">5 min</span></div>
 <p class="why">Three things keep Nexus working: a health check, the correct way to update, and a current index.</p>
 
 <h3>Health check</h3>
