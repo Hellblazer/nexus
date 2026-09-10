@@ -193,7 +193,7 @@ ul.plain li{margin:3px 0}
 <li>A guidance block describes situations, not commands: "something is broken", "a plan needs a check", "an answer must come from many documents". For each situation it names the skill that fits. Claude matches your request to a situation and uses the skill by itself.</li>
 </ul>
 <div class="callout rule"><p><strong>What this means for you:</strong> describe what you want in your own words. You do not need to learn a command for each task. If you say "this test fails and I do not know why", Claude recognizes a debugging situation and follows the debugging skill. If you say "is what the docs say about caching true in the code", Claude recognizes a question that needs many documents and plans a search. The <code>/conexus:…</code> commands in later lessons are shortcuts. They are never required. The language model does the routing.</p></div>
-<p>This also means Claude adapts to how you work. A person who writes short instructions and a person who thinks aloud in long paragraphs get the same tools, chosen from what they said. The lessons show one way to phrase each request. Your own phrasing works too.</p>
+<p>This also means Claude adapts to how you work. A person who writes short instructions and a person who thinks aloud in long paragraphs get the same tools, chosen from what they said. The prompts in these lessons are examples of phrasing, not scripts. Your own words work the same.</p>
 
 <h3>The three stores</h3>
 <p>Every Nexus tool works on one of three stores. The stores differ in one way: how long the data lives.</p>
@@ -218,7 +218,7 @@ ul.plain li{margin:3px 0}
 <p class="why">Indexing reads your repository and adds its chunks to the knowledge store. After that, Claude can answer questions about the code by searching for meaning, instead of reading many files. This is the step that makes all later searches possible.</p>
 
 <h3>Index</h3>
-<div class="see">Say to Claude</div>
+<div class="see">You might say</div>
 <div class="cmd"><pre>Index this repository into Nexus.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What Claude does</div>
 <p>Claude runs the terminal command <code>nx index repo .</code> for you. Claude Code shows a Bash tool call with that command. The command reads every file, cuts it into chunks, and stores the chunks. On a large repository this takes a few minutes. At the end the output shows <code>Done.</code> and, after the first index, the topics that Nexus found.</p>
@@ -226,13 +226,13 @@ ul.plain li{margin:3px 0}
 
 <h3>Find out what is in the index</h3>
 <p>You know your repository. The lessons do not. So the first question after indexing is one that works for every repository: what did Nexus find?</p>
-<div class="see">Say to Claude</div>
+<div class="see">You might say</div>
 <div class="cmd"><pre>Which topics did Nexus find in this repository? List them with a short description of each.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>Claude runs <code>nx taxonomy list</code> and describes each topic. The topics are groups of related code that Nexus found by itself. They are a map of your repository. Pick one topic that interests you for the next step.</p>
 
 <h3>Search one topic</h3>
-<div class="see">Say to Claude</div>
+<div class="see">You might say</div>
 <div class="cmd"><pre>Use Nexus search to show me the main files for the topic "<span class="ph">&lt;TOPIC&gt;</span>", and explain in a few sentences what they do.</pre><button class="copy" type="button">Copy</button></div>
 <p class="note">Replace <span class="ph">&lt;TOPIC&gt;</span> with a topic from the list.</p>
 <div class="see">What you see</div>
@@ -257,32 +257,23 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <!-- ============ 3 ============ -->
 <section class="lesson" id="l3">
 <div class="lhead"><span class="lnum">3</span><h2>Memory: what Claude keeps between sessions</h2><span class="ltime">5 min</span></div>
-<p class="why">The memory store holds facts and decisions about a project. Claude writes to it by itself while it works: a decision it made, a finding from an investigation, the state of the work at the end of a session. When a new session starts, Claude receives these entries first. Memory is not a to-do list or a place for your own notes. Claude fills it, and Claude reads it. You do not manage this store. You watch it, and now and then you correct it.</p>
+<p class="why">The memory store holds facts and decisions about a project. Claude writes to it by itself while it works: a decision it made, a finding from an investigation, the state of the work at the end of a session. When a new session starts, Claude receives these entries first. Memory is not a to-do list or a place for your own notes. Claude fills it, and Claude reads it. You do not manage this store. You work, and it fills.</p>
 
-<h3>See what Claude remembers</h3>
-<div class="see">Say to Claude, in your second or later session on a project</div>
-<div class="cmd"><pre>What do you remember about this project from previous sessions?</pre><button class="copy" type="button">Copy</button></div>
-<div class="see">What you see</div>
-<p>Claude answers from the "T2 Memory" block it received at session start, and may call <code>memory_search</code> or <code>memory_get</code> for details. In a brand-new project the answer is "nothing yet". After a few sessions of real work, the answer lists the decisions and findings that Claude recorded.</p>
-
-<h3>Where the entries come from</h3>
-<ul class="plain">
-<li>Claude records a decision or a finding while it works, when the plugin's guidance tells it the finding is worth keeping.</li>
-<li>At the end of a session, <code>/conexus:continuation</code> writes the state of the work, and the plugin saves notes that were marked for keeping.</li>
-<li>Helper agents that Claude starts write their results to memory, because memory is the store that all agents share.</li>
-</ul>
+<h3>How it fills</h3>
+<p>Nothing to do here except work. Spend a session with Claude on a real task: fix a bug, add a feature, investigate a question. As it works, Claude records what it decided and what it found. At the end, if you close the session with <code>/conexus:continuation</code>, the state of the work is recorded too. Helper agents that Claude starts write their results to the same store.</p>
 <p>Each entry has a project name and a title. An entry lives 30 days by default. Each time Claude reads it, it lives longer. So facts that stay useful stay, and facts that nobody reads expire.</p>
 
-<h3>When you want to say something yourself</h3>
-<p>This is the exception, not the rule. Use it when Claude does not know a fact that it cannot find in the code, for example a decision made outside the repository.</p>
-<div class="see">Say to Claude</div>
-<div class="cmd"><pre>Remember in Nexus memory, permanently: <span class="ph">&lt;A FACT ABOUT THIS PROJECT THAT IS NOT IN THE CODE&gt;</span></pre><button class="copy" type="button">Copy</button></div>
-<div class="see">What you see</div>
-<p>A tool call named <code>memory_put</code> on the <code>nexus</code> server. Claude chooses a title. "Permanently" tells it to not set a 30-day TTL. If an entry is wrong, say so: <em>"The memory entry about X is wrong. The correct fact is Y."</em> Claude replaces it.</p>
+<h3>How you notice it</h3>
+<p>Start a new session on the same project the next day. Claude already knows what was decided. You see this in how it answers: it refers to yesterday's decision without you repeating it. If you want to check directly, ask in any words you like. Something like:</p>
+<div class="cmd"><pre>What do you already know about this project from earlier sessions?</pre><button class="copy" type="button">Copy</button></div>
+<p>Claude answers from the memory block it received at session start, and may call <code>memory_search</code> or <code>memory_get</code> for details. In a brand-new project the answer is "nothing yet".</p>
+
+<h3>When you correct it</h3>
+<p>Sometimes Claude remembers something that is wrong or out of date, or does not know a fact that is not in the code, for example a decision made in a meeting. Then tell it, in conversation, the way you would tell a colleague: "that was changed last week, we use X now" or "for the record, the team decided Y". Claude updates the store. You see a <code>memory_put</code> tool call. You do not need a special phrase.</p>
 <p class="note">From the terminal: <code>nx memory list -p PROJECT</code> shows every entry for a project.</p>
 
 <div class="further"><h4>Investigate further</h4><ul>
-<li>Ask Claude: <em>"List every Nexus memory entry for this project, with its age."</em></li>
+<li>After a week of sessions, ask Claude to list what it remembers about the project, with the age of each entry. Delete what is stale.</li>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md#t2----memory-bank">Storage tiers: T2</a>: how the TTL grows with each read, and how entries move on to knowledge.</li>
 </ul></div>
 </section>
@@ -290,25 +281,17 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <!-- ============ 4 ============ -->
 <section class="lesson" id="l4">
 <div class="lhead"><span class="lnum">4</span><h2>Scratch: how Claude and its agents share notes</h2><span class="ltime">5 min</span></div>
-<p class="why">The scratch store belongs to the current session. Claude uses it as a shared notepad. When Claude starts helper agents to investigate a problem, each agent reads and writes the same scratch store. That is how the agents coordinate. Nexus deletes the store when the session ends. You rarely write to it. It is useful to know that it exists, and how to look inside.</p>
+<p class="why">The scratch store belongs to the current session. Claude uses it as a shared notepad. When Claude starts helper agents to investigate a problem, each agent reads and writes the same scratch store. That is how the agents coordinate. Nexus deletes the store when the session ends. You do not write to it. It is useful to know that it exists, and what it looks like while it is in use.</p>
 
-<h3>Look inside</h3>
-<div class="see">Say to Claude, while it is working on something with several steps</div>
-<div class="cmd"><pre>What is in Nexus scratch right now?</pre><button class="copy" type="button">Copy</button></div>
-<div class="see">What you see</div>
-<p>A tool call named <code>scratch</code> on the <code>nexus</code> server, with the action <code>list</code> or <code>search</code>. Claude lists the notes: hypotheses, partial results, and messages between agents. Early in a session the store is often empty. This is normal.</p>
+<h3>Where you see it</h3>
+<p>Give Claude a task that takes several steps, for example an investigation of a bug that has more than one possible cause, or <code>/conexus:analyze-code</code> on a part of the codebase. Watch the tool calls. Between the searches and file reads you see calls named <code>scratch</code> on the <code>nexus</code> server: Claude and its agents writing hypotheses and partial results for each other. When the task ends, the notes have served their purpose.</p>
+<p>If you are curious what is in there at some moment, ask. Any phrasing works: "what have you noted so far", "what are the agents finding". Claude lists the notes.</p>
 
-<h3>What happens at the end of a session</h3>
-<p>Most scratch notes disappear. That is the purpose of the store. Two things survive:</p>
-<ul class="plain">
-<li>Notes that Claude marked for keeping. The plugin copies them to memory when the session ends.</li>
-<li>Notes that Claude promoted during the session, because a hypothesis proved true. These are already in memory.</li>
-</ul>
-<p>You can ask for either: <em>"Keep that scratch note. Promote it to memory."</em> Claude calls <code>scratch_manage</code> with the action <code>promote</code>.</p>
+<h3>What survives the session</h3>
+<p>Most scratch notes disappear at the end. That is the purpose of the store. A hypothesis that proved true does not stay a scratch note: Claude promotes it to memory during the session, or marks it, and the plugin copies it to memory at session end. You see this as a <code>scratch_manage</code> call with the action <code>promote</code>. If you think a finding is worth keeping and Claude has not kept it, say so in passing. "Keep that" is enough.</p>
 <p class="note">From the terminal: <code>nx scratch list</code> shows the notes of the current session.</p>
 
 <div class="further"><h4>Investigate further</h4><ul>
-<li>Start a task that makes Claude use helper agents, for example <code>/conexus:analyze-code</code>. While it runs, ask what is in scratch. You see the agents' notes appear.</li>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md#t1----session-scratch">Storage tiers: T1</a>: how a session is identified, and how agents share the store.</li>
 </ul></div>
 </section>
@@ -319,7 +302,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <p class="why">The knowledge store is permanent, and Claude searches it by meaning. In lesson 2 you added a repository. In this lesson you add a written note and a document. You also meet the catalog, which lists every document and the links between them.</p>
 
 <h3>A note in a subject collection</h3>
-<div class="see">Say to Claude</div>
+<div class="see">You might say</div>
 <div class="cmd"><pre>Store this in Nexus knowledge, in the collection "<span class="ph">&lt;SUBJECT&gt;</span>", with the title "<span class="ph">&lt;SHORT-TITLE&gt;</span>":
 <span class="ph">&lt;A LESSON YOU LEARNED THAT IS TRUE BEYOND THIS PROJECT&gt;</span></pre><button class="copy" type="button">Copy</button></div>
 <p class="note">Example: collection <code>distributed-systems</code>, title <code>idempotency-keys-per-tenant</code>, text "Idempotency keys must be scoped per tenant. A global key space let two tenants collide in production."</p>
@@ -328,14 +311,14 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <div class="callout rule"><p><strong>A collection is a subject.</strong> Name it after a subject that will exist for years: <code>distributed-systems</code>, <code>postgres</code>, <code>team-process</code>. Do not name it after a session, a task, or a program. Nexus refuses the names <code>knowledge</code>, <code>notes</code>, <code>default</code>, <code>tmp</code>, and <code>test</code>. If you do not know the existing collections, ask Claude: <em>"List the Nexus collections."</em></p></div>
 
 <h3>Documents</h3>
-<div class="see">Say to Claude</div>
+<div class="see">You might say</div>
 <div class="cmd"><pre>Index <span class="ph">&lt;PATH/TO/A-MARKDOWN-FILE.md&gt;</span> and <span class="ph">&lt;PATH/TO/A-PAPER.pdf&gt;</span> into Nexus.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What Claude does</div>
 <p>Claude runs <code>nx index md</code> for the Markdown file and <code>nx index pdf</code> for the PDF. Nexus chooses the correct PDF reader automatically, also for scanned PDFs. Both documents are now in the knowledge store and in the catalog.</p>
 
 <h3>The catalog</h3>
 <p>Nexus adds every repository, note, and document to the catalog. The catalog also records links between documents. A link has a type, for example <code>cites</code>, <code>implements</code>, or <code>supersedes</code>. Search finds text inside documents. The catalog answers two other questions: what documents exist, and how they are connected.</p>
-<div class="see">Say to Claude</div>
+<div class="see">You might say</div>
 <div class="cmd"><pre>Which documents in the Nexus catalog are linked to <span class="ph">&lt;THE TITLE OF THE PAPER&gt;</span>?</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>Tool calls on the <code>nexus-catalog</code> server: <code>show</code> or <code>links</code>. Claude lists the linked documents and the type of each link. In a new install there are few links yet. Links appear when Nexus enriches documents and when an RDR cites a source.</p>
@@ -354,7 +337,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <p class="why">The lessons so far put things into Nexus and took them out again. This lesson is the loop that Nexus is built for: you ask, Claude searches, you follow what it finds, you connect it to other things, and the store gets better each time. Every step here is a conversation, not a command.</p>
 
 <h3>Research a subject</h3>
-<div class="see">Say to Claude</div>
+<div class="see">You might say</div>
 <div class="cmd"><pre>/conexus:research <span class="ph">&lt;A SUBJECT THAT YOUR PROJECT DEPENDS ON&gt;</span></pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>Claude starts a research agent. The agent searches the knowledge store first, then the web, then your code. Claude Code shows the agent's tool calls: <code>search</code>, <code>query</code>, web searches, and at the end <code>store_put</code>. The result is a summary with sources, and the findings are saved in the knowledge store. The next search on that subject finds them.</p>
@@ -368,7 +351,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 
 <h3>Connect a document to code</h3>
 <p>The catalog records links between documents. Most links appear by themselves: an indexed paper cites other papers, an RDR cites its sources. You can also add one when you know a connection that Nexus does not.</p>
-<div class="see">Say to Claude</div>
+<div class="see">You might say</div>
 <div class="cmd"><pre>Link <span class="ph">&lt;THE PAPER OR DESIGN DOCUMENT&gt;</span> to <span class="ph">&lt;THE FILE OR MODULE THAT IMPLEMENTS IT&gt;</span> with an "implements" link.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>A tool call named <code>link</code> on the <code>nexus-catalog</code> server, with the two documents and the type <code>implements</code>. From now on, a question about the design finds the code, and a question about the code finds the design. Ask: <em>"What implements <span class="ph">&lt;THE DESIGN DOCUMENT&gt;</span>?"</em> Claude follows the link.</p>
@@ -376,7 +359,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 
 <h3>Shape the topic map</h3>
 <p>In lesson 2 you saw the topics that Nexus found in your repository. Topics are not fixed. You can look at them, question them, and change them.</p>
-<div class="see">Say to Claude</div>
+<div class="see">You might say</div>
 <div class="cmd"><pre>Show me the topic map for this project. Which topics appear in both the code and the documentation?</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>Claude runs <code>nx taxonomy list</code> and <code>nx taxonomy hubs</code>. The hubs are topics that connect several collections. They are often the most important ideas in the project. Then narrow a search to one topic: <em>"Search for <span class="ph">&lt;A QUESTION&gt;</span> inside the topic <span class="ph">&lt;TOPIC&gt;</span> only."</em> Claude passes the topic to the <code>search</code> tool, and results outside that topic are excluded.</p>
@@ -397,7 +380,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <div class="lhead"><span class="lnum">7</span><h2>Questions that need many documents</h2><span class="ltime">10 min</span></div>
 <p class="why">A normal question makes one or two searches. Some questions need more: compare what the documentation says with what the code does, or collect a pattern from many files. For these, the plugin has a skill that plans several steps and combines the results.</p>
 
-<div class="see">Say to Claude</div>
+<div class="see">You might say</div>
 <div class="cmd"><pre>/conexus:query Compare what the documentation says about <span class="ph">&lt;A CONCEPT FROM LESSON 2&gt;</span> with what the code actually does.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>A tool call named <code>nx_answer</code>. It searches the documentation and the code, extracts the relevant facts from each, compares them, and returns one answer with sources. This takes longer than a normal search, usually 5 to 15 seconds and sometimes more.</p>
@@ -436,7 +419,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <p>Do not write one when the reason is clear from the code.</p>
 
 <h3>The steps</h3>
-<div class="see">Say to Claude</div>
+<div class="see">You might say</div>
 <div class="cmd"><pre>/conexus:rdr-create             <span class="c"># create the document, status Draft</span>
 /conexus:rdr-research add 12    <span class="c"># add a finding, with a tag that says how sure you are</span>
 /conexus:rdr-gate 12            <span class="c"># optional: automatic checks and a critique</span>
@@ -457,18 +440,18 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <p class="why">Three things keep Nexus working: a health check, the correct way to update, and a current index.</p>
 
 <h3>Health check</h3>
-<div class="see">Say to Claude</div>
+<div class="see">You might say</div>
 <div class="cmd"><pre>Run nx doctor and tell me if anything is wrong.</pre><button class="copy" type="button">Copy</button></div>
 <p>Every line must show ✓. One line may say "credentials not set". This is normal for a local install. Inside Claude Code, <code>/conexus:nx-preflight</code> checks the plugin in the same way.</p>
 
 <h3>Update</h3>
-<div class="see">Say to Claude</div>
+<div class="see">You might say</div>
 <div class="cmd"><pre>/conexus:upgrade</pre><button class="copy" type="button">Copy</button></div>
 <p>The skill shows what an update would change, then runs it. From the terminal, the same update is two commands: <code>nx self install</code>, then <code>nx upgrade</code>. Always run both.</p>
 <div class="callout"><p><strong>Never update with <code>uv tool install conexus</code>.</strong> That command removes the local search model, and search then returns nothing. If this happened, <code>nx self install</code> repairs it.</p></div>
 
 <h3>Keep the index current</h3>
-<div class="see">Say to Claude</div>
+<div class="see">You might say</div>
 <div class="cmd"><pre>Install the Nexus git hooks in this repository.</pre><button class="copy" type="button">Copy</button></div>
 <p>Claude runs <code>nx hooks install</code>. After that, git indexes the changed files after each commit. Without the hooks, say <em>"Index this repository into Nexus"</em> again after the code changes. Only changed files are indexed.</p>
 
