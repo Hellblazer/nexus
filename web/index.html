@@ -31,7 +31,6 @@
 /* Code blocks scroll sideways inside their column. A grid or flex child defaults to min-width:auto, which lets a long <pre> line widen the track and the page; min-width:0 on every wrapper between the track and the <pre> stops that. */
 .wrap,.wrap>*,main,.step,.cmd,.tbl,.further,.callout,.lesson{min-width:0}
 pre{max-width:100%}
-pre{white-space:pre-wrap;overflow-wrap:anywhere;padding-right:76px}
 
 html{margin:0}body{margin:0;background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;font-size:16px;line-height:1.55;padding-inline:clamp(16px,4vw,40px);padding-block:40px 80px;}
 .wrap{max-width:820px;margin:0 auto}
@@ -71,6 +70,7 @@ ol.steps>li::before{content:counter(s);font-family:"Source Serif 4",Georgia,seri
 .step h3{margin-top:0}
 .step p{margin:6px 0 10px}
 pre{margin:0;background:var(--code-bg);color:var(--code-fg);border-radius:var(--radius);padding:14px 16px;font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;font-size:14px;line-height:1.6;overflow-x:auto;position:relative}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;padding-right:76px}
 pre .c{color:var(--code-cmt)}
 .cmd{position:relative}
 .copy{position:absolute;top:8px;right:8px;font:inherit;font-size:12px;font-weight:500;padding:4px 9px;border-radius:4px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:var(--code-fg);cursor:pointer}
