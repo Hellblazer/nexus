@@ -4,6 +4,29 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.39.0] - 2026-09-10
+
+Plugin version aligned with conexus 7.39.0. Live at this pin, from
+`PENDING_RELEASE.md`:
+
+- `hooks/hooks.json`: nexus-xn84f — SessionStart runs `nx self gc` (third,
+  after the upgrade and the preflight) so a generation a long-lived session
+  held at install time is reaped once that session ends; a box without the
+  verb or the layout is silent.
+- `skills/rdr-gate/SKILL.md`, `commands/rdr-gate.md`, `skills/rdr-fix/SKILL.md`,
+  `commands/rdr-fix.md`, `skills/rdr-accept/SKILL.md`, `commands/rdr-accept.md`,
+  `agents/substantive-critic.md` (nexus-yjf5l.1, .2, .3, .5, .7, .8, .14,
+  .17): gate findings carry a class (BLOCKS-PLANNING or
+  DISCOVER-AT-IMPLEMENTATION) that governs disposition; from round 3 the
+  fix closes only ship-blockers and the rest are residuals dispositioned at
+  accept (a DISCOVER-AT-IMPLEMENTATION residual by a bead against its
+  phase, a BLOCKS-PLANNING one by an explicit author disposition); a
+  residual dispositioned by an RDR edit carries a fix check; a recorded
+  residual is exempt from the survivor sweep; residuals carry forward
+  across rounds; the fix check lists every other occurrence of a changed
+  identifier, names what constrains what, names a pair once, and runs
+  serially before Layer 1 and Layer 3.
+
 ## [7.38.0] - 2026-09-09
 
 Plugin version aligned with conexus 7.38.0. Live at this pin, from

@@ -431,7 +431,7 @@ from __future__ import annotations
 #: entry leads with [additive], so the engine is deployed before this client
 #: tag (nexus-1emxn choreography (a)). Local-mode installs get the restore
 #: verb and the tombstone protection ONLY through this pin.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 112)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 113)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed
