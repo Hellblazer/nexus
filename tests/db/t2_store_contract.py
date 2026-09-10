@@ -340,6 +340,13 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         # is a prefer-higher upsert, so nothing else can lower or remove a
         # row); no SQLite twin ever had it.
         'prune_projection_below': ['source_collection_prefix', 'min_similarity'],
+        # nexus-c0g6e (GH #1529): pure-read topic_assignments row count for a
+        # topic, backing the `nx doctor` doc_count-drift row. Service-only by
+        # construction — the engine's TaxonomyRepository.countAssignments
+        # (already-shipped route, GET /topics/count_assignments) is the sole
+        # oracle; topics.doc_count is trigger-maintained (RDR-154 P0), so no
+        # SQLite twin ever counted topic_assignments directly.
+        'count_assignments': ['topic_id'],
     },
     'telemetry': {
         # nexus-onjvy: hook_failures was WRITE-ONLY over HTTP (/record + /trim,

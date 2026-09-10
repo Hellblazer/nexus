@@ -330,6 +330,19 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             params["collection"] = collection
         return self._get("/topics/unreviewed", params)
 
+    def count_assignments(self, topic_id: int) -> int:
+        """Pure read: the REAL topic_assignments row count for a topic, from
+        the engine's ``TaxonomyRepository.countAssignments`` (already-shipped
+        route, ``GET /topics/count_assignments``) — never ``topics.doc_count``
+        itself, which is trigger-maintained (taxonomy-013) and can drift on an
+        import that wrote both tables from a snapshot whose counts never
+        agreed (bead nexus-c0g6e, GH #1529; hygiene-007-1 is the engine-side
+        boot-time repair). Used by the doctor drift check below to compare the
+        two without trusting the cached column.
+        """
+        result = self._get("/topics/count_assignments", {"topic_id": topic_id})
+        return int(result.get("count") or 0)
+
     def update_topic_label(self, topic_id: int, new_label: str) -> None:
         """Update topic label without changing review_status."""
         self._post("/topics/update_label", {"topic_id": topic_id, "label": new_label})

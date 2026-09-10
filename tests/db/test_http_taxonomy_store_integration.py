@@ -640,6 +640,37 @@ class TestTaxonomyMVV:
         docs = taxonomy_store.get_topic_doc_ids(1001, limit=10)
         assert canonical_chunk_id("doc-inttest-a1") in docs
 
+    def test_a2_count_assignments_matches_real_rows(self, taxonomy_store, pg_instance) -> None:
+        """bead nexus-c0g6e (GH #1529): count_assignments (GET /topics/
+        count_assignments, engine's already-shipped countAssignments) returns
+        the REAL topic_assignments row count, independent of whatever
+        doc_count itself happens to hold — the doctor drift check's oracle."""
+        topic_id = taxonomy_store.import_topic(
+            src_id=1002,
+            label="count-assignments-inttest",
+            parent_id=None,
+            collection="knowledge__papers",
+            centroid_hash=None,
+            doc_count=99,  # deliberately wrong — count_assignments must ignore it
+            created_at="2026-01-01T00:00:00Z",
+            review_status="pending",
+            terms=None,
+        )
+        assert taxonomy_store.count_assignments(topic_id) == 0
+
+        _seed_chunk(pg_instance, "default", "knowledge__papers", canonical_chunk_id("doc-count-a1"))
+        _seed_chunk(pg_instance, "default", "knowledge__papers", canonical_chunk_id("doc-count-a2"))
+        taxonomy_store.assign_topic(
+            canonical_chunk_id("doc-count-a1"), topic_id, "hdbscan",
+            source_collection="knowledge__papers",
+        )
+        taxonomy_store.assign_topic(
+            canonical_chunk_id("doc-count-a2"), topic_id, "hdbscan",
+            source_collection="knowledge__papers",
+        )
+
+        assert taxonomy_store.count_assignments(topic_id) == 2
+
     def test_b_merge_topics(self, taxonomy_store, pg_instance) -> None:
         """b) merge_topics: source removed, returns collection for chroma cleanup."""
         taxonomy_store.import_topic(

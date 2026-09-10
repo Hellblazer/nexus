@@ -3971,3 +3971,155 @@ class TestDoctorFenceNonRepoOwners:
         assert r.ok is False
         assert "non-repo owner" not in r.detail
         assert not r.fix_suggestions[0].startswith("nx catalog reconcile-fences")
+
+
+class TestCheckTopicsDocCountDrift:
+    """Topics whose cached doc_count disagrees with the real topic_assignments
+    count (bead nexus-c0g6e, GH #1529).
+
+    The engine self-heals this silently on its next restart (hygiene-007-1,
+    the boot-time recount walk); this check exists so the blast radius is
+    reportable rather than guessed, mirroring TestCheckNextSeqDrift's own
+    framing for the sibling sequence-lag defect (hygiene-006-1).
+    """
+
+    def _store(
+        self, topics, counts: dict[int, int] | None = None,
+        *, list_exc: Exception | None = None, count_404_for: set[int] | None = None,
+        count_exc_for: dict[int, Exception] | None = None,
+    ):
+        counts = counts or {}
+        count_404_for = count_404_for or set()
+        count_exc_for = count_exc_for or {}
+
+        class _Store:
+            closed = False
+
+            def get_all_topics(self) -> list[dict]:
+                if list_exc is not None:
+                    raise list_exc
+                return list(topics)
+
+            def count_assignments(self, topic_id: int) -> int:
+                if topic_id in count_404_for:
+                    request = httpx.Request(
+                        "GET", "https://engine.example/v1/taxonomy/topics/count_assignments")
+                    response = httpx.Response(404, request=request)
+                    raise httpx.HTTPStatusError("404 error", request=request, response=response)
+                if topic_id in count_exc_for:
+                    raise count_exc_for[topic_id]
+                return counts[topic_id]
+
+            def close(self) -> None:
+                self.closed = True
+
+        return _Store()
+
+    def _run(self, monkeypatch, store) -> "object":
+        import nexus.health as h
+        monkeypatch.setattr(
+            "nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore",
+            lambda *a, **k: store, raising=False,
+        )
+        return h._check_topics_doc_count_drift()[0]
+
+    def test_drifted_topic_is_named(self, monkeypatch) -> None:
+        store = self._store(
+            [{"id": 500, "label": "over-counted", "doc_count": 5}],
+            counts={500: 2},
+        )
+        r = self._run(monkeypatch, store)
+        assert r.ok is False and r.warn is True
+        assert "500" in r.detail and "over-counted" in r.detail
+        assert "doc_count=5" in r.detail and "actual=2" in r.detail
+        assert store.closed is True
+
+    def test_zero_case_topic_with_no_assignments_is_flagged(self, monkeypatch) -> None:
+        """A topic whose real assignment count is 0 must still be flagged as
+        drift, not skipped as 'no rows found' — the same zero-case the
+        engine-side hygiene-007-1 changeset covers via its LEFT JOIN."""
+        store = self._store(
+            [{"id": 502, "label": "zeroed", "doc_count": 7}],
+            counts={502: 0},
+        )
+        r = self._run(monkeypatch, store)
+        assert r.ok is False and r.warn is True
+        assert "doc_count=7" in r.detail and "actual=0" in r.detail
+
+    def test_healthy_topics_are_clean(self, monkeypatch) -> None:
+        store = self._store(
+            [
+                {"id": 501, "label": "already-correct", "doc_count": 3},
+                {"id": 503, "label": "also-correct", "doc_count": 0},
+            ],
+            counts={501: 3, 503: 0},
+        )
+        r = self._run(monkeypatch, store)
+        assert r.ok is True
+        assert "none" in r.detail and "2 topic(s) checked" in r.detail
+
+    def test_no_topics_skips(self, monkeypatch) -> None:
+        store = self._store([])
+        r = self._run(monkeypatch, store)
+        assert r.ok is True and "skipped" in r.detail and "no topics" in r.detail
+
+    def test_connect_failure_skips(self, monkeypatch) -> None:
+        import nexus.health as h
+
+        def _raise(*a, **k):
+            raise RuntimeError("no service registered")
+
+        monkeypatch.setattr(
+            "nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore", _raise, raising=False,
+        )
+        r = h._check_topics_doc_count_drift()[0]
+        assert r.ok is True
+        assert "skipped" in r.detail and "no engine reachable" in r.detail
+
+    def test_list_topics_failure_skips(self, monkeypatch) -> None:
+        store = self._store([], list_exc=RuntimeError("transport failure"))
+        r = self._run(monkeypatch, store)
+        assert r.ok is True
+        assert "skipped" in r.detail and "taxonomy store unavailable" in r.detail
+
+    def test_route_missing_404_reads_as_unread_not_clean(self, monkeypatch) -> None:
+        """NON-VACUITY: a pre-route engine must report UNREAD, not a false
+        all-clear — mirrors TestCheckNextSeqDrift.
+        test_engine_without_next_seq_reads_as_skipped_not_clean."""
+        store = self._store(
+            [{"id": 500, "label": "t", "doc_count": 5}],
+            count_404_for={500},
+        )
+        r = self._run(monkeypatch, store)
+        assert r.ok is True
+        assert "skipped" in r.detail and "count_assignments" in r.detail
+        assert "none (" not in r.detail
+
+    def test_one_unreadable_topic_does_not_end_the_sweep(self, monkeypatch) -> None:
+        store = self._store(
+            [
+                {"id": 500, "label": "unreadable", "doc_count": 5},
+                {"id": 501, "label": "drifted", "doc_count": 9},
+            ],
+            counts={501: 1},
+            count_exc_for={500: RuntimeError("transient")},
+        )
+        r = self._run(monkeypatch, store)
+        assert r.ok is False and r.warn is True
+        assert "501" in r.detail and "doc_count=9" in r.detail and "actual=1" in r.detail
+        assert "500" not in r.detail
+
+    def test_topic_missing_id_is_skipped(self, monkeypatch) -> None:
+        store = self._store(
+            [{"label": "no-id-field", "doc_count": 5}, {"id": 501, "label": "ok", "doc_count": 2}],
+            counts={501: 2},
+        )
+        r = self._run(monkeypatch, store)
+        assert r.ok is True and "none (1 topic(s) checked)" in r.detail
+
+    def test_store_closed_even_when_drift_found(self, monkeypatch) -> None:
+        store = self._store(
+            [{"id": 500, "label": "t", "doc_count": 5}], counts={500: 2},
+        )
+        self._run(monkeypatch, store)
+        assert store.closed is True
