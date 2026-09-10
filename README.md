@@ -11,7 +11,7 @@
   <img src="https://i0.wp.com/tensegrity.blog/wp-content/uploads/2026/04/a-stately-pleasure-dome.png?w=480&ssl=1" alt="A brass-ribbed crystal dome on a hilltop at dusk" align="right" width="320" />
 </a>
 
-**Start here**: [**hellblazer.github.io/nexus**](https://hellblazer.github.io/nexus/) — the install guide, tailored to how you use Claude, with copyable commands. For the ideas behind it, [**How I actually use Nexus**](https://tensegrity.blog/2026/04/26/how-i-actually-use-nexus/) — the conceptual overview and the shape of the substrate. Then [**Installing Nexus**](https://tensegrity.blog/2026/04/26/installing-nexus/) — a ten-minute hands-on walkthrough from `uv tool install` through your first search.
+**Start here**: [**hellblazer.github.io/nexus**](https://hellblazer.github.io/nexus/) — the install guide, tailored to how you use Claude, with copyable commands, then [**Your First Hour with Nexus**](https://hellblazer.github.io/nexus/getting-started.html), eight short interactive lessons from first search to first RDR. For the ideas behind it, [**How I actually use Nexus**](https://tensegrity.blog/2026/04/26/how-i-actually-use-nexus/) — the conceptual overview and the shape of the substrate. Then [**Installing Nexus**](https://tensegrity.blog/2026/04/26/installing-nexus/) — a ten-minute hands-on walkthrough from `uv tool install` through your first search.
 
 ## Prerequisites
 
@@ -142,6 +142,7 @@ especially the first time.
 | Browse the docs tree | [docs/README.md](docs/README.md) |
 | Read the conceptual story | [How I actually use Nexus](https://tensegrity.blog/2026/04/26/how-i-actually-use-nexus/) |
 | Install step by step | [Install guide](https://hellblazer.github.io/nexus/) |
+| Learn the tooling in an hour | [Your First Hour with Nexus](https://hellblazer.github.io/nexus/getting-started.html) |
 | Walk through a fresh install | [Installing Nexus](https://tensegrity.blog/2026/04/26/installing-nexus/) |
 | Browse the full series | [Tensegrity blog](https://tensegrity.blog/) |
 
