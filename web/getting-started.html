@@ -169,7 +169,7 @@ ul.plain li{margin:3px 0}
 <tr><td>Tool</td><td>An action that Claude can take. Nexus adds tools to Claude Code. When Claude uses one, Claude Code shows the tool name.</td></tr>
 <tr><td>Skill</td><td>A named procedure that Claude follows for one kind of situation. Claude chooses it from what you say. A command such as <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/query/SKILL.md"><code>/conexus:query</code></a> starts it directly.</td></tr>
 <tr><td>Session</td><td>One run of Claude Code. The scratch store belongs to one session.</td></tr>
-<tr><td>Rendering</td><td>A readable document, in Markdown or as a web page, that Claude writes from what is in the stores at that moment.</td></tr>
+<tr><td>Rendering</td><td>A readable document, in Markdown or as a web page, that Claude writes from what is in the stores at that time.</td></tr>
 <tr><td>RDR</td><td>Research, Design, Review. A short document that records a decision before the code is written.</td></tr>
 <tr><td><code>nx</code></td><td>The Nexus terminal command. Claude runs it for you when needed. You can also run it yourself.</td></tr>
 </table></div></details>
@@ -246,9 +246,9 @@ ul.plain li{margin:3px 0}
 <p>Type <code>/clear</code>, or start a new session. Paste the copied line as the first message. Claude reads the file, runs the first actions, and continues where the last session stopped. Claude also receives the memory block from <a href="#l1">lesson 1</a>. So it has both the facts and the position.</p>
 
 <h3>When to run it</h3>
-<p>There are three moments. In each one, run <code>/conexus:continuation</code> first. Then do the other thing.</p>
+<p>There are three cases. In each one, run <code>/conexus:continuation</code> first. Then do the other thing.</p>
 <div class="tbl"><table>
-<tr><th>Moment</th><th>How you notice it</th><th>Then</th></tr>
+<tr><th>Case</th><th>How you notice it</th><th>Then</th></tr>
 <tr><td>You are about to stop working</td><td>End of the day, a meeting, lunch. Any time the terminal will wait for more than one hour.</td><td>Run it. Then close the terminal, or leave the session open. Both are fine.</td></tr>
 <tr><td>You finished a task, or are about to change subject</td><td>The task is committed, or the next task is not related to the current one: a different branch, a different part of the system.</td><td>Run it. Then type <code>/clear</code>. Start the next task in the empty session. Paste the handoff later, when you return to the old subject.</td></tr>
 <tr><td>The context window is filling</td><td><code>/context</code> shows that most of the window is used, or Claude Code shows its warning, or Claude asks about things you told it one hour ago.</td><td>Run it. Then type <code>/clear</code> and paste the handoff. You lose nothing, and the session is fast again. Details are below.</td></tr>
@@ -258,12 +258,12 @@ ul.plain li{margin:3px 0}
 
 <div class="see">See how full it is</div>
 <div class="cmd"><pre>/context</pre><button class="copy" type="button">Copy</button></div>
-<p>Claude Code shows how much of the window is used, and what uses it. Look at it when a session has run for some time, or when an answer seems wrong. When the window is almost full, Claude Code also shows a warning above the input line. The warning is the last moment. Run the continuation when you see it, not later.</p>
+<p>Claude Code shows how much of the window is used, and what uses it. Look at it when a session has run for some time, or when an answer seems wrong. When the window is almost full, Claude Code also shows a warning above the input line. The warning is the last chance. Run the continuation when you see it, not later.</p>
 
 <div class="callout rule"><p><strong>Keep it lean on purpose.</strong> Do not wait for the warning. The habit that works is one task per session. Finish the task. Run <code>/conexus:continuation</code>. Type <code>/clear</code>. Start the next task in an empty window that contains only the handoff and the plugin's context. A session that stays small answers faster, costs less, and does not lose detail to compression. The continuation makes clearing safe: everything you need is in the file or in memory, not only in the window.</p></div>
 
 <p class="note">These fill the window fastest: reading large files, long command outputs, and wide searches. If Claude is about to read a big file, ask for only the part you need. If a command prints thousands of lines, ask Claude to summarize the output instead of showing it. This is not a small detail. It is the difference between a session that lasts an afternoon and a session that is compressed before lunch.</p>
-<p class="note">You can also compress by hand with <code>/compact</code>. This is better than automatic compression, because you choose the moment. But it still loses detail. Continuation and <code>/clear</code> lose nothing. Prefer them.</p>
+<p class="note">You can also compress by hand with <code>/compact</code>. This is better than automatic compression, because you choose the time. But it still loses detail. Continuation and <code>/clear</code> lose nothing. Prefer them.</p>
 <p>If you forget to run it: everything that was in memory (<a href="#l4">lesson 4</a>) is still there. Start the new session and ask <em>"What do you know about this project, and what was I working on?"</em> Claude answers from memory. The last continuation file, if there was one, is still in <code>/tmp</code> until the next restart of the computer. Ask Claude to find it.</p>
 
 <h3>What it looks like, end to end</h3>
@@ -288,7 +288,7 @@ ul.plain li{margin:3px 0}
         Continuing with the fix. Starting with the test for the duplicate case.</pre><button class="copy" type="button">Copy</button></div>
 <p>Claude ran the first actions from the file: it checked the branch, checked that there were no uncommitted changes, and read the memory entry that the file named. Then it continued the open work. You typed one line. The names in this example are invented. The form is what you will see.</p>
 
-<div class="callout rule"><p><strong>Two stores, two jobs.</strong> Memory holds what is true about the project, for weeks. The continuation file holds where the work stands, for the next session only. Use <code>/conexus:continuation</code> at the three moments above. It takes a few seconds. Without it, the next session spends its first minutes finding out what this session already knew.</p></div>
+<div class="callout rule"><p><strong>Two stores, two jobs.</strong> Memory holds what is true about the project, for weeks. The continuation file holds where the work stands, for the next session only. Use <code>/conexus:continuation</code> in the three cases above. It takes a few seconds. Without it, the next session spends its first minutes finding out what this session already knew.</p></div>
 <p class="note">You can give a topic: <code>/conexus:continuation <span class="ph">&lt;TOPIC&gt;</span></code>. The file is then named after the topic. This helps when you work on several things at the same time. The files live in <code>/tmp</code> and disappear at the next restart of the computer. They are a handoff, not a record. The record is memory.</p>
 
 
@@ -371,7 +371,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 
 <h3>Where you see it</h3>
 <p>Give Claude a task that takes several steps, for example an investigation of a bug that has more than one possible cause, or <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/commands/analyze-code.md"><code>/conexus:analyze-code</code></a> on a part of the codebase. Watch the tool calls. Between the searches and file reads you see calls named <code>scratch</code> on the <code>nexus</code> server: Claude and its agents writing hypotheses and partial results for each other. When the task ends, the notes have served their purpose.</p>
-<p>If you are curious what is in there at some moment, ask. Any phrasing works: "what have you noted so far", "what are the agents finding". Claude lists the notes.</p>
+<p>If you want to know what is in there, ask. Any phrasing works: "what have you noted so far", "what are the agents finding". Claude lists the notes.</p>
 
 <h3>What survives the session</h3>
 <p>Most scratch notes disappear at the end. That is the purpose of the store. A hypothesis that proved true does not stay a scratch note: Claude promotes it to memory during the session, or marks it, and the plugin copies it to memory at session end. You see this as a <code>scratch_manage</code> call with the action <code>promote</code>. If you think a finding is worth keeping and Claude has not kept it, say so in passing. "Keep that" is enough.</p>
