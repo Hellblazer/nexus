@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Nexus getting started, inside Claude Code. Eight lessons: the session, indexing and search, memory, scratch, knowledge and the catalog, large questions, RDRs, and maintenance.">
+<meta name="description" content="Nexus getting started, inside Claude Code. Nine lessons: the session, indexing and search, memory, scratch, knowledge and the catalog, exploration, large questions, RDRs, and maintenance.">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AD%3C/text%3E%3C/svg%3E">
 <title>Nexus Getting Started</title>
@@ -126,9 +126,10 @@ ul.plain li{margin:3px 0}
     <li><a href="#l3">3. Memory: what Claude keeps</a></li>
     <li><a href="#l4">4. Scratch: shared notes</a></li>
     <li><a href="#l5">5. Knowledge and the catalog</a></li>
-    <li><a href="#l6">6. Questions that need many documents</a></li>
-    <li><a href="#l7">7. Record a decision</a></li>
-    <li><a href="#l8">8. Maintenance</a></li>
+    <li><a href="#l6">6. Explore: research, links, topics</a></li>
+    <li><a href="#l7">7. Questions that need many documents</a></li>
+    <li><a href="#l8">8. Record a decision</a></li>
+    <li><a href="#l9">9. Maintenance</a></li>
   </ol>
   <div class="meta"><a href="./">← Install guide</a></div>
 </nav>
@@ -136,7 +137,7 @@ ul.plain li{margin:3px 0}
 <main>
 <div class="eyebrow">Nexus · getting started</div>
 <h1>Nexus Getting Started</h1>
-<p class="lede">You do all of this inside Claude Code. You give Claude a short instruction. Claude uses Nexus for you. Each lesson shows the instruction to give, what Claude does, and what you see. Eight lessons, about one hour.</p>
+<p class="lede">You do all of this inside Claude Code. You give Claude a short instruction. Claude uses Nexus for you. Each lesson shows the instruction to give, what Claude does, and what you see. Nine lessons, about ninety minutes.</p>
 <p class="note">Words in <span class="ph">ORANGE CAPITALS</span> are placeholders. Replace them with something from your own project before you send the instruction.</p>
 <p class="note">Before you start: install Nexus and the plugin with the <a href="./">install guide</a>. Then open a terminal in a project of yours and run <code>claude</code>. Every lesson happens in that Claude Code session.</p>
 
@@ -339,7 +340,51 @@ Which files deal with <span class="ph">A CONCEPT</span>, and how are they connec
 
 <!-- ============ 6 ============ -->
 <section class="lesson" id="l6">
-<div class="lhead"><span class="lnum">6</span><h2>Questions that need many documents</h2><span class="ltime">10 min</span></div>
+<div class="lhead"><span class="lnum">6</span><h2>Explore: research, links, and the topic map</h2><span class="ltime">20 min</span></div>
+<p class="why">The lessons so far put things into Nexus and took them out again. This lesson is the loop that Nexus is built for: you ask, Claude searches, you follow what it finds, you connect it to other things, and the store gets better each time. Every step here is a conversation, not a command.</p>
+
+<h3>Research a subject</h3>
+<div class="see">Say to Claude</div>
+<div class="cmd"><pre>/conexus:research <span class="ph">A SUBJECT THAT YOUR PROJECT DEPENDS ON</span></pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What you see</div>
+<p>Claude starts a research agent. The agent searches the knowledge store first, then the web, then your code. Claude Code shows the agent's tool calls: <code>search</code>, <code>query</code>, web searches, and at the end <code>store_put</code>. The result is a summary with sources, and the findings are saved in the knowledge store. The next search on that subject finds them.</p>
+<p class="note">Example subjects: the consensus protocol your database uses, the retry rules of an API you call, a library your build depends on. Pick something you want to understand better, not something you already know.</p>
+
+<h3>Follow what you found</h3>
+<p>A research result names documents and files. Each of them is a place to continue. Ask about one:</p>
+<div class="cmd"><pre>Open <span class="ph">ONE DOCUMENT OR FILE FROM THE RESULT</span> and tell me what else in the store is related to it.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What you see</div>
+<p>Claude calls <code>show</code> and <code>links</code> on the <code>nexus-catalog</code> server, and <code>search</code> for related chunks. It tells you what the document is, what links to it, and what is similar. Then ask about one of those. This is how you move through the store: from one document to its neighbours, without knowing the names in advance.</p>
+
+<h3>Connect a document to code</h3>
+<p>The catalog records links between documents. Most links appear by themselves: an indexed paper cites other papers, an RDR cites its sources. You can also add one when you know a connection that Nexus does not.</p>
+<div class="see">Say to Claude</div>
+<div class="cmd"><pre>Link <span class="ph">THE PAPER OR DESIGN DOCUMENT</span> to <span class="ph">THE FILE OR MODULE THAT IMPLEMENTS IT</span> with an "implements" link.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What you see</div>
+<p>A tool call named <code>link</code> on the <code>nexus-catalog</code> server, with the two documents and the type <code>implements</code>. From now on, a question about the design finds the code, and a question about the code finds the design. Ask: <em>"What implements <span class="ph">THE DESIGN DOCUMENT</span>?"</em> Claude follows the link.</p>
+<p class="note">Link types: <code>cites</code>, <code>implements</code>, <code>supersedes</code>, <code>relates</code>, and others. If you index papers, ask Claude to <em>"enrich the <span class="ph">COLLECTION</span> collection with bibliographic data"</em>. Claude runs <code>nx enrich bib</code>, which looks up each paper and adds <code>cites</code> links automatically.</p>
+
+<h3>Shape the topic map</h3>
+<p>In lesson 2 you saw the topics that Nexus found in your repository. Topics are not fixed. You can look at them, question them, and change them.</p>
+<div class="see">Say to Claude</div>
+<div class="cmd"><pre>Show me the topic map for this project. Which topics appear in both the code and the documentation?</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What you see</div>
+<p>Claude runs <code>nx taxonomy list</code> and <code>nx taxonomy hubs</code>. The hubs are topics that connect several collections. They are often the most important ideas in the project. Then narrow a search to one topic: <em>"Search for <span class="ph">A QUESTION</span> inside the topic <span class="ph">TOPIC</span> only."</em> Claude passes the topic to the <code>search</code> tool, and results outside that topic are excluded.</p>
+<p>When a topic is wrong, say so: <em>"The topic <span class="ph">TOPIC</span> should be called <span class="ph">BETTER NAME</span>."</em> or <em>"Assign <span class="ph">DOCUMENT</span> to the topic <span class="ph">TOPIC</span>."</em> Claude runs <code>nx taxonomy assign</code>. For a full review of every topic, <code>nx taxonomy review</code> in the terminal walks through them one by one and lets you accept, rename, or merge each.</p>
+
+<div class="callout rule"><p><strong>The loop:</strong> ask a question. Look at what Claude found. Ask about one of the results. Connect what belongs together. Repeat. Each search, link, and topic you touch makes the next answer better, for you and for Claude.</p></div>
+
+<div class="further"><h4>Investigate further</h4><ul>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/catalog.md">Document catalog</a>: all link types, and how links change search ranking.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/catalog.md#topic-taxonomy">Topic taxonomy</a>: how topics are found, labelled, and reviewed.</li>
+<li>Ask Claude: <em>"Which topics have documents from more than one collection, and what connects them?"</em></li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/querying-guide.md">Querying guide</a>: how the <code>query</code> tool follows links while it searches.</li>
+</ul></div>
+</section>
+
+<!-- ============ 7 ============ -->
+<section class="lesson" id="l7">
+<div class="lhead"><span class="lnum">7</span><h2>Questions that need many documents</h2><span class="ltime">10 min</span></div>
 <p class="why">A normal question makes one or two searches. Some questions need more: compare what the documentation says with what the code does, or collect a pattern from many files. For these, the plugin has a skill that plans several steps and combines the results.</p>
 
 <div class="see">Say to Claude</div>
@@ -366,9 +411,9 @@ Which files deal with <span class="ph">A CONCEPT</span>, and how are they connec
 </ul></div>
 </section>
 
-<!-- ============ 7 ============ -->
-<section class="lesson" id="l7">
-<div class="lhead"><span class="lnum">7</span><h2>Record a decision with an RDR</h2><span class="ltime">15 min</span></div>
+<!-- ============ 8 ============ -->
+<section class="lesson" id="l8">
+<div class="lhead"><span class="lnum">8</span><h2>Record a decision with an RDR</h2><span class="ltime">15 min</span></div>
 <p class="why">An RDR is a short document that you write before you write code. It records the problem, what you found out, the options, and the option you chose. When you close an RDR, Nexus indexes it into the knowledge store. Later, when you or Claude work on a similar decision, the old RDR appears in search.</p>
 
 <h3>When to write one</h3>
@@ -395,9 +440,9 @@ Which files deal with <span class="ph">A CONCEPT</span>, and how are they connec
 </ul></div>
 </section>
 
-<!-- ============ 8 ============ -->
-<section class="lesson" id="l8">
-<div class="lhead"><span class="lnum">8</span><h2>Maintenance</h2><span class="ltime">5 min</span></div>
+<!-- ============ 9 ============ -->
+<section class="lesson" id="l9">
+<div class="lhead"><span class="lnum">9</span><h2>Maintenance</h2><span class="ltime">5 min</span></div>
 <p class="why">Three things keep Nexus working: a health check, the correct way to update, and a current index.</p>
 
 <h3>Health check</h3>
@@ -424,7 +469,7 @@ Which files deal with <span class="ph">A CONCEPT</span>, and how are they connec
 
 <div class="finish">
 <h2>Complete</h2>
-<p>You know the three stores and how to choose one. You can ask Claude to index a repository and search it. You know what Claude keeps in memory and scratch, and how to look inside. You can store notes and documents in knowledge and find their links in the catalog. You know the commands for large questions, for RDRs, and for maintenance. Search results and session context get better as you index and record more.</p>
+<p>You know the three stores and how to choose one. You can ask Claude to index a repository and search it. You know what Claude keeps in memory and scratch, and how to look inside. You can store notes and documents in knowledge, research a subject, follow and add links, and shape the topic map. You know the commands for large questions, for RDRs, and for maintenance. Search results and session context get better as you index and record more.</p>
 <p>Reference: <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/README.md">Plugin README</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md">CLI reference</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/querying-guide.md">Querying guide</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr.md">RDR</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md">Storage tiers</a></p>
 </div>
 
