@@ -2324,6 +2324,14 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
         "tip after the disposition. A residual dispositioned by a bead id changed nothing "
         "in the file and needs none (nexus-yjf5l.1)."
     )
+    print(
+        f"   Classification determines which disposition applies: a residual classed "
+        f"`{DISCOVER_AT_IMPLEMENTATION}` is dispositioned by a bead id, and the bead names "
+        "the Implementation Plan phase whose steps would hit it. A residual classed "
+        f"`{BLOCKS_PLANNING}`, or an unclassified residual (every line written before the "
+        "class field existed), needs an explicit author disposition — a sha or a bead — "
+        "and the choice is recorded, never defaulted (nexus-yjf5l.8)."
+    )
     print()
     print(f"**RDR file path:** `{rdr_file}`")
     print()

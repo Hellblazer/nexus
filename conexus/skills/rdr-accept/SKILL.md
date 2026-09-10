@@ -21,7 +21,7 @@ Accepts an RDR after it passes the gate. This is the author/reviewer decision po
 ## Behavior
 
 1. **Verify gate result** — read `{id}-gate-latest` from T2. Block if outcome is not PASSED. Block if the record has a `prior:` chain and no `fix_check:` (a skipped fix check), if its `fix_check:` sha is not the record's `commit:` (the gate cited a fix check of an older tree), or if the named `{id}-fix-check-<sha>` record does not exist in T2.
-1b. **Disposition residuals** — for every `residuals:` line in the gate record (findings a round-3-or-later gate recorded instead of blocking), name a disposition: the commit sha that fixed it, or the bead id that carries it. Record the dispositions in Revision History. A residual with no disposition blocks accept.
+1b. **Disposition residuals** — for every `residuals:` line in the gate record (findings a round-3-or-later gate recorded instead of blocking), name a disposition: the commit sha that fixed it, or the bead id that carries it. A residual classed `DISCOVER-AT-IMPLEMENTATION` is dispositioned by a bead id, and the bead names the Implementation Plan phase whose steps would hit it. A residual classed `BLOCKS-PLANNING`, or an unclassified residual (every line written before the class field existed), needs an explicit author disposition — a sha (with its fix check, step 1c) or a bead — and the choice is recorded, never defaulted. Record the dispositions in Revision History. A residual with no disposition blocks accept.
 1c. **Fix-check the dispositioning change** — a residual dispositioned by a change to the RDR file carries a fix check on that change. Dispatch substantive-critic with ONLY that diff — the range is `git diff <gated-commit>..HEAD -- <rdr file>`, where `<gated-commit>` is the gate record's `commit:` — and the RDR file, under the same brief the re-gate fix check uses, and store the verdict as `{id}-fix-check-<sha>` in project `<repo>_rdr`, where `<sha>` is the RDR file's tip after the disposition. A residual dispositioned by a bead id changed nothing in the file and needs none. Any FAIL: fix it, re-run the check on the new diff, before the T2 write in step 2.
 2. **Update T2** (process authority) — set `status: "accepted"`, `accepted_date: "YYYY-MM-DD"`.
 3. **Flip the file frontmatter + README via the CLI (do NOT hand-edit):**
@@ -64,6 +64,7 @@ The accept skill writes a T1 scratch entry tagged `rdr-planning-context` before 
 
 - [ ] T2 gate result verified as PASSED before accepting
 - [ ] Every `residuals:` line in the gate record has a disposition (commit sha or bead id)
+- [ ] A `DISCOVER-AT-IMPLEMENTATION` residual is dispositioned by a bead naming its Implementation Plan phase; a `BLOCKS-PLANNING` or unclassified residual carries an explicit author disposition, never a default
 - [ ] Every residual dispositioned by a change to the RDR file names its `{id}-fix-check-<sha>` record, CLEAN or with its FAILs closed; a residual dispositioned by a bead id needs none
 - [ ] T2 metadata updated with status=accepted and accepted_date
 - [ ] File frontmatter updated to match T2

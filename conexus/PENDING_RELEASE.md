@@ -81,3 +81,10 @@ mechanize, it matters enough to ship.
   Ship-blocker/DISCOVER-AT-IMPLEMENTATION contradiction refusal.
 - `conexus/commands/rdr-gate.md`: nexus-yjf5l.7 — mirrors the Class line
   and the contradiction refusal.
+- `conexus/skills/rdr-accept/SKILL.md`: nexus-yjf5l.8 — step 1b and its
+  Success Criteria row: a `DISCOVER-AT-IMPLEMENTATION` residual is
+  dispositioned by a bead naming its Implementation Plan phase; a
+  `BLOCKS-PLANNING` or unclassified residual needs an explicit author
+  disposition, never a default.
+- `conexus/commands/rdr-accept.md`: nexus-yjf5l.8 — Step 2b mirrors the
+  same class-to-disposition rule.

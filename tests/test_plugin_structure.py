@@ -1543,6 +1543,15 @@ class TestRdrGateLoopRemedies:
             assert "bead" in text and "commit" in text, path
             assert "fix-check-" in text, f"{path}: the T2 title a sha disposition's check goes under"
             assert "bead id" in text and "needs none" in text, f"{path}: the bead-disposition exemption"
+            # nexus-yjf5l.8: classification determines which disposition
+            # applies — DISCOVER-AT-IMPLEMENTATION takes a bead naming its
+            # Implementation Plan phase; BLOCKS-PLANNING or an unclassified
+            # residual needs an explicit author disposition, never a default.
+            assert "DISCOVER-AT-IMPLEMENTATION" in text, f"{path}: missing the class name"
+            assert "Implementation Plan phase" in text, f"{path}: missing the bead-names-the-phase rule"
+            assert "BLOCKS-PLANNING" in text, f"{path}: missing the class name"
+            assert "unclassified" in text, f"{path}: missing the unclassified-residual case"
+            assert "never defaulted" in text, f"{path}: the disposition must never be defaulted"
 
     def test_finding_classification_imported_and_scoped(self) -> None:
         """R3 (nexus-yjf5l.7): every gate finding carries a Class alongside

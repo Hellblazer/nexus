@@ -29,6 +29,7 @@ from click.testing import CliRunner
 
 from nexus.commands.rdr import rdr
 from nexus.db.t2 import T2Database
+from nexus.plans.audit_rounds import BLOCKS_PLANNING, DISCOVER_AT_IMPLEMENTATION
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +402,42 @@ class TestRdrAccept:
         assert "docs/rdr/rdr-204-example.md" in out, "the range names the RDR file"
         assert "tip" in out, "the sha is the RDR file's tip after the disposition"
         assert "bead id" in out and "needs none" in out, "the bead-disposition exemption"
+
+    def test_rdr_accept_names_the_class_to_disposition_rule(self, rdr_env):
+        """nexus-yjf5l.8: classification determines which disposition a
+        residual needs. A DISCOVER-AT-IMPLEMENTATION residual is
+        dispositioned by a bead naming its Implementation Plan phase; a
+        BLOCKS-PLANNING or unclassified residual (every line written before
+        the class field existed) needs an explicit author disposition,
+        never a default."""
+        _write_rdr(
+            rdr_env["rdr_dir"], "rdr-204-example.md",
+            {"title": "Example", "status": "draft", "type": "Architecture", "priority": "medium"},
+            body="## Problem\n\nText.\n",
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-accept", "--", "204"])
+        assert result.exit_code == 0, result.output
+        out = result.output
+        assert DISCOVER_AT_IMPLEMENTATION in out
+        assert "bead id" in out
+        assert "Implementation Plan phase" in out
+        assert BLOCKS_PLANNING in out
+        assert "unclassified" in out
+        assert "never defaulted" in out
+
+    def test_rdr_accept_preamble_opens_no_t2_client(self):
+        """nexus-yjf5l.8: preamble_rdr_accept prints instructions only; it
+        never opens a T2 client itself — the no-T2 boundary is mechanical,
+        not a claim in a docstring."""
+        import inspect
+
+        from nexus.commands.rdr import preamble_rdr_accept
+
+        # preamble_rdr_accept is a click Command (@preamble.command wraps
+        # the function); .callback is the underlying function inspect can
+        # read source from.
+        src = inspect.getsource(preamble_rdr_accept.callback)
+        assert "_t2_client_factory" not in src
 
     def test_rdr_accept_with_draft_rdr_prints_planning_handoff(self, rdr_env):
         """Draft RDR with plan section: prints Planning Handoff block."""
