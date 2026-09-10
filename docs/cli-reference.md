@@ -1605,6 +1605,8 @@ nx taxonomy project code__nexus --use-icf --persist  # suppress hub topics (RDR-
 nx taxonomy project --backfill --persist        # project all collections
 nx taxonomy hubs --min-collections 5 --max-icf 1.2 --explain  # hub detector (RDR-077)
 nx taxonomy audit --collection code__nexus                    # projection quality audit (RDR-077)
+nx taxonomy audit --collection code__nexus --fix-doc-count    # preview doc_count drift (bead nexus-c0g6e, GH #1529)
+nx taxonomy audit --collection code__nexus --fix-doc-count --yes  # apply the correction (tenant-wide; --collection scopes only the display)
 nx taxonomy validate-refs docs/**/*.md                        # stale-reference validator (RDR-081)
 nx taxonomy backfill-source-collection                        # RETIRED: refuses with guidance
 nx taxonomy backfill-source-collection --apply                # RETIRED: refuses with guidance

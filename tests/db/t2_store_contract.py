@@ -341,12 +341,23 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         # row); no SQLite twin ever had it.
         'prune_projection_below': ['source_collection_prefix', 'min_similarity'],
         # nexus-c0g6e (GH #1529): pure-read topic_assignments row count for a
-        # topic, backing the `nx doctor` doc_count-drift row. Service-only by
-        # construction — the engine's TaxonomyRepository.countAssignments
-        # (already-shipped route, GET /topics/count_assignments) is the sole
-        # oracle; topics.doc_count is trigger-maintained (RDR-154 P0), so no
-        # SQLite twin ever counted topic_assignments directly.
+        # SINGLE topic. Service-only by construction — the engine's
+        # TaxonomyRepository.countAssignments (already-shipped route, GET
+        # /topics/count_assignments) is the sole oracle; topics.doc_count is
+        # trigger-maintained (RDR-154 P0), so no SQLite twin ever counted
+        # topic_assignments directly. Not used by the doctor drift check as
+        # of the nexus-c0g6e fix round (GH #1529 review) — see the next two
+        # entries, its batched replacement.
         'count_assignments': ['topic_id'],
+        # nexus-c0g6e fix round (GH #1529 review): the batched doc_count-
+        # drift read (GET /topics/doc_count_drift) and its apply/dry-run
+        # twin (POST /topics/recount_doc_count) — both call a shared
+        # nexus.* SQL function (taxonomy-016-doc-count-drift-functions.xml)
+        # also called by hygiene-007-1's boot walk. Service-only by
+        # construction, same no-SQLite-twin reasoning as count_assignments
+        # above (topics.doc_count is trigger-maintained).
+        'get_doc_count_drift': [],
+        'recount_doc_count': ['dry_run'],
     },
     'telemetry': {
         # nexus-onjvy: hook_failures was WRITE-ONLY over HTTP (/record + /trim,

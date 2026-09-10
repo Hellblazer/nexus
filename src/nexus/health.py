@@ -6563,11 +6563,13 @@ def _check_topics_doc_count_drift() -> list[HealthResult]:
     THE DEFECT. 94 topics created 2026-04-22..05-01 on a store that went
     through the conexus 6.18.1 guided upgrade carry ``doc_count`` above their
     real assignment count (12,379 recorded vs 9,625 rows, every one
-    over-counted) — drift from the fidelity import, predating taxonomy-013's
-    recompute triggers. ``doc_count`` is trigger-maintained on every live
-    INSERT/DELETE against ``topic_assignments`` (RDR-154 P0, nexus-i7ivk) so
-    it never drifts again once a store is past this one import boundary; this
-    check exists for the stores that already crossed it.
+    over-counted) — drift from the fidelity import, predating taxonomy-013's/
+    taxonomy-015's recompute triggers. ``doc_count`` is trigger-maintained on
+    every live INSERT/DELETE against ``topic_assignments`` (RDR-154 P0,
+    nexus-i7ivk) so it never drifts again once a store is past this one
+    import boundary; this check exists for the stores that already crossed
+    it, and importTopic's own root cause (fix round, GH #1529 review) is
+    closed separately on the engine so a fresh import cannot reproduce it.
 
     THE FIX lives on the engine: ``hygiene-007-1``
     (``hygiene-007-doc-count-recount.xml``) is a boot-time walk, the same
@@ -6575,11 +6577,30 @@ def _check_topics_doc_count_drift() -> list[HealthResult]:
     from ``topic_assignments`` and self-heals on the engine's next restart.
     This check exists because that healing is SILENT until the operator
     restarts: it names the blast radius so it is known rather than guessed,
-    the same framing as :func:`_check_next_seq_drift`.
+    the same framing as :func:`_check_next_seq_drift`. The remedy this check
+    names is repeatable and does not require a restart: `nx taxonomy audit
+    --fix-doc-count` calls the SAME engine-side recount on demand (`--yes`
+    to apply, dry-run by default) — useful when drift reappears from a fresh
+    import between restarts, a case a one-shot boot-time changeset cannot
+    self-heal a second time.
+
+    ONE ROUND TRIP, REGARDLESS OF TOPIC COUNT (fix round, GH #1529 review —
+    Critical/Important finding on the prior version of this check, which
+    looped one HTTP GET per topic via ``count_assignments`` against an
+    unbounded ``get_all_topics()``: the exact N+1-per-item anti-pattern
+    :func:`_check_next_seq_drift`'s own header documents as a past incident,
+    "65 owners x ~22k documents ... measured at 218s of a 224s doctor",
+    nexus-ohxzu). This check now calls
+    :meth:`HttpTaxonomyStore.get_doc_count_drift` exactly ONCE — the engine
+    computes the whole batched GROUP BY / LEFT JOIN server-side
+    (``nexus.topics_doc_count_drift``, the same relation hygiene-007-1's
+    boot walk and the recount route both call) and returns only the
+    disagreeing rows. A store with hundreds or thousands of topics costs
+    this check the SAME one HTTP call a store with none does.
 
     Read-only, per the RDR-185 rung shape. Degrades to a skip on any
-    connectivity failure, an empty topic set, or a pre-route engine (the
-    ``/topics/count_assignments`` route the check depends on) — a pre-route
+    connectivity failure, an empty drift set, or a pre-route engine (the
+    ``/topics/doc_count_drift`` route the check depends on) — a pre-route
     engine must report the row as UNREAD, never clean (mirrors
     :func:`_check_next_seq_drift`'s own next_seq-absent skip). A doctor check
     must never crash the command it is diagnosing.
@@ -6597,61 +6618,31 @@ def _check_topics_doc_count_drift() -> list[HealthResult]:
 
     try:
         try:
-            topics = store.get_all_topics()
+            drifted = store.get_doc_count_drift()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                # The route is newer than the deployed engine — distinct
+                # from "no drift found": unread, not clean.
+                return [HealthResult(
+                    label=label, ok=True,
+                    detail="skipped (engine does not report /topics/doc_count_drift — "
+                           "needs a newer engine)",
+                )]
+            _log.debug("doctor_topics_doc_count_check_failed", stage="get_drift", error=str(exc))
+            return [HealthResult(label=label, ok=True, detail="skipped (taxonomy store unavailable)")]
         except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
-            _log.debug("doctor_topics_doc_count_check_failed", stage="list_topics", error=str(exc))
+            _log.debug("doctor_topics_doc_count_check_failed", stage="get_drift", error=str(exc))
             return [HealthResult(label=label, ok=True, detail="skipped (taxonomy store unavailable)")]
 
-        if not topics:
-            return [HealthResult(label=label, ok=True, detail="skipped (no topics)")]
-
-        drifted: list[tuple[Any, str, int, int]] = []
-        checked = 0
-        route_missing = False
-        for topic in topics:
-            topic_id = topic.get("id")
-            if topic_id is None:
-                continue
-            try:
-                actual = store.count_assignments(int(topic_id))
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 404:
-                    # The route is older code than this check assumes —
-                    # distinct from "no drift found": unread, not clean.
-                    route_missing = True
-                    break
-                _log.debug(
-                    "doctor_topics_doc_count_topic_skipped", topic_id=topic_id, error=str(exc),
-                )
-                continue
-            except Exception as exc:  # noqa: BLE001 — one unreadable topic must not end the sweep
-                _log.debug(
-                    "doctor_topics_doc_count_topic_skipped", topic_id=topic_id, error=str(exc),
-                )
-                continue
-            checked += 1
-            recorded = int(topic.get("doc_count") or 0)
-            if recorded != actual:
-                pretty = topic.get("label") or f"(unlabelled id={topic_id})"
-                drifted.append((topic_id, pretty, recorded, actual))
-
-        if route_missing:
-            return [HealthResult(
-                label=label, ok=True,
-                detail="skipped (engine does not report /topics/count_assignments — "
-                       "needs a newer engine)",
-            )]
-        if checked == 0:
-            return [HealthResult(label=label, ok=True, detail="skipped (no topic was readable)")]
         if not drifted:
-            return [HealthResult(
-                label=label, ok=True, detail=f"none ({checked} topic(s) checked)",
-            )]
+            return [HealthResult(label=label, ok=True, detail="none")]
 
-        names = "; ".join(
-            f"{tid} {lbl!r} (doc_count={rec}, actual={act})"
-            for tid, lbl, rec, act in drifted[:10]
-        )
+        def _pretty(row: dict) -> str:
+            tid = row.get("topic_id")
+            label_ = row.get("label") or f"(unlabelled id={tid})"
+            return f"{tid} {label_!r} (doc_count={row.get('doc_count')}, actual={row.get('actual_count')})"
+
+        names = "; ".join(_pretty(row) for row in drifted[:10])
         if len(drifted) > 10:
             names += f"; … {len(drifted) - 10} more"
         return [HealthResult(
@@ -6659,14 +6650,15 @@ def _check_topics_doc_count_drift() -> list[HealthResult]:
             ok=False,
             warn=True,
             detail=(
-                f"{len(drifted)}/{checked} topic(s) whose doc_count disagrees with the "
-                f"real topic_assignments count: {names}. The engine self-heals this on "
-                "its next restart (hygiene-007-1); restart the service "
-                "(`nx daemon service restart`) to run it now, or confirm the deployed "
-                "engine tag carries it."
+                f"{len(drifted)} topic(s) whose doc_count disagrees with the real "
+                f"topic_assignments count: {names}. Run `nx taxonomy audit "
+                "--fix-doc-count --yes` to correct now (dry-run by default), or "
+                "restart the service to run the engine's own boot-time recount "
+                "(hygiene-007-1) — the CLI fix is repeatable and also covers drift "
+                "reappearing between restarts."
             ),
             fix_suggestions=[
-                "nx daemon service restart   (runs hygiene-007-1's boot-time recount)",
+                "nx taxonomy audit --collection <collection> --fix-doc-count --yes",
             ],
         )]
     finally:
