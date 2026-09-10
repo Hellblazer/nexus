@@ -1544,6 +1544,34 @@ class TestRdrGateLoopRemedies:
             assert "fix-check-" in text, f"{path}: the T2 title a sha disposition's check goes under"
             assert "bead id" in text and "needs none" in text, f"{path}: the bead-disposition exemption"
 
+    def test_finding_classification_imported_and_scoped(self) -> None:
+        """R3 (nexus-yjf5l.7): every gate finding carries a Class alongside
+        Ship-blocker (BLOCKS-PLANNING / DISCOVER-AT-IMPLEMENTATION,
+        imported from nexus.plans.audit_rounds), classification governs
+        disposition rather than blocking, and the critic's bullet scopes
+        the requirement to an RDR gate critique so the other consumers of
+        this agent inherit no unstated obligation."""
+        critic = (PLUGIN_DIR / "agents" / "substantive-critic.md").read_text()
+        normalized = re.sub(r"\s+", " ", critic)
+        assert "- **Class**:" in critic
+        assert "BLOCKS-PLANNING" in critic and "DISCOVER-AT-IMPLEMENTATION" in critic
+        assert "required for an RDR gate critique" in normalized, (
+            "the Class bullet must scope itself to an RDR gate critique"
+        )
+        assert "optional for every other consumer of this agent" in normalized, (
+            "the Class bullet must read as optional to a critic dispatched by code review "
+            "and the other seven consumers"
+        )
+        assert "`Ship-blocker: yes` implies `Class: BLOCKS-PLANNING`" in normalized
+        for path in (self.GATE_SKILL, self.GATE_CMD):
+            text = path.read_text()
+            text_normalized = re.sub(r"\s+", " ", text)
+            assert "BLOCKS-PLANNING" in text and "DISCOVER-AT-IMPLEMENTATION" in text, (
+                f"{path}: rdr-gate must name both class strings"
+            )
+            assert "Classification governs disposition, not blocking" in text_normalized, path
+            assert "ship_blockers` stays the sole blocking field" in text_normalized, path
+
 
 class TestReviewRoundContracts:
     """nexus-dv7gw: every skill that states a round number states the table's."""

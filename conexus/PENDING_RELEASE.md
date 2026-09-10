@@ -71,3 +71,13 @@ mechanize, it matters enough to ship.
   Template's Deliverable line.
 - `conexus/commands/rdr-fix.md`: nexus-yjf5l.5 — mirrors the identifier
   clause and the serial precondition.
+- `conexus/agents/substantive-critic.md`: nexus-yjf5l.7 — the Issue output
+  format gains a `Class:` bullet (BLOCKS-PLANNING or
+  DISCOVER-AT-IMPLEMENTATION), scoped as required for an RDR gate critique
+  and optional for every other consumer of this agent.
+- `conexus/skills/rdr-gate/SKILL.md`: nexus-yjf5l.7 — the Layer 3 relay's
+  brief and Gate Aggregation gain the Class line, the
+  classification-governs-disposition rule, and the
+  Ship-blocker/DISCOVER-AT-IMPLEMENTATION contradiction refusal.
+- `conexus/commands/rdr-gate.md`: nexus-yjf5l.7 — mirrors the Class line
+  and the contradiction refusal.

@@ -1996,6 +1996,55 @@ class TestRdrGateRegateBlock:
         )
         assert "that is not a recorded residual" in out, "Layer 0 states the exemption"
 
+    def test_finding_title_key_strips_a_classed_residual_tag(self) -> None:
+        """nexus-yjf5l.7: from this bead a `residuals:` line carries a class
+        tag (`[DISCOVER-AT-IMPLEMENTATION] <title>`), never present on a
+        `_critique_findings` title (`Issue: <title>`). One normalisation
+        must still equate them, or Phase 1's exemption and split
+        (nexus-yjf5l.2/.3) silently stop matching classed residuals."""
+        from nexus.commands.rdr import _finding_title_key
+
+        assert (
+            _finding_title_key("[DISCOVER-AT-IMPLEMENTATION] Some Title")
+            == _finding_title_key("Issue: Some Title")
+        )
+        assert (
+            _finding_title_key("[BLOCKS-PLANNING] Some Title")
+            == _finding_title_key("Some Title")
+        )
+
+    def test_classed_residual_is_exempt_from_the_survivor_sweep(self, rdr_env, monkeypatch):
+        """The same exemption as test_recorded_residual_is_exempt_from_the_
+        survivor_sweep, but the prior round's `residuals:` line now carries
+        the classed shape this bead writes."""
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                "outcome: \"PASSED\"\ndate: \"2026-09-09\"\n"
+                "critique: nexus_rdr/204-gate-critique-2026-09-09z\n"
+                "residuals:\n  - [DISCOVER-AT-IMPLEMENTATION] unused variable in the fallback branch\n"
+            ),
+            "204-gate-critique-2026-09-09z": (
+                "## Critical Issues\n\n### Issue: query timeout doubles under load\n"
+                "- **Location**: L100\n\n"
+                "## Significant Issues\n\n### Issue: unused variable in the fallback branch\n"
+                "- **Location**: L200\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"])
+        assert result.exit_code == 0, result.output
+        out = result.output
+        assert "Recorded residuals (dispositioned at accept; not survivors" in out, out
+        rec_idx = out.index("Recorded residuals")
+        pf_idx = out.index("Prior findings (each must be closed EVERYWHERE")
+        res_finding_idx = out.index("unused variable in the fallback branch")
+        assert rec_idx < res_finding_idx < pf_idx, (
+            "the classed residual is still recognised and listed under its own heading"
+        )
+
     def test_unmatched_residual_is_named_not_dropped(self, rdr_env, monkeypatch):
         """A residual recorded on the prior round that matches no finding in
         the critique is named under its own line, never silently dropped."""
@@ -2668,6 +2717,83 @@ class TestRdrVerdictPreamble:
         out = self._run(rdr_env, monkeypatch, {}, "204-gate-critique-nope").output
         assert "no such T2 record" in out
 
+    def test_residual_line_carries_its_class(self, rdr_env, monkeypatch):
+        """nexus-yjf5l.7 (R3): at round 4, alpha's `Ship-blocker: yes` makes
+        it the ship-blocker (not a residual); beta is a residual and its
+        `Class: DISCOVER-AT-IMPLEMENTATION` line survives onto the printed
+        `residuals:` line, exactly as `  - [<class>] <title>`."""
+        self._commit(rdr_env)
+        crit = (
+            "## Critical Issues\n\n### Issue: alpha\n- **Location**: L1\n"
+            "- **Class**: BLOCKS-PLANNING\n- **Ship-blocker**: yes\n\n"
+            "## Significant Issues\n\n### Issue: beta\n- **Location**: L2\n"
+            "- **Class**: DISCOVER-AT-IMPLEMENTATION\n- **Ship-blocker**: no\n\n"
+            "## Verdict\n\n- **outcome**: not-justified\n- **critical_count**: 1\n"
+            "- **significant_count**: 1\n- **ship_blockers**: 1\n"
+        )
+        store = {"c": crit, "204-gate-latest": "outcome: \"PASSED\"\nprior: [1] (1C), [2] (1C)\n"}
+        out = self._run(rdr_env, monkeypatch, store, "c").output
+        assert "Gate round 4" in out, out
+        assert "outcome: \"BLOCKED\"" in out, out
+        assert "residuals:\n  - [DISCOVER-AT-IMPLEMENTATION] beta" in out, out
+        assert "[DISCOVER-AT-IMPLEMENTATION] alpha" not in out, "alpha is the ship-blocker, not a residual"
+
+    def test_ship_blocker_and_discover_at_implementation_contradiction_refuses(self, rdr_env, monkeypatch):
+        """Decision 2: `Ship-blocker: yes` plus `Class: DISCOVER-AT-IMPLEMENTATION`
+        on the SAME finding disagree — a ship-blocker is BLOCKS-PLANNING by
+        definition — and the verdict refuses to compute an outcome at all."""
+        self._commit(rdr_env)
+        crit = (
+            "## Critical Issues\n\n### Issue: gamma\n- **Location**: L1\n"
+            "- **Class**: DISCOVER-AT-IMPLEMENTATION\n- **Ship-blocker**: yes\n\n"
+            "## Significant Issues\nNone.\n\n"
+            "## Verdict\n\n- **outcome**: not-justified\n- **critical_count**: 1\n"
+            "- **significant_count**: 0\n- **ship_blockers**: 1\n"
+        )
+        out = self._run(rdr_env, monkeypatch, {"c": crit}, "c").output
+        assert "Contradiction" in out, out
+        assert "gamma" in out
+        assert "Ship-blocker: yes" in out and "DISCOVER-AT-IMPLEMENTATION" in out
+        assert "outcome: \"BLOCKED\"" not in out and "outcome: \"PASSED\"" not in out
+        assert "**Outcome:" not in out
+
+    def test_class_carrying_critique_with_no_ship_blocker_line_computes_normally(self, rdr_env, monkeypatch):
+        """A critique that carries Class lines but no per-finding
+        Ship-blocker line at all is not a contradiction — it falls through
+        to the ordinary ship_blockers computation untouched."""
+        self._commit(rdr_env)
+        crit = (
+            "## Critical Issues\n\n### Issue: delta\n- **Location**: L1\n"
+            "- **Class**: BLOCKS-PLANNING\n\n"
+            "## Significant Issues\nNone.\n\n"
+            "## Verdict\n\n- **outcome**: not-justified\n- **critical_count**: 1\n"
+            "- **significant_count**: 0\n- **ship_blockers**: 0\n"
+        )
+        out = self._run(rdr_env, monkeypatch, {"c": crit}, "c").output
+        assert "Contradiction" not in out, out
+        assert "outcome: \"BLOCKED\"" in out, "critical_count > 0 blocks at round 1 regardless of Class"
+
+    def test_unclassified_residual_does_not_change_what_blocks(self, rdr_env, monkeypatch):
+        """gamma carries no `Class:` line at all. It still prints as a
+        residual under the conservative BLOCKS-PLANNING default (needs a
+        human disposition, never auto-beaded) but the outcome stays driven
+        by alpha's ship-blocker, exactly as it would with no classes at
+        all — an unclassified finding never changes what blocks."""
+        self._commit(rdr_env)
+        crit = (
+            "## Critical Issues\n\n### Issue: alpha\n- **Location**: L1\n"
+            "- **Class**: BLOCKS-PLANNING\n- **Ship-blocker**: yes\n\n"
+            "## Significant Issues\n\n### Issue: gamma\n- **Location**: L2\n"
+            "- **Ship-blocker**: no\n\n"
+            "## Verdict\n\n- **outcome**: not-justified\n- **critical_count**: 1\n"
+            "- **significant_count**: 1\n- **ship_blockers**: 1\n"
+        )
+        store = {"c": crit, "204-gate-latest": "outcome: \"PASSED\"\nprior: [1] (1C), [2] (1C)\n"}
+        out = self._run(rdr_env, monkeypatch, store, "c").output
+        assert "Gate round 4" in out, out
+        assert "outcome: \"BLOCKED\"" in out, out
+        assert "residuals:\n  - [BLOCKS-PLANNING] gamma" in out, out
+
 
 class TestCritiqueFindings:
     """nexus-7vdf9 (critique [24815] Critical 2): the extractor must read the
@@ -2722,3 +2848,31 @@ class TestCritiqueFindings:
         from nexus.commands.rdr import _critique_findings
 
         assert _critique_findings("") == []
+
+    def test_class_line_survives_the_allowlist(self) -> None:
+        """nexus-yjf5l.7: unlike Ship-blocker (handled solely by
+        _critique_tally, never reaching this extractor's output), Class
+        must reach the author through the re-gate and fix preambles, or it
+        vanishes silently — add it to _critique_findings' detail allowlist."""
+        from nexus.commands.rdr import _critique_findings
+
+        text = (
+            "## Critical Issues\n\n### Issue: title\n- **Location**: L1\n"
+            "- **Class**: BLOCKS-PLANNING\n- **Ship-blocker**: yes\n\n"
+            "## Significant Issues\nNone.\n"
+        )
+        f = _critique_findings(text)
+        assert any("Class: BLOCKS-PLANNING" in x for x in f), f
+        assert not any("Ship-blocker" in x for x in f), "Ship-blocker stays out, as before"
+
+    def test_absent_class_line_is_not_an_error(self) -> None:
+        """Backward compatibility: a historical critique that predates the
+        Class field (204-gate-critique-2026-09-07i.md) parses exactly as it
+        did before — its findings are recognised, and no Class detail is
+        invented for them."""
+        from nexus.commands.rdr import _critique_findings
+
+        text = (FIXTURES / "204-gate-critique-2026-09-07i.md").read_text()
+        f = _critique_findings(text)
+        assert f, "the historical critique's findings must still parse"
+        assert not any("Class:" in x for x in f)

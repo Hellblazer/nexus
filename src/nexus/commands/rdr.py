@@ -21,6 +21,11 @@ from pathlib import Path
 import click
 import yaml
 
+from nexus.plans.audit_rounds import (
+    BLOCKS_PLANNING,
+    DISCOVER_AT_IMPLEMENTATION,
+    VALID_CLASSIFICATIONS,
+)
 from nexus.tables.load import Table, TableLoadError, load_packaged_table
 from nexus.tables.resolve import resolve
 from nexus.tables.review_rounds import blocking_rounds, rule_for
@@ -1704,7 +1709,7 @@ def preamble_rdr_gate(args: tuple[str, ...]) -> None:
 
 _CRITIQUE_SECTION_RE = re.compile(r"^\s*#{1,3}\s*(critical|significant)\b", re.IGNORECASE)
 _CRITIQUE_ISSUE_RE = re.compile(r"^\s*#{1,6}\s*issue:\s*(.+)$", re.IGNORECASE)
-_CRITIQUE_DETAIL_RE = re.compile(r"^\s*[-*]\s*\*{0,2}(location|problem|recommendation|issue|sites)\*{0,2}\s*:\s*(.+)$", re.IGNORECASE)
+_CRITIQUE_DETAIL_RE = re.compile(r"^\s*[-*]\s*\*{0,2}(location|problem|recommendation|issue|sites|class)\*{0,2}\s*:\s*(.+)$", re.IGNORECASE)
 # A free-form finding opens with the severity and then a number, a colon, a
 # bold close or the word "issue"; "Critical mass of the aspect queue" and
 # "Significant prior art exists" are prose (deep critique [24873] S1).
@@ -1748,7 +1753,7 @@ def _critique_findings(text: str) -> list[str]:
                 out.append(f"Issue: {m.group(1).strip()}")
                 continue
             d = _CRITIQUE_DETAIL_RE.match(line)
-            if d and d.group(1).lower() in ("location", "recommendation", "issue", "sites"):
+            if d and d.group(1).lower() in ("location", "recommendation", "issue", "sites", "class"):
                 out.append(f"  {d.group(1).capitalize()}: {d.group(2).strip()}")
                 continue
     if saw_sections:
@@ -1768,8 +1773,10 @@ def _finding_title_key(text: str) -> str:
 
     ``_critique_findings`` prefixes a canonical title with ``Issue: ``; a
     gate record's ``residuals:`` bullet carries the bare title with
-    neither that prefix nor list decoration. One normalisation — strip the
-    ``Issue:`` prefix, strip leading/trailing list and markdown
+    neither that prefix nor list decoration, but from nexus-yjf5l.7 it is
+    prefixed with the residual's class instead (``[DISCOVER-AT-IMPLEMENTATION]
+    <title>``). One normalisation — strip a leading classed-residual tag,
+    strip the ``Issue:`` prefix, strip leading/trailing list and markdown
     decoration, collapse whitespace, casefold — so a residual's stored
     title and a finding's title match the same way everywhere a surface
     needs to tell them apart: the fix preamble's ship-blocker/residual
@@ -1778,6 +1785,7 @@ def _finding_title_key(text: str) -> str:
     copy.
     """
     t = text.strip()
+    t = re.sub(r"^\[[A-Z][A-Z-]*\]\s*", "", t)
     t = re.sub(r"^(?:issue\s*:\s*)", "", t, flags=re.IGNORECASE)
     t = t.lstrip("-*# ").rstrip("*").strip()
     t = re.sub(r"\s+", " ", t)
@@ -3176,6 +3184,14 @@ def _gate_loop_health_lines(rows: list[dict]) -> list[str]:
 _VERDICT_FIELD_RE = re.compile(r"^\s*-\s*\*\*(outcome|critical_count|significant_count|ship_blockers)\*\*\s*:\s*(\S+)", re.IGNORECASE | re.MULTILINE)
 _VERDICT_INLINE_RE = re.compile(r"\b(critical_count|significant_count|ship_blockers)\s*=\s*(\d+)", re.IGNORECASE)
 _SHIP_BLOCKER_RE = re.compile(r"^\s*(?:-\s*)?\*{0,2}Ship-blocker\*{0,2}\s*:\s*\*{0,2}(yes|no)\b", re.IGNORECASE | re.MULTILINE)
+# nexus-yjf5l.7: a per-finding Class line, imported from nexus.plans.audit_rounds
+# rather than spelled out here — see VALID_CLASSIFICATIONS above.
+_CLASS_LINE_RE = re.compile(
+    r"^\s*(?:-\s*)?\*{0,2}Class\*{0,2}\s*:\s*\*{0,2}("
+    + "|".join(re.escape(c) for c in VALID_CLASSIFICATIONS)
+    + r")\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -3188,6 +3204,12 @@ class CritiqueTally:
     reported_critical: int | None
     reported_significant: int | None
     reported_ship_blockers: int | None
+    #: nexus-yjf5l.7: each Critical/Significant title that carried an
+    #: explicit ``Class:`` line, mapped to its normalised classification
+    #: (one of VALID_CLASSIFICATIONS). A title absent from this dict is
+    #: unclassified — see ``_classification_of``'s conservative default,
+    #: which rdr-gate applies for disposition only, never for blocking.
+    classifications: dict[str, str]
 
 
 def _critique_tally(text: str) -> CritiqueTally:
@@ -3203,6 +3225,7 @@ def _critique_tally(text: str) -> CritiqueTally:
     criticals: list[str] = []
     significants: list[str] = []
     blockers: list[str] = []
+    classes: dict[str, str] = {}
     section: str | None = None
     current: str | None = None
     current_kind: str | None = None
@@ -3212,6 +3235,12 @@ def _critique_tally(text: str) -> CritiqueTally:
         # block must not count twice (code review [24900] finding 2).
         if yes and title is not None and kind in ("critical", "significant") and title not in blockers:
             blockers.append(title)
+
+    def _mark_class(kind: str | None, title: str | None, classification: str) -> None:
+        # First Class line per issue wins, same one-mark-per-issue rule as
+        # _mark above.
+        if title is not None and kind in ("critical", "significant") and title not in classes:
+            classes[title] = classification.strip().upper()
 
     # Canonical critiques carry section headings; free-form ones do not.
     # A ``CRITICAL —`` paragraph counts only in a free-form critique and
@@ -3251,6 +3280,10 @@ def _critique_tally(text: str) -> CritiqueTally:
         sb = _SHIP_BLOCKER_RE.match(line)
         if sb:
             _mark(current_kind, current, sb.group(1).lower() == "yes")
+            continue
+        cl = _CLASS_LINE_RE.match(line)
+        if cl:
+            _mark_class(current_kind, current, cl.group(1))
     # The Verdict is read from the LAST ``## Verdict`` section (or the last
     # ``VERDICT:`` line), with fenced code stripped first, so a quoted or
     # example verdict earlier in the text cannot poison the counts (code
@@ -3279,6 +3312,7 @@ def _critique_tally(text: str) -> CritiqueTally:
         reported_critical=_int("critical_count"),
         reported_significant=_int("significant_count"),
         reported_ship_blockers=_int("ship_blockers"),
+        classifications=classes,
     )
 
 
@@ -3348,6 +3382,27 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
             "findings cannot be counted. No outcome is computed. Re-store it in the canonical format "
             "(conexus/agents/substantive-critic.md § Output Format) and run this again."
         )
+        return
+    # nexus-yjf5l.7 decision 2: a finding cannot carry both an explicit
+    # `Ship-blocker: yes` and an explicit `Class: DISCOVER-AT-IMPLEMENTATION`
+    # — those two fields disagree about the same finding, and no outcome
+    # is computed until the critique is fixed. This is a per-finding,
+    # both-lines-present test only: a Class-carrying critique with no
+    # per-finding Ship-blocker line, or a Ship-blocker line with no Class
+    # line, is not a contradiction and falls through untouched below.
+    contradictions = [
+        title for title in tally.ship_blocker_titles
+        if tally.classifications.get(title) == DISCOVER_AT_IMPLEMENTATION
+    ]
+    if contradictions:
+        print(f"> Contradiction in `{critique_title}`; no outcome is computed:")
+        for title in contradictions:
+            print(
+                f"> - \"{title}\" is marked `Ship-blocker: yes` and `Class: "
+                f"{DISCOVER_AT_IMPLEMENTATION}`; these disagree — a ship-blocker "
+                f"is {BLOCKS_PLANNING} by definition. Fix the critique (drop one "
+                "line or the other) and run this again."
+            )
         return
     round_no = _gate_round_number(latest_content, critique_count)
     rule = rule_for("rdr-gate", round_no)
@@ -3421,10 +3476,15 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
         print(f"- {n}")
     print()
     print(f"**Outcome: {outcome}**")
+    # nexus-yjf5l.7: every residual carries its class — BLOCKS_PLANNING is
+    # the conservative default for a finding with no explicit Class line
+    # (same default _classification_of applies in plan-audit), and here it
+    # means "needs an explicit human disposition", never auto-beaded; it
+    # never changes what blocks (ship_blockers, computed above, is unaffected).
     if residuals:
         print(f"Residuals ({len(residuals)}), recorded for accept to disposition:")
         for r in residuals:
-            print(f"- {r}")
+            print(f"- [{tally.classifications.get(r, BLOCKS_PLANNING)}] {r}")
     print()
     print("Gate record to write (memory_put project=\"" + project + f"\", title=\"{t2_key}-gate-latest\", ttl=\"permanent\", tags=\"rdr,gate\"):")
     print()
@@ -3442,7 +3502,7 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
     if residuals:
         print("residuals:")
         for r in residuals:
-            print(f"  - {r}")
+            print(f"  - [{tally.classifications.get(r, BLOCKS_PLANNING)}] {r}")
     if prior_parts:
         print("prior: " + ", ".join(prior_parts))
     print("```")

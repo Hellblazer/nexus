@@ -11,6 +11,7 @@ the feature.
 from __future__ import annotations
 
 import inspect
+import re
 
 import pytest
 
@@ -175,3 +176,52 @@ class TestPromptAndSchema:
     async def test_past_the_cap_the_prompt_says_so(self, audit_returning) -> None:
         await audit_returning([], round_number=MAX_BLOCKING_ROUNDS + 1)
         assert "do not argue for another round" in audit_returning.last_prompt
+
+
+class TestRdrGateImportsClassification:
+    """nexus-yjf5l.7: ``src/nexus/commands/rdr.py`` imports BLOCKS_PLANNING
+    and DISCOVER_AT_IMPLEMENTATION from this module rather than
+    re-declaring the string literals — two spellings of the same
+    classification is the same defect class the epic's decision 2 already
+    named for the blocking field.
+
+    This is NOT a claim that ``test_unclassified_findings_still_block``
+    above governs rdr-gate too. That pin is plan-audit's own doctrine: an
+    unclassified finding there BLOCKS. rdr-gate deliberately diverges
+    (epic decision 2): in rdr-gate an unclassified finding inherits the
+    same conservative default value for DISPOSITION only ("needs an
+    explicit human disposition, never auto-beaded") and never changes what
+    blocks (``ship_blockers`` stays the sole blocking field). The two
+    contracts share a constant, not a consequence; this class only
+    asserts the import and the absence of a duplicated literal, never the
+    plan-audit blocking meaning.
+    """
+
+    def test_rdr_py_imports_the_classification_constants(self) -> None:
+        import nexus.commands.rdr as rdr_mod
+
+        src = inspect.getsource(rdr_mod)
+        assert re.search(
+            r"from\s+nexus\.plans\.audit_rounds\s+import\s*\(?[^)]*\bBLOCKS_PLANNING\b", src,
+        ), "rdr.py must import BLOCKS_PLANNING from nexus.plans.audit_rounds"
+        assert re.search(
+            r"from\s+nexus\.plans\.audit_rounds\s+import\s*\(?[^)]*\bDISCOVER_AT_IMPLEMENTATION\b", src,
+        ), "rdr.py must import DISCOVER_AT_IMPLEMENTATION from nexus.plans.audit_rounds"
+        # The imported names must be the SAME objects audit_rounds defines,
+        # not shadowed by a same-named local re-declaration further down.
+        assert rdr_mod.BLOCKS_PLANNING is BLOCKS_PLANNING
+        assert rdr_mod.DISCOVER_AT_IMPLEMENTATION is DISCOVER_AT_IMPLEMENTATION
+
+    def test_rdr_py_has_no_bare_classification_literal(self) -> None:
+        """A bare Python string literal spelling either classification is
+        the two-spellings defect; rdr.py must spend the constant, never
+        the string. The literal legitimately appears elsewhere in the
+        repo (audit_rounds.py's own CLASSIFICATION_PROMPT, review-rounds.toml's
+        comment header, the tests) — this assertion is scoped to rdr.py's
+        own source only, never a repo-wide grep."""
+        import nexus.commands.rdr as rdr_mod
+
+        src = inspect.getsource(rdr_mod)
+        for literal in (BLOCKS_PLANNING, DISCOVER_AT_IMPLEMENTATION):
+            assert f'"{literal}"' not in src, f"rdr.py spells out {literal!r} as a bare string literal"
+            assert f"'{literal}'" not in src, f"rdr.py spells out {literal!r} as a bare string literal"

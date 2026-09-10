@@ -192,6 +192,8 @@ Gate round: N (from the preamble). Ship-blocker for an RDR gate: "yes" iff an im
 
 Every Critical and Significant carries a `Sites:` line listing every file:line where the fact lives, so the author sweeps an enumerated set rather than a remembered phrase.
 
+Every Critical and Significant also carries a `Class:` line, `BLOCKS-PLANNING` or `DISCOVER-AT-IMPLEMENTATION` (the substantive-critic agent's Output Format states which). `Ship-blocker: yes` implies `Class: BLOCKS-PLANNING`; a finding carrying both `Ship-blocker: yes` and `Class: DISCOVER-AT-IMPLEMENTATION` is a contradiction the verdict tool refuses to compute an outcome on.
+
 ### Quality Criteria
 - [ ] Every fail has a specific section reference and fix suggestion
 - [ ] Every Critical and Significant has a Sites: list
@@ -220,6 +222,15 @@ by hand. The rules it applies (`review-rounds.toml`, contract `rdr-gate`):
   to Revision History, and accept dispositions each one (rdr-accept skill).
 - A Verdict with no `ship_blockers` line is read as `ship_blockers = critical_count`
   (the conservative default of `nexus.plans.audit_rounds`); never as zero.
+- Classification governs disposition, not blocking: `ship_blockers` stays the
+  sole blocking field. Every `residuals:` line records its finding's class
+  (`[BLOCKS-PLANNING] <title>` or `[DISCOVER-AT-IMPLEMENTATION] <title>`); an
+  unclassified finding is recorded under the conservative BLOCKS-PLANNING
+  default and needs an explicit human disposition at accept — it never
+  changes what blocks. `Ship-blocker: yes` together with
+  `Class: DISCOVER-AT-IMPLEMENTATION` on the same finding is a contradiction:
+  the verdict tool refuses to compute an outcome and names the finding and
+  both values.
 - Criterion 6 output is never a finding and never counted.
 - Warns only, or all pass → PASSED. Status remains Draft.
 
@@ -228,7 +239,7 @@ by hand. The rules it applies (`review-rounds.toml`, contract `rdr-gate`):
 ### On Pass
 
 1. Store the critique in T2 FIRST: mcp__plugin_conexus_nexus__memory_put(content="{critique}", project="{repo}_rdr", title="{id}-gate-critique-{date}", ttl="permanent", tags="rdr,gate,critique"). Same-day re-gates append a letter (`{date}b`, `{date}c`). T2 is where the preamble reads; a T3 copy (collection="<subject>", title="gate-rdr-NNN-{date}") is optional and never the only copy.
-2. Write gate result to T2: mcp__plugin_conexus_nexus__memory_put(content="outcome: PASSED\ndate: YYYY-MM-DD\ncritical_count: 0\nsignificant_count: N\nobservation_count: N\nship_blockers: 0\nsummary: One-sentence summary\ncritique: {repo}_rdr/{id}-gate-critique-{date}\ncommit: <git log -1 --format=%h -- <rdr file>>\nfix_check: <{repo}_rdr/{id}-fix-check-<sha>, sha equal to commit:, or 'none (no change since <sha>)'; mandatory on every re-gate>\nresiduals: <one line per residual finding, round 3+>\nprior: [<previous record id>] (<OUTCOME> <nC> <nS>), <the previous record's own prior chain>", project="{repo}_rdr", title="{id}-gate-latest", ttl="permanent", tags="rdr,gate"). `critique:`, `commit:` and `prior:` are what the re-gate block reads; `fix_check:` must equal `commit:`.
+2. Write gate result to T2: mcp__plugin_conexus_nexus__memory_put(content="outcome: PASSED\ndate: YYYY-MM-DD\ncritical_count: 0\nsignificant_count: N\nobservation_count: N\nship_blockers: 0\nsummary: One-sentence summary\ncritique: {repo}_rdr/{id}-gate-critique-{date}\ncommit: <git log -1 --format=%h -- <rdr file>>\nfix_check: <{repo}_rdr/{id}-fix-check-<sha>, sha equal to commit:, or 'none (no change since <sha>)'; mandatory on every re-gate>\nresiduals: <one line per residual finding, round 3+, each `  - [<class>] <title>`>\nprior: [<previous record id>] (<OUTCOME> <nC> <nS>), <the previous record's own prior chain>", project="{repo}_rdr", title="{id}-gate-latest", ttl="permanent", tags="rdr,gate"). `critique:`, `commit:` and `prior:` are what the re-gate block reads; `fix_check:` must equal `commit:`.
 3. Append gate findings to the RDR's Revision History section
 4. Print: `> Run '/conexus:rdr-accept <id>' to accept this RDR.`
 
