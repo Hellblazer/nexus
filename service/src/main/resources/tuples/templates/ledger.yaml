@@ -1,0 +1,20 @@
+# RDR-205 v1 template: session ledger rows.
+#
+# Read-only: take.enabled is false, so ledger rows are never claimed. The
+# retention window (90 days) is what the census compares within.
+name: ledger/<session_id>
+
+keys:
+  - agent_id
+  - kind
+
+dimensions:
+  agent_type:
+    type: string
+
+id_from: keys
+
+take:
+  enabled: false
+
+retention_seconds: 7776000

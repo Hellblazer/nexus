@@ -74,8 +74,18 @@ public final class NexusService {
 
     private static final Logger log = LoggerFactory.getLogger(NexusService.class);
 
-    /** How often to run the per-default-tenant TTL sweep (crash-safety backstop). */
-    private static final long SWEEP_INTERVAL_HOURS = 6L;
+    /**
+     * How often to run the per-default-tenant TTL sweep (crash-safety backstop).
+     *
+     * <p>Public (nexus-em75s.3): the RDR-205 tuple-template registry's boot check
+     * (a template's {@code retention_seconds} must be exceeded by the claim log's
+     * TTL setting by strictly more than one sweep interval) needs this value from
+     * {@code dev.nexus.service.tuples}, a different package — widened rather than
+     * mirrored so the two stay one source of truth (see AGENTS.md's
+     * {@code REQUIRED_ENGINE_VERSION} precedent for the same "widen, don't mirror"
+     * rule).
+     */
+    public static final long SWEEP_INTERVAL_HOURS = 6L;
 
     /** Age threshold: scratch rows older than this are eligible for TTL sweep. */
     private static final long SWEEP_TTL_HOURS = 24L;
