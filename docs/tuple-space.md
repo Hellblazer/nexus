@@ -35,16 +35,16 @@ subspace_stats(subspace) -> {total, available, claimed, dead, consumed, expired_
 
 | Operation | Parks | Idempotent | Probe form |
 | --- | --- | --- | --- |
-| `out` | no | yes — the id is derived from caller-supplied fields only, so a retry is the same tuple | — |
-| `rd` | yes, up to `timeout_s` | yes — a read takes nothing | `rdp` |
+| `out` | no | yes: the id is derived from caller-supplied fields only, so a retry is the same tuple | none |
+| `rd` | yes, up to `timeout_s` | yes: a read takes nothing | `rdp` |
 | `rdp` | no | yes | is the probe form of `rd` |
 | `in` | yes, up to `timeout_s` | a same-claimant retake within its lease returns the existing claim id, no new update or log row | `inp` |
 | `inp` | no | same same-claimant rule as `in` | is the probe form of `in` |
-| `ack` | no | no — a second `ack` on the same claim is `ClaimNotFound` | — |
-| `nack` | no | no — every call counts an attempt against `max_attempts` | — |
-| `registry` | no | yes | — |
-| `subspace_list` | no | yes | — |
-| `subspace_stats` | no | yes | — |
+| `ack` | no | no: a second `ack` on the same claim is `ClaimNotFound` | none |
+| `nack` | no | no: every call counts an attempt against `max_attempts` | none |
+| `registry` | no | yes | none |
+| `subspace_list` | no | yes | none |
+| `subspace_stats` | no | yes | none |
 
 Matching differs by read. `in` and `inp` require every pinned key and match by equality, because exclusion needs an exact target. `rd` and `rdp` match by equality on every key the pattern supplies and place no condition on keys it omits; a pattern of `None` or `{}` reads the whole subspace, which is what a census does and what a claimant never may. `rd` and `rdp` return up to `n` live tuples, live meaning `expires_at > now()` and not acked, whatever the claim state: a row under a live claim and a dead-lettered row are both returned, with their state. Results are ordered by `(created_at, id)`, resuming strictly after `since`, a `(created_at, id)` cursor the caller keeps. Acked rows are never returned by any read.
 
@@ -59,7 +59,7 @@ Two v1 templates, and only two:
 | `ledger/<session_id>` | `agent_id`, `kind` ∈ {start, report} | `agent_type` | `keys` | disabled: rows are read, never claimed | 90 days |
 | `mailbox/<address>` | `to` | `from` (required), `kind`, `correlation_id`, `address_kind` ∈ {agent, instance} | `keys+nonce`, with `from` in `id_dims` | enabled: `max_attempts` 3, `max_lease_seconds` 900 | 7 days |
 
-The id is derived from caller-supplied fields only, so `out` is idempotent by construction and a retry across a deploy gap is the same tuple. Which fields is the template's `id_from`: `keys` (the ledger — `agent_id` and `kind` identify a dispatch, so a second start for the same agent is the same tuple, which is what the census wants); `keys+nonce` (the mailbox — the sender mints a message id, unique among its own messages, and passes it as the nonce; the template's `id_dims` name the dims that also enter the id, `from` for the mailbox, so a nonce need only be unique per sender and two senders' messages never collide; two messages to one address are two tuples and a resent message is one); or `keys+body` (content-addressed, no v1 template). The insert time is never part of an id. A refire with the same id refreshes `expires_at` only, never the body, the claim state or the consumed state, and never past `created_at` plus the template's `retention_seconds`.
+The id is derived from caller-supplied fields only, so `out` is idempotent by construction and a retry across a deploy gap is the same tuple. Which fields is the template's `id_from`: `keys` (the ledger: `agent_id` and `kind` identify a dispatch, so a second start for the same agent is the same tuple, which is what the census wants); `keys+nonce` (the mailbox: the sender mints a message id, unique among its own messages, and passes it as the nonce; the template's `id_dims` name the dims that also enter the id, `from` for the mailbox, so a nonce need only be unique per sender and two senders' messages never collide; two messages to one address are two tuples and a resent message is one); or `keys+body` (content-addressed, no v1 template). The insert time is never part of an id. A refire with the same id refreshes `expires_at` only, never the body, the claim state or the consumed state, and never past `created_at` plus the template's `retention_seconds`.
 
 Templates ship as YAML in engine resources, loaded and validated at boot; a breach fails boot with the file and field named. Templates change with an engine release, not with a data changeset; removing a template that has live rows needs a data changeset with a migration note. One test-only path exists beside the resource files: the engine also loads templates from the directory named by `NX_TUPLE_TEMPLATE_DIR` when it is set, logs that it did at boot, and lists both sources in `registry()`; a directory set in production is a red gate, not a silent second registry.
 
@@ -156,11 +156,11 @@ insert claim_log(tuple_id, claim_id, c, 'claim', now)
 
 ## Claims, leases, nack and dead letter
 
-A claim is the state between `in` and `ack`/`nack`, held under a lease — a deadline after which the claim is released by a sweep. `lease_until` is clamped to the row's `expires_at` at claim time, so a claim can never outlive its tuple. `attempts` counts nacks and lapsed leases alike; at the template's `max_attempts` the row is dead-lettered (`claim_state = 'dead'`, a `dead` log row), whether the cap was reached by nacks or by lapsed leases nobody re-took. A dead-lettered row leaves every claimant's view but stays readable by `rd`, and `subspace_stats` counts it under `dead`.
+A claim is the state between `in` and `ack`/`nack`, held under a lease, a deadline after which the claim is released by a sweep. `lease_until` is clamped to the row's `expires_at` at claim time, so a claim can never outlive its tuple. `attempts` counts nacks and lapsed leases alike; at the template's `max_attempts` the row is dead-lettered (`claim_state = 'dead'`, a `dead` log row), whether the cap was reached by nacks or by lapsed leases nobody re-took. A dead-lettered row leaves every claimant's view but stays readable by `rd`, and `subspace_stats` counts it under `dead`.
 
 A same-claimant retake is idempotent: before the claim statement, `in` reads for a live claim already held by this claimant on a matching tuple and, if one exists, returns its claim id with no new update and no log row. Without that read a retry after a lost response could never recover its claim.
 
-Every claim reaches a terminal transition: `ack`, `nack`, `expire` or `dead`. `ack` sets `consumed_at` and logs `ack`; `nack` releases the claim (`claim_state`, `claimant`, `claim_id` and `lease_until` to NULL) and increments `attempts`. When a claim finds a row whose previous lease has lapsed, the same transaction writes the `expire` row for the previous claim and increments `attempts`; if that brings `attempts` to `max_attempts` the row is dead-lettered there and then and the claim re-runs its select — bounded, each pass either claims or dead-letters one row, and the call gives up after `NX_TUPLE_READ_MAX` passes and returns the probe result. `ack` and `nack` are checked against ownership: `ClaimOwnership` if a live claim is held by someone else, `ClaimNotFound` if no live claim matches the id (including a second `ack` on an already-acked claim).
+Every claim reaches a terminal transition: `ack`, `nack`, `expire` or `dead`. `ack` sets `consumed_at` and logs `ack`; `nack` releases the claim (`claim_state`, `claimant`, `claim_id` and `lease_until` to NULL) and increments `attempts`. When a claim finds a row whose previous lease has lapsed, the same transaction writes the `expire` row for the previous claim and increments `attempts`; if that brings `attempts` to `max_attempts` the row is dead-lettered there and then and the claim re-runs its select. The re-run is bounded: each pass either claims or dead-letters one row, and the call gives up after `NX_TUPLE_READ_MAX` passes and returns the probe result. `ack` and `nack` are checked against ownership: `ClaimOwnership` if a live claim is held by someone else, `ClaimNotFound` if no live claim matches the id (including a second `ack` on an already-acked claim).
 
 ## Blocking reads
 
@@ -183,23 +183,23 @@ Two more guards live in the client: the request it is about to send is measured 
 
 ## The sweep
 
-Every `SWEEP_INTERVAL_HOURS` (six hours today), a second scheduled task on the same scheduler that runs the existing sweep enumerates tenants from `nexus.tuple_tenants` — a small table with no row-level security, one row per tenant that has ever written a tuple, upserted by `out` — visited least-recently-swept first (`last_swept_at` ascending, nulls first, `tenant_id` as the tie-break). Per tenant it releases lapsed claims nobody re-took with an `expire` log row and an `attempts` increment, dead-lettering at `max_attempts`; purges expired and consumed-past-retention tuple rows (setting the claim log's `tuple_id` to null); then purges log rows past the log's own longer TTL (`NX_TUPLE_CLAIM_LOG_TTL_DAYS`, default 180); all in batches of a few hundred, committing per batch. Two bounds keep it from starving the T1 crash-safety sweep sharing the same single-thread scheduler: the token loop's statement bound on every statement, and a budget on the task itself — a cap on batches per tenant per run and a wall-clock budget per run. A tenant is stamped only when its sweep finishes cleanly; a tenant cut short by the budget keeps its old stamp and is therefore first next run, so the order lives in the table and survives a restart with no cursor held in the JVM.
+Every `SWEEP_INTERVAL_HOURS` (six hours today), a second scheduled task on the same scheduler that runs the existing sweep enumerates tenants from `nexus.tuple_tenants`, a small table with no row-level security, one row per tenant that has ever written a tuple, upserted by `out`, visited least-recently-swept first (`last_swept_at` ascending, nulls first, `tenant_id` as the tie-break). Per tenant it releases lapsed claims nobody re-took with an `expire` log row and an `attempts` increment, dead-lettering at `max_attempts`; purges expired and consumed-past-retention tuple rows (setting the claim log's `tuple_id` to null); then purges log rows past the log's own longer TTL (`NX_TUPLE_CLAIM_LOG_TTL_DAYS`, default 180); all in batches of a few hundred, committing per batch. Two bounds keep it from starving the T1 crash-safety sweep sharing the same single-thread scheduler: the token loop's statement bound on every statement, and a budget on the task itself, a cap on batches per tenant per run and a wall-clock budget per run. A tenant is stamped only when its sweep finishes cleanly; a tenant cut short by the budget keeps its old stamp and is therefore first next run, so the order lives in the table and survives a restart with no cursor held in the JVM.
 
 Every run logs a counted outcome record: tenants visited, the oldest `last_swept_at` after the run, scanned, released, dead-lettered, purged, log rows purged, and whether the budget was exhausted. A run that finds nothing expired is the normal state of a healthy table; the failure the counts detect is a run that scanned nothing at all, or a run that did not happen, which the doctor row on last-sweep age reports.
 
-Three `nx doctor` rows: oldest unclaimed age per subspace over claimable rows only (live, unclaimed, not dead-lettered); dead-tuple ratio and last autovacuum on the table; age of the last tuple sweep and whether its budget was exhausted. `autovacuum_vacuum_scale_factor = 0.01` on `nexus.tuples` and `nexus.tuple_claim_log` — the first per-table storage parameter in the changelog — reclaims during sustained churn; the default already self-heals once churn stops.
+Three `nx doctor` rows: oldest unclaimed age per subspace over claimable rows only (live, unclaimed, not dead-lettered); dead-tuple ratio and last autovacuum on the table; age of the last tuple sweep and whether its budget was exhausted. `autovacuum_vacuum_scale_factor = 0.01` on `nexus.tuples` and `nexus.tuple_claim_log`, the first per-table storage parameter in the changelog, reclaims during sustained churn; the default already self-heals once churn stops.
 
 ## Errors
 
-- `UnknownSubspace` — the subspace does not match a registered template.
-- `SchemaViolation` — a field and reason, checked before any write; covers a missing pinned key, a missing required dim, an `out` without a nonce on a `keys+nonce` template, and a `ttl_seconds` or `lease_s` at or below zero or a negative `timeout_s`.
-- `TakeDisabled` — the template's `take.enabled` is false.
-- `TimeoutTooLong` — `timeout_s` above the engine's cap.
-- `ClaimNotFound` — no live claim with that id.
-- `ClaimOwnership` — a live claim held by someone else.
-- `ParkCapExceeded` — the per-claimant or global park cap is reached; the caller gets the probe result and backs off.
-- `TtlTooLong` — a `ttl_seconds` above the template's `retention_seconds`.
-- `LeaseTooLong` — a `lease_s` above the template's `max_lease_seconds`; a lease longer than the row's remaining TTL is clamped, not refused.
+- `UnknownSubspace`: the subspace does not match a registered template.
+- `SchemaViolation`: a field and reason, checked before any write; covers a missing pinned key, a missing required dim, an `out` without a nonce on a `keys+nonce` template, and a `ttl_seconds` or `lease_s` at or below zero or a negative `timeout_s`.
+- `TakeDisabled`: the template's `take.enabled` is false.
+- `TimeoutTooLong`: `timeout_s` above the engine's cap.
+- `ClaimNotFound`: no live claim with that id.
+- `ClaimOwnership`: a live claim held by someone else.
+- `ParkCapExceeded`: the per-claimant or global park cap is reached; the caller gets the probe result and backs off.
+- `TtlTooLong`: a `ttl_seconds` above the template's `retention_seconds`.
+- `LeaseTooLong`: a `lease_s` above the template's `max_lease_seconds`; a lease longer than the row's remaining TTL is clamped, not refused.
 
 ## What it is not for
 

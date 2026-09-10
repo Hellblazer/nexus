@@ -240,4 +240,4 @@ sequenceDiagram
     end
 ```
 
-What the lease scope buys and what it costs: keeping every v1 lease short is why the absence of a renew operation is safe, on an assumption the record names as such — no v1 consumer holds a mailbox claim across work longer than 900 s. Lease-renewal traffic was among Jini's failure causes; this design avoids it by scope, not by construction. The window between `in` and `ack` while the work runs is inherent to any leased take, JavaSpaces included, and is not what either candidate closes.
+What the lease scope buys and what it costs: keeping every v1 lease short is why the absence of a renew operation is safe, on an assumption the record names as such: no v1 consumer holds a mailbox claim across work longer than 900 s. Lease-renewal traffic was among Jini's failure causes; this design avoids it by scope, not by construction. The window between `in` and `ack` while the work runs is inherent to any leased take, JavaSpaces included, and is not what either candidate closes.
