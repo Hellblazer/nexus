@@ -1944,6 +1944,35 @@ def _nearest_finding_title(residual_title: str, candidate_titles: list[str]) -> 
     return best_title
 
 
+def _finding_blocks(findings: list[str]) -> list[list[str]]:
+    """Group :func:`_critique_findings` output into per-finding blocks: a
+    non-indented title line followed by its indented detail lines (nexus-
+    yjf5l.11, needed to union two critiques' findings without splitting a
+    finding from its own ``Location``/``Sites`` lines)."""
+    blocks: list[list[str]] = []
+    for f in findings:
+        if not f.startswith("  "):
+            blocks.append([f])
+        elif blocks:
+            blocks[-1].append(f)
+    return blocks
+
+
+def _merge_finding_blocks(primary: list[str], secondary: list[str]) -> list[str]:
+    """Union of two :func:`_critique_findings` outputs: *primary*'s blocks
+    first, then any *secondary* block whose title key is not already in
+    *primary* (nexus-yjf5l.11) — sweeping the last two rounds' critiques as
+    one list without duplicating a finding both rounds happened to carry."""
+    primary_blocks = _finding_blocks(primary)
+    secondary_blocks = _finding_blocks(secondary)
+    primary_keys = {_finding_title_key(b[0]) for b in primary_blocks}
+    merged = list(primary)
+    for b in secondary_blocks:
+        if _finding_title_key(b[0]) not in primary_keys:
+            merged.extend(b)
+    return merged
+
+
 def _preamble_regate_block(
     *, repo_root: str, repo_name: str, t2_key: str, rdr_file: Path, status: str = "",
 ) -> list[str]:
@@ -1970,6 +1999,22 @@ def _preamble_regate_block(
     (nexus-g7zgw.1). A T2 read failure returns a single named note rather
     than nothing, so an unreachable T2 is visible and never mistaken for
     "no prior round".
+
+    nexus-yjf5l.11: the survivor sweep covers the last TWO rounds'
+    critiques, not one — "two consecutive clean confirmations" retires a
+    finding without a new gate-record field, because ``get_all`` already
+    returns full column data for every ``{id}-gate-critique-*`` row
+    (``HttpMemoryStore.get_all``'s own docstring), so every critique OLDER
+    than the two most recent is free to read, no extra fetch. A finding
+    present in the latest critique, or in the one before it, is swept
+    (printed under "Prior findings"); a finding present only in an older
+    critique, and not re-raised in either of the last two, is printed
+    under one "Retired from the sweep" line instead, as a count with its
+    titles. A record whose critique history implies a second critique
+    exists but it cannot be placed or loaded is a visible note, never a
+    silently narrower sweep. A recorded residual (nexus-yjf5l.3) is exempt
+    from both the sweep and the retired bucket regardless of age, unaffected
+    by this.
     """
     project = f"{repo_name}_rdr"
     try:
@@ -1993,14 +2038,20 @@ def _preamble_regate_block(
                 fix_check_exists = client.get(project=project, title=f"{t2_key}-fix-check-{fc.group(1)}") is not None
             # Every gate round writes a critique record; their count is the
             # round count nobody retypes (deep critique [24873] Critical 1).
-            critique_count = 0
+            # nexus-yjf5l.11: get_all already returns full column data (the
+            # HttpMemoryStore.get_all docstring), so every critique's
+            # content rides this ONE call for free — sorted by title, which
+            # is chronological by construction (``{id}-gate-critique-
+            # {date}``, same-day re-gates append a letter).
+            critique_rows: list[tuple[str, str]] = []
             get_all = getattr(client, "get_all", None)
             if callable(get_all):
                 prefix = f"{t2_key}-gate-critique-"
-                critique_count = sum(
-                    1 for row in (get_all(project=project) or [])
-                    if isinstance(row, dict) and str(row.get("title", "")).startswith(prefix)
-                )
+                for row in (get_all(project=project) or []):
+                    if isinstance(row, dict) and str(row.get("title", "")).startswith(prefix):
+                        critique_rows.append((str(row.get("title", "")), str(row.get("content", ""))))
+                critique_rows.sort(key=lambda tc: tc[0])
+            critique_count = len(critique_rows)
             critique = None
             fetch_failed = False
             if critique_title:
@@ -2013,6 +2064,36 @@ def _preamble_regate_block(
                 else:
                     critique = client.get(project=project, title=critique_title)
                 fetch_failed = critique is None
+            # nexus-yjf5l.11: "the one before" the latest critique — load
+            # up to two critiques instead of one. A record whose critique
+            # count implies a second exists, but critique_title cannot be
+            # placed among the enumerated critiques (or the placed title
+            # fails to load), is a visible note rather than a silently
+            # narrower sweep.
+            second_critique_title = ""
+            second_critique_content: str | None = None
+            second_missing = False
+            older_critique_rows: list[tuple[str, str]] = []
+            if critique_title and not fetch_failed:
+                titles_sorted = [t for t, _ in critique_rows]
+                idx = titles_sorted.index(critique_title) if critique_title in titles_sorted else -1
+                if idx >= 1:
+                    second_critique_title = titles_sorted[idx - 1]
+                    resolve = getattr(client, "resolve_title", None)
+                    if callable(resolve):
+                        second_critique, _cand2 = resolve(project=project, title=second_critique_title)
+                    else:
+                        second_critique = client.get(project=project, title=second_critique_title)
+                    if second_critique is None:
+                        second_missing = True
+                    else:
+                        second_critique_content = (
+                            str(second_critique.get("content", "")) if isinstance(second_critique, dict) else ""
+                        )
+                    if idx >= 2:
+                        older_critique_rows = critique_rows[:idx - 1]
+                elif critique_count >= 2:
+                    second_missing = True
     except Exception as exc:  # noqa: BLE001 — T2 unreachable must be a visible note, never a silent "no prior round"
         return [
             f"> Re-gate check: T2 unreachable ({type(exc).__name__}: {exc}); the prior "
@@ -2032,8 +2113,25 @@ def _preamble_regate_block(
         fix_check_field, gated_commit,
         is_regate=bool(_t2_field_block(content, "prior")), record_exists=fix_check_exists,
     ))
+    if second_missing:
+        lines.append(
+            "**Second critique missing:** the record's critique history shows at least 2 "
+            "prior critiques, so the sweep should also cover the one before "
+            f"`{critique_title}`"
+            + (f" (`{second_critique_title}`)" if second_critique_title else " (could not place it among the "
+               "enumerated critiques)")
+            + ", but it could not be loaded. The sweep below covers only the latest round "
+            "until the second one is found by hand and re-checked."
+        )
+        lines.append("")
 
     findings = _critique_findings(str(critique.get("content", ""))) if isinstance(critique, dict) else []
+    # nexus-yjf5l.11: sweep the last two rounds' critiques as one list — a
+    # finding from the round before the latest still gets one more chance to
+    # be reconfirmed, on the theory that the freshest pass might simply not
+    # have looked at it rather than having verified it closed.
+    second_findings = _critique_findings(second_critique_content) if second_critique_content else []
+    findings = _merge_finding_blocks(findings, second_findings)
     # nexus-yjf5l.3: a finding recorded on the prior round's residuals: lines
     # was dispositioned at accept, not left open — it is not a survivor to
     # re-sweep. Match it out of the sweep list by the same normalisation
@@ -2041,13 +2139,35 @@ def _preamble_regate_block(
     # separate copies of the comparison.
     residual_titles = _residual_titles(content)
     residual_keys = {_finding_title_key(t) for t in residual_titles}
+    # nexus-yjf5l.11: findings raised only in a critique OLDER than the last
+    # two, and not re-raised in either of them, are two consecutive clean
+    # confirmations — retire them from the sweep rather than re-listing them
+    # every round. Every older critique's content rode the same get_all call
+    # above, so this costs no extra fetch. A recorded residual is exempt
+    # from this bucket too; it already prints under its own heading.
+    older_titles: list[str] = []
+    _seen_older_keys: set[str] = set()
+    for _older_title, _older_content in older_critique_rows:
+        for f in _critique_findings(_older_content):
+            if f.startswith("  "):
+                continue
+            k = _finding_title_key(f)
+            if k in _seen_older_keys:
+                continue
+            _seen_older_keys.add(k)
+            older_titles.append(f)
+    sweep_keys = {_finding_title_key(f) for f in findings if not f.startswith("  ")}
+    retired_titles = [
+        t for t in older_titles
+        if _finding_title_key(t) not in sweep_keys and _finding_title_key(t) not in residual_keys
+    ]
     # nexus-yjf5l.14: a residual's title can drift by a self-referential
     # count or pointer between rounds — the loose key catches that drift
     # as a second pass, never the first, so two genuinely different
     # findings sharing every non-digit word cannot collide on it.
     residual_loose_unique = _loose_unique_index(residual_titles)
     finding_loose_unique = _loose_unique_index([f for f in findings if not f.startswith("  ")])
-    if findings:
+    if findings or retired_titles:
         survivors: list[str] = []
         recorded: list[str] = []
         matched_keys: set[str] = set()
@@ -2069,6 +2189,12 @@ def _preamble_regate_block(
         if recorded:
             lines.append("Recorded residuals (dispositioned at accept; not survivors — do not re-open):")
             lines.extend(f"- {f}" for f in recorded)
+            lines.append("")
+        if retired_titles:
+            lines.append(
+                f"Retired from the sweep (confirmed closed in the last two rounds): {len(retired_titles)}"
+            )
+            lines.extend(f"- {t}" for t in retired_titles)
             lines.append("")
         unmatched = [
             t for t in residual_titles
@@ -2102,8 +2228,10 @@ def _preamble_regate_block(
                     break
         if survivors:
             lines.extend(f"- {f}" for f in survivors[:cut])
-        else:
+        elif findings:
             lines.append("(none — every finding this round matched the gate record's `residuals:` field)")
+        else:
+            lines.append("(none — the last two rounds' critiques raised nothing)")
         hidden = sum(1 for f in survivors[cut:] if not f.startswith("  "))
         if hidden:
             lines.append(f"- ... and {hidden} more findings in the critique")

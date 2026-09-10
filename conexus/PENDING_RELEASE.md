@@ -134,3 +134,9 @@ mechanize, it matters enough to ship.
   mirrors the same one-line Revision History rule and drops the earlier
   claim that residuals are also recorded in Revision History for accept
   to disposition (accept reads the gate record's `residuals:` field).
+- `conexus/skills/rdr-gate/SKILL.md`: nexus-yjf5l.11 — Layer 0 step 1 now
+  scopes the sweep to the findings printed under "Prior findings" (the
+  last two rounds' critiques); a finding absent from both, printed under
+  "Retired from the sweep" instead, needs no re-check.
+- `conexus/commands/rdr-gate.md`: nexus-yjf5l.11 — the Layer 0 bullet
+  mirrors the same last-two-rounds scoping.

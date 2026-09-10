@@ -1540,6 +1540,24 @@ class TestRdrGateLoopRemedies:
             "accept dispositions residuals from the gate record's residuals:, not Revision History"
         )
 
+    def test_layer_zero_retirement_rule_stated_identically(self) -> None:
+        """R5 follow-on (nexus-yjf5l.11): the sweep covers only the last two
+        rounds' critiques — a finding absent from both retires (printed
+        under its own line, not under "Prior findings"). One clause, the
+        same in the skill and the command mirror. Whitespace-normalised
+        (same convention as ``_all_crosswalk_clauses`` above) so the skill's
+        own line wrap cannot desync this pin from the source text."""
+        clause = (
+            'for every prior finding printed under "prior findings" (the last two '
+            "rounds' critiques; a finding absent from both, printed under \"retired "
+            'from the sweep" instead, needs no re-check) that is not a recorded '
+            "residual"
+        )
+        skill = re.sub(r"\s+", " ", self.GATE_SKILL.read_text()).lower()
+        assert clause in skill, "rdr-gate/SKILL.md: the retirement clause is missing or drifted"
+        cmd = re.sub(r"\s+", " ", self.GATE_CMD.read_text()).lower()
+        assert clause in cmd, "rdr-gate.md: the retirement clause is missing or drifted"
+
     def test_command_and_skill_agree_on_fix_check_scope(self) -> None:
         cmd = self.GATE_CMD.read_text()
         assert "research entry" in cmd, "the enumeration rule covers the cited research entry"

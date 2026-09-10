@@ -2306,6 +2306,125 @@ class TestRdrGateRegateBlock:
         assert "no matching finding in the critique" not in out
         assert "that is not a recorded residual" not in out
 
+    def test_a_finding_absent_two_rounds_running_retires(self, rdr_env, monkeypatch):
+        """nexus-yjf5l.11: a round-1 finding not re-raised in round 2's or
+        round 3's own critique has two consecutive clean confirmations and
+        retires — printed under its own count-and-titles line, never under
+        the "Prior findings" sweep. The round-2 and round-3 findings
+        (genuinely new each round) stay under the active sweep."""
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                "outcome: \"BLOCKED\"\ndate: \"2026-09-09\"\n"
+                "critique: nexus_rdr/204-gate-critique-2026-09-09\n"
+            ),
+            "204-gate-critique-2026-09-07": (
+                "## Critical Issues\n\n### Issue: ghost sweep omits topic_assignments\n"
+                "- **Location**: L1\n"
+            ),
+            "204-gate-critique-2026-09-08": (
+                "## Significant Issues\n\n### Issue: phase 1 item now stale\n"
+                "- **Location**: L2\n"
+            ),
+            "204-gate-critique-2026-09-09": (
+                "## Significant Issues\n\n### Issue: new census gap\n"
+                "- **Location**: L3\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"])
+        assert result.exit_code == 0, result.output
+        out = result.output
+        assert "Retired from the sweep (confirmed closed in the last two rounds): 1" in out, out
+        retired_idx = out.index("Retired from the sweep")
+        pf_idx = out.index("Prior findings (each must be closed EVERYWHERE")
+        ghost_idx = out.index("ghost sweep omits topic_assignments")
+        assert retired_idx < ghost_idx < pf_idx, (
+            "the retired round-1 finding prints under the Retired line, before Prior findings"
+        )
+        prior_section = out[pf_idx:out.index("Layer 0")]
+        assert "ghost sweep omits topic_assignments" not in prior_section, (
+            "a retired finding must not also appear in the active sweep list"
+        )
+        assert "phase 1 item now stale" in prior_section
+        assert "new census gap" in prior_section
+
+    def test_a_finding_re_raised_in_a_later_round_is_still_swept(self, rdr_env, monkeypatch):
+        """nexus-yjf5l.11: 'unless a later critique re-raised it' — a
+        round-1 finding that reappears in the latest (round 3) critique is
+        NOT retired; it always sweeps, same as any fresh finding."""
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                "outcome: \"BLOCKED\"\ndate: \"2026-09-09\"\n"
+                "critique: nexus_rdr/204-gate-critique-2026-09-09\n"
+            ),
+            "204-gate-critique-2026-09-07": (
+                "## Critical Issues\n\n### Issue: ghost sweep omits topic_assignments\n"
+                "- **Location**: L1\n"
+            ),
+            "204-gate-critique-2026-09-08": (
+                "## Significant Issues\n\n### Issue: phase 1 item now stale\n"
+                "- **Location**: L2\n"
+            ),
+            "204-gate-critique-2026-09-09": (
+                "## Critical Issues\n\n### Issue: ghost sweep omits topic_assignments\n"
+                "- **Location**: L1\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"])
+        assert result.exit_code == 0, result.output
+        out = result.output
+        assert "Retired from the sweep" not in out, out
+        pf_idx = out.index("Prior findings (each must be closed EVERYWHERE")
+        prior_section = out[pf_idx:out.index("Layer 0")]
+        assert "ghost sweep omits topic_assignments" in prior_section
+        assert "phase 1 item now stale" in prior_section
+
+    def test_missing_second_critique_is_a_visible_note(self, rdr_env, monkeypatch):
+        """nexus-yjf5l.11: the gate record's critique history implies a
+        second (older) critique exists, but it cannot be placed among the
+        enumerated critiques — a visible note, never a silently narrower
+        (latest-round-only) sweep."""
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient(
+            entries={
+                "204-gate-latest": (
+                    "outcome: \"BLOCKED\"\ndate: \"2026-09-09\"\n"
+                    "critique: nexus_rdr/204-gate-critique-2026-09-09c\n"
+                ),
+                "204-gate-critique-2026-09-07": (
+                    "## Critical Issues\n\n### Issue: finding A\n- **Location**: L1\n"
+                ),
+                "204-gate-critique-2026-09-08": (
+                    "## Significant Issues\n\n### Issue: finding B\n- **Location**: L2\n"
+                ),
+                "204-gate-critique-2026-09-09c": (
+                    "## Significant Issues\n\n### Issue: finding C\n- **Location**: L3\n"
+                ),
+            },
+            # nexus-zu1q0 race shape: the record's own critique (C) is
+            # fetchable directly but does not show up in the get_all-based
+            # enumeration used to place it among its peers — so it cannot
+            # be placed even though the record's critique history implies
+            # at least 2 prior critiques (A, B) exist.
+            hidden_from_get_all=frozenset({"204-gate-critique-2026-09-09c"}),
+        )
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"])
+        assert result.exit_code == 0, result.output
+        out = result.output
+        assert "**Second critique missing:**" in out, out
+        assert "could not be loaded" in out
+        assert "finding C" in out, "the latest critique's own findings still sweep"
+
 
 class TestRdrGateRoundAndFixCheck:
     """nexus-g7zgw.1 / .2: the re-gate block carries the gate round number,
