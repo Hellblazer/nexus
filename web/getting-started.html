@@ -96,7 +96,14 @@ table{border-collapse:collapse;width:100%;font-size:15px;margin:14px 0;max-width
 th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
 th{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
 .tbl{overflow-x:auto}
-table.gloss td:first-child{font-weight:500;white-space:nowrap}
+.gloss-wrap{margin:22px 0 8px;max-width:68ch}
+details.gloss{border:1px solid var(--line);border-radius:var(--radius);background:var(--paper);margin:6px 0}
+details.gloss summary{cursor:pointer;padding:10px 14px;font-weight:500;list-style:none;display:flex;justify-content:space-between}
+details.gloss summary::after{content:"+";color:var(--brass);font-family:"IBM Plex Mono",monospace}
+details.gloss[open] summary::after{content:"–"}
+details.gloss table{margin:0;font-size:14px}
+details.gloss td:first-child{font-weight:500;white-space:nowrap;width:9em}
+details.gloss tr:last-child td{border-bottom:0}
 ul.plain{margin:6px 0 10px;padding-left:22px;max-width:66ch}
 ul.plain li{margin:3px 0}
 .finish{border:1px solid var(--line);background:var(--paper);border-radius:var(--radius);padding:18px 20px;margin-top:40px;max-width:68ch}
@@ -129,33 +136,40 @@ ul.plain li{margin:3px 0}
 <p class="lede">You do all of this inside Claude Code. You give Claude a short instruction. Claude uses Nexus for you. Each lesson shows the instruction to give, what Claude does, and what you see. Eight lessons, about one hour.</p>
 <p class="note">Before you start: install Nexus and the plugin with the <a href="./">install guide</a>. Then open a terminal in a project of yours and run <code>claude</code>. Every lesson happens in that Claude Code session.</p>
 
-<h3 style="margin-top:22px">Words used in these lessons</h3>
-<div class="tbl"><table class="gloss">
-<tr><th>Word</th><th>Meaning here</th></tr>
+<div class="gloss-wrap">
+<p class="note" style="margin-bottom:6px">The lessons use a few words with one fixed meaning. Open a group to read them.</p>
+<details class="gloss"><summary>Where data lives</summary><div class="tbl"><table>
 <tr><td>Store</td><td>A place where Nexus keeps data. There are three stores: scratch, memory, and knowledge.</td></tr>
-<tr><td>Tool</td><td>An action that Claude can take. Nexus adds tools to Claude Code. When Claude uses one, Claude Code shows the tool name.</td></tr>
 <tr><td>Entry</td><td>One item in the scratch store or the memory store.</td></tr>
 <tr><td>Document</td><td>One item in the knowledge store: a file from a repository, a note, or a PDF.</td></tr>
-<tr><td>Chunk</td><td>A piece of a document. Nexus cuts each document into chunks before it indexes them.</td></tr>
-<tr><td>Index</td><td>To read documents, cut them into chunks, and add the chunks to the knowledge store.</td></tr>
-<tr><td>Semantic search</td><td>Search by meaning. The question and the chunks are compared as meanings, not as exact words.</td></tr>
 <tr><td>Collection</td><td>A named group of documents in the knowledge store, for example <code>distributed-systems</code>.</td></tr>
 <tr><td>Catalog</td><td>The list of all documents and the links between them.</td></tr>
 <tr><td>TTL</td><td>Time to live. How long an entry stays before Nexus deletes it.</td></tr>
 <tr><td>Promote</td><td>To copy an entry from one store to the next store. Scratch to memory, or memory to knowledge.</td></tr>
-<tr><td>Session</td><td>One run of Claude Code. The scratch store belongs to one session.</td></tr>
+</table></div></details>
+<details class="gloss"><summary>Finding things</summary><div class="tbl"><table>
+<tr><td>Chunk</td><td>A piece of a document. Nexus cuts each document into chunks before it indexes them.</td></tr>
+<tr><td>Index</td><td>To read documents, cut them into chunks, and add the chunks to the knowledge store.</td></tr>
+<tr><td>Semantic search</td><td>Search by meaning. The question and the chunks are compared as meanings, not as exact words.</td></tr>
+</table></div></details>
+<details class="gloss"><summary>Claude Code</summary><div class="tbl"><table>
+<tr><td>Tool</td><td>An action that Claude can take. Nexus adds tools to Claude Code. When Claude uses one, Claude Code shows the tool name.</td></tr>
 <tr><td>Skill</td><td>A named procedure that Claude follows. You start one with a command such as <code>/conexus:query</code>.</td></tr>
+<tr><td>Session</td><td>One run of Claude Code. The scratch store belongs to one session.</td></tr>
 <tr><td>RDR</td><td>Research, Design, Review. A short document that records a decision before the code is written.</td></tr>
 <tr><td><code>nx</code></td><td>The Nexus terminal command. Claude runs it for you when needed. You can also run it yourself.</td></tr>
-</table></div>
+</table></div></details>
+</div>
 
 <!-- ============ 1 ============ -->
 <section class="lesson" id="l1">
 <div class="lhead"><span class="lnum">1</span><h2>Start a session</h2><span class="ltime">5 min</span></div>
-<p class="why">When Claude Code starts with the Nexus plugin, Nexus gives Claude some context before you type anything. This lesson shows what that context is, and introduces the three stores that all later lessons use.</p>
+<p class="why">When Claude Code starts with the Nexus plugin, Nexus gives Claude some context before you type anything. You do not see this context. This lesson shows what it contains, and introduces the three stores that all later lessons use.</p>
 
-<h3>What you see when the session starts</h3>
-<p>Run <code>claude</code> in your project. Before your first message, the plugin shows Claude several blocks of text, each with a heading. You can read them too. The important ones are:</p>
+<h3>What Claude receives when the session starts</h3>
+<p>Run <code>claude</code> in your project. Before your first message, the plugin gives Claude several blocks of text. Claude Code does not show them to you. To see them, ask Claude:</p>
+<div class="cmd"><pre>What context did the Nexus plugin give you at the start of this session?</pre><button class="copy" type="button">Copy</button></div>
+<p>Claude repeats the blocks. The important ones are:</p>
 <div class="tbl"><table>
 <tr><th>Block</th><th>Content</th></tr>
 <tr><td>T2 Memory</td><td>The memory entries for this project. Empty in a new project. Lesson 3 adds the first one.</td></tr>
@@ -163,7 +177,7 @@ ul.plain li{margin:3px 0}
 <tr><td>nx Capabilities</td><td>A short list of the Nexus tools that Claude can use.</td></tr>
 <tr><td>Knowledge Map</td><td>The main subjects in the knowledge store, with the number of chunks for each.</td></tr>
 </table></div>
-<p class="note">If you see a block with the heading "nx Preflight: FAILED", a part of the install is missing. Type <code>/conexus:nx-preflight</code>. It tells you which part.</p>
+<p class="note">If Claude reports a block with the heading "nx Preflight: FAILED", a part of the install is missing. Type <code>/conexus:nx-preflight</code>. It tells you which part.</p>
 
 <h3>The three stores</h3>
 <p>Every Nexus tool works on one of three stores. The stores differ in one way: how long the data lives.</p>
@@ -223,7 +237,7 @@ Auth uses JWT. Tokens expire after 24 hours. The refresh endpoint is /v2/refresh
 <div class="see">Say to Claude, later or in a new session</div>
 <div class="cmd"><pre>What does Nexus memory say about authentication in this project?</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
-<p>A tool call named <code>memory_search</code> or <code>memory_get</code>. Claude answers with the stored text. In a new session, the entry also appears in the "T2 Memory" block from lesson 1, before you ask.</p>
+<p>A tool call named <code>memory_search</code> or <code>memory_get</code>. Claude answers with the stored text. In a new session, Claude also receives the entry in the "T2 Memory" block from lesson 1, before you ask.</p>
 
 <div class="callout rule"><p><strong>Three rules for good entries:</strong> Put one fact in each entry. Give it a title that describes it, for example <code>auth-tokens</code>, not <code>notes-3</code>. Say "permanently" for facts that must stay. Without that word, the entry lives 30 days, and each read makes it live longer.</p></div>
 <p class="note">If you store an entry with the same title again, the new text replaces the old text. To change a fact, store it again. From the terminal: <code>nx memory put "…" -p PROJECT -t TITLE --ttl permanent</code>.</p>
