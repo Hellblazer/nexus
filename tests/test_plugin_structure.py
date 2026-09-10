@@ -1568,8 +1568,7 @@ class TestRdrGateLoopRemedies:
             "the Class bullet must scope itself to an RDR gate critique"
         )
         assert "optional for every other consumer of this agent" in normalized, (
-            "the Class bullet must read as optional to a critic dispatched by code review "
-            "and the other seven consumers"
+            "the Class bullet must read as optional for every consumer other than an RDR gate critique"
         )
         assert "`Ship-blocker: yes` implies `Class: BLOCKS-PLANNING`" in normalized
         for path in (self.GATE_SKILL, self.GATE_CMD):
@@ -1580,6 +1579,57 @@ class TestRdrGateLoopRemedies:
             )
             assert "Classification governs disposition, not blocking" in text_normalized, path
             assert "ship_blockers` stays the sole blocking field" in text_normalized, path
+
+    #: nexus-yjf5l.10 (fix for a nexus-yjf5l.9 critique finding): the
+    #: Class bullet's "optional for every other consumer" parenthetical
+    #: once named plan-audit and phase-review-gate, neither of which ever
+    #: dispatches this agent (plan-audit calls the nx_plan_audit MCP tool
+    #: with "no agent spawn"; phase-review-gate is a pure evidence-table
+    #: gate). Each entry below maps a named consumer to the file(s) whose
+    #: text is the grep-verifiable proof it actually dispatches
+    #: substantive-critic, so the bullet's claim is pinned against the
+    #: same evidence that must keep it true.
+    _REAL_CRITIC_CONSUMERS: dict[str, tuple[Path, ...]] = {
+        "code review": (
+            SKILLS_DIR / "orchestration" / "SKILL.md",
+            SKILLS_DIR / "development" / "SKILL.md",
+        ),
+        "rdr-fix": (SKILLS_DIR / "rdr-fix" / "SKILL.md",),
+        "rdr-accept": (SKILLS_DIR / "rdr-accept" / "SKILL.md",),
+        "rdr-close": (SKILLS_DIR / "rdr-close" / "SKILL.md",),
+        "the substantive-critique skill": (SKILLS_DIR / "substantive-critique" / "SKILL.md",),
+    }
+
+    def test_critic_consumer_list_names_only_real_dispatchers(self) -> None:
+        """nexus-yjf5l.10: every consumer named in the Class bullet's
+        "optional for every other consumer" parenthetical actually
+        dispatches substantive-critic somewhere in its own skill file
+        (mentioning the agent's name is not enough — plan-audit.md and
+        phase-review-gate's files both DO mention "substantive-critic" in
+        passing without ever dispatching it, which is exactly how the
+        stale claim went unnoticed). plan-audit and phase-review-gate are
+        pinned as the negative case so the false claim cannot silently
+        return."""
+        critic = (PLUGIN_DIR / "agents" / "substantive-critic.md").read_text()
+        normalized = re.sub(r"\s+", " ", critic)
+        match = re.search(r"optional for every other consumer of this agent \(([^)]+)\)", normalized)
+        assert match, "the Class bullet's consumer parenthetical was not found"
+        named = [n.strip().removeprefix("and ") for n in match.group(1).split(",")]
+        assert set(named) == set(self._REAL_CRITIC_CONSUMERS), (
+            f"the bullet names {named!r}; the test's mapping covers "
+            f"{list(self._REAL_CRITIC_CONSUMERS)!r} — update both together"
+        )
+        for name, paths in self._REAL_CRITIC_CONSUMERS.items():
+            assert any("substantive-critic" in p.read_text() for p in paths), (
+                f"{name}: none of {paths} references substantive-critic at all"
+            )
+        # The two names the bullet used to carry are confirmed NOT real
+        # dispatchers — this is the defect nexus-yjf5l.10 fixes.
+        plan_audit_cmd = (PLUGIN_DIR / "commands" / "plan-audit.md").read_text()
+        plan_auditor_agent = (PLUGIN_DIR / "agents" / "plan-auditor.md").read_text()
+        assert "no agent spawn" in plan_audit_cmd or "no agent spawn" in plan_auditor_agent
+        phase_gate_skill = (SKILLS_DIR / "phase-review-gate" / "SKILL.md").read_text()
+        assert "substantive-critic" not in phase_gate_skill
 
 
 class TestReviewRoundContracts:

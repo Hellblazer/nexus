@@ -20,6 +20,7 @@ Invocation convention mirrors test_rdr_lint.py:
 """
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -30,6 +31,30 @@ from click.testing import CliRunner
 from nexus.commands.rdr import rdr
 from nexus.db.t2 import T2Database
 from nexus.plans.audit_rounds import BLOCKS_PLANNING, DISCOVER_AT_IMPLEMENTATION
+
+_PLUGIN_DIR = Path(__file__).parent.parent / "conexus"
+
+#: nexus-yjf5l.10: the class-to-disposition clause (which disposition a
+#: BLOCKS-PLANNING or unclassified residual needs) is stated identically in
+#: rdr-accept/SKILL.md step 1b, conexus/commands/rdr-accept.md Step 2b, and
+#: the printed ``preamble_rdr_accept`` brief. One regex extracts the sentence
+#: from whichever surface carries it so the comparison is a single equality
+#: across all three, not three independent substring checks that could each
+#: drift on their own (the fix-check parenthetical is exactly what drifted:
+#: the printed brief dropped it entirely).
+_ACCEPT_DISPOSITION_CLAUSE_RE = re.compile(
+    r"A residual classed `BLOCKS-PLANNING`, or an unclassified residual \(every line "
+    r"written before the class field existed\), needs an explicit author disposition "
+    r"— a sha \(with its fix check\) or a bead — and the choice is recorded, never "
+    r"defaulted",
+)
+
+
+def _disposition_clause(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", text)
+    match = _ACCEPT_DISPOSITION_CLAUSE_RE.search(normalized)
+    assert match, f"disposition clause not found in: {text[:200]!r}..."
+    return match.group(0).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +449,14 @@ class TestRdrAccept:
         assert BLOCKS_PLANNING in out
         assert "unclassified" in out
         assert "never defaulted" in out
+        # nexus-yjf5l.10: the disposition clause is the SAME sentence in the
+        # skill, the command mirror, and this printed brief — one equality
+        # across all three rather than three separate substring checks that
+        # could each drift independently (the printed brief once dropped the
+        # "(with its fix check)" parenthetical the other two carried).
+        skill = (_PLUGIN_DIR / "skills" / "rdr-accept" / "SKILL.md").read_text()
+        cmd = (_PLUGIN_DIR / "commands" / "rdr-accept.md").read_text()
+        assert _disposition_clause(skill) == _disposition_clause(cmd) == _disposition_clause(out)
 
     def test_rdr_accept_preamble_opens_no_t2_client(self):
         """nexus-yjf5l.8: preamble_rdr_accept prints instructions only; it
@@ -2830,6 +2863,44 @@ class TestRdrVerdictPreamble:
         assert "Gate round 4" in out, out
         assert "outcome: \"BLOCKED\"" in out, out
         assert "residuals:\n  - [BLOCKS-PLANNING] gamma" in out, out
+
+    def test_ship_blocker_with_no_class_line_is_unclassified_and_not_a_residual(self, rdr_env, monkeypatch):
+        """Boundary value (critique nexus-yjf5l.9 finding, item (a)): a
+        finding carrying `Ship-blocker: yes` and NO `Class:` line at all.
+        This is a pin, not a red-before-green test — no code change makes
+        it pass, because the behaviour already holds: the contradiction
+        check (`tally.classifications.get(title) ==
+        DISCOVER_AT_IMPLEMENTATION`) only fires when a Class line is
+        present and says DISCOVER-AT-IMPLEMENTATION; an absent Class line
+        makes `.get()` return `None`, `None == DISCOVER_AT_IMPLEMENTATION`
+        is `False`, so no contradiction fires and alpha proceeds as an
+        ordinary, unclassified ship-blocker. And because `residuals` is
+        built as `criticals + significants` MINUS `ship_blocker_titles`,
+        alpha — being a ship-blocker — can never reach the `residuals:`
+        printed list at all, classified or not; there is no
+        BLOCKS-PLANNING default line to observe for it. beta pins the
+        sibling boundary: unclassified AND excluded from
+        `ship_blocker_titles`, so it IS a residual, and its printed line
+        carries the conservative BLOCKS-PLANNING default — exactly as
+        `test_unclassified_residual_does_not_change_what_blocks` already
+        shows for a differently-named finding."""
+        self._commit(rdr_env)
+        crit = (
+            "## Critical Issues\n\n### Issue: alpha\n- **Location**: L1\n"
+            "- **Ship-blocker**: yes\n\n"
+            "## Significant Issues\n\n### Issue: beta\n- **Location**: L2\n"
+            "- **Ship-blocker**: no\n\n"
+            "## Verdict\n\n- **outcome**: not-justified\n- **critical_count**: 1\n"
+            "- **significant_count**: 1\n- **ship_blockers**: 1\n"
+        )
+        store = {"c": crit, "204-gate-latest": "outcome: \"PASSED\"\nprior: [1] (1C), [2] (1C)\n"}
+        out = self._run(rdr_env, monkeypatch, store, "c").output
+        assert "Gate round 4" in out, out
+        assert "Contradiction" not in out, out
+        assert "outcome: \"BLOCKED\"" in out, out
+        assert "ship_blockers: 1" in out, out
+        assert "residuals:\n  - [BLOCKS-PLANNING] beta" in out, out
+        assert "[BLOCKS-PLANNING] alpha" not in out, "alpha is the ship-blocker, not a residual"
 
 
 class TestCritiqueFindings:

@@ -286,8 +286,8 @@ The canonical structure (in emission order):
   contract. Everything else is "no" and becomes a bead, not a reason to hold.
 - **Class**: BLOCKS-PLANNING | DISCOVER-AT-IMPLEMENTATION — required for an RDR
   gate critique (dispatched via `/conexus:rdr-gate` or the rdr-gate skill);
-  optional for every other consumer of this agent (code review, plan-audit,
-  phase-review-gate, rdr-fix, and the substantive-critique skill), none of
+  optional for every other consumer of this agent (code review, rdr-fix,
+  rdr-accept, rdr-close, and the substantive-critique skill), none of
   which states a rule for this field. `Ship-blocker: yes` implies
   `Class: BLOCKS-PLANNING`.
 

@@ -74,7 +74,12 @@ mechanize, it matters enough to ship.
 - `conexus/agents/substantive-critic.md`: nexus-yjf5l.7 — the Issue output
   format gains a `Class:` bullet (BLOCKS-PLANNING or
   DISCOVER-AT-IMPLEMENTATION), scoped as required for an RDR gate critique
-  and optional for every other consumer of this agent.
+  and optional for every other consumer of this agent. nexus-yjf5l.10
+  corrected the named "every other consumer" list to the ones that
+  actually dispatch this agent (code review, rdr-fix, rdr-accept,
+  rdr-close, and the substantive-critique skill) — the original list
+  named plan-audit and phase-review-gate, neither of which ever
+  dispatches it.
 - `conexus/skills/rdr-gate/SKILL.md`: nexus-yjf5l.7 — the Layer 3 relay's
   brief and Gate Aggregation gain the Class line, the
   classification-governs-disposition rule, and the
