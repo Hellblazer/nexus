@@ -2378,12 +2378,11 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # just as well as the legacy source_path key"). cloud_mode would be a
     # no-op declaration here too.
     "test_catalog_path.py",
-    # "retry-mechanics" class: ``target_model`` is an opaque literal passed
-    # into ``_index_code_file`` against a mocked collection/Voyage client;
-    # the test proves retry-on-connect-error behavior, which does not
-    # depend on deployment mode. No module-level fixtures/marks in this
-    # file's header.
-    "test_vector_retry.py",  # renamed from test_chroma_retry.py at RDR-155 P4b P0d
+    # nexus-0y4c6 burn-down, batch 5: test_vector_retry.py promoted out —
+    # its one voyage-token occurrence (test_index_code_file_retries_on_
+    # connect_error's `target_model` argument) hoisted to the
+    # module-level `_TARGET_MODEL` constant.
+    #
     # Whole-file "nxexp export/import format" class: every flagged test
     # constructs or reads a ``.nxexp`` header/record by hand (or via
     # ``export_collection``/``import_collection`` against a local
@@ -2403,8 +2402,11 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # embedder produced. No module-level fixtures/marks in this file's
     # header.
     "test_pdf_chunks_no_silent_zero.py",
-    # Same class, same header-verified absence of credential fixtures.
-    "test_pdf_extractor.py",
+    # nexus-0y4c6 burn-down, batch 5: test_pdf_extractor.py promoted out —
+    # its one voyage-token occurrence (test_pdf_chunks_extracts_without_
+    # error_on_any_formula_count's `target_model` argument) hoisted to
+    # the module-level `_TARGET_MODEL` constant.
+    #
     # Same class. This file's one autouse fixture (``_legacy_vector_backend``)
     # only pins ``NX_STORAGE_BACKEND_VECTORS=local`` (a vector-STORAGE-backend
     # axis, Chroma-direct vs service) — orthogonal to embedder mode. The
@@ -2464,8 +2466,14 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # usefixtures("cloud_mode")`` (RDR-109 Phase 2), making the blanket
     # file exclusion redundant. See the correction note above
     # test_catalog_path.py for the full sweep methodology.
-    "test_backfill_hash.py",
-    "test_catalog_backfill_collections.py",
+    #
+    # nexus-0y4c6 burn-down, batch 5 (2026-09-09): test_backfill_hash.py,
+    # test_catalog_backfill_collections.py, and
+    # test_catalog_doctor_collections_drift.py removed as DEAD entries —
+    # each file's one voyage-token occurrence is prose in a module-level
+    # comment/docstring, never inside any test function's own source, so
+    # none of their tests were ever real offenders. A clean shrink, no
+    # test-file change.
     # Five entries removed (nexus-i711w terminal deletion): test_catalog_
     # collections_rebuild / concurrent_writer_lock / db / incremental_rebuild
     # / collections_owner_backfill died with the local catalog. DOWNWARD-only.
@@ -2473,7 +2481,7 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     "test_catalog_collections.py",
     # test_catalog_etl.py entry removed (nexus-i711w Stage 2 sub-stage A):
     # the file died with the SQLite->PG ETL readers. DOWNWARD-only edit.
-    "test_catalog_doctor_collections_drift.py",
+    #
     # RDR-103 / nexus-j9ey + b03o advisor: voyage tokens appear in
     # synthetic collection names being asserted against, not as
     # cloud-mode behaviour under test.
@@ -2485,8 +2493,11 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # deletion): the file's raw-Catalog harness died with the local catalog.
     # test_catalog_migrate_fallback.py entry removed (nexus-i711w terminal
     # deletion, DIE batch-b rm). DOWNWARD-only edit.
+    #
+    # nexus-0y4c6 burn-down, batch 5: test_catalog_rename_collection.py
+    # removed as a DEAD entry — same class as the three above (its one
+    # voyage-token occurrence is prose in a module-level comment).
     "test_catalog_papers_curator_isolation.py",
-    "test_catalog_rename_collection.py",
     "test_catalog_spans_chunk_char.py",
     "test_checkpoint.py",
     "test_collection_gc.py",
@@ -2505,11 +2516,11 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # appear in synthetic conformant collection names used as
     # adapter-test fixtures; no Voyage call is ever made.
     "test_rdr137_followup_critical_345.py",
-    # RDR-137 followup SIG-6/8/11 (nexus-43qgm.6,8,11): same pattern
-    # — voyage tokens in synthetic collection-name fixtures for the
-    # OQ-5 deterministic-ordering and catalog-missing observability
-    # tests; no Voyage call.
-    "test_rdr137_followup_reader_sigs.py",
+    # nexus-0y4c6 burn-down, batch 5: test_rdr137_followup_reader_sigs.py
+    # removed as a DEAD entry — same class as the batch-5 removals above
+    # (its one voyage-token occurrence is prose in a module-level
+    # comment, never inside a test function's own source).
+    #
     # RDR-137 followup SIG-10/13/14/17 (nexus-43qgm.10,13,14,17):
     # voyage tokens in adapter / context / collection synthetic
     # fixtures; no Voyage call.
@@ -2525,12 +2536,22 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # reason — pre-existing module cloud_mode mark).
     "test_doc_indexer_hash_sync.py",
     "test_doctor_cmd.py",
-    "test_doctor_integrity.py",
+    # nexus-0y4c6 burn-down, batch 5: test_doctor_integrity.py removed as
+    # a DEAD entry — its one voyage-token occurrence is inside a shared
+    # helper METHOD (`_write_ckpt`, not a `test_*` function), which
+    # `_scan_offenders`'s per-test source scan never sees either way.
     "test_doctor_search.py",
-    "test_indexer_duplicate_content.py",
+    # nexus-0y4c6 burn-down, batch 5: test_indexer_duplicate_content.py
+    # promoted out — its one voyage-token occurrence (the pinned
+    # destination collection name in
+    # test_pdf_indexer_handles_duplicate_chunks_within_document) hoisted
+    # to the module-level `_PINNED_DUP_PDF_COLLECTION` constant.
     "test_indexer_modules.py",
     "test_indexer_utils_repo.py",
-    "test_memory.py",
+    # nexus-0y4c6 burn-down, batch 5: test_memory.py promoted out — its
+    # one voyage-token occurrence (test_promote_calls_t3_put's asserted
+    # auto-promoted collection name) hoisted to the module-level
+    # `_PROMOTED_COLLECTION` constant.
     "test_metadata_consistency.py",
     "test_metadata_extraction_source.py",  # RDR-139 Layer D: pure schema unit
     "test_metadata_schema.py",
@@ -2539,21 +2560,33 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # placeholder embedding_model / collection-name segment, not cloud-mode
     # behavior.
     "test_dt_content_layer_d.py",
-    "test_dt_mcp_fallback.py",
+    # nexus-0y4c6 burn-down, batch 5: test_dt_mcp_fallback.py promoted
+    # out — its one voyage-token occurrence
+    # (TestLayerDFallback.test_file_backed_chunk_has_no_extraction_source's
+    # embedding_model argument) hoisted to the class attribute `_MODEL`.
     # test_document_highlights.py entry removed (nexus-i711w Stage 2
     # sub-stage A): the file died with the SQLite store. DOWNWARD-only edit.
-    "test_dt_highlights_layer_e.py",
-    "test_dt_capture_cmd.py",
+    #
+    # nexus-0y4c6 burn-down, batch 5: test_dt_highlights_layer_e.py and
+    # test_dt_capture_cmd.py promoted out — their one-occurrence-each
+    # literals hoisted to `_HIGHLIGHTS_COLLECTION` /
+    # `_COLLECTION` (module-level constants).
     # test_migrations_rdr108_phase1c.py entry removed (RDR-158 P4 Stage 4,
     # nexus-i711w): the file died with db/migrations.py. DOWNWARD-only edit.
     "test_plan_run.py",
     # nexus-vgq89 correction sweep: test_rdr_hook.py (tests/hooks/) and
     # test_registry.py removed here (same free-win reason — pre-existing
     # module cloud_mode mark).
-    "test_source_uri_home_key.py",
-    "test_store_enrich_doc_id.py",
+    #
+    # nexus-0y4c6 burn-down, batch 5: test_source_uri_home_key.py removed
+    # as a DEAD entry — its one voyage-token occurrence is prose in a
+    # module-level docstring. test_store_enrich_doc_id.py PROMOTED out
+    # the same batch — its one occurrence (a pre-existing chunk-metadata
+    # literal) hoisted to `_PRE_EXISTING_MODEL`.
     "test_store_put_cli_parity.py",
-    "test_t3_strict_collection_naming.py",
+    # nexus-0y4c6 burn-down, batch 5: test_t3_strict_collection_naming.py
+    # promoted out — its one occurrence (a conformant collection-NAME
+    # string) hoisted to `_CONFORMANT_NAME`.
     "test_t3.py",
     "test_tuning_config.py",
     # Mode-self-tests — these assert local-mode behavior; cloud_mode

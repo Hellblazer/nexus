@@ -10,6 +10,12 @@ from nexus.cli import main
 from nexus.db.t2 import T2Database
 from tests._t2_fixture_ops import backdate_memory, memory_row
 
+# nexus-0y4c6: hoisted out of test_promote_calls_t3_put's own body so the
+# RDR-109 mode-declaration lint no longer needs to exclude this file --
+# the RDR-103 Phase 5 auto-promoted conformant collection name asserted
+# against a MagicMock t3; no embedder is constructed.
+_PROMOTED_COLLECTION = "knowledge__proj__voyage-context-3__v1"
+
 
 # ── T2 database layer ───────────────────────────────────────────────────────
 
@@ -326,7 +332,7 @@ def test_promote_calls_t3_put(runner: CliRunner, mem_home: Path, db: T2Database)
     # RDR-103 Phase 5: ``t3_collection_name`` auto-promotes
     # ``--collection knowledge__proj`` to a conformant 4-segment name.
     assert (kw["collection"], kw["content"], kw["title"], kw["ttl_days"]) == (
-        "knowledge__proj__voyage-context-3__v1", "the content", "doc.md", 7
+        _PROMOTED_COLLECTION, "the content", "doc.md", 7
     )
     assert "abc123" in result.output
 

@@ -9,6 +9,12 @@ from __future__ import annotations
 import pytest
 from click.testing import CliRunner
 
+# nexus-0y4c6: hoisted out of test_webarchive_capture_routes_through_
+# dt_content's own body so the RDR-109 mode-declaration lint no longer
+# needs to exclude this file -- a collection-NAME CLI flag value; no
+# embedder or credential path is exercised.
+_COLLECTION = "docs__t__voyage-context-3__v1"
+
 
 @pytest.fixture
 def runner() -> CliRunner:
@@ -51,7 +57,7 @@ def test_webarchive_capture_routes_through_dt_content(runner, monkeypatch) -> No
                         lambda url, **kw: "NEW-UUID")
     dt_calls, file_calls = _patch_index(monkeypatch)
     result = runner.invoke(main, ["dt", "capture", "https://example.com",
-                                  "--collection", "docs__t__voyage-context-3__v1"])
+                                  "--collection", _COLLECTION])
     assert result.exit_code == 0, result.output
     assert "Captured https://example.com -> DEVONthink record NEW-UUID" in result.output
     assert dt_calls == ["NEW-UUID"]   # non-file-backed -> Layer D path

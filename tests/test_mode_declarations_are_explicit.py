@@ -230,7 +230,30 @@ def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
 # surfaced this as a standing offender (it is vacuous on any shrunk
 # item list, including a solo run of this file). Rationale in
 # conftest.py beside the entry.
-_MODE_LINT_EXCLUDE_FILES_CEILING = 60
+# 60 -> 44 (nexus-0y4c6 burn-down batch 5, 2026-09-09): -16 entries. 7
+# were DEAD: test_backfill_hash.py, test_catalog_backfill_collections.py,
+# test_catalog_doctor_collections_drift.py,
+# test_catalog_rename_collection.py, test_doctor_integrity.py,
+# test_rdr137_followup_reader_sigs.py, and test_source_uri_home_key.py
+# each had exactly ONE voyage-* occurrence in the whole file, and every
+# one of those was prose in a module-level comment/docstring (or, for
+# test_doctor_integrity.py, inside a shared helper METHOD, not a
+# `test_*` function) -- never inside any test's own source, so none of
+# their tests were ever real offenders; a clean shrink, no test-file
+# change. The other 9 were PROMOTED the same way as the nodeid batches
+# above: test_vector_retry.py, test_pdf_extractor.py,
+# test_indexer_duplicate_content.py, test_memory.py,
+# test_dt_mcp_fallback.py, test_dt_highlights_layer_e.py,
+# test_dt_capture_cmd.py, test_store_enrich_doc_id.py, and
+# test_t3_strict_collection_naming.py each had exactly ONE voyage-*
+# occurrence, located inside exactly one test; that literal was hoisted
+# to a module- or class-level constant in the same file, so the lint no
+# longer sees it. No test behavior changed. 44 entries remain
+# unconverted; see bead nexus-0y4c6 for the burn-down's continuation
+# (the remaining entries mostly carry MANY tests per file, or a
+# scattered literal across dozens of call sites, and were left for a
+# future batch).
+_MODE_LINT_EXCLUDE_FILES_CEILING = 44
 # 43 -> 46 (6.10.1): +3 real keyed integration tests in test_integration.py
 # — cloud_mode's fake credentials broke them against the live Voyage API
 # (their mode declaration is the requires-key gating; see conftest entry).

@@ -191,6 +191,11 @@ class TestLayerDFallback:
     """Layer D: DT absent → non-file-backed records skipped; file chunks
     carry no extraction_source key (absent == file)."""
 
+    # nexus-0y4c6: a class attribute so the test below no longer carries
+    # the literal in its own body -- an opaque embedding_model label
+    # passed straight through to metadata; no embedder is constructed.
+    _MODEL = "voyage-context-3"
+
     def test_dt_content_record_skipped_when_dt_down(self):
         from nexus.commands.dt import _index_dt_content_record
         with patch("nexus.doc_indexer.index_markdown") as idx, \
@@ -205,7 +210,7 @@ class TestLayerDFallback:
             chunk_text_hash="a" * 64,
             content_hash="b" * 64,
             indexed_at="2026-05-30T00:00:00Z",
-            embedding_model="voyage-context-3",
+            embedding_model=self._MODEL,
         )
         assert "extraction_source" not in meta  # absent == file
 
