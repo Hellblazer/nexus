@@ -182,7 +182,14 @@ class JooqRecordReflectionFeatureTest {
     // nexus.catalog_collections table are a column-count change only, no
     // new Record type (same shape as telemetry-012's column-only bump
     // above). This is the deliberate bump the assertion message demands.
-    private static final int EXPECTED_RECORD_TYPES = 90;
+    // 90 -> 92: nexus-c0g6e fix round (GH #1529), taxonomy-016-doc-count-
+    // drift-functions.xml added two RETURNS TABLE functions —
+    // nexus.topics_doc_count_drift (the batched doc_count-vs-real-count
+    // read) and nexus.topics_recount_doc_count (its apply/dry-run twin) —
+    // each a generated Record type (TopicsDocCountDriftRecord,
+    // TopicsRecountDocCountRecord), same shape as the taxonomy_ann_query
+    // / plain_search RETURNS TABLE functions above, +2.
+    private static final int EXPECTED_RECORD_TYPES = 92;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

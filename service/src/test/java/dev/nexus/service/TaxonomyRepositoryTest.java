@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static org.assertj.core.api.Assertions.*;
 import static org.assertj.core.data.Offset.offset;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -1880,10 +1881,18 @@ class TaxonomyRepositoryTest {
      *  the ONLY thing that can produce a genuinely drifted row for these
      *  tests, since every normal write path here is trigger-maintained). */
     private void forceDocCount(long topicId, int docCount) {
+        // Typed jOOQ DSL (nexus-zrcj7: no raw SQL strings in Java, including
+        // test sources) -- a plain UPDATE against the superuser connection,
+        // bypassing RLS and the topic_assignments-side trigger entirely
+        // (exactly the shape a fidelity import writing both tables from a
+        // stale snapshot would produce).
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "UPDATE nexus.topics SET doc_count = " + docCount + " WHERE id = " + topicId);
+            DSL.using(su, SQLDialect.POSTGRES)
+               .update(TOPICS)
+               .set(TOPICS.DOC_COUNT, docCount)
+               .where(TOPICS.ID.eq(topicId))
+               .execute();
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
