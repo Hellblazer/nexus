@@ -863,8 +863,28 @@ def _delete_docs_for_paths(repo: Path, deleted_relpaths: list[str]) -> None:
 
     The delta path's replacement for housekeeping's miss-count sweep: git
     already told us these worktree-relative paths are gone (rename detection
-    applied), so their docs are deleted immediately — the manifest FK CASCADE
-    then exposes their chunks to ``_prune_deleted_files``'s orphan sweep.
+    applied), so their docs are tombstoned immediately rather than waiting on
+    the two-run sweep. CORRECTION (nexus-d6qmz round 3, review
+    nexus/critique-nexus-d6qmz-7710a262b-2026-09-09): this used to claim "the
+    manifest FK CASCADE then exposes their chunks to _prune_deleted_files's
+    orphan sweep" — false. ``writer.delete_document`` is a plain soft-
+    tombstone UPDATE (sets ``deleted_at``) that deliberately does NOT cascade
+    (nexus-mqd6t tripwire; store_hook.py's nexus-3ck2g docstring says the
+    same). The underlying T3 chunk stays referenced by the tombstoned
+    manifest until ``nx catalog purge-trash`` reclaims it past its age
+    window (one day by default) — same latency as a git deletion always
+    had here.
+
+    ``reader.by_file_path`` filters ``deleted_at IS NULL`` server-side
+    (``documentsByFilePath``, ``service/.../CatalogRepository.java``), so an
+    already-tombstoned path is a safe no-op HERE by construction — not
+    merely because the ``entry is None`` check happens to catch it. A
+    caller (e.g. ``_stored_paths_among`` below, which reads through
+    ``by_owner`` — the identical ``deleted_at IS NULL`` filter,
+    ``documentsByOwner``) never needs its own tombstone check before
+    feeding a path in here; an already-reclaimed path never re-enters this
+    function's caller's ``delta_deleted`` in the first place.
+
     Best-effort per path; a failed lookup/delete is logged and skipped (the
     next FULL run's housekeeping recovers it).
     """
@@ -896,6 +916,56 @@ def _delete_docs_for_paths(repo: Path, deleted_relpaths: list[str]) -> None:
                 )
     except Exception:  # noqa: BLE001 — catalog unavailable: nothing to delete from
         _log.debug("since_head_delete_docs_unavailable", exc_info=True)
+
+
+def _stored_paths_among(repo: Path, candidate_relpaths: set[str]) -> set[str]:
+    """Filter *candidate_relpaths* down to the ones with a LIVE catalog document
+    (nexus-d6qmz round 2, review nexus/review-nexus-d6qmz-7710a262b-since-head-
+    regression-2026-09-09).
+
+    ``rdr_excluded_present`` (the RDR-basename-exclusion feed into
+    ``delta_deleted``, below) finds the SAME permanent basenames present on
+    disk every single run — a repo's own ``docs/rdr/README.md`` and
+    ``AGENTS.md`` never go away. Feeding an already-reclaimed (or never-
+    stored) path into ``delta_deleted`` unconditionally would make
+    ``delta_deleted`` permanently non-empty, defeating the ``--since-head:
+    no deletions in delta`` skip gate at the prune-deleted phase and paying
+    the full per-collection orphan sweep on every incremental run forever
+    — in steady state there is nothing left to reclaim after the first run.
+
+    ONE batched ``by_owner`` read (mirrors ``_run_housekeeping``'s own
+    pattern), never one lookup per candidate path — the candidate set is
+    at most a handful of basenames, but the cost that matters is per-RUN,
+    not per-path. ``by_owner`` is backed by the IDENTICAL ``deleted_at IS
+    NULL`` filter as ``by_file_path`` (``documentsByOwner`` /
+    ``documentsByFilePath``, ``service/.../CatalogRepository.java`` — see
+    ``_delete_docs_for_paths``'s docstring), so an already-tombstoned path
+    drops out of ``owned_paths`` on its own the run right after it was
+    reclaimed — this function never needs its own tombstone check, and an
+    already-reclaimed README can never re-enter ``delta_deleted``.
+    Catalog-absent, owner-absent, or any lookup failure is a safe empty
+    result (best-effort; the caller then feeds nothing new into
+    ``delta_deleted`` and defers to the next full run's housekeeping
+    sweep, exactly as before this filter existed).
+    """
+    if not candidate_relpaths:
+        return set()
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+        from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+        reader = make_catalog_reader()
+        if reader is None:
+            return set()
+        _, repo_hash = _repo_identity(repo)
+        owner = reader.owner_for_repo(repo_hash)
+        if owner is None:
+            return set()
+        owned_paths = {e.file_path for e in reader.by_owner(owner)}
+    except Exception:  # noqa: BLE001 — best-effort filter; empty result defers to full-run housekeeping
+        _log.debug("rdr_excluded_present_filter_unavailable", exc_info=True)
+        return set()
+    return candidate_relpaths & owned_paths
 
 
 def _catalog_progress(
@@ -4311,11 +4381,21 @@ def _run_index(
     # exclusion only stops it being RE-discovered here, it never reaches
     # the stored catalog row. Left alone, the only reclaim path is
     # ``_run_housekeeping``'s two-run miss-count sweep (the file is simply
-    # absent from every run's ``indexed_set``). Collected here and fed
-    # into ``delta_deleted`` below so it rides the SAME same-run prune
-    # (``_delete_docs_for_paths`` -> ``_prune_deleted_files``'s orphan
-    # sweep) the --since-head path already uses for a real git deletion —
-    # reclaimed THIS run, not the second one.
+    # absent from every run's ``indexed_set``). Collected here (every
+    # excluded basename present on disk, whether or not it still has a
+    # stored document — that filtering happens once, batched, below via
+    # ``_stored_paths_among``) and fed into ``delta_deleted`` so a path
+    # that DOES still have a stored document rides the SAME same-run
+    # tombstone (``_delete_docs_for_paths``) the --since-head path already
+    # uses for a real git deletion — tombstoned THIS run, not the second
+    # one (the underlying T3 chunk still follows only at
+    # ``nx catalog purge-trash``'s window, same as a git deletion — see
+    # the comment above ``_delete_docs_for_paths(repo, delta_deleted)``
+    # below). A repo's own permanent docs/rdr/README.md is present on disk
+    # every run, so this SET is non-empty every run; ``_stored_paths_among``
+    # is what keeps ``delta_deleted`` (and the expensive orphan sweep it
+    # triggers) empty in steady state, once there is nothing left to
+    # reclaim.
     rdr_excluded_present: set[str] = set()
 
     rdr_md_paths: list[tuple[float, Path]] = []
@@ -4357,8 +4437,14 @@ def _run_index(
     have_rdr_files = bool(rdr_md_paths)
 
     if rdr_excluded_present:
-        _already = set(delta_deleted)
-        delta_deleted.extend(sorted(rdr_excluded_present - _already))
+        # nexus-d6qmz round 2: filter to paths that actually still HAVE a
+        # stored document before merging into delta_deleted — see
+        # _stored_paths_among's docstring for why the unfiltered set made
+        # delta_deleted permanently non-empty on --since-head runs.
+        _stored = _stored_paths_among(repo, rdr_excluded_present)
+        if _stored:
+            _already = set(delta_deleted)
+            delta_deleted.extend(sorted(_stored - _already))
 
     # Walk repo and classify files into code, prose, and PDF lists
     code_files: list[tuple[float, Path]] = []
@@ -5873,18 +5959,31 @@ def _run_index(
             _phase("  skipped (--since-head: no deletions in delta)")
         else:
             if delta_deleted:
-                # nexus-fltb4: git said these paths are GONE (rename detection
-                # already applied) — delete their catalog docs NOW so the
-                # manifest CASCADE exposes their chunks to the orphan sweep
-                # below.
-                # nexus-d6qmz: a FULL walk can also populate delta_deleted —
-                # not only real git deletions ride this list. Paths this
-                # run's RDR-basename exclusion found present-but-no-longer-
-                # discovered (rdr_excluded_present, above) are appended to
-                # delta_deleted too, so a stored document at an excluded
-                # path is reclaimed THIS run exactly like a git deletion,
-                # instead of waiting on housekeeping's two-run miss-count
-                # sweep.
+                # nexus-fltb4: git said these paths are GONE (rename
+                # detection already applied) — tombstone their catalog
+                # docs NOW. CORRECTION (nexus-d6qmz round 3, review
+                # nexus/critique-nexus-d6qmz-7710a262b-2026-09-09): this
+                # used to claim "the manifest CASCADE exposes their
+                # chunks to the orphan sweep below" — that is false.
+                # deleteDocument (service CatalogRepository.java) is a
+                # plain soft-tombstone UPDATE (sets deleted_at) that
+                # deliberately does NOT cascade (nexus-mqd6t tripwire;
+                # store_hook.py's nexus-3ck2g docstring says the same).
+                # The document drops out of every live-only lookup
+                # (by_file_path, by_owner, ...) THIS run; its T3 chunk
+                # stays referenced by the tombstoned manifest until
+                # `nx catalog purge-trash` reclaims it past its age
+                # window (one day by default) — same latency as a real
+                # git deletion, not a same-run chunk sweep.
+                # nexus-d6qmz: a FULL walk can also populate delta_deleted
+                # — not only real git deletions ride this list. Paths
+                # this run's RDR-basename exclusion found present-but-
+                # no-longer-discovered (rdr_excluded_present, filtered to
+                # still-live documents by _stored_paths_among, above) are
+                # appended to delta_deleted too, so a stored document at
+                # an excluded path is tombstoned THIS run exactly like a
+                # git deletion, instead of waiting on housekeeping's
+                # two-run miss-count sweep.
                 _delete_docs_for_paths(repo, delta_deleted)
             _prune_deleted_files(
                 code_collection, docs_collection, db, catalog=_cat,
