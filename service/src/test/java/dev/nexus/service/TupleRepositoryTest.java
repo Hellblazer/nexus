@@ -691,14 +691,18 @@ class TupleRepositoryTest {
             seedExpiredTuple(tenant, tenant + "-purge-row-" + i, base.plusSeconds(i));
         }
 
-        int first = repo.purgeExpiredTuplesBatch(tenant, 2, null);
-        assertThat(first).isEqualTo(2);
-        int second = repo.purgeExpiredTuplesBatch(tenant, 2, null);
-        assertThat(second).isEqualTo(2);
-        int third = repo.purgeExpiredTuplesBatch(tenant, 2, null);
-        assertThat(third).isEqualTo(1); // drained: fewer than batchSize remained
-        int fourth = repo.purgeExpiredTuplesBatch(tenant, 2, null);
-        assertThat(fourth).isZero(); // nothing left
+        var first = repo.purgeExpiredTuplesBatch(tenant, 2, null);
+        assertThat(first.purged()).isEqualTo(2);
+        assertThat(first.examined()).isEqualTo(2);
+        var second = repo.purgeExpiredTuplesBatch(tenant, 2, null);
+        assertThat(second.purged()).isEqualTo(2);
+        assertThat(second.examined()).isEqualTo(2);
+        var third = repo.purgeExpiredTuplesBatch(tenant, 2, null);
+        assertThat(third.purged()).isEqualTo(1); // drained: fewer than batchSize remained
+        assertThat(third.examined()).isEqualTo(1);
+        var fourth = repo.purgeExpiredTuplesBatch(tenant, 2, null);
+        assertThat(fourth.purged()).isZero(); // nothing left
+        assertThat(fourth.examined()).isZero();
     }
 
     @Test
@@ -757,8 +761,9 @@ class TupleRepositoryTest {
                     .execute();
         }
 
-        int purged = repo.purgeOldClaimLogBatch(tenant, 300, null);
-        assertThat(purged).isEqualTo(1);
+        var purgeResult = repo.purgeOldClaimLogBatch(tenant, 300, null);
+        assertThat(purgeResult.purged()).isEqualTo(1);
+        assertThat(purgeResult.examined()).isEqualTo(1);
 
         try (Connection su = pg.createConnection("")) {
             var dsl = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES);

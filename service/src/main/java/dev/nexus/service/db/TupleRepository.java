@@ -202,6 +202,21 @@ public final class TupleRepository {
     public record ReleaseBatchResult(int scanned, int released, int deadLettered) {
     }
 
+    /**
+     * RDR-205 Phase 1 follow-on (bead nexus-em75s.38, review finding M9): one BATCH
+     * of a sweep PURGE arm ({@link #purgeExpiredTuplesBatch} or {@link
+     * #purgeOldClaimLogBatch}) — {@code examined} is the row count the arm's own
+     * candidate SELECT returned (capped at {@code batchSize}, same drained
+     * convention as {@link ReleaseBatchResult#scanned}), captured BEFORE the delete
+     * and independently of it; {@code purged} is the delete statement's own affected-
+     * row count. The two are obtained from two different statements, so a future
+     * divergence between them (a row skip-locked out from under the delete, say)
+     * would be visible; today they always agree on a healthy path, but only because
+     * both statements succeeded, not because one is derived from the other.
+     */
+    public record PurgeBatchResult(int examined, int purged) {
+    }
+
     // ── out ──────────────────────────────────────────────────────────────────
 
     /** {@code out(subspace, keys, dims, body, *, nonce=None, ttl_seconds=None) -> id}. */
@@ -790,8 +805,12 @@ public final class TupleRepository {
      * DELETE SET NULL} (tuples-001-2's FK) — a purged tuple's log rows survive with
      * a null {@code tuple_id}, never deleted here; the log's own retention is the
      * separate {@link #purgeOldClaimLogBatch} arm.
+     *
+     * @return {@code examined} is the candidate SELECT's own row count (RDR-205
+     *         Phase 1 follow-on, bead nexus-em75s.38), independent of {@code
+     *         purged}, the delete's affected-row count
      */
-    public int purgeExpiredTuplesBatch(String tenant, int batchSize, Duration statementTimeout) {
+    public PurgeBatchResult purgeExpiredTuplesBatch(String tenant, int batchSize, Duration statementTimeout) {
         return tenantScope.withTenant(tenant, ctx -> {
             SweepBounds.applyStatementTimeout(ctx, statementTimeout);
             List<byte[]> ids = ctx.select(TUPLES.ID)
@@ -803,9 +822,10 @@ public final class TupleRepository {
                     .skipLocked()
                     .fetch(TUPLES.ID);
             if (ids.isEmpty()) {
-                return 0;
+                return new PurgeBatchResult(0, 0);
             }
-            return ctx.deleteFrom(TUPLES).where(TUPLES.ID.in(ids)).execute();
+            int purged = ctx.deleteFrom(TUPLES).where(TUPLES.ID.in(ids)).execute();
+            return new PurgeBatchResult(ids.size(), purged);
         });
     }
 
@@ -818,8 +838,12 @@ public final class TupleRepository {
      * NX_TUPLE_CLAIM_LOG_TTL_DAYS}). The cutoff is evaluated server-side via {@code
      * DSL.currentOffsetDateTime().sub(...)}, the same now/interval split {@link #out}
      * uses (see the class javadoc's now/interval convention).
+     *
+     * @return {@code examined} is the candidate SELECT's own row count (RDR-205
+     *         Phase 1 follow-on, bead nexus-em75s.38), independent of {@code
+     *         purged}, the delete's affected-row count
      */
-    public int purgeOldClaimLogBatch(String tenant, int batchSize, Duration statementTimeout) {
+    public PurgeBatchResult purgeOldClaimLogBatch(String tenant, int batchSize, Duration statementTimeout) {
         DayToSecond ttlInterval = interval(registry.claimLogTtlSeconds());
         return tenantScope.withTenant(tenant, ctx -> {
             SweepBounds.applyStatementTimeout(ctx, statementTimeout);
@@ -833,9 +857,10 @@ public final class TupleRepository {
                     .skipLocked()
                     .fetch(TUPLE_CLAIM_LOG.LOG_ID);
             if (ids.isEmpty()) {
-                return 0;
+                return new PurgeBatchResult(0, 0);
             }
-            return ctx.deleteFrom(TUPLE_CLAIM_LOG).where(TUPLE_CLAIM_LOG.LOG_ID.in(ids)).execute();
+            int purged = ctx.deleteFrom(TUPLE_CLAIM_LOG).where(TUPLE_CLAIM_LOG.LOG_ID.in(ids)).execute();
+            return new PurgeBatchResult(ids.size(), purged);
         });
     }
 

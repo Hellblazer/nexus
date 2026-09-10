@@ -234,6 +234,23 @@ class NexusServiceTupleSweepTest {
         assertThat(result.deadLettered()).isGreaterThanOrEqualTo(1);
         assertThat(result.purged()).isGreaterThanOrEqualTo(2);
         assertThat(result.logRowsPurged()).isGreaterThanOrEqualTo(1);
+        // Two lapsed claims seeded (one released, one dead-lettered): the release
+        // arm's examined count (`scanned`) is captured independently of how each
+        // row was dispositioned, not derived by summing the two outcomes after the
+        // fact (nexus-em75s.38, review finding M9) -- confirmed here as an identity
+        // rather than a fixed value, since this PER_CLASS-shared PG instance's
+        // `tuple_tenants` may carry other tests' tenants too.
+        assertThat(result.scanned()).isGreaterThanOrEqualTo(2);
+        assertThat(result.scanned()).isEqualTo(result.released() + result.deadLettered());
+        // The purge-tuples and purge-log arms now report their own SELECT-matched
+        // ("examined") counts independently of what they actually purged -- on this
+        // healthy path the two agree (they're read from two different statements,
+        // not one arithmetically derived from the other), so a future divergence
+        // (e.g. a row skip-locked out from under the delete) would be visible.
+        assertThat(result.purgeExamined()).isGreaterThanOrEqualTo(2);
+        assertThat(result.purgeExamined()).isEqualTo(result.purged());
+        assertThat(result.logPurgeExamined()).isGreaterThanOrEqualTo(1);
+        assertThat(result.logPurgeExamined()).isEqualTo(result.logRowsPurged());
 
         // The lapsed-but-not-dead row is released: claim cleared, attempts incremented,
         // an `expire` log row exists.
@@ -290,6 +307,9 @@ class NexusServiceTupleSweepTest {
         assertThat(result.released()).isZero();
         assertThat(result.deadLettered()).isZero();
         assertThat(result.purged()).isZero();
+        assertThat(result.purgeExamined()).isZero();
+        assertThat(result.logRowsPurged()).isZero();
+        assertThat(result.logPurgeExamined()).isZero();
         assertThat(result.incompleteCause()).isEqualTo(NONE);
         assertThat(lastSweptAt(tenant)).isNotNull();
     }

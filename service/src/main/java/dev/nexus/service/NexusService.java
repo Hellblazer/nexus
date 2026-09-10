@@ -996,10 +996,42 @@ public final class NexusService {
      * when that tenant had never been swept before — when the run leaves one behind;
      * or {@code null} outright when {@code nexus.tuple_tenants} has no rows at all
      * (nothing has ever called {@code out}).
+     *
+     * <p>{@code purgeExamined} / {@code logPurgeExamined} (RDR-205 Phase 1 follow-on,
+     * bead nexus-em75s.38, review finding M9): the purge-tuples and purge-log arms'
+     * own candidate-SELECT row counts ({@link
+     * dev.nexus.service.db.TupleRepository.PurgeBatchResult#examined}), independent
+     * of {@code purged} / {@code logRowsPurged} (those arms' delete-affected-row
+     * counts). {@code scanned} was already this shape for the release arm — {@link
+     * dev.nexus.service.db.TupleRepository.ReleaseBatchResult#scanned} is the
+     * release-arm SELECT's own row count, captured before either disposition is
+     * decided, not derived by summing {@code released + deadLettered} after the
+     * fact; it always EQUALS that sum only because the release arm's per-row logic
+     * has no third outcome, an invariant of that arm's control flow, not a
+     * definitional identity of the field. Before this fix, the purge arms had no
+     * counterpart at all: {@code purged}/{@code logRowsPurged} were the ONLY signal
+     * for those two arms, and both are delete-affected-row counts — so a purge
+     * arm whose SELECT predicate silently matched nothing (a broken predicate, a
+     * wrong tenant scope, a dropped index) was reported identically to a genuinely
+     * idle table, in both cases zero.
+     *
+     * <p><b>Reading an all-zero run</b> (documented here, not asserted in code — this
+     * record cannot see {@code nexus.tuple_tenants} on its own): a run where {@code
+     * scanned}, {@code purgeExamined}, and {@code logPurgeExamined} are ALL zero
+     * across every tenant visited is the ordinary healthy-idle state, and every
+     * tenant reached is freshly stamped {@code oldestLastSweptAt == now} to prove it
+     * (per the paragraph above). If a caller instead finds {@code
+     * nexus.tuple_tenants} carrying rows whose {@code last_swept_at} is OLD despite
+     * a report of all three examined counts at zero for the run cycle that should
+     * have reached them, that combination — stale stamps alongside a report that
+     * found nothing to examine — is the broken-arm signal this fix exists to make
+     * visible: either the tenant enumeration itself is wrong, or an arm never
+     * reached its own SELECT.
      */
     record TupleSweepRunResult(
             int tenantsVisited, OffsetDateTime oldestLastSweptAt,
-            int scanned, int released, int deadLettered, int purged, int logRowsPurged,
+            int scanned, int released, int deadLettered,
+            int purged, int purgeExamined, int logRowsPurged, int logPurgeExamined,
             TupleSweepIncompleteCause incompleteCause) { }
 
     /**
@@ -1096,7 +1128,7 @@ public final class NexusService {
                                                 int batchSize, int maxBatchesPerTenant,
                                                 Duration wallClockBudget) {
         if (tupleRepo == null) {
-            return new TupleSweepRunResult(0, null, 0, 0, 0, 0, 0, TupleSweepIncompleteCause.NONE);
+            return new TupleSweepRunResult(0, null, 0, 0, 0, 0, 0, 0, 0, TupleSweepIncompleteCause.NONE);
         }
         long deadlineNanos = System.nanoTime() + wallClockBudget.toNanos();
         List<TupleTenantCursor> tenants = listTupleSweepTenants(statementTimeout);
@@ -1106,7 +1138,9 @@ public final class NexusService {
         int released = 0;
         int deadLettered = 0;
         int purged = 0;
+        int purgeExamined = 0;
         int logRowsPurged = 0;
+        int logPurgeExamined = 0;
         TupleSweepIncompleteCause cause = TupleSweepIncompleteCause.NONE;
         OffsetDateTime oldestRemaining = null;
         boolean oldestRemainingSet = false;
@@ -1178,10 +1212,12 @@ public final class NexusService {
                         tenantCause = TupleSweepIncompleteCause.TENANT_CAP;
                         break;
                     }
-                    int n = tupleRepo.purgeExpiredTuplesBatch(tenant, batchSize, statementTimeout);
+                    TupleRepository.PurgeBatchResult r2 =
+                            tupleRepo.purgeExpiredTuplesBatch(tenant, batchSize, statementTimeout);
                     purgeBatches++;
-                    purged += n;
-                    if (n < batchSize) {
+                    purged += r2.purged();
+                    purgeExamined += r2.examined();
+                    if (r2.examined() < batchSize) {
                         purgeDrained = true;
                     }
                 }
@@ -1196,10 +1232,12 @@ public final class NexusService {
                         tenantCause = TupleSweepIncompleteCause.TENANT_CAP;
                         break;
                     }
-                    int n = tupleRepo.purgeOldClaimLogBatch(tenant, batchSize, statementTimeout);
+                    TupleRepository.PurgeBatchResult r3 =
+                            tupleRepo.purgeOldClaimLogBatch(tenant, batchSize, statementTimeout);
                     logPurgeBatches++;
-                    logRowsPurged += n;
-                    if (n < batchSize) {
+                    logRowsPurged += r3.purged();
+                    logPurgeExamined += r3.examined();
+                    if (r3.examined() < batchSize) {
                         logPurgeDrained = true;
                     }
                 }
@@ -1247,12 +1285,13 @@ public final class NexusService {
         }
 
         log.info("event=tuple_sweep_run tenants_visited={} oldest_last_swept_at={} scanned={} released={} "
-                + "dead_lettered={} purged={} log_rows_purged={} incomplete_cause={}",
-            tenantsVisited, oldestRemaining, scanned, released, deadLettered, purged, logRowsPurged,
-            cause);
+                + "dead_lettered={} purged={} purge_examined={} log_rows_purged={} log_purge_examined={} "
+                + "incomplete_cause={}",
+            tenantsVisited, oldestRemaining, scanned, released, deadLettered, purged, purgeExamined,
+            logRowsPurged, logPurgeExamined, cause);
 
         return new TupleSweepRunResult(tenantsVisited, oldestRemaining, scanned, released, deadLettered,
-                purged, logRowsPurged, cause);
+                purged, purgeExamined, logRowsPurged, logPurgeExamined, cause);
     }
 
     /**
