@@ -116,6 +116,7 @@ mechanize, it matters enough to ship.
   `conexus/commands/rdr-gate.md`, `conexus/commands/rdr-fix.md`:
   nexus-yjf5l.17 review — the cross-walk check names a pair once: a pair
   the identifier check already named is not named again.
+  bead: nexus-yjf5l.17
 - `conexus/skills/rdr-gate/SKILL.md`: nexus-yjf5l.13 — On Pass step 2's
   `prior:` field names the previous round's own critique record id,
   never the upserted `{id}-gate-latest` row's own id (that row is one
@@ -149,9 +150,12 @@ mechanize, it matters enough to ship.
 - `conexus/commands/rdr-gate.md`: same follow-on review — the `prior:`
   field template and the gate-outcome bullet's Revision History wording
   mirror the skill's corrections.
+  bead: nexus-yjf5l.13
 - `conexus/skills/rdr-accept/SKILL.md`: same follow-on review — step 1b's
   "Record the dispositions in Revision History" instruction now states
   its own bound explicitly: one line, naming each residual's disposition
   (sha or bead id), never the finding text.
+  bead: nexus-yjf5l.12
 - `conexus/commands/rdr-accept.md`: same follow-on review — Step 2b
   mirrors the skill's disposition-recording bound.
+  bead: nexus-yjf5l.12
