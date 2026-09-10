@@ -7,7 +7,15 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/conexus)](https://pypi.org/project/conexus/)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-**Start here**: [**hellblazer.github.io/nexus**](https://hellblazer.github.io/nexus/) is the install guide, tailored to how you use Claude, with copyable commands. Then [**Getting started**](https://hellblazer.github.io/nexus/getting-started.html): eleven lessons done inside Claude Code, from the first search to the first RDR.
+<img src="web/assets/a-stately-pleasure-dome.png" alt="A brass-ribbed crystal dome on a hilltop at dusk" align="right" width="320" />
+
+## Start here
+
+Three pages, in order:
+
+- [**Install**](https://hellblazer.github.io/nexus/) — set up Nexus for how you use Claude: Claude Desktop, Claude Code, or Claude Cowork.
+- [**Getting started**](https://hellblazer.github.io/nexus/getting-started.html) — learn the tooling, eleven lessons done inside Claude Code.
+- [**Working with RDRs**](https://hellblazer.github.io/nexus/rdr.html) — record a decision with an RDR, eight lessons on the practised cycle.
 
 ## Prerequisites
 
@@ -38,6 +46,33 @@ The full deployment story across all three surfaces is [docs/desktop-deployment.
 - **Typed document catalog** — Xanadu-inspired addressing with typed links (`cites`, `implements`, `supersedes`). Walk from a design doc to the code that implements it.
 - **RDR: Research-Design-Review** — write a spec before you code. Captures the problem, research, alternatives, and chosen approach. The corpus is searchable, so prior decisions surface during new design work.
 - **Local-first** — runs entirely on your machine: an on-device bge-768 ONNX embedder over a bundled Postgres 17 + pgvector service that `nx init` provisions for you. Voyage AI (server-side embeddings) is opt-in for the managed-cloud deployment.
+
+## Learn
+
+[Getting started](https://hellblazer.github.io/nexus/getting-started.html) — eleven lessons, done inside Claude Code:
+
+1. [Start a session](https://hellblazer.github.io/nexus/getting-started.html#l1)
+2. [End a session, start the next one](https://hellblazer.github.io/nexus/getting-started.html#l2)
+3. [Index your repository, then search it](https://hellblazer.github.io/nexus/getting-started.html#l3)
+4. [Memory: what Claude keeps between sessions](https://hellblazer.github.io/nexus/getting-started.html#l4)
+5. [Scratch: how Claude and its agents share notes](https://hellblazer.github.io/nexus/getting-started.html#l5)
+6. [Knowledge: notes, documents, and the catalog](https://hellblazer.github.io/nexus/getting-started.html#l6)
+7. [Explore: research, links, and the topic map](https://hellblazer.github.io/nexus/getting-started.html#l7)
+8. [Render and iterate](https://hellblazer.github.io/nexus/getting-started.html#l8)
+9. [Questions that need many documents](https://hellblazer.github.io/nexus/getting-started.html#l9)
+10. [Record a decision with an RDR](https://hellblazer.github.io/nexus/getting-started.html#l10)
+11. [Maintenance](https://hellblazer.github.io/nexus/getting-started.html#l11)
+
+[Working with RDRs](https://hellblazer.github.io/nexus/rdr.html) — eight lessons on the practised cycle:
+
+1. [What an RDR is here](https://hellblazer.github.io/nexus/rdr.html#l1)
+2. [It starts as a conversation](https://hellblazer.github.io/nexus/rdr.html#l2)
+3. [Research, in cycles](https://hellblazer.github.io/nexus/rdr.html#l3)
+4. [Read it, react, repeat](https://hellblazer.github.io/nexus/rdr.html#l4)
+5. [The gate](https://hellblazer.github.io/nexus/rdr.html#l5)
+6. [Accept, and the plan follows](https://hellblazer.github.io/nexus/rdr.html#l6)
+7. [Build it, across many sessions](https://hellblazer.github.io/nexus/rdr.html#l7)
+8. [Close it, and what remains](https://hellblazer.github.io/nexus/rdr.html#l8)
 
 ## Updating
 
@@ -92,9 +127,6 @@ especially the first time.
 | Back up my knowledge store | [Storage Tiers § T3 Backup and Migration](docs/storage-tiers.md#t3-backup-and-migration-exportimport) |
 | Fix empty search results after upgrading | [Getting Started § Troubleshooting](docs/getting-started.md#troubleshooting) |
 | Browse the docs tree | [docs/README.md](docs/README.md) |
-| Install step by step | [Install guide](https://hellblazer.github.io/nexus/) |
-| Learn the tooling | [Getting started](https://hellblazer.github.io/nexus/getting-started.html) |
-| Work with RDRs, as practised | [Working with RDRs](https://hellblazer.github.io/nexus/rdr.html) |
 
 ## License
 
