@@ -1,0 +1,41 @@
+# GitHub Pages for hellblazer.github.io/nexus (nexus-ynejb).
+#
+# Publishes the static `web/` directory. CI Cost Discipline (AGENTS.md):
+# path-filtered so an ordinary push to main does not redeploy an unchanged
+# site; a concurrency group so back-to-back edits do not stack deploys
+# (cancel-in-progress stays false: a half-cancelled Pages deploy can leave
+# the environment pointing at a torn artifact). Publish-only, no tests.
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy web/ to GitHub Pages
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/
+      - id: deployment
+        uses: actions/deploy-pages@v4
