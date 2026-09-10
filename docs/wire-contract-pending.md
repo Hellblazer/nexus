@@ -59,7 +59,7 @@ carries no method signature for a contract change to reconcile against) is a
 
 ## Unshipped
 
-(none)
+- `844ba9c32` -- bead nexus-c0g6e -- engine tag `TBD (not yet tagged; the sha is the develop landing commit)` -- [additive] two NEW routes: `GET /v1/taxonomy/topics/doc_count_drift` (read-only, no params, returns `[{topic_id, label, collection, doc_count, actual_count}, ...]` for every topic this tenant whose cached doc_count disagrees with its real topic_assignments count) and `POST /v1/taxonomy/topics/recount_doc_count` (body `{"dry_run"?: bool}`, absent/non-bool = `false`; applies -- or, `dry_run`, previews -- the correction tenant-wide, returns `{dry_run, corrected, topics: [...]}` with the same row shape). Both call a shared `nexus.*` SQL function (`taxonomy-016-doc-count-drift-functions.xml`) also called by `hygiene-007-1`'s boot walk. No existing route, request field or response field changed shape. Client half (`18f2b9497`): `HttpTaxonomyStore.get_doc_count_drift`/`recount_doc_count`, the `nx doctor` "topics.doc_count drift" row (now one batched call instead of a per-topic loop), and `nx taxonomy audit --fix-doc-count`. Direction safety, both directions: OLD client + NEW engine -- no released client calls either route, so they are unreachable dead surface for an old client; every other taxonomy route is byte-identical. NEW client + OLD engine -- the doctor check and the audit flag both read 404 as "engine does not report this route yet" (an explicit skip/unread state, never a false all-clear), never a fallback to the retired per-topic loop. Ack condition: the client release whose `REQUIRED_ENGINE_VERSION` bumps to the engine tag carrying these routes.
 
 ## Shipped
 
