@@ -1066,6 +1066,11 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/TokenStoreDataTokenSweepTest.java", 2),
         Map.entry("dev/nexus/service/TokenStoreSessionSweepTest.java", 2),
         Map.entry("dev/nexus/service/TopicsDocCountDeadlockConcurrencyTest.java", 8),
+        // RDR-205 Phase 1 follow-on (bead nexus-em75s.34): the ChashProbePlanShapeTest /
+        // TaxonomyCentroidAnnPlanShapeTest idiom -- 3 bulk INSERT...SELECT generate_series
+        // seeding statements, 1 EXPLAIN dispatch in the shared explain() helper, 1 raw
+        // count-cardinality JDBC query in seededCardinalityIsReal.
+        Map.entry("dev/nexus/service/TupleSweepIndexPlanShapeTest.java", 5),
         Map.entry("dev/nexus/service/UpdatedAtTriggerTest.java", 7),
         Map.entry("dev/nexus/service/VectorsChashIndexLiquibaseTest.java", 3),
         // nexus-cbo4a batch 9 item 0: 63 -> 68 (extension-ownership-transfer dance);
@@ -1411,7 +1416,9 @@ class RawSqlGateTest {
      * but the new function is available for a future batch to rewire them
      * onto.
      */
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1129;
+    // RDR-205 Phase 1 follow-on (bead nexus-em75s.34): 1129 -> 1134 (+5, the new
+    // TupleSweepIndexPlanShapeTest.java entry above).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1134;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

@@ -1019,6 +1019,50 @@ public final class NexusService {
     }
 
     /**
+     * RDR-205 Phase 1 follow-on (bead nexus-em75s.34): this tenant's total
+     * per-visit batch cap ({@code maxBatchesPerTenant}), split into three
+     * roughly-equal PER-ARM shares — release (arm index 0), purge-tuples (arm
+     * index 1), purge-log (arm index 2) — so no single arm can spend the WHOLE
+     * per-tenant budget and starve the other two.
+     *
+     * <p>THE BUG THIS CLOSES: before this split, all three arms in {@link
+     * #runScheduledTupleSweep(OffsetDateTime, Duration, int, int, Duration)}
+     * shared ONE counter and ONE cap check, gated on a single {@code complete}
+     * flag. A tenant whose release-arm backlog alone exceeded {@code
+     * maxBatchesPerTenant} would exhaust the shared cap inside arm 1's own
+     * {@code while} loop; arms 2 and 3's loops were guarded on that same {@code
+     * complete} flag, so their loop bodies never executed even once for that
+     * tenant THIS visit — a release-heavy tenant could starve its own purge
+     * arms indefinitely, run after run, even though its purge backlogs were
+     * small enough to drain trivially on their own.
+     *
+     * <p>THE RULE (documented here because it is a real design choice, not the
+     * only defensible one): {@code maxBatchesPerTenant} STAYS THE TOTAL across
+     * all three arms — the meaning {@value #TUPLE_SWEEP_MAX_BATCHES_PER_TENANT_ENV}'s
+     * own javadoc already documents ("summed across its three arms") and that a
+     * deployer may already have tuned against real per-visit DB load — rather
+     * than becoming a PER-ARM cap, which would silently TRIPLE a tenant's
+     * worst-case batch (and therefore row-lock/statement) spend per visit with
+     * no change to the env var's value. The three shares this method returns
+     * always sum to exactly {@code maxBatchesPerTenant}; nothing here grows the
+     * ceiling a deployer already tuned, so an operator watching per-visit load
+     * against that ceiling sees no discontinuity from this fix.
+     *
+     * <p>The split is even with the remainder (0, 1, or 2 leftover batches)
+     * going to the earlier arms first — arbitrary but deterministic, and
+     * irrelevant once {@code maxBatchesPerTenant} is large enough that ±1 batch
+     * does not matter (the production default is 50; every value used in this
+     * file's own tests is 3 or larger). Below 3, at least one arm's share is
+     * 0 — that arm gets no batches at all this visit, an unavoidable
+     * consequence of splitting a cap smaller than the arm count.
+     */
+    static int tupleSweepArmBatchShare(int maxBatchesPerTenant, int armIndex) {
+        int share = maxBatchesPerTenant / 3;
+        int remainder = maxBatchesPerTenant % 3;
+        return share + (armIndex < remainder ? 1 : 0);
+    }
+
+    /**
      * As {@link #runScheduledTupleSweep(OffsetDateTime)}, with every tunable
      * injected — production passes the real settings; tests pass small ones so
      * the budget scenarios (RDR-205 §Test Plan) are fast assertions rather than
@@ -1039,6 +1083,14 @@ public final class NexusService {
      * outright. Neither bound is ever checked mid-batch: every batch call is one
      * committed transaction, so the task always stops AT a batch boundary,
      * never inside one.
+     *
+     * <p>PER-ARM SHARES (RDR-205 Phase 1 follow-on, bead nexus-em75s.34): {@code
+     * maxBatchesPerTenant} is split three ways via {@link
+     * #tupleSweepArmBatchShare} — release, purge-tuples, purge-log each get their
+     * OWN counter checked against their OWN share, so a tenant with a large
+     * release-arm backlog can no longer exhaust the whole per-tenant cap on arm 1
+     * alone and leave arms 2/3 unrun this visit (see that method's javadoc for the
+     * full rationale and the split rule).
      */
     TupleSweepRunResult runScheduledTupleSweep(OffsetDateTime now, Duration statementTimeout,
                                                 int batchSize, int maxBatchesPerTenant,
@@ -1079,56 +1131,76 @@ public final class NexusService {
                 break;
             }
             String tenant = cursor.tenantId();
-            int batches = 0;
             boolean complete = true;
             TupleSweepIncompleteCause tenantCause = TupleSweepIncompleteCause.NONE;
 
             try {
+                // nexus-em75s.34: each arm below gets its OWN counter checked against
+                // its OWN share of maxBatchesPerTenant (see tupleSweepArmBatchShare's
+                // javadoc for the split rule and the starvation this fixes) — an arm
+                // hitting its own share no longer gates whether the NEXT arm's loop
+                // even runs. Every arm's loop still runs unconditionally (not gated on
+                // an earlier arm's outcome); `complete`/`tenantCause` only record
+                // whether ANY arm was cut short, for the tenant-level stamping decision
+                // below.
+
                 // Arm 1: release lapsed claims nobody re-took. No wall-clock check here
-                // or in arms 2/3 below — maxBatchesPerTenant is the only bound WITHIN a
-                // tenant; the wall clock is checked only at the tenant boundary above.
-                while (complete) {
-                    if (batches >= maxBatchesPerTenant) {
+                // or in arms 2/3 below — maxBatchesPerTenant (split into per-arm shares)
+                // is the only bound WITHIN a tenant; the wall clock is checked only at
+                // the tenant boundary above.
+                int releaseShare = tupleSweepArmBatchShare(maxBatchesPerTenant, 0);
+                int releaseBatches = 0;
+                boolean releaseDrained = false;
+                while (!releaseDrained) {
+                    if (releaseBatches >= releaseShare) {
                         complete = false;
                         tenantCause = TupleSweepIncompleteCause.TENANT_CAP;
                         break;
                     }
                     TupleRepository.ReleaseBatchResult r =
                             tupleRepo.releaseLapsedClaimsBatch(tenant, batchSize, statementTimeout);
-                    batches++;
+                    releaseBatches++;
                     scanned += r.scanned();
                     released += r.released();
                     deadLettered += r.deadLettered();
                     if (r.scanned() < batchSize) {
-                        break; // drained
+                        releaseDrained = true; // drained
                     }
                 }
-                // Arm 2: purge expired / consumed-past-retention tuples.
-                while (complete) {
-                    if (batches >= maxBatchesPerTenant) {
+                // Arm 2: purge expired / consumed-past-retention tuples. Runs
+                // regardless of whether arm 1 above hit its own share.
+                int purgeShare = tupleSweepArmBatchShare(maxBatchesPerTenant, 1);
+                int purgeBatches = 0;
+                boolean purgeDrained = false;
+                while (!purgeDrained) {
+                    if (purgeBatches >= purgeShare) {
                         complete = false;
                         tenantCause = TupleSweepIncompleteCause.TENANT_CAP;
                         break;
                     }
                     int n = tupleRepo.purgeExpiredTuplesBatch(tenant, batchSize, statementTimeout);
-                    batches++;
+                    purgeBatches++;
                     purged += n;
                     if (n < batchSize) {
-                        break;
+                        purgeDrained = true;
                     }
                 }
-                // Arm 3: purge claim-log rows past their own (longer) TTL.
-                while (complete) {
-                    if (batches >= maxBatchesPerTenant) {
+                // Arm 3: purge claim-log rows past their own (longer) TTL. Runs
+                // regardless of whether arms 1/2 above hit their own share.
+                int logPurgeShare = tupleSweepArmBatchShare(maxBatchesPerTenant, 2);
+                int logPurgeBatches = 0;
+                boolean logPurgeDrained = false;
+                while (!logPurgeDrained) {
+                    if (logPurgeBatches >= logPurgeShare) {
                         complete = false;
                         tenantCause = TupleSweepIncompleteCause.TENANT_CAP;
                         break;
                     }
                     int n = tupleRepo.purgeOldClaimLogBatch(tenant, batchSize, statementTimeout);
-                    batches++;
+                    logPurgeBatches++;
                     logRowsPurged += n;
                     if (n < batchSize) {
-                        break;
+                        logPurgeDrained = true;
                     }
                 }
             } catch (Exception ex) {

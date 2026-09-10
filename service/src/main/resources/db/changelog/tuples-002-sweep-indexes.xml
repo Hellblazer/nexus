@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-205 Phase 1 follow-on (bead nexus-em75s.34) — indexes for the tuple
+    sweep's three query predicates plus the ack/nack claim_id lookup, all on
+    nexus.tuples / nexus.tuple_claim_log (tuples-001-baseline.xml).
+
+    tuples-001-1's idx_tuples_claim_scan is a PARTIAL index scoped to
+    `WHERE consumed_at IS NULL AND claim_state IS NULL` — deliberately
+    EXCLUDING claim_state = 'claimed' rows, since that index serves the
+    in/inp claim-scan predicate (an AVAILABLE tuple has no claim_state at
+    all). It therefore serves none of the four queries below, every one of
+    which either targets `claim_state = 'claimed'` rows specifically or
+    ignores claim_state entirely:
+
+      1. TupleRepository.releaseLapsedClaimsBatch (the sweep's release arm):
+         tenant_id = ? AND claim_state = 'claimed' AND consumed_at IS NULL
+         AND lease_until < now(), ORDER BY lease_until ASC, id ASC.
+         Served by idx_tuples_claim_lease below.
+
+      2. TupleRepository.liveClaimRow (ack/nack's claim_id lookup):
+         tenant_id = ? AND claim_id = ? AND claim_state = 'claimed' AND
+         consumed_at IS NULL AND lease_until > now().
+         Served by idx_tuples_claim_id below — a DIFFERENT leading-column
+         shape than idx_tuples_claim_lease (equality on claim_id, not a
+         range scan on lease_until), so it needs its own index rather than
+         reusing #1's.
+
+      3. TupleRepository.purgeExpiredTuplesBatch (the sweep's purge-tuples
+         arm): tenant_id = ? AND expires_at <= now(), ORDER BY created_at
+         ASC, id ASC. Applies to EVERY claim_state (a never-claimed expired
+         tuple and a consumed-past-retention tuple both purge through this
+         one predicate — tuples-001's file header), so this index cannot be
+         partial on claim_state. Served by idx_tuples_expires_at below.
+
+      4. TupleRepository.purgeOldClaimLogBatch (the sweep's purge-log arm):
+         tenant_id = ? AND at < ?, ORDER BY log_id ASC, on
+         nexus.tuple_claim_log rather than nexus.tuples. Served by
+         idx_tuple_claim_log_tenant_at below.
+
+    idx_tuples_claim_lease / idx_tuples_claim_id are PARTIAL (WHERE
+    claim_state = 'claimed' AND consumed_at IS NULL, both constant-foldable
+    at CREATE INDEX time — no now()/current_setting() in the predicate,
+    which Postgres requires for a partial index) so they carry only the
+    claimed-and-live subset of nexus.tuples, the same "small, targeted"
+    shape as idx_tuples_claim_scan. idx_tuples_expires_at cannot be partial
+    for the reason in #3 above, and idx_tuple_claim_log_tenant_at cannot be
+    partial either (its cutoff is `at < ?`, a server-evaluated bind
+    parameter, not a literal).
+
+    ADDITIVE ONLY: four CREATE INDEX statements, one rollback each. No
+    grants edit needed — CREATE INDEX confers no new privilege beyond what
+    grants-nexus-svc.xml's per-relation walk (and grants-nexus-diag.xml's
+    bulk SELECT) already cover for the two tables' existing indexes.
+
+    Placed near the current tail (after hygiene-007-doc-count-recount.xml)
+    and before the grants-nexus-svc.xml runAlways block, matching the
+    established late-append convention (D0.1) — NOT spliced back into the
+    tuples-001 family's own block above, same reasoning as every other
+    RDR-156+ changeset's own <include> comment cites.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: lapsed-claim release scan (sweep arm 1) ─────────────── -->
+    <changeSet id="tuples-002-1" author="nexus-em75s.34">
+        <comment>idx_tuples_claim_lease: serves TupleRepository.releaseLapsedClaimsBatch's tenant_id + claim_state='claimed' + consumed_at IS NULL + lease_until &lt; now() scan, ORDER BY lease_until. Partial on the claimed-and-live subset, same shape as idx_tuples_claim_scan.</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE INDEX idx_tuples_claim_lease ON nexus.tuples (tenant_id, lease_until)
+    WHERE claim_state = 'claimed' AND consumed_at IS NULL;
+        </sql>
+        <rollback>DROP INDEX IF EXISTS nexus.idx_tuples_claim_lease</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: ack/nack claim_id lookup ─────────────────────────────── -->
+    <changeSet id="tuples-002-2" author="nexus-em75s.34">
+        <comment>idx_tuples_claim_id: serves TupleRepository.liveClaimRow's tenant_id + claim_id equality lookup (ack/nack), scoped to the same claimed-and-live subset as idx_tuples_claim_lease but keyed on claim_id rather than lease_until — a distinct leading-column shape, so it cannot share that index.</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE INDEX idx_tuples_claim_id ON nexus.tuples (tenant_id, claim_id)
+    WHERE claim_state = 'claimed' AND consumed_at IS NULL;
+        </sql>
+        <rollback>DROP INDEX IF EXISTS nexus.idx_tuples_claim_id</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: expired / consumed-past-retention purge (sweep arm 2) ─ -->
+    <changeSet id="tuples-002-3" author="nexus-em75s.34">
+        <comment>idx_tuples_expires_at: serves TupleRepository.purgeExpiredTuplesBatch's tenant_id + expires_at &lt;= now() scan, ORDER BY created_at. NOT partial on claim_state -- the purge predicate covers both a never-claimed expired tuple and a consumed tuple past its retention ceiling, any claim_state (tuples-001-baseline.xml's file header).</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE INDEX idx_tuples_expires_at ON nexus.tuples (tenant_id, expires_at);
+        </sql>
+        <rollback>DROP INDEX IF EXISTS nexus.idx_tuples_expires_at</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 4: claim-log retention purge (sweep arm 3) ──────────────── -->
+    <changeSet id="tuples-002-4" author="nexus-em75s.34">
+        <comment>idx_tuple_claim_log_tenant_at: serves TupleRepository.purgeOldClaimLogBatch's tenant_id + at &lt; cutoff scan on nexus.tuple_claim_log, ORDER BY log_id. Not partial -- the TTL cutoff is a bind parameter, not a constant-foldable literal.</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE INDEX idx_tuple_claim_log_tenant_at ON nexus.tuple_claim_log (tenant_id, at);
+        </sql>
+        <rollback>DROP INDEX IF EXISTS nexus.idx_tuple_claim_log_tenant_at</rollback>
+    </changeSet>
+
+</databaseChangeLog>

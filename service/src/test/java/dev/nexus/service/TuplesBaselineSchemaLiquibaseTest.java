@@ -436,6 +436,120 @@ class TuplesBaselineSchemaLiquibaseTest {
         }
     }
 
+    // ── Test 13: tuples-002-sweep-indexes.xml — the sweep's index shapes ────
+
+    /**
+     * RDR-205 Phase 1 follow-on (bead nexus-em75s.34): the four indexes
+     * {@code tuples-002-sweep-indexes.xml} adds, against the SAME shared,
+     * already-fully-migrated cluster Tests 1-9 use — a live proof the
+     * changeset walks clean and lands the expected shape. Which query each
+     * index serves and why {@code idx_tuples_claim_scan} cannot is documented
+     * on the changeset file's own header; this test only pins the DDL shape,
+     * not query-plan usage (see {@code TupleSweepIndexPlanShapeTest} for the
+     * EXPLAIN-based usage proof).
+     */
+    @Test
+    void tuplesSweepIndexes_exist_withExpectedShapes() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+
+            assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuples_claim_lease")).isTrue();
+            String leaseDef = PgCatalogProbes.indexDef(ctx, "nexus", "idx_tuples_claim_lease");
+            assertThat(leaseDef).contains("tenant_id").contains("lease_until");
+            assertThat(leaseDef.toUpperCase(Locale.ROOT))
+                .as("idx_tuples_claim_lease must be PARTIAL on the claimed+live predicate")
+                .contains("WHERE").contains("CLAIM_STATE = 'CLAIMED'").contains("CONSUMED_AT IS NULL");
+
+            assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuples_claim_id")).isTrue();
+            String claimIdDef = PgCatalogProbes.indexDef(ctx, "nexus", "idx_tuples_claim_id");
+            assertThat(claimIdDef).contains("tenant_id").contains("claim_id");
+            assertThat(claimIdDef.toUpperCase(Locale.ROOT))
+                .as("idx_tuples_claim_id must be PARTIAL on the same claimed+live predicate")
+                .contains("WHERE").contains("CLAIM_STATE = 'CLAIMED'").contains("CONSUMED_AT IS NULL");
+
+            assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuples_expires_at")).isTrue();
+            String expiresDef = PgCatalogProbes.indexDef(ctx, "nexus", "idx_tuples_expires_at");
+            assertThat(expiresDef).contains("tenant_id").contains("expires_at");
+            assertThat(expiresDef.toUpperCase(Locale.ROOT))
+                .as("idx_tuples_expires_at must NOT be partial -- the purge predicate covers every claim_state")
+                .doesNotContain("WHERE");
+
+            assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuple_claim_log_tenant_at")).isTrue();
+            String logDef = PgCatalogProbes.indexDef(ctx, "nexus", "idx_tuple_claim_log_tenant_at");
+            assertThat(logDef).contains("tenant_id").contains("at");
+            assertThat(logDef.toUpperCase(Locale.ROOT))
+                .as("idx_tuple_claim_log_tenant_at must NOT be partial -- the TTL cutoff is a bind parameter")
+                .doesNotContain("WHERE");
+        }
+    }
+
+    // ── Test 14: tuples-002's own rollback round trip ────────────────────────
+
+    /**
+     * Rolls back exactly {@code tuples-002}'s 4 changesets (which land at the
+     * execution tail on a walk from empty, same as Test 10's tuples-001
+     * proof), asserts all four indexes are gone, re-applies, and asserts they
+     * are restored.
+     */
+    @Test
+    void tuplesSweepIndexesChangesets_rollBackAndReapply_restoreAllFourIndexes() throws Exception {
+        PostgreSQLContainer<?> dedicated = PgContainerHelper.startDedicated();
+        try {
+            // Migrate up to (and including) tuples-002-4 ONLY -- not the full
+            // changelog -- so tuples-002's own 4 changesets land at the walk's
+            // execution TAIL and rollback(4) below removes precisely them (Test
+            // 10's identical idiom; a full-changelog apply would instead make
+            // grants-nexus-diag's later changesets the tail, and rollback(4)
+            // would remove THOSE, not tuples-002's).
+            try (Connection su = dedicated.createConnection("")) {
+                migrateUpTo(su, "tuples-002-4", true);
+            }
+
+            try (Connection su = dedicated.createConnection("")) {
+                Database database = DatabaseFactory.getInstance()
+                    .findCorrectDatabaseImplementation(new JdbcConnection(su));
+                try (Liquibase liquibase = new Liquibase(
+                        MASTER_CHANGELOG, new ClassLoaderResourceAccessor(), database)) {
+                    liquibase.rollback(4, new Contexts(), new LabelExpression());
+                }
+            }
+
+            try (Connection su = dedicated.createConnection("")) {
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuples_claim_lease"))
+                    .as("idx_tuples_claim_lease must be gone after rollback").isFalse();
+                assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuples_claim_id"))
+                    .as("idx_tuples_claim_id must be gone after rollback").isFalse();
+                assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuples_expires_at"))
+                    .as("idx_tuples_expires_at must be gone after rollback").isFalse();
+                assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuple_claim_log_tenant_at"))
+                    .as("idx_tuple_claim_log_tenant_at must be gone after rollback").isFalse();
+                // The underlying tables and tuples-001's own index must survive --
+                // this rollback touches ONLY tuples-002's 4 index changesets.
+                assertThat(PgCatalogProbes.tableExists(ctx, "nexus", "tuples")).isTrue();
+                assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuples_claim_scan")).isTrue();
+            }
+
+            try (Connection su = dedicated.createConnection("")) {
+                applyFullChangelog(su);
+            }
+
+            try (Connection su = dedicated.createConnection("")) {
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuples_claim_lease"))
+                    .as("idx_tuples_claim_lease must be recreated by the re-apply").isTrue();
+                assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuples_claim_id"))
+                    .as("idx_tuples_claim_id must be recreated by the re-apply").isTrue();
+                assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuples_expires_at"))
+                    .as("idx_tuples_expires_at must be recreated by the re-apply").isTrue();
+                assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuple_claim_log_tenant_at"))
+                    .as("idx_tuple_claim_log_tenant_at must be recreated by the re-apply").isTrue();
+            }
+        } finally {
+            dedicated.stop();
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────
 
     private static Set<String> columnNames(Connection su, String table) throws Exception {

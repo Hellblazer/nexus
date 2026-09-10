@@ -51,7 +51,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * finish, and the wall clock is checked ONLY at a tenant boundary, never mid-tenant,
  * so a tenant already underway always finishes cleanly or hits its own cap first);
  * the T1 sweep still runs in the same cycle; a tenant reachable only through its
- * {@code tuple_tenants} row (no {@code service_tokens} row at all) is still visited.
+ * {@code tuple_tenants} row (no {@code service_tokens} row at all) is still visited;
+ * each arm gets its own bounded per-visit share of the per-tenant cap, so a
+ * release-heavy tenant capped on arm 1 alone does not starve the purge arms within
+ * the same visit (RDR-205 Phase 1 follow-on, bead nexus-em75s.34).
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class NexusServiceTupleSweepTest {
@@ -330,12 +333,14 @@ class NexusServiceTupleSweepTest {
         insertTupleTenant(tenantA, now.minusDays(2), now.minusDays(2), null);
         insertTupleTenant(tenantB, now.minusDays(2), now.minusDays(2), now.minusMinutes(1));
 
-        // tenantA: 5 expired rows, batchSize=2, maxBatchesPerTenant=3. Every tenant
-        // spends its FIRST batch on arm 1 (release) even with nothing to release —
-        // that batch call still counts against the per-tenant cap. So the purge arm
-        // gets 2 of the remaining 3 cap: batches 2 and 3 purge 2+2=4 of the 5 rows,
-        // then the cap is hit before the 5th row or the log-purge arm — tenantA is
-        // cut short, keeping its (null) stamp.
+        // tenantA: 5 expired rows, batchSize=2, maxBatchesPerTenant=3. nexus-em75s.34:
+        // the cap of 3 splits into a share of 1 batch per arm (release, purge-tuples,
+        // purge-log), each with its OWN counter. Arm 1 (release) has nothing to
+        // release, drains cleanly in its 1-batch share. Arm 2 (purge-tuples) spends
+        // its own 1-batch share purging 2 of the 5 rows, then hits ITS OWN share
+        // (independently of arm 1) and stops -- tenantA is cut short, keeping its
+        // (null) stamp. Arm 3 (purge-log) still runs its own share regardless (finds
+        // nothing, since arm 1 never released anything to log).
         for (int i = 0; i < 5; i++) {
             byte[] id = fakeId(tenantA + "-row-" + i);
             insertTuple(id, tenantA, "mailbox/agent-budget", null, null, null,
@@ -359,7 +364,7 @@ class NexusServiceTupleSweepTest {
         // be re-visited (trivially, at zero cost) within this run's generous budget.
         assertThat(run1.tenantsVisited()).isGreaterThanOrEqualTo(2);
         assertThat(run1.incompleteCause()).isEqualTo(TENANT_CAP);
-        assertThat(run1.purged()).isEqualTo(5); // 4 from tenantA's capped batches + 1 from tenantB
+        assertThat(run1.purged()).isEqualTo(3); // 2 from tenantA's own capped purge-arm share + 1 from tenantB
         // RDR-205 Phase 1 review, Sam's ruling (nexus-em75s.7): a tenant is stamped
         // ONLY on a clean finish, per the RDR verbatim — tenantA's own cap cut it
         // short, so it keeps its OLD (null) stamp and sorts first again next run.
@@ -373,9 +378,9 @@ class NexusServiceTupleSweepTest {
         // unchanged (null) stamp -- never `now`.
         assertThat(run1.oldestLastSweptAt()).isNull();
 
-        // tenantA's remaining backlog (1 of 5 rows) is drained within a bounded number
+        // tenantA's remaining backlog (3 of 5 rows) is drained within a bounded number
         // of further runs: each makes durable, cumulative progress (idempotent — the
-        // remaining row and both other arms simply run on the next call), even though
+        // remaining rows and every other arm simply run on the next call), even though
         // tenantA is never stamped until a run finally finishes it cleanly.
         int runsToComplete = 0;
         OffsetDateTime clock = now;
@@ -388,6 +393,74 @@ class NexusServiceTupleSweepTest {
                 .as("tenantA's backlog must be fully drained within a bounded number of runs")
                 .isZero();
         assertThat(runsToComplete).isLessThanOrEqualTo(10);
+    }
+
+    // ── Scenario: per-arm shares (nexus-em75s.34) — a capped release arm must not
+    //    starve the purge arms within the SAME visit ──────────────────────────────
+
+    /**
+     * RDR-205 Phase 1 follow-on (bead nexus-em75s.34): before the per-arm split,
+     * the three arms shared ONE counter and ONE cap — a tenant whose release-arm
+     * backlog alone exceeded {@code maxBatchesPerTenant} would exhaust the WHOLE
+     * cap inside arm 1's own loop, and arms 2/3 (the purge arms) would never run a
+     * single batch for that tenant this visit: their {@code while} loops were
+     * gated on the same {@code complete} flag arm 1 had already cleared. This test
+     * seeds a backlog on arm 1 alone that exceeds its (now per-arm) share, plus
+     * small backlogs for arms 2 and 3, and asserts the purge arms still ran in the
+     * SAME visit — {@link NexusService#tupleSweepArmBatchShare} gives each arm its
+     * own bounded share of {@code maxBatchesPerTenant} (1 batch each, here, for a
+     * cap of 3) so a release-heavy tenant can no longer starve its own purge arms.
+     */
+    @Test
+    void sweep_armsGetIndependentShares_arm1CappedAlone_purgeArmsStillRunSameVisit() throws Exception {
+        String tenant = "sweep-arm-share-" + UUID.randomUUID();
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        insertTupleTenant(tenant, now.minusDays(2), now.minusDays(2), null);
+
+        // Arm 1 (release): 5 lapsed claims — far more than a 1-batch share at
+        // batchSize=1 can drain in one visit.
+        for (int i = 0; i < 5; i++) {
+            byte[] id = fakeId(tenant + "-lapsed-" + i);
+            insertTuple(id, tenant, "mailbox/agent-share", "claimed", "worker-" + i, "claim-" + i,
+                    now.minusMinutes(5), 0, null, now.plusDays(1), now.minusHours(1).plusSeconds(i));
+        }
+        // Arm 2 (purge expired tuples): 2 expired, never-claimed rows — a small
+        // backlog, unrelated to arm 1's.
+        for (int i = 0; i < 2; i++) {
+            byte[] id = fakeId(tenant + "-expired-" + i);
+            insertTuple(id, tenant, "mailbox/agent-share-expired", null, null, null,
+                    null, 0, null, now.minusMinutes(1), now.minusHours(2).plusSeconds(i));
+        }
+        // Arm 3 (purge old claim-log rows): 2 rows well past the 180-day default TTL.
+        insertClaimLogRow(tenant, "mailbox/agent-share-log-1", null, "claim", now.minusDays(200));
+        insertClaimLogRow(tenant, "mailbox/agent-share-log-2", null, "claim", now.minusDays(201));
+
+        // maxBatchesPerTenant=3, batchSize=1: tupleSweepArmBatchShare splits this
+        // 1/1/1 across the three arms.
+        var result = service.runScheduledTupleSweep(now, Duration.ofSeconds(30),
+                /* batchSize */ 1, /* maxBatchesPerTenant */ 3, /* wallClockBudget */ Duration.ofMinutes(5));
+
+        assertThat(result.incompleteCause()).isEqualTo(TENANT_CAP);
+        // Arm 1 spent its own 1-batch share and released exactly one lapsed claim;
+        // its 5-row backlog is nowhere near drained.
+        assertThat(result.released()).isEqualTo(1);
+        int stillClaimed = su.fetchCount(su.selectFrom(TUPLES)
+                .where(TUPLES.TENANT_ID.eq(tenant).and(TUPLES.CLAIM_STATE.eq("claimed"))));
+        assertThat(stillClaimed).as("arm 1's own cap left most lapsed claims unreleased").isEqualTo(4);
+        // The purge arms still ran THIS SAME visit, despite arm 1 hitting its own
+        // share first — the starvation this bead fixes.
+        assertThat(result.purged())
+                .as("purge-expired arm ran in the same visit as the capped release arm")
+                .isGreaterThanOrEqualTo(1);
+        assertThat(result.logRowsPurged())
+                .as("purge-log arm ran in the same visit as the capped release arm")
+                .isGreaterThanOrEqualTo(1);
+        assertThat(lastSweptAt(tenant)).as("cut short by arm 1's own cap -- keeps its old (null) stamp").isNull();
+
+        // Drain fully so this test does not leave a permanently unswept tenant
+        // behind for PER_CLASS siblings sharing this table.
+        service.runScheduledTupleSweep(now.plusMinutes(1), Duration.ofSeconds(30), 300, 300, Duration.ofMinutes(2));
+        assertThat(lastSweptAt(tenant)).as("cleaned up -- no longer polluting later tests").isNotNull();
     }
 
     // ── Scenario: per-tenant-cap starvation across several tenants (nexus-em75s.7,
@@ -585,6 +658,43 @@ class NexusServiceTupleSweepTest {
         assertThat(NexusService.resolveTupleSweepMaxBatchesPerTenant(null))
                 .isEqualTo(NexusService.DEFAULT_TUPLE_SWEEP_MAX_BATCHES_PER_TENANT);
         assertThat(NexusService.resolveTupleSweepMaxBatchesPerTenant("7")).isEqualTo(7);
+    }
+
+    // ── tupleSweepArmBatchShare: the per-arm split (nexus-em75s.34) ──────────────
+
+    @Test
+    void tupleSweepArmBatchShare_evenlyDivisible_splitsEqually() {
+        // 3 -> 1/1/1, summing to the original total.
+        assertThat(NexusService.tupleSweepArmBatchShare(3, 0)).isEqualTo(1);
+        assertThat(NexusService.tupleSweepArmBatchShare(3, 1)).isEqualTo(1);
+        assertThat(NexusService.tupleSweepArmBatchShare(3, 2)).isEqualTo(1);
+    }
+
+    @Test
+    void tupleSweepArmBatchShare_remainder_goesToEarlierArmsFirst_sumEqualsTotal() {
+        // 5 -> 2/2/1: remainder 2 goes to arm indices 0 and 1.
+        assertThat(NexusService.tupleSweepArmBatchShare(5, 0)).isEqualTo(2);
+        assertThat(NexusService.tupleSweepArmBatchShare(5, 1)).isEqualTo(2);
+        assertThat(NexusService.tupleSweepArmBatchShare(5, 2)).isEqualTo(1);
+
+        // The production default (50) -> 17/17/16, still summing to 50.
+        int a = NexusService.tupleSweepArmBatchShare(NexusService.DEFAULT_TUPLE_SWEEP_MAX_BATCHES_PER_TENANT, 0);
+        int b = NexusService.tupleSweepArmBatchShare(NexusService.DEFAULT_TUPLE_SWEEP_MAX_BATCHES_PER_TENANT, 1);
+        int c = NexusService.tupleSweepArmBatchShare(NexusService.DEFAULT_TUPLE_SWEEP_MAX_BATCHES_PER_TENANT, 2);
+        assertThat(a + b + c).isEqualTo(NexusService.DEFAULT_TUPLE_SWEEP_MAX_BATCHES_PER_TENANT);
+        assertThat(a).isEqualTo(17);
+        assertThat(b).isEqualTo(17);
+        assertThat(c).isEqualTo(16);
+    }
+
+    @Test
+    void tupleSweepArmBatchShare_belowArmCount_someArmsGetZero() {
+        // maxBatchesPerTenant=1: only arm 0 gets a share; arms 1/2 get none this
+        // visit -- an unavoidable consequence of splitting a cap smaller than the
+        // arm count, documented on tupleSweepArmBatchShare's own javadoc.
+        assertThat(NexusService.tupleSweepArmBatchShare(1, 0)).isEqualTo(1);
+        assertThat(NexusService.tupleSweepArmBatchShare(1, 1)).isEqualTo(0);
+        assertThat(NexusService.tupleSweepArmBatchShare(1, 2)).isEqualTo(0);
     }
 
     @Test
