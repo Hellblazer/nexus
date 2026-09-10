@@ -58,3 +58,16 @@ mechanize, it matters enough to ship.
   swept again.
 - `conexus/commands/rdr-gate.md`: nexus-yjf5l.3 — the Layer 0 bullet mirrors
   the same exemption.
+- `conexus/skills/rdr-gate/SKILL.md`: nexus-yjf5l.5 — Fix check step 1 gains
+  a fifth clause: list every other occurrence of a changed identifier
+  (column, caller-supplied parameter, typed error, setting, phase or step
+  number) and say whether each still holds; step 4 states the serial
+  precondition (fix, check, then Layer 1 and Layer 3, never dispatched in
+  parallel against the same commit).
+- `conexus/commands/rdr-gate.md`: nexus-yjf5l.5 — the Fix check bullet
+  mirrors both the identifier clause and the serial precondition.
+- `conexus/skills/rdr-fix/SKILL.md`: nexus-yjf5l.5 — the identifier clause
+  and the serial precondition in Rules, Behavior step 5, and the Relay
+  Template's Deliverable line.
+- `conexus/commands/rdr-fix.md`: nexus-yjf5l.5 — mirrors the identifier
+  clause and the serial precondition.

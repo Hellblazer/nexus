@@ -2168,6 +2168,9 @@ class TestRdrGateRoundAndFixCheck:
         assert f"204-fix-check-{fixed}" in out, "the T2 title carries the tip sha"
         assert "enumeration" in out and "universal" in out
         assert "Do not enter Layer 1 or Layer 3" in out
+        # nexus-yjf5l.5 (R2): the brief goes identifier-level — every
+        # changed identifier's other occurrences in the file, enumerated.
+        assert "owning phase" in out and "every other occurrence" in out, out
 
     def test_no_regate_fix_check_past_the_gate(self, rdr_env, monkeypatch):
         """Past the gate there is no re-gate to gate, and the branch says so —
@@ -2320,6 +2323,10 @@ class TestRdrFixPreamble:
         assert "nothing else" in out and "inferred, not read" in out and "census" in out
         assert f"204-fix-check-{fixed}" in out
         assert "no fix-check record yet" in out.lower()
+        # nexus-yjf5l.5 (R2): the serial precondition — fix, check, then
+        # Layer 1 and Layer 3, never a parallel dispatch against one commit
+        # — is printed among the fix rules on the fix side.
+        assert "dispatched against the same commit in parallel" in out, out
 
     def test_existing_fix_check_record_is_reported(self, rdr_env, monkeypatch):
         import nexus.commands.rdr as rdr_mod

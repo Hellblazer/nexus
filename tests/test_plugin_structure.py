@@ -1342,6 +1342,27 @@ def test_changelog_has_a_section_for_pyprojects_version() -> None:
     )
 
 
+#: nexus-yjf5l.5 (R2): the identifier-level fix-check clause, stated
+#: identically in rdr-gate/SKILL.md, conexus/commands/rdr-gate.md and the
+#: printed ``_fix_check_lines`` brief. One regex extracts the sentence from
+#: whichever surface carries it so the comparison is a single equality
+#: across all three, not three independent substring checks that could
+#: each drift on their own.
+_IDENTIFIER_CLAUSE_RE = re.compile(
+    r"For every identifier whose meaning, bound, or owning phase this change "
+    r"alters.*?list every other occurrence in the file and say whether each "
+    r"still holds\.",
+    re.DOTALL,
+)
+
+
+def _identifier_clause(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", text)
+    match = _IDENTIFIER_CLAUSE_RE.search(normalized)
+    assert match, f"identifier clause not found in: {text[:200]!r}..."
+    return match.group(0).strip()
+
+
 class TestRdrGateLoopRemedies:
     """nexus-g7zgw: the five process remedies for the RDR gate/fix loop
     (T2 nexus/deep-analysis-rdr-gate-fix-loop-2026-09-07) are stated in the
@@ -1362,10 +1383,21 @@ class TestRdrGateLoopRemedies:
             assert "with ONLY th" in text and "diff" in text, f"{path}: the fix check reads only the diff"
             assert "fix-check-" in text, f"{path}: names the T2 title shape"
             assert "fix_check:" in text, f"{path}: the gate record carries the pointer"
+            # nexus-yjf5l.5 (R2): the fix-check brief goes identifier-level —
+            # every changed identifier's other occurrences are enumerated,
+            # not just the clause carrying it.
+            assert "owning phase" in text and "every other occurrence" in text, (
+                f"{path}: the identifier clause is missing"
+            )
         skill = self.GATE_SKILL.read_text()
         for phrase in ("contradicted by any other line", "enumeration", "universal", "research entry"):
             assert phrase in skill, f"rdr-gate/SKILL.md: fix-check brief lacks '{phrase}'"
         assert "never counts toward the round" in skill
+        # nexus-yjf5l.5 (R2): the serial precondition — fix, check, then
+        # Layer 1 and Layer 3, never a parallel dispatch against one commit.
+        assert "dispatched against the same commit in parallel" in skill, (
+            "rdr-gate/SKILL.md: the serial precondition is missing"
+        )
 
     def test_termination_rule_and_ship_blockers_in_gate_skill(self) -> None:
         """Remedy 2: rounds 1-2 block on any Critical; from round 3 only a
@@ -1411,6 +1443,17 @@ class TestRdrGateLoopRemedies:
         assert "fix_check:" in accept and "not the record's `commit:`" in accept
         assert "no `fix_check:`" in accept, "a skipped fix check blocks accept"
         assert "mandatory on every re-gate" in skill and "mandatory on every re-gate" in self.GATE_CMD.read_text()
+        # nexus-yjf5l.5 (R2): the identifier clause must be the SAME sentence
+        # in the skill, the command mirror, and the printed fix-check brief —
+        # one equality across all three rather than three separate substring
+        # checks that could each drift independently.
+        from nexus.commands.rdr import _fix_check_lines
+
+        printed = "\n".join(_fix_check_lines(
+            repo_root=str(REPO_ROOT), t2_key="0", rel="README.md",
+            gated_commit="HEAD", changed=True,
+        ))
+        assert _identifier_clause(skill) == _identifier_clause(cmd) == _identifier_clause(printed)
 
     def test_fix_commit_rule_in_research_and_gate_skills(self) -> None:
         """Remedy 5: a fix changes the fact named and nothing else; glosses and
@@ -1464,7 +1507,10 @@ class TestRdrGateLoopRemedies:
         assert fix_skill.exists() and fix_cmd.exists()
         assert "nx rdr preamble rdr-fix" in fix_cmd.read_text()
         skill = fix_skill.read_text()
-        for phrase in ("nothing else", "inferred, not read", "census", "before the edit", "fix-check-", "Ship-blocker: yes"):
+        for phrase in (
+            "nothing else", "inferred, not read", "census", "before the edit",
+            "fix-check-", "Ship-blocker: yes", "every other occurrence",
+        ):
             assert phrase in skill, f"rdr-fix/SKILL.md lacks '{phrase}'"
         assert "/conexus:rdr-fix" in self.GATE_SKILL.read_text()
         lifecycle = (SKILLS_DIR / "using-nx-skills" / "SKILL.md").read_text()

@@ -28,7 +28,7 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 2. No gate record: stop; findings from a review go through `/conexus:rdr-research add <id>`. Past the gate (status not draft/open): stop; post-accept edits are not gate fixes.
 3. For each finding, before the edit: read the source and quote it with a tool (`sed -n`, `grep -n`, a T2 read); record the research entry with `nx rdr preamble rdr-research -- add <id> <finding tokens>`. A file:line from a T3 search hit is a lead, not a citation; re-read it from the working tree.
 4. Edit every site in the finding's `Sites:` list; where a finding has none, grep the RDR for the refuted phrasing AND the corrected one. A fact lives in Problem Statement, Research Findings, Technical Design and the Implementation Plan at once.
-5. Commit by explicit path. Run `nx rdr preamble rdr-gate -- <id>`; it prints the Fix check section (range, fix commits, T2 title `{id}-fix-check-<sha>`). Dispatch the fix check (relay below) and store the verdict under that title. Any FAIL: fix, re-run on the new diff.
+5. Commit by explicit path. Run `nx rdr preamble rdr-gate -- <id>`; it prints the Fix check section (range, fix commits, T2 title `{id}-fix-check-<sha>`). For every identifier whose meaning, bound, or owning phase this change alters (a column, a caller-supplied parameter, a typed error, a setting, a phase or step number), list every other occurrence in the file and say whether each still holds. Dispatch the fix check (relay below) and store the verdict under that title. Any FAIL: fix, re-run on the new diff. The fix check and the gate critique are never dispatched against the same commit in parallel: fix, then check, then Layer 1 and Layer 3.
 6. Do not run the gate. The user drives lifecycle transitions.
 
 ## Rules
@@ -39,6 +39,8 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 - The research entry is written before the edit; its `commits:` field is filled after the commit exists.
 - From round 3, the fix closes only findings marked `Ship-blocker: yes`; every other Critical and Significant is a residual, recorded and dispositioned at accept — never re-gated for this change.
 - A Criterion 6 readability WARN is never closed inside a fix commit.
+- For every identifier whose meaning, bound, or owning phase this change alters (a column, a caller-supplied parameter, a typed error, a setting, a phase or step number), list every other occurrence in the file and say whether each still holds.
+- The fix check and the gate critique are never dispatched against the same commit in parallel: fix, then check, then Layer 1 and Layer 3.
 
 ## Relay Template (Use This Format)
 
@@ -54,7 +56,7 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 - Files: $RDR_DIR/NNN-*.md and the diff range above
 
 ### Deliverable
-One row per ADDED or CHANGED clause, PASS or FAIL with line numbers: (1) contradicted by any other line in this file; (2) an attribution, count or universal without an enumeration or quoted source, in the diff or in the research entry it cites; (3) a cited source that does not carry the claim as stated. Standard Verdict block.
+One row per ADDED or CHANGED clause, PASS or FAIL with line numbers: (1) contradicted by any other line in this file; (2) an attribution, count or universal without an enumeration or quoted source, in the diff or in the research entry it cites; (3) a cited source that does not carry the claim as stated; (4) for every identifier whose meaning, bound, or owning phase this change alters (a column, a caller-supplied parameter, a typed error, a setting, a phase or step number), list every other occurrence in the file and say whether each still holds. Standard Verdict block.
 
 ### Quality Criteria
 - [ ] Every FAIL cites both lines or the source read

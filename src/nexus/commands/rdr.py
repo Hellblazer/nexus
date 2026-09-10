@@ -2190,10 +2190,18 @@ def _fix_check_lines(
         "enumeration or the artifact's own text, quoted; two sites that agree are not a "
         "source. The same enumeration requirement applies to the research entry the fix cites.",
         "3. Does its cited source (changeset, file:line, RDR, T2 entry) contain the claim as stated?",
+        "4. A `file:line` taken from a T3 search or query hit is a lead, not a citation: the "
+        "store carries the line as of index time. The clause passes only when the line was "
+        "re-read from the working tree.",
+        "5. For every identifier whose meaning, bound, or owning phase this change alters (a "
+        "column, a caller-supplied parameter, a typed error, a setting, a phase or step "
+        "number), list every other occurrence in the file and say whether each still holds.",
         "",
         f"Verdict goes to T2 `{t2_key}-fix-check-{tip_sha}` (project `<repo>_rdr`); the gate "
         f"record's `fix_check:` must name `{tip_sha}`, equal to its `commit:`. Any FAIL: fix, "
-        "re-run the fix check on the new diff. Do not enter Layer 1 or Layer 3 with a FAIL open.",
+        "re-run the fix check on the new diff. Do not enter Layer 1 or Layer 3 with a FAIL open. "
+        "The fix check and the gate critique are never dispatched against the same commit in "
+        "parallel: fix, then check, then Layer 1 and Layer 3.",
     ])
     return lines
 
@@ -2851,6 +2859,8 @@ _FIX_RULES: tuple[str, ...] = (
     "Critical and Significant is a residual, recorded and dispositioned at accept — never "
     "re-gated for this change.",
     "A Criterion 6 readability WARN is never closed inside a fix commit.",
+    "The fix check and the gate critique are never dispatched against the same commit in "
+    "parallel: fix, then check, then Layer 1 and Layer 3.",
 )
 
 

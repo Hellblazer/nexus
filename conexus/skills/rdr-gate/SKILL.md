@@ -71,11 +71,17 @@ fix commits, and the T2 title for the verdict. Then:
    4. A `file:line` taken from a T3 search or query hit is a lead, not a
       citation: the store carries the line as of index time. The clause passes
       only when the line was re-read from the working tree.
+   5. For every identifier whose meaning, bound, or owning phase this change
+      alters (a column, a caller-supplied parameter, a typed error, a
+      setting, a phase or step number), list every other occurrence in the
+      file and say whether each still holds.
 2. Deliverable: one row per clause, PASS or FAIL with line numbers, plus the
    standard Verdict block.
 3. Store the verdict in T2: mcp__plugin_conexus_nexus__memory_put(project="{repo}_rdr", title="{id}-fix-check-<sha>", ttl="permanent", tags="rdr,gate,fix-check"), where `<sha>` is the RDR file's tip commit as printed by the preamble.
 4. Any FAIL: fix it, re-run the fix check on the new diff. Do not enter Layer 1
-   or Layer 3 with a FAIL open. Zero FAIL: proceed.
+   or Layer 3 with a FAIL open. Zero FAIL: proceed. The fix check and the gate
+   critique are never dispatched against the same commit in parallel: fix,
+   then check, then Layer 1 and Layer 3.
 
 Every re-gated record (one with a `prior:` chain) carries `fix_check:`: either
 `{repo}_rdr/{id}-fix-check-<sha>` with the sha equal to the record's `commit:`, or
